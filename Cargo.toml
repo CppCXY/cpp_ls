@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/*",
+]
+
+[workspace.dependencies]
+# local
+cpp_parser = { path = "crates/cpp_parser" }
+
+# external
+lsp-server = "0.7.7"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] } 
+serde_json = "1"
+rowan = { version = "0.16" }
+notify = { version = "6.1.1", features = ["serde"] }
+lsp-types = { version = "0.97.0", features = ["proposed"]}
+schemars = "0.8.21"
+regex = "1"
+internment = { version = "0.8", features = ["arc"] }
+rust-i18n = "3"
+log = "0.4"
+fern = "0.7"
+chrono = "0.4"
+tokio-util = "0.7"
+walkdir = "2.5.0"
+serde_yml = "0.0.12"
+dirs = "5"
+structopt = "0.3"
+wax = "0.6.0"
+percent-encoding = "2.3"
+flagset = "0.4.6"
+encoding_rs = "0.8"
+url = "2.5.2"
+smol_str = "0.3.2"
+tera = "1.20.0"
+serde_with = "3.12.0"
+proc-macro2 = "1.0"
+syn = "2.0"
+quote = "1.0"
+glob = "0.3"
+include_dir = "0.7.4"
+toml_edit = "0.22.23"
+itertools = "0.11.0"
+ariadne = { version = "0.5.0", features = ["auto-color"] }

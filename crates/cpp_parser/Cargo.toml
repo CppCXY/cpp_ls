@@ -1,0 +1,9 @@
+[package]
+name = "cpp_parser"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rowan.workspace = true
+rust-i18n.workspace = true
+serde.workspace = true
