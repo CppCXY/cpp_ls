@@ -1,7 +1,6 @@
 mod lexer_config;
 mod cpp_doc_lexer;
 mod cpp_lexer;
-mod test;
 mod token_data;
 
 pub use lexer_config::LexerConfig;

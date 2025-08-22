@@ -1,336 +1,296 @@
 use crate::{
     grammar::ParseResult,
-    kind::{BinaryOperator, CppSyntaxKind, CppTokenKind, CppOpKind, UnaryOperator},
+    kind::{CppSyntaxKind, CppTokenKind},
     parser::{CppParser, MarkerEventContainer},
     parser_error::CppParseError,
 };
 
-use super::{expect_token, if_token_bump, parse_compound_stat};
+use super::expect_token;
 
+/// 解析表达式的主要入口点
 pub fn parse_expr(p: &mut CppParser) -> ParseResult {
-    // parse_sub_expr(p, 0)
-    todo!()
+    parse_ternary_expr(p)
 }
 
-// fn parse_sub_expr(p: &mut LuaParser, limit: i32) -> ParseResult {
-//     let uop = LuaOpKind::to_unary_operator(p.current_token());
-//     let mut cm = if uop != UnaryOperator::OpNop {
-//         let m = p.mark(CppSyntaxKind::UnaryExpr);
-//         let range = p.current_token_range();
-//         p.bump();
-//         match parse_sub_expr(p, UNARY_PRIORITY) {
-//             Ok(_) => {}
-//             Err(err) => {
-//                 p.push_error(LuaParseError::syntax_error_from(
-//                     &t!("unary operator not followed by expression"),
-//                     range,
-//                 ));
-//                 return Err(err);
-//             }
-//         }
-//         m.complete(p)
-//     } else {
-//         parse_simple_expr(p)?
-//     };
+/// 解析三元表达式 (condition ? true_expr : false_expr)
+fn parse_ternary_expr(p: &mut CppParser) -> ParseResult {
+    let mut expr = parse_logical_or_expr(p)?;
 
-//     let mut bop = LuaOpKind::to_binary_operator(p.current_token());
-//     while bop != BinaryOperator::OpNop && bop.get_priority().left > limit {
-//         let range = p.current_token_range();
-//         let m = cm.precede(p, CppSyntaxKind::BinaryExpr);
-//         p.bump();
-//         match parse_sub_expr(p, bop.get_priority().right) {
-//             Ok(_) => {}
-//             Err(err) => {
-//                 p.push_error(LuaParseError::syntax_error_from(
-//                     &t!("binary operator not followed by expression"),
-//                     range,
-//                 ));
+    if p.current_token() == CppTokenKind::Question {
+        let m = expr.precede(p, CppSyntaxKind::TernaryExpr);
+        p.bump(); // consume '?'
 
-//                 return Err(err);
-//             }
-//         }
+        parse_expr(p)?; // true expression
+        expect_token(p, CppTokenKind::Colon)?;
+        parse_ternary_expr(p)?; // false expression
 
-//         cm = m.complete(p);
-//         bop = LuaOpKind::to_binary_operator(p.current_token());
-//     }
+        expr = m.complete(p);
+    }
 
-//     Ok(cm)
-// }
+    Ok(expr)
+}
 
-// fn parse_simple_expr(p: &mut LuaParser) -> ParseResult {
-//     match p.current_token() {
-//         CppTokenKind::TkInt
-//         | CppTokenKind::TkFloat
-//         | CppTokenKind::TkComplex
-//         | CppTokenKind::TkNil
-//         | CppTokenKind::TkTrue
-//         | CppTokenKind::TkFalse
-//         | CppTokenKind::TkDots
-//         | CppTokenKind::TkString
-//         | CppTokenKind::TkLongString => {
-//             let m = p.mark(CppSyntaxKind::LiteralExpr);
-//             p.bump();
-//             Ok(m.complete(p))
-//         }
-//         CppTokenKind::TkLeftBrace => parse_table_expr(p),
-//         CppTokenKind::TkFunction => parse_closure_expr(p),
-//         _ => parse_suffixed_expr(p),
-//     }
-// }
+/// 解析逻辑或表达式 (||)
+fn parse_logical_or_expr(p: &mut CppParser) -> ParseResult {
+    parse_binary_expr(p, parse_logical_and_expr, &[CppTokenKind::LogicalOr])
+}
 
-// pub fn parse_closure_expr(p: &mut LuaParser) -> ParseResult {
-//     let m = p.mark(CppSyntaxKind::ClosureExpr);
+/// 解析逻辑与表达式 (&&)
+fn parse_logical_and_expr(p: &mut CppParser) -> ParseResult {
+    parse_binary_expr(p, parse_bitwise_or_expr, &[CppTokenKind::LogicalAnd])
+}
 
-//     if_token_bump(p, CppTokenKind::TkFunction);
-//     parse_param_list(p)?;
+/// 解析按位或表达式 (|)
+fn parse_bitwise_or_expr(p: &mut CppParser) -> ParseResult {
+    parse_binary_expr(p, parse_bitwise_xor_expr, &[CppTokenKind::Pipe])
+}
 
-//     if p.current_token() != CppTokenKind::TkEnd {
-//         parse_block(p)?;
-//     }
+/// 解析按位异或表达式 (^)
+fn parse_bitwise_xor_expr(p: &mut CppParser) -> ParseResult {
+    parse_binary_expr(p, parse_bitwise_and_expr, &[CppTokenKind::Caret])
+}
 
-//     expect_token(p, CppTokenKind::TkEnd)?;
-//     Ok(m.complete(p))
-// }
+/// 解析按位与表达式 (&)
+fn parse_bitwise_and_expr(p: &mut CppParser) -> ParseResult {
+    parse_binary_expr(p, parse_equality_expr, &[CppTokenKind::Ampersand])
+}
 
-// fn parse_param_list(p: &mut LuaParser) -> ParseResult {
-//     let m = p.mark(CppSyntaxKind::ParamList);
+/// 解析相等性表达式 (==, !=)
+fn parse_equality_expr(p: &mut CppParser) -> ParseResult {
+    parse_binary_expr(
+        p,
+        parse_relational_expr,
+        &[CppTokenKind::Equal, CppTokenKind::NotEqual],
+    )
+}
 
-//     expect_token(p, CppTokenKind::TkLeftParen)?;
-//     if p.current_token() != CppTokenKind::TkRightParen {
-//         parse_param_name(p)?;
-//         while p.current_token() == CppTokenKind::TkComma {
-//             p.bump();
-//             parse_param_name(p)?;
-//         }
-//     }
+/// 解析关系表达式 (<, <=, >, >=, <=>)
+fn parse_relational_expr(p: &mut CppParser) -> ParseResult {
+    parse_binary_expr(
+        p,
+        parse_shift_expr,
+        &[
+            CppTokenKind::Less,
+            CppTokenKind::LessEqual,
+            CppTokenKind::Greater,
+            CppTokenKind::GreaterEqual,
+            CppTokenKind::Spaceship,
+        ],
+    )
+}
 
-//     expect_token(p, CppTokenKind::TkRightParen)?;
-//     Ok(m.complete(p))
-// }
+/// 解析移位表达式 (<<, >>)
+fn parse_shift_expr(p: &mut CppParser) -> ParseResult {
+    parse_binary_expr(
+        p,
+        parse_additive_expr,
+        &[CppTokenKind::LeftShift, CppTokenKind::RightShift],
+    )
+}
 
-// fn parse_param_name(p: &mut LuaParser) -> ParseResult {
-//     let m = p.mark(CppSyntaxKind::ParamName);
+/// 解析加法表达式 (+, -)
+fn parse_additive_expr(p: &mut CppParser) -> ParseResult {
+    parse_binary_expr(
+        p,
+        parse_multiplicative_expr,
+        &[CppTokenKind::Plus, CppTokenKind::Minus],
+    )
+}
 
-//     if p.current_token() == CppTokenKind::TkName || p.current_token() == CppTokenKind::TkDots {
-//         p.bump();
-//     } else {
-//         return Err(LuaParseError::syntax_error_from(
-//             &t!("expect parameter name"),
-//             p.current_token_range(),
-//         ));
-//     }
+/// 解析乘法表达式 (*, /, %)
+fn parse_multiplicative_expr(p: &mut CppParser) -> ParseResult {
+    parse_binary_expr(
+        p,
+        parse_unary_expr,
+        &[
+            CppTokenKind::Star,
+            CppTokenKind::Slash,
+            CppTokenKind::Percent,
+        ],
+    )
+}
 
-//     Ok(m.complete(p))
-// }
+/// 解析一元表达式
+fn parse_unary_expr(p: &mut CppParser) -> ParseResult {
+    match p.current_token() {
+        CppTokenKind::LogicalNot
+        | CppTokenKind::Tilde
+        | CppTokenKind::Plus
+        | CppTokenKind::Minus
+        | CppTokenKind::PlusPlus
+        | CppTokenKind::MinusMinus
+        | CppTokenKind::Star
+        | CppTokenKind::Ampersand => {
+            let m = p.mark(CppSyntaxKind::UnaryExpr);
+            p.bump(); // consume unary operator
+            parse_unary_expr(p)?; // parse operand recursively
+            Ok(m.complete(p))
+        }
+        CppTokenKind::SizeofKeyword => {
+            let m = p.mark(CppSyntaxKind::UnaryExpr);
+            p.bump(); // consume 'sizeof'
 
-// fn parse_table_expr(p: &mut LuaParser) -> ParseResult {
-//     let mut m = p.mark(CppSyntaxKind::TableEmptyExpr);
-//     p.bump();
+            if p.current_token() == CppTokenKind::LeftParen {
+                p.bump(); // consume '('
+                parse_expr(p)?; // parse expression or type
+                expect_token(p, CppTokenKind::RightParen)?;
+            } else {
+                parse_unary_expr(p)?;
+            }
 
-//     if p.current_token() == CppTokenKind::TkRightBrace {
-//         p.bump();
-//         return Ok(m.complete(p));
-//     }
+            Ok(m.complete(p))
+        }
+        CppTokenKind::TypeidKeyword => {
+            let m = p.mark(CppSyntaxKind::UnaryExpr);
+            p.bump(); // consume 'typeid'
+            expect_token(p, CppTokenKind::LeftParen)?;
+            parse_expr(p)?; // parse expression or type
+            expect_token(p, CppTokenKind::RightParen)?;
+            Ok(m.complete(p))
+        }
+        CppTokenKind::NewKeyword => {
+            let m = p.mark(CppSyntaxKind::UnaryExpr);
+            p.bump(); // consume 'new'
+            // TODO: parse placement new and type specifier
+            parse_postfix_expr(p)?;
+            Ok(m.complete(p))
+        }
+        CppTokenKind::DeleteKeyword => {
+            let m = p.mark(CppSyntaxKind::UnaryExpr);
+            p.bump(); // consume 'delete'
+            if p.current_token() == CppTokenKind::LeftBracket {
+                p.bump(); // consume '['
+                expect_token(p, CppTokenKind::RightBracket)?;
+            }
+            parse_unary_expr(p)?;
+            Ok(m.complete(p))
+        }
+        _ => parse_postfix_expr(p),
+    }
+}
 
-//     let mut cm = parse_field(p)?;
-//     match cm.kind {
-//         CppSyntaxKind::TableFieldAssign => {
-//             m.set_kind(p, CppSyntaxKind::TableObjectExpr);
-//         }
-//         CppSyntaxKind::TableFieldValue => {
-//             m.set_kind(p, CppSyntaxKind::TableArrayExpr);
-//         }
-//         _ => {}
-//     }
+/// 解析后缀表达式 (函数调用、数组访问、成员访问、后增后减等)
+fn parse_postfix_expr(p: &mut CppParser) -> ParseResult {
+    let mut expr = parse_primary_expr(p)?;
 
-//     while p.current_token() == CppTokenKind::TkComma
-//         || p.current_token() == CppTokenKind::TkSemicolon
-//     {
-//         p.bump();
-//         if p.current_token() == CppTokenKind::TkRightBrace {
-//             break;
-//         }
-//         cm = parse_field(p)?;
-//         if cm.kind == CppSyntaxKind::TableFieldAssign {
-//             m.set_kind(p, CppSyntaxKind::TableObjectExpr);
-//         }
-//     }
+    loop {
+        match p.current_token() {
+            CppTokenKind::LeftParen => {
+                // 函数调用
+                let m = expr.precede(p, CppSyntaxKind::CallExpr);
+                p.bump(); // consume '('
 
-//     expect_token(p, CppTokenKind::TkRightBrace)?;
-//     Ok(m.complete(p))
-// }
+                // 解析参数列表
+                if p.current_token() != CppTokenKind::RightParen {
+                    parse_expr(p)?;
+                    while p.current_token() == CppTokenKind::Comma {
+                        p.bump(); // consume ','
+                        parse_expr(p)?;
+                    }
+                }
 
-// fn parse_field(p: &mut LuaParser) -> ParseResult {
-//     let mut m = p.mark(CppSyntaxKind::TableFieldValue);
+                expect_token(p, CppTokenKind::RightParen)?;
+                expr = m.complete(p);
+            }
+            CppTokenKind::LeftBracket => {
+                // 数组访问
+                let m = expr.precede(p, CppSyntaxKind::IndexExpr);
+                p.bump(); // consume '['
+                parse_expr(p)?;
+                expect_token(p, CppTokenKind::RightBracket)?;
+                expr = m.complete(p);
+            }
+            CppTokenKind::Dot | CppTokenKind::Arrow => {
+                // 成员访问
+                let m = expr.precede(p, CppSyntaxKind::IndexExpr);
+                p.bump(); // consume '.' or '->'
 
-//     if p.current_token() == CppTokenKind::TkLeftBracket {
-//         m.set_kind(p, CppSyntaxKind::TableFieldAssign);
-//         p.bump();
-//         parse_expr(p)?;
-//         expect_token(p, CppTokenKind::TkRightBracket)?;
-//         expect_token(p, CppTokenKind::TkAssign)?;
-//         parse_expr(p)?;
-//     } else if p.current_token() == CppTokenKind::TkName {
-//         if p.peek_next_token() == CppTokenKind::TkAssign {
-//             m.set_kind(p, CppSyntaxKind::TableFieldAssign);
-//             p.bump();
-//             p.bump();
-//             parse_expr(p)?;
-//         } else {
-//             parse_expr(p)?;
-//         }
-//     } else {
-//         parse_expr(p)?;
-//     }
+                if p.current_token() == CppTokenKind::Identifier {
+                    p.bump();
+                } else {
+                    return Err(CppParseError::syntax_error_from(
+                        &t!("expected identifier after member access operator"),
+                        p.current_token_range(),
+                    ));
+                }
 
-//     Ok(m.complete(p))
-// }
+                expr = m.complete(p);
+            }
+            CppTokenKind::PlusPlus | CppTokenKind::MinusMinus => {
+                // 后增/后减
+                let m = expr.precede(p, CppSyntaxKind::UnaryExpr);
+                p.bump(); // consume '++' or '--'
+                expr = m.complete(p);
+            }
+            _ => break,
+        }
+    }
 
-// fn parse_suffixed_expr(p: &mut LuaParser) -> ParseResult {
-//     let mut cm = match p.current_token() {
-//         CppTokenKind::TkName => parse_name_or_special_function(p)?,
-//         CppTokenKind::TkLeftParen => {
-//             let m = p.mark(CppSyntaxKind::ParenExpr);
-//             p.bump();
-//             parse_expr(p)?;
-//             expect_token(p, CppTokenKind::TkRightParen)?;
-//             m.complete(p)
-//         }
-//         _ => {
-//             return Err(LuaParseError::syntax_error_from(
-//                 &t!("expect primary expression"),
-//                 p.current_token_range(),
-//             ))
-//         }
-//     };
+    Ok(expr)
+}
 
-//     loop {
-//         match p.current_token() {
-//             CppTokenKind::TkDot | CppTokenKind::TkColon | CppTokenKind::TkLeftBracket => {
-//                 let m = cm.precede(p, CppSyntaxKind::IndexExpr);
-//                 parse_index_struct(p)?;
-//                 cm = m.complete(p);
-//             }
-//             CppTokenKind::TkLeftParen
-//             | CppTokenKind::TkLongString
-//             | CppTokenKind::TkString
-//             | CppTokenKind::TkLeftBrace => {
-//                 let m = cm.precede(p, CppSyntaxKind::CallExpr);
-//                 parse_args(p)?;
-//                 cm = m.complete(p);
-//             }
-//             _ => {
-//                 return Ok(cm);
-//             }
-//         }
-//     }
-// }
+/// 解析主表达式 (标识符、字面量、括号表达式等)
+fn parse_primary_expr(p: &mut CppParser) -> ParseResult {
+    match p.current_token() {
+        // 字面量
+        CppTokenKind::IntegerLiteral
+        | CppTokenKind::FloatingLiteral
+        | CppTokenKind::StringLiteral
+        | CppTokenKind::CharLiteral
+        | CppTokenKind::TrueKeyword
+        | CppTokenKind::FalseKeyword => {
+            let m = p.mark(CppSyntaxKind::LiteralExpr);
+            p.bump();
+            Ok(m.complete(p))
+        }
 
-// fn parse_name_or_special_function(p: &mut LuaParser) -> ParseResult {
-//     let m = p.mark(CppSyntaxKind::NameExpr);
-//     let special_kind = match p.parse_config.get_special_function(p.current_token_text()) {
-//         SpecialFunction::Require => CppSyntaxKind::RequireCallExpr,
-//         SpecialFunction::Assert => CppSyntaxKind::AssertCallExpr,
-//         SpecialFunction::Error => CppSyntaxKind::ErrorCallExpr,
-//         SpecialFunction::Type => CppSyntaxKind::TypeCallExpr,
-//         SpecialFunction::Setmatable => CppSyntaxKind::SetmetatableCallExpr,
-//         _ => CppSyntaxKind::None,
-//     };
-//     p.bump();
-//     let mut cm = m.complete(p);
-//     if special_kind == CppSyntaxKind::None {
-//         return Ok(cm);
-//     }
+        // 标识符
+        CppTokenKind::Identifier => {
+            let m = p.mark(CppSyntaxKind::IdentifierExpr);
+            p.bump();
+            Ok(m.complete(p))
+        }
 
-//     if matches!(
-//         p.current_token(),
-//         CppTokenKind::TkLeftParen
-//             | CppTokenKind::TkLongString
-//             | CppTokenKind::TkString
-//             | CppTokenKind::TkLeftBrace
-//     ) {
-//         let m1 = cm.precede(p, special_kind);
-//         parse_args(p)?;
-//         cm = m1.complete(p);
-//     }
+        // 括号表达式
+        CppTokenKind::LeftParen => {
+            let m = p.mark(CppSyntaxKind::ParenExpr);
+            p.bump(); // consume '('
+            parse_expr(p)?;
+            expect_token(p, CppTokenKind::RightParen)?;
+            Ok(m.complete(p))
+        }
 
-//     Ok(cm)
-// }
+        // this 关键字
+        CppTokenKind::ThisKeyword => {
+            let m = p.mark(CppSyntaxKind::IdentifierExpr);
+            p.bump();
+            Ok(m.complete(p))
+        }
 
-// fn parse_index_struct(p: &mut LuaParser) -> Result<(), LuaParseError> {
-//     match p.current_token() {
-//         CppTokenKind::TkLeftBracket => {
-//             p.bump();
-//             parse_expr(p)?;
-//             expect_token(p, CppTokenKind::TkRightBracket)?;
-//         }
-//         CppTokenKind::TkDot => {
-//             p.bump();
-//             expect_token(p, CppTokenKind::TkName)?;
-//         }
-//         CppTokenKind::TkColon => {
-//             p.bump();
-//             expect_token(p, CppTokenKind::TkName)?;
-//             if !matches!(
-//                 p.current_token(),
-//                 CppTokenKind::TkLeftParen
-//                     | CppTokenKind::TkLeftBrace
-//                     | CppTokenKind::TkString
-//                     | CppTokenKind::TkLongString
-//             ) {
-//                 return Err(LuaParseError::syntax_error_from(
-//                     &t!("colon accessor must be followed by a function call or table constructor or string literal"),
-//                     p.current_token_range(),
-//                 ));
-//             }
-//         }
-//         _ => {
-//             return Err(LuaParseError::syntax_error_from(
-//                 &t!("expect index struct"),
-//                 p.current_token_range(),
-//             ));
-//         }
-//     }
+        _ => Err(CppParseError::syntax_error_from(
+            &t!("expected primary expression"),
+            p.current_token_range(),
+        )),
+    }
+}
 
-//     Ok(())
-// }
+/// 通用的二元表达式解析器
+fn parse_binary_expr<F>(
+    p: &mut CppParser,
+    parse_operand: F,
+    operators: &[CppTokenKind],
+) -> ParseResult
+where
+    F: Fn(&mut CppParser) -> ParseResult,
+{
+    let mut expr = parse_operand(p)?;
 
-// fn parse_args(p: &mut LuaParser) -> ParseResult {
-//     let m = p.mark(CppSyntaxKind::CallArgList);
-//     match p.current_token() {
-//         CppTokenKind::TkLeftParen => {
-//             p.bump();
-//             if p.current_token() != CppTokenKind::TkRightParen {
-//                 parse_expr(p)?;
-//                 while p.current_token() == CppTokenKind::TkComma {
-//                     p.bump();
-//                     if p.current_token() == CppTokenKind::TkRightParen {
-//                         p.push_error(LuaParseError::syntax_error_from(
-//                             &t!("expect expression"),
-//                             p.current_token_range(),
-//                         ));
-//                         break;
-//                     }
-//                     parse_expr(p)?;
-//                 }
-//             }
-//             expect_token(p, CppTokenKind::TkRightParen)?;
-//         }
-//         CppTokenKind::TkLeftBrace => {
-//             parse_table_expr(p)?;
-//         }
-//         CppTokenKind::TkString | CppTokenKind::TkLongString => {
-//             let m1 = p.mark(CppSyntaxKind::LiteralExpr);
-//             p.bump();
-//             m1.complete(p);
-//         }
-//         _ => {
-//             return Err(LuaParseError::syntax_error_from(
-//                 &t!("expect args"),
-//                 p.current_token_range(),
-//             ));
-//         }
-//     }
+    while operators.contains(&p.current_token()) {
+        let m = expr.precede(p, CppSyntaxKind::BinaryExpr);
+        p.bump(); // consume operator
+        parse_operand(p)?; // parse right operand
+        expr = m.complete(p);
+    }
 
-//     Ok(m.complete(p))
-// }
+    Ok(expr)
+}

@@ -4,7 +4,7 @@
 /// along with their precedence and associativity.
 
 #[derive(Debug, PartialEq, Copy, Clone)]
-pub enum UnaryOperator {
+pub enum CppUnaryOperator {
     /// Logical NOT: !expr
     Not,
     /// Bitwise NOT: ~expr
@@ -38,7 +38,7 @@ pub enum UnaryOperator {
 }
 
 #[derive(Debug, PartialEq, Copy, Clone)]
-pub enum BinaryOperator {
+pub enum CppBinaryOperator {
     /// Addition: a + b
     Add,
     /// Subtraction: a - b
@@ -129,43 +129,43 @@ pub struct OperatorPrecedence {
 
 pub const UNARY_PRECEDENCE: u8 = 3; // Example: unary +, -, !, ~
 
-pub const BINARY_PRECEDENCE: &[(BinaryOperator, OperatorPrecedence)] = &[
+pub const BINARY_PRECEDENCE: &[(CppBinaryOperator, OperatorPrecedence)] = &[
     // Precedence and associativity based on C++ standard
-    (BinaryOperator::Scope, OperatorPrecedence { precedence: 1, right_associative: false }),
-    (BinaryOperator::MemberAccess, OperatorPrecedence { precedence: 2, right_associative: false }),
-    (BinaryOperator::PtrMemberAccess, OperatorPrecedence { precedence: 2, right_associative: false }),
-    (BinaryOperator::Call, OperatorPrecedence { precedence: 2, right_associative: false }),
-    (BinaryOperator::Subscript, OperatorPrecedence { precedence: 2, right_associative: false }),
-    (BinaryOperator::Mul, OperatorPrecedence { precedence: 5, right_associative: false }),
-    (BinaryOperator::Div, OperatorPrecedence { precedence: 5, right_associative: false }),
-    (BinaryOperator::Mod, OperatorPrecedence { precedence: 5, right_associative: false }),
-    (BinaryOperator::Add, OperatorPrecedence { precedence: 6, right_associative: false }),
-    (BinaryOperator::Sub, OperatorPrecedence { precedence: 6, right_associative: false }),
-    (BinaryOperator::Shl, OperatorPrecedence { precedence: 7, right_associative: false }),
-    (BinaryOperator::Shr, OperatorPrecedence { precedence: 7, right_associative: false }),
-    (BinaryOperator::Lt, OperatorPrecedence { precedence: 8, right_associative: false }),
-    (BinaryOperator::Le, OperatorPrecedence { precedence: 8, right_associative: false }),
-    (BinaryOperator::Gt, OperatorPrecedence { precedence: 8, right_associative: false }),
-    (BinaryOperator::Ge, OperatorPrecedence { precedence: 8, right_associative: false }),
-    (BinaryOperator::Eq, OperatorPrecedence { precedence: 9, right_associative: false }),
-    (BinaryOperator::Neq, OperatorPrecedence { precedence: 9, right_associative: false }),
-    (BinaryOperator::BitAnd, OperatorPrecedence { precedence: 10, right_associative: false }),
-    (BinaryOperator::BitXor, OperatorPrecedence { precedence: 11, right_associative: false }),
-    (BinaryOperator::BitOr, OperatorPrecedence { precedence: 12, right_associative: false }),
-    (BinaryOperator::LogicalAnd, OperatorPrecedence { precedence: 13, right_associative: false }),
-    (BinaryOperator::LogicalOr, OperatorPrecedence { precedence: 14, right_associative: false }),
-    (BinaryOperator::Conditional, OperatorPrecedence { precedence: 15, right_associative: true }),
-    (BinaryOperator::Assign, OperatorPrecedence { precedence: 16, right_associative: true }),
-    (BinaryOperator::AddAssign, OperatorPrecedence { precedence: 16, right_associative: true }),
-    (BinaryOperator::SubAssign, OperatorPrecedence { precedence: 16, right_associative: true }),
-    (BinaryOperator::MulAssign, OperatorPrecedence { precedence: 16, right_associative: true }),
-    (BinaryOperator::DivAssign, OperatorPrecedence { precedence: 16, right_associative: true }),
-    (BinaryOperator::ModAssign, OperatorPrecedence { precedence: 16, right_associative: true }),
-    (BinaryOperator::BitAndAssign, OperatorPrecedence { precedence: 16, right_associative: true }),
-    (BinaryOperator::BitOrAssign, OperatorPrecedence { precedence: 16, right_associative: true }),
-    (BinaryOperator::BitXorAssign, OperatorPrecedence { precedence: 16, right_associative: true }),
-    (BinaryOperator::ShlAssign, OperatorPrecedence { precedence: 16, right_associative: true }),
-    (BinaryOperator::ShrAssign, OperatorPrecedence { precedence: 16, right_associative: true }),
-    (BinaryOperator::Comma, OperatorPrecedence { precedence: 17, right_associative: false }),
-    (BinaryOperator::Spaceship, OperatorPrecedence { precedence: 9, right_associative: false }),
+    (CppBinaryOperator::Scope, OperatorPrecedence { precedence: 1, right_associative: false }),
+    (CppBinaryOperator::MemberAccess, OperatorPrecedence { precedence: 2, right_associative: false }),
+    (CppBinaryOperator::PtrMemberAccess, OperatorPrecedence { precedence: 2, right_associative: false }),
+    (CppBinaryOperator::Call, OperatorPrecedence { precedence: 2, right_associative: false }),
+    (CppBinaryOperator::Subscript, OperatorPrecedence { precedence: 2, right_associative: false }),
+    (CppBinaryOperator::Mul, OperatorPrecedence { precedence: 5, right_associative: false }),
+    (CppBinaryOperator::Div, OperatorPrecedence { precedence: 5, right_associative: false }),
+    (CppBinaryOperator::Mod, OperatorPrecedence { precedence: 5, right_associative: false }),
+    (CppBinaryOperator::Add, OperatorPrecedence { precedence: 6, right_associative: false }),
+    (CppBinaryOperator::Sub, OperatorPrecedence { precedence: 6, right_associative: false }),
+    (CppBinaryOperator::Shl, OperatorPrecedence { precedence: 7, right_associative: false }),
+    (CppBinaryOperator::Shr, OperatorPrecedence { precedence: 7, right_associative: false }),
+    (CppBinaryOperator::Lt, OperatorPrecedence { precedence: 8, right_associative: false }),
+    (CppBinaryOperator::Le, OperatorPrecedence { precedence: 8, right_associative: false }),
+    (CppBinaryOperator::Gt, OperatorPrecedence { precedence: 8, right_associative: false }),
+    (CppBinaryOperator::Ge, OperatorPrecedence { precedence: 8, right_associative: false }),
+    (CppBinaryOperator::Eq, OperatorPrecedence { precedence: 9, right_associative: false }),
+    (CppBinaryOperator::Neq, OperatorPrecedence { precedence: 9, right_associative: false }),
+    (CppBinaryOperator::BitAnd, OperatorPrecedence { precedence: 10, right_associative: false }),
+    (CppBinaryOperator::BitXor, OperatorPrecedence { precedence: 11, right_associative: false }),
+    (CppBinaryOperator::BitOr, OperatorPrecedence { precedence: 12, right_associative: false }),
+    (CppBinaryOperator::LogicalAnd, OperatorPrecedence { precedence: 13, right_associative: false }),
+    (CppBinaryOperator::LogicalOr, OperatorPrecedence { precedence: 14, right_associative: false }),
+    (CppBinaryOperator::Conditional, OperatorPrecedence { precedence: 15, right_associative: true }),
+    (CppBinaryOperator::Assign, OperatorPrecedence { precedence: 16, right_associative: true }),
+    (CppBinaryOperator::AddAssign, OperatorPrecedence { precedence: 16, right_associative: true }),
+    (CppBinaryOperator::SubAssign, OperatorPrecedence { precedence: 16, right_associative: true }),
+    (CppBinaryOperator::MulAssign, OperatorPrecedence { precedence: 16, right_associative: true }),
+    (CppBinaryOperator::DivAssign, OperatorPrecedence { precedence: 16, right_associative: true }),
+    (CppBinaryOperator::ModAssign, OperatorPrecedence { precedence: 16, right_associative: true }),
+    (CppBinaryOperator::BitAndAssign, OperatorPrecedence { precedence: 16, right_associative: true }),
+    (CppBinaryOperator::BitOrAssign, OperatorPrecedence { precedence: 16, right_associative: true }),
+    (CppBinaryOperator::BitXorAssign, OperatorPrecedence { precedence: 16, right_associative: true }),
+    (CppBinaryOperator::ShlAssign, OperatorPrecedence { precedence: 16, right_associative: true }),
+    (CppBinaryOperator::ShrAssign, OperatorPrecedence { precedence: 16, right_associative: true }),
+    (CppBinaryOperator::Comma, OperatorPrecedence { precedence: 17, right_associative: false }),
+    (CppBinaryOperator::Spaceship, OperatorPrecedence { precedence: 9, right_associative: false }),
 ];

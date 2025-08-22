@@ -4,7 +4,7 @@ mod cpp_syntax_kind;
 mod cpp_token_kind;
 
 pub use cpp_language_level::CppLanguageLevel;
-pub use cpp_operator_kind::{BinaryOperator, UnaryOperator, UNARY_PRECEDENCE};
+pub use cpp_operator_kind::{CppBinaryOperator, CppUnaryOperator, UNARY_PRECEDENCE, BINARY_PRECEDENCE};
 pub use cpp_syntax_kind::CppSyntaxKind;
 pub use cpp_token_kind::CppTokenKind;
 
@@ -79,18 +79,18 @@ pub struct PriorityTable {
 #[derive(Debug, PartialEq)]
 pub enum CppOpKind {
     None,
-    Unary(UnaryOperator),
-    Binary(BinaryOperator),
+    Unary(CppUnaryOperator),
+    Binary(CppBinaryOperator),
 }
 
-impl From<UnaryOperator> for CppOpKind {
-    fn from(op: UnaryOperator) -> Self {
+impl From<CppUnaryOperator> for CppOpKind {
+    fn from(op: CppUnaryOperator) -> Self {
         CppOpKind::Unary(op)
     }
 }
 
-impl From<BinaryOperator> for CppOpKind {
-    fn from(op: BinaryOperator) -> Self {
+impl From<CppBinaryOperator> for CppOpKind {
+    fn from(op: CppBinaryOperator) -> Self {
         CppOpKind::Binary(op)
     }
 }
