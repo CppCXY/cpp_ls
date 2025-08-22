@@ -8,6 +8,7 @@ pub struct CppLexer<'a> {
     errors: &'a mut Vec<CppParseError>,
 }
 
+#[allow(unused)]
 impl CppLexer<'_> {
     pub fn new<'a>(
         text: &'a str,

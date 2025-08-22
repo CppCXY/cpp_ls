@@ -7,6 +7,46 @@ use crate::{
 
 use super::expect_token;
 
+/// 操作符优先级定义
+/// 数值越高，优先级越高
+fn get_operator_precedence(token: CppTokenKind) -> Option<u8> {
+    match token {
+        // 乘法、除法、模运算 - 最高优先级
+        CppTokenKind::Star | CppTokenKind::Slash | CppTokenKind::Percent => Some(13),
+        
+        // 加法、减法
+        CppTokenKind::Plus | CppTokenKind::Minus => Some(12),
+        
+        // 移位运算
+        CppTokenKind::LeftShift | CppTokenKind::RightShift => Some(11),
+        
+        // 关系运算
+        CppTokenKind::Less | CppTokenKind::LessEqual | 
+        CppTokenKind::Greater | CppTokenKind::GreaterEqual | 
+        CppTokenKind::Spaceship => Some(10),
+        
+        // 相等性运算
+        CppTokenKind::Equal | CppTokenKind::NotEqual => Some(9),
+        
+        // 按位与
+        CppTokenKind::Ampersand => Some(8),
+        
+        // 按位异或
+        CppTokenKind::Caret => Some(7),
+        
+        // 按位或
+        CppTokenKind::Pipe => Some(6),
+        
+        // 逻辑与
+        CppTokenKind::LogicalAnd => Some(5),
+        
+        // 逻辑或
+        CppTokenKind::LogicalOr => Some(4),
+        
+        _ => None,
+    }
+}
+
 /// 解析表达式的主要入口点
 pub fn parse_expr(p: &mut CppParser) -> ParseResult {
     parse_ternary_expr(p)
@@ -14,7 +54,7 @@ pub fn parse_expr(p: &mut CppParser) -> ParseResult {
 
 /// 解析三元表达式 (condition ? true_expr : false_expr)
 fn parse_ternary_expr(p: &mut CppParser) -> ParseResult {
-    let mut expr = parse_logical_or_expr(p)?;
+    let mut expr = parse_binary_expr_with_precedence(p, 0)?;
 
     if p.current_token() == CppTokenKind::Question {
         let m = expr.precede(p, CppSyntaxKind::TernaryExpr);
@@ -30,84 +70,28 @@ fn parse_ternary_expr(p: &mut CppParser) -> ParseResult {
     Ok(expr)
 }
 
-/// 解析逻辑或表达式 (||)
-fn parse_logical_or_expr(p: &mut CppParser) -> ParseResult {
-    parse_binary_expr(p, parse_logical_and_expr, &[CppTokenKind::LogicalOr])
-}
+/// 使用优先级爬升算法解析二元表达式
+/// min_prec: 当前最小优先级
+fn parse_binary_expr_with_precedence(p: &mut CppParser, min_prec: u8) -> ParseResult {
+    let mut left = parse_unary_expr(p)?;
 
-/// 解析逻辑与表达式 (&&)
-fn parse_logical_and_expr(p: &mut CppParser) -> ParseResult {
-    parse_binary_expr(p, parse_bitwise_or_expr, &[CppTokenKind::LogicalAnd])
-}
+    while let Some(prec) = get_operator_precedence(p.current_token()) {
+        if prec < min_prec {
+            break;
+        }
 
-/// 解析按位或表达式 (|)
-fn parse_bitwise_or_expr(p: &mut CppParser) -> ParseResult {
-    parse_binary_expr(p, parse_bitwise_xor_expr, &[CppTokenKind::Pipe])
-}
+        let m = left.precede(p, CppSyntaxKind::BinaryExpr);
+        p.bump(); // consume operator
 
-/// 解析按位异或表达式 (^)
-fn parse_bitwise_xor_expr(p: &mut CppParser) -> ParseResult {
-    parse_binary_expr(p, parse_bitwise_and_expr, &[CppTokenKind::Caret])
-}
+        // 对于左结合运算符，使用 prec + 1；对于右结合运算符，使用 prec
+        // C++ 中大部分二元运算符都是左结合的
+        let next_min_prec = prec + 1;
+        parse_binary_expr_with_precedence(p, next_min_prec)?;
 
-/// 解析按位与表达式 (&)
-fn parse_bitwise_and_expr(p: &mut CppParser) -> ParseResult {
-    parse_binary_expr(p, parse_equality_expr, &[CppTokenKind::Ampersand])
-}
+        left = m.complete(p);
+    }
 
-/// 解析相等性表达式 (==, !=)
-fn parse_equality_expr(p: &mut CppParser) -> ParseResult {
-    parse_binary_expr(
-        p,
-        parse_relational_expr,
-        &[CppTokenKind::Equal, CppTokenKind::NotEqual],
-    )
-}
-
-/// 解析关系表达式 (<, <=, >, >=, <=>)
-fn parse_relational_expr(p: &mut CppParser) -> ParseResult {
-    parse_binary_expr(
-        p,
-        parse_shift_expr,
-        &[
-            CppTokenKind::Less,
-            CppTokenKind::LessEqual,
-            CppTokenKind::Greater,
-            CppTokenKind::GreaterEqual,
-            CppTokenKind::Spaceship,
-        ],
-    )
-}
-
-/// 解析移位表达式 (<<, >>)
-fn parse_shift_expr(p: &mut CppParser) -> ParseResult {
-    parse_binary_expr(
-        p,
-        parse_additive_expr,
-        &[CppTokenKind::LeftShift, CppTokenKind::RightShift],
-    )
-}
-
-/// 解析加法表达式 (+, -)
-fn parse_additive_expr(p: &mut CppParser) -> ParseResult {
-    parse_binary_expr(
-        p,
-        parse_multiplicative_expr,
-        &[CppTokenKind::Plus, CppTokenKind::Minus],
-    )
-}
-
-/// 解析乘法表达式 (*, /, %)
-fn parse_multiplicative_expr(p: &mut CppParser) -> ParseResult {
-    parse_binary_expr(
-        p,
-        parse_unary_expr,
-        &[
-            CppTokenKind::Star,
-            CppTokenKind::Slash,
-            CppTokenKind::Percent,
-        ],
-    )
+    Ok(left)
 }
 
 /// 解析一元表达式
@@ -272,25 +256,4 @@ fn parse_primary_expr(p: &mut CppParser) -> ParseResult {
             p.current_token_range(),
         )),
     }
-}
-
-/// 通用的二元表达式解析器
-fn parse_binary_expr<F>(
-    p: &mut CppParser,
-    parse_operand: F,
-    operators: &[CppTokenKind],
-) -> ParseResult
-where
-    F: Fn(&mut CppParser) -> ParseResult,
-{
-    let mut expr = parse_operand(p)?;
-
-    while operators.contains(&p.current_token()) {
-        let m = expr.precede(p, CppSyntaxKind::BinaryExpr);
-        p.bump(); // consume operator
-        parse_operand(p)?; // parse right operand
-        expr = m.complete(p);
-    }
-
-    Ok(expr)
 }

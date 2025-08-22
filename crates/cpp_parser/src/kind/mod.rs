@@ -4,7 +4,7 @@ mod cpp_syntax_kind;
 mod cpp_token_kind;
 
 pub use cpp_language_level::CppLanguageLevel;
-pub use cpp_operator_kind::{CppBinaryOperator, CppUnaryOperator, UNARY_PRECEDENCE, BINARY_PRECEDENCE};
+pub use cpp_operator_kind::{CppBinaryOperator, CppUnaryOperator};
 pub use cpp_syntax_kind::CppSyntaxKind;
 pub use cpp_token_kind::CppTokenKind;
 
