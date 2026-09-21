@@ -88,6 +88,11 @@ pub enum CppSyntaxKind {
     /// e.g.: class A { int member; };
     FieldDecl,
 
+    /// Class/struct/union body - the `{ ... }` part of a class definition, including access
+    /// specifier sections and member declarations.
+    /// e.g.: the `{ public: void f(); }` in `class A { public: void f(); };`
+    ClassBody,
+
     /// Template declaration
     /// e.g.: template<typename T> class MyClass;
     TemplateDecl,

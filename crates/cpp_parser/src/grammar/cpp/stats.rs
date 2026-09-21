@@ -39,7 +39,7 @@
 
 use crate::{
     grammar::ParseResult,
-    kind::{self, CppSyntaxKind, CppTokenKind},
+    kind::{CppSyntaxKind, CppTokenKind},
     parser::{CppParser, MarkerEventContainer},
     parser_error::CppParseError,
 };
@@ -52,11 +52,12 @@ pub fn parse_stats(p: &mut CppParser) {
         match parse_stat(p) {
             Ok(_) => {}
             Err(err) => {
-                p.errors.push(err);
-                let current_level = p.get_mark_level();
-                for _ in 0..(current_level - level) {
-                    p.push_node_end();
-                }
+                p.push_error(err);
+
+                // `?` early returns inside `parse_stat` leave markers open. Close them before
+                // recovering, otherwise the event stream stays unbalanced and corrupts the rest
+                // of the file rather than just this statement.
+                p.recover_to_level(level);
 
                 // Skip to next semicolon or closing brace for error recovery
                 while !p.is_eof()
@@ -87,34 +88,46 @@ fn block_follow(p: &CppParser) -> bool {
     }
 }
 
+/// Dispatch to the statement rule for the current token.
+///
+/// Every statement passes through here, which makes this the natural enforcement point for the
+/// marker contract documented in `grammar::mod`: an `Err` leaving this function has closed every
+/// node the statement opened, so callers can recover by skipping tokens without having to know how
+/// deep the failed rule got.
 pub fn parse_stat(p: &mut CppParser) -> ParseResult {
-    let cm = match p.current_token() {
+    let base = p.open_marks();
+
+    let result = match p.current_token() {
         // Control flow statements
-        CppTokenKind::IfKeyword => parse_if_statement(p)?,
-        CppTokenKind::WhileKeyword => parse_while_statement(p)?,
-        CppTokenKind::DoKeyword => parse_do_while_statement(p)?,
-        CppTokenKind::ForKeyword => parse_for_statement(p)?,
-        CppTokenKind::SwitchKeyword => parse_switch_statement(p)?,
+        CppTokenKind::IfKeyword => parse_if_statement(p),
+        CppTokenKind::WhileKeyword => parse_while_statement(p),
+        CppTokenKind::DoKeyword => parse_do_while_statement(p),
+        CppTokenKind::ForKeyword => parse_for_statement(p),
+        CppTokenKind::SwitchKeyword => parse_switch_statement(p),
         // Compound statement
-        CppTokenKind::LeftBrace => parse_compound_stat(p)?,
+        CppTokenKind::LeftBrace => parse_compound_stat(p),
         // Declaration statements
-        CppTokenKind::ClassKeyword => parse_class_declaration(p)?,
-        CppTokenKind::StructKeyword => parse_struct_declaration(p)?,
-        CppTokenKind::EnumKeyword => parse_enum_declaration(p)?,
-        CppTokenKind::NamespaceKeyword => parse_namespace_declaration(p)?,
-        // CppTokenKind::UsingKeyword => parse_using_declaration(p)?,
-        // CppTokenKind::TypedefKeyword => parse_typedef_declaration(p)?,
-        // CppTokenKind::ConstKeyword => parse_const_declaration(p)?,
-        // CppTokenKind::StaticKeyword => parse_static_declaration(p)?,
-        // CppTokenKind::ExternKeyword => parse_extern_declaration(p)?,
-        // CppTokenKind::VolatileKeyword => parse_volatile_declaration(p)?,
-        // CppTokenKind::InlineKeyword => parse_inline_declaration(p)?,
+        CppTokenKind::ClassKeyword => parse_class_declaration(p),
+        CppTokenKind::StructKeyword => parse_struct_declaration(p),
+        CppTokenKind::EnumKeyword => parse_enum_declaration(p),
+        CppTokenKind::NamespaceKeyword => parse_namespace_declaration(p),
+        // CppTokenKind::UsingKeyword => parse_using_declaration(p),
+        // CppTokenKind::TypedefKeyword => parse_typedef_declaration(p),
+        // CppTokenKind::ConstKeyword => parse_const_declaration(p),
+        // CppTokenKind::StaticKeyword => parse_static_declaration(p),
+        // CppTokenKind::ExternKeyword => parse_extern_declaration(p),
+        // CppTokenKind::VolatileKeyword => parse_volatile_declaration(p),
+        // CppTokenKind::InlineKeyword => parse_inline_declaration(p),
 
         // Everything else is either a declaration or an expression statement
-        _ => parse_declaration_or_expression_statement(p)?,
+        _ => parse_declaration_or_expression_statement(p),
     };
 
-    Ok(cm)
+    if result.is_err() {
+        p.close_marks_above(base);
+    }
+
+    result
 }
 
 fn parse_if_statement(p: &mut CppParser) -> ParseResult {
@@ -547,11 +560,15 @@ fn parse_constructor_or_method_declaration(p: &mut CppParser) -> ParseResult {
             expect_token(p, CppTokenKind::RightParen)?;
         }
     }
-      // Parse override/final specifiers (C++11)
-    while matches!(p.current_token(), CppTokenKind::Identifier) {
-        // TODO: Need to implement current_token_text() method to check for "override" or "final"
-        // For now, just skip identifiers that might be override/final
-        break;
+    // Parse override/final specifiers (C++11).
+    //
+    // `override` and `final` are *contextual* keywords: the lexer correctly hands them over as
+    // plain identifiers, and they are only meaningful immediately after a declarator. So we match
+    // on text here rather than in the lexer.
+    while matches!(p.current_token(), CppTokenKind::Identifier)
+        && matches!(p.current_token_text(), "override" | "final")
+    {
+        p.bump();
     }
     
     // Parse pure virtual specifier: = 0
@@ -687,26 +704,35 @@ fn parse_template_argument(p: &mut CppParser) -> ParseResult {
     Ok(m.complete(p))
 }
 
-/// Parse declaration or expression statement
+/// Parse declaration or expression statement.
+///
+/// This is the single biggest gap in the grammar: it does not yet distinguish `int x = 1;` from
+/// `x = 1;`, because that requires a `decl-specifier-seq` and a type-name table. Until then it
+/// consumes to the end of the construct and labels the result `DeclStat`.
 fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
-    // This is a placeholder - in a real parser, you'd need to distinguish
-    // between declarations and expressions through lookahead
+    let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::DeclStat);
-    
-    // For now, just consume tokens until semicolon
+
+    // Consume tokens until the end of the construct. A `{` starts a body and is parsed as a
+    // nested block so that its contents get their own nodes instead of being flattened in here.
     while p.current_token() != CppTokenKind::Semicolon && !p.is_eof() {
         if p.current_token() == CppTokenKind::LeftBrace {
-            parse_compound_stat(p)?;
+            if let Err(err) = parse_compound_stat(p) {
+                // Close whatever this function opened before propagating: a leaked `DeclStat`
+                // would sit in front of its parent's `NodeEnd` and swallow the rest of the file.
+                p.close_marks_above(base);
+                return Err(err);
+            }
             break;
         } else {
             p.bump();
         }
     }
-    
+
     if p.current_token() == CppTokenKind::Semicolon {
         p.bump();
     }
-    
+
     Ok(m.complete(p))
 }
 

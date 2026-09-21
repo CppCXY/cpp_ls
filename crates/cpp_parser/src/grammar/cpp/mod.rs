@@ -12,8 +12,19 @@ use crate::{
 
 use super::ParseResult;
 
-#[allow(unused)]
+/// Parse a whole translation unit.
+///
+/// This is the parser's outermost recovery loop and it must always terminate having consumed
+/// every token:
+///
+/// 1. `parse_stats` parses as many declarations/statements as it can.
+/// 2. If it consumed nothing at all, we are looking at a token no production accepts. We wrap it
+///    in an `ErrorNode`, report it, and force progress by consuming it.
+///
+/// Step 2 is what guarantees termination and losslessness at the same time: no input can make the
+/// loop spin, and no token can be dropped.
 pub fn parse_cpp_unit(p: &mut CppParser) {
+    let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::TranslationUnit);
 
     p.init();
@@ -33,24 +44,55 @@ pub fn parse_cpp_unit(p: &mut CppParser) {
         }
     }
 
+    // The translation unit is the one node that must never be left to the recovery machinery: if
+    // an inner rule unwound past its marker, the root would be swallowed into an error node.
+    debug_assert_eq!(
+        p.open_marks(),
+        base + 1,
+        "a grammar rule unwound past the translation unit marker"
+    );
     m.complete(p);
+    p.close_marks_above(base);
 }
 
+/// Parse a compound statement — `{ ... }` — or, in C++, a *single* statement.
+///
+/// The `{` is what distinguishes `Foo::Foo() : a(1) {}` (a function body) from
+/// `Foo::Foo() : a(1);` (a declaration), so this rule drives most of the declaration/definition
+/// decision and is the first thing a real declaration parser will need to hook into.
 fn parse_compound_stat(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::CompoundStat);
 
-    let left_brace_founded = if_token_bump(p, CppTokenKind::LeftBrace);
-
-    if left_brace_founded {
+    if if_token_bump(p, CppTokenKind::LeftBrace) {
         parse_stats(p);
-        expect_token(p, CppTokenKind::RightBrace)?;
-    } else {
-        parse_stat(p)?;
+
+        if let Err(err) = expect_token(p, CppTokenKind::RightBrace) {
+            // A missing `}` is the single most common error while editing. Keeping the block and
+            // recording the absence as a zero-width node gives completion a sane place to live
+            // instead of swallowing the rest of the file into an error node — but the problem must
+            // still be reported, or the editor has no way to tell the user about it.
+            //
+            // Note that the `MissingNode` itself will not show up in the finished tree: it is
+            // zero-width, and the tree builder drops those. The diagnostic is what carries the
+            // information.
+            p.emit_missing_node();
+            p.push_error(err);
+            return Ok(m.complete(p));
+        }
+    } else if let Err(err) = parse_stat(p) {
+        p.close_marks_above(base);
+        return Err(err);
     }
 
     Ok(m.complete(p))
 }
 
+/// Report a token that is expected but absent, without consuming anything.
+///
+/// Note the deliberate absence of a `bump()` on the failure path: the caller (or the outer
+/// recovery loop) decides what to do with the offending token, and silently eating it here is how
+/// a parser ends up "succeeding" on input it did not actually understand.
 fn expect_token(p: &mut CppParser, token: CppTokenKind) -> Result<(), CppParseError> {
     if p.current_token() == token {
         p.bump();

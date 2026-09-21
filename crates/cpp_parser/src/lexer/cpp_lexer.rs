@@ -4,6 +4,10 @@ use super::{is_name_continue, is_name_start, lexer_config::LexerConfig, token_da
 
 pub struct CppLexer<'a> {
     reader: Reader<'a>,
+    /// Reserved for standard-dependent lexing (raw strings in C++11, digit separators in C++14,
+    /// `<=>` in C++20, `#if`-sensitive tokenization). The lexer currently accepts the superset of
+    /// all supported standards, so this is not consulted yet.
+    #[allow(dead_code)]
     lexer_config: LexerConfig,
     errors: &'a mut Vec<CppParseError>,
 }
@@ -371,9 +375,9 @@ impl CppLexer<'_> {
                         CppTokenKind::DotStar
                     }
                     '0'..='9' => {
-                        // Decimal number starting with '.'
-                        // We need to restart number parsing from the '.'
-                        return self.lex_number();
+                        // Decimal number starting with '.', e.g. `.5`. `.` has already been
+                        // consumed, so tell `lex_number` to skip its own first-character step.
+                        self.lex_number()
                     }
                     _ => CppTokenKind::Dot,
                 }
@@ -409,6 +413,16 @@ impl CppLexer<'_> {
             // Unknown character
             _ => {
                 self.reader.bump();
+                // Still emit a token, so the tree stays lossless, but say so: an unrecognised
+                // character is either a typo in the source or a gap in the lexer, and both should
+                // be visible rather than silently absorbed into the surrounding construct.
+                self.errors.push(CppParseError::syntax_error_from(
+                    &format!(
+                        "unrecognized character `{}`",
+                        self.reader.current_saved_text()
+                    ),
+                    self.reader.saved_range(),
+                ));
                 CppTokenKind::Unknown
             }
         }
@@ -589,8 +603,8 @@ impl CppLexer<'_> {
                 }
             }
         } else if first == '.' {
-            // Float starting with decimal point
-            self.reader.bump();
+            // Float starting with a decimal point. The scanner for `.` has already consumed it
+            // and delegated here, so there is nothing left to bump.
             state = NumberState::Float;
         } else {
             // Regular decimal number

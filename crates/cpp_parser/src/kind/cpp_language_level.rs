@@ -81,13 +81,13 @@ impl CppLanguageLevel {
         }
     }
     
-    /// Get the default language level
-    pub fn default() -> Self {
+    /// Get the default language level used when no build configuration is known.
+    pub const fn default_level() -> Self {
         CppLanguageLevel::Cpp17
     }
-    
-    /// Parse language level from string
-    pub fn from_str(s: &str) -> Option<Self> {
+
+    /// Parse language level from a `-std=` style spelling.
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "c++11" | "11" => Some(CppLanguageLevel::Cpp11),
             "c++14" | "14" => Some(CppLanguageLevel::Cpp14),
@@ -98,6 +98,12 @@ impl CppLanguageLevel {
             "msvc" | "visual c++" => Some(CppLanguageLevel::MsvcCpp),
             _ => None,
         }
+    }
+}
+
+impl Default for CppLanguageLevel {
+    fn default() -> Self {
+        CppLanguageLevel::default_level()
     }
 }
 

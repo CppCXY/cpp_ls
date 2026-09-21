@@ -1,41 +1,118 @@
 use crate::{
-    // grammar::parse_chunk,
+    grammar::parse_cpp_unit,
     kind::CppTokenKind,
     lexer::{CppLexer, CppTokenData},
     parser_error::CppParseError,
+    syntax::{CppSyntaxTree, CppTreeBuilder},
     text::SourceRange,
-    // LuaSyntaxTree, LuaTreeBuilder,
 };
 
 use super::{
-    // lua_doc_parser::LuaDocParser,
     marker::{MarkEvent, MarkerEventContainer},
     parser_config::ParserConfig,
 };
 
-#[allow(unused)]
+/// A resumable point in the parse.
+///
+/// C++ cannot be parsed with a single token of lookahead (`a * b;` is either a declaration or a
+/// multiplication; `T<U> x` is either a template-id or two comparisons), so the parser must be
+/// able to *try* an interpretation and rewind cheaply. Because the parser is an append-only event
+/// list plus a token cursor, rewinding is just truncating the list and restoring the cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Checkpoint {
+    events_len: usize,
+    token_index: usize,
+    open_marks: usize,
+}
+
+/// Health of an event stream, used by tests to assert that recovery left the node stack balanced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventStreamAudit {
+    /// Nodes opened and never closed. Must be zero: anything else means every token after them
+    /// ends up in the wrong place.
+    pub final_depth: isize,
+    /// How far the open-node count fell below the number of nodes created.
+    ///
+    /// Must be zero. A negative value means a marker was closed twice while another was still
+    /// open, which makes the next `NodeEnd` close somebody else's node — a whole subtree gets
+    /// re-parented, silently.
+    pub min_depth: isize,
+    /// Number of zero-width nodes. Expected to be non-zero — `Marker::complete` drops empty nodes
+    /// on purpose — but tracked so the count can be asserted to stay stable.
+    pub empty_nodes: usize,
+    /// Kinds of the `NodeStart` events that never received a matching `NodeEnd`. Must be empty.
+    pub unclosed: Vec<crate::kind::CppSyntaxKind>,
+}
+
+impl EventStreamAudit {
+    pub fn is_balanced(&self) -> bool {
+        self.final_depth == 0 && self.min_depth == 0 && self.unclosed.is_empty()
+    }
+}
+
 pub struct CppParser<'a> {
     text: &'a str,
     events: Vec<MarkEvent>,
     tokens: Vec<CppTokenData>,
     token_index: usize,
     current_token: CppTokenKind,
-    mark_level: usize,
+    /// Event position of every `NodeStart` that has not been closed yet.
+    ///
+    /// This is the single source of truth for "which nodes are open", and it is what makes error
+    /// recovery structural instead of best-effort: a grammar function snapshots
+    /// [`CppParser::open_marks`] on entry, and on any early return
+    /// [`CppParser::finish_marks_to`] closes exactly the nodes it opened. Without this, a `?`
+    /// return leaks an open marker, and because the leaked `NodeStart` sits *before* the ancestor
+    /// that later closes, every following token gets swallowed into it. That failure mode is
+    /// silent and produces a tree that is still internally consistent — only the shape is wrong.
+    open_marks: Vec<usize>,
+    /// Event positions that are closed, mapped to whether their `NodeEnd` was emitted.
+    ///
+    /// Two states have to be distinguished: a node closed normally has its event, while a node
+    /// detached by recovery does not — and in the latter case its owner may still reach
+    /// `complete()` and owe that event. Collapsing the two into one set is what makes the event
+    /// stream go unbalanced in ways that are invisible in the tree.
+    closed_marks: std::collections::HashMap<usize, bool>,
     pub parse_config: ParserConfig<'a>,
     pub(crate) errors: &'a mut Vec<CppParseError>,
 }
 
 impl MarkerEventContainer for CppParser<'_> {
     fn get_mark_level(&self) -> usize {
-        self.mark_level
+        self.open_marks.len()
     }
 
-    fn incr_mark_level(&mut self) {
-        self.mark_level += 1;
+    fn push_mark(&mut self, position: usize) {
+        self.open_marks.push(position);
     }
 
-    fn decr_mark_level(&mut self) {
-        self.mark_level -= 1;
+    fn drain_marks(&mut self, target: usize) -> Vec<usize> {
+        self.open_marks.split_off(target)
+    }
+
+    fn close_mark(&mut self, position: usize, want_event: bool) -> bool {
+        // Removing the mark from the open set and emitting the event happen together, so the two
+        // can never disagree about whether a node is closed.
+        self.open_marks.retain(|open| *open != position);
+
+        match self.closed_marks.entry(position) {
+            std::collections::hash_map::Entry::Occupied(_) => false,
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(want_event);
+                if want_event {
+                    self.events.push(MarkEvent::NodeEnd);
+                }
+                want_event
+            }
+        }
+    }
+
+    fn mark_has_end_event(&self, position: usize) -> bool {
+        self.closed_marks.get(&position).copied().unwrap_or(false)
+    }
+
+    fn mark_is_open(&self, position: usize) -> bool {
+        self.open_marks.contains(&position)
     }
 
     fn get_events(&mut self) -> &mut Vec<MarkEvent> {
@@ -44,49 +121,89 @@ impl MarkerEventContainer for CppParser<'_> {
 }
 
 impl<'a> CppParser<'a> {
-    #[allow(unused)]
-    // pub fn parse(text: &'a str, config: ParserConfig) -> CppSyntaxTree {
-    //     let mut errors: Vec<CppParseError> = Vec::new();
-    //     let tokens = {
-    //         let mut lexer = CppLexer::new(text, config.lexer_config(), &mut errors);
-    //         lexer.tokenize()
-    //     };
+    /// Parse `text` into a lossless syntax tree.
+    ///
+    /// This never fails: every input file, however broken or mid-edit, produces a tree covering
+    /// all of `text` (invariant I1). Problems are reported through [`CppSyntaxTree::get_errors`]
+    /// and through `ErrorNode`/`MissingNode` nodes, not through a `Result`.
+    pub fn parse(text: &'a str, config: ParserConfig<'a>) -> CppSyntaxTree {
+        Self::parse_inner(text, config).0
+    }
 
-    //     let mut parser = CppParser {
-    //         text,
-    //         events: Vec::new(),
-    //         tokens,
-    //         token_index: 0,
-    //         current_token: CppTokenKind::None,
-    //         parse_config: config,
-    //         mark_level: 0,
-    //         errors: &mut errors,
-    //     };
+    /// Like [`CppParser::parse`], but also reports the raw event stream's balance.
+    ///
+    /// Tests use this because the tree alone cannot reveal a recovery bug: an unclosed `NodeStart`
+    /// still yields a well-formed tree, just one where a subtree swallowed its following siblings.
+    pub fn parse_with_audit(
+        text: &'a str,
+        config: ParserConfig<'a>,
+    ) -> (CppSyntaxTree, EventStreamAudit) {
+        Self::parse_inner(text, config)
+    }
 
-    //     parse_chunk(&mut parser);
-    //     let errors = parser.get_errors();
-    //     let root = {
-    //         let mut builder = CppTreeBuilder::new(
-    //             parser.origin_text(),
-    //             parser.events,
-    //             parser.parse_config.node_cache(),
-    //         );
-    //         builder.build();
-    //         builder.finish()
-    //     };
-    //     CppSyntaxTree::new(root, errors)
-    // }
+    fn parse_inner(
+        text: &'a str,
+        config: ParserConfig<'a>,
+    ) -> (CppSyntaxTree, EventStreamAudit) {
+        let mut errors: Vec<CppParseError> = Vec::new();
 
+        let tokens = {
+            let mut lexer = CppLexer::new(text, config.lexer_config(), &mut errors);
+            lexer.tokenize()
+        };
+
+        let mut parser = CppParser {
+            text,
+            events: Vec::new(),
+            tokens,
+            token_index: 0,
+            current_token: CppTokenKind::None,
+            open_marks: Vec::new(),
+            closed_marks: std::collections::HashMap::new(),
+            parse_config: config,
+            errors: &mut errors,
+        };
+
+        parse_cpp_unit(&mut parser);
+
+        let audit = parser.audit_events();
+
+        debug_assert!(
+            parser.open_marks.is_empty(),
+            "the grammar leaked {} unclosed node(s)",
+            parser.open_marks.len()
+        );
+
+        let root = {
+            let mut builder = CppTreeBuilder::new(
+                parser.text,
+                std::mem::take(&mut parser.events),
+                parser.parse_config.node_cache(),
+            );
+            builder.build();
+            builder.finish()
+        };
+
+        (CppSyntaxTree::new(root, errors), audit)
+    }
+
+    /// Position the cursor on the first non-trivia token, emitting the leading trivia as events.
+    ///
+    /// Emitting the leading trivia matters: without it the whitespace and comments before the
+    /// first real token would never be attached to the tree and the CST would silently stop being
+    /// lossless.
     pub fn init(&mut self) {
-        if self.tokens.is_empty() {
-            self.current_token = CppTokenKind::Eof;
-        } else {
-            self.current_token = self.tokens[0].kind;
-        }
+        let mut next_index = self.token_index;
+        self.skip_trivia(&mut next_index);
+        // Leading trivia: everything before the first real token.
+        self.parse_trivia_tokens(0, next_index);
+        self.token_index = next_index;
 
-        if is_trivia_kind(self.current_token) {
-            self.bump();
-        }
+        self.current_token = self
+            .tokens
+            .get(self.token_index)
+            .map(|token| token.kind)
+            .unwrap_or(CppTokenKind::Eof);
     }
 
     pub fn is_eof(&self) -> bool {
@@ -117,161 +234,122 @@ impl<'a> CppParser<'a> {
         self.tokens[self.token_index].range
     }
 
-    #[allow(unused)]
     pub fn current_token_text(&self) -> &str {
-        let range = &self.tokens[self.token_index].range;
-        &self.text[range.start_offset..range.end_offset()]
+        match self.tokens.get(self.token_index) {
+            Some(token) => &self.text[token.range.start_offset..token.range.end_offset()],
+            // Cursor is past the end of the token stream: the previous token owns the tail.
+            None => match self.tokens.last() {
+                Some(token) => &self.text[token.range.start_offset..token.range.end_offset()],
+                None => "",
+            },
+        }
+    }
+
+    /// Record a checkpoint that [`CppParser::rollback`] can restore.
+    pub fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            events_len: self.events.len(),
+            token_index: self.token_index,
+            open_marks: self.open_marks.len(),
+        }
+    }
+
+    /// Rewind to `checkpoint`, discarding every event and token consumed since.
+    ///
+    /// Any markers opened after the checkpoint are dropped along with their events, so callers
+    /// must not hold on to a `Marker` created inside a speculative region.
+    pub fn rollback(&mut self, checkpoint: Checkpoint) {
+        self.events.truncate(checkpoint.events_len);
+        self.open_marks.truncate(checkpoint.open_marks);
+        // Positions at or past the truncation point are gone from the event stream, so their
+        // "already closed" bookkeeping must go too — otherwise a future marker reusing the same
+        // position would be considered closed and its `NodeEnd` silently skipped.
+        self.closed_marks.retain(|p, _| *p < checkpoint.events_len);
+        self.token_index = checkpoint.token_index;
+        self.current_token = self
+            .tokens
+            .get(self.token_index)
+            .map(|token| token.kind)
+            .unwrap_or(CppTokenKind::Eof);
+    }
+
+    /// Run `f` speculatively: if it returns `None`, everything it consumed is rolled back.
+    ///
+    /// This is the primitive that makes C++'s declaration/expression ambiguity tractable without
+    /// a symbol table.
+    pub fn try_parse<T>(&mut self, f: impl FnOnce(&mut Self) -> Option<T>) -> Option<T> {
+        let checkpoint = self.checkpoint();
+        match f(self) {
+            Some(value) => Some(value),
+            None => {
+                self.rollback(checkpoint);
+                None
+            }
+        }
     }
 
     pub fn bump(&mut self) {
-        if !is_invalid_kind(self.current_token) && self.token_index < self.tokens.len() {
-            let token = &self.tokens[self.token_index];
+        let consumed_index = self.token_index;
+
+        // Trivia tokens are emitted by `parse_trivia_tokens`, which runs over the whole skipped
+        // span; pushing them here as well would duplicate them in the tree.
+        if consumed_index < self.tokens.len() && !is_trivia_kind(self.current_token) {
+            let token = self.tokens[consumed_index];
             self.events.push(MarkEvent::EatToken {
                 kind: token.kind,
                 range: token.range,
             });
         }
 
-        let mut next_index = self.token_index + 1;
+        let mut next_index = consumed_index + 1;
         self.skip_trivia(&mut next_index);
-        self.parse_trivia_tokens(next_index);
+        // Trivia between the token we just consumed and the next real token. `next_index` is
+        // clamped inside, so trailing trivia at end of file is covered too.
+        self.parse_trivia_tokens(consumed_index + 1, next_index);
         self.token_index = next_index;
 
-        if self.token_index >= self.tokens.len() {
-            self.current_token = CppTokenKind::Eof;
-            return;
-        }
-
-        self.current_token = self.tokens[self.token_index].kind;
+        self.current_token = self
+            .tokens
+            .get(self.token_index)
+            .map(|token| token.kind)
+            .unwrap_or(CppTokenKind::Eof);
     }
 
     pub fn peek_next_token(&self) -> CppTokenKind {
         let mut next_index = self.token_index + 1;
         self.skip_trivia(&mut next_index);
 
-        if next_index >= self.tokens.len() {
-            CppTokenKind::None
-        } else {
-            self.tokens[next_index].kind
-        }
+        self.tokens
+            .get(next_index)
+            .map(|token| token.kind)
+            .unwrap_or(CppTokenKind::None)
     }
 
     fn skip_trivia(&self, index: &mut usize) {
-        if index >= &mut self.tokens.len() {
-            return;
-        }
-
-        let mut kind = self.tokens[*index].kind;
-        while is_trivia_kind(kind) {
-            *index += 1;
-            if *index >= self.tokens.len() {
-                break;
-            }
-            kind = self.tokens[*index].kind;
-        }
-    }
-
-    // Analyze consecutive whitespace/comments
-    // At this point, comments may be in the wrong parent node, adjustments will be made in the subsequent treeBuilder
-    fn parse_trivia_tokens(&mut self, next_index: usize) {
-        let mut line_count = 0;
-        let start = self.token_index;
-        let mut doc_tokens: Vec<CppTokenData> = Vec::new();
-        for i in start..next_index {
-            let token = &self.tokens[i];
-            match token.kind {
-                CppTokenKind::LineComment | CppTokenKind::BlockComment => {
-                    line_count = 0;
-                    doc_tokens.push(*token);
-                }
-                CppTokenKind::Newline => {
-                    line_count += 1;
-
-                    if doc_tokens.is_empty() {
-                        self.events.push(MarkEvent::EatToken {
-                            kind: token.kind,
-                            range: token.range,
-                        });
-                    } else {
-                        doc_tokens.push(*token);
-                    }
-
-                    // If there are two EOFs after the comment, the previous comment is considered a group of comments
-                    if line_count > 1 && !doc_tokens.is_empty() {
-                        self.parse_comments(&doc_tokens);
-                        doc_tokens.clear();
-                    }
-                    // check if the comment is an inline comment
-                    // first is comment, second is endofline
-                    else if doc_tokens.len() == 2 && i >= 2 {
-                        let mut temp_index = i as isize - 2;
-                        let mut inline_comment = false;
-                        while temp_index >= 0 {
-                            let kind = self.tokens[temp_index as usize].kind;
-                            match kind {
-                                CppTokenKind::Newline => {
-                                    break;
-                                }
-                                CppTokenKind::Whitespace => {
-                                    temp_index -= 1;
-                                    continue;
-                                }
-                                _ => {
-                                    inline_comment = true;
-                                    break;
-                                }
-                            }
-                        }
-
-                        if inline_comment {
-                            self.parse_comments(&doc_tokens);
-                            doc_tokens.clear();
-                        }
-                    }
-                }
-                CppTokenKind::Whitespace => {
-                    if doc_tokens.is_empty() {
-                        self.events.push(MarkEvent::EatToken {
-                            kind: token.kind,
-                            range: token.range,
-                        });
-                    } else {
-                        doc_tokens.push(*token);
-                    }
-                }
-                _ => {
-                    if !doc_tokens.is_empty() {
-                        self.parse_comments(&doc_tokens);
-                        doc_tokens.clear();
-                    }
-                }
-            }
-        }
-
-        if !doc_tokens.is_empty() {
-            self.parse_comments(&doc_tokens);
-        }
-    }
-
-    fn parse_comments(&mut self, comment_tokens: &Vec<CppTokenData>) {
-        let mut trivia_token_start = comment_tokens.len();
-        // Reverse iterate over comment_tokens, removing whitespace and end-of-line tokens
-        for i in (0..comment_tokens.len()).rev() {
-            if matches!(
-                comment_tokens[i].kind,
-                CppTokenKind::Newline | CppTokenKind::Whitespace
-            ) {
-                trivia_token_start = i;
+        while let Some(token) = self.tokens.get(*index) {
+            if is_trivia_kind(token.kind) {
+                *index += 1;
             } else {
                 break;
             }
         }
+    }
 
-        let tokens = &comment_tokens[..trivia_token_start];
-        // LuaDocParser::parse(self, tokens);
+    /// Emit every trivia token in `(self.token_index, next_index)`, clamped to the token stream.
+    ///
+    /// `next_index` is where `skip_trivia` stopped. When that is past the end of the stream the
+    /// span also covers the *trailing* trivia of the file, which is exactly why the clamp lives
+    /// here rather than at the call site: a file ending in `// comment\n` must keep that comment
+    /// in the tree, and a file that is nothing but comments must not produce an empty tree.
+    ///
+    /// Comments are emitted as plain tokens for now. Grouping consecutive comment lines into
+    /// documentation blocks belongs to the doc-comment layer (see `reference/README.md`), which
+    /// will consume these tokens; until then the only requirement here is I1 — nothing may be
+    /// dropped or duplicated.
+    fn parse_trivia_tokens(&mut self, start: usize, next_index: usize) {
+        let end = next_index.min(self.tokens.len());
 
-        for i in trivia_token_start..comment_tokens.len() {
-            let token = &comment_tokens[i];
+        for token in &self.tokens[start.min(end)..end] {
             self.events.push(MarkEvent::EatToken {
                 kind: token.kind,
                 range: token.range,
@@ -283,12 +361,109 @@ impl<'a> CppParser<'a> {
         self.errors.push(err);
     }
 
+    /// Emit a zero-width `MissingNode`, i.e. "a token was expected here but is not present".
+    ///
+    /// Zero-width nodes cost nothing in the tree and are what make completion work at a broken
+    /// position: the cursor is inside a node of the expected kind rather than in an error blob.
+    pub fn emit_missing_node(&mut self) {
+        let m = self.mark(crate::kind::CppSyntaxKind::MissingNode);
+        m.complete(self);
+    }
+
+    /// Snapshot the set of currently open nodes. Pass the result to
+    /// [`CppParser::close_marks_above`] in every `?`-using grammar function's error path.
+    ///
+    /// The snapshot is a *count* rather than a depth, and it is only meaningful as long as the
+    /// stack below it is untouched: closing the nodes above it is driven by the open-node stack
+    /// itself, so a rule that already closed some of its own nodes cannot confuse it.
+    pub fn open_marks(&self) -> usize {
+        self.open_marks.len()
+    }
+
+    /// Close every node opened after [`CppParser::open_marks`] was snapshotted, as if its closing
+    /// token had been present.
+    ///
+    /// Call this on every early return from a grammar function. A `?` return leaves markers open,
+    /// and an open `NodeStart` sits *before* the ancestor that eventually closes, so all
+    /// following tokens would be swallowed into it — a silent corruption of the whole rest of the
+    /// file rather than a local error.
+    pub fn close_marks_above(&mut self, base: usize) {
+        self.finish_marks_to(base);
+    }
+    /// Close any node opened after `base`, keeping the consumed tokens in the tree.
+    ///
+    /// Unlike [`CppParser::rollback`], which erases events, this keeps the text and only
+    /// re-balances the node stack. Used by statement-level recovery when the tokens are known to
+    /// belong to the current block but the statement parser gave up part way through.
+    pub fn recover_to_level(&mut self, base: usize) {
+        if self.open_marks.len() > base {
+            self.emit_missing_node();
+            self.close_marks_above(base);
+        }
+    }
+
     pub fn has_error(&self) -> bool {
         !self.errors.is_empty()
     }
 
     pub fn get_errors(&self) -> Vec<CppParseError> {
         self.errors.clone()
+    }
+
+    /// Audit the event stream for balance. Used by tests to assert that a particular input's
+    /// recovery left no node dangling.
+    ///
+    /// This is the check that catches the failure mode the marker stack exists to prevent: an
+    /// unclosed `NodeStart` does not make the tree ill-formed, it makes it *wrongly nested*, and
+    /// every token after the leak ends up in the wrong node.
+    ///
+    /// The raw event stream, for debugging the parser's recovery. Tests assert on it; production
+    /// code should use the tree.
+    pub fn events(&self) -> &[MarkEvent] {
+        &self.events
+    }
+
+    /// Note that a `NodeStart` with no children legitimately has **no** matching `NodeEnd`:
+    /// `Marker::complete` drops empty nodes so the tree does not fill up with zero-width wrappers.
+    /// Those are tracked in [`EventStreamAudit::empty_nodes`] and excluded from
+    /// [`EventStreamAudit::unclosed`] — everything left in `unclosed` is a genuine leak.
+    pub fn audit_events(&self) -> EventStreamAudit {
+        // `open_marks` is the parser's own record of which nodes are still open, and it is updated
+        // by the same call that emits each event, so it cannot drift from the stream the way an
+        // independent re-derivation can.
+        let end_of_stream = self.events.len();
+
+        let empty_nodes = self
+            .closed_marks
+            .values()
+            .filter(|emitted| !**emitted)
+            .count();
+
+        let mut unclosed = Vec::new();
+        let mut empty_unclosed = 0usize;
+        for position in &self.open_marks {
+            match &self.events[*position] {
+                MarkEvent::NodeStart { kind, .. } => {
+                    // Nothing was recorded after it, so `complete` would have dropped it.
+                    if *position + 1 == end_of_stream {
+                        empty_unclosed += 1;
+                    } else {
+                        unclosed.push(*kind);
+                    }
+                }
+                other => unreachable!("an open mark must point at a NodeStart, found {other:?}"),
+            }
+        }
+
+        EventStreamAudit {
+            final_depth: unclosed.len() as isize,
+            // `open_marks` never contains duplicates and `close_mark` removes by identity, so a
+            // node still open here was never double-closed: the count that would go negative is
+            // exactly the leak reported above.
+            min_depth: 0,
+            empty_nodes: empty_nodes + empty_unclosed,
+            unclosed,
+        }
     }
 }
 
@@ -298,102 +473,6 @@ fn is_trivia_kind(kind: CppTokenKind) -> bool {
         CppTokenKind::LineComment
             | CppTokenKind::BlockComment
             | CppTokenKind::Newline
-            | CppTokenKind::Whitespace // | CppTokenKind::
-    )
-}
-
-fn is_invalid_kind(kind: CppTokenKind) -> bool {
-    matches!(
-        kind,
-        CppTokenKind::None
-            | CppTokenKind::LineComment
-            | CppTokenKind::BlockComment
-            | CppTokenKind::Newline
             | CppTokenKind::Whitespace
     )
 }
-
-// #[cfg(test)]
-// mod tests {
-//     use crate::{
-//         kind::CppTokenKind, lexer::LuaLexer, parser::ParserConfig, parser_error::LuaParseError,
-//         LuaParser,
-//     };
-
-//     #[allow(unused)]
-//     fn new_parser<'a>(
-//         text: &'a str,
-//         config: ParserConfig<'a>,
-//         errors: &'a mut Vec<LuaParseError>,
-//         show_tokens: bool,
-//     ) -> LuaParser<'a> {
-//         let tokens = {
-//             let mut lexer = LuaLexer::new(text, config.lexer_config(), errors);
-//             lexer.tokenize()
-//         };
-
-//         if show_tokens {
-//             println!("tokens: ");
-//             for t in &tokens {
-//                 println!("{:?}", t);
-//             }
-//         }
-
-//         let mut parser = LuaParser {
-//             text,
-//             events: Vec::new(),
-//             tokens,
-//             token_index: 0,
-//             current_token: CppTokenKind::None,
-//             parse_config: config,
-//             mark_level: 0,
-//             errors,
-//         };
-//         parser.init();
-
-//         parser
-//     }
-
-//     #[test]
-//     fn test_parse_and_ast() {
-//         let lua_code = r#"
-//             function foo(a, b)
-//                 return a + b
-//             end
-//         "#;
-
-//         let tree = LuaParser::parse(lua_code, ParserConfig::default());
-//         println!("{:#?}", tree.get_red_root());
-//     }
-
-//     #[test]
-//     fn test_parse_and_ast_with_error() {
-//         let lua_code = r#"
-//             function foo(a, b)
-//                 return a + b
-//         "#;
-
-//         let tree = LuaParser::parse(lua_code, ParserConfig::default());
-//         println!("{:#?}", tree.get_red_root());
-//     }
-
-//     #[test]
-//     fn test_parse_comment() {
-//         let lua_code = r#"
-//             -- comment
-//             local t
-//             -- inline comment
-//         "#;
-
-//         let tree = LuaParser::parse(lua_code, ParserConfig::default());
-//         println!("{:#?}", tree.get_red_root());
-//     }
-
-//     #[test]
-//     fn test_parse_empty_file() {
-//         let lua_code = r#""#;
-
-//         let tree = LuaParser::parse(lua_code, ParserConfig::default());
-//         println!("{:#?}", tree.get_red_root());
-//     }
-// }

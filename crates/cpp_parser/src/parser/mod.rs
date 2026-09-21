@@ -3,9 +3,8 @@ mod cpp_parser;
 mod marker;
 mod parser_config;
 
-// pub use lua_doc_parser::LuaDocParser;
-pub use cpp_parser::CppParser;
+pub use cpp_parser::{Checkpoint, CppParser, EventStreamAudit};
 #[allow(unused)]
 pub use marker::*;
 #[allow(unused)]
-pub use parser_config::{ParserConfig};
+pub use parser_config::ParserConfig;
