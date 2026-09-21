@@ -168,8 +168,36 @@ const CORPUS: &[(&str, &str)] = &[
         "template <typename T, int N>\nstruct Vec {\n    T data[N];\n    auto begin() -> T* { return data; }\n};\n\nVec<std::vector<int>, 3> v;\n",
     ),
     (
-        "lambdas and raw strings",
-        "auto f = [x = 1](int y) mutable -> int { return x + y; };\nauto s = R\"delim(a \"raw\" string)delim\";\n",
+        "lambdas",
+        "auto f = [x = 1](int y) mutable -> int { return x + y; };\n",
+    ),
+    (
+        "raw strings",
+        // Every one of these used to split at the first inner quote and re-lex the rest as C++.
+        concat!(
+            "auto a = R\"(plain)\";\n",
+            "auto b = R\"(has \"quotes\" and \\backslashes)\";\n",
+            "auto c = R\"delim(contains )\" without ending)delim\";\n",
+            "auto d = u8R\"(utf8 raw)\";\n",
+            "auto e = LR\"(wide raw)\";\n",
+        ),
+    ),
+    (
+        "prefixed literals",
+        "auto a = u8\"utf8\";\nauto b = u\"utf16\";\nauto c = U\"utf32\";\nauto d = L\"wide\";\nauto e = u'c';\n",
+    ),
+    (
+        "numbers and suffixes",
+        "auto a = 1'000'000;\nauto b = 0xFF'FF;\nauto c = 0b1010'1010;\nauto d = 42_km;\nauto e = 1.5_deg;\n",
+    ),
+    (
+        "line splices",
+        "#define GREETING \\\n    \"hi\"\nint x = 1 + \\\n        2;\n",
+    ),
+    ("unicode identifiers", "int café = 1;\nint λ = 2;\nint \\u00e9 = 3;\n"),
+    (
+        "nested-looking block comment",
+        "/* /* this does not nest */ int x;\n",
     ),
     (
         "preprocessor soup",

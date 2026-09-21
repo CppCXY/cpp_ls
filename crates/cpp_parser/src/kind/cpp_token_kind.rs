@@ -294,6 +294,16 @@ pub enum CppTokenKind {
     /// e.g.: "hello", L"wide", R"(raw)"
     StringLiteral,
 
+    /// A header name, as it appears after `#include` / `#include_next` / `__has_include`.
+    ///
+    /// This is a *preprocessor-only* token: outside a directive, `<iostream>` is `Less`,
+    /// `Identifier`, `Greater`. The lexer therefore produces it on demand, via
+    /// `CppLexer::lex_header_name`, rather than during the ordinary token sweep — `<` and `>` are
+    /// far too common to make a guess at, and guessing wrong would wreck every template.
+    ///
+    /// e.g.: `<iostream>`, `"local.h"`
+    HeaderName,
+
     /// Boolean literal (true/false are defined as keywords)
     BoolLiteral,
 
@@ -327,6 +337,16 @@ pub enum CppTokenKind {
 
     /// Block comment /* ... */
     BlockComment,
+
+    /// A backslash-newline line splice.
+    ///
+    /// Phase 2 of translation deletes these, which makes them *trivia* for the parser (they must
+    /// not separate tokens) — but they are kept in the tree so the CST stays lossless. Note that
+    /// they are not "whitespace" either: `#if FOO \<newline> && BAR` is one directive, so a parser
+    /// that treats the splice as a normal newline breaks preprocessor conditionals.
+    ///
+    /// e.g.: `\` followed by `\n` or `\r\n`
+    LineContinuation,
 
     // ========== Special Tokens ==========
     /// End of file
@@ -474,8 +494,25 @@ impl fmt::Display for CppTokenKind {
             Self::Hash => write!(f, "#"),
             Self::HashHash => write!(f, "##"),
 
-            // 其他
-            _ => write!(f, "{:?}", self),
+            // 字面量与预处理器扩展
+            Self::HeaderName => write!(f, "header-name"),
+            Self::LineContinuation => write!(f, "\\"),
+            Self::UserDefinedLiteral => write!(f, "user-defined literal"),
+            Self::IntegerLiteral => write!(f, "integer literal"),
+            Self::FloatingLiteral => write!(f, "floating literal"),
+            Self::StringLiteral => write!(f, "string literal"),
+            Self::CharLiteral => write!(f, "character literal"),
+            Self::BoolLiteral => write!(f, "boolean literal"),
+            Self::NullptrLiteral => write!(f, "nullptr"),
+            Self::Identifier => write!(f, "identifier"),
+            Self::Whitespace => write!(f, "whitespace"),
+            Self::Newline => write!(f, "newline"),
+            Self::LineComment => write!(f, "line comment"),
+            Self::BlockComment => write!(f, "block comment"),
+            Self::Eof => write!(f, "end of file"),
+            Self::Unknown => write!(f, "unknown"),
+            Self::Error => write!(f, "error"),
+            Self::None => write!(f, "none"),
         }
     }
 }

@@ -57,6 +57,16 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// Start a new token buffer without relying on [`Reader::reset_buff`]'s lazy first-character
+    /// handling.
+    ///
+    /// `reset_buff` only primes the cursor the *first* time it is called, so any entry point that
+    /// lexes outside the normal `lex` loop — `CppLexer::lex_header_name` is one — needs this to be
+    /// sure `current_char` is the first character of the token rather than `EOF`.
+    pub fn begin_token(&mut self) {
+        self.reset_buff();
+    }
+
     pub fn is_eof(&self) -> bool {
         self.current == EOF && self.start
     }
@@ -71,6 +81,19 @@ impl<'a> Reader<'a> {
 
     pub fn next_char(&mut self) -> char {
         self.chars.peek().cloned().unwrap_or(EOF)
+    }
+
+    /// The `n`-th character *after* the current one, without consuming anything.
+    ///
+    /// `lookahead(0)` is the current character. Used to disambiguate prefixes that need more than
+    /// one character of context: `u8"x"` is a string literal while `u8x` is an identifier, and
+    /// `R"(...)"` is a raw string while `R` alone is a name.
+    pub fn lookahead(&self, n: usize) -> char {
+        if n == 0 {
+            return self.current;
+        }
+
+        self.chars.clone().nth(n - 1).unwrap_or(EOF)
     }
 
     pub fn saved_range(&self) -> SourceRange {
@@ -220,5 +243,20 @@ mod tests {
         let count = reader.eat_while(|c| c.is_ascii_digit());
         assert_eq!(count, 5);
         assert_eq!(reader.current_char(), 'H');
+    }
+
+    #[test]
+    fn test_lookahead() {
+        let text = "u8\"x\"";
+        let mut reader = Reader::new(text);
+        reader.reset_buff();
+
+        assert_eq!(reader.lookahead(0), 'u');
+        assert_eq!(reader.lookahead(1), '8');
+        assert_eq!(reader.lookahead(2), '"');
+        // Past the end is EOF rather than a panic: callers probe a fixed window.
+        assert_eq!(reader.lookahead(99), EOF);
+        // Peeking must not move the cursor.
+        assert_eq!(reader.current_char(), 'u');
     }
 }

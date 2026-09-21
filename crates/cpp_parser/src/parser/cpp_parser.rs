@@ -467,6 +467,15 @@ impl<'a> CppParser<'a> {
     }
 }
 
+/// Is this token invisible to the grammar?
+///
+/// Trivia tokens still appear in the tree — the CST must stay lossless — but the parser skips over
+/// them, and `bump` attaches them to whichever node is currently open.
+///
+/// [`CppTokenKind::LineContinuation`] belongs here even though it is not whitespace: translation
+/// phase 2 removes `\`-newline before the grammar ever sees it, so `int \<newline> x;` is one
+/// declaration. The preprocessor layer reads the splices back out of the tree when it needs to know
+/// that a directive continued onto the next line.
 fn is_trivia_kind(kind: CppTokenKind) -> bool {
     matches!(
         kind,
@@ -474,5 +483,6 @@ fn is_trivia_kind(kind: CppTokenKind) -> bool {
             | CppTokenKind::BlockComment
             | CppTokenKind::Newline
             | CppTokenKind::Whitespace
+            | CppTokenKind::LineContinuation
     )
 }

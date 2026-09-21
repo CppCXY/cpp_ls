@@ -61,6 +61,7 @@ dependencies = [
  "rowan",
  "rust-i18n",
  "serde",
+ "unicode-ident",
 ]
 
 [[package]]
