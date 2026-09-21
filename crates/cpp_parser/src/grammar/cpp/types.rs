@@ -50,30 +50,6 @@ pub fn is_type_specifier_keyword(kind: CppTokenKind) -> bool {
     )
 }
 
-/// Keywords that are decl-specifiers but not type specifiers.
-pub fn is_decl_specifier_keyword(kind: CppTokenKind) -> bool {
-    is_type_specifier_keyword(kind)
-        || matches!(
-            kind,
-            CppTokenKind::ConstKeyword
-                | CppTokenKind::VolatileKeyword
-                | CppTokenKind::ConstexprKeyword
-                | CppTokenKind::ConstevalKeyword
-                | CppTokenKind::ConstinitKeyword
-                | CppTokenKind::StaticKeyword
-                | CppTokenKind::ExternKeyword
-                | CppTokenKind::ThreadLocalKeyword
-                | CppTokenKind::MutableKeyword
-                | CppTokenKind::InlineKeyword
-                | CppTokenKind::VirtualKeyword
-                | CppTokenKind::ExplicitKeyword
-                | CppTokenKind::FriendKeyword
-                | CppTokenKind::TypedefKeyword
-                | CppTokenKind::RegisterKeyword
-                | CppTokenKind::NoexceptKeyword
-        )
-}
-
 /// Does this token *end* a decl-specifier-seq / type-id beyond doubt?
 ///
 /// Used to decide whether an unclassifiable token can still be part of a type. `[` and `(` can
@@ -909,17 +885,20 @@ pub fn parse_template_argument_list(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::TemplateArgumentList);
 
-    // The depth measured at the `<` that opens this list. Used to tell "the `>` that closes me" from
-    // "a `>` that closes an enclosing list", which matters as soon as argument parsing has split a
-    // `>>` into two `>`s.
-    let open_depth = angle_depth_at_cursor(p);
-
     expect_token(p, CppTokenKind::Less)?;
 
     while !p.is_eof() {
-        // A `>` at our depth closes this list. `split_closing_angle` has already turned any `>>` into
-        // a lone `>` by the time we look, so this is the only place the closer is consumed.
-        if p.current_token() == CppTokenKind::Greater && angle_depth_at_cursor(p) <= open_depth {
+        // A `>` closes this list exactly when it has no opener of its own: scanning forward from it,
+        // the angles balance at zero before any unmatched `<` appears.
+        //
+        // This is deliberately *not* a comparison of nesting depths. Recomputing a depth on either
+        // side of a sub-parse gives different answers for the same token, because parsing an inner
+        // list splits a `>>` into two `>`s and changes what the scan counts. Asking "does this `>`
+        // already belong to someone else?" has one answer regardless of when it is asked.
+        //
+        // `split_closing_angle` has already turned any `>>` into a lone `>` by the time we look, so
+        // this is the only place the closer is consumed.
+        if p.current_token() == CppTokenKind::Greater && closer_belongs_to_this_list(p) {
             p.bump();
             return Ok(m.complete(p));
         }
@@ -998,14 +977,48 @@ fn split_closing_angle(p: &mut CppParser) -> bool {
 ///
 /// The read-only counterpart of [`split_closing_angle`], for callers that need to ask without
 /// mutating the token stream.
-fn closes_a_template_list(p: &CppParser) -> bool {
-    matches!(
-        p.current_token(),
-        CppTokenKind::Greater
-            | CppTokenKind::RightShift
-            | CppTokenKind::GreaterEqual
-            | CppTokenKind::RightShiftAssign
-    )
+/// Is the `>` at the cursor the closer of the template argument list being parsed?
+///
+/// A `>` belongs to this list when no `<` between it and here is still waiting for it — that is, when
+/// scanning forward from the `>` the angle nesting returns to zero before going positive.
+///
+/// The alternative, comparing nesting depths computed before and after a sub-parse, is unreliable:
+/// parsing an inner argument list splits `>>` into two `>`s, which changes what the same forward scan
+/// counts and silently shifts the reference point. Looking forward from the `>` itself has one answer
+/// whenever it is asked.
+fn closer_belongs_to_this_list(p: &CppParser) -> bool {
+    let mut depth = 0isize;
+
+    for kind in p.peek_token_kind_at(1..96) {
+        match kind {
+            // An unmatched `<` after this `>` means the `>` was already claimed by it.
+            CppTokenKind::Less => return false,
+            CppTokenKind::Greater => {
+                depth -= 1;
+                if depth < 0 {
+                    return true;
+                }
+            }
+            CppTokenKind::RightShift => {
+                depth -= 2;
+                if depth < 0 {
+                    return true;
+                }
+            }
+            // A `>` never closes across one of these.
+            CppTokenKind::Semicolon
+            | CppTokenKind::LeftBrace
+            | CppTokenKind::RightBrace
+            | CppTokenKind::LeftParen
+            | CppTokenKind::Eof
+            | CppTokenKind::None => return true,
+            _ => {}
+        }
+    }
+
+    // Reached the end of the lookahead window without finding an opener: treat it as ours, so a
+    // truncated template argument list still closes rather than reporting a bogus nesting error.
+    true
 }
 
 /// Parse one template argument: a type, a template-id, or a constant expression.
@@ -1014,73 +1027,47 @@ fn closes_a_template_list(p: &CppParser) -> bool {
 /// the cursor is already on the delimiter that ends it. `Err` means neither reading worked.
 fn parse_template_argument(p: &mut CppParser) -> ParseResult {
     let checkpoint = p.checkpoint();
-    let before = angle_depth_at_cursor(p);
+    let start = p.current_token_index();
 
-    // The type reading. Its *result* matters less than where it stopped: a type-id can return an
-    // error after consuming the type (a name is not allowed to be followed by another name, for
-    // instance), and if the cursor is now on the delimiter that ends this argument, the argument is
-    // complete either way.
-    let _type_read = parse_type_id(p).is_ok();
-    let at_boundary = stops_at_an_argument_boundary(p, before);
+    let type_read = parse_type_id(p);
 
-    if at_boundary {
-        // Whatever was consumed belongs to this argument; keep it.
+    // Did the type reading get anywhere, and stop somewhere a type can end?
+    //
+    // The test is deliberately *not* a comparison of `<>` nesting depths. Depth recomputed on either
+    // side of a sub-parse disagrees about the same token, because parsing an inner argument list
+    // splits a `>>` into two `>`s and changes what the scan counts. "Did this reading consume
+    // something, and is the cursor now on a token that cannot continue a type?" has one answer
+    // whenever it is asked.
+    if p.current_token_index() > start
+        && (type_read.is_ok() || !continues_a_type(p.current_token()))
+    {
         return Ok(CompleteMarker::empty());
     }
 
-    // Not at a delimiter: either a complete type that turned out to be an expression, or nothing that
-    // parsed at all. Both want the expression reading from a clean slate.
+    // Nothing usable: read it as an expression instead.
     p.rollback(checkpoint);
     super::exprs::parse_expr(p)
 }
 
-/// Is the cursor on a token that ends a template argument belonging to the list open at `depth`?
+/// Can a type-id continue with this token?
 ///
-/// The subtlety is that `>` closes the *innermost* list, not necessarily ours: in
-/// `Vec<std::vector<int>, 3>` the `>` after `int` belongs to the inner list, so a `parse_type_id`
-/// that stops there has stopped too early and would end the argument in the wrong place.
-/// Comparing the depth now against the depth before the argument was read tells the two apart.
-/// Does a template argument of the list open at `depth` end here?
-///
-/// The subtlety is that a closing `>` closes the *innermost* list, not necessarily ours: in
-/// `Vec<std::vector<int>, 3>` the `>` after `int` belongs to the inner list, so a `parse_type_id`
-/// that stops there has stopped too early and would end the argument in the wrong place.
-///
-/// `before` is the angle depth measured *before* the argument was read, and it is compared against a
-/// fresh measurement taken now. It must be a value captured up front rather than recomputed: parsing
-/// an inner argument list splits a `>>` into two `>`s, which changes what the same forward scan
-/// counts, and recomputing on both sides would silently shift the reference point.
-fn stops_at_an_argument_boundary(p: &CppParser, before: isize) -> bool {
-    let now = angle_depth_at_cursor(p);
-    match p.current_token() {
-        CppTokenKind::Comma => true,
-        CppTokenKind::Greater => now <= before,
-        CppTokenKind::RightShift => now <= before + 1,
-        CppTokenKind::GreaterEqual => now <= before + 1,
-        _ => false,
-    }
-}
-
-/// How many template argument lists are open at the cursor?
-///
-/// Counts `<` and `>` in the token stream up to the cursor. The count is approximate — it treats
-/// every `<` as opening a list — but it is only ever used as a *relative* comparison, and both sides
-/// are computed the same way, so the approximation cancels out.
-fn angle_depth_at_cursor(p: &CppParser) -> isize {
-    let index = p.current_token_index();
-    let mut depth = 0isize;
-
-    for position in 0..index {
-        match p.token_kind_at(position) {
-            CppTokenKind::Less => depth += 1,
-            CppTokenKind::Greater => depth -= 1,
-            CppTokenKind::RightShift => depth -= 2,
-            CppTokenKind::GreaterEqual => depth -= 1,
-            _ => {}
-        }
-    }
-
-    depth
+/// Used to decide whether a type reading that stopped early stopped *correctly*. `*` and `&` can
+/// continue a declarator, so a stop there is premature; a literal or a `,` cannot, so a stop there is
+/// the end of the type.
+fn continues_a_type(kind: CppTokenKind) -> bool {
+    matches!(
+        kind,
+        CppTokenKind::Star
+            | CppTokenKind::Ampersand
+            | CppTokenKind::LogicalAnd
+            | CppTokenKind::LeftBracket
+            | CppTokenKind::LeftParen
+            | CppTokenKind::Scope
+            | CppTokenKind::Less
+            | CppTokenKind::Identifier
+            | CppTokenKind::ConstKeyword
+            | CppTokenKind::VolatileKeyword
+    )
 }
 
 /// Consume the qualifiers and specifiers that may follow a function declarator's parameter list.

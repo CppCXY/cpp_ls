@@ -441,6 +441,29 @@ impl<'a> CppParser<'a> {
         self.events.len()
     }
 
+    /// Text of the significant token at relative offset `offset` from the cursor. Empty past the end.
+    ///
+    /// The companion to [`CppParser::peek_token_kind_at`], needed because `module` and `import` are
+    /// *contextual* keywords: they must be recognised by spelling, not by kind.
+    pub fn peek_token_text_at(&self, offset: usize) -> &str {
+        let mut index = self.token_index;
+
+        for current in 0..=offset {
+            self.skip_trivia(&mut index);
+            if current == offset {
+                return match self.tokens.get(index) {
+                    Some(token) => {
+                        &self.text[token.range.start_offset..token.range.end_offset()]
+                    }
+                    None => "",
+                };
+            }
+            index += 1;
+        }
+
+        ""
+    }
+
     /// Kind of the token at `index`, ignoring trivia. `None` past the end.
     pub fn token_kind_at(&self, index: usize) -> CppTokenKind {
         self.tokens
@@ -491,6 +514,14 @@ impl<'a> CppParser<'a> {
     /// Trivia is skipped, so this is "the next few things the grammar will see". Shorter than
     /// `range` near end of input, and padded with [`CppTokenKind::None`] so callers can index it
     /// without a length check.
+    ///
+    /// # Comparing the result
+    ///
+    /// This returns a `Vec`, and `Vec<T> == [T; N]` is **always false** in Rust — there is no
+    /// `PartialEq<[T; N]>` impl. A comparison written as `peek_token_kind_at(1..2) == [X]` therefore
+    /// compiles and silently never matches, which is exactly the kind of bug that reads as "the
+    /// branch is dead" rather than "the comparison is wrong". Call `.as_slice()` or use the
+    /// single-token helpers ([`CppParser::peek_next_token`], [`CppParser::peek_token_text_at`]).
     pub fn peek_token_kind_at(&self, range: std::ops::Range<usize>) -> Vec<CppTokenKind> {
         let mut kinds = Vec::with_capacity(range.len());
         let mut index = self.token_index;

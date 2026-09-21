@@ -576,6 +576,47 @@ pub enum CppSyntaxKind {
     /// that an editor must still parse and index — the preprocessor layer, which knows which branch
     /// is selected, is built on top of this node rather than underneath it.
     PreprocessorDirective,
+
+    // ========== Modules (C++20) ==========
+    // `module` and `import` are *contextual* keywords: the standard calls them "identifier with
+    // special meaning", so they stay usable as ordinary names and the lexer hands them over as
+    // identifiers. The parser decides from the text, in the contexts where the meaning is special.
+    /// A module declaration: `export? module name : partition? ;`.
+    ///
+    /// e.g.: `export module my.mod;`, `module my.mod:part;`
+    ModuleDecl,
+
+    /// An import declaration: `export? import name | :partition | <header> ;`.
+    ///
+    /// e.g.: `import std;`, `export import :part;`, `import <iostream>;`
+    ImportDecl,
+
+    /// An export block: `export { declaration-seq? }`.
+    ExportBlock,
+
+    /// The dotted name of a module.
+    ///
+    /// e.g.: the `my.mod` in `export module my.mod;`
+    ModuleName,
+
+    /// A module partition, including its leading `:`.
+    ///
+    /// e.g.: the `:part` in `module my.mod:part;`
+    ModulePartition,
+
+    /// A header unit name in an import: `<iostream>` or `"local.h"`.
+    HeaderName,
+
+    /// A global module fragment: `module ;` followed by preprocessing directives.
+    ///
+    /// This is where `#include` is still allowed inside a module unit, because the preprocessor runs
+    /// before the module machinery and a header that uses configuration macros has to be included
+    /// rather than imported.
+    GlobalModuleFragment,
+
+    /// A private module fragment: `module : private ;` followed by declarations that importers of
+    /// the module cannot see.
+    PrivateModuleFragment,
     // A declaration in C++ is `decl-specifier-seq init-declarator-list ;`, and every one of those
     // three pieces is optional depending on the declaration, so they each get their own node
     // rather than being flattened into the declaration. The AST layer needs the boundaries: "what

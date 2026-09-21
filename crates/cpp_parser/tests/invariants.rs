@@ -207,8 +207,38 @@ const CORPUS: &[(&str, &str)] = &[
         "/* /* this does not nest */ int x;\n",
     ),
     (
-        "preprocessor soup",
-        "#pragma once\n#include <vector>\n#include \"local.h\"\n#define MAX(a, b) ((a) > (b) ? (a) : (b))\n#if defined(FOO) && FOO > 2\nextern \"C\" {\n#endif\nvoid f();\n#ifdef BAR\n}\n#endif\n",
+        "modules",
+        concat!(
+            "export module my.mod;\n",
+            "import std;\n",
+            "export import :part;\n",
+            "import <iostream>;\n",
+            "export { void exported(); }\n",
+        ),
+    ),
+    (
+        "module partitions and fragments",
+        concat!(
+            "module;\n",
+            "#include <stdlib.h>\n",
+            "export module A:B;\n",
+            "import :C;\n",
+            "export int f();\n",
+            "module : private;\n",
+            "int f() { return 42; }\n",
+        ),
+    ),
+    (
+        // `module` and `import` are contextual keywords, so using them as names has to keep working.
+        "module and import as ordinary names",
+        "int module = 1;\nauto import = module;\n",
+    ),
+    (
+        "labels",
+        "void f() {\nagain:\n    goto again;\n}\n",
+    ),
+    (
+        "preprocessor soup",        "#pragma once\n#include <vector>\n#include \"local.h\"\n#define MAX(a, b) ((a) > (b) ? (a) : (b))\n#if defined(FOO) && FOO > 2\nextern \"C\" {\n#endif\nvoid f();\n#ifdef BAR\n}\n#endif\n",
     ),
     (
         "modules",
@@ -412,6 +442,9 @@ const MUST_PARSE_CLEANLY: &[&str] = &[
     "namespace",
     "using declarations",
     "enums",
+    "modules",
+    "module partitions and fragments",
+    "module and import as ordinary names",
 ];
 
 /// Input that is genuinely malformed and must therefore leave a mark: either a diagnostic or an
@@ -521,19 +554,22 @@ fn known_unparsed() -> [(&'static str, &'static str, &'static str); 2] {
         (
             "nested template-id with non-type argument",
             "Vec<std::vector<int>, 3> v;",
-            "Template argument lists track the depth of `<`/`>` to decide which `>` closes which \
-             list. When an argument is itself a template-id and the list carries further arguments, \
-             the inner list's closing `>` is mistaken for the outer list's and the declaration falls \
-             back to the expression reading. `Vec<std::vector<int>> v;` and `Vec<A<int>, 3> v;` do \
-             work; the combination of the two does not.",
+            "A `<` is only a template argument list in a template-id, and the parser decides that \
+             with a lookahead over `<`/`>` nesting before descending. The decision is sound for \
+             `Vec<A<int>>` and for `Vec<A<int>, 3>`/`Vec<std::vector<int>, 3>` separately, but not \
+             for a list that both nests a template-id and carries a further argument. The argument \
+             reading has to report where it stopped instead of the caller re-deriving that from the \
+             token stream — see `parse_template_argument`.",
         ),
         (
-            "modules",
-            "export module my.mod:part;\nimport <iostream>;\nimport :other;\nexport import std.core;\nexport {\n    void exported();\n}\n",
-            "C++20 module declarations are not implemented. `module` and `import` are contextual \
-             keywords, so they arrive as identifiers and need their own rules for the module \
-             declaration, header-unit and partition forms, plus the `export` prefix and block. The \
-             `SyntaxKind`s for these exist; the grammar does not.",
+            "a label inside a function body",
+            "void f() {\nagain:\n    goto again;\n}\n",
+            "`parse_stat` dispatches `identifier :` to the label rule, and a bare `a: goto a;` at \
+             top level parses. Nested inside a function body the same tokens do not reach that rule, \
+             so the enclosing function definition fails and the whole file falls back to the \
+             expression reading. The label rule sits after the module check (which needs to come \
+             first for `module : private;`), so the likely cause is in how the compound-statement \
+             loop reaches `parse_stat` rather than in the label rule itself.",
         ),
     ]
 }

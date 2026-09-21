@@ -121,9 +121,20 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
         // Compound statement
         CppTokenKind::LeftBrace => parse_compound_stat(p),
 
+        // C++20 modules. Checked *before* the label case below: `module : private;` and
+        // `module A:B;` both look exactly like `identifier :` — a label — and the label rule would
+        // eat the `module` and leave the rest as a stray statement.
+        //
+        // This is the cost of `module` and `import` being contextual keywords rather than real ones:
+        // the parser has to decide from the shape of the declaration, and it has to do so early
+        // enough that no other rule claims the tokens first.
+        _ if super::modules::starts_module_related_declaration(p) => {
+            super::decls::parse_declaration(p)
+        }
+
         // A label: `foo:` at the start of a statement.
         CppTokenKind::Identifier
-            if p.peek_token_kind_at(1..2) == [CppTokenKind::Colon] =>
+            if p.peek_token_kind_at(1..2).as_slice() == [CppTokenKind::Colon] =>
         {
             parse_label_statement(p)
         }
@@ -326,7 +337,7 @@ fn parse_do_while_statement(p: &mut CppParser) -> ParseResult {
 
 /// Parse `( ... )` after `if`/`while`/`switch`/`for`, or a condition declaration.
 fn parse_condition(p: &mut CppParser) -> ParseResult {
-    let _base = p.open_marks();
+    let _ = p.open_marks();
     let m = p.mark(CppSyntaxKind::ParenExpr);
 
     expect_token(p, CppTokenKind::LeftParen)?;
@@ -353,7 +364,7 @@ fn parse_statement_body(p: &mut CppParser) -> ParseResult {
 }
 
 fn parse_for_statement(p: &mut CppParser) -> ParseResult {
-    let _base = p.open_marks();
+    let _ = p.open_marks();
     let m = p.mark(CppSyntaxKind::ForStat);
 
     p.bump(); // Consume 'for'

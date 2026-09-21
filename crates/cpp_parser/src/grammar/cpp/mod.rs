@@ -1,4 +1,5 @@
 mod decls;
+mod modules;
 mod exprs;
 mod stats;
 mod types;

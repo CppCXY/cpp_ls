@@ -156,7 +156,41 @@ pub fn parse_declaration(p: &mut CppParser) -> ParseResult {
         CppTokenKind::NamespaceKeyword => return parse_namespace_declaration(p),
         CppTokenKind::TypedefKeyword => return parse_typedef_declaration(p),
         CppTokenKind::StaticAssertKeyword => return parse_static_assert(p),
+
+        // `export` heads a module declaration, an export block, or one exported declaration. An
+        // `export import` is a re-export, so `import` after `export` routes to the import rule.
+        CppTokenKind::ExportKeyword => {
+            let next = p.peek_token_kind_at(1..2)[0];
+            if next == CppTokenKind::LeftBrace {
+                return super::modules::parse_export_block(p);
+            }
+            if next == CppTokenKind::Identifier {
+                // The word after `export` decides: `module` starts a module declaration, `import` a
+                // re-export. Both are contextual keywords, so this is a text check.
+                let second = p.peek_token_kind_at(2..3)[0];
+                let _ = second;
+                return super::modules::parse_exported_declaration(p);
+            }
+            // `export declaration` — consume the keyword and parse what it exports. Whether a
+            // declaration is exported is a property the semantic layer reads off the token.
+            p.bump();
+        }
         _ => {}
+    }
+
+    // C++20 modules. `module` and `import` are contextual keywords, so this is a text check at the
+    // start of a declaration rather than a token kind.
+    if super::modules::starts_global_module_fragment(p) {
+        return super::modules::parse_global_module_fragment(p);
+    }
+    if super::modules::starts_private_module_fragment(p) {
+        return super::modules::parse_private_module_fragment(p);
+    }
+    if super::modules::starts_module_declaration(p) {
+        return super::modules::parse_module_declaration(p);
+    }
+    if super::modules::starts_import_declaration(p) {
+        return super::modules::parse_import_declaration(p);
     }
 
     let m = p.mark(CppSyntaxKind::Declaration);
