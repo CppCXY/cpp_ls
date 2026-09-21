@@ -567,6 +567,48 @@ pub enum CppSyntaxKind {
     /// e.g.: /// or /** */ style comment
     DocComment,
 
+    // ========== Declarations (grammar detail) ==========
+    /// A preprocessor directive, from `#` to the end of its logical line: `#include <vector>`,
+    /// `#define MAX(a, b) ...`, `#if`, `#endif`.
+    ///
+    /// Directives are *not* removed from the tree. They have to stay for the CST to be lossless, and
+    /// more importantly the branches of a conditional compilation block contain real declarations
+    /// that an editor must still parse and index — the preprocessor layer, which knows which branch
+    /// is selected, is built on top of this node rather than underneath it.
+    PreprocessorDirective,
+    // A declaration in C++ is `decl-specifier-seq init-declarator-list ;`, and every one of those
+    // three pieces is optional depending on the declaration, so they each get their own node
+    // rather than being flattened into the declaration. The AST layer needs the boundaries: "what
+    // is the type of this declaration" and "what is its name" are the two most common questions
+    // asked of a C++ tree, and neither can be answered from a flat token list.
+    /// One complete declaration, whatever its kind.
+    ///
+    /// e.g.: `int x = 1;`, `void f();`, `MyClass obj;`, `static constexpr int n = 5;`
+    Declaration,
+
+    /// The `decl-specifier-seq`: type specifiers, cv-qualifiers, storage class and function
+    /// specifiers, in any order.
+    ///
+    /// e.g.: `int`, `static const`, `virtual inline`, `std::vector<int>`, `auto`
+    DeclSpecifierSeq,
+
+    /// An `init-declarator`: a declarator plus an optional initializer or function body.
+    ///
+    /// e.g.: `x = 1`, `*p`, `f(int a)`, `arr[10]`
+    InitDeclarator,
+
+    /// A `declarator`: the part that names the entity, possibly wrapped in pointers, references,
+    /// arrays, function parameter lists and template argument lists.
+    ///
+    /// e.g.: `x`, `*p`, `&r`, `arr[10]`, `f(int)`, `ns::C::operator+`
+    Declarator,
+
+    /// A type on its own, as it appears after `sizeof`, in a cast, in a parameter or as a
+    /// `type-id`.
+    ///
+    /// e.g.: `int`, `const char*`, `std::vector<int>`
+    TypeId,
+
     // ========== Error Recovery ==========
     /// Error node - for error recovery in parsing
     /// Used when the parser encounters unrecognized syntax

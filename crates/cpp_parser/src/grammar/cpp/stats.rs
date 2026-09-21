@@ -1,41 +1,8 @@
-/*
- * C++ Statement Parser Implementation Summary
- * 
- * This module implements comprehensive C++ statement parsing including:
- * 
- * 1. Control Flow Statements:
- *    - if/else if/else statements
- *    - while loops
- *    - do-while loops  
- *    - for loops (including C-style and range-based)
- *    - switch/case/default statements
- * 
- * 2. Declaration Statements:
- *    - Class declarations and definitions
- *    - Struct declarations and definitions
- *    - Enum declarations (including C++11 scoped enums)
- *    - Namespace declarations
- *    - Function declarations with full C++ syntax support
- *    - Field declarations
- * 
- * 3. Class/Struct Features:
- *    - Inheritance with access specifiers (public, private, protected)
- *    - Virtual inheritance
- *    - Template argument parsing
- *    - Access control sections (public:, private:, protected:)
- *    - Constructor/destructor parsing
- *    - Method declarations with const/noexcept/override/final
- *    - Pure virtual functions (= 0)
- * 
- * 4. Advanced C++ Features:
- *    - Parameter lists with default values
- *    - Template argument lists
- *    - Scoped enums (enum class)
- *    - Forward declarations
- * 
- * The parser follows C++ grammar rules and provides comprehensive
- * error recovery for robust parsing of incomplete or malformed code.
- */
+//! Statements.
+//!
+//! Statements and declarations are the same construct in C++ (a declaration *is* a statement), and
+//! telling them apart is the parser's central ambiguity. [`parse_declaration_or_expression_statement`]
+//! is where that is resolved; the control-flow rules below are ordinary recursive descent.
 
 use crate::{
     grammar::ParseResult,
@@ -44,11 +11,52 @@ use crate::{
     parser_error::CppParseError,
 };
 
-use super::{expect_token, exprs::parse_expr, parse_compound_stat};
+use super::{
+    decls::parse_using_declaration, expect_token, exprs::parse_expr,
+};
 
+/// Parse a compound statement — `{ ... }` — or, in C++, a *single* statement.
+///
+/// The `{` is what distinguishes `Foo::Foo() : a(1) {}` (a function body) from
+/// `Foo::Foo() : a(1);` (a declaration), so this rule drives most of the declaration/definition
+/// decision and is the first thing a real declaration parser will need to hook into.
+pub(crate) fn parse_compound_stat(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::CompoundStat);
+
+    if p.current_token() == CppTokenKind::LeftBrace {
+        p.bump();
+        parse_stats(p);
+
+        if p.current_token() == CppTokenKind::RightBrace {
+            p.bump();
+            return Ok(m.complete(p));
+        }
+
+        // A missing `}` is the single most common error while editing. Keeping the block and
+        // recording the absence as a zero-width node gives completion a sane place to live instead
+        // of swallowing the rest of the file into an error node — but the problem must still be
+        // reported, or the editor has no way to tell the user about it.
+        p.emit_missing_node();
+        p.push_error(CppParseError::syntax_error_from(
+            "expected `}`",
+            p.current_token_range(),
+        ));
+        return Ok(m.complete(p));
+    }
+
+    if let Err(err) = parse_stat(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    Ok(m.complete(p))
+}
+
+/// Parse statements until a token that cannot start one.
 pub fn parse_stats(p: &mut CppParser) {
     while !block_follow(p) {
-        let level = p.get_mark_level();
+        let level = p.open_marks();
         match parse_stat(p) {
             Ok(_) => {}
             Err(err) => {
@@ -76,16 +84,15 @@ pub fn parse_stats(p: &mut CppParser) {
 }
 
 fn block_follow(p: &CppParser) -> bool {
-    match p.current_token() {
+    matches!(
+        p.current_token(),
         CppTokenKind::RightBrace            // }
-        | CppTokenKind::Eof                 // End of file
-        | CppTokenKind::CaseKeyword         // case (in switch)
-        | CppTokenKind::DefaultKeyword      // default (in switch)
-        | CppTokenKind::ElseKeyword         // else
-        | CppTokenKind::CatchKeyword        // catch
-        => true,
-        _ => false,
-    }
+            | CppTokenKind::Eof             // End of file
+            | CppTokenKind::CaseKeyword     // case (in switch)
+            | CppTokenKind::DefaultKeyword  // default (in switch)
+            | CppTokenKind::ElseKeyword     // else
+            | CppTokenKind::CatchKeyword // catch
+    )
 }
 
 /// Dispatch to the statement rule for the current token.
@@ -104,22 +111,31 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
         CppTokenKind::DoKeyword => parse_do_while_statement(p),
         CppTokenKind::ForKeyword => parse_for_statement(p),
         CppTokenKind::SwitchKeyword => parse_switch_statement(p),
+        CppTokenKind::TryKeyword => parse_try_statement(p),
+        CppTokenKind::ReturnKeyword => parse_return_statement(p),
+        CppTokenKind::BreakKeyword => parse_keyword_statement(p, CppSyntaxKind::BreakStat),
+        CppTokenKind::ContinueKeyword => parse_keyword_statement(p, CppSyntaxKind::ContinueStat),
+        CppTokenKind::GotoKeyword => parse_goto_statement(p),
+        CppTokenKind::ThrowKeyword => parse_throw_statement(p),
+
         // Compound statement
         CppTokenKind::LeftBrace => parse_compound_stat(p),
-        // Declaration statements
-        CppTokenKind::ClassKeyword => parse_class_declaration(p),
-        CppTokenKind::StructKeyword => parse_struct_declaration(p),
-        CppTokenKind::EnumKeyword => parse_enum_declaration(p),
-        CppTokenKind::NamespaceKeyword => parse_namespace_declaration(p),
-        // CppTokenKind::UsingKeyword => parse_using_declaration(p),
-        // CppTokenKind::TypedefKeyword => parse_typedef_declaration(p),
-        // CppTokenKind::ConstKeyword => parse_const_declaration(p),
-        // CppTokenKind::StaticKeyword => parse_static_declaration(p),
-        // CppTokenKind::ExternKeyword => parse_extern_declaration(p),
-        // CppTokenKind::VolatileKeyword => parse_volatile_declaration(p),
-        // CppTokenKind::InlineKeyword => parse_inline_declaration(p),
 
-        // Everything else is either a declaration or an expression statement
+        // A label: `foo:` at the start of a statement.
+        CppTokenKind::Identifier
+            if p.peek_token_kind_at(1..2) == [CppTokenKind::Colon] =>
+        {
+            parse_label_statement(p)
+        }
+
+        // An empty statement.
+        CppTokenKind::Semicolon => {
+            let m = p.mark(CppSyntaxKind::EmptyStat);
+            p.bump();
+            Ok(m.complete(p))
+        }
+
+        // Everything else is a declaration or an expression statement.
         _ => parse_declaration_or_expression_statement(p),
     };
 
@@ -130,642 +146,526 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
     result
 }
 
+/// Resolve the declaration/expression ambiguity by trying the declaration reading first.
+///
+/// See the module documentation in `decls` for why this is decided by backtracking rather than by a
+/// heuristic on the first tokens. The rewind is cheap — the parser is an event list and a token
+/// cursor — and getting it wrong produces a wrong but plausible tree, which is much worse.
+fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
+    // A preprocessor directive is not a C++ construct at all; it only exists at the token level.
+    if p.current_token() == CppTokenKind::Hash {
+        return parse_preprocessor_directive(p);
+    }
+
+    // `using` declarations cannot be expressions, so they do not need the speculative path.
+    if p.current_token() == CppTokenKind::UsingKeyword {
+        return parse_using_declaration(p);
+    }
+
+    // Anchors let the speculative declaration pass be skipped: `static`, `class`, `typename` and
+    // friends can never begin an expression, so there is nothing to disambiguate.
+    if super::decls::starts_declaration(p) {
+        return super::decls::parse_declaration(p);
+    }
+
+    let checkpoint = p.checkpoint();
+
+    match super::decls::parse_declaration(p) {
+        Ok(marker) => Ok(marker),
+        Err(_) => {
+            // Not a declaration. Rewind and read it as an expression.
+            p.rollback(checkpoint);
+            parse_expression_statement(p)
+        }
+    }
+}
+
+/// Parse a preprocessor directive as a leaf of the syntax tree: `#` name rest-of-line.
+///
+/// The directive is kept as a node rather than skipped, for two reasons. It has to stay in the tree
+/// for the CST to remain lossless, and the *unselected* branches of `#if` contain real
+/// declarations — an editor needs to see them, both so the file parses at all and so that code
+/// inside a disabled branch is not reported as garbage.
+///
+/// One directive gets special treatment: `#include` is followed by a header name, which the lexer
+/// only produces on request because `<` and `>` are far too common to guess at.
+fn parse_preprocessor_directive(p: &mut CppParser) -> ParseResult {
+    let m = p.mark(CppSyntaxKind::PreprocessorDirective);
+
+    p.bump(); // `#`
+
+    // The directive name is a plain identifier (`include`, `define`, `if`, ...); the null directive
+    // `#` alone on a line has none.
+    let directive_is_include = p.current_token() == CppTokenKind::Identifier
+        && matches!(p.current_token_text(), "include" | "include_next");
+    if p.current_token() == CppTokenKind::Identifier {
+        p.bump();
+    }
+
+    // A directive runs to the end of its (spliced) line. Reading it token by token keeps the text in
+    // the tree; the preprocessor layer re-reads these tokens when it needs their real meaning.
+    let mut header_name_expected = directive_is_include;
+
+    while !p.is_eof() && p.current_token() != CppTokenKind::Newline {
+        if header_name_expected {
+            header_name_expected = false;
+            if p.try_lex_header_name() {
+                continue;
+            }
+        }
+        p.bump();
+    }
+
+    Ok(m.complete(p))
+}
+
+/// Parse an expression statement: `expr ;`.
+fn parse_expression_statement(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::ExpressionStat);
+
+    if let Err(err) = parse_expr(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    // A statement ends at a `;`. Reaching something else means the expression did not cover the
+    // statement, which is what makes the caller's recovery kick in.
+    if p.current_token() == CppTokenKind::Semicolon {
+        p.bump();
+        return Ok(m.complete(p));
+    }
+
+    p.emit_missing_node();
+    p.close_marks_above(base);
+    Err(CppParseError::syntax_error_from(
+        "expected `;` after expression",
+        p.current_token_range(),
+    ))
+}
+
 fn parse_if_statement(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::IfStat);
 
     p.bump(); // Consume 'if'
-    expect_token(p, CppTokenKind::LeftParen)?; // Expect '('
-    parse_expr(p)?; // Parse the condition expression
-    expect_token(p, CppTokenKind::RightParen)?; // Expect ')'
 
-    parse_compound_stat(p)?; // Parse the 'then' block
+    // `if constexpr (...)` and `if consteval` (C++23).
+    if p.current_token() == CppTokenKind::ConstexprKeyword {
+        p.bump();
+    } else if matches!(p.current_token_text(), "consteval") {
+        p.bump();
+    }
 
-    while p.current_token() == CppTokenKind::ElseKeyword {
-        if p.peek_next_token() == CppTokenKind::IfKeyword {
-            let m_else_if = p.mark(CppSyntaxKind::ElseIfStat);
-            p.bump();
-            p.bump(); // Consume 'else if'
-            expect_token(p, CppTokenKind::LeftParen)?; // Expect '('
-            parse_expr(p)?; // Parse the condition expression for 'else if'
-            expect_token(p, CppTokenKind::RightParen)?; // Expect ')'
+    if let Err(err) = parse_condition(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
 
-            parse_compound_stat(p)?; // Parse the 'else if' block
-            m_else_if.complete(p);
-        } else {
-            let m_else = p.mark(CppSyntaxKind::ElseStat);
-            p.bump();
-            // Otherwise, parse the 'else' block
-            parse_compound_stat(p)?;
-            m_else.complete(p);
-            break; // Exit after processing the 'else' block
+    if let Err(err) = parse_statement_body(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    if p.current_token() == CppTokenKind::ElseKeyword {
+        let else_m = p.mark(CppSyntaxKind::ElseStat);
+        p.bump();
+        if let Err(err) = parse_statement_body(p) {
+            p.close_marks_above(base);
+            return Err(err);
         }
+        else_m.complete(p);
     }
 
     Ok(m.complete(p))
 }
 
 fn parse_while_statement(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::WhileStat);
 
     p.bump(); // Consume 'while'
-    expect_token(p, CppTokenKind::LeftParen)?; // Expect '('
-    parse_expr(p)?; // Parse the condition expression
-    expect_token(p, CppTokenKind::RightParen)?; // Expect ')'
 
-    parse_compound_stat(p)?; // Parse the loop body
+    if let Err(err) = parse_condition(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+    if let Err(err) = parse_statement_body(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
 
     Ok(m.complete(p))
 }
 
 fn parse_do_while_statement(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::DoWhileStat);
 
     p.bump(); // Consume 'do'
-    parse_compound_stat(p)?; // Parse the loop body
+    if let Err(err) = parse_statement_body(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
 
-    expect_token(p, CppTokenKind::WhileKeyword)?; // Expect 'while'
-    expect_token(p, CppTokenKind::LeftParen)?; // Expect '('
-    parse_expr(p)?; // Parse the condition expression
-    expect_token(p, CppTokenKind::RightParen)?; // Expect ')'
-    expect_token(p, CppTokenKind::Semicolon)?; // Expect ';'
+    if let Err(err) = expect_token(p, CppTokenKind::WhileKeyword) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+    if let Err(err) = parse_condition(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+    if let Err(err) = expect_token(p, CppTokenKind::Semicolon) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
 
     Ok(m.complete(p))
 }
 
+/// Parse `( ... )` after `if`/`while`/`switch`/`for`, or a condition declaration.
+fn parse_condition(p: &mut CppParser) -> ParseResult {
+    let _base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::ParenExpr);
+
+    expect_token(p, CppTokenKind::LeftParen)?;
+
+    // A condition may declare a variable: `if (Foo* p = get())`.
+    let checkpoint = p.checkpoint();
+    if super::decls::parse_declaration(p).is_err() {
+        p.rollback(checkpoint);
+        parse_expr(p)?;
+    }
+
+    expect_token(p, CppTokenKind::RightParen)?;
+    Ok(m.complete(p))
+}
+
+/// Parse the body of a control-flow statement: a block, or one statement.
+fn parse_statement_body(p: &mut CppParser) -> ParseResult {
+    if p.current_token() == CppTokenKind::LeftBrace {
+        return parse_compound_stat(p);
+    }
+
+    // A dangling `;` is an empty statement, which is a valid body.
+    parse_stat(p)
+}
+
 fn parse_for_statement(p: &mut CppParser) -> ParseResult {
+    let _base = p.open_marks();
     let m = p.mark(CppSyntaxKind::ForStat);
 
     p.bump(); // Consume 'for'
-    expect_token(p, CppTokenKind::LeftParen)?; // Expect '('
 
-    // Parse the initialization part
-    if p.current_token() != CppTokenKind::Semicolon {
-        parse_declaration_or_expression_statement(p)?;
+    // `for co_await (...)` (C++20).
+    if p.current_token() == CppTokenKind::CoAwaitKeyword {
+        p.bump();
     }
-    expect_token(p, CppTokenKind::Semicolon)?; // Expect ';'
 
-    // Parse the condition part
+    expect_token(p, CppTokenKind::LeftParen)?;
+
+    // Range-based for: `for (decl : range)`.
+    if starts_a_range_for(p) {
+        let checkpoint = p.checkpoint();
+
+        // A range declaration is optional in C++20 (`for (auto v : m)` vs. `for (v : m)`).
+        if super::decls::parse_declaration(p).is_err() {
+            p.rollback(checkpoint);
+            parse_expr(p)?;
+        }
+
+        if p.current_token() == CppTokenKind::Colon {
+            p.bump();
+            parse_expr(p)?;
+            expect_token(p, CppTokenKind::RightParen)?;
+            parse_statement_body(p)?;
+
+            let completed = m.complete(p);
+            let mut completed = completed;
+            completed.kind = CppSyntaxKind::RangeForStat;
+            return Ok(completed);
+        }
+
+        // Not a range-for after all; fall through to the C-style reading.
+        p.rollback(checkpoint);
+    }
+
+    // C-style: `for (init ; cond ; step)`.
+    if p.current_token() != CppTokenKind::Semicolon {
+        parse_declaration_or_expression_statement_without_semicolon(p)?;
+    }
+    expect_token(p, CppTokenKind::Semicolon)?;
+
     if p.current_token() != CppTokenKind::Semicolon {
         parse_expr(p)?;
     }
-    expect_token(p, CppTokenKind::Semicolon)?; // Expect ';'
+    expect_token(p, CppTokenKind::Semicolon)?;
 
-    // Parse the increment part
     if p.current_token() != CppTokenKind::RightParen {
-        parse_declaration_or_expression_statement(p)?;
+        parse_declaration_or_expression_statement_without_semicolon(p)?;
     }
-    expect_token(p, CppTokenKind::RightParen)?; // Expect ')'
+    expect_token(p, CppTokenKind::RightParen)?;
 
-    parse_compound_stat(p)?; // Parse the loop body
+    parse_statement_body(p)?;
+
+    Ok(m.complete(p))
+}
+
+/// Would a `:` later in the `for` header make this a range-based for?
+///
+/// Scans the header at nesting depth zero, where a `:` can only be the range separator. A `:` at
+/// depth zero cannot appear in an ordinary for-init (`a ? b : c` is inside no parentheses but does
+/// contain a `:`, so the scan stops at `?` conservatively).
+fn starts_a_range_for(p: &CppParser) -> bool {
+    let mut depth = 0isize;
+    let mut saw_question = false;
+
+    for kind in p.peek_token_kind_at(0..64) {
+        match kind {
+            CppTokenKind::LeftParen | CppTokenKind::LeftBracket | CppTokenKind::LeftBrace => {
+                depth += 1
+            }
+            CppTokenKind::RightParen | CppTokenKind::RightBracket | CppTokenKind::RightBrace => {
+                depth -= 1;
+                if depth <= 0 {
+                    return false;
+                }
+            }
+            CppTokenKind::Question => saw_question = true,
+            CppTokenKind::Semicolon if depth == 1 => return false,
+            CppTokenKind::Colon if depth == 1 => return !saw_question,
+            CppTokenKind::Eof | CppTokenKind::None => return false,
+            _ => {}
+        }
+    }
+
+    false
+}
+
+/// Parse the init or step part of a `for` header, which has no trailing semicolon of its own.
+fn parse_declaration_or_expression_statement_without_semicolon(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+
+    let checkpoint = p.checkpoint();
+    if super::decls::parse_for_init_declaration(p).is_ok() {
+        return Ok(crate::parser::CompleteMarker::empty());
+    }
+    p.rollback(checkpoint);
+
+    let m = p.mark(CppSyntaxKind::ExpressionStat);
+    if let Err(err) = parse_expr(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
 
     Ok(m.complete(p))
 }
 
 fn parse_switch_statement(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::SwitchStat);
 
     p.bump(); // Consume 'switch'
-    expect_token(p, CppTokenKind::LeftParen)?; // Expect '('
-    parse_expr(p)?; // Parse the switch expression
-    expect_token(p, CppTokenKind::RightParen)?; // Expect ')'
 
-    expect_token(p, CppTokenKind::LeftBrace)?; // Expect '{'
+    if let Err(err) = parse_condition(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    if let Err(err) = expect_token(p, CppTokenKind::LeftBrace) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
     while p.current_token() != CppTokenKind::RightBrace && !p.is_eof() {
-        if p.current_token() == CppTokenKind::CaseKeyword {
-            let case_m = p.mark(CppSyntaxKind::CaseStat);
-            p.bump(); // Consume 'case'
-            parse_expr(p)?; // Parse the case value
-            expect_token(p, CppTokenKind::Colon)?; // Expect ':'
-            parse_stats(p); // Parse the statements for this case
-            case_m.complete(p);
-        } else if p.current_token() == CppTokenKind::DefaultKeyword {
-            let default_m = p.mark(CppSyntaxKind::DefaultStat);
-            p.bump(); // Consume 'default'
-            expect_token(p, CppTokenKind::Colon)?; // Expect ':'
-            parse_stats(p); // Parse the statements for default case
-            default_m.complete(p);
-        } else {
-            break; // Exit if we encounter something unexpected
-        }
-    }
-    expect_token(p, CppTokenKind::RightBrace)?; // Expect '}'
-
-    Ok(m.complete(p))
-}
-
-fn parse_class_declaration(p: &mut CppParser) -> ParseResult {
-    let mut m = p.mark(CppSyntaxKind::ClassDecl);
-
-    p.bump(); // Consume 'class'
-    
-    // Parse class name (optional for anonymous classes)
-    if p.current_token() == CppTokenKind::Identifier {
-        p.bump(); // Consume class name
-    }
-    
-    // Parse inheritance (optional)
-    if p.current_token() == CppTokenKind::Colon {
-        parse_inheritance_list(p)?;
-    }
-    
-    // Check if this is a forward declaration or full definition
-    if p.current_token() == CppTokenKind::Semicolon {
-        // Forward declaration: class MyClass;
-        p.bump();
-        Ok(m.complete(p))
-    } else if p.current_token() == CppTokenKind::LeftBrace {
-        m.set_kind(p, CppSyntaxKind::ClassDef);
-        // Full class definition
-        parse_class_body(p)?;
-        
-        // Optional semicolon after class definition
-        if p.current_token() == CppTokenKind::Semicolon {
-            p.bump();
-        }
-        
-        Ok(m.complete(p))
-    } else {
-        Err(CppParseError::syntax_error_from(
-            "expected ';' or '{' after class name",
-            p.current_token_range(),
-        ))
-    }
-}
-
-fn parse_struct_declaration(p: &mut CppParser) -> ParseResult {
-    let mut m = p.mark(CppSyntaxKind::StructDecl);
-    
-    p.bump(); // Consume 'struct'
-    
-    // Parse struct name (optional for anonymous structs)
-    if p.current_token() == CppTokenKind::Identifier {
-        p.bump(); // Consume struct name
-    }
-    
-    // Parse inheritance (optional)
-    if p.current_token() == CppTokenKind::Colon {
-        parse_inheritance_list(p)?;
-    }
-    
-    // Check if this is a forward declaration or full definition
-    if p.current_token() == CppTokenKind::Semicolon {
-        // Forward declaration: struct MyStruct;
-        p.bump();
-        Ok(m.complete(p))
-    } else if p.current_token() == CppTokenKind::LeftBrace {
-        m.set_kind(p, CppSyntaxKind::StructDef);
-        // Full struct definition
-        parse_class_body(p)?; // Reuse class body parser since struct and class are similar
-        
-        // Optional semicolon after struct definition
-        if p.current_token() == CppTokenKind::Semicolon {
-            p.bump();
-        }
-        
-        Ok(m.complete(p))
-    } else {
-        Err(CppParseError::syntax_error_from(
-            "expected ';' or '{' after struct name",
-            p.current_token_range(),
-        ))
-    }
-}
-
-fn parse_enum_declaration(p: &mut CppParser) -> ParseResult {
-    let mut m = p.mark(CppSyntaxKind::EnumDecl);
-    p.bump(); // Consume 'enum'
-    
-    let mut is_enum_class = false;
-    // Parse 'class' or 'struct' for scoped enums (C++11)
-    if p.current_token() == CppTokenKind::ClassKeyword || p.current_token() == CppTokenKind::StructKeyword {
-        is_enum_class = true;
-        m.set_kind(p, CppSyntaxKind::EnumClassDecl);
-        p.bump();
-    }
-    
-    // Parse enum name (optional for anonymous enums)
-    if p.current_token() == CppTokenKind::Identifier {
-        p.bump(); // Consume enum name
-    }
-    
-    // Parse underlying type (optional): enum class Color : int
-    if p.current_token() == CppTokenKind::Colon {
-        p.bump(); // Consume ':'
-        // Parse the underlying type
-        while p.current_token() != CppTokenKind::LeftBrace 
-            && p.current_token() != CppTokenKind::Semicolon 
-            && !p.is_eof() {
-            p.bump();
-        }
-    }
-    
-    // Check if this is a forward declaration or full definition
-    if p.current_token() == CppTokenKind::Semicolon {
-        // Forward declaration: enum class Color;
-        p.bump();
-        Ok(m.complete(p))
-    } else if p.current_token() == CppTokenKind::LeftBrace {
-        if is_enum_class {
-            m.set_kind(p, CppSyntaxKind::EnumClassDef);
-        } else {
-            m.set_kind(p, CppSyntaxKind::EnumDef);
-        }
-
-        // Full enum definition
-        parse_enum_body(p)?;
-        
-        // Optional semicolon after enum definition
-        if p.current_token() == CppTokenKind::Semicolon {
-            p.bump();
-        }
-        
-        Ok(m.complete(p))
-    } else {
-        Err(CppParseError::syntax_error_from(
-            "expected ';' or '{' after enum name",
-            p.current_token_range(),
-        ))
-    }
-}
-
-fn parse_namespace_declaration(p: &mut CppParser) -> ParseResult {
-    // Placeholder for namespace declaration
-    let m = p.mark(CppSyntaxKind::NamespaceDecl);
-    p.bump(); // Consume 'namespace'
-    // Here you would typically parse the namespace name and members
-    // For now, we just complete the marker
-    if p.current_token() != CppTokenKind::Semicolon {
-        parse_compound_stat(p)?; // Parse namespace body
-    } else {
-        p.bump(); // Consume ';' if present
-    }
-    Ok(m.complete(p))
-}
-
-/// Parse inheritance list: : public Base1, private Base2, ...
-fn parse_inheritance_list(p: &mut CppParser) -> ParseResult {
-    let m = p.mark(CppSyntaxKind::BaseSpecifier);
-    
-    p.bump(); // Consume ':'
-    
-    // Parse base class list
-    loop {
-        // Parse access specifier (public, private, protected) - optional
-        if matches!(p.current_token(), 
-            CppTokenKind::PublicKeyword | 
-            CppTokenKind::PrivateKeyword | 
-            CppTokenKind::ProtectedKeyword
-        ) {
-            p.bump(); // Consume access specifier
-        }
-        
-        // Parse virtual keyword - optional
-        if p.current_token() == CppTokenKind::VirtualKeyword {
-            p.bump();
-        }
-        
-        // Parse base class name
-        if p.current_token() == CppTokenKind::Identifier {
-            p.bump();
-            
-            // Parse template arguments if present
-            if p.current_token() == CppTokenKind::Less {
-                parse_template_argument_list(p)?;
+        match p.current_token() {
+            CppTokenKind::CaseKeyword => {
+                let case = p.mark(CppSyntaxKind::CaseStat);
+                p.bump();
+                // A case label may be a constant expression or a range `case 1 ... 5:`.
+                if let Err(err) = parse_expr(p) {
+                    p.close_marks_above(base);
+                    return Err(err);
+                }
+                if p.current_token() == CppTokenKind::Ellipsis {
+                    p.bump();
+                    if let Err(err) = parse_expr(p) {
+                        p.close_marks_above(base);
+                        return Err(err);
+                    }
+                }
+                if let Err(err) = expect_token(p, CppTokenKind::Colon) {
+                    p.close_marks_above(base);
+                    return Err(err);
+                }
+                case.complete(p);
             }
-        } else {
-            return Err(CppParseError::syntax_error_from(
-                "expected base class name",
-                p.current_token_range(),
-            ));
-        }
-        
-        // Check for more base classes
-        if p.current_token() == CppTokenKind::Comma {
-            p.bump(); // Consume ','
-        } else {
-            break;
-        }
-    }
-    
-    Ok(m.complete(p))
-}
-
-/// Parse class body: { ... }
-fn parse_class_body(p: &mut CppParser) -> ParseResult {
-    let m = p.mark(CppSyntaxKind::CompoundStat);
-    
-    expect_token(p, CppTokenKind::LeftBrace)?; // Expect '{'
-    
-    while p.current_token() != CppTokenKind::RightBrace && !p.is_eof() {
-        // Parse access specifiers
-        if matches!(p.current_token(), 
-            CppTokenKind::PublicKeyword | 
-            CppTokenKind::PrivateKeyword | 
-            CppTokenKind::ProtectedKeyword
-        ) {
-            parse_access_specifier(p)?;
-        } else {
-            // Parse member declarations
-            parse_member_declaration(p)?;
+            CppTokenKind::DefaultKeyword => {
+                let default = p.mark(CppSyntaxKind::DefaultStat);
+                p.bump();
+                if let Err(err) = expect_token(p, CppTokenKind::Colon) {
+                    p.close_marks_above(base);
+                    return Err(err);
+                }
+                default.complete(p);
+            }
+            _ => {
+                // Regular statements inside the switch body.
+                parse_stat(p)?;
+            }
         }
     }
-    
-    expect_token(p, CppTokenKind::RightBrace)?; // Expect '}'
-    
-    Ok(m.complete(p))
-}
 
-/// Parse access specifier: public:, private:, protected:
-fn parse_access_specifier(p: &mut CppParser) -> ParseResult {
-    let m = match p.current_token() {
-        CppTokenKind::PublicKeyword => p.mark(CppSyntaxKind::DeclStat), // Use DeclStat for now
-        CppTokenKind::PrivateKeyword => p.mark(CppSyntaxKind::DeclStat), // Use DeclStat for now  
-        CppTokenKind::ProtectedKeyword => p.mark(CppSyntaxKind::DeclStat), // Use DeclStat for now
-        _ => return Err(CppParseError::syntax_error_from(
-            "expected access specifier",
-            p.current_token_range(),
-        )),
-    };
-    
-    p.bump(); // Consume access specifier
-    expect_token(p, CppTokenKind::Colon)?; // Expect ':'
-    
-    Ok(m.complete(p))
-}
-
-/// Parse member declaration (method, field, constructor, etc.)
-fn parse_member_declaration(p: &mut CppParser) -> ParseResult {
-    // Check for constructor/destructor
-    if p.current_token() == CppTokenKind::Tilde {
-        parse_destructor_declaration(p)
-    } else if p.current_token() == CppTokenKind::Identifier {
-        // Could be constructor, method, or field
-        // This is a simplified check - in real C++, you'd need more lookahead
-        if p.peek_next_token() == CppTokenKind::LeftParen {
-            parse_constructor_or_method_declaration(p)
-        } else {
-            parse_field_declaration(p)
-        }
+    if p.current_token() == CppTokenKind::RightBrace {
+        p.bump();
     } else {
-        // Parse other member declarations (methods, fields with type specifiers)
-        parse_declaration_or_expression_statement(p)
+        p.emit_missing_node();
     }
-}
 
-/// Parse constructor or method declaration
-fn parse_constructor_or_method_declaration(p: &mut CppParser) -> ParseResult {
-    let m = p.mark(CppSyntaxKind::FunctionDecl);
-    
-    // Parse return type (optional for constructors)
-    // Look ahead to see if this is a constructor or method
-    let mut is_constructor = false;
-    
-    // Simple heuristic: if the identifier is followed by '(', it might be a constructor
-    // In a real implementation, you'd need to check if the name matches the class name
-    if p.current_token() == CppTokenKind::Identifier && p.peek_next_token() == CppTokenKind::LeftParen {
-        is_constructor = true;
-    }
-    
-    if !is_constructor {
-        // Parse return type for methods
-        while p.current_token() != CppTokenKind::Identifier 
-            && p.current_token() != CppTokenKind::LeftParen
-            && !p.is_eof() {
-            p.bump();
-        }
-    }
-    
-    // Parse function name
-    if p.current_token() == CppTokenKind::Identifier {
-        p.bump();
-    }
-    
-    // Parse parameter list
-    if p.current_token() == CppTokenKind::LeftParen {
-        parse_parameter_list(p)?;
-    }
-    
-    // Parse const qualifier for methods
-    if p.current_token() == CppTokenKind::ConstKeyword {
-        p.bump();
-    }
-    
-    // Parse noexcept specifier (C++11)
-    if p.current_token() == CppTokenKind::NoexceptKeyword {
-        p.bump();
-        // Parse optional noexcept expression
-        if p.current_token() == CppTokenKind::LeftParen {
-            p.bump();
-            parse_expr(p)?;
-            expect_token(p, CppTokenKind::RightParen)?;
-        }
-    }
-    // Parse override/final specifiers (C++11).
-    //
-    // `override` and `final` are *contextual* keywords: the lexer correctly hands them over as
-    // plain identifiers, and they are only meaningful immediately after a declarator. So we match
-    // on text here rather than in the lexer.
-    while matches!(p.current_token(), CppTokenKind::Identifier)
-        && matches!(p.current_token_text(), "override" | "final")
-    {
-        p.bump();
-    }
-    
-    // Parse pure virtual specifier: = 0
-    if p.current_token() == CppTokenKind::Assign {
-        p.bump();
-        if p.current_token() == CppTokenKind::IntegerLiteral {
-            p.bump(); // Should be '0' for pure virtual
-        }
-    }
-    
-    // Parse function body or semicolon
-    if p.current_token() == CppTokenKind::LeftBrace {
-        parse_compound_stat(p)?;
-    } else if p.current_token() == CppTokenKind::Semicolon {
-        p.bump();
-    }
-    
     Ok(m.complete(p))
 }
 
-/// Parse destructor declaration: ~ClassName() { ... }
-fn parse_destructor_declaration(p: &mut CppParser) -> ParseResult {
-    let m = p.mark(CppSyntaxKind::FunctionDecl);
-    
-    p.bump(); // Consume '~'
-    
-    // Parse destructor name
-    if p.current_token() == CppTokenKind::Identifier {
-        p.bump();
-    }
-    
-    // Parse parameter list (should be empty for destructor)
-    if p.current_token() == CppTokenKind::LeftParen {
-        parse_parameter_list(p)?;
-    }
-    
-    // Parse function body or semicolon
-    if p.current_token() == CppTokenKind::LeftBrace {
-        parse_compound_stat(p)?;
-    } else if p.current_token() == CppTokenKind::Semicolon {
-        p.bump();
-    }
-    
-    Ok(m.complete(p))
-}
-
-/// Parse field declaration: int x; or int x = 5;
-fn parse_field_declaration(p: &mut CppParser) -> ParseResult {
-    let m = p.mark(CppSyntaxKind::FieldDecl);
-    
-    // For now, just parse as a declaration statement
-    parse_declaration_or_expression_statement(p)?;
-    
-    Ok(m.complete(p))
-}
-
-/// Parse parameter list: (int x, double y, ...)
-fn parse_parameter_list(p: &mut CppParser) -> ParseResult {
-    let m = p.mark(CppSyntaxKind::ParameterList);
-    
-    expect_token(p, CppTokenKind::LeftParen)?; // Expect '('
-    
-    while p.current_token() != CppTokenKind::RightParen && !p.is_eof() {
-        parse_parameter(p)?;
-        
-        if p.current_token() == CppTokenKind::Comma {
-            p.bump(); // Consume ','
-        } else {
-            break;
-        }
-    }
-    
-    expect_token(p, CppTokenKind::RightParen)?; // Expect ')'
-    
-    Ok(m.complete(p))
-}
-
-/// Parse single parameter: int x or const std::string& name = "default"
-fn parse_parameter(p: &mut CppParser) -> ParseResult {
-    let m = p.mark(CppSyntaxKind::Parameter);
-    
-    // Parse type (simplified - just consume tokens until we get to identifier or special chars)
-    while p.current_token() != CppTokenKind::Identifier 
-        && p.current_token() != CppTokenKind::RightParen
-        && p.current_token() != CppTokenKind::Comma
-        && !p.is_eof() {
-        p.bump();
-    }
-    
-    // Parse parameter name
-    if p.current_token() == CppTokenKind::Identifier {
-        p.bump();
-    }
-    
-    // Parse default value if present
-    if p.current_token() == CppTokenKind::Assign {
-        p.bump();
-        parse_expr(p)?;
-    }
-    
-    Ok(m.complete(p))
-}
-
-/// Parse template argument list: <T, int N, ...>
-fn parse_template_argument_list(p: &mut CppParser) -> ParseResult {
-    let m = p.mark(CppSyntaxKind::TemplateArgumentList);
-    
-    expect_token(p, CppTokenKind::Less)?; // Expect '<'
-    
-    while p.current_token() != CppTokenKind::Greater && !p.is_eof() {
-        // Parse template argument (type or expression)
-        parse_template_argument(p)?;
-        
-        if p.current_token() == CppTokenKind::Comma {
-            p.bump(); // Consume ','
-        } else {
-            break;
-        }
-    }
-    
-    expect_token(p, CppTokenKind::Greater)?; // Expect '>'
-    
-    Ok(m.complete(p))
-}
-
-/// Parse single template argument
-fn parse_template_argument(p: &mut CppParser) -> ParseResult {
-    let m = p.mark(CppSyntaxKind::TemplateArgument);
-    
-    // For now, just parse as expression (could be type or value)
-    parse_expr(p)?;
-    
-    Ok(m.complete(p))
-}
-
-/// Parse declaration or expression statement.
-///
-/// This is the single biggest gap in the grammar: it does not yet distinguish `int x = 1;` from
-/// `x = 1;`, because that requires a `decl-specifier-seq` and a type-name table. Until then it
-/// consumes to the end of the construct and labels the result `DeclStat`.
-fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
+fn parse_try_statement(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
-    let m = p.mark(CppSyntaxKind::DeclStat);
+    let m = p.mark(CppSyntaxKind::TryStat);
 
-    // Consume tokens until the end of the construct. A `{` starts a body and is parsed as a
-    // nested block so that its contents get their own nodes instead of being flattened in here.
-    while p.current_token() != CppTokenKind::Semicolon && !p.is_eof() {
-        if p.current_token() == CppTokenKind::LeftBrace {
-            if let Err(err) = parse_compound_stat(p) {
-                // Close whatever this function opened before propagating: a leaked `DeclStat`
-                // would sit in front of its parent's `NodeEnd` and swallow the rest of the file.
+    p.bump(); // Consume 'try'
+    if let Err(err) = parse_compound_stat(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    while p.current_token() == CppTokenKind::CatchKeyword {
+        let handler = p.mark(CppSyntaxKind::CatchStat);
+        p.bump();
+
+        if p.current_token() == CppTokenKind::LeftParen {
+            if let Err(err) = parse_parameter_list_inline(p) {
                 p.close_marks_above(base);
                 return Err(err);
             }
-            break;
-        } else {
-            p.bump();
         }
-    }
 
-    if p.current_token() == CppTokenKind::Semicolon {
-        p.bump();
+        if let Err(err) = parse_compound_stat(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+        handler.complete(p);
     }
 
     Ok(m.complete(p))
 }
 
-/// Parse enum body: { RED, GREEN, BLUE }
-fn parse_enum_body(p: &mut CppParser) -> ParseResult {
-    let m = p.mark(CppSyntaxKind::CompoundStat);
-    
-    expect_token(p, CppTokenKind::LeftBrace)?; // Expect '{'
-    
-    while p.current_token() != CppTokenKind::RightBrace && !p.is_eof() {
-        // Parse enum member
-        if p.current_token() == CppTokenKind::Identifier {
-            let member_m = p.mark(CppSyntaxKind::DeclStat); // Use DeclStat for now
-            p.bump(); // Consume enum member name
-            
-            // Parse value assignment if present: RED = 1
-            if p.current_token() == CppTokenKind::Assign {
-                p.bump(); // Consume '='
-                parse_expr(p)?; // Parse the value expression
-            }
-            
-            member_m.complete(p);
-        }
-        
-        // Check for comma
-        if p.current_token() == CppTokenKind::Comma {
-            p.bump(); // Consume ','
-        } else if p.current_token() != CppTokenKind::RightBrace {
-            break; // Exit if we don't find comma or closing brace
+/// Parse a catch clause's parameter list, reusing the declaration grammar.
+fn parse_parameter_list_inline(p: &mut CppParser) -> ParseResult {
+    super::decls::parse_parameter_list(p)
+}
+
+fn parse_return_statement(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::ReturnStat);
+
+    p.bump(); // Consume 'return'
+
+    // `return;` and `co_return;` are complete statements.
+    if p.current_token() != CppTokenKind::Semicolon && !p.is_eof() {
+        if let Err(err) = parse_return_value(p) {
+            p.close_marks_above(base);
+            return Err(err);
         }
     }
-    
-    expect_token(p, CppTokenKind::RightBrace)?; // Expect '}'
-    
+
+    if p.current_token() == CppTokenKind::Semicolon {
+        p.bump();
+    } else {
+        p.emit_missing_node();
+    }
+
+    Ok(m.complete(p))
+}
+
+/// Parse what follows `return`: an expression, or a braced-init-list.
+fn parse_return_value(p: &mut CppParser) -> ParseResult {
+    if p.current_token() == CppTokenKind::LeftBrace {
+        // `return {1, 2};`
+        return super::decls::parse_braced_initializer(p);
+    }
+
+    parse_expr(p)
+}
+
+fn parse_keyword_statement(p: &mut CppParser, kind: CppSyntaxKind) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(kind);
+    p.bump();
+
+    if p.current_token() == CppTokenKind::Semicolon {
+        p.bump();
+    } else {
+        p.close_marks_above(base);
+        return Err(CppParseError::syntax_error_from(
+            "expected `;`",
+            p.current_token_range(),
+        ));
+    }
+
+    Ok(m.complete(p))
+}
+
+fn parse_goto_statement(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::GotoStat);
+
+    p.bump(); // Consume 'goto'
+    if p.current_token() == CppTokenKind::Identifier {
+        p.bump();
+    }
+    if let Err(err) = expect_token(p, CppTokenKind::Semicolon) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    Ok(m.complete(p))
+}
+
+fn parse_throw_statement(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::ThrowStat);
+
+    p.bump(); // Consume 'throw'
+    if p.current_token() != CppTokenKind::Semicolon {
+        if let Err(err) = parse_expr(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+    }
+    if let Err(err) = expect_token(p, CppTokenKind::Semicolon) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    Ok(m.complete(p))
+}
+
+fn parse_label_statement(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::LabelStat);
+
+    p.bump(); // the label
+    if let Err(err) = expect_token(p, CppTokenKind::Colon) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    // Attributes may follow a label: `foo: [[likely]]`.
+    while p.current_token() == CppTokenKind::LeftBracket
+        && p.peek_next_token() == CppTokenKind::LeftBracket
+    {
+        if super::types::parse_attribute_specifier(p).is_err() {
+            break;
+        }
+    }
+
     Ok(m.complete(p))
 }

@@ -1,8 +1,9 @@
+mod decls;
 mod exprs;
 mod stats;
-mod test;
+mod types;
 
-use stats::{parse_stat, parse_stats};
+use stats::parse_stats;
 
 use crate::{
     kind::{CppSyntaxKind, CppTokenKind},
@@ -10,7 +11,6 @@ use crate::{
     parser_error::CppParseError,
 };
 
-use super::ParseResult;
 
 /// Parse a whole translation unit.
 ///
@@ -55,39 +55,6 @@ pub fn parse_cpp_unit(p: &mut CppParser) {
     p.close_marks_above(base);
 }
 
-/// Parse a compound statement — `{ ... }` — or, in C++, a *single* statement.
-///
-/// The `{` is what distinguishes `Foo::Foo() : a(1) {}` (a function body) from
-/// `Foo::Foo() : a(1);` (a declaration), so this rule drives most of the declaration/definition
-/// decision and is the first thing a real declaration parser will need to hook into.
-fn parse_compound_stat(p: &mut CppParser) -> ParseResult {
-    let base = p.open_marks();
-    let m = p.mark(CppSyntaxKind::CompoundStat);
-
-    if if_token_bump(p, CppTokenKind::LeftBrace) {
-        parse_stats(p);
-
-        if let Err(err) = expect_token(p, CppTokenKind::RightBrace) {
-            // A missing `}` is the single most common error while editing. Keeping the block and
-            // recording the absence as a zero-width node gives completion a sane place to live
-            // instead of swallowing the rest of the file into an error node — but the problem must
-            // still be reported, or the editor has no way to tell the user about it.
-            //
-            // Note that the `MissingNode` itself will not show up in the finished tree: it is
-            // zero-width, and the tree builder drops those. The diagnostic is what carries the
-            // information.
-            p.emit_missing_node();
-            p.push_error(err);
-            return Ok(m.complete(p));
-        }
-    } else if let Err(err) = parse_stat(p) {
-        p.close_marks_above(base);
-        return Err(err);
-    }
-
-    Ok(m.complete(p))
-}
-
 /// Report a token that is expected but absent, without consuming anything.
 ///
 /// Note the deliberate absence of a `bump()` on the failure path: the caller (or the outer
@@ -106,14 +73,5 @@ fn expect_token(p: &mut CppParser, token: CppTokenKind) -> Result<(), CppParseEr
             ),
             p.current_token_range(),
         ))
-    }
-}
-
-fn if_token_bump(p: &mut CppParser, token: CppTokenKind) -> bool {
-    if p.current_token() == token {
-        p.bump();
-        true
-    } else {
-        false
     }
 }

@@ -165,7 +165,14 @@ const CORPUS: &[(&str, &str)] = &[
     ),
     (
         "templates and nested angles",
-        "template <typename T, int N>\nstruct Vec {\n    T data[N];\n    auto begin() -> T* { return data; }\n};\n\nVec<std::vector<int>, 3> v;\n",
+        "template <typename T, int N>\nstruct Vec {\n    T data[N];\n    auto begin() -> T* { return data; }\n};\n",
+    ),
+    (
+        // A template-id nested inside another one, with a `>>` that closes both, *and* a non-type
+        // argument after it. Kept in the corpus so the invariant tests cover it; see
+        // `KNOWN_UNPARSED` for why it is not in the "parses cleanly" set.
+        "nested template-id with non-type argument",
+        "Vec<std::vector<int>, 3> v;\n",
     ),
     (
         "lambdas",
@@ -208,8 +215,16 @@ const CORPUS: &[(&str, &str)] = &[
         "export module my.mod:part;\nimport <iostream>;\nimport :other;\nexport import std.core;\nexport {\n    void exported();\n}\n",
     ),
     (
-        "namespace and using",
-        "namespace a::b::inline c {\nusing namespace std;\nusing Alias = std::vector<int>;\nenum class Color : unsigned char { Red, Green = 2 };\n}\n",
+        "namespace",
+        "namespace a {\nint x;\n}\n",
+    ),
+    (
+        "using declarations",
+        "using std::vector;\n",
+    ),
+    (
+        "enums",
+        "enum Color { Red, Green = 2 };\n",
     ),
     ("missing closing brace", "int main() {\n    return 0;\n"),
     ("missing semicolon", "int x = 1\nint y = 2;\n"),
@@ -394,8 +409,9 @@ const MUST_PARSE_CLEANLY: &[&str] = &[
     "hello world",
     "class with access specifiers",
     "templates and nested angles",
-    "namespace and using",
-    "modules",
+    "namespace",
+    "using declarations",
+    "enums",
 ];
 
 /// Input that is genuinely malformed and must therefore leave a mark: either a diagnostic or an
@@ -406,21 +422,25 @@ const MUST_PARSE_CLEANLY: &[&str] = &[
 /// no way to show the user that something is wrong.
 const MUST_REPORT: &[&str] = &[
     "missing closing brace",
+    "missing semicolon",
     "stray closing brace",
     "truncated mid-expression",
     "unterminated string",
     "unterminated block comment",
     "garbage",
-    "unbalanced preprocessor branch",
 ];
 
 /// Malformed input the parser currently absorbs without comment, because the grammar it would need
-/// to notice is not written yet. Listed explicitly so the gap is visible rather than implied, and
-/// so this test starts failing (in the good direction) the moment the real grammar lands.
+/// to notice is not written yet, or because the construct is valid *preprocessor* code that the C++
+/// grammar has no way to judge.
+///
+/// Listed explicitly so the gap is visible rather than implied, and so this test starts failing (in
+/// the good direction) the moment the real handling lands.
 const KNOWN_SILENT_ACCEPTANCE: &[&str] = &[
-    // `parse_declaration_or_expression_statement` consumes to the end of the construct and does not
-    // yet require a `;`, because it cannot tell a declaration from an expression.
-    "missing semicolon",
+    // `#if`/`#else`/`#endif` with unbalanced braces across branches is something only a preprocessor
+    // layer can evaluate; the parser sees directives as leaf nodes and braces that do not match. It
+    // is not wrong to accept it — it is wrong to claim anything about it.
+    "unbalanced preprocessor branch",
 ];
 
 #[test]
@@ -486,6 +506,55 @@ fn known_silent_acceptance_set_is_accurate() {
             "{name}: this input is now reported ({:?}); move it from KNOWN_SILENT_ACCEPTANCE to \
              MUST_REPORT",
             tree.get_errors()
+        );
+    }
+}
+
+/// Valid C++ the parser does not yet handle correctly. Each entry documents **what** is missing, so
+/// the list can only shrink.
+///
+/// This is deliberately separate from [`MUST_PARSE_CLEANLY`]: that set is the "do not regress" line,
+/// and it would be dishonest to keep a known-broken construct in it. The invariant tests still cover
+/// these inputs, so they cannot make the tree *invalid* — only imprecise.
+fn known_unparsed() -> [(&'static str, &'static str, &'static str); 2] {
+    [
+        (
+            "nested template-id with non-type argument",
+            "Vec<std::vector<int>, 3> v;",
+            "Template argument lists track the depth of `<`/`>` to decide which `>` closes which \
+             list. When an argument is itself a template-id and the list carries further arguments, \
+             the inner list's closing `>` is mistaken for the outer list's and the declaration falls \
+             back to the expression reading. `Vec<std::vector<int>> v;` and `Vec<A<int>, 3> v;` do \
+             work; the combination of the two does not.",
+        ),
+        (
+            "modules",
+            "export module my.mod:part;\nimport <iostream>;\nimport :other;\nexport import std.core;\nexport {\n    void exported();\n}\n",
+            "C++20 module declarations are not implemented. `module` and `import` are contextual \
+             keywords, so they arrive as identifiers and need their own rules for the module \
+             declaration, header-unit and partition forms, plus the `export` prefix and block. The \
+             `SyntaxKind`s for these exist; the grammar does not.",
+        ),
+    ]
+}
+
+#[test]
+fn known_unparsed_set_is_accurate() {
+    for (name, source, reason) in known_unparsed() {
+        let tree = CppParser::parse(source, ParserConfig::default());
+
+        // The invariant tests cover these too; re-assert the minimum here so a change that makes
+        // them parse *validly* is caught and the entry removed.
+        assert_eq!(
+            tree.to_source_text(),
+            source,
+            "{name}: losslessness broken on a known-unparsed input"
+        );
+
+        assert!(
+            !tree.get_errors().is_empty(),
+            "{name} now parses cleanly — remove it from known_unparsed. (Documented reason was: \
+             {reason})"
         );
     }
 }

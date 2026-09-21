@@ -222,31 +222,58 @@ fn parse_primary_expr(p: &mut CppParser) -> ParseResult {
         | CppTokenKind::StringLiteral
         | CppTokenKind::CharLiteral
         | CppTokenKind::TrueKeyword
-        | CppTokenKind::FalseKeyword => {
+        | CppTokenKind::FalseKeyword
+        | CppTokenKind::NullptrKeyword => {
             let m = p.mark(CppSyntaxKind::LiteralExpr);
             p.bump();
             Ok(m.complete(p))
         }
 
-        // 标识符
-        CppTokenKind::Identifier => {
+        // A name, possibly qualified (`std::vector`), and possibly a template-id
+        // (`std::vector<int>`). Both forms appear as expressions — `std::move(x)`,
+        // `std::vector<int>::size_type` — so the expression grammar has to accept them, not just the
+        // type grammar.
+        CppTokenKind::Identifier | CppTokenKind::Scope if !is_expression_keyword(p) => {
+            let base = p.open_marks();
             let m = p.mark(CppSyntaxKind::IdentifierExpr);
-            p.bump();
+
+            // A leading `::` makes the name fully qualified.
+            if p.current_token() == CppTokenKind::Scope {
+                p.bump();
+            }
+
+            loop {
+                if p.current_token() != CppTokenKind::Identifier {
+                    p.close_marks_above(base);
+                    return Err(CppParseError::syntax_error_from(
+                        "expected a name after `::`",
+                        p.current_token_range(),
+                    ));
+                }
+                p.bump();
+
+                // A template-id: `vector<int>`.
+                if p.current_token() == CppTokenKind::Less && super::types::could_start_template_arguments(p)
+                {
+                    if let Err(err) = super::types::parse_template_argument_list(p) {
+                        p.close_marks_above(base);
+                        return Err(err);
+                    }
+                }
+
+                if p.current_token() == CppTokenKind::Scope {
+                    p.bump();
+                    continue;
+                }
+                break;
+            }
+
             Ok(m.complete(p))
         }
 
-        // 括号表达式
-        CppTokenKind::LeftParen => {
-            let m = p.mark(CppSyntaxKind::ParenExpr);
-            p.bump(); // consume '('
-            parse_expr(p)?;
-            expect_token(p, CppTokenKind::RightParen)?;
-            Ok(m.complete(p))
-        }
-
-        // this 关键字
+        // `this`
         CppTokenKind::ThisKeyword => {
-            let m = p.mark(CppSyntaxKind::IdentifierExpr);
+            let m = p.mark(CppSyntaxKind::ThisExpr);
             p.bump();
             Ok(m.complete(p))
         }
@@ -256,4 +283,23 @@ fn parse_primary_expr(p: &mut CppParser) -> ParseResult {
             p.current_token_range(),
         )),
     }
+}
+
+/// Keywords that look like a name start to the dispatch above but are their own expression forms.
+///
+/// `nullptr` is handled as a literal; the rest are parsed as unary or postfix operators. Listing
+/// them here keeps the name branch from swallowing them.
+fn is_expression_keyword(p: &CppParser) -> bool {
+    matches!(
+        p.current_token(),
+        CppTokenKind::NullptrKeyword
+            | CppTokenKind::SizeofKeyword
+            | CppTokenKind::AlignofKeyword
+            | CppTokenKind::TypeidKeyword
+            | CppTokenKind::NewKeyword
+            | CppTokenKind::DeleteKeyword
+            | CppTokenKind::ThrowKeyword
+            | CppTokenKind::CoAwaitKeyword
+            | CppTokenKind::RequiresKeyword
+    )
 }

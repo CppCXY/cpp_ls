@@ -288,6 +288,167 @@ impl<'a> CppParser<'a> {
         }
     }
 
+    /// Split the current token into two, consuming the first part and leaving the remainder at the
+    /// cursor.
+    ///
+    /// C++ needs this exactly once, but it needs it badly: `std::vector<std::vector<int>>` ends in a
+    /// single `>>` token that has to close two template argument lists. The alternative — lexing `>`
+    /// one character at a time and letting the parser join them — is worse, because then `a >> b`
+    /// costs a merge on every shift. Splitting on demand keeps the common case free and puts the
+    /// decision where the context actually is.
+    ///
+    /// `consumed` is the length of the first part in bytes and `first_kind` its kind — the first half
+    /// of `>>` is a `>`, not a `>>`, and keeping the original kind would leave a one-byte token still
+    /// claiming to be a shift operator. Every later token-level decision (counting angle-bracket
+    /// depth, deciding whether a `>` closes a list) would then be wrong. The second token is inserted
+    /// after the cursor, so the caller's current token is the first part and its index is unchanged.
+    pub fn split_current_token(
+        &mut self,
+        consumed: usize,
+        first_kind: CppTokenKind,
+        remainder_kind: CppTokenKind,
+    ) {
+        let Some(token) = self.tokens.get(self.token_index).copied() else {
+            return;
+        };
+
+        let first_end = token.range.start_offset + consumed;
+        if consumed == 0 || first_end >= token.range.end_offset() {
+            // Nothing to split: either the whole token is consumed or the request is degenerate.
+            return;
+        }
+
+        let first = CppTokenData::new(
+            first_kind,
+            crate::text::SourceRange::new(token.range.start_offset, consumed),
+        );
+        let second = CppTokenData::new(
+            remainder_kind,
+            crate::text::SourceRange::new(first_end, token.range.end_offset() - first_end),
+        );
+
+        self.tokens[self.token_index] = first;
+        self.tokens.insert(self.token_index + 1, second);
+        self.current_token = first.kind;
+    }
+
+    /// Consume the current token, treating only its first `consumed` bytes as consumed.
+    pub fn bump_prefix_of_current_token(&mut self, consumed: usize, first_kind: CppTokenKind) {
+        self.split_current_token(consumed, first_kind, CppTokenKind::Greater);
+        self.bump();
+    }
+
+    /// Try to consume a header name at the cursor, folding the `<`, name and `>` tokens the ordinary
+    /// sweep produced into a single [`CppTokenKind::HeaderName`].
+    ///
+    /// Only the parser knows when a header name is expected (`#include` and friends), and only the
+    /// parser can rewrite the token stream, so the two halves of header-name lexing live on either
+    /// side of this call. Returns whether a header name was consumed; on `false` the caller should
+    /// lex the token normally.
+    pub fn try_lex_header_name(&mut self) -> bool {
+        let Some(start) = self.tokens.get(self.token_index) else {
+            return false;
+        };
+
+        // A quoted header name survives the ordinary sweep as a string literal, because the lexer
+        // cannot tell it apart from a string at the time. `"local.h"` is already the right shape, so
+        // this case only has to relabel it.
+        if start.kind == CppTokenKind::StringLiteral {
+            let text = &self.text[start.range.start_offset..start.range.end_offset()];
+            // A header name has no escapes and no concatenation; anything else is a real string.
+            if !text.contains('\\') {
+                let token = self.tokens[self.token_index];
+                self.tokens[self.token_index] = CppTokenData::new(CppTokenKind::HeaderName, token.range);
+                self.current_token = CppTokenKind::HeaderName;
+                self.bump();
+                return true;
+            }
+            return false;
+        }
+
+        if start.kind != CppTokenKind::Less {
+            return false;
+        }
+
+        // Angle form: scan forward for the closing `>` at the same "line", refusing if anything
+        // shows up that cannot be inside a header name.
+        let mut end_index = self.token_index + 1;
+        let mut consumed = 0usize;
+        loop {
+            let Some(token) = self.tokens.get(end_index) else {
+                return false;
+            };
+
+            match token.kind {
+                CppTokenKind::Greater => break,
+                CppTokenKind::Whitespace => {}
+                // Anything else invalidates the guess and the caller lexes normally.
+                CppTokenKind::Identifier
+                | CppTokenKind::Dot
+                | CppTokenKind::Slash
+                | CppTokenKind::Minus
+                | CppTokenKind::Plus
+                | CppTokenKind::IntegerLiteral => {}
+                _ => return false,
+            }
+
+            consumed += 1;
+            end_index += 1;
+        }
+
+        if consumed == 0 {
+            return false;
+        }
+
+        let close = self.tokens[end_index];
+        let whole = CppTokenData::new(
+            CppTokenKind::HeaderName,
+            crate::text::SourceRange::new(
+                start.range.start_offset,
+                close.range.end_offset() - start.range.start_offset,
+            ),
+        );
+
+        // Replace the whole run with the single header-name token and advance past it.
+        self.tokens.splice(self.token_index..=end_index, [whole]);
+        self.current_token = CppTokenKind::HeaderName;
+        self.bump();
+        true
+    }
+
+    /// Does any node opened at or after `from_event` have one of these kinds?
+    ///
+    /// Used by the grammar to answer "what did I just parse?" without threading a return value
+    /// through every level. `from_event` is an event index from
+    /// [`CppParser::current_event_count`].
+    pub fn events_contain_any(
+        &self,
+        from_event: usize,
+        kinds: &[crate::kind::CppSyntaxKind],
+    ) -> bool {
+        self.events[from_event.min(self.events.len())..]
+            .iter()
+            .any(|event| {
+                matches!(
+                    event,
+                    MarkEvent::NodeStart { kind, .. } if kinds.contains(kind)
+                )
+            })
+    }
+
+    /// Number of events recorded so far, for use as a `from_event` bound.
+    pub fn current_event_count(&self) -> usize {
+        self.events.len()
+    }
+
+    /// Kind of the token at `index`, ignoring trivia. `None` past the end.
+    pub fn token_kind_at(&self, index: usize) -> CppTokenKind {
+        self.tokens
+            .get(index)
+            .map(|token| token.kind)
+            .unwrap_or(CppTokenKind::None)
+    }
+
     pub fn bump(&mut self) {
         let consumed_index = self.token_index;
 
@@ -323,6 +484,33 @@ impl<'a> CppParser<'a> {
             .get(next_index)
             .map(|token| token.kind)
             .unwrap_or(CppTokenKind::None)
+    }
+
+    /// Kinds of the next `range.len()` significant tokens, starting at the cursor.
+    ///
+    /// Trivia is skipped, so this is "the next few things the grammar will see". Shorter than
+    /// `range` near end of input, and padded with [`CppTokenKind::None`] so callers can index it
+    /// without a length check.
+    pub fn peek_token_kind_at(&self, range: std::ops::Range<usize>) -> Vec<CppTokenKind> {
+        let mut kinds = Vec::with_capacity(range.len());
+        let mut index = self.token_index;
+
+        for offset in 0..range.end {
+            self.skip_trivia(&mut index);
+            if offset < range.start {
+                index += 1;
+                continue;
+            }
+
+            match self.tokens.get(index) {
+                Some(token) => kinds.push(token.kind),
+                None => break,
+            }
+            index += 1;
+        }
+
+        kinds.resize(range.len(), CppTokenKind::None);
+        kinds
     }
 
     fn skip_trivia(&self, index: &mut usize) {

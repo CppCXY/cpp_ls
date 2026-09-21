@@ -122,6 +122,10 @@ pub enum CppTokenKind {
     AlignofKeyword,
     /// constexpr - constant expression (C++11)
     ConstexprKeyword,
+    /// consteval - immediate function (C++20)
+    ConstevalKeyword,
+    /// constinit - constant initialization (C++20)
+    ConstinitKeyword,
     /// decltype - type deduction (C++11)
     DecltypeKeyword,
     /// explicit - explicit conversion
@@ -130,6 +134,10 @@ pub enum CppTokenKind {
     ExportKeyword,
     /// mutable - mutable member
     MutableKeyword,
+    /// friend - grant access to a non-member
+    FriendKeyword,
+    /// register - storage class hint (removed in C++17, still accepted by every compiler)
+    RegisterKeyword,
     /// namespace - namespace
     NamespaceKeyword,
     /// noexcept - no exception (C++11)
@@ -421,12 +429,16 @@ impl fmt::Display for CppTokenKind {
             Self::ExplicitKeyword => write!(f, "explicit"),
             Self::ExportKeyword => write!(f, "export"),
             Self::MutableKeyword => write!(f, "mutable"),
+            Self::FriendKeyword => write!(f, "friend"),
+            Self::RegisterKeyword => write!(f, "register"),
             Self::NamespaceKeyword => write!(f, "namespace"),
             Self::NoexceptKeyword => write!(f, "noexcept"),
             Self::NullptrKeyword => write!(f, "nullptr"),
             Self::StaticAssertKeyword => write!(f, "static_assert"),
             Self::TemplateKeyword => write!(f, "template"),
             Self::ThreadLocalKeyword => write!(f, "thread_local"),
+            Self::ConstevalKeyword => write!(f, "consteval"),
+            Self::ConstinitKeyword => write!(f, "constinit"),
 
             // C++20关键字
             Self::ConceptKeyword => write!(f, "concept"),
