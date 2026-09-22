@@ -34,6 +34,11 @@ pub struct Checkpoint {
     /// [`CppParser::is_a_known_type_name`] needs. See [`CppParser::rollback`].
     declaration_type_name: Option<Box<str>>,
     previous_declaration_type_name: Option<Box<str>>,
+    /// Was the declaration's type written as a **qualified** name when the checkpoint was taken?
+    ///
+    /// Parser state like the two above, and restored for the same reason: a speculative region parses its own
+    /// declaration, and whether *that* one's type was qualified must not leak back into the enclosing one.
+    declaration_type_is_qualified: bool,
 }
 
 /// A position in the parse, for a question asked later about the tokens around it.
@@ -136,6 +141,24 @@ pub struct CppParser<'a> {
     /// A single slot rather than a stack: parsers nest one declaration inside another only through a
     /// *speculative* region, and the checkpoint taken at the start of that region carries the value back.
     previous_declaration_type_name: Option<Box<str>>,
+    /// Was the declaration's type written as a **qualified** name — `ns::C::method` rather than `method`?
+    ///
+    /// Read by the declarator for one decision: a qualified name in type position is the head of a definition, so
+    /// the parameters after it belong to a function declarator whose name the specifier sequence has already
+    /// taken. An unqualified name gets no such reading, which is what keeps `Foo(1, 2);` a call. See
+    /// `a_qualified_name_is_the_type` in the type grammar.
+    declaration_type_is_qualified: bool,
+    /// How many class bodies are open, for the one declaration rule that has to know: a `:` after a member
+    /// declarator is a **bit-field**'s width, while after a function declarator it is a constructor's
+    /// member-initializer list. See [`CppParser::is_in_class_body`].
+    class_body_depth: usize,
+    /// Did the specifier sequence just parsed finish a whole declaration, `;` and all?
+    ///
+    /// Exactly one specifier does: `friend`, whose payload *is* the declaration that follows it. The flag lets
+    /// `parse_declaration` tell "the statement is already over" from "the specifiers were followed by nothing",
+    /// which the cursor alone cannot say. Cleared when a declaration begins, so it always describes the
+    /// sequence just parsed.
+    declaration_ended_inside_specifiers: bool,
     pub parse_config: ParserConfig<'a>,
     pub(crate) errors: &'a mut Vec<CppParseError>,
 }
@@ -237,6 +260,9 @@ impl<'a> CppParser<'a> {
             type_names: TypeNames::new(),
             declaration_type_name: None,
             previous_declaration_type_name: None,
+            declaration_type_is_qualified: false,
+            class_body_depth: 0,
+            declaration_ended_inside_specifiers: false,
             parse_config: config,
             errors: &mut errors,
         };
@@ -275,6 +301,9 @@ impl<'a> CppParser<'a> {
             type_names: TypeNames::new(),
             declaration_type_name: None,
             previous_declaration_type_name: None,
+            declaration_type_is_qualified: false,
+            class_body_depth: 0,
+            declaration_ended_inside_specifiers: false,
             parse_config: config,
             errors: &mut errors,
         };
@@ -390,6 +419,7 @@ impl<'a> CppParser<'a> {
             open_marks: self.open_marks.len(),
             declaration_type_name: self.declaration_type_name.clone(),
             previous_declaration_type_name: self.previous_declaration_type_name.clone(),
+            declaration_type_is_qualified: self.declaration_type_is_qualified,
         }
     }
 
@@ -406,6 +436,7 @@ impl<'a> CppParser<'a> {
         self.closed_marks.retain(|p, _| *p < checkpoint.events_len);
         self.declaration_type_name = checkpoint.declaration_type_name;
         self.previous_declaration_type_name = checkpoint.previous_declaration_type_name;
+        self.declaration_type_is_qualified = checkpoint.declaration_type_is_qualified;
         self.token_index = checkpoint.token_index;
         self.current_token = self
             .tokens
@@ -695,6 +726,8 @@ impl<'a> CppParser<'a> {
     /// run this and then be rolled back — see [`Checkpoint`].
     pub fn begin_declaration_type(&mut self) {
         self.previous_declaration_type_name = self.declaration_type_name.take();
+        self.declaration_type_is_qualified = false;
+        self.declaration_ended_inside_specifiers = false;
     }
 
     /// Record a name seen in type position, if none has been recorded for this declaration yet.
@@ -706,6 +739,62 @@ impl<'a> CppParser<'a> {
         if self.declaration_type_name.is_none() && !name.is_empty() {
             self.declaration_type_name = Some(name.into_boxed_str());
         }
+    }
+
+    /// Record that the declaration's type was written as a qualified name.
+    ///
+    /// Called by the specifier sequence as it walks a name's `::`-separated segments. Read once, by the
+    /// declarator, to tell `void ns::C::method()` — where the last segment *is* the function being defined —
+    /// from `Foo(1, 2);`, where the name is a callee and the parentheses are an argument list.
+    pub fn note_qualified_declaration_type(&mut self) {
+        self.declaration_type_is_qualified = true;
+    }
+
+    /// Was the declaration's type written as a qualified name? See the field's documentation.
+    pub fn has_qualified_declaration_type_name(&self) -> bool {
+        self.declaration_type_is_qualified
+    }
+
+    /// Enter a class body, for the declaration rule that distinguishes a bit-field from a member initializer.
+    ///
+    /// A *count* rather than a flag because class bodies nest — a member class inside a class — and the depth
+    /// has to come back to what it was once the inner body closes. Deliberately not part of [`Checkpoint`]: no
+    /// speculative region opens a class body and then rewinds past it, since the braces it would be rewinding
+    /// over are its own rather than a guess.
+    pub fn enter_class_body(&mut self) {
+        self.class_body_depth += 1;
+    }
+
+    /// Record that the specifier sequence finished a whole declaration — which only `friend` does.
+    ///
+    /// Called by the specifier rule for `friend`, whose payload is the declaration that follows it, including
+    /// its `;`. See the field's documentation.
+    pub fn note_declaration_ended_inside_specifiers(&mut self) {
+        self.declaration_ended_inside_specifiers = true;
+    }
+
+    /// Take the flag above: was the statement already over when the specifiers ended?
+    ///
+    /// A *take* rather than a read, so the answer cannot leak into the next declaration: the flag describes the
+    /// sequence just parsed, and the caller that asks is the one that parses the declaration around it.
+    pub fn take_declaration_ended_inside_specifiers(&mut self) -> bool {
+        std::mem::take(&mut self.declaration_ended_inside_specifiers)
+    }
+
+    /// Leave a class body.
+    pub fn leave_class_body(&mut self) {
+        self.class_body_depth = self.class_body_depth.saturating_sub(1);
+    }
+
+    /// Is the cursor inside a class body?
+    ///
+    /// The question `finish_init_declarator` puts to it: `int bits : 3;` and `S() : a(1) {}` have a `:` in the
+    /// same position, and only the enclosing construct says which they are — a member declarator's `:`
+    /// introduces a width, while a *function* declarator's introduces the member-initializer list of a
+    /// constructor. The function case is decided first and does not need this; what does is the member that
+    /// names no function.
+    pub fn is_in_class_body(&self) -> bool {
+        self.class_body_depth > 0
     }
 
     /// The declaration's leading type name, when it has one.

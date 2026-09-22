@@ -481,6 +481,10 @@ fn parse_one_decl_specifier_inner(
                 p.close_marks_above(base);
                 return Err(err);
             }
+            // `friend` is the one specifier whose payload *is* the declaration that follows it, its `;`
+            // included. Saying so is what lets the declaration rule *around* it stop when the specifiers end,
+            // rather than looking for an init-declarator that is not there and rewinding over the member.
+            p.note_declaration_ended_inside_specifiers();
             return Ok(m.complete(p));
         }
 
@@ -529,6 +533,28 @@ fn parse_one_decl_specifier_inner(
         // the loop only costs the declaration reading of that shape. It is a C-with-classes idiom, not a C++
         // one, and it is the trade this grammar makes everywhere else too.
         CppTokenKind::OperatorKeyword if specifier_seen => {}
+
+        // The `~` of a destructor name in a *qualified* declaration: `Foo::~Foo`, `ns::C::~C`.
+        //
+        // Part of a name rather than a specifier, and it arrives here in the middle of one: the loop above walks
+        // a qualified name one segment per iteration, so `Foo::` has already been consumed as the type when the
+        // tilde shows up. Accepting it continues the same name, which is what makes an out-of-line destructor a
+        // declaration of `Foo::~Foo` instead of a name-less declaration with an error node where the tilde was.
+        //
+        // Conditional on a name having been **written**, not merely on a specifier having been consumed. That
+        // distinction is load-bearing and it was worth a bug: `virtual ~Shape();` has a specifier (`virtual`) and
+        // no name, so a check for "a specifier was seen" let this arm claim the tilde and the declaration became
+        // `virtual ~ Shape()` — an abstract declarator for a function type. Inside a namespace that member then
+        // consumed its way past the namespace's closing brace, and the namespace swallowed the rest of the file.
+        // `Foo::~Foo` is the only shape that reaches here with a name already in hand.
+        CppTokenKind::Tilde if p.declaration_type_name().is_some() => {
+            let m = p.mark(CppSyntaxKind::TemplateType);
+            if let Err(err) = parse_name(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+            return Ok(m.complete(p));
+        }
 
         // A qualified or unqualified name, possibly a template-id. This is the case that needs a
         // symbol table to be certain about; the grammar accepts it and lets the caller decide.
@@ -1019,6 +1045,10 @@ fn parse_enumerator_body(p: &mut CppParser) -> ParseResult {
 ///
 /// Template arguments are attempted speculatively, because `<` is also the less-than operator and
 /// only the matching `>` (accounting for nesting) distinguishes them.
+///
+/// Exposed for the qualifier loop, which walks a name's segments and has to hand the rest of one back to this
+/// rule: `using ns::f;` reads the first segment itself — to decide whether an `=` follows — and then asks for
+/// everything after it.
 pub fn parse_name(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::NameExpr);
@@ -1067,6 +1097,11 @@ pub fn parse_name(p: &mut CppParser) -> ParseResult {
             return Err(err);
         }
         if p.current_token() == CppTokenKind::Scope {
+            // A `::` *inside* the name: this name is qualified, which the declarator needs to know. Recorded
+            // here because this is the loop that reads the segments, and a caller that saw only the name's first
+            // token cannot tell `ns::C::method` from `method` — the two are one call to this function from
+            // outside. See [`CppParser::has_qualified_declaration_type_name`].
+            p.note_qualified_declaration_type();
             p.bump();
             continue;
         }
@@ -1158,6 +1193,15 @@ fn a_matching_angle_bracket_follows(p: &CppParser) -> bool {
 }
 
 /// Parse an operator name after the `operator` keyword.
+/// Parse an operator name after the `operator` keyword.
+///
+/// Exposed for the expression grammar, which reads the same names in the same position: `Foo::operator+()` is an
+/// expression's callee before it is a declaration's name, and a second rule for it would be a second answer to
+/// "what is an operator name".
+pub fn parse_operator_name_here(p: &mut CppParser) -> ParseResult {
+    parse_operator_name(p)
+}
+
 fn parse_operator_name(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::NameExpr);
@@ -1581,6 +1625,7 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::Declarator);
 
+
     // Where this declarator's own events begin. The suffix loop below asks "has this declarator named
     // anything yet?" of the event stream, and this is the bound that keeps the *type*'s name — recorded before
     // it, by the specifier sequence — out of the answer.
@@ -1588,6 +1633,24 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
 
     // The answer for the declarator about to be parsed; each way of becoming a function sets it.
     p.set_last_declarator_is_function(false);
+
+    // A destructor's name is written before anything else: `~S()`, `~S() = default`. The tilde is part of the
+    // *name*, so it belongs to the declarator — and the specifier sequence, which is what runs first, reads a
+    // `~` as a unary operator it cannot use and refuses the whole declaration. Claiming the pair here is what
+    // gives the declaration a name to hang its parameter list on; without it `~S();` came out as an error node
+    // holding the tilde and a declaration of nothing at all.
+    if p.current_token() == CppTokenKind::Tilde {
+        if let Err(err) = parse_destructor_name(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+
+        if let Err(err) = parse_declarator_function_suffixes(p, declarator_from) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+        return Ok(m.complete(p));
+    }
 
     // `(*f)(int)` — a parenthesised declarator with a *name* inside. Claimed here, before
     // [`parse_abstract_declarator`] can read the same tokens as an abstract pointer-to-function type and then
@@ -1635,13 +1698,23 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
     // Suffixes: function parameter lists and array bounds. These bind tighter than pointers, which
     // is why they attach here rather than being folded into the type.
     //
-    // A declarator with a name gets them unconditionally. A declarator *without* one gets them only when the
+    // A declarator with a name gets them unconditionally — and so does one whose declarator name was taken by
+    // the specifier sequence as the last segment of a **qualified** name. `void ns::C::method()` is the case:
+    // the sequence walks `ns::C::method` segment by segment as one name, so by the time the declarator is
+    // reached there is no name left for it to read, and the parameter list had nothing to attach to. A
+    // qualified name in type position is the head of a definition, which is what makes this safe: an
+    // unqualified `Foo(1, 2);` is a call, and it is not affected because nothing forced its name into the type.
+    //
+    // A declarator *without* one gets them only when the
     // direct-initialisation reading has been chosen, and the question is put to the same rule the main declarator
     // path would put it to rather than to a proxy for it: `Widget w(1, 2);` opens the loop and reads an
     // initializer, while the `g(1, 2);` and `Max(a, b);` of a body do not open it at all and keep their
     // parentheses for the expression reading. An abstract declarator's real reason to exist is a type-id such as
     // `int(void)`, and that is reached through `parse_type_id`, not here.
-    if named || super::decls::a_declaration_is_the_better_reading(p, declarator_from) {
+    if named
+        || a_qualified_name_is_the_type(p)
+        || super::decls::a_declaration_is_the_better_reading(p, declarator_from)
+    {
         loop {
             match p.current_token() {
                 CppTokenKind::LeftParen => {
@@ -1723,8 +1796,88 @@ fn parse_parenthesised_declarator(p: &mut CppParser) -> ParseResult {
     Ok(m.complete(p))
 }
 
-/// Parse a template argument list: `<T, int N, ...>`.
+/// Parse a destructor's name: the `~` and the class name it destroys.
 ///
+/// Produces `NameExpr(Tilde, Identifier)`, which is the node every other kind of name gets — `parse_name`
+/// already builds one for `~Foo` when it reaches the tilde, and this is the same shape reached from the
+/// declarator's own entry point instead.
+///
+/// The class name is optional in the grammar because a *definition* may be written out of line with a qualified
+/// name — `Foo::~Foo()` reaches here with `Foo::` already consumed by the specifier sequence — and because a
+/// missing name is ordinary in a file being edited.
+fn parse_destructor_name(p: &mut CppParser) -> ParseResult {
+    let m = p.mark(CppSyntaxKind::NameExpr);
+
+    expect_token(p, CppTokenKind::Tilde)?;
+    if p.current_token() == CppTokenKind::Identifier {
+        p.bump();
+    }
+
+    Ok(m.complete(p))
+}
+
+/// Parse the parameter list and qualifiers of a declarator whose name has already been read.
+///
+/// For the destructor above, whose name is claimed before the usual declarator path runs. The loop is the same
+/// shape as the one in [`parse_declarator_with`], and it is a second copy for the same reason the first is not
+/// reusable there: that loop is driven by the declaration/expression decision, which a destructor has already
+/// answered by existing.
+///
+/// The `last_declarator_is_function` flag is set for the same reason it is set everywhere else — it is what
+/// makes a `{` after the declarator a *body* rather than a braced initializer, and `~S() {}` is a definition.
+fn parse_declarator_function_suffixes(
+    p: &mut CppParser,
+    declarator_from: usize,
+) -> ParseResult {
+    loop {
+        match p.current_token() {
+            CppTokenKind::LeftParen => {
+                super::decls::parse_function_suffix_or_initializer(p, declarator_from)?;
+                if p.current_token() == CppTokenKind::LeftParen {
+                    break;
+                }
+            }
+            CppTokenKind::LeftBracket => {
+                let array = p.mark(CppSyntaxKind::ArrayType);
+                p.bump();
+                if p.current_token() != CppTokenKind::RightBracket
+                    && !p.is_eof()
+                    && let Err(err) = super::exprs::parse_expr(p)
+                {
+                    array.undo(p);
+                    return Err(err);
+                }
+                if let Err(err) = expect_token(p, CppTokenKind::RightBracket) {
+                    array.undo(p);
+                    return Err(err);
+                }
+                array.complete(p);
+            }
+            _ => break,
+        }
+    }
+
+    Ok(CompleteMarker::empty())
+}
+
+/// Is the declaration's type a **qualified** name, which makes the declarator's own name the last segment?
+///
+/// `void ns::C::method()` is the case. The specifier sequence treats `ns::C::method` as one name — it walks a
+/// qualified name segment by segment — so the declarator that follows has no name of its own to read, and the
+/// question this answers is what lets its parameters still be recognised as parameters.
+///
+/// A qualified name in type position is the head of a *definition* rather than the name of a value, which is
+/// the whole argument for allowing it: `Foo(1, 2);` is a call and its name was never forced into the type, so
+/// the unqualified shape is untouched. The `::` that must be present for a true answer is what separates them.
+fn a_qualified_name_is_the_type(p: &CppParser) -> bool {
+    let Some(name) = p.declaration_type_name() else {
+        return false;
+    };
+
+    p.has_qualified_declaration_type_name() && !name.is_empty()
+}
+
+/// Parse a template argument list: `<T, int N, ...>`.///
 /// The closing `>` is the hard part. `std::vector<std::vector<int>>` ends in `>>`, which the lexer
 /// has already produced as a single `RightShift` token, so the *last* `>` of a nested template list
 /// has to be split back out here. Doing it in the parser rather than the lexer is deliberate: in

@@ -121,11 +121,13 @@ impl CppDeclaration {
 
     /// The name this declaration introduces, if it has one.
     ///
-    /// Three places a name can live, and they are tried in order:
+    /// Four places a name can live, and they are tried in order:
     ///
     /// * a class, struct, union or enum definition — the name is on the definition node;
     /// * a namespace — same;
-    /// * everything else — the name is the first declarator's.
+    /// * everything else — the name is the first declarator's;
+    /// * a **forward declaration** — `class Widget;` — has no declarator at all, and the name is the type
+    ///   written beside the class-like keyword. See [`CppDeclaration::elaborated_type_name`].
     ///
     /// Taken from the first declarator, which is what almost every caller wants. A declaration of
     /// several entities (`int a, b;`) has more — use `get_init_declarators` for those.
@@ -154,7 +156,38 @@ impl CppDeclaration {
             return Some(name);
         }
 
-        self.get_init_declarator()?.get_name()
+        // A forward declaration — `class Widget;` — names the class through its *specifier*: there is no
+        // declarator, and the keyword and the name are all the declaration has. It is the elaborated-type-
+        // specifier spelling, so the name to report is the type written after the keyword.
+        //
+        // Checked after the declarator, not before: `class Widget x;` declares the *variable* `x` and mentions
+        // `Widget` as its type, and the declarator is the answer there.
+        if let Some(declarator) = self.get_init_declarator()
+            && let Some(name) = declarator.get_name()
+        {
+            return Some(name);
+        }
+
+        self.elaborated_type_name()
+    }
+
+    /// The class name of an elaborated type specifier: the `Widget` of `class Widget;`.
+    ///
+    /// `None` for every declaration whose specifiers are not a class-like keyword followed by a name, which is
+    /// what keeps this from answering for `class { ... } x;` — an unnamed class with a declarator — or for
+    /// `int x;`.
+    fn elaborated_type_name(&self) -> Option<CppNameToken> {
+        let specifiers = self.get_decl_specifiers()?;
+
+        let builtin = specifiers.get_builtin_type();
+        let has_class_keyword = builtin.as_ref().is_some_and(|builtin| builtin.is_class_like());
+        if !has_class_keyword {
+            return None;
+        }
+
+        specifiers
+            .get_type_name()
+            .and_then(|name| name.get_name_token())
     }
 
     /// The text of the declared name.
@@ -371,6 +404,21 @@ impl CppBuiltinType {
 
     pub fn get_type_text(&self) -> String {
         crate::syntax::node::traits::subtree_text_spaced(self.syntax())
+    }
+
+    /// Is this specifier a class-like keyword — `class`, `struct`, `union` or `enum`?
+    ///
+    /// Asked by callers that need to tell an **elaborated type specifier** — `class Widget;`, where the keyword
+    /// names a kind of type and the name after it is the type — from every other use of those keywords, where a
+    /// body or a base clause follows and the keyword is the head of a definition.
+    pub fn is_class_like(&self) -> bool {
+        matches!(
+            self.syntax().children_with_tokens().next().and_then(|element| element.into_token()).map(|token| token.kind()),
+            Some(CppKind::Token(CppTokenKind::ClassKeyword))
+                | Some(CppKind::Token(CppTokenKind::StructKeyword))
+                | Some(CppKind::Token(CppTokenKind::UnionKeyword))
+                | Some(CppKind::Token(CppTokenKind::EnumKeyword))
+        )
     }
 }
 

@@ -332,6 +332,11 @@ impl ScopeWalker {
         // A using-declaration is usually qualified — `using ns::f;` — and what it introduces is the **last**
         // component: `f` becomes usable unqualified, `ns` does not. An alias is never qualified in the same
         // way, because the name it introduces is written first, so either component would be the same.
+        //
+        // Read from the *deepest* name in the declaration rather than from the outermost. The two differ for a
+        // qualified using-declaration, where the outer `NameExpr` holds the first segment and the rest of the
+        // name sits inside it: the outer one's own tokens are `ns`, and its `::` — so a "last identifier" read
+        // from there finds nothing and the binding is the qualifier. See [`find_name_node`].
         let Some(name_node) = find_name_node(node) else {
             return;
         };
@@ -484,6 +489,18 @@ impl ScopeWalker {
         match self.specifiers(node, outer, inner, is_friend) {
             SpecifierName::Bound => return,
             SpecifierName::InDeclarator(kind) => {
+                // The class-like specifier named nothing, so the name is in a declarator — and when there is
+                // **no** declarator at all, the name is in the specifier beside the keyword instead:
+                // `class Widget;` is a forward declaration, and the grammar now writes it flat (the keyword is
+                // one specifier and `Widget` the next) rather than nesting the name inside the keyword. Without
+                // this the forward declaration declared nothing, since it has no declarator to read a name from.
+                if declarators(node).is_empty() {
+                    if let Some((name, name_range)) = elaborated_type_name(node) {
+                        self.bind(outer, name, kind, node, name_range);
+                    }
+                    return;
+                }
+
                 for declarator in declarators(node) {
                     function_scope = self
                         .declarator_as(
@@ -1158,14 +1175,24 @@ fn span_of(
 
 /// The `NameExpr` a declaration names itself with, looking through the declarator wrappers.
 ///
+/// Search is depth-first, and it stops at the **deepest** name first.
+///
 /// The search is depth-first and stops at the first name, which is what the declarator grammar guarantees:
 /// the outermost name in a declarator is the one being declared, and anything nested is a parameter or a
-/// return type.
+/// return type. A *name* is the exception, because a name can contain one: `using ns::f;` is written as an
+/// outer `NameExpr` for the first segment with the rest of the name inside it, so the outermost node's own
+/// tokens are `ns` and its `::`. Descending before answering is what makes the answer the last component —
+/// the thing the statement introduces — rather than the qualifier.
 fn find_name_node(node: &CppSyntaxNode) -> Option<CppSyntaxNode> {
-    if CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr {
-        return Some(node.clone());
+    if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::NameExpr {
+        return find_name_child(node);
     }
 
+    find_name_child(node).or_else(|| Some(node.clone()))
+}
+
+/// The deepest name inside `node`, if it has one.
+fn find_name_child(node: &CppSyntaxNode) -> Option<CppSyntaxNode> {
     for child in node.children() {
         // A parameter list belongs to the signature rather than to the name, and a body is a different scope.
         // Skipping them keeps `void f(int g)` from reporting `g` as the declared name, and keeps a class body
@@ -1183,6 +1210,47 @@ fn find_name_node(node: &CppSyntaxNode) -> Option<CppSyntaxNode> {
     }
 
     None
+}
+
+/// The class name of an **elaborated type specifier**: the `Widget` of `class Widget;`.
+///
+/// The grammar writes that declaration flat — `class` is one specifier and `Widget` the next — so the name is
+/// the type written beside the class-like keyword rather than a declarator's. Asked only when the declaration has
+/// no declarator at all; with one, the declarator is the name and this would report the type instead.
+fn elaborated_type_name(node: &CppSyntaxNode) -> Option<(Name, cpp_parser::SourceRange)> {
+    let specifiers = first_child(node, CppSyntaxKind::DeclSpecifierSeq)?;
+
+    let has_class_keyword = specifiers.children().any(|child| {
+        CppSyntaxKind::from(child.kind()) == CppSyntaxKind::BuiltinType
+            && is_class_like_keyword_token(&child)
+    });
+    if !has_class_keyword {
+        return None;
+    }
+
+    let name_node = specifiers
+        .children()
+        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TemplateType)?;
+
+    let token = first_identifier_in_name(&name_node)?;
+    let name = name_from_text(token.text(), node)?;
+
+    Some((name, cpp_parser::source_range(token.text_range())))
+}
+
+/// Is this built-in specifier a class-like keyword?
+fn is_class_like_keyword_token(node: &CppSyntaxNode) -> bool {
+    node.children_with_tokens()
+        .filter_map(|element| element.into_token())
+        .any(|token| {
+            matches!(
+                token.kind(),
+                cpp_parser::CppKind::Token(CppTokenKind::ClassKeyword)
+                    | cpp_parser::CppKind::Token(CppTokenKind::StructKeyword)
+                    | cpp_parser::CppKind::Token(CppTokenKind::UnionKeyword)
+                    | cpp_parser::CppKind::Token(CppTokenKind::EnumKeyword)
+            )
+        })
 }
 
 /// Is this name written with a qualifier?

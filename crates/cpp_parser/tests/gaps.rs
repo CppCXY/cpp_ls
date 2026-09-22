@@ -239,9 +239,29 @@ fn constructs_the_parser_reads() {
             "Probe(int v) : a(v) {}",
             "Probe() : a(1) {}",
             "Probe() : b{2} {}",
+            // Destructors, in every spelling: declared, defined, defaulted, deleted, virtual, and written
+            // out of line with a qualified name.
+            "~Probe();",
+            "~Probe() {}",
+            "virtual ~Probe() = default;",
+            "~Probe() = delete;",
+            "~Probe() noexcept {}",
             "template <typename T> void f(T t);",
             "struct Nested { int x; };",
             "enum Color { Red, Green };",
+            // Bit-fields, including a run of them and a nameless one.
+            "int bits : 3;",
+            "unsigned flags : 1, spare : 7;",
+            "int : 0;",
+            // A using-declaration of a base member, in the two shapes it is written in.
+            "using Base::method;",
+            "using Base::Alias;",
+            "using Alias = int;",
+            // A `friend` declaration *followed by another member*. The friend is a specifier whose payload is
+            // the whole declaration — `;` included — so the member written after it is where the old rule ran
+            // out of tokens and turned everything into error nodes.
+            "friend void swap(Probe&, Probe&); int after = 0;",
+            "friend class Other; int later = 0;",
         ],
     );
 }
@@ -306,25 +326,17 @@ fn constructs_the_parser_does_not_read_yet() {
     assert_does_not_read_yet(
         Where::Class,
         &[
-            (
-                "int bits : 3;",
-                "a bit-field. The `:` after a member declarator is taken for a constructor's \
-                 member-initializer list — the two are the same token in the same position, and only the fact \
-                 that this is a class body tells them apart — so the width is read as an initializer and the \
-                 declarator is left without a name.",
-            ),
-            (
-                "using Base::method;",
-                "a using-*declaration* of a base member. `parse_using_declaration` reads a name and then the \
-                 `::`-qualified path, but not the `Base::method` shape this needs.",
-            ),
-            (
-                "union Value { int i; ~Value() {} };",
-                "a destructor definition in a union — or in anything else. `~Value() {}` is read as a member \
-                 declarator that never binds `(` to the name, and one error node is left where the braces \
-                 were; the declaration is otherwise read. A *declared* destructor (`~Value();`) works, so the \
-                 gap is in the body.",
-            ),
+            // Everything that was here is read now. The entries were:
+            //
+            //   `int bits : 3;` — a bit-field, which needed the class-body context to tell its `:` from a
+            //   constructor's member-initializer list;
+            //   `using Base::method;` — a using-declaration, which needed the declaration rule to dispatch
+            //   `using` at all (at file scope the statement rule happened to claim it first);
+            //   `union Value { int i; ~Value() {} };` — a destructor definition, which needed the tilde
+            //   claimed before the specifier sequence could read it as an operator.
+            //
+            // They are pinned as *read* in the test above instead, and this list is kept — rather than deleted —
+            // so that the next gap has a place to go.
         ],
     );
 }

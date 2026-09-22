@@ -685,14 +685,31 @@ fn parse_primary_expr(p: &mut CppParser) -> ParseResult {
             }
 
             loop {
-                if p.current_token() != CppTokenKind::Identifier {
-                    p.close_marks_above(base);
-                    return Err(CppParseError::syntax_error_from(
-                        "expected a name after `::`",
-                        p.current_token_range(),
-                    ));
+                // A segment of the name. `~Foo` and `operator+` are segments too — they are how a destructor and
+                // an operator are named — and refusing them is what made `Foo::~Foo()` and `Foo::operator+()`
+                // report `expected a name after '::'` against perfectly ordinary definitions. Both are written
+                // *after* a `::`, so nothing else can be at this position.
+                match p.current_token() {
+                    CppTokenKind::Identifier => p.bump(),
+                    CppTokenKind::Tilde => {
+                        p.bump();
+                        if p.current_token() == CppTokenKind::Identifier {
+                            p.bump();
+                        }
+                        break;
+                    }
+                    CppTokenKind::OperatorKeyword => {
+                        super::types::parse_operator_name_here(p)?;
+                        break;
+                    }
+                    _ => {
+                        p.close_marks_above(base);
+                        return Err(CppParseError::syntax_error_from(
+                            "expected a name after `::`",
+                            p.current_token_range(),
+                        ));
+                    }
                 }
-                p.bump();
 
                 // A template-id: `vector<int>`.
                 if p.current_token() == CppTokenKind::Less

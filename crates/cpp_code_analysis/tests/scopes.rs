@@ -547,33 +547,35 @@ fn direct_initialisation_of_a_user_type_declares_a_variable() {
     );
 }
 
-/// A user type written **before** its declaration is not a type as far as this file knows.
+/// A user type written **before** its declaration is a type for the *parser*, which reads the statement by its
+/// shape rather than by the table.
 ///
-/// The table is filled in as the file is read, not resolved afterwards, so a type used above its definition is
-/// missed. That costs the declaration reading and leaves the tokens to the expression, which is the cheap
-/// mistake — the alternative would be a second pass over every file to answer a question the first pass has
-/// already answered for every well-ordered one.
+/// The table is still filled in as the file is read, and still cannot answer for a name declared further down —
+/// but the parser no longer needs it to: `Widget w(1, 2);` is a declaration because it has a name and an
+/// argument list, and no call has that shape. The declaration reading no longer depends on the order in which
+/// the file is written, which is what a file being edited needs.
 #[test]
-fn a_user_type_declared_later_is_not_yet_known() {
+fn a_user_type_declared_later_is_still_a_declaration() {
     let source = "void f() { Widget w(1, 2); }\nstruct Widget {};\n";
     let tree = CppParser::parse(source, ParserConfig::default());
 
     assert!(
-        !tree
-            .get_red_root()
+        tree.get_red_root()
             .descendants()
             .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Initializer),
-        "a type declared after its use is not in the table yet"
+        "the declarator's name is the evidence, and it is there whether or not the type is"
     );
     assert_eq!(tree.to_source_text(), source, "and the file stays lossless");
 }
 
-/// A user type the file never declares at all stays an expression.
+/// A user type the file never declares at all is still a declaration.
 ///
-/// The cost of a file-local table, pinned so that it cannot be described more broadly than it is: nothing in
-/// this file says `Widget` is a type, so `Widget w(1, 2);` keeps the reading that loses the least.
+/// This used to be the documented cost of a file-local table: nothing says `Widget` is a type, so
+/// `Widget w(1, 2);` kept the reading that lost the least. It is a declaration now, because the *shape* says so —
+/// a name followed by an argument list is not a call — and the trade moved to the other side: `A(B);` is read as
+/// a call, and `MyType` used in a cast has to be declared somewhere in the file.
 #[test]
-fn an_undeclared_type_name_stays_an_expression() {
+fn an_undeclared_type_name_is_still_a_declaration() {
     for source in [
         "void f() { Widget w(1, 2); }\n",
         "void f() { std::string s(\"x\"); }\n",
@@ -582,23 +584,23 @@ fn an_undeclared_type_name_stays_an_expression() {
         let tree = CppParser::parse(source, ParserConfig::default());
 
         assert!(
-            !tree
-                .get_red_root()
+            tree.get_red_root()
                 .descendants()
                 .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Initializer),
-            "{source:?} has no evidence that the leading name is a type"
+            "{source:?} names a declarator and initialises it"
         );
         assert_eq!(tree.to_source_text(), source, "{source:?} stays lossless");
     }
 }
 
-/// `sizeof` of a **builtin** type as a statement does not parse yet.
+/// `sizeof` of a **builtin** type parses, as it always should have.
 ///
-/// Narrow, and the shape of the gap is the point: `sizeof(std::vector<int>)` parses, `sizeof(Foo)` parses — as an
-/// expression, since a bare name is one — and only `sizeof(int)` fails. `int` cannot start an expression, so the
-/// parenthesised-type reading is the only one available, and it is the one missing.
+/// `sizeof(std::vector<int>)` and `sizeof(Foo)` worked — the first as a type, the second as an expression, since
+/// a bare name is one. Only `sizeof(int)` failed, because `int` cannot start an expression and the
+/// parenthesised-type reading was missing. It is there now, and this test pins that the two readings of `sizeof`
+/// both work.
 #[test]
-fn sizeof_a_builtin_type_does_not_parse_yet() {
+fn sizeof_a_builtin_type_parses() {
     for source in [
         "void f() { sizeof(int); }\n",
         "void f() { sizeof(unsigned char); }\n",
@@ -606,8 +608,9 @@ fn sizeof_a_builtin_type_does_not_parse_yet() {
         let tree = CppParser::parse(source, ParserConfig::default());
 
         assert!(
-            !tree.get_errors().is_empty(),
-            "{source:?} now parses — move it into `assignment_operators_parse`"
+            tree.get_errors().is_empty(),
+            "{source:?} should parse, got {:?}",
+            tree.get_errors()
         );
         assert_eq!(tree.to_source_text(), source, "and stays lossless");
     }
@@ -941,26 +944,30 @@ fn a_static_assert_declares_nothing() {
     assert_eq!(shape(&table), "File{after,before}");
 }
 
-/// A `static_assert` whose argument contains a template-id does not parse yet.
+/// A `static_assert` whose argument is a comparison *does* parse, template-id or not.
 ///
-/// The gap is in the parser and is narrower than it looks: `static_assert(a > 0)` and `static_assert(a < 0)`
-/// both parse, and so does `static_assert(true)`, but `static_assert(sizeof(int) > 0)` does not — the `>` is
-/// readable as closing a template argument list, and the expression parser gives up rather than treating it as
-/// a comparison. Recorded here so that fixing it is deliberate.
+/// This was a documented gap in the parser: `static_assert(a > 0)` and `static_assert(true)` parsed, but
+/// `static_assert(sizeof(int) > 0)` did not — the `>` was readable as closing a template argument list, and the
+/// expression parser gave up rather than treating it as a comparison. The `sizeof` of a builtin type is read
+/// now, and with it the comparison.
 #[test]
-fn a_static_assert_with_a_template_id_does_not_parse_yet() {
+fn a_static_assert_with_a_comparison_parses() {
     let source = "static_assert(sizeof(int) > 0);\n";
     let tree = CppParser::parse(source, ParserConfig::default());
 
     assert!(
-        !tree.get_errors().is_empty(),
-        "this now parses — move it into `a_static_assert_declares_nothing`"
+        tree.get_errors().is_empty(),
+        "the comparison should parse, got {:?}",
+        tree.get_errors()
     );
     assert_eq!(
         tree.to_source_text(),
         source,
         "and stays lossless regardless"
     );
+
+    // And it declares nothing, like every other `static_assert`.
+    assert_eq!(shape(&scopes(source)), "File");
 }
 
 /// A reference is not a binding — only what a declaration introduces is.

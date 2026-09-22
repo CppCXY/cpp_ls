@@ -190,6 +190,35 @@ struct Ops {
     bool operator<(const Ops&) const;
 };
 
+// --- declarations that used to be gaps -------------------------------------
+struct Packed {
+    unsigned kind : 3;
+    unsigned flags : 5 = 0;
+    unsigned : 0;
+    virtual ~Packed() = default;
+    Packed(const Packed&) = delete;
+    Packed& operator=(const Packed&) = delete;
+    explicit operator bool() const noexcept;
+    static constexpr int kWidth = 8;
+    mutable int cache_ = 0;
+    bool operator==(const Packed&) const = default;
+};
+
+union Variant {
+    int i;
+    float f;
+    ~Variant() {}
+};
+
+struct Derived : Packed {
+    using Packed::operator bool;
+    using Alias = Packed;
+    Derived() : Packed{}, cache_(0) {}
+    ~Derived() {}
+};
+
+Packed::~Packed() {}
+
 // --- namespaces ------------------------------------------------------------
 namespace outer::inner {
 int nested = 1;

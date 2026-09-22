@@ -253,38 +253,65 @@ pub fn parse_declaration(p: &mut CppParser) -> ParseResult {
         CppTokenKind::NamespaceKeyword => return parse_namespace_declaration(p),
         CppTokenKind::TypedefKeyword => return parse_typedef_declaration(p),
         CppTokenKind::StaticAssertKeyword => return parse_static_assert(p),
+        // A using-declaration or alias — `using ns::f;`, `using Alias = T;`.
+        //
+        // Dispatched here rather than left to the general rule, which begins with a specifier and would read
+        // `using` as a type. At file scope the statement rule happens to claim it first, which is why this gap
+        // was invisible until a *class member* was written the same way: `using Base::method;` inside a class
+        // came out as an error node holding the keyword and a declaration of a type called `Base::method`.
+        CppTokenKind::UsingKeyword => return parse_using_declaration(p),
         CppTokenKind::ExternKeyword if starts_a_linkage_specification(p) => {
             return parse_linkage_specification(p);
         }
+        // A destructor — `~S();`, `~S() {}`, `virtual ~S() = default;`.
+        //
+        // Dispatched here rather than left to the general rule because the tilde is *part of the name* and the
+        // specifier sequence, which runs first, sees it as a unary operator where a type should be: the whole
+        // declaration was refused, the tilde was wrapped in an error node on its own, and what followed was
+        // read as a declaration of `S` with a parameter list and nothing named.
+        CppTokenKind::Tilde => return parse_destructor_declaration(p),
 
-        // `export` heads a module declaration, an export block, or one exported declaration. An
-        // `export import` is a re-export, so `import` after `export` routes to the import rule.
+        // `export` heads a module declaration, an export block, or one exported declaration.
         CppTokenKind::ExportKeyword => {
-            let next = p.peek_token_kind_at(1..2)[0];
-            if next == CppTokenKind::LeftBrace {
+            if p.peek_token_kind_at(1..2)[0] == CppTokenKind::LeftBrace {
                 return super::modules::parse_export_block(p);
             }
-            if next == CppTokenKind::Identifier {
-                // The word after `export` decides: `module` starts a module declaration, `import` a
-                // re-export. Both are contextual keywords, so this is a text check.
-                let second = p.peek_token_kind_at(2..3)[0];
-                let _ = second;
+
+            // Everything else is `export declaration`, and the declaration is parsed by the ordinary rule —
+            // which is what puts the `export` *inside* the declaration node, so that a consumer reading a
+            // declaration's own tokens can see that it is exported. Consuming the keyword here and then
+            // wrapping the result would put it outside instead: a token is emitted at the moment it is
+            // consumed, and by then the wrapper had not been opened yet.
+            //
+            // `module` and `import` are contextual keywords — they arrive as identifiers — so the word after
+            // `export` is what says whether this is a module declaration or a re-export. Recognised by
+            // spelling, which is what [`super::modules::parse_exported_declaration`] does.
+            if matches!(p.peek_token_text_at(1), "module" | "import") {
                 return super::modules::parse_exported_declaration(p);
             }
-            // `export declaration` — consume the keyword and parse what it exports. Whether a
-            // declaration is exported is a property the semantic layer reads off the token.
-            //
-            // What follows is a full declaration, and the general rule below does not cover all of
-            // them: `using` and `template` are not specifiers it can start from. Dispatching them
-            // here keeps `export using Point = shapes::Point;` — an everyday spelling in a module
-            // interface — from being re-read as an expression and reported as broken.
-            p.bump();
 
-            match p.current_token() {
-                CppTokenKind::UsingKeyword => return parse_using_declaration(p),
-                CppTokenKind::NamespaceKeyword => return parse_namespace_declaration(p),
-                CppTokenKind::TypedefKeyword => return parse_typedef_declaration(p),
-                CppTokenKind::StaticAssertKeyword => return parse_static_assert(p),
+            // `using`, `namespace`, `typedef` and `static_assert` have rules of their own, and the general
+            // rule below cannot start from any of them: it begins with a specifier, and none of those four
+            // keywords is one. `export using Point = shapes::Point;` — an everyday line in a module interface —
+            // would be read as an expression and reported as broken. Dispatched *after* the keyword so that it
+            // is consumed by the rule that owns the construct, which is where those rules expect to start.
+            match p.peek_token_kind_at(1..2)[0] {
+                CppTokenKind::UsingKeyword => {
+                    p.bump();
+                    return parse_using_declaration(p);
+                }
+                CppTokenKind::NamespaceKeyword => {
+                    p.bump();
+                    return parse_namespace_declaration(p);
+                }
+                CppTokenKind::TypedefKeyword => {
+                    p.bump();
+                    return parse_typedef_declaration(p);
+                }
+                CppTokenKind::StaticAssertKeyword => {
+                    p.bump();
+                    return parse_static_assert(p);
+                }
                 _ => {}
             }
         }
@@ -308,6 +335,14 @@ pub fn parse_declaration(p: &mut CppParser) -> ParseResult {
 
     let m = p.mark(CppSyntaxKind::Declaration);
 
+    // The `export` of `export int helper();`, consumed *inside* the declaration node rather than at the
+    // dispatch above. A token is emitted at the moment it is consumed, so an `export` consumed before this
+    // marker existed would land beside the declaration instead of in it — and "is this declaration exported?"
+    // is answered by reading the declaration's own tokens, which is the whole reason the spelling exists.
+    if p.current_token() == CppTokenKind::ExportKeyword {
+        p.bump();
+    }
+
     // A template head wraps whatever declaration follows it: `template <typename T> struct V {};`
     // is a template *declaration* whose payload is the class. Handling it here rather than in a
     // separate rule is what lets templates apply to classes, functions, variables, aliases and
@@ -329,6 +364,17 @@ pub fn parse_declaration(p: &mut CppParser) -> ParseResult {
     // commonly, `struct Foo;`.
     if p.current_token() == CppTokenKind::Semicolon {
         p.bump();
+        return Ok(m.complete(p));
+    }
+
+    // The same thing, one level in: a **`friend` declaration is a specifier whose payload is the whole
+    // declaration**, `;` included. `friend void swap(A&, A&);` therefore leaves the cursor on the *next*
+    // member with the statement already finished — indistinguishable from an empty specifier sequence by the
+    // cursor alone, which is why the outer rule looked for an init-declarator that was not there, failed, and
+    // rewound: `friend` ate every member written after it, and the recovery turned them into error nodes.
+    //
+    // The specifier sequence reports that it finished a statement, which no other specifier ever does.
+    if p.take_declaration_ended_inside_specifiers() {
         return Ok(m.complete(p));
     }
 
@@ -659,6 +705,27 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
         // be read as a variable declaration and its member initializer list rejected.
         CppTokenKind::Colon if p.last_declarator_is_function() => {
             parse_member_initializer_list(p)?;
+        }
+        // A bit-field: `int bits : 3;`, `unsigned flags : 1, spare : 7;`.
+        //
+        // The same `:` in the same position as a member-initializer list, and the enclosing construct is what
+        // tells them apart: a constructor's `:` follows a *function* declarator, which the arm above has already
+        // claimed, while a bit-field's follows a member that names no function and sits inside a class body.
+        //
+        // Read as a member-initializer list, as it was, `int bits : 3` came out as a declarator with no name at
+        // all: the width was consumed as an initializer, the member was nameless, and a consumer asking the
+        // class for its fields found nothing where the field was.
+        CppTokenKind::Colon if p.is_in_class_body() => {
+            let width = p.mark(CppSyntaxKind::Initializer);
+            p.bump(); // `:`
+
+            // The width is a constant-expression, and it is optional in the grammar's own terms only because a
+            // nameless bit-field is written `int : 0` — the `:` is never followed by a `;`.
+            if let Err(err) = parse_expr(p) {
+                width.undo(p);
+                return Err(err);
+            }
+            width.complete(p);
         }
         _ => {}
     }
@@ -1581,9 +1648,12 @@ pub fn parse_class_body(p: &mut CppParser) -> ParseResult {
     expect_token(p, CppTokenKind::LeftBrace)?;
 
     // A nested class is a type name inside this body and not outside it, so the table's scope follows the
-    // brace — the same approximation a compound statement makes.
+    // brace — the same approximation a compound statement makes. The body depth is recorded for the same
+    // region, because a `:` after a member declarator means something different in here than outside.
     p.enter_type_name_scope();
+    p.enter_class_body();
     let result = parse_class_body_members(p);
+    p.leave_class_body();
     p.leave_type_name_scope();
     result?;
 
@@ -1720,6 +1790,74 @@ pub fn starts_declaration(p: &CppParser) -> bool {
     }
 }
 
+/// Parse a destructor declaration: `~S();`, `~S() {}`, `virtual ~S() = default;`.
+///
+/// Entered from [`parse_declaration`] when the cursor is on the `~` of a declaration that has no specifiers —
+/// which is the only way a destructor is ever written. The shape is a declaration of one init-declarator whose
+/// declarator is the destructor name, so the nodes are the ordinary ones and a consumer finds the destructor
+/// the same way it finds any other declaration.
+///
+/// `virtual ~S() = default;` and `inline ~S() {}` reach here *after* the specifier sequence has consumed
+/// `virtual` or `inline`, because those are specifiers the sequence knows; the tilde after them is what stops
+/// it. That is why this rule starts at the declarator rather than at a type.
+fn parse_destructor_declaration(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::Declaration);
+
+    let declarator_from = p.current_event_count();
+
+    if let Err(err) = super::types::parse_declarator(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+    if let Err(err) = finish_init_declarator(p, m, declarator_from) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    // A destructor's body or its `;`, which is the same choice every function declarator gets at the end of
+    // `parse_declaration` — and the reason the first attempt at this rule reported `expected ';'` against the
+    // `}` of `~S() {}`: a declarator whose parameter list has been read is a *function*, and the brace after it
+    // is a definition rather than a braced initializer.
+    if p.current_token() == CppTokenKind::LeftBrace {
+        if let Err(err) = parse_compound_stat(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+        return Ok(CompleteMarker::empty());
+    }
+
+    if let Err(err) = expect_semicolon(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    Ok(CompleteMarker::empty())
+}
+
+/// Is the qualified name at the cursor followed by an `=`, making this a `using` **alias**?
+///
+/// `using Base::method;` and `using Base::Alias = T;` begin the same way, and only the word at the end of the
+/// name decides: an alias introduces a *type* and needs the type parser, while a using-declaration introduces a
+/// name and does not. The scan walks the whole name — segments, template arguments and all — because the `=`
+/// can be arbitrarily far away.
+fn a_qualified_name_is_followed_by_an_equals(p: &CppParser) -> bool {
+    for kind in p.peek_token_kind_at(0..96) {
+        match kind {
+            CppTokenKind::Assign => return true,
+            // Anything that ends the statement or the name: there is no `=` in this one.
+            CppTokenKind::Semicolon
+            | CppTokenKind::LeftBrace
+            | CppTokenKind::RightBrace
+            | CppTokenKind::Eof
+            | CppTokenKind::None => return false,
+            _ => {}
+        }
+    }
+
+    false
+}
+
 /// Parse a `using` declaration or directive, and `using` aliases.
 pub fn parse_using_declaration(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
@@ -1747,6 +1885,41 @@ pub fn parse_using_declaration(p: &mut CppParser) -> ParseResult {
     } else {
         None
     };
+
+    // A using-*declaration*: `using ns::f;`, `using Base::method;`. What is introduced is the last segment of
+    // a qualified name, and there is no type and no declarator — so the qualified name is read as **one** name
+    // and the statement ends there.
+    //
+    // Read as a type-id instead, as it was, `Base::method` split into a type and a declarator: the type parser
+    // walks `Base::` as a nested name specifier and then takes `method` for the declarator's name, and the
+    // semicolon afterwards is a parameter list that never comes. The statement was reported as broken, and the
+    // only spelling that worked was one qualifying a *type* — which is the alias form, not this one.
+    if p.current_token() == CppTokenKind::Identifier
+        && p.peek_next_token() == CppTokenKind::Scope
+        && !a_qualified_name_is_followed_by_an_equals(p)
+    {
+        let name = p.mark(CppSyntaxKind::NameExpr);
+        p.bump(); // the first segment
+        // The rest of the name, in a node of its own *inside* this one: `parse_name` opens a `NameExpr` for
+        // what it reads, and a consumer asking a `NameExpr` for its text gets the text of its own tokens — so
+        // wrapping the tail directly would report the first segment as the name and the qualifier as
+        // everything else. `using ns::f;` introduces `f`, and this is what makes the tree say so.
+        let rest = p.mark(CppSyntaxKind::NameExpr);
+        if let Err(err) = super::types::parse_name(p) {
+            rest.undo(p);
+            name.undo(p);
+            p.close_marks_above(base);
+            return Err(err);
+        }
+        rest.complete(p);
+        name.complete(p);
+
+        if let Err(err) = expect_semicolon(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+        return Ok(m.complete(p));
+    }
 
     if let Err(err) = parse_name(p) {
         p.close_marks_above(base);
