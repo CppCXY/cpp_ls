@@ -10,7 +10,8 @@
 //!   events are appended to the C++ event stream, and the tree builder slices the file with them.
 
 use cpp_parser::{
-    DocCommentStyle, DocToken, DocTokenKind, is_block_comment, is_documentation_comment, lex_comment,
+    DocCommentStyle, DocToken, DocTokenKind, is_block_comment, is_documentation_comment,
+    lex_comment,
 };
 
 fn lex(source: &str) -> (Vec<DocToken>, String) {
@@ -23,9 +24,7 @@ fn lex(source: &str) -> (Vec<DocToken>, String) {
     let tokens = lex_comment(source, 0);
     let text: String = tokens
         .iter()
-        .map(|token| {
-            &source[token.range.start_offset..token.range.end_offset()]
-        })
+        .map(|token| &source[token.range.start_offset..token.range.end_offset()])
         .collect();
     (tokens, text)
 }
@@ -110,13 +109,7 @@ fn ranges_are_in_file_coordinates() {
 
 #[test]
 fn the_third_character_decides_documentation() {
-    let documented = [
-        "/// x",
-        "//! x",
-        "/** x */",
-        "/*! x */",
-        "/*** x */",
-    ];
+    let documented = ["/// x", "//! x", "/** x */", "/*! x */", "/*** x */"];
     let not_documented = ["// x", "//// x", "/* x */", "/*!*/", "/**/", "", "x"];
     for source in documented {
         assert!(
@@ -317,7 +310,10 @@ fn the_space_before_a_block_closer_is_not_text() {
         .iter()
         .find(|(kind, _)| *kind == DocTokenKind::DocText)
         .expect("the brief's text");
-    assert_eq!(text.1, "B", "the text run stops before the closer: {lexed:?}");
+    assert_eq!(
+        text.1, "B",
+        "the text run stops before the closer: {lexed:?}"
+    );
 
     // And the space really is still there — as layout, not as lost bytes.
     assert!(

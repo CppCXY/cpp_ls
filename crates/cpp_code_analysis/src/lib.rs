@@ -52,6 +52,8 @@ pub mod module_info;
 pub mod modules;
 pub mod paths;
 pub mod preprocess;
+pub mod scopes;
+pub mod symbol;
 pub mod token;
 
 pub use condition::{ConditionExpr, EvalError, MacroValues, Value, evaluate, parse_condition};
@@ -86,4 +88,9 @@ pub use paths::{
     normalize_path, parent_normalized,
 };
 pub use preprocess::{FilePreprocessing, PositionalMacros, preprocess};
+pub use scopes::{build_scopes, declared_module_names};
+pub use symbol::{
+    Binding, BindingKind, BindingOrigin, DeclName, HeaderName, Known, MaybeName, Name, NameKind,
+    QualifiedName, Scope, ScopeId, ScopeKind, SymbolTable, UnknownReason,
+};
 pub use token::Token;

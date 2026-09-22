@@ -5,7 +5,7 @@
 //! does not merely produce one wrong token — it re-lexes the tail of the raw string as C++, which
 //! corrupts everything downstream. So each case asserts the exact token text, not just the kind.
 
-use cpp_parser::{CppLexer, CppLanguageLevel, CppTokenKind, LexerConfig};
+use cpp_parser::{CppLanguageLevel, CppLexer, CppTokenKind, LexerConfig};
 
 /// `(kind, text)` for every token, trivia included. Keeping trivia in makes the expectations
 /// explicit and doubles as a losslessness check.
@@ -195,7 +195,11 @@ fn digit_separators_are_part_of_the_number() {
 fn digit_separator_requires_a_digit_after_it() {
     // `1'` is the integer `1` followed by a user-defined suffix marker, not the number `1'`.
     let lexed = significant("1'");
-    assert_eq!(lexed.len(), 2, "expected the number and the quote, got {lexed:?}");
+    assert_eq!(
+        lexed.len(),
+        2,
+        "expected the number and the quote, got {lexed:?}"
+    );
     assert_eq!(lexed[0], (CppTokenKind::IntegerLiteral, "1".to_string()));
 }
 
@@ -344,7 +348,12 @@ fn header_names_need_an_explicit_request() {
 
 #[test]
 fn lex_header_name_reads_angles_and_quotes() {
-    for source in ["<iostream>", "<sys/types.h>", "\"local.h\"", "\"./rel/path.h\""] {
+    for source in [
+        "<iostream>",
+        "<sys/types.h>",
+        "\"local.h\"",
+        "\"./rel/path.h\"",
+    ] {
         let mut errors = Vec::new();
         let mut lexer = CppLexer::new(source, LexerConfig::default(), &mut errors);
 

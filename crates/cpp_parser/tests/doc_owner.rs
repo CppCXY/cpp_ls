@@ -14,7 +14,8 @@
 //!   nothing.
 
 use cpp_parser::{
-    CppAstNode, CppDeclaration, CppDocComment, CppParser, CppSyntaxKind, CppSyntaxTree, ParserConfig,
+    CppAstNode, CppDeclaration, CppDocComment, CppParser, CppSyntaxKind, CppSyntaxTree,
+    ParserConfig,
 };
 
 fn parse(source: &str) -> CppSyntaxTree {
@@ -70,7 +71,10 @@ fn a_comment_documents_the_declaration_after_it() {
 fn the_owner_is_the_next_node_not_the_parent() {
     let comment = the_comment("/// Doc.\nint x;\n");
     let owner = comment.get_owner().expect("a following node");
-    assert_eq!(CppSyntaxKind::from(owner.kind()), CppSyntaxKind::Declaration);
+    assert_eq!(
+        CppSyntaxKind::from(owner.kind()),
+        CppSyntaxKind::Declaration
+    );
 
     assert_eq!(
         comment
@@ -129,10 +133,7 @@ fn a_using_alias_is_documented_too() {
 fn a_comment_at_the_end_of_a_file_documents_nothing() {
     let comment = the_comment("int x;\n/// Trailing note.\n");
 
-    assert!(
-        comment.get_owner().is_none(),
-        "nothing follows the comment"
-    );
+    assert!(comment.get_owner().is_none(), "nothing follows the comment");
     assert!(comment.get_documented_declaration().is_none());
 }
 
@@ -172,10 +173,18 @@ fn a_trailing_comment_documents_nothing_forwards() {
 /// A comment written the ordinary way is not trailing, whatever else it says.
 #[test]
 fn only_the_trailing_marker_reverses_the_direction() {
-    for source in ["/// Doc.\nint x;\n", "//! Doc.\nint x;\n", "/** Doc. */\nint x;\n"] {
+    for source in [
+        "/// Doc.\nint x;\n",
+        "//! Doc.\nint x;\n",
+        "/** Doc. */\nint x;\n",
+    ] {
         let comment = the_comment(source);
         assert!(!comment.is_trailing(), "{source:?}");
-        assert_eq!(documented_name(&comment), Some("x".to_string()), "{source:?}");
+        assert_eq!(
+            documented_name(&comment),
+            Some("x".to_string()),
+            "{source:?}"
+        );
     }
 }
 
@@ -208,7 +217,9 @@ fn separate_comment_groups_do_not_merge() {
         "the earlier group documents the later comment, which is not a declaration"
     );
     assert_eq!(
-        comments[0].get_owner().map(|node| CppSyntaxKind::from(node.kind())),
+        comments[0]
+            .get_owner()
+            .map(|node| CppSyntaxKind::from(node.kind())),
         Some(CppSyntaxKind::DocComment),
         "but it does have a following node"
     );
@@ -219,10 +230,7 @@ fn separate_comment_groups_do_not_merge() {
 #[test]
 fn a_comment_in_a_class_body_documents_the_member_after_it() {
     let tree = parse("struct S {\n    /// The n.\n    int n;\n    int m;\n};\n");
-    let comment = comments(&tree)
-        .into_iter()
-        .next()
-        .expect("the comment");
+    let comment = comments(&tree).into_iter().next().expect("the comment");
 
     assert_eq!(documented_name(&comment), Some("n".to_string()));
     assert!(
@@ -275,7 +283,9 @@ fn a_comment_before_a_namespace_has_an_owner_but_no_declaration() {
     let comment = the_comment("/// Doc.\nnamespace ns { }\n");
 
     assert_eq!(
-        comment.get_owner().map(|node| CppSyntaxKind::from(node.kind())),
+        comment
+            .get_owner()
+            .map(|node| CppSyntaxKind::from(node.kind())),
         Some(CppSyntaxKind::NamespaceDecl)
     );
     assert!(
@@ -322,10 +332,7 @@ double dist(const Point& a, const Point& b);
 ";
 
     let tree = parse(source);
-    let names: Vec<Option<String>> = comments(&tree)
-        .iter()
-        .map(documented_name)
-        .collect();
+    let names: Vec<Option<String>> = comments(&tree).iter().map(documented_name).collect();
 
     assert_eq!(
         names,

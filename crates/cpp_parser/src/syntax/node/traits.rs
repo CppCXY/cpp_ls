@@ -31,8 +31,8 @@ use rowan::{TextRange, TextSize, WalkEvent};
 use crate::kind::{CppKind, CppSyntaxKind, CppTokenKind};
 use crate::kind::{CppSyntaxElementChildren, CppSyntaxNodeChildren};
 
-use crate::syntax::{CppSyntaxId, CppSyntaxNode, CppSyntaxToken};
 use crate::lexer::CppTokenData;
+use crate::syntax::{CppSyntaxId, CppSyntaxNode, CppSyntaxToken};
 
 pub use super::cpp::*;
 pub use super::token::*;
@@ -187,7 +187,10 @@ pub trait CppAstToken {
 
     /// The token's own data, for callers that want to pass it around without the tree.
     fn get_token_data(&self) -> CppTokenData {
-        CppTokenData::new(self.get_token_kind(), source_range(self.syntax().text_range()))
+        CppTokenData::new(
+            self.get_token_kind(),
+            source_range(self.syntax().text_range()),
+        )
     }
 
     fn get_position(&self) -> TextSize {

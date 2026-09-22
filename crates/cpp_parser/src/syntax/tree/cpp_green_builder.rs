@@ -133,7 +133,8 @@ impl CppGreenNodeBuilder<'_> {
             let root = self.roots.pop().expect("checked just above");
             emit_element(&mut self.builder, root, text);
         } else {
-            self.builder.start_node(CppSyntaxKind::TranslationUnit.into());
+            self.builder
+                .start_node(CppSyntaxKind::TranslationUnit.into());
             for root in std::mem::take(&mut self.roots) {
                 emit_element(&mut self.builder, root, text);
             }
@@ -148,11 +149,7 @@ impl CppGreenNodeBuilder<'_> {
 ///
 /// The emitted call sequence corresponds one-to-one with the element tree: one `start_node` and one
 /// `finish_node` per node, in document order. Nothing here does any index arithmetic.
-fn emit_element(
-    builder: &mut rowan::GreenNodeBuilder<'_>,
-    element: CppGreenElement,
-    text: &str,
-) {
+fn emit_element(builder: &mut rowan::GreenNodeBuilder<'_>, element: CppGreenElement, text: &str) {
     match element {
         CppGreenElement::Node { kind, children } => {
             builder.start_node(kind.into());

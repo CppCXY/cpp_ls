@@ -166,7 +166,10 @@ mod tests {
 
     #[test]
     fn out_of_range_raw_is_rejected() {
-        assert!(CppKind::try_from_raw(CppSyntaxKind::MissingNode as u16 + 1 + SYNTAX_KIND_TAG).is_none());
+        assert!(
+            CppKind::try_from_raw(CppSyntaxKind::MissingNode as u16 + 1 + SYNTAX_KIND_TAG)
+                .is_none()
+        );
         assert!(CppKind::try_from_raw(CppTokenKind::Error as u16 + 1).is_none());
         assert!(CppKind::try_from_raw(0xFFFF).is_none());
     }

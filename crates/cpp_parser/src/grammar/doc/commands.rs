@@ -81,10 +81,7 @@ pub struct DocCommandSpec {
 /// one whose arguments this table cannot describe, and it gets the permissive reading.
 pub fn lookup(name: &str) -> Option<DocCommandSpec> {
     let lower = name.to_ascii_lowercase();
-    DOC_COMMANDS
-        .iter()
-        .find(|spec| spec.name == lower)
-        .copied()
+    DOC_COMMANDS.iter().find(|spec| spec.name == lower).copied()
 }
 
 /// How to read a command that is not in the table.
@@ -115,23 +112,71 @@ const DOC_COMMANDS: &[DocCommandSpec] = &[
     spec("authors", DocCommandArgs::Body, DocCommandKind::Description),
     spec("date", DocCommandArgs::Body, DocCommandKind::Description),
     spec("version", DocCommandArgs::Body, DocCommandKind::Description),
-    spec("copyright", DocCommandArgs::Body, DocCommandKind::Description),
+    spec(
+        "copyright",
+        DocCommandArgs::Body,
+        DocCommandKind::Description,
+    ),
     spec("remark", DocCommandArgs::Body, DocCommandKind::Callout),
     spec("remarks", DocCommandArgs::Body, DocCommandKind::Callout),
     // Doxygen's `@param` and `@tparam` are the two that carry a name, and getting that name out is
     // the whole point of parsing them.
-    spec("param", DocCommandArgs::DirectionalNameAndBody, DocCommandKind::Parameter),
-    spec("tparam", DocCommandArgs::NameAndBody, DocCommandKind::Parameter),
-    spec("exception", DocCommandArgs::NameAndBody, DocCommandKind::Exception),
-    spec("throw", DocCommandArgs::NameAndBody, DocCommandKind::Exception),
-    spec("throws", DocCommandArgs::NameAndBody, DocCommandKind::Exception),
+    spec(
+        "param",
+        DocCommandArgs::DirectionalNameAndBody,
+        DocCommandKind::Parameter,
+    ),
+    spec(
+        "tparam",
+        DocCommandArgs::NameAndBody,
+        DocCommandKind::Parameter,
+    ),
+    spec(
+        "exception",
+        DocCommandArgs::NameAndBody,
+        DocCommandKind::Exception,
+    ),
+    spec(
+        "throw",
+        DocCommandArgs::NameAndBody,
+        DocCommandKind::Exception,
+    ),
+    spec(
+        "throws",
+        DocCommandArgs::NameAndBody,
+        DocCommandKind::Exception,
+    ),
     // ---- References ----
-    spec("ref", DocCommandArgs::ReferenceAndBody, DocCommandKind::Reference),
-    spec("sa", DocCommandArgs::ReferenceAndBody, DocCommandKind::Reference),
-    spec("see", DocCommandArgs::ReferenceAndBody, DocCommandKind::Reference),
-    spec("overload", DocCommandArgs::ReferenceAndBody, DocCommandKind::Reference),
-    spec("extends", DocCommandArgs::ReferenceAndBody, DocCommandKind::Reference),
-    spec("implements", DocCommandArgs::ReferenceAndBody, DocCommandKind::Reference),
+    spec(
+        "ref",
+        DocCommandArgs::ReferenceAndBody,
+        DocCommandKind::Reference,
+    ),
+    spec(
+        "sa",
+        DocCommandArgs::ReferenceAndBody,
+        DocCommandKind::Reference,
+    ),
+    spec(
+        "see",
+        DocCommandArgs::ReferenceAndBody,
+        DocCommandKind::Reference,
+    ),
+    spec(
+        "overload",
+        DocCommandArgs::ReferenceAndBody,
+        DocCommandKind::Reference,
+    ),
+    spec(
+        "extends",
+        DocCommandArgs::ReferenceAndBody,
+        DocCommandKind::Reference,
+    ),
+    spec(
+        "implements",
+        DocCommandArgs::ReferenceAndBody,
+        DocCommandKind::Reference,
+    ),
     // ---- Advisory ----
     spec("note", DocCommandArgs::Body, DocCommandKind::Advisory),
     spec("warning", DocCommandArgs::Body, DocCommandKind::Advisory),
@@ -144,13 +189,33 @@ const DOC_COMMANDS: &[DocCommandSpec] = &[
     spec("par", DocCommandArgs::Body, DocCommandKind::Advisory),
     // ---- Structural ----
     spec("file", DocCommandArgs::Body, DocCommandKind::Structural),
-    spec("headerfile", DocCommandArgs::Body, DocCommandKind::Structural),
+    spec(
+        "headerfile",
+        DocCommandArgs::Body,
+        DocCommandKind::Structural,
+    ),
     spec("ingroup", DocCommandArgs::Body, DocCommandKind::Structural),
-    spec("defgroup", DocCommandArgs::NameAndBody, DocCommandKind::Structural),
-    spec("addtogroup", DocCommandArgs::NameAndBody, DocCommandKind::Structural),
-    spec("weakgroup", DocCommandArgs::NameAndBody, DocCommandKind::Structural),
+    spec(
+        "defgroup",
+        DocCommandArgs::NameAndBody,
+        DocCommandKind::Structural,
+    ),
+    spec(
+        "addtogroup",
+        DocCommandArgs::NameAndBody,
+        DocCommandKind::Structural,
+    ),
+    spec(
+        "weakgroup",
+        DocCommandArgs::NameAndBody,
+        DocCommandKind::Structural,
+    ),
     spec("name", DocCommandArgs::Body, DocCommandKind::Structural),
-    spec("namespace", DocCommandArgs::Body, DocCommandKind::Structural),
+    spec(
+        "namespace",
+        DocCommandArgs::Body,
+        DocCommandKind::Structural,
+    ),
     spec("class", DocCommandArgs::Body, DocCommandKind::Structural),
     spec("struct", DocCommandArgs::Body, DocCommandKind::Structural),
     spec("union", DocCommandArgs::Body, DocCommandKind::Structural),
@@ -158,63 +223,167 @@ const DOC_COMMANDS: &[DocCommandSpec] = &[
     spec("fn", DocCommandArgs::Body, DocCommandKind::Structural),
     spec("var", DocCommandArgs::Body, DocCommandKind::Structural),
     spec("typedef", DocCommandArgs::Body, DocCommandKind::Structural),
-    spec("interface", DocCommandArgs::Body, DocCommandKind::Structural),
+    spec(
+        "interface",
+        DocCommandArgs::Body,
+        DocCommandKind::Structural,
+    ),
     spec("protocol", DocCommandArgs::Body, DocCommandKind::Structural),
     spec("category", DocCommandArgs::Body, DocCommandKind::Structural),
     spec("property", DocCommandArgs::Body, DocCommandKind::Structural),
     spec("relates", DocCommandArgs::Body, DocCommandKind::Structural),
     spec("related", DocCommandArgs::Body, DocCommandKind::Structural),
-    spec("relatesalso", DocCommandArgs::Body, DocCommandKind::Structural),
-    spec("relatedalso", DocCommandArgs::Body, DocCommandKind::Structural),
+    spec(
+        "relatesalso",
+        DocCommandArgs::Body,
+        DocCommandKind::Structural,
+    ),
+    spec(
+        "relatedalso",
+        DocCommandArgs::Body,
+        DocCommandKind::Structural,
+    ),
     spec("memberof", DocCommandArgs::Body, DocCommandKind::Structural),
-    spec("hideinitializer", DocCommandArgs::None, DocCommandKind::Structural),
-    spec("showinitializer", DocCommandArgs::None, DocCommandKind::Structural),
-    spec("nosubgrouping", DocCommandArgs::None, DocCommandKind::Structural),
+    spec(
+        "hideinitializer",
+        DocCommandArgs::None,
+        DocCommandKind::Structural,
+    ),
+    spec(
+        "showinitializer",
+        DocCommandArgs::None,
+        DocCommandKind::Structural,
+    ),
+    spec(
+        "nosubgrouping",
+        DocCommandArgs::None,
+        DocCommandKind::Structural,
+    ),
     spec("internal", DocCommandArgs::None, DocCommandKind::Structural),
-    spec("endinternal", DocCommandArgs::None, DocCommandKind::Structural),
+    spec(
+        "endinternal",
+        DocCommandArgs::None,
+        DocCommandKind::Structural,
+    ),
     spec("public", DocCommandArgs::None, DocCommandKind::Structural),
-    spec("protected", DocCommandArgs::None, DocCommandKind::Structural),
+    spec(
+        "protected",
+        DocCommandArgs::None,
+        DocCommandKind::Structural,
+    ),
     spec("private", DocCommandArgs::None, DocCommandKind::Structural),
     spec("static", DocCommandArgs::None, DocCommandKind::Structural),
     spec("pure", DocCommandArgs::None, DocCommandKind::Structural),
     spec("virtual", DocCommandArgs::None, DocCommandKind::Structural),
-    spec("nosubgrouping", DocCommandArgs::None, DocCommandKind::Structural),
-    spec("callgraph", DocCommandArgs::None, DocCommandKind::Structural),
-    spec("hidecallgraph", DocCommandArgs::None, DocCommandKind::Structural),
-    spec("callergraph", DocCommandArgs::None, DocCommandKind::Structural),
-    spec("hidecallergraph", DocCommandArgs::None, DocCommandKind::Structural),
+    spec(
+        "nosubgrouping",
+        DocCommandArgs::None,
+        DocCommandKind::Structural,
+    ),
+    spec(
+        "callgraph",
+        DocCommandArgs::None,
+        DocCommandKind::Structural,
+    ),
+    spec(
+        "hidecallgraph",
+        DocCommandArgs::None,
+        DocCommandKind::Structural,
+    ),
+    spec(
+        "callergraph",
+        DocCommandArgs::None,
+        DocCommandKind::Structural,
+    ),
+    spec(
+        "hidecallergraph",
+        DocCommandArgs::None,
+        DocCommandKind::Structural,
+    ),
     // ---- Sections and formatting ----
-    spec("section", DocCommandArgs::SectionTitle, DocCommandKind::Structural),
-    spec("subsection", DocCommandArgs::SectionTitle, DocCommandKind::Structural),
-    spec("subsubsection", DocCommandArgs::SectionTitle, DocCommandKind::Structural),
-    spec("paragraph", DocCommandArgs::SectionTitle, DocCommandKind::Structural),
-    spec("anchor", DocCommandArgs::SectionTitle, DocCommandKind::Structural),
-    spec("code", DocCommandArgs::CodeBlock, DocCommandKind::Structural),
+    spec(
+        "section",
+        DocCommandArgs::SectionTitle,
+        DocCommandKind::Structural,
+    ),
+    spec(
+        "subsection",
+        DocCommandArgs::SectionTitle,
+        DocCommandKind::Structural,
+    ),
+    spec(
+        "subsubsection",
+        DocCommandArgs::SectionTitle,
+        DocCommandKind::Structural,
+    ),
+    spec(
+        "paragraph",
+        DocCommandArgs::SectionTitle,
+        DocCommandKind::Structural,
+    ),
+    spec(
+        "anchor",
+        DocCommandArgs::SectionTitle,
+        DocCommandKind::Structural,
+    ),
+    spec(
+        "code",
+        DocCommandArgs::CodeBlock,
+        DocCommandKind::Structural,
+    ),
     spec("endcode", DocCommandArgs::None, DocCommandKind::Structural),
-    spec("verbatim", DocCommandArgs::CodeBlock, DocCommandKind::Structural),
-    spec("endverbatim", DocCommandArgs::None, DocCommandKind::Structural),
+    spec(
+        "verbatim",
+        DocCommandArgs::CodeBlock,
+        DocCommandKind::Structural,
+    ),
+    spec(
+        "endverbatim",
+        DocCommandArgs::None,
+        DocCommandKind::Structural,
+    ),
     spec("dot", DocCommandArgs::CodeBlock, DocCommandKind::Structural),
     spec("enddot", DocCommandArgs::None, DocCommandKind::Structural),
     spec("htmlonly", DocCommandArgs::Body, DocCommandKind::Structural),
-    spec("endhtmlonly", DocCommandArgs::None, DocCommandKind::Structural),
-    spec("latexonly", DocCommandArgs::Body, DocCommandKind::Structural),
-    spec("endlatexonly", DocCommandArgs::None, DocCommandKind::Structural),
+    spec(
+        "endhtmlonly",
+        DocCommandArgs::None,
+        DocCommandKind::Structural,
+    ),
+    spec(
+        "latexonly",
+        DocCommandArgs::Body,
+        DocCommandKind::Structural,
+    ),
+    spec(
+        "endlatexonly",
+        DocCommandArgs::None,
+        DocCommandKind::Structural,
+    ),
     spec("xmlonly", DocCommandArgs::Body, DocCommandKind::Structural),
-    spec("endxmlonly", DocCommandArgs::None, DocCommandKind::Structural),
+    spec(
+        "endxmlonly",
+        DocCommandArgs::None,
+        DocCommandKind::Structural,
+    ),
     // ---- Callouts ----
     spec("todo", DocCommandArgs::Body, DocCommandKind::Callout),
     spec("bug", DocCommandArgs::Body, DocCommandKind::Callout),
     spec("test", DocCommandArgs::Body, DocCommandKind::Callout),
     spec("example", DocCommandArgs::Body, DocCommandKind::Callout),
     spec("attention", DocCommandArgs::Body, DocCommandKind::Callout),
-    spec("cite", DocCommandArgs::ReferenceAndBody, DocCommandKind::Callout),
-    spec("xrefitem", DocCommandArgs::NameAndBody, DocCommandKind::Callout),
+    spec(
+        "cite",
+        DocCommandArgs::ReferenceAndBody,
+        DocCommandKind::Callout,
+    ),
+    spec(
+        "xrefitem",
+        DocCommandArgs::NameAndBody,
+        DocCommandKind::Callout,
+    ),
 ];
 
-const fn spec(
-    name: &'static str,
-    args: DocCommandArgs,
-    kind: DocCommandKind,
-) -> DocCommandSpec {
+const fn spec(name: &'static str, args: DocCommandArgs, kind: DocCommandKind) -> DocCommandSpec {
     DocCommandSpec { name, args, kind }
 }

@@ -60,7 +60,10 @@ mod tests {
     fn unicode_identifiers_follow_xid() {
         // C++23 allows these; C++20 technically did not, but every real compiler does.
         for ch in ['é', '中', 'λ', 'Ж'] {
-            assert!(is_name_start(ch), "{ch:?} is XID_Start and must be accepted");
+            assert!(
+                is_name_start(ch),
+                "{ch:?} is XID_Start and must be accepted"
+            );
             assert!(is_name_continue(ch));
         }
 

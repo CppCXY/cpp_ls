@@ -205,10 +205,7 @@ impl<'a> CppParser<'a> {
         (tree, events)
     }
 
-    fn parse_inner(
-        text: &'a str,
-        config: ParserConfig<'a>,
-    ) -> (CppSyntaxTree, EventStreamAudit) {
+    fn parse_inner(text: &'a str, config: ParserConfig<'a>) -> (CppSyntaxTree, EventStreamAudit) {
         let mut errors: Vec<CppParseError> = Vec::new();
 
         let tokens = {
@@ -424,7 +421,8 @@ impl<'a> CppParser<'a> {
             // A header name has no escapes and no concatenation; anything else is a real string.
             if !text.contains('\\') {
                 let token = self.tokens[self.token_index];
-                self.tokens[self.token_index] = CppTokenData::new(CppTokenKind::HeaderName, token.range);
+                self.tokens[self.token_index] =
+                    CppTokenData::new(CppTokenKind::HeaderName, token.range);
                 self.current_token = CppTokenKind::HeaderName;
                 self.bump();
                 return true;
@@ -549,9 +547,7 @@ impl<'a> CppParser<'a> {
             self.skip_trivia(&mut index);
             if current == offset {
                 return match self.tokens.get(index) {
-                    Some(token) => {
-                        &self.text[token.range.start_offset..token.range.end_offset()]
-                    }
+                    Some(token) => &self.text[token.range.start_offset..token.range.end_offset()],
                     None => "",
                 };
             }

@@ -5,9 +5,9 @@
 //! returns `Option` and nothing asserts structure.
 
 use crate::{
+    CppSyntaxNode,
     kind::CppSyntaxKind,
     syntax::traits::{CppAstChildren, CppAstNode},
-    CppSyntaxNode,
 };
 
 use super::{CppExpr, CppNameToken, CppParamList, CppParenExpr};
@@ -72,7 +72,12 @@ impl CppIfStat {
 
     /// The `then` branch.
     pub fn get_then_branch(&self) -> Option<CppStat> {
-        self.children::<CppStat>().find(|stat| !matches!(CppSyntaxKind::from(stat.syntax().kind()), CppSyntaxKind::ElseStat | CppSyntaxKind::ParenExpr))
+        self.children::<CppStat>().find(|stat| {
+            !matches!(
+                CppSyntaxKind::from(stat.syntax().kind()),
+                CppSyntaxKind::ElseStat | CppSyntaxKind::ParenExpr
+            )
+        })
     }
 
     pub fn get_else_branch(&self) -> Option<CppElseStat> {
@@ -103,8 +108,9 @@ impl CppAstNode for CppElseStat {
 impl CppElseStat {
     /// The body of the else clause. For `else if`, this is the nested `if`.
     pub fn get_stat(&self) -> Option<CppStat> {
-        self.children()
-            .find(|stat: &CppStat| CppSyntaxKind::from(stat.syntax().kind()) != CppSyntaxKind::ParenExpr)
+        self.children().find(|stat: &CppStat| {
+            CppSyntaxKind::from(stat.syntax().kind()) != CppSyntaxKind::ParenExpr
+        })
     }
 
     pub fn is_else_if(&self) -> bool {
@@ -138,8 +144,9 @@ impl CppWhileStat {
     }
 
     pub fn get_body(&self) -> Option<CppStat> {
-        self.children()
-            .find(|stat: &CppStat| CppSyntaxKind::from(stat.syntax().kind()) != CppSyntaxKind::ParenExpr)
+        self.children().find(|stat: &CppStat| {
+            CppSyntaxKind::from(stat.syntax().kind()) != CppSyntaxKind::ParenExpr
+        })
     }
 }
 
@@ -165,8 +172,9 @@ impl CppAstNode for CppDoWhileStat {
 
 impl CppDoWhileStat {
     pub fn get_body(&self) -> Option<CppStat> {
-        self.children()
-            .find(|stat: &CppStat| CppSyntaxKind::from(stat.syntax().kind()) != CppSyntaxKind::ParenExpr)
+        self.children().find(|stat: &CppStat| {
+            CppSyntaxKind::from(stat.syntax().kind()) != CppSyntaxKind::ParenExpr
+        })
     }
 
     pub fn get_condition(&self) -> Option<CppParenExpr> {
@@ -201,7 +209,14 @@ impl CppForStat {
     }
 
     pub fn get_body(&self) -> Option<CppStat> {
-        self.children::<CppStat>().find(|stat| !matches!(CppSyntaxKind::from(stat.syntax().kind()), CppSyntaxKind::ParenExpr | CppSyntaxKind::Declaration | CppSyntaxKind::ExpressionStat))
+        self.children::<CppStat>().find(|stat| {
+            !matches!(
+                CppSyntaxKind::from(stat.syntax().kind()),
+                CppSyntaxKind::ParenExpr
+                    | CppSyntaxKind::Declaration
+                    | CppSyntaxKind::ExpressionStat
+            )
+        })
     }
 }
 
@@ -235,7 +250,8 @@ impl CppSwitchStat {
         self.syntax()
             .children()
             .filter(|node| {
-                matches!(CppSyntaxKind::from(node.kind()),
+                matches!(
+                    CppSyntaxKind::from(node.kind()),
                     CppSyntaxKind::CaseStat | CppSyntaxKind::DefaultStat
                 )
             })
@@ -421,10 +437,7 @@ impl CppAstNode for CppJumpStat {
     }
 
     fn can_cast(kind: CppSyntaxKind) -> bool {
-        matches!(
-            kind,
-            CppSyntaxKind::BreakStat | CppSyntaxKind::ContinueStat
-        )
+        matches!(kind, CppSyntaxKind::BreakStat | CppSyntaxKind::ContinueStat)
     }
 
     fn cast(syntax: CppSyntaxNode) -> Option<Self> {

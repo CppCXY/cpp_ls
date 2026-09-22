@@ -147,10 +147,7 @@ fn parse_decl_specifier_seq_stopping_at_one_name(p: &mut CppParser) -> ParseResu
 /// the name is still part of the type) and `Point p` (where it is the declarator), and guessing
 /// wrong there loses the whole declaration — once the loop eats `p` as part of the type there is no
 /// declarator left and the `;` never matches.
-fn parse_decl_specifier_seq_with(
-    p: &mut CppParser,
-    allow_second_name: bool,
-) -> ParseResult {
+fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::DeclSpecifierSeq);
 
@@ -445,7 +442,6 @@ fn continues_a_qualified_name(p: &CppParser) -> bool {
         }
     }
 
-
     result
 }
 
@@ -537,11 +533,11 @@ fn parse_class_like_head(p: &mut CppParser) -> ParseResult {
     if matches!(
         p.current_token(),
         CppTokenKind::Identifier | CppTokenKind::Scope
-    )
-        && let Err(err) = parse_name(p) {
-            p.close_marks_above(base_marks);
-            return Err(err);
-        }
+    ) && let Err(err) = parse_name(p)
+    {
+        p.close_marks_above(base_marks);
+        return Err(err);
+    }
 
     // Attributes on the class head: `class C [[deprecated]] { ... }`. They may also be written before
     // the keyword, and that form is consumed as a leading decl-specifier by the caller — so both
@@ -570,10 +566,11 @@ fn parse_class_like_head(p: &mut CppParser) -> ParseResult {
     if keyword != CppTokenKind::EnumKeyword
         && p.current_token() == CppTokenKind::Colon
         && a_brace_follows_the_base_clause(p)
-        && let Err(err) = parse_base_clause(p) {
-            p.close_marks_above(base_marks);
-            return Err(err);
-        }
+        && let Err(err) = parse_base_clause(p)
+    {
+        p.close_marks_above(base_marks);
+        return Err(err);
+    }
 
     // The body.
     if p.current_token() == CppTokenKind::LeftBrace {
@@ -746,11 +743,13 @@ pub fn parse_name(p: &mut CppParser) -> ParseResult {
         // the matching `>`. Deciding *before* descending matters: parsing the arguments and rolling
         // back on failure would throw away the argument nodes that were already built, and the
         // caller only ever sees "this was not a name after all" instead of "the name ended here".
-        if p.current_token() == CppTokenKind::Less && a_matching_angle_bracket_follows(p)
-            && let Err(err) = parse_template_argument_list(p) {
-                p.close_marks_above(base);
-                return Err(err);
-            }
+        if p.current_token() == CppTokenKind::Less
+            && a_matching_angle_bracket_follows(p)
+            && let Err(err) = parse_template_argument_list(p)
+        {
+            p.close_marks_above(base);
+            return Err(err);
+        }
         if p.current_token() == CppTokenKind::Scope {
             p.bump();
             continue;
@@ -810,7 +809,11 @@ fn a_matching_angle_bracket_follows(p: &CppParser) -> bool {
                 CppTokenKind::Greater | CppTokenKind::RightShift => {
                     // `>>` closes two levels at once; a lone `>` closes one. Both arrive here because
                     // the amount is all that differs.
-                    depth -= if kind == CppTokenKind::RightShift { 2 } else { 1 };
+                    depth -= if kind == CppTokenKind::RightShift {
+                        2
+                    } else {
+                        1
+                    };
                     if depth <= 0 {
                         break 'scan true;
                     }
@@ -1098,12 +1101,14 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
                 let array = p.mark(CppSyntaxKind::ArrayType);
                 p.bump();
                 // The bound is optional: `int a[]`.
-                if p.current_token() != CppTokenKind::RightBracket && !p.is_eof()
-                    && let Err(err) = super::exprs::parse_expr(p) {
-                        array.undo(p);
-                        p.close_marks_above(base);
-                        return Err(err);
-                    }
+                if p.current_token() != CppTokenKind::RightBracket
+                    && !p.is_eof()
+                    && let Err(err) = super::exprs::parse_expr(p)
+                {
+                    array.undo(p);
+                    p.close_marks_above(base);
+                    return Err(err);
+                }
                 if let Err(err) = expect_token(p, CppTokenKind::RightBracket) {
                     array.undo(p);
                     p.close_marks_above(base);
@@ -1371,7 +1376,8 @@ pub fn eat_function_qualifiers(p: &mut CppParser) {
                     return;
                 }
                 p.set_last_declarator_is_function(true);
-                trailing.complete(p);            }
+                trailing.complete(p);
+            }
             _ => return,
         }
     }

@@ -11,9 +11,7 @@ use crate::{
     parser_error::CppParseError,
 };
 
-use super::{
-    decls::parse_using_declaration, expect_token, exprs::parse_expr,
-};
+use super::{decls::parse_using_declaration, expect_token, exprs::parse_expr};
 
 /// Parse a compound statement — `{ ... }` — or, in C++, a *single* statement.
 ///
@@ -106,7 +104,8 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
 
     let result = match p.current_token() {
         // Control flow statements
-        CppTokenKind::IfKeyword => parse_if_statement(p),        CppTokenKind::WhileKeyword => parse_while_statement(p),
+        CppTokenKind::IfKeyword => parse_if_statement(p),
+        CppTokenKind::WhileKeyword => parse_while_statement(p),
         CppTokenKind::DoKeyword => parse_do_while_statement(p),
         CppTokenKind::ForKeyword => parse_for_statement(p),
         CppTokenKind::SwitchKeyword => parse_switch_statement(p),
@@ -457,22 +456,31 @@ fn parse_for_statement(p: &mut CppParser) -> ParseResult {
     if starts_a_range_for(p) {
         let checkpoint = p.checkpoint();
 
-        // A range declaration is optional in C++20 (`for (auto v : m)` vs. `for (v : m)`).
-        if super::decls::parse_declaration(p).is_err() {
+        // A range declaration is optional in C++20 (`for (auto v : m)` vs. `for (v : m)`), so a failure here
+        // means the header held an expression and the range reading is still open.
+        //
+        // The rule is the *for-init* one rather than a whole declaration: the header has no `;` of its own, so
+        // a rule expecting one reports "expected `;`" against the range expression.
+        if super::decls::parse_for_init_declaration(p).is_err() {
             p.rollback(checkpoint);
             parse_expr(p)?;
         }
 
         if p.current_token() == CppTokenKind::Colon {
+            // The kind is decided *here*, before the node is closed, and set on the marker rather than on the
+            // value `complete` hands back. The marker's kind is what the `NodeStart` event was emitted with, and
+            // `complete` only reads it — so writing to the returned `CompleteMarker` changes a copy and leaves
+            // the tree with the `ForStat` the node was opened as. That is how a range-based `for` came out
+            // labelled as a C-style one while parsing perfectly.
+            let mut m = m;
+            m.set_kind(p, CppSyntaxKind::RangeForStat);
+
             p.bump();
             parse_expr(p)?;
             expect_token(p, CppTokenKind::RightParen)?;
             parse_statement_body(p)?;
 
-            let completed = m.complete(p);
-            let mut completed = completed;
-            completed.kind = CppSyntaxKind::RangeForStat;
-            return Ok(completed);
+            return Ok(m.complete(p));
         }
 
         // Not a range-for after all; fall through to the C-style reading.
@@ -502,9 +510,12 @@ fn parse_for_statement(p: &mut CppParser) -> ParseResult {
 
 /// Would a `:` later in the `for` header make this a range-based for?
 ///
-/// Scans the header at nesting depth zero, where a `:` can only be the range separator. A `:` at
-/// depth zero cannot appear in an ordinary for-init (`a ? b : c` is inside no parentheses but does
-/// contain a `:`, so the scan stops at `?` conservatively).
+/// Called with the cursor just **inside** the opening `(`, so the header is scanned at relative depth zero and
+/// a `:` at that depth is the range separator. Scanning from depth one instead — the state *before* the `(` was
+/// consumed — makes every `:` look nested, so the scan never fires and `for (auto x : items)` is read as a
+/// C-style header and fails on the `:`.
+///
+/// A `?` at depth zero rules the range reading out, because `a ? b : c` has a `:` that is not a separator.
 fn starts_a_range_for(p: &CppParser) -> bool {
     let mut depth = 0isize;
     let mut saw_question = false;
@@ -516,13 +527,14 @@ fn starts_a_range_for(p: &CppParser) -> bool {
             }
             CppTokenKind::RightParen | CppTokenKind::RightBracket | CppTokenKind::RightBrace => {
                 depth -= 1;
-                if depth <= 0 {
+                // The header's own `)` at depth zero ends it without a range separator.
+                if depth < 0 {
                     return false;
                 }
             }
             CppTokenKind::Question => saw_question = true,
-            CppTokenKind::Semicolon if depth == 1 => return false,
-            CppTokenKind::Colon if depth == 1 => return !saw_question,
+            CppTokenKind::Semicolon if depth == 0 => return false,
+            CppTokenKind::Colon if depth == 0 => return !saw_question,
             CppTokenKind::Eof | CppTokenKind::None => return false,
             _ => {}
         }
@@ -629,10 +641,11 @@ fn parse_try_statement(p: &mut CppParser) -> ParseResult {
         p.bump();
 
         if p.current_token() == CppTokenKind::LeftParen
-            && let Err(err) = parse_parameter_list_inline(p) {
-                p.close_marks_above(base);
-                return Err(err);
-            }
+            && let Err(err) = parse_parameter_list_inline(p)
+        {
+            p.close_marks_above(base);
+            return Err(err);
+        }
 
         if let Err(err) = parse_compound_stat(p) {
             p.close_marks_above(base);
@@ -656,11 +669,13 @@ fn parse_return_statement(p: &mut CppParser) -> ParseResult {
     p.bump(); // Consume 'return'
 
     // `return;` and `co_return;` are complete statements.
-    if p.current_token() != CppTokenKind::Semicolon && !p.is_eof()
-        && let Err(err) = parse_return_value(p) {
-            p.close_marks_above(base);
-            return Err(err);
-        }
+    if p.current_token() != CppTokenKind::Semicolon
+        && !p.is_eof()
+        && let Err(err) = parse_return_value(p)
+    {
+        p.close_marks_above(base);
+        return Err(err);
+    }
 
     if p.current_token() == CppTokenKind::Semicolon {
         p.bump();
@@ -721,10 +736,11 @@ fn parse_throw_statement(p: &mut CppParser) -> ParseResult {
 
     p.bump(); // Consume 'throw'
     if p.current_token() != CppTokenKind::Semicolon
-        && let Err(err) = parse_expr(p) {
-            p.close_marks_above(base);
-            return Err(err);
-        }
+        && let Err(err) = parse_expr(p)
+    {
+        p.close_marks_above(base);
+        return Err(err);
+    }
     if let Err(err) = expect_token(p, CppTokenKind::Semicolon) {
         p.close_marks_above(base);
         return Err(err);

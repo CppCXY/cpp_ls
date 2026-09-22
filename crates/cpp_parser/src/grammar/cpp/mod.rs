@@ -1,6 +1,6 @@
 mod decls;
-mod modules;
 mod exprs;
+mod modules;
 mod stats;
 mod types;
 
@@ -11,7 +11,6 @@ use crate::{
     parser::{CppParser, MarkerEventContainer},
     parser_error::CppParseError,
 };
-
 
 /// Parse a whole translation unit.
 ///

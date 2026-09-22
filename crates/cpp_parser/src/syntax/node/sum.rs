@@ -4,11 +4,7 @@
 //! convenience: `parse_stats` genuinely produces declarations from statement position, and a sum
 //! type that excluded them would force every caller to check both.
 
-use crate::{
-    kind::CppSyntaxKind,
-    syntax::traits::CppAstNode,
-    CppSyntaxNode,
-};
+use crate::{CppSyntaxNode, kind::CppSyntaxKind, syntax::traits::CppAstNode};
 
 use super::*;
 
@@ -108,28 +104,20 @@ impl CppAstNode for CppStat {
 
     fn cast(syntax: CppSyntaxNode) -> Option<Self> {
         match CppSyntaxKind::from(syntax.kind()) {
-            CppSyntaxKind::Declaration => {
-                CppDeclaration::cast(syntax).map(CppStat::Declaration)
-            }
-            CppSyntaxKind::CompoundStat => {
-                CppCompoundStat::cast(syntax).map(CppStat::CompoundStat)
-            }
+            CppSyntaxKind::Declaration => CppDeclaration::cast(syntax).map(CppStat::Declaration),
+            CppSyntaxKind::CompoundStat => CppCompoundStat::cast(syntax).map(CppStat::CompoundStat),
             CppSyntaxKind::IfStat => CppIfStat::cast(syntax).map(CppStat::IfStat),
             CppSyntaxKind::ElseStat | CppSyntaxKind::ElseIfStat => {
                 CppElseStat::cast(syntax).map(CppStat::ElseStat)
             }
             CppSyntaxKind::WhileStat => CppWhileStat::cast(syntax).map(CppStat::WhileStat),
-            CppSyntaxKind::DoWhileStat => {
-                CppDoWhileStat::cast(syntax).map(CppStat::DoWhileStat)
-            }
+            CppSyntaxKind::DoWhileStat => CppDoWhileStat::cast(syntax).map(CppStat::DoWhileStat),
             CppSyntaxKind::ForStat | CppSyntaxKind::RangeForStat => {
                 CppForStat::cast(syntax).map(CppStat::ForStat)
             }
             CppSyntaxKind::SwitchStat => CppSwitchStat::cast(syntax).map(CppStat::SwitchStat),
             CppSyntaxKind::CaseStat => CppCaseStat::cast(syntax).map(CppStat::CaseStat),
-            CppSyntaxKind::DefaultStat => {
-                CppDefaultStat::cast(syntax).map(CppStat::DefaultStat)
-            }
+            CppSyntaxKind::DefaultStat => CppDefaultStat::cast(syntax).map(CppStat::DefaultStat),
             CppSyntaxKind::TryStat => CppTryStat::cast(syntax).map(CppStat::TryStat),
             CppSyntaxKind::ReturnStat => CppReturnStat::cast(syntax).map(CppStat::ReturnStat),
             CppSyntaxKind::BreakStat => CppJumpStat::cast(syntax).map(CppStat::BreakStat),

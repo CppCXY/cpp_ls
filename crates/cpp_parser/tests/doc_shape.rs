@@ -101,8 +101,7 @@ fn direct_tokens(node: &cpp_parser::CppSyntaxNode) -> String {
         .filter(|token| {
             !matches!(
                 token.kind(),
-                CppKind::Token(CppTokenKind::Whitespace)
-                    | CppKind::Token(CppTokenKind::Newline)
+                CppKind::Token(CppTokenKind::Whitespace) | CppKind::Token(CppTokenKind::Newline)
             )
         })
         .map(|token| token.text().to_string())
@@ -315,7 +314,9 @@ fn a_plain_comment_has_no_commands() {
         .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::DocCommentBody)
         .expect("a comment body");
     assert!(
-        body.text().to_string().contains("@param x not documentation"),
+        body.text()
+            .to_string()
+            .contains("@param x not documentation"),
         "the whole comment is prose: {:?}",
         body.text().to_string()
     );
@@ -414,7 +415,10 @@ fn a_multiline_block_body_stops_at_the_closer() {
     );
 
     // And the tree it came from still reproduces the file: the closer is *somewhere*, just not there.
-    assert_eq!(tree.to_source_text(), "/**\n * @brief First\n * second\n */\nint x;\n");
+    assert_eq!(
+        tree.to_source_text(),
+        "/**\n * @brief First\n * second\n */\nint x;\n"
+    );
 }
 
 // ============================================================================
@@ -594,12 +598,16 @@ fn a_command_is_named_by_its_first_token() {
     assert_eq!(name.text().to_string(), "param");
 
     // Everything the command owns is inside it, arguments and body included.
-    assert!(command.descendants().any(|node| {
-        CppSyntaxKind::from(node.kind()) == CppSyntaxKind::DocCommandArg
-    }));
-    assert!(command.descendants().any(|node| {
-        CppSyntaxKind::from(node.kind()) == CppSyntaxKind::DocCommandBody
-    }));
+    assert!(
+        command
+            .descendants()
+            .any(|node| { CppSyntaxKind::from(node.kind()) == CppSyntaxKind::DocCommandArg })
+    );
+    assert!(
+        command
+            .descendants()
+            .any(|node| { CppSyntaxKind::from(node.kind()) == CppSyntaxKind::DocCommandBody })
+    );
 }
 
 /// The description a command reports never includes the layout that separates it from the command.

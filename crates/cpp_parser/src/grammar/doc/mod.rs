@@ -486,7 +486,7 @@ impl<'a, 'p> DocParser<'a, 'p> {
                 DocTokenKind::DocIntroducer | DocTokenKind::DocCommandName
                     if self.starts_a_command_here() =>
                 {
-                    break
+                    break;
                 }
                 // The comment's own terminator ends it too, and is left outside.
                 DocTokenKind::BlockCommentEnd => break,
@@ -530,7 +530,8 @@ impl<'a, 'p> DocParser<'a, 'p> {
             return;
         }
 
-        self.tokens[self.index].range = SourceRange::new(range.start_offset + layout, range.length - layout);
+        self.tokens[self.index].range =
+            SourceRange::new(range.start_offset + layout, range.length - layout);
         self.tokens.insert(
             self.index,
             DocToken::new(
@@ -573,14 +574,12 @@ impl<'a, 'p> DocParser<'a, 'p> {
     fn starts_a_command_here(&self) -> bool {
         match self.current() {
             DocTokenKind::DocCommandName => true,
-            DocTokenKind::DocIntroducer => {
-                self.tokens.get(self.index + 1).is_some_and(|token| {
-                    matches!(
-                        token.kind,
-                        DocTokenKind::DocCommandName | DocTokenKind::DocWhitespace
-                    )
-                })
-            }
+            DocTokenKind::DocIntroducer => self.tokens.get(self.index + 1).is_some_and(|token| {
+                matches!(
+                    token.kind,
+                    DocTokenKind::DocCommandName | DocTokenKind::DocWhitespace
+                )
+            }),
             _ => false,
         }
     }
@@ -681,14 +680,11 @@ impl<'a, 'p> DocParser<'a, 'p> {
             DocTokenKind::DocCommandName => {
                 self.current_text().eq_ignore_ascii_case(END_CODE_COMMAND)
             }
-            DocTokenKind::DocIntroducer => self
-                .tokens
-                .get(self.index + 1)
-                .is_some_and(|token| {
-                    token.kind == DocTokenKind::DocCommandName
-                        && self.text[token.range.start_offset..token.range.end_offset()]
-                            .eq_ignore_ascii_case(END_CODE_COMMAND)
-                }),
+            DocTokenKind::DocIntroducer => self.tokens.get(self.index + 1).is_some_and(|token| {
+                token.kind == DocTokenKind::DocCommandName
+                    && self.text[token.range.start_offset..token.range.end_offset()]
+                        .eq_ignore_ascii_case(END_CODE_COMMAND)
+            }),
             _ => false,
         }
     }
@@ -880,5 +876,3 @@ impl CppParser<'_> {
 pub(crate) fn report(p: &mut CppParser<'_>, message: &str, range: SourceRange) {
     p.push_error(CppParseError::syntax_error_from(message, range));
 }
-
-

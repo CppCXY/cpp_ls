@@ -99,7 +99,9 @@ impl DocTokenKind {
     pub fn to_cpp_token(self) -> CppTokenKind {
         match self {
             DocTokenKind::None => CppTokenKind::None,
-            DocTokenKind::DocLineStart | DocTokenKind::LineCommentStart => CppTokenKind::LineComment,
+            DocTokenKind::DocLineStart | DocTokenKind::LineCommentStart => {
+                CppTokenKind::LineComment
+            }
             DocTokenKind::DocBlockStart
             | DocTokenKind::BlockCommentStart
             | DocTokenKind::BlockCommentEnd => CppTokenKind::BlockComment,
@@ -125,10 +127,7 @@ impl DocTokenKind {
 
     /// Is this token layout rather than content? The doc grammar steps over these.
     pub fn is_trivia(self) -> bool {
-        matches!(
-            self,
-            DocTokenKind::DocWhitespace | DocTokenKind::DocNewline
-        )
+        matches!(self, DocTokenKind::DocWhitespace | DocTokenKind::DocNewline)
     }
 
     /// Does this token end the line it is on? Used by the line-oriented parsers.

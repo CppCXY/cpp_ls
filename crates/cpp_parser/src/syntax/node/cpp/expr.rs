@@ -11,9 +11,9 @@
 //! position has to be listed there.
 
 use crate::{
+    CppSyntaxNode,
     kind::{CppKind, CppSyntaxKind, CppTokenKind},
     syntax::traits::{CppAstChildren, CppAstNode, CppAstToken},
-    CppSyntaxNode,
 };
 
 use super::{CppDeclaration, CppDeclarator, CppTypeId};
@@ -84,9 +84,7 @@ impl CppAstNode for CppExpr {
 
     fn cast(syntax: CppSyntaxNode) -> Option<Self> {
         match CppSyntaxKind::from(syntax.kind()) {
-            CppSyntaxKind::LiteralExpr => {
-                CppLiteralExpr::cast(syntax).map(CppExpr::LiteralExpr)
-            }
+            CppSyntaxKind::LiteralExpr => CppLiteralExpr::cast(syntax).map(CppExpr::LiteralExpr),
             CppSyntaxKind::IdentifierExpr | CppSyntaxKind::NameExpr => {
                 CppNameExpr::cast(syntax).map(CppExpr::NameExpr)
             }
@@ -99,9 +97,7 @@ impl CppAstNode for CppExpr {
             CppSyntaxKind::MemberExpr | CppSyntaxKind::ArrowExpr => {
                 CppMemberExpr::cast(syntax).map(CppExpr::MemberExpr)
             }
-            CppSyntaxKind::InitListExpr => {
-                CppInitListExpr::cast(syntax).map(CppExpr::InitListExpr)
-            }
+            CppSyntaxKind::InitListExpr => CppInitListExpr::cast(syntax).map(CppExpr::InitListExpr),
             CppSyntaxKind::DesignatedInitExpr => {
                 CppDesignatedInitExpr::cast(syntax).map(CppExpr::DesignatedInitExpr)
             }
@@ -109,9 +105,7 @@ impl CppAstNode for CppExpr {
                 CppLambdaExpr::cast(syntax).map(CppExpr::LambdaExpr)
             }
             CppSyntaxKind::ThisExpr => CppThisExpr::cast(syntax).map(CppExpr::ThisExpr),
-            CppSyntaxKind::ErrorNode => {
-                CppUnknownExpr::cast(syntax).map(CppExpr::ErrorNode)
-            }
+            CppSyntaxKind::ErrorNode => CppUnknownExpr::cast(syntax).map(CppExpr::ErrorNode),
             _ => None,
         }
     }
@@ -207,7 +201,11 @@ impl CppLiteralExpr {
             .children_with_tokens()
             .filter_map(|it| it.into_token())
             .any(|token| {
-                matches!(token.kind(), CppKind::Token(CppTokenKind::NullptrKeyword) | CppKind::Token(CppTokenKind::NullptrLiteral))
+                matches!(
+                    token.kind(),
+                    CppKind::Token(CppTokenKind::NullptrKeyword)
+                        | CppKind::Token(CppTokenKind::NullptrLiteral)
+                )
             })
     }
 
@@ -216,7 +214,12 @@ impl CppLiteralExpr {
             .children_with_tokens()
             .filter_map(|it| it.into_token())
             .any(|token| {
-                matches!(token.kind(), CppKind::Token(CppTokenKind::TrueKeyword) | CppKind::Token(CppTokenKind::FalseKeyword) | CppKind::Token(CppTokenKind::BoolLiteral))
+                matches!(
+                    token.kind(),
+                    CppKind::Token(CppTokenKind::TrueKeyword)
+                        | CppKind::Token(CppTokenKind::FalseKeyword)
+                        | CppKind::Token(CppTokenKind::BoolLiteral)
+                )
             })
     }
 }
@@ -582,10 +585,7 @@ impl CppAstNode for CppMemberExpr {
     }
 
     fn can_cast(kind: CppSyntaxKind) -> bool {
-        matches!(
-            kind,
-            CppSyntaxKind::MemberExpr | CppSyntaxKind::ArrowExpr
-        )
+        matches!(kind, CppSyntaxKind::MemberExpr | CppSyntaxKind::ArrowExpr)
     }
 
     fn cast(syntax: CppSyntaxNode) -> Option<Self> {
@@ -698,10 +698,7 @@ impl CppAstNode for CppLambdaExpr {
     }
 
     fn can_cast(kind: CppSyntaxKind) -> bool {
-        matches!(
-            kind,
-            CppSyntaxKind::LambdaExpr | CppSyntaxKind::ClosureExpr
-        )
+        matches!(kind, CppSyntaxKind::LambdaExpr | CppSyntaxKind::ClosureExpr)
     }
 
     fn cast(syntax: CppSyntaxNode) -> Option<Self> {
@@ -719,7 +716,11 @@ impl CppLambdaExpr {
     }
 
     pub fn get_trailing_return_type(&self) -> Option<super::CppTypeId> {
-        crate::syntax::node::traits::first_child_of_kind(self.syntax(), &[CppSyntaxKind::TrailingReturnType]).and_then(CppTypeId::cast)
+        crate::syntax::node::traits::first_child_of_kind(
+            self.syntax(),
+            &[CppSyntaxKind::TrailingReturnType],
+        )
+        .and_then(CppTypeId::cast)
     }
 }
 

@@ -1,9 +1,9 @@
 //! Declaration, type and module nodes.
 
 use crate::{
+    CppSyntaxNode,
     kind::{CppKind, CppSyntaxKind, CppTokenKind},
     syntax::traits::{CppAstChildren, CppAstNode, CppAstToken},
-    CppSyntaxNode,
 };
 
 use super::{CppKeywordToken, CppNameToken, CppPunctuationToken, CppStat};
@@ -725,8 +725,10 @@ impl CppPointerType {
     }
 
     pub fn is_reference(&self) -> bool {
-        matches!(CppSyntaxKind::from(self.syntax().kind()),
-            CppSyntaxKind::ReferenceType | CppSyntaxKind::RValueReferenceType)
+        matches!(
+            CppSyntaxKind::from(self.syntax().kind()),
+            CppSyntaxKind::ReferenceType | CppSyntaxKind::RValueReferenceType
+        )
     }
 
     pub fn get_operator_token(&self) -> Option<CppPunctuationToken> {
@@ -1008,9 +1010,7 @@ impl CppAstNode for CppEnumDef {
     fn can_cast(kind: CppSyntaxKind) -> bool {
         matches!(
             kind,
-            CppSyntaxKind::EnumDef
-                | CppSyntaxKind::EnumClassDef
-                | CppSyntaxKind::BuiltinType
+            CppSyntaxKind::EnumDef | CppSyntaxKind::EnumClassDef | CppSyntaxKind::BuiltinType
         )
     }
 
@@ -1057,7 +1057,11 @@ impl CppEnumDef {
             .children_with_tokens()
             .filter_map(|it| it.into_token())
             .any(|token| {
-                matches!(token.kind(), CppKind::Token(CppTokenKind::ClassKeyword) | CppKind::Token(CppTokenKind::StructKeyword))
+                matches!(
+                    token.kind(),
+                    CppKind::Token(CppTokenKind::ClassKeyword)
+                        | CppKind::Token(CppTokenKind::StructKeyword)
+                )
             })
     }
 
@@ -1261,7 +1265,11 @@ impl CppTemplateParam {
             .children_with_tokens()
             .filter_map(|it| it.into_token())
             .any(|token| {
-                matches!(token.kind(), CppKind::Token(CppTokenKind::TypenameKeyword) | CppKind::Token(CppTokenKind::ClassKeyword))
+                matches!(
+                    token.kind(),
+                    CppKind::Token(CppTokenKind::TypenameKeyword)
+                        | CppKind::Token(CppTokenKind::ClassKeyword)
+                )
             })
     }
 }

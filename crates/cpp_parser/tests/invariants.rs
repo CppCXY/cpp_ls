@@ -234,7 +234,10 @@ const CORPUS: &[(&str, &str)] = &[
         "line splices",
         "#define GREETING \\\n    \"hi\"\nint x = 1 + \\\n        2;\n",
     ),
-    ("unicode identifiers", "int café = 1;\nint λ = 2;\nint \\u00e9 = 3;\n"),
+    (
+        "unicode identifiers",
+        "int café = 1;\nint λ = 2;\nint \\u00e9 = 3;\n",
+    ),
     (
         // The `[a, b]` is a binding pattern, not an array declarator: an array's `[` follows its name,
         // and a declarator that *starts* with one has no other reading. The reference forms put the
@@ -294,29 +297,57 @@ const CORPUS: &[(&str, &str)] = &[
         "module and import as ordinary names",
         "int module = 1;\nauto import = module;\n",
     ),
+    ("labels", "void f() {\nagain:\n    goto again;\n}\n"),
     (
-        "labels",
-        "void f() {\nagain:\n    goto again;\n}\n",
+        // Every shape a range-based `for` declares its variable with. The binding-pattern form is the one that
+        // also needed `last_declarator_is_function` cleared, because a stale flag made `: pairs` look like a
+        // constructor's member initializer list.
+        "range-based for",
+        concat!(
+            "void f() {\n",
+            "    for (auto x : items) {}\n",
+            "    for (int y : items) {}\n",
+            "    for (auto& z : items) {}\n",
+            "    for (const auto& w : items) {}\n",
+            "    for (auto [key, value] : map) {}\n",
+            "    for (auto x : make_items()) {}\n",
+            "    for (auto x : a ? b : c) {}\n",
+            "    for (;;) { break; }\n",
+            "    for (int i = 0; i < 3; ++i) {}\n",
+            "    for (int i = c ? 1 : 2; i < 3; ++i) {}\n",
+            "    for co_await (auto v : gen()) {}\n",
+            "}\n",
+        ),
     ),
     (
-        "preprocessor soup",        "#pragma once\n#include <vector>\n#include \"local.h\"\n#define MAX(a, b) ((a) > (b) ? (a) : (b))\n#if defined(FOO) && FOO > 2\nextern \"C\" {\n#endif\nvoid f();\n#ifdef BAR\n}\n#endif\n",
+        // A `:` after a function declarator is a member initializer list; a `:` after a variable is not. Both
+        // readings live in one rule, so both spellings belong in one corpus entry.
+        "member initializer lists",
+        concat!(
+            "struct S {\n",
+            "    S() : a(1), b(2) {}\n",
+            "    S(int x) : a(x) {}\n",
+            "    S() noexcept : a(0) {}\n",
+            "    S() : a{1} {}\n",
+            "    int a;\n",
+            "    int b;\n",
+            "};\n",
+            "struct D : B {\n",
+            "    D() : B(1) {}\n",
+            "};\n",
+        ),
+    ),
+    (
+        "preprocessor soup",
+        "#pragma once\n#include <vector>\n#include \"local.h\"\n#define MAX(a, b) ((a) > (b) ? (a) : (b))\n#if defined(FOO) && FOO > 2\nextern \"C\" {\n#endif\nvoid f();\n#ifdef BAR\n}\n#endif\n",
     ),
     (
         "modules",
         "export module my.mod:part;\nimport <iostream>;\nimport :other;\nexport import std.core;\nexport {\n    void exported();\n}\n",
     ),
-    (
-        "namespace",
-        "namespace a {\nint x;\n}\n",
-    ),
-    (
-        "using declarations",
-        "using std::vector;\n",
-    ),
-    (
-        "enums",
-        "enum Color { Red, Green = 2 };\n",
-    ),
+    ("namespace", "namespace a {\nint x;\n}\n"),
+    ("using declarations", "using std::vector;\n"),
+    ("enums", "enum Color { Red, Green = 2 };\n"),
     (
         "scoped enum with underlying type",
         "enum class Color : unsigned char { Red, Green = 2 };\n",
@@ -420,8 +451,14 @@ fn single_character_deletions_are_parseable() {
 #[test]
 fn parsing_is_deterministic() {
     for (name, source) in CORPUS {
-        let first = format!("{:#?}", CppParser::parse(source, ParserConfig::default()).get_red_root());
-        let second = format!("{:#?}", CppParser::parse(source, ParserConfig::default()).get_red_root());
+        let first = format!(
+            "{:#?}",
+            CppParser::parse(source, ParserConfig::default()).get_red_root()
+        );
+        let second = format!(
+            "{:#?}",
+            CppParser::parse(source, ParserConfig::default()).get_red_root()
+        );
         assert_eq!(first, second, "{name}: parse is not deterministic");
     }
 }
@@ -513,7 +550,10 @@ fn trivia_tokens_tile_the_source_exactly() {
         // The contiguity check above already proves no byte is unaccounted for; this proves that the
         // bytes which *were* trivia are not now part of something else. Without it, folding a comment's
         // text into a neighbouring identifier would pass, because the bytes still round-trip.
-        for lexed in lex_source(source).iter().filter(|token| is_trivia(token.kind)) {
+        for lexed in lex_source(source)
+            .iter()
+            .filter(|token| is_trivia(token.kind))
+        {
             for offset in lexed.range.start_offset..lexed.range.end_offset() {
                 let covering = tokens
                     .iter()
@@ -565,7 +605,8 @@ fn trivia_tokens_tile_the_source_exactly() {
 /// compares it with itself would agree no matter what was thrown away.
 fn lex_source(source: &str) -> Vec<cpp_parser::CppTokenData> {
     let mut errors = Vec::new();
-    let mut lexer = cpp_parser::CppLexer::new(source, cpp_parser::LexerConfig::default(), &mut errors);
+    let mut lexer =
+        cpp_parser::CppLexer::new(source, cpp_parser::LexerConfig::default(), &mut errors);
     lexer.tokenize()
 }
 
@@ -676,6 +717,11 @@ const MUST_PARSE_CLEANLY: &[&str] = &[
     "module partitions and fragments",
     "module and import as ordinary names",
     "labels",
+    // Range-based `for`, which did not parse at all until the range predicate scanned at the right depth and
+    // the `:` stopped being read as a constructor's member initializer list. All four declaration forms are
+    // here because the fourth — a binding pattern — needed a fix of its own.
+    "range-based for",
+    "member initializer lists",
     // The doc layer writes into the same event stream, so a comment must not turn valid code into a
     // diagnostic. `@code`, `@param[in]` and a comment inside a class body are the shapes that would.
     "documentation comments",

@@ -46,9 +46,7 @@ fn command_names(node: &cpp_parser::CppSyntaxNode) -> Vec<String> {
             command
                 .children_with_tokens()
                 .filter_map(|element| element.into_token())
-                .find(|token| {
-                    token.kind() == cpp_parser::CppTokenKind::DocCommandName.into()
-                })
+                .find(|token| token.kind() == cpp_parser::CppTokenKind::DocCommandName.into())
                 .map(|token| token.text().to_string())
         })
         .collect()
@@ -562,7 +560,11 @@ fn a_realistic_module_unit_yields_its_documentation() {
         "documentation must not turn valid code into a diagnostic: {:?}",
         tree.get_errors()
     );
-    assert_eq!(tree.to_source_text(), source, "the tree must reproduce the file");
+    assert_eq!(
+        tree.to_source_text(),
+        source,
+        "the tree must reproduce the file"
+    );
 
     let found = comments(&tree);
     assert!(
@@ -609,7 +611,9 @@ fn a_realistic_module_unit_yields_its_documentation() {
         "template parameters need their own command: {commands:?}"
     );
     // The cross-cutting ones.
-    for name in ["file", "brief", "returns", "note", "warning", "code", "copydoc"] {
+    for name in [
+        "file", "brief", "returns", "note", "warning", "code", "copydoc",
+    ] {
         assert!(
             commands.iter().any(|(command, _)| command == name),
             "`@{name}` should have been recognised: {commands:?}"

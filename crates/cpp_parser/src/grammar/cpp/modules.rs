@@ -366,4 +366,3 @@ pub fn starts_private_module_fragment(p: &CppParser) -> bool {
                 CppTokenKind::Semicolon,
             ]
 }
-

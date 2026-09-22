@@ -30,36 +30,38 @@ fn get_operator_precedence(p: &CppParser, token: CppTokenKind) -> Option<u8> {
     match token {
         // 乘法、除法、模运算 - 最高优先级
         CppTokenKind::Star | CppTokenKind::Slash | CppTokenKind::Percent => Some(13),
-        
+
         // 加法、减法
         CppTokenKind::Plus | CppTokenKind::Minus => Some(12),
-        
+
         // 移位运算
         CppTokenKind::LeftShift | CppTokenKind::RightShift => Some(11),
-        
+
         // 关系运算
-        CppTokenKind::Less | CppTokenKind::LessEqual | 
-        CppTokenKind::Greater | CppTokenKind::GreaterEqual | 
-        CppTokenKind::Spaceship => Some(10),
-        
+        CppTokenKind::Less
+        | CppTokenKind::LessEqual
+        | CppTokenKind::Greater
+        | CppTokenKind::GreaterEqual
+        | CppTokenKind::Spaceship => Some(10),
+
         // 相等性运算
         CppTokenKind::Equal | CppTokenKind::NotEqual => Some(9),
-        
+
         // 按位与
         CppTokenKind::Ampersand => Some(8),
-        
+
         // 按位异或
         CppTokenKind::Caret => Some(7),
-        
+
         // 按位或
         CppTokenKind::Pipe => Some(6),
-        
+
         // 逻辑与
         CppTokenKind::LogicalAnd => Some(5),
-        
+
         // 逻辑或
         CppTokenKind::LogicalOr => Some(4),
-        
+
         _ => None,
     }
 }
@@ -270,11 +272,13 @@ fn parse_primary_expr(p: &mut CppParser) -> ParseResult {
                 p.bump();
 
                 // A template-id: `vector<int>`.
-                if p.current_token() == CppTokenKind::Less && super::types::could_start_template_arguments(p)
-                    && let Err(err) = super::types::parse_template_argument_list(p) {
-                        p.close_marks_above(base);
-                        return Err(err);
-                    }
+                if p.current_token() == CppTokenKind::Less
+                    && super::types::could_start_template_arguments(p)
+                    && let Err(err) = super::types::parse_template_argument_list(p)
+                {
+                    p.close_marks_above(base);
+                    return Err(err);
+                }
 
                 if p.current_token() == CppTokenKind::Scope {
                     p.bump();

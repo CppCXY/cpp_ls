@@ -6,7 +6,7 @@ mod lexer_config;
 mod token_data;
 
 pub use cpp_doc_lexer::{
-    DocCommentStyle, DocToken, is_block_comment, is_documentation_comment, is_doc_whitespace,
+    DocCommentStyle, DocToken, is_block_comment, is_doc_whitespace, is_documentation_comment,
     lex_comment,
 };
 pub use cpp_lexer::CppLexer;

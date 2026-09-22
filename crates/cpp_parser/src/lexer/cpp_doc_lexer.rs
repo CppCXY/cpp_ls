@@ -26,11 +26,7 @@
 //! prefix is recomputed from the text at the start of each line, which keeps the lexer a pure
 //! function of its input.
 
-use crate::{
-    kind::CppTokenKind,
-    lexer::doc_token_kind::DocTokenKind,
-    text::SourceRange,
-};
+use crate::{kind::CppTokenKind, lexer::doc_token_kind::DocTokenKind, text::SourceRange};
 
 /// One token of a documentation comment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,7 +79,8 @@ pub fn is_documentation_comment(text: &str) -> bool {
 
     // A block comment documents when its third character is `*` or `!`. `/**/` and `/*!*/` are the
     // exception: the `*` there belongs to the closing `*/`, and an empty comment documents nothing.
-    (text.starts_with("/**") && !text.starts_with("/**/")) || text.starts_with("/*!") && !text.starts_with("/*!*/")
+    (text.starts_with("/**") && !text.starts_with("/**/"))
+        || text.starts_with("/*!") && !text.starts_with("/*!*/")
 }
 
 /// Is this comment written as a block comment?
@@ -305,7 +302,9 @@ impl<'a> DocLexer<'a> {
         if self.at_comment_start {
             return true;
         }
-        self.pos == 0 || self.text[..self.pos].ends_with('\n') || self.text[..self.pos].ends_with('\r')
+        self.pos == 0
+            || self.text[..self.pos].ends_with('\n')
+            || self.text[..self.pos].ends_with('\r')
     }
 
     fn line_ending_len(&self, pos: usize) -> Option<usize> {

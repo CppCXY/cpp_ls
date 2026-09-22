@@ -427,7 +427,7 @@ pub enum CppSyntaxKind {
     /// e.g.: volatile int x;
     VolatileQual,
     /// e.g.: restrict int* ptr; (C extension)
-    RestrictQual,    // ========== Other Syntax Elements ==========
+    RestrictQual, // ========== Other Syntax Elements ==========
     /// Function parameter - single parameter in function definition/declaration
     /// e.g.: int func(int param) param
     Parameter,
@@ -456,7 +456,7 @@ pub enum CppSyntaxKind {
     /// Name expression - identifier reference
     /// e.g.: variable_name
     NameExpr,
-    
+
     /// Do statement - rarely used in C++ but exists
     /// e.g.: do { ... } while(condition);
     DoStat,

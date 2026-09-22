@@ -93,7 +93,7 @@ impl<'a> CppLexer<'a> {
             "void" => CppTokenKind::VoidKeyword,
             "volatile" => CppTokenKind::VolatileKeyword,
             "while" => CppTokenKind::WhileKeyword,
-            
+
             // C++11 and later keywords
             "alignas" => CppTokenKind::AlignasKeyword,
             "alignof" => CppTokenKind::AlignofKeyword,
@@ -112,14 +112,14 @@ impl<'a> CppLexer<'a> {
             "static_assert" => CppTokenKind::StaticAssertKeyword,
             "template" => CppTokenKind::TemplateKeyword,
             "thread_local" => CppTokenKind::ThreadLocalKeyword,
-            
+
             // C++20 keywords
             "concept" => CppTokenKind::ConceptKeyword,
             "requires" => CppTokenKind::RequiresKeyword,
             "co_await" => CppTokenKind::CoAwaitKeyword,
             "co_return" => CppTokenKind::CoReturnKeyword,
             "co_yield" => CppTokenKind::CoYieldKeyword,
-            
+
             // Not a keyword, return as identifier
             _ => CppTokenKind::Identifier,
         }
@@ -133,7 +133,7 @@ impl<'a> CppLexer<'a> {
             // Whitespace
             '\n' | '\r' => self.lex_newline(),
             ' ' | '\t' => self.lex_whitespace(),
-            
+
             // Single character tokens
             '(' => {
                 self.reader.bump();
@@ -175,7 +175,7 @@ impl<'a> CppLexer<'a> {
                 self.reader.bump();
                 CppTokenKind::Question
             }
-            
+
             // Operators that can be single or multi-character
             '+' => {
                 self.reader.bump();
@@ -394,7 +394,7 @@ impl<'a> CppLexer<'a> {
                     CppTokenKind::Hash
                 }
             }
-            
+
             // String and character literals, including the `u8`/`u`/`U`/`L` encoding prefixes and
             // the `R` raw-string prefix.
             '"' => self.lex_string_literal(),
@@ -411,10 +411,10 @@ impl<'a> CppLexer<'a> {
             ch if is_name_start_with_dollar(ch, self.lexer_config.dollar_in_identifier) => {
                 self.lex_identifier_like()
             }
-            
+
             // End of file
             _ if self.reader.is_eof() => CppTokenKind::Eof,
-            
+
             // Unknown character
             _ => {
                 self.reader.bump();
@@ -618,7 +618,9 @@ impl<'a> CppLexer<'a> {
             'U' | 'L' => 1,
             'u' => match self.reader.lookahead(1) {
                 '8' => 2,
-                'R' if self.reader.lookahead(2) == '"' && self.lexer_config.supports_raw_strings() => {
+                'R' if self.reader.lookahead(2) == '"'
+                    && self.lexer_config.supports_raw_strings() =>
+                {
                     1
                 }
                 _ => 1,
@@ -684,8 +686,7 @@ impl<'a> CppLexer<'a> {
                 }
                 None => {
                     // Stop at the first bad digit so the rest of the line still lexes normally.
-                    while self.reader.current_saved_text().len()
-                        < 2 + digits
+                    while self.reader.current_saved_text().len() < 2 + digits
                         && is_name_continue(self.reader.current_char())
                     {
                         self.reader.bump();
@@ -771,11 +772,7 @@ impl<'a> CppLexer<'a> {
                 break;
             }
             // `\0` means end of input, so an opening paren is missing.
-            if ch == '\\'
-                || ch == '\0'
-                || ch == ')'
-                || ch.is_whitespace()
-                || delimiter.len() >= 16
+            if ch == '\\' || ch == '\0' || ch == ')' || ch.is_whitespace() || delimiter.len() >= 16
             {
                 self.errors.push(CppParseError::syntax_error_from(
                     "malformed raw string delimiter",

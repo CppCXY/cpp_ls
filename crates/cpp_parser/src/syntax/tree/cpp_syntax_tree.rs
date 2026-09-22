@@ -1,10 +1,6 @@
 use rowan::GreenNode;
 
-use crate::{
-    kind::CppSyntaxKind,
-    parser_error::CppParseError,
-    syntax::CppSyntaxNode,
-};
+use crate::{kind::CppSyntaxKind, parser_error::CppParseError, syntax::CppSyntaxNode};
 
 /// The parse result for one source file.
 ///

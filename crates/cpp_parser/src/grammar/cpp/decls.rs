@@ -112,10 +112,11 @@ fn parse_template_parameter(p: &mut CppParser) -> ParseResult {
 
     // A template template parameter: `template <typename> class C`.
     if p.current_token() == CppTokenKind::TemplateKeyword
-        && let Err(err) = parse_template_head(p) {
-            p.close_marks_above(base);
-            return Err(err);
-        }
+        && let Err(err) = parse_template_head(p)
+    {
+        p.close_marks_above(base);
+        return Err(err);
+    }
 
     // The parameter itself is a declaration: `typename T`, `int N`, `auto N`, and a constrained
     // parameter is a type followed by a name. Reusing the declaration machinery keeps the shapes
@@ -129,10 +130,11 @@ fn parse_template_parameter(p: &mut CppParser) -> ParseResult {
     if !definitely_ends_a_type(p.current_token())
         && p.current_token() != CppTokenKind::Comma
         && p.current_token() != CppTokenKind::Greater
-        && let Err(err) = parse_declarator(p) {
-            p.close_marks_above(base);
-            return Err(err);
-        }
+        && let Err(err) = parse_declarator(p)
+    {
+        p.close_marks_above(base);
+        return Err(err);
+    }
 
     if p.current_token() == CppTokenKind::Ellipsis {
         p.bump();
@@ -238,10 +240,11 @@ pub fn parse_declaration(p: &mut CppParser) -> ParseResult {
     // separate rule is what lets templates apply to classes, functions, variables, aliases and
     // concepts without five copies of the same parser.
     if p.current_token() == CppTokenKind::TemplateKeyword
-        && let Err(err) = parse_template_head(p) {
-            p.rollback(checkpoint);
-            return Err(err);
-        }
+        && let Err(err) = parse_template_head(p)
+    {
+        p.rollback(checkpoint);
+        return Err(err);
+    }
 
     let specifiers_from = p.current_event_count();
 
@@ -303,7 +306,8 @@ pub fn parse_declaration(p: &mut CppParser) -> ParseResult {
     // A class, struct, union or enum definition ends with `;` as part of the *declaration*, not as
     // an empty declaration after it. `class Foo {};` is one declaration; without this, the `;` is
     // parsed as a stray empty statement.
-    if p.current_token() == CppTokenKind::Semicolon && declaration_defined_a_class(p, specifiers_from)
+    if p.current_token() == CppTokenKind::Semicolon
+        && declaration_defined_a_class(p, specifiers_from)
     {
         p.bump();
         return Ok(m.complete(p));
@@ -417,6 +421,13 @@ pub fn parse_init_declarator(p: &mut CppParser) -> ParseResult {
             p.close_marks_above(base);
             return Err(err);
         }
+
+        // A binding pattern is never a function declarator, so the flag has to be cleared rather than left as
+        // whatever the previous declarator set. It is sticky by design — an empty parameter list leaves no
+        // event behind for a caller to look for — and a stale `true` here is what made
+        // `for (auto [a, b] : pairs)` consume `: pairs` as a constructor's member initializer list.
+        p.set_last_declarator_is_function(false);
+
         return finish_init_declarator(p, m, declarator_from);
     }
 
@@ -432,6 +443,24 @@ pub fn parse_init_declarator(p: &mut CppParser) -> ParseResult {
         } else if p.current_token() == CppTokenKind::RightParen {
             p.bump();
             paren.complete(p);
+
+            // `S()` is a function declarator, and this branch is the one that recognises it: the empty
+            // parentheses are consumed here rather than by `parse_parameter_list`, so the flag that
+            // `parse_declarator` would have set has to be set here too. Without it a constructor's member
+            // initializer list — `S() : a(1) {}` — is not recognised, because the `:` looks like it follows a
+            // variable.
+            //
+            // Safe for the variable reading (`int (x)`, a parenthesized declarator) because the two are
+            // distinguished by what follows: a name cannot be followed by `:`, so the flag is only ever
+            // consulted on a path where the function reading is the right one.
+            p.set_last_declarator_is_function(true);
+
+            // The qualifiers that follow a parameter list, which the suffix loop below does not know about: it
+            // continues on `(` and `[`, and `noexcept` is neither. Leaving them to the caller is how
+            // `C() noexcept : x(0)` ended up with the `noexcept` unread and the member initializer list
+            // unrecognised — the two mistakes are the same one.
+            super::types::eat_function_qualifiers(p);
+
             if let Err(err) = finish_declarator_suffixes(p) {
                 p.close_marks_above(base);
                 return Err(err);
@@ -476,7 +505,10 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
     let declarator_is_function = p.last_declarator_is_function()
         || p.events_contain_any(
             declarator_from,
-            &[CppSyntaxKind::ParameterList, CppSyntaxKind::TrailingReturnType],
+            &[
+                CppSyntaxKind::ParameterList,
+                CppSyntaxKind::TrailingReturnType,
+            ],
         );
 
     match p.current_token() {
@@ -498,9 +530,18 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
             }
             init.complete(p);
         }
-        CppTokenKind::Colon => {
-            // A constructor's member initializer list: `Foo() : a(1), b(2) {}`. A `:` only follows a
-            // function declarator, so this is unambiguous.
+        // A constructor's member initializer list: `Foo() : a(1), b(2) {}`. Only a *function* declarator can be
+        // followed by one, so a `:` after a variable belongs to whatever encloses it.
+        //
+        // This is what a range-based `for`'s separator is: `for (auto x : items)` has a `:` right after the
+        // declared variable, and reading it as a member initializer list swallowed the whole range and then
+        // reported "expected `;`" against the header's `)`.
+        //
+        // The flag alone decides it, because `parse_declarator` sets it on **every** path — false at the start,
+        // true when a parameter list is parsed, including an empty one. Consulting the event stream as well looks
+        // like belt and braces and is not: an empty parameter list leaves no node behind, so `Foo() : a(1)` would
+        // be read as a variable declaration and its member initializer list rejected.
+        CppTokenKind::Colon if p.last_declarator_is_function() => {
             parse_member_initializer_list(p)?;
         }
         _ => {}
@@ -522,11 +563,13 @@ fn finish_declarator_suffixes(p: &mut CppParser) -> ParseResult {
             CppTokenKind::LeftBracket => {
                 let array = p.mark(CppSyntaxKind::ArrayType);
                 p.bump();
-                if p.current_token() != CppTokenKind::RightBracket && !p.is_eof()
-                    && let Err(err) = parse_expr(p) {
-                        array.undo(p);
-                        return Err(err);
-                    }
+                if p.current_token() != CppTokenKind::RightBracket
+                    && !p.is_eof()
+                    && let Err(err) = parse_expr(p)
+                {
+                    array.undo(p);
+                    return Err(err);
+                }
                 if let Err(err) = expect_token(p, CppTokenKind::RightBracket) {
                     array.undo(p);
                     return Err(err);
@@ -583,8 +626,7 @@ pub fn parse_braced_initializer(p: &mut CppParser) -> ParseResult {
 
     while p.current_token() != CppTokenKind::RightBrace && !p.is_eof() {
         // A designated initializer: `.field = 1` (C++20) or `[index] = 1`.
-        if p.current_token() == CppTokenKind::Dot
-            || p.current_token() == CppTokenKind::LeftBracket
+        if p.current_token() == CppTokenKind::Dot || p.current_token() == CppTokenKind::LeftBracket
         {
             let designator = p.mark(CppSyntaxKind::DesignatedInitExpr);
             if p.current_token() == CppTokenKind::Dot {
@@ -749,10 +791,11 @@ fn parse_parameter(p: &mut CppParser) -> ParseResult {
     // The declarator is optional: `void f(int)` is as valid as `void f(int x)`.
     if !definitely_ends_a_type(p.current_token())
         && p.current_token() != CppTokenKind::Comma
-        && let Err(err) = parse_declarator(p) {
-            p.close_marks_above(base);
-            return Err(err);
-        }
+        && let Err(err) = parse_declarator(p)
+    {
+        p.close_marks_above(base);
+        return Err(err);
+    }
 
     if p.current_token() == CppTokenKind::Assign {
         p.bump();
@@ -1008,8 +1051,7 @@ pub fn parse_namespace_declaration(p: &mut CppParser) -> ParseResult {
     expect_token(p, CppTokenKind::NamespaceKeyword)?;
 
     // A namespace alias: `namespace fs = std::filesystem;`
-    if p.current_token() == CppTokenKind::Identifier
-        && p.peek_next_token() == CppTokenKind::Assign
+    if p.current_token() == CppTokenKind::Identifier && p.peek_next_token() == CppTokenKind::Assign
     {
         p.bump();
         p.bump();

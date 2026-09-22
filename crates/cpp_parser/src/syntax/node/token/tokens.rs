@@ -7,9 +7,9 @@
 //! [`CppSyntaxToken`] plus a `CppAstToken` impl, with accessors as inherent methods.
 
 use crate::{
+    CppSyntaxToken,
     kind::{CppKind, CppSyntaxKind, CppTokenKind},
     syntax::traits::CppAstToken,
-    CppSyntaxToken,
 };
 
 /// Any token. The fallback for tokens with no special behaviour.

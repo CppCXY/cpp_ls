@@ -43,10 +43,7 @@ fn finds_top_level_declarations() {
     assert_eq!(kinds, vec!["variable", "function", "class"]);
     // A namespace is a `NamespaceDecl`, not a `Declaration`, so it is not in that list.
     assert_eq!(root.get_namespaces().count(), 1);
-    assert_eq!(
-        decl_names(source),
-        vec!["counter", "reset", "Point"]
-    );
+    assert_eq!(decl_names(source), vec!["counter", "reset", "Point"]);
 }
 
 #[test]
@@ -76,7 +73,10 @@ fn function_definition_exposes_params_and_body() {
     let (root, _) = unit("int add(int a, int b) { return a + b; }\n");
     let decl = root.get_declarations().next().unwrap();
 
-    assert!(decl.is_function_def(), "should be recognised as a definition");
+    assert!(
+        decl.is_function_def(),
+        "should be recognised as a definition"
+    );
     assert_eq!(decl.get_name_text().as_deref(), Some("add"));
 
     let declarator = decl.get_declarator().expect("declarator");
@@ -112,7 +112,8 @@ fn function_definition_with_trailing_return_type() {
 
 #[test]
 fn class_definition_exposes_members_and_access() {
-    let source = "class Foo : public Base {\npublic:\n    void method();\nprivate:\n    int value_;\n};\n";
+    let source =
+        "class Foo : public Base {\npublic:\n    void method();\nprivate:\n    int value_;\n};\n";
     let (root, _) = unit(source);
     let decl = root.get_declarations().next().unwrap();
 
@@ -151,7 +152,13 @@ fn enum_definition_exposes_enumerators() {
     let decl = root.get_declarations().next().unwrap();
     let enum_def = decl.get_enum_def().expect("enum definition");
 
-    assert_eq!(enum_def.get_name().map(|it| it.get_name_text().to_string()).as_deref(), Some("Color"));
+    assert_eq!(
+        enum_def
+            .get_name()
+            .map(|it| it.get_name_text().to_string())
+            .as_deref(),
+        Some("Color")
+    );
     assert!(enum_def.is_scoped(), "`enum class` is a scoped enum");
 
     let names: Vec<String> = enum_def
@@ -166,17 +173,17 @@ fn modules_are_typed() {
     let (root, _) = unit("export module my.mod:part;\n");
 
     let module = root.get_module_decl().expect("module declaration");
-    assert!(module.is_interface(), "`export module` is an interface unit");
+    assert!(
+        module.is_interface(),
+        "`export module` is an interface unit"
+    );
     assert_eq!(
         module.get_name().map(|it| it.get_name_text()).as_deref(),
         Some("my.mod")
     );
     let partition = module.get_partition().expect("partition");
     assert_eq!(
-        partition
-            .get_name()
-            .map(|it| it.get_name_text())
-            .as_deref(),
+        partition.get_name().map(|it| it.get_name_text()).as_deref(),
         Some("part")
     );
 }
@@ -200,10 +207,17 @@ fn imports_cover_all_three_forms() {
         .descendants()
         .filter_map(cpp_parser::CppImportDecl::cast)
         .collect();
-    assert_eq!(tree_imports.len(), 3, "expected three imports, got {imports:?}");
+    assert_eq!(
+        tree_imports.len(),
+        3,
+        "expected three imports, got {imports:?}"
+    );
 
     assert_eq!(
-        tree_imports[0].get_name().map(|it| it.get_name_text()).as_deref(),
+        tree_imports[0]
+            .get_name()
+            .map(|it| it.get_name_text())
+            .as_deref(),
         Some("std")
     );
     assert!(tree_imports[1].is_reexport());
@@ -276,12 +290,18 @@ fn preprocessor_directives_are_typed() {
         .collect();
 
     assert_eq!(directives.len(), 2);
-    assert_eq!(directives[0].get_directive_name().as_deref(), Some("include"));
+    assert_eq!(
+        directives[0].get_directive_name().as_deref(),
+        Some("include")
+    );
     assert_eq!(
         directives[0].get_header_name_text().as_deref(),
         Some("vector")
     );
-    assert_eq!(directives[1].get_directive_name().as_deref(), Some("define"));
+    assert_eq!(
+        directives[1].get_directive_name().as_deref(),
+        Some("define")
+    );
 }
 
 #[test]
@@ -447,7 +467,10 @@ fn accessors_agree_across_entry_points() {
         by_descendant.get_name_text(),
         "the same declaration must look the same however it is found"
     );
-    assert_eq!(by_child.syntax().text_range(), by_descendant.syntax().text_range());
+    assert_eq!(
+        by_child.syntax().text_range(),
+        by_descendant.syntax().text_range()
+    );
 }
 
 /// A module unit written the way a real one is, with a namespace around it.
@@ -489,7 +512,13 @@ fn a_realistic_module_unit_yields_its_declarations() {
     // reports itself as one rather than as a nameless variable.
     let top_level: Vec<String> = root
         .get_declarations()
-        .map(|decl| format!("{} {}", decl.kind_name(), decl.get_name_text().unwrap_or_default()))
+        .map(|decl| {
+            format!(
+                "{} {}",
+                decl.kind_name(),
+                decl.get_name_text().unwrap_or_default()
+            )
+        })
         .collect();
     assert_eq!(top_level, vec!["alias Point", "function helper"]);
 
@@ -503,7 +532,11 @@ fn a_realistic_module_unit_yields_its_declarations() {
         .get_declarations()
         .map(|stat| match stat {
             CppStat::Declaration(decl) => {
-                format!("{} {}", decl.kind_name(), decl.get_name_text().unwrap_or_default())
+                format!(
+                    "{} {}",
+                    decl.kind_name(),
+                    decl.get_name_text().unwrap_or_default()
+                )
             }
             other => format!("{other:?}"),
         })
@@ -668,7 +701,11 @@ fn attribute_lists_consume_both_closing_brackets() {
         let (_, tree) = unit(source);
 
         assert_eq!(tree.get_errors(), [], "{source:?} must parse cleanly");
-        assert_eq!(tree.to_source_text(), source, "{source:?} must stay lossless");
+        assert_eq!(
+            tree.to_source_text(),
+            source,
+            "{source:?} must stay lossless"
+        );
 
         // Every `[[` in the source is matched by a `]]` inside an `AttributeList`, so none is left over for
         // an enclosing rule to trip over.

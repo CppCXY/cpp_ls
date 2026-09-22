@@ -6,12 +6,12 @@
 //! still being written.
 
 use crate::{
+    CppSyntaxNode,
     kind::{CppKind, CppSyntaxKind, CppTokenKind},
     syntax::traits::{CppAstChildren, CppAstNode},
-    CppSyntaxNode,
 };
 
-use super::{CppDeclaration};
+use super::CppDeclaration;
 
 // ============================================================================
 // Modules
