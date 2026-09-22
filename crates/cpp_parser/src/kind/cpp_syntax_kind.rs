@@ -258,6 +258,18 @@ pub enum CppSyntaxKind {
     /// e.g.: [capture](params) -> return_type { body }
     LambdaExpr,
 
+    /// A lambda's capture list: the `[` … `]` of a lambda expression.
+    /// e.g.: the `[&x, y = 1]` of `[&x, y = 1](int z) { return x + y + z; }`
+    ///
+    /// A node of its own because the captures are what a reader of a lambda needs first — which names it takes,
+    /// and whether it takes them by reference — and finding them inside the raw tokens of the whole lambda means
+    /// re-implementing the list's grammar.
+    LambdaCaptureList,
+
+    /// One capture of a lambda's capture list.
+    /// e.g.: `x`, `&x`, `this`, `*this`, `=`, `&`, `...`, `x = std::move(y)`
+    LambdaCapture,
+
     /// Initializer list expression (C++11)
     /// e.g.: {1, 2, 3}, {.x = 1, .y = 2}
     InitListExpr,

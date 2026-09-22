@@ -340,6 +340,40 @@ fn parse_primary_expr(p: &mut CppParser) -> ParseResult {
             Ok(m.complete(p))
         }
 
+        // A parenthesized expression: `(a + b)`, `(x)`, `(f())`.
+        //
+        // This was simply missing, and nothing about it is subtle — `x = (a + b);` reported "expected primary
+        // expression" at the `(`. It went unnoticed because the parenthesised forms the corpus reached were
+        // all *statement* parentheses — `if (x)`, `f(a)` — which the statement and postfix rules consume
+        // themselves, so only an expression that begins with `(` ever got here.
+        //
+        // A `(` in an expression is never a declarator: the declaration reading is tried first and rewound
+        // before the expression grammar runs, so anything still standing at a `(` here is being *used*.
+        //
+        // A **comma** inside the parentheses is the comma operator, and the expression rule does not have it —
+        // see the comment on the operator table. `(a, b)` therefore does not parse yet, which is the same gap
+        // and not a second one.
+        CppTokenKind::LeftParen => {
+            let m = p.mark(CppSyntaxKind::ParenExpr);
+            p.bump();
+            if let Err(err) = parse_expr(p) {
+                m.undo(p);
+                return Err(err);
+            }
+            if let Err(err) = expect_token(p, CppTokenKind::RightParen) {
+                m.undo(p);
+                return Err(err);
+            }
+            Ok(m.complete(p))
+        }
+
+        // A lambda: `[capture](params) -> type { body }`.
+        //
+        // Decided by a shape check before anything is consumed, because `[` in an expression is otherwise an
+        // index — and the two are told apart by what follows the `]`: a lambda continues with `(`, `{`, or a
+        // qualifier, while an index has an expression in front of it and an operator after.
+        CppTokenKind::LeftBracket if starts_a_lambda(p) => parse_lambda(p),
+
         // `this`
         CppTokenKind::ThisKeyword => {
             let m = p.mark(CppSyntaxKind::ThisExpr);
@@ -371,4 +405,184 @@ fn is_expression_keyword(p: &CppParser) -> bool {
             | CppTokenKind::CoAwaitKeyword
             | CppTokenKind::RequiresKeyword
     )
+}
+
+/// Does the `[` at the cursor introduce a lambda rather than an index expression?
+///
+/// The two are the same token and there is no name in front to help, so the decision is made from what follows
+/// the matching `]`:
+///
+/// ```text
+/// [x]        { return x; }      a lambda: capture list, then the body
+/// [x]        (int y) { ... }    a lambda: capture list, then the parameters
+/// [x]        mutable { ... }    a lambda: a qualifier may sit between them
+/// arr[i]                        an index — the `[` has an expression before it
+/// ```
+///
+/// A `]` followed by anything else is not a lambda introducer, and the caller's index reading takes it. The scan
+/// is bounded and does not descend: a capture list cannot contain an unbalanced `]`, so the first one closes it.
+fn starts_a_lambda(p: &CppParser) -> bool {
+    use CppTokenKind::{
+        Ampersand, Arrow, Assign, CharLiteral, Comma, Ellipsis, FalseKeyword, FloatingLiteral,
+        Identifier, IntegerLiteral, LeftBrace, LeftParen, MutableKeyword, NoexceptKeyword,
+        NullptrKeyword, RightBracket, RightParen, Scope, Star, StringLiteral, ThisKeyword,
+        TrueKeyword,
+    };
+
+    // The capture list's own contents, so that a malformed one stops the reading rather than swallowing the
+    // rest of the expression. Relative offsets: `0` is the `[` at the cursor, so the scan starts at `1`.
+    //
+    // A **literal or a call** is admitted too, and only because of the init-capture: `[p = 1]` and
+    // `[p = make()]` are single captures whose initialiser is an expression, and refusing every token an
+    // expression can contain would refuse those. The risk runs the other way — an index expression like
+    // `arr[1]` — and the second half of the check catches it, because `arr[1]` is followed by whatever the
+    // statement continues with rather than by `(`, `{` or a qualifier.
+    let mut next_after_the_list = None;
+    for (offset, kind) in p.peek_token_kind_at(1..64).into_iter().enumerate() {
+        match kind {
+            Identifier
+            | Comma
+            | Ampersand
+            | Assign
+            | Ellipsis
+            | ThisKeyword
+            | Star
+            | Scope
+            // An init-capture's initialiser, which is an expression: its literal, or the parentheses of a call.
+            | IntegerLiteral
+            | FloatingLiteral
+            | StringLiteral
+            | CharLiteral
+            | TrueKeyword
+            | FalseKeyword
+            | NullptrKeyword
+            | LeftParen
+            | RightParen => {}
+            RightBracket => {
+                next_after_the_list = p.peek_token_kind_at(offset + 2..offset + 3).first().copied();
+                break;
+            }
+            // Anything else cannot appear in a capture list at all — a `;`, a `)`, a `}` — so this `[` was not
+            // the start of one.
+            _ => return false,
+        }
+    }
+
+    // What follows decides, and only two things can: the parameters or the body, with the qualifiers that may
+    // sit between them.
+    matches!(
+        next_after_the_list,
+        Some(LeftParen)
+            | Some(LeftBrace)
+            | Some(MutableKeyword)
+            | Some(NoexceptKeyword)
+            | Some(Arrow)
+    )
+}
+
+/// Parse a lambda expression: `[capture](params) qualifiers -> type { body }`.
+///
+/// Everything after the capture list is optional, and the body is required — which is what makes the shape check
+/// in [`starts_a_lambda`] safe to trust.
+fn parse_lambda(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::LambdaExpr);
+
+    if let Err(err) = parse_capture_list(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    // The parameter list, when it is written. A lambda's parameters are the same grammar as a function's, and
+    // reusing the rule is what makes a default argument, a pack or a `std::function` parameter work here too.
+    if p.current_token() == CppTokenKind::LeftParen
+        && let Err(err) = super::decls::parse_parameter_list(p)
+    {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    // `mutable`, `constexpr`, `consteval`, `noexcept`, `-> type`, and the attributes that may appear among them.
+    super::types::eat_function_qualifiers(p);
+
+    // The body. A lambda's body is a compound statement like any other, so it is parsed by the statement rule —
+    // which is also what keeps `return` and every other statement inside it working.
+    if let Err(err) = super::stats::parse_compound_stat(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    Ok(m.complete(p))
+}
+
+/// Parse a lambda's capture list: the `[` … `]` at the cursor.
+///
+/// Kept as its own node so that a consumer can see what a lambda *captures* — the names, the `&` that makes a
+/// capture by reference, `this`, and the initialisers of an init-capture — without walking the raw tokens of the
+/// whole lambda to find them.
+fn parse_capture_list(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::LambdaCaptureList);
+
+    if let Err(err) = expect_token(p, CppTokenKind::LeftBracket) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    while p.current_token() != CppTokenKind::RightBracket && !p.is_eof() {
+        if let Err(err) = parse_capture(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+        if p.current_token() == CppTokenKind::Comma {
+            p.bump();
+            continue;
+        }
+        break;
+    }
+
+    if let Err(err) = expect_token(p, CppTokenKind::RightBracket) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    Ok(m.complete(p))
+}
+
+/// One capture: `x`, `&x`, `this`, `*this`, `=`, `&`, `...`, or `x = expr`.
+fn parse_capture(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::LambdaCapture);
+
+    // The sigil, when there is one. `&` alone captures everything by reference and `=` everything by copy, so
+    // neither has to be followed by a name — and `*this` is a capture of the object by copy.
+    if matches!(
+        p.current_token(),
+        CppTokenKind::Ampersand | CppTokenKind::Star
+    ) {
+        p.bump();
+    }
+
+    // The capture itself: a name, `this`, `...`, or the `=` of a by-copy default. None of them is required —
+    // `[&]` and `[=]` are complete captures on their own — so this is one optional token, not a chain of cases.
+    if matches!(
+        p.current_token(),
+        CppTokenKind::ThisKeyword
+            | CppTokenKind::Ellipsis
+            | CppTokenKind::Assign
+            | CppTokenKind::Identifier
+    ) {
+        p.bump();
+    }
+
+    // An init-capture: `x = std::move(other)`, or `...args = pack`.
+    if p.current_token() == CppTokenKind::Assign {
+        p.bump();
+        if let Err(err) = parse_expr(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+    }
+
+    Ok(m.complete(p))
 }

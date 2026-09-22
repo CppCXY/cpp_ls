@@ -1386,6 +1386,12 @@ pub fn eat_function_qualifiers(p: &mut CppParser) {
         match p.current_token() {
             CppTokenKind::ConstKeyword
             | CppTokenKind::VolatileKeyword
+            // `mutable` is a specifier on a member function and a qualifier on a lambda's `operator()`, and it
+            // sits in the same position either way: after the parameter list, before the body. `constexpr` and
+            // `consteval` may follow a lambda's parameter list for the same reason.
+            | CppTokenKind::MutableKeyword
+            | CppTokenKind::ConstexprKeyword
+            | CppTokenKind::ConstevalKeyword
             | CppTokenKind::Ampersand
             | CppTokenKind::LogicalAnd => p.bump(),
             CppTokenKind::NoexceptKeyword => {

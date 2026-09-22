@@ -365,6 +365,62 @@ const CORPUS: &[(&str, &str)] = &[
         ),
     ),
     (
+        // A parenthesized expression was simply missing from the primary-expression rule, so every expression
+        // that *began* with `(` failed — and that is what kept the conditional operator from working, since
+        // `(a > b) ? x : y` has to parse the parenthesized condition first.
+        "parenthesized expressions and the conditional operator",
+        concat!(
+            "void f() {\n",
+            "    x = (a);\n",
+            "    x = (a + b);\n",
+            "    x = (f());\n",
+            "    x = a * (b + c);\n",
+            "    x = ((a));\n",
+            "    x = a ? b : c;\n",
+            "    x = (a > b) ? a : b;\n",
+            "    x = (a ? b : c) ? d : e;\n",
+            "    x = cond ? (a + b) : (c + d);\n",
+            "    f((a), (b));\n",
+            "    if ((a)) { }\n",
+            "    while ((a && b)) { }\n",
+            "    auto y = (a > b) ? a : b;\n",
+            "    return (a) ? (b) : (c);\n",
+            "}\n",
+        ),
+    ),
+    (
+        // Every shape a lambda's capture list can take, and every position its parameters, qualifiers, trailing
+        // return type and body can occupy. The introducer is decided by a shape check because `[` is also the
+        // index operator, so the index spellings are here too — they are what the check must not steal.
+        "lambda expressions",
+        concat!(
+            "void f() {\n",
+            "    auto a = [] {};\n",
+            "    auto b = []() { return 1; };\n",
+            "    auto c = [](int x) { return x; };\n",
+            "    auto d = [&](int x) { return x + 1; };\n",
+            "    auto e = [x](int y) { return x + y; };\n",
+            "    auto g = [&x, y]() { return x + y; };\n",
+            "    auto h = [=]() { return x; };\n",
+            "    auto i = [this]() { return n; };\n",
+            "    auto j = [*this]() { return n; };\n",
+            "    auto k = []() mutable { };\n",
+            "    auto l = []() constexpr { };\n",
+            "    auto m = []() noexcept { };\n",
+            "    auto n = [](int x) -> int { return x; };\n",
+            "    auto o = [p = 1]() { return p; };\n",
+            "    auto q = [n](auto x) { return x; };\n",
+            "    auto r = [x, &y]() { };\n",
+            "    std::sort(v.begin(), v.end(), [](int i, int j) { return i < j; });\n",
+            "    call([](int i) { return i; }, 1);\n",
+            "    arr[index] = 1;\n",
+            "    auto s = a[b];\n",
+            "    int t[] = {1, 2};\n",
+            "}\n",
+            "auto file_scope = [](int x) { return x; };\n",
+        ),
+    ),
+    (
         "preprocessor soup",
         "#pragma once\n#include <vector>\n#include \"local.h\"\n#define MAX(a, b) ((a) > (b) ? (a) : (b))\n#if defined(FOO) && FOO > 2\nextern \"C\" {\n#endif\nvoid f();\n#ifdef BAR\n}\n#endif\n",
     ),
@@ -753,6 +809,13 @@ const MUST_PARSE_CLEANLY: &[&str] = &[
     // *expression* reading stop at the `=`, so a statement was reported as `expected ; after expression` and
     // the declaration/expression fallback could not help — the expression reading was the one that failed.
     "assignment and compound assignment",
+    // The expression grammar had no rule for a `(` at all, so any expression that *began* with one failed —
+    // which is also why `(a > b) ? x : y` never reached the conditional operator that was already implemented.
+    "parenthesized expressions and the conditional operator",
+    // A lambda is introduced by `[`, which is also the index operator, so the two readings are decided by a
+    // shape check on the capture list and what follows it. Every capture form is in the entry because each one
+    // is a token the check has to accept.
+    "lambda expressions",
     // The doc layer writes into the same event stream, so a comment must not turn valid code into a
     // diagnostic. `@code`, `@param[in]` and a comment inside a class body are the shapes that would.
     "documentation comments",
