@@ -32,10 +32,7 @@
 
 use cpp_parser::{CppTokenKind, SourceRange};
 
-use crate::{
-    macros::MacroDef,
-    token::Token,
-};
+use crate::{macros::MacroDef, token::Token};
 
 /// The value of a conditional expression, or the reason there is not one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -247,7 +244,8 @@ pub fn eval(expr: &ConditionExpr, macros: &impl MacroValues) -> Value {
             None => Value::Unknown,
         },
         ConditionExpr::Binary { op, left, right } => {
-            let (Some(left), Some(right)) = (eval(left, macros).known(), eval(right, macros).known())
+            let (Some(left), Some(right)) =
+                (eval(left, macros).known(), eval(right, macros).known())
             else {
                 return Value::Unknown;
             };
@@ -294,7 +292,9 @@ fn macro_value(definition: &MacroDef) -> Value {
     }
 
     match first.kind {
-        CppTokenKind::IntegerLiteral => parse_integer(first.text()).map_or(Value::Unknown, Value::Known),
+        CppTokenKind::IntegerLiteral => {
+            parse_integer(first.text()).map_or(Value::Unknown, Value::Known)
+        }
         _ => Value::Unknown,
     }
 }
@@ -351,15 +351,16 @@ pub fn parse_integer(text: &str) -> Option<i128> {
         return None;
     }
 
-    let (digits, radix) = if let Some(rest) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
-        (rest, 16)
-    } else if let Some(rest) = body.strip_prefix("0b").or_else(|| body.strip_prefix("0B")) {
-        (rest, 2)
-    } else if body.len() > 1 && body.starts_with('0') {
-        (&body[1..], 8)
-    } else {
-        (body, 10)
-    };
+    let (digits, radix) =
+        if let Some(rest) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
+            (rest, 16)
+        } else if let Some(rest) = body.strip_prefix("0b").or_else(|| body.strip_prefix("0B")) {
+            (rest, 2)
+        } else if body.len() > 1 && body.starts_with('0') {
+            (&body[1..], 8)
+        } else {
+            (body, 10)
+        };
 
     i128::from_str_radix(digits, radix).ok()
 }
@@ -571,7 +572,9 @@ impl<'a> Parser<'a> {
         };
 
         match token.kind {
-            CppTokenKind::IntegerLiteral | CppTokenKind::CharLiteral | CppTokenKind::BoolLiteral => {
+            CppTokenKind::IntegerLiteral
+            | CppTokenKind::CharLiteral
+            | CppTokenKind::BoolLiteral => {
                 let token = self.bump().expect("checked");
                 Ok(ConditionExpr::Number(
                     parse_integer(token.text()).unwrap_or(0),

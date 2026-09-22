@@ -86,8 +86,15 @@ pub enum Origin {
 pub struct MacroInvocation {
     /// The macro's name.
     pub name: Box<str>,
-    /// Where the macro was defined.
+    /// Where the macro was **defined**: the whole directive, for a consumer that wants to show it.
     pub definition: SourceRange,
+    /// Where the macro's **name** was written, for a consumer that wants to put a cursor on it.
+    ///
+    /// Separate from `definition` because the two are asked for by different features and the difference
+    /// is visible: "reveal this macro" opens the file at the directive, while a go-to-definition puts the
+    /// cursor *on the name* so that a second jump goes wherever the name leads. A range covering the whole
+    /// `#define` would put the cursor on the `#`.
+    pub name_at: SourceRange,
     /// Where it was called: the name, and the argument list when there is one.
     pub call_site: SourceRange,
 }
@@ -182,17 +189,20 @@ impl ExpandedToken {
         }
     }
 
-    /// Where to *navigate* from this token.
+    /// Where to *navigate* from this token: the macro's name.
     ///
     /// **The innermost macro**, which is the one whose body the token was actually written in — and so the
     /// one whose text the token is. Deliberately the opposite end of the chain from
     /// [`diagnostic_range`](Self::diagnostic_range): a reader following a link wants the definition, and a
     /// reader fixing a problem wants their own code.
+    ///
+    /// The *name* rather than the whole directive, so that the cursor lands somewhere a second jump can
+    /// start from. See [`MacroInvocation::name_at`].
     pub fn navigation_range(&self) -> SourceRange {
         match &self.origin {
             Origin::Expanded { invocations } => invocations
                 .last()
-                .map(|invocation| invocation.definition)
+                .map(|invocation| invocation.name_at)
                 .unwrap_or(self.token.range),
             _ => self.token.range,
         }
@@ -219,7 +229,11 @@ pub enum ExpansionNote {
     /// typed.
     UnterminatedArgumentList { name: Box<str> },
     /// The wrong number of arguments.
-    WrongArgumentCount { name: Box<str>, expected: usize, found: usize },
+    WrongArgumentCount {
+        name: Box<str>,
+        expected: usize,
+        found: usize,
+    },
     /// The macro is already being expanded, so expanding it again would not terminate.
     Recursive { name: Box<str> },
     /// Expansions nested deeper than [`MAX_DEPTH`].
@@ -389,7 +403,8 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
             }
         };
 
-        let separated_in_source = same_file && previous.range.end_offset() < token.range.start_offset;
+        let separated_in_source =
+            same_file && previous.range.end_offset() < token.range.start_offset;
 
         separated_in_source || needs_a_separator(previous, token)
     }
@@ -457,10 +472,7 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
             let name = token.text.clone();
 
             if self.active.contains(&name) {
-                self.note(
-                    ExpansionNote::Recursive { name: name.clone() },
-                    token.range,
-                );
+                self.note(ExpansionNote::Recursive { name: name.clone() }, token.range);
                 if !self.push(token.clone(), tokens[index].origin.clone(), region) {
                     return;
                 }
@@ -483,6 +495,7 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
                     let invocation = MacroInvocation {
                         name: name.clone(),
                         definition: definition.range,
+                        name_at: definition.name_range,
                         call_site: token.range,
                     };
                     self.expand_body(&definition, &[], tokens, invocation);
@@ -492,7 +505,10 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
                 // check is on the next token rather than on the next significant one.
                 Some(_) => {
                     if !next_token_is_a_call(tokens, index) {
-                        self.note(ExpansionNote::NoArgumentList { name: name.clone() }, token.range);
+                        self.note(
+                            ExpansionNote::NoArgumentList { name: name.clone() },
+                            token.range,
+                        );
                         if !self.push(token.clone(), tokens[index].origin.clone(), region) {
                             return;
                         }
@@ -535,6 +551,7 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
                     let invocation = MacroInvocation {
                         name: name.clone(),
                         definition: definition.range,
+                        name_at: definition.name_range,
                         call_site,
                     };
 
@@ -741,7 +758,10 @@ fn substitute(
         // An object-like macro is its body. The layout around the body goes: it is the space after the
         // macro's name and the newline that ended the directive, and it belongs to the `#define` rather
         // than to what the macro expands to. Keeping it would make `VERSION` expand to `" 3\n"`.
-        return significant_tokens(&definition.body.tokens).into_iter().map(Marked::from).collect();
+        return significant_tokens(&definition.body.tokens)
+            .into_iter()
+            .map(Marked::from)
+            .collect();
     };
 
     // Every token that is not layout, in body order. `stringize` and `paste` index into *this*, which is
@@ -1055,20 +1075,3 @@ fn is_parameter(params: &[crate::macros::Parameter], name: &str) -> bool {
 pub fn could_be_a_macro_name(kind: CppTokenKind) -> bool {
     kind == CppTokenKind::Identifier || is_keyword(kind)
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

@@ -7,8 +7,7 @@
 //!   written in the file, or go-to-definition and diagnostics both point at the wrong place.
 
 use cpp_code_analysis::{
-    ExpandedToken, MacroTable, Origin, Token, expand, expand_with_budget,
-    macros::MacroDef, preprocess::preprocess,
+    ExpandedToken, MacroTable, Origin, Token, expand, expand_with_budget, preprocess::preprocess,
 };
 use cpp_parser::{CppParser, CppTokenKind, ParserConfig};
 
@@ -27,7 +26,8 @@ use cpp_parser::{CppParser, CppTokenKind, ParserConfig};
 /// the tokens in that range.
 fn lex(source: &str) -> Vec<Token> {
     let mut errors = Vec::new();
-    let mut lexer = cpp_parser::CppLexer::new(source, cpp_parser::LexerConfig::default(), &mut errors);
+    let mut lexer =
+        cpp_parser::CppLexer::new(source, cpp_parser::LexerConfig::default(), &mut errors);
 
     lexer
         .tokenize()
@@ -107,14 +107,6 @@ fn rendered(expansion: &cpp_code_analysis::Expansion) -> String {
     out
 }
 
-/// One definition, for the tests that need the `MacroDef` itself.
-fn definition(defines: &str, name: &str) -> MacroDef {
-    table(defines)
-        .get(name)
-        .unwrap_or_else(|| panic!("{name} is defined"))
-        .clone()
-}
-
 // ============================================================================
 // Object-like macros
 // ============================================================================
@@ -124,7 +116,11 @@ fn an_object_like_macro_is_replaced_by_its_body() {
     let expansion = expand_use("#define VERSION 3\n", "VERSION");
 
     assert_eq!(joined(&expansion), "3");
-    assert!(expansion.diagnostics.is_empty(), "{:?}", expansion.diagnostics);
+    assert!(
+        expansion.diagnostics.is_empty(),
+        "{:?}",
+        expansion.diagnostics
+    );
 }
 
 /// An empty body expands to nothing. `#define FEATURE` is a feature flag, and the identifier simply
@@ -163,10 +159,7 @@ fn a_macro_body_containing_another_macro_is_expanded_too() {
 
 #[test]
 fn a_function_like_macro_takes_arguments() {
-    let expansion = expand_use(
-        "#define MAX(a, b) ((a) > (b) ? (a) : (b))\n",
-        "MAX(1, 2)",
-    );
+    let expansion = expand_use("#define MAX(a, b) ((a) > (b) ? (a) : (b))\n", "MAX(1, 2)");
 
     assert_eq!(joined(&expansion), "((1) > (2) ? (1) : (2))");
 }
@@ -219,7 +212,11 @@ fn a_comma_inside_brackets_does_not_split_an_argument() {
     let expansion = expand_use("#define ID(x) x\n", "ID((1, 2))");
 
     assert_eq!(joined(&expansion), "(1, 2)");
-    assert!(expansion.diagnostics.is_empty(), "{:?}", expansion.diagnostics);
+    assert!(
+        expansion.diagnostics.is_empty(),
+        "{:?}",
+        expansion.diagnostics
+    );
 }
 
 /// An argument that is a macro is expanded before it is substituted — the standard's prescan.
@@ -254,7 +251,11 @@ fn an_empty_argument_list_is_zero_arguments() {
     let expansion = expand_use("#define NOTHING() 42\n", "NOTHING()");
 
     assert_eq!(joined(&expansion), "42");
-    assert!(expansion.diagnostics.is_empty(), "{:?}", expansion.diagnostics);
+    assert!(
+        expansion.diagnostics.is_empty(),
+        "{:?}",
+        expansion.diagnostics
+    );
 }
 
 #[test]
@@ -369,7 +370,8 @@ fn a_token_from_a_macro_body_is_marked_as_expanded() {
 }
 
 /// **The two ranges disagree on purpose, and both are needed.** A reader following a link wants the
-/// macro; a reader fixing a problem wants the line they are looking at.
+/// macro's *name* — so that a second jump starts from it — and a reader fixing a problem wants their own
+/// line.
 #[test]
 fn navigation_reaches_the_macro_and_a_diagnostic_reaches_the_call_site() {
     let defines = "#define VERSION 3\n";
@@ -381,9 +383,12 @@ fn navigation_reaches_the_macro_and_a_diagnostic_reaches_the_call_site() {
         .find(|token| token.is_expanded())
         .expect("an expanded token");
 
-    // The macro's name is written in the `#define`, so navigation lands there…
-    let definition_range = definition(defines, "VERSION").range;
-    assert_eq!(expanded.navigation_range(), definition_range);
+    // Navigation lands on the name, in the `#define`, and the name is exactly `VERSION`.
+    let name_range = expanded.navigation_range();
+    assert_eq!(
+        &defines[name_range.start_offset..name_range.end_offset()],
+        "VERSION"
+    );
 
     // …while a diagnostic lands on the use, which is in the *use site* and not in the defines.
     let range = expanded.diagnostic_range();
@@ -397,6 +402,27 @@ fn navigation_reaches_the_macro_and_a_diagnostic_reaches_the_call_site() {
     );
 }
 
+/// The name's position is *recorded*, not searched for, so an unusual spelling of the directive's head
+/// still navigates to the name. `#  define  NAME` is legal and a search for the first identifier would
+/// find `define`.
+#[test]
+fn navigation_finds_the_name_however_the_head_is_spelled() {
+    for defines in [
+        "#define VERSION 3\n",
+        "#  define  VERSION 3\n",
+        "#define\tVERSION 3\n",
+    ] {
+        let expansion = expand_use(defines, "VERSION");
+        let range = expansion.tokens[0].navigation_range();
+
+        assert_eq!(
+            &defines[range.start_offset..range.end_offset()],
+            "VERSION",
+            "{defines:?}"
+        );
+    }
+}
+
 /// The call site covers the name *and* its arguments, because that is the extent a reader recognizes
 /// as "the thing I wrote".
 #[test]
@@ -404,10 +430,7 @@ fn the_call_site_covers_the_whole_invocation() {
     let expansion = expand_use("#define MAX(a, b) 0\n", "MAX(1, 2)");
 
     let range = match &expansion.tokens[0].origin {
-        Origin::Expanded { invocations } => invocations
-            .first()
-            .expect("an invocation")
-            .call_site,
+        Origin::Expanded { invocations } => invocations.first().expect("an invocation").call_site,
         other => panic!("expected an expansion, got {other:?}"),
     };
 
@@ -486,7 +509,11 @@ fn mutually_recursive_macros_terminate() {
         "{:?}",
         expansion.diagnostics
     );
-    assert!(expansion.tokens.len() < 16, "it stopped: {:?}", text(&expansion));
+    assert!(
+        expansion.tokens.len() < 16,
+        "it stopped: {:?}",
+        text(&expansion)
+    );
 }
 
 /// A macro that only *mentions* itself in a branch that is not taken still terminates, because the hide
@@ -509,7 +536,8 @@ fn a_macro_that_mentions_itself_after_other_tokens_terminates() {
 /// about one spelling rather than about the mechanism.
 #[test]
 fn the_token_budget_stops_a_runaway_expansion() {
-    let macros = table("#define A B B\n#define B C C\n#define C D D\n#define D E E\n#define E F F\n");
+    let macros =
+        table("#define A B B\n#define B C C\n#define C D D\n#define D E E\n#define E F F\n");
     let tokens = tokens_of("A");
 
     let expansion = expand_with_budget(&tokens, &macros, 20);
@@ -649,7 +677,11 @@ fn a_realistic_macro_expands_correctly() {
         joined(&expansion),
         "int m = ((x + 1) > (y) ? (x + 1) : (y));"
     );
-    assert!(expansion.diagnostics.is_empty(), "{:?}", expansion.diagnostics);
+    assert!(
+        expansion.diagnostics.is_empty(),
+        "{:?}",
+        expansion.diagnostics
+    );
 
     // The `x` in the expansion came from the argument, which came from the file — and it is still
     // marked as expanded, because its *position in the output* is a macro body's.
@@ -660,5 +692,3 @@ fn a_realistic_macro_expands_correctly() {
         .count();
     assert!(expanded > 8, "most of the expression came from the macro");
 }
-
-

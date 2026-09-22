@@ -185,7 +185,9 @@ pub enum Directive {
         name: Box<str>,
     },
     /// `#else` / `#endif`: no arguments to read.
-    Marker { kind: DirectiveKind },
+    Marker {
+        kind: DirectiveKind,
+    },
     Define(Define),
     Undef {
         /// `None` when the directive has no readable name, which is the state of `#undef` with the
@@ -198,17 +200,26 @@ pub enum Directive {
     /// Not interpreted. `#pragma once` and `#pragma pack` are the two that matter and neither needs a
     /// grammar; a layer that claimed to understand every pragma would have to understand every
     /// compiler's extensions.
-    Pragma { tokens: Vec<Token> },
+    Pragma {
+        tokens: Vec<Token>,
+    },
     /// `#error` or `#warning`, with its message as written.
-    Diagnostic { kind: DirectiveKind, message: String },
+    Diagnostic {
+        kind: DirectiveKind,
+        message: String,
+    },
     /// `#line ...`, with its arguments.
-    Line { tokens: Vec<Token> },
+    Line {
+        tokens: Vec<Token>,
+    },
     /// A `#` alone on a line.
     Null,
     /// A name this layer does not know, or one whose arguments did not read.
     ///
     /// Carries the name so that a consumer can still tell `#pragma_custom` from ``.
-    Other { name: Box<str> },
+    Other {
+        name: Box<str>,
+    },
 }
 
 impl Directive {
@@ -291,12 +302,17 @@ pub fn scan_directives(root: &CppSyntaxNode) -> Vec<SpannedDirective> {
         let directive = parse_directive_tokens(&tokens, range);
 
         let kind = directive.kind();
-        if kind.closes_a_condition() && kind != DirectiveKind::Elif {
-            // `#endif` closes the region it ends. The depth recorded on it is the depth it was
-            // written at — the one it closes — and the running depth drops afterwards.
+
+        // `#endif` is the only directive that *ends* a region. `#elif` and `#else` continue the one they are
+        // in — they are written at the same depth as the `#if` they belong to, and everything after them is
+        // still inside it. Treating `#else` as a closer is a one-line mistake that corrupts the depth of every
+        // directive after it in the file: the `#define` in an `#else` branch is recorded as being at file
+        // scope, so a consumer looking for "which `#if` is this in" finds none.
+        if kind == DirectiveKind::Endif {
             out.push(SpannedDirective {
                 directive,
                 range,
+                // The depth it was written at, which is the one it closes.
                 condition_depth: depth.saturating_sub(1),
             });
             depth = depth.saturating_sub(1);

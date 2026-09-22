@@ -90,8 +90,18 @@ pub struct MacroDef {
 
     pub body: MacroBody,
 
-    /// The definition's range, for "go to definition" on a use.
+    /// The definition's range: the whole `#define` directive.
+    ///
+    /// What "reveal this macro" opens the file at.
     pub range: SourceRange,
+
+    /// Where the macro's **name** was written inside that directive.
+    ///
+    /// Recorded here rather than derived later, because deriving it means searching the directive's text
+    /// for the name — and the head's spelling varies (`#  define  NAME`, `#define\tNAME`), so a search is
+    /// a second implementation of the same rule, free to disagree with the one that assigned the name.
+    /// A go-to-definition puts the cursor here, not at the `#`.
+    pub name_range: SourceRange,
 }
 
 impl MacroDef {
@@ -187,11 +197,9 @@ impl MacroTable {
 
     /// The binding in force at `offset`, or at the end of the file when `offset` is `None`.
     fn binding_at(&self, name: &str, offset: Option<usize>) -> Option<&Binding> {
-        self.bindings
-            .iter()
-            .rfind(|binding| {
-                &*binding.name == name && offset.is_none_or(|offset| binding.at <= offset)
-            })
+        self.bindings.iter().rfind(|binding| {
+            &*binding.name == name && offset.is_none_or(|offset| binding.at <= offset)
+        })
     }
 
     /// What `name` means at the end of the file.
@@ -271,11 +279,12 @@ pub fn parse_define(tokens: &[Token], range: SourceRange) -> Option<MacroDef> {
 
     // Leading whitespace before the name is legal: `#  define  FOO 1`.
     skip_trivia(tokens, &mut index);
-    let name = tokens.get(index)?;
-    if !could_be_a_macro_name(name.kind) {
+    let name_token = tokens.get(index)?;
+    if !could_be_a_macro_name(name_token.kind) {
         return None;
     }
-    let name = name.text.clone();
+    let name_range = name_token.range;
+    let name = name_token.text.clone();
     index += 1;
 
     let params = parse_parameters(tokens, &mut index);
@@ -286,6 +295,7 @@ pub fn parse_define(tokens: &[Token], range: SourceRange) -> Option<MacroDef> {
         params,
         body,
         range,
+        name_range,
     })
 }
 
@@ -424,9 +434,11 @@ fn is_dropped_in_a_body(kind: CppTokenKind) -> bool {
 }
 
 fn is_parameter(params: &Option<Vec<Parameter>>, name: &str) -> bool {
-    params
-        .as_ref()
-        .is_some_and(|params| params.iter().any(|param| &*param.name == name || name == "__VA_ARGS__"))
+    params.as_ref().is_some_and(|params| {
+        params
+            .iter()
+            .any(|param| &*param.name == name || name == "__VA_ARGS__")
+    })
 }
 
 fn skip_trivia(tokens: &[Token], index: &mut usize) {

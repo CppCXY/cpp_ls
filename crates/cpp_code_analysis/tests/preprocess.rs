@@ -60,7 +60,10 @@ fn directive(text: &str) -> Directive {
         })
         .expect("a directive node");
 
-    parse_directive_tokens(&cpp_code_analysis::token::tokens_of(&node), source_range(node.text_range()))
+    parse_directive_tokens(
+        &cpp_code_analysis::token::tokens_of(&node),
+        source_range(node.text_range()),
+    )
 }
 
 /// The macro a `#define` introduces.
@@ -134,7 +137,13 @@ fn a_null_directive_is_recognised() {
 #[test]
 fn a_truncated_directive_is_read_as_far_as_it_goes() {
     for text in [
-        "#\n", "#if\n", "#ifdef\n", "#define\n", "#include\n", "#undef\n", "#pragma\n",
+        "#\n",
+        "#if\n",
+        "#ifdef\n",
+        "#define\n",
+        "#include\n",
+        "#undef\n",
+        "#pragma\n",
         "#error\n",
     ] {
         let tree = CppParser::parse(text, ParserConfig::default());
@@ -151,7 +160,10 @@ fn a_truncated_directive_is_read_as_far_as_it_goes() {
 fn an_angle_include_is_an_angle_include() {
     match first("#include <vector>\n", DirectiveKind::Include) {
         Directive::Include(Include {
-            form, target, is_next, ..
+            form,
+            target,
+            is_next,
+            ..
         }) => {
             assert_eq!(form, IncludeForm::Angle);
             assert_eq!(&*target, "vector");
@@ -518,7 +530,10 @@ fn a_macro_with_an_unreadable_body_is_unknown() {
     let mut macros = MacroTable::new();
     macros.define(macro_of("#define _MSC_VER (1900 + 1)\n"));
 
-    assert_eq!(condition_value("#if _MSC_VER > 1900\n", &macros), Value::Unknown);
+    assert_eq!(
+        condition_value("#if _MSC_VER > 1900\n", &macros),
+        Value::Unknown
+    );
     assert_eq!(
         condition_value("#if _MSC_VER > 1900\n", &macros).is_true(),
         None,
@@ -756,7 +771,11 @@ fn a_guard_reports_its_depth() {
         .collect();
 
     assert_eq!(preprocessing.guard_at(0).depth(), 0, "before anything");
-    assert_eq!(preprocessing.guard_at(ends[0]).depth(), 1, "inside the outer region");
+    assert_eq!(
+        preprocessing.guard_at(ends[0]).depth(),
+        1,
+        "inside the outer region"
+    );
     assert_eq!(
         preprocessing.guard_at(ends[1]).depth(),
         2,
@@ -804,6 +823,119 @@ fn an_elif_is_an_alternative_to_the_branches_before_it() {
 // ============================================================================
 // Robustness
 // ============================================================================
+
+/// **`#else` does not end a region.** It continues the one it is in, so everything after it is at the same
+/// depth as the `#if` — and a `#define` in an `#else` branch is inside a conditional, not at file scope.
+///
+/// Getting this wrong is one line and corrupts the depth of every directive after it in the file, which is
+/// how a consumer asking "which `#if` is this in" ends up finding none.
+#[test]
+fn an_else_does_not_change_the_depth() {
+    let sources = [
+        "#if 1\n#define A\n#else\n#define B\n#endif\n",
+        "#if 1\n#define A\n#elif 2\n#define B\n#else\n#define C\n#endif\n",
+    ];
+
+    for source in sources {
+        let depths: Vec<(DirectiveKind, usize)> = run(source)
+            .directives
+            .iter()
+            .map(|spanned| (spanned.directive.kind(), spanned.condition_depth))
+            .collect();
+
+        assert_eq!(
+            depths[0],
+            (DirectiveKind::If, 0),
+            "the `#if` is at file scope: {depths:?}"
+        );
+        assert_eq!(
+            depths[1],
+            (DirectiveKind::Define, 1),
+            "and so its body is one deeper: {depths:?}"
+        );
+
+        assert!(
+            depths
+                .iter()
+                .filter(|(kind, _)| matches!(kind, DirectiveKind::Define))
+                .all(|(_, depth)| *depth == 1),
+            "every branch's body is at the same depth: {depths:?}"
+        );
+
+        assert_eq!(
+            depths.last(),
+            Some(&(DirectiveKind::Endif, 0)),
+            "and the `#endif` closes the region: {depths:?}"
+        );
+    }
+}
+
+/// A region inside an `#else` nests from the same depth, so the depth still counts conditionals correctly.
+///
+/// `#else` reports the depth of the region's **body**, not of the `#if` line, because that is where it is
+/// written: an `#else` line sits inside the region it belongs to, at the same depth as the `#define`s in
+/// either arm. What it must not do is open another level — the `#if B` inside the `#else` is nested exactly
+/// one deeper and not two, which is the mistake that would make every later directive in the file look as if
+/// it were inside one more conditional than it is.
+///
+/// Each `#endif` reports the depth of the `#if` it *closes* — the depth that line was written at — so the
+/// inner one reports `1` and the outer `0`. Reporting the depth after the pop would make the two `#endif`s in
+/// a nested file look like a flat pair.
+#[test]
+fn nesting_inside_an_else_still_counts() {
+    let depths: Vec<(DirectiveKind, usize)> =
+        run("#if A\n#else\n#if B\n#define X\n#endif\n#endif\n")
+            .directives
+            .iter()
+            .map(|spanned| (spanned.directive.kind(), spanned.condition_depth))
+            .collect();
+
+    assert_eq!(
+        depths,
+        vec![
+            (DirectiveKind::If, 0),
+            (DirectiveKind::Else, 1),
+            (DirectiveKind::If, 1),
+            (DirectiveKind::Define, 2),
+            (DirectiveKind::Endif, 1),
+            (DirectiveKind::Endif, 0),
+        ]
+    );
+}
+
+/// The depth a file's directives report is what `guard_at` rebuilds its regions from, so the two have to
+/// agree about an `#else` — which is what the `#define` in its branch depends on.
+#[test]
+fn a_define_in_an_else_branch_is_inside_a_guard() {
+    let preprocessing = run("#if 1\n#define A\n#else\n#define B\n#endif\n");
+
+    let offset = preprocessing
+        .directives
+        .iter()
+        .find(|spanned| {
+            matches!(spanned.directive.kind(), DirectiveKind::Define)
+                && spanned
+                    .directive
+                    .defines()
+                    .is_some_and(|def| &*def.name == "B")
+        })
+        .map(|spanned| spanned.range.start_offset)
+        .expect("the `#else` branch's define");
+
+    let guard = preprocessing.guard_at(offset + 1);
+    assert_eq!(
+        guard.depth(),
+        1,
+        "it is inside the region, not at file scope"
+    );
+    assert!(
+        matches!(
+            guard.visibility(&preprocessing.macros_at(offset)),
+            cpp_code_analysis::Visibility::Inactive
+        ),
+        "and the branch it is in is the one not taken"
+    );
+}
 
 /// Whatever the input, preprocessing terminates and does not panic.
 ///

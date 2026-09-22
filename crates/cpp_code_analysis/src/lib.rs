@@ -39,23 +39,44 @@
 //! token was written in a different file: navigation reaches the macro, diagnostics reach the call site.
 
 pub mod condition;
+pub mod config;
 pub mod directive;
 pub mod expand;
+pub mod file;
+pub mod graph;
 pub mod guard;
+pub mod guards;
+pub mod include;
 pub mod macros;
+pub mod paths;
 pub mod preprocess;
 pub mod token;
 
 pub use condition::{ConditionExpr, EvalError, MacroValues, Value, evaluate, parse_condition};
+pub use config::{
+    CommandLineMacro, CompileCommand, CompileCommands, CompilerConfig, IncludePath,
+    parse_compile_commands, split_command_line,
+};
 pub use directive::{
-    Define, Directive, DirectiveKind, Include, IncludeForm, SpannedDirective, parse_directive_tokens,
-    scan_directives,
+    Define, Directive, DirectiveKind, Include, IncludeForm, SpannedDirective,
+    parse_directive_tokens, scan_directives,
 };
 pub use expand::{
     Diagnostic, ExpandedToken, Expansion, ExpansionNote, MacroInvocation, Origin, expand,
     expand_with_budget,
 };
+pub use file::{FileAnalysis, FileTokens};
+pub use graph::{
+    Edge, FileEntry, FileGraph, MAX_INCLUDE_DEPTH, SkipReason, UnresolvedInclude, Visit, WalkScope,
+    file_only, walk, walk_scoped,
+};
 pub use guard::{Branch, Guard, GuardStack, Region, Visibility};
+pub use guards::{FileGuard, GuardAnalysis, analyse_guards, detect_guard};
+pub use include::{FoundIn, IncludeResolver, Resolution, Resolved, Unresolved};
 pub use macros::{MacroBody, MacroDef, MacroTable, Parameter, ParameterKind};
+pub use paths::{
+    DiskFiles, FileId, FileProvider, MemoryFiles, OverlayFiles, PathInterner, join_normalized,
+    normalize_path, parent_normalized,
+};
 pub use preprocess::{FilePreprocessing, PositionalMacros, preprocess};
 pub use token::Token;
