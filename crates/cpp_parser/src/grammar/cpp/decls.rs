@@ -36,7 +36,8 @@ use super::{
     exprs::parse_expr,
     stats::{parse_compound_stat, parse_stats},
     types::{
-        definitely_ends_a_type, parse_decl_specifier_seq, parse_declarator, parse_name, parse_type_id,
+        definitely_ends_a_type, parse_decl_specifier_seq, parse_declarator, parse_declarator_with,
+        parse_name, parse_type_id,
     },
 };
 /// Parse a template head: `template <typename T, int N>`, or the explicit-specialization
@@ -345,6 +346,56 @@ fn declaration_opens_a_body(p: &CppParser) -> bool {
     })
 }
 
+/// Parse a structured binding's name list: the `[a, b]` of `auto [a, b] = pair;`.
+///
+/// Consumes nothing and returns `Err` when the brackets do not hold a binding pattern, which is what
+/// lets a `[` that is something else be handled by its own rule.
+///
+/// # Why the names are `NameExpr` children
+///
+/// The same node a reference to a name gets, so "which names does this declare?" is one query over
+/// one node kind rather than a second kind that means almost the same thing. Each name is followed by
+/// an optional `...`, C++26's pack expansion, which is a token here rather than a node: nothing can
+/// be said about it until the pack is known, and that is a semantic question.
+pub fn parse_structured_binding(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::StructuredBinding);
+
+    expect_token(p, CppTokenKind::LeftBracket)?;
+
+    // An identifier or a pack expansion — `[a, b]`, `[a, ...]`, `[... xs]`. Anything else means this
+    // `[` was not a binding pattern after all, and `Err` here sends it to whichever rule owns it.
+    while matches!(
+        p.current_token(),
+        CppTokenKind::Identifier | CppTokenKind::Ellipsis
+    ) {
+        if p.current_token() == CppTokenKind::Ellipsis {
+            p.bump();
+            continue;
+        }
+
+        let name = p.mark(CppSyntaxKind::NameExpr);
+        if let Err(err) = parse_name(p) {
+            name.undo(p);
+            p.close_marks_above(base);
+            return Err(err);
+        }
+        name.complete(p);
+
+        if p.current_token() != CppTokenKind::Comma {
+            break;
+        }
+        p.bump();
+    }
+
+    if let Err(err) = expect_token(p, CppTokenKind::RightBracket) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    Ok(m.complete(p))
+}
+
 /// Parse one `init-declarator`: a declarator plus an optional initializer or function body.
 pub fn parse_init_declarator(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
@@ -352,6 +403,22 @@ pub fn parse_init_declarator(p: &mut CppParser) -> ParseResult {
     // Where the declarator's own events start, so `finish_init_declarator` can tell whether it had a
     // parameter list.
     let declarator_from = p.current_event_count();
+
+    // A structured binding: `auto [a, b] = pair;`, or `auto& [k, v] = map;` where the `&` comes
+    // first. The plain form is handled here because it is the whole declarator; the reference form is
+    // handled inside `parse_declarator`, which is the only place that knows where the name would go.
+    //
+    // This is not a declarator in any useful sense — no name, no derived type — so it gets its own
+    // node rather than a `Declarator` holding brackets. The distinction matters to a consumer: the
+    // names inside are separate variables that share one initializer, and a walk that reports "this
+    // declaration declares `[a, b]`" is worse than one that reports nothing.
+    if p.current_token() == CppTokenKind::LeftBracket {
+        if let Err(err) = parse_structured_binding(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+        return finish_init_declarator(p, m, declarator_from);
+    }
 
     // `T(x);` and `int (x);` are parenthesized declarators, not calls. Detecting that here is what
     // keeps the declarator reading from mis-nesting the parentheses.
@@ -375,7 +442,7 @@ pub fn parse_init_declarator(p: &mut CppParser) -> ParseResult {
         }
     }
 
-    if let Err(err) = parse_declarator(p) {
+    if let Err(err) = parse_declarator_with(p, true) {
         p.close_marks_above(base);
         return Err(err);
     }

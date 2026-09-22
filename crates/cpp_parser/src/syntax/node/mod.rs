@@ -7,6 +7,7 @@
 //! node/
 //!   traits.rs      CppAstNode, CppAstToken, CppAstChildren, CppAstTokenChildren
 //!   sum.rs         CppStat, CppAst — the sum types over nodes
+//!   docs.rs        documentation comments: CppDocComment, CppDocCommand, ...
 //!   cpp/
 //!     mod.rs       declarations, types
 //!     expr.rs      expressions
@@ -33,6 +34,7 @@
 //! half-typed declaration returns whatever name it can find.
 
 mod cpp;
+mod docs;
 mod sum;
 pub mod token;
 pub mod traits;
@@ -41,6 +43,8 @@ pub use sum::*;
 
 #[allow(unused_imports)]
 pub use cpp::*;
+#[allow(unused_imports)]
+pub use docs::*;
 #[allow(unused_imports)]
 pub use token::*;
 #[allow(unused_imports)]

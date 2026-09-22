@@ -768,12 +768,24 @@ pub fn could_start_template_arguments(p: &CppParser) -> bool {
 /// — so it can be fooled by `a < b > c` written without spaces. That form is rare, and the failure
 /// mode is benign: the tokens are still parsed, just as a template-id rather than a comparison.
 ///
-/// Where it must **not** be shallow is the stop set below. The scan starts at a `<` and looks for
-/// the matching `>`; if it is willing to run past a `)` or a `,`, it will find a `>` belonging to
-/// something else entirely later in the file and report a template-id that is not there. That is
-/// not a rare form — `double f(const Point a) { return a; }` contains a `>`-less declaration whose
-/// only `<`…`>` pair is nowhere near it, and reading `Point a` as `Point<a>` swallows the parameter
-/// name and then the whole declaration.
+/// # Why a top-level `,` is not a stop
+///
+/// A comma at depth 1 separates template arguments and is entirely ordinary: `Vec<std::vector<int>,
+/// 3>` and `Map<K, V>` are template-ids. Only a comma *inside* a nested argument list means the
+/// enclosing construct is a call or a declaration rather than a template-id, and that case is
+/// already covered by the nesting itself — at depth 2 the scan is looking for the inner list's `>`,
+/// and the stop set catches it if there is none.
+///
+/// Treating every comma as fatal was tried and is what made a multi-argument template-id with a
+/// nested template-id in it unparseable, which is exactly the shape `Vec<std::vector<int>, 3>` has.
+///
+/// # Where it must not be shallow
+///
+/// The stop set below. The scan starts at a `<` and looks for the matching `>`; if it is willing to
+/// run past a `)` or a `;`, it will find a `>` belonging to something else entirely later in the file
+/// and report a template-id that is not there. That is not a rare form — `double f(const Point a) {
+/// return a; }` contains a `>`-less declaration whose only `<`…`>` pair is nowhere near it, and
+/// reading `Point a` as `Point<a>` swallows the parameter name and then the whole declaration.
 fn a_matching_angle_bracket_follows(p: &CppParser) -> bool {
     // Relative offsets: `0` is the `<` at the cursor, so the scan starts at `1`.
     let mut depth = 1isize;
@@ -782,29 +794,23 @@ fn a_matching_angle_bracket_follows(p: &CppParser) -> bool {
         for kind in p.peek_token_kind_at(1..128) {
             match kind {
                 CppTokenKind::Less => depth += 1,
-                CppTokenKind::Greater => {
-                    depth -= 1;
-                    if depth == 0 {
-                        break 'scan true;
-                    }
-                }
-                CppTokenKind::RightShift => {
-                    // `>>` closes two levels at once.
-                    depth -= 2;
+                CppTokenKind::Greater | CppTokenKind::RightShift => {
+                    // `>>` closes two levels at once; a lone `>` closes one. Both arrive here because
+                    // the amount is all that differs.
+                    depth -= if kind == CppTokenKind::RightShift { 2 } else { 1 };
                     if depth <= 0 {
                         break 'scan true;
                     }
                 }
-                // Anything that cannot appear between a `<` and its `>`, including the structural
-                // boundaries of the enclosing declaration. `)` and `,` are the load-bearing ones:
-                // a template argument list never contains an unmatched one, so reaching either
-                // means this `<` was a less-than after all.
+                // Anything that cannot appear between a `<` and its `>`, however deeply nested: the
+                // structural boundaries of the enclosing declaration. A template argument list never
+                // contains an unmatched one of these, so reaching one means this `<` was a less-than
+                // after all.
                 CppTokenKind::Semicolon
                 | CppTokenKind::LeftBrace
                 | CppTokenKind::RightBrace
                 | CppTokenKind::RightParen
                 | CppTokenKind::RightBracket
-                | CppTokenKind::Comma
                 | CppTokenKind::Colon
                 | CppTokenKind::Assign
                 | CppTokenKind::Arrow
@@ -1017,6 +1023,17 @@ fn eat_cv_qualifiers(p: &mut CppParser) {
 /// The name is optional: `void f(int)` declares a parameter with no name, and an abstract
 /// declarator may have no name at all.
 pub fn parse_declarator(p: &mut CppParser) -> ParseResult {
+    parse_declarator_with(p, false)
+}
+
+/// [`parse_declarator`], optionally allowing a structured binding where the name would go.
+///
+/// `auto& [k, v] = m;` is why the flag exists. The `&` is an abstract declarator and the `[…]` after
+/// it is the binding pattern, so by the time the name would be read the brackets are already past the
+/// point where a declarator rule can see them. A separate entry point rather than a general rule:
+/// outside a variable declaration's declarator a `[` here is an array bound or a lambda capture, and
+/// reading it as a binding pattern would take those away from the rules that own them.
+pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::Declarator);
 
@@ -1026,6 +1043,15 @@ pub fn parse_declarator(p: &mut CppParser) -> ParseResult {
     if let Err(err) = parse_abstract_declarator(p) {
         p.close_marks_above(base);
         return Err(err);
+    }
+
+    // A structured binding, in the position the name would occupy.
+    if allow_structured_binding && p.current_token() == CppTokenKind::LeftBracket {
+        if let Err(err) = super::decls::parse_structured_binding(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+        return Ok(m.complete(p));
     }
 
     // The name, if there is one.
@@ -1115,6 +1141,14 @@ fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
         if p.current_token() == CppTokenKind::Greater && closer_belongs_to_this_list(p) {
             p.bump();
             return Ok(m.complete(p));
+        }
+
+        if std::env::var_os("CPP_DBG").is_some() {
+            eprintln!(
+                "DBG arg loop: current={:?} belongs={}",
+                p.current_token(),
+                closer_belongs_to_this_list(p)
+            );
         }
 
         let before = p.current_token_index();

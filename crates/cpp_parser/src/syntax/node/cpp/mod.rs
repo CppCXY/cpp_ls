@@ -77,12 +77,29 @@ impl CppAstNode for CppDeclaration {
         &self.syntax
     }
 
+    /// Narrow on purpose, unlike [`CppDeclaration::cast`].
+    ///
+    /// `can_cast` is what [`CppAstChildren`](crate::syntax::traits::CppAstChildren) uses on every step
+    /// of an iteration, so widening it would put every `using` directive — including
+    /// `using namespace std;`, which declares nothing — into
+    /// [`CppTranslationUnit::get_declarations`].
     fn can_cast(kind: CppSyntaxKind) -> bool {
         kind == CppSyntaxKind::Declaration
     }
 
+    /// Wider than [`CppDeclaration::can_cast`]: it also accepts a `using` alias, which declares a name
+    /// but has a shape that is not `specifiers declarators` and therefore its own node kind.
+    ///
+    /// This is the same asymmetry [`CppEnumDef`] has — a deliberate cast target that is not reachable
+    /// by iterating children — and it exists because the two questions differ. "List this file's
+    /// declarations" should not be polluted by directives; "what declaration does this comment
+    /// document?" must not miss `/// Doc.` in front of `using Point = shapes::Point;`.
     fn cast(syntax: CppSyntaxNode) -> Option<Self> {
-        Self::can_cast(syntax.kind().into()).then_some(Self { syntax })
+        matches!(
+            CppSyntaxKind::from(syntax.kind()),
+            CppSyntaxKind::Declaration | CppSyntaxKind::UsingDecl
+        )
+        .then_some(Self { syntax })
     }
 }
 
@@ -113,6 +130,18 @@ impl CppDeclaration {
     /// Taken from the first declarator, which is what almost every caller wants. A declaration of
     /// several entities (`int a, b;`) has more — use `get_init_declarators` for those.
     pub fn get_name(&self) -> Option<CppNameToken> {
+        // A `using` alias: the name comes before the `=`, so it is the first `NameExpr` child. The
+        // target is a second one, nested inside a `TypeId`, which is why this is the *child* search
+        // rather than a descendant one.
+        if CppSyntaxKind::from(self.syntax.kind()) == CppSyntaxKind::UsingDecl {
+            return crate::syntax::node::traits::first_child_of_kind(
+                self.syntax(),
+                &[CppSyntaxKind::NameExpr],
+            )
+            .and_then(CppNameExpr::cast)
+            .and_then(|name| name.get_name_token());
+        }
+
         if let Some(class) = self.get_class_def()
             && let Some(name) = class.get_name()
         {
@@ -198,7 +227,12 @@ impl CppDeclaration {
     /// A namespace is not one of the answers: `namespace ns { ... }` is a `NamespaceDecl` node, not
     /// a `Declaration`, so it never reaches here — ask the translation unit for namespaces.
     pub fn kind_name(&self) -> &'static str {
-        if self.get_enum_def().is_some() {
+        // A `using` alias is its own node kind, reached through `CppDeclaration::cast` for consumers
+        // that ask "what does this document?" rather than by iterating declarations. It is an alias
+        // for the same reason `using A = B;` is, so it reports the same word.
+        if CppSyntaxKind::from(self.syntax.kind()) == CppSyntaxKind::UsingDecl {
+            "alias"
+        } else if self.get_enum_def().is_some() {
             "enum"
         } else if self.get_class_def().is_some() {
             "class"
@@ -472,6 +506,102 @@ impl CppDeclarator {
     pub fn get_array_type(&self) -> Option<CppArrayType> {
         self.child()
     }
+
+    /// The structured binding this declarator introduces, if it is one: the `[a, b]` of
+    /// `auto [a, b] = pair;`.
+    ///
+    /// Two shapes reach here, because the `&` of `auto& [k, v]` is an abstract declarator and the
+    /// pattern comes after it: the `StructuredBinding` is either a child of this declarator or a
+    /// child of the `InitDeclarator` beside it. Both are searched, so a caller asking "is this a
+    /// binding?" gets one answer rather than having to know which spelling produced the node.
+    pub fn get_structured_binding(&self) -> Option<CppStructuredBinding> {
+        if let Some(binding) = self.child::<CppStructuredBinding>() {
+            return Some(binding);
+        }
+
+        self.syntax()
+            .parent()
+            .and_then(|parent| {
+                crate::syntax::node::traits::first_child_of_kind(
+                    &parent,
+                    &[CppSyntaxKind::StructuredBinding],
+                )
+            })
+            .and_then(CppStructuredBinding::cast)
+    }
+
+    /// Is this a structured binding declarator?
+    pub fn is_structured_binding(&self) -> bool {
+        self.get_structured_binding().is_some()
+    }
+
+    /// The names a structured binding introduces. Empty for an ordinary declarator.
+    pub fn get_binding_names(&self) -> Vec<CppNameToken> {
+        self.get_structured_binding()
+            .map(|binding| binding.get_names().collect())
+            .unwrap_or_default()
+    }
+}
+
+/// A structured binding's name list: the `[a, b]` of `auto [a, b] = pair;`.
+///
+/// The names are `NameExpr` children rather than declarators, because that is the node a name
+/// reference gets — so "which names does this declaration introduce?" is one query over one kind.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CppStructuredBinding {
+    syntax: CppSyntaxNode,
+}
+
+impl CppAstNode for CppStructuredBinding {
+    fn syntax(&self) -> &CppSyntaxNode {
+        &self.syntax
+    }
+
+    fn can_cast(kind: CppSyntaxKind) -> bool {
+        kind == CppSyntaxKind::StructuredBinding
+    }
+
+    fn cast(syntax: CppSyntaxNode) -> Option<Self> {
+        Self::can_cast(syntax.kind().into()).then_some(Self { syntax })
+    }
+}
+
+impl CppStructuredBinding {
+    /// The identifiers bound, in order.
+    ///
+    /// A pack expansion (`[... xs]`) contributes the names it names and nothing for the `...`: what it
+    /// expands to is a semantic question, and a syntactic layer that guessed would be wrong for every
+    /// pack whose size is not yet known.
+    pub fn get_names(&self) -> impl Iterator<Item = CppNameToken> {
+        self.syntax()
+            .descendants()
+            .filter_map(CppNameExpr::cast)
+            .filter_map(|name| name.get_name_token())
+    }
+
+    /// The names as text.
+    pub fn get_name_texts(&self) -> Vec<String> {
+        self.get_names()
+            .map(|name| name.get_name_text().to_string())
+            .collect()
+    }
+
+    /// How many names the pattern binds.
+    pub fn len(&self) -> usize {
+        self.get_names().count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Is any of the names a pack expansion (`...`)?
+    pub fn is_pack_expansion(&self) -> bool {
+        self.syntax()
+            .children_with_tokens()
+            .filter_map(|it| it.into_token())
+            .any(|token| token.kind() == CppKind::Token(CppTokenKind::Ellipsis))
+    }
 }
 
 /// An `init-declarator`: a declarator plus an optional initializer.
@@ -500,11 +630,35 @@ impl CppInitDeclarator {
     }
 
     pub fn get_name(&self) -> Option<CppNameToken> {
+        // A structured binding has no single name: `auto [a, b] = pair;` declares two. The declarator
+        // is where the pattern lives, so this answers with the first of them rather than with the
+        // rendered pattern, and [`CppDeclarator::get_binding_names`] is the accessor for all of them.
+        if let Some(binding) = self.get_structured_binding() {
+            return binding.get_names().next();
+        }
+
         self.get_declarator()?.get_name()
     }
 
     pub fn get_initializer(&self) -> Option<CppInitializer> {
         self.child()
+    }
+
+    /// The structured binding this init-declarator introduces, in either spelling.
+    ///
+    /// `auto [a, b] = pair;` puts the pattern directly under the init-declarator, while
+    /// `auto& [k, v] = map;` puts it inside the declarator, after the `&`. This is the one place that
+    /// knows both, so a caller asking "is this a binding?" gets one answer.
+    pub fn get_structured_binding(&self) -> Option<CppStructuredBinding> {
+        if let Some(binding) = self.child::<CppStructuredBinding>() {
+            return Some(binding);
+        }
+
+        self.get_declarator()?.get_structured_binding()
+    }
+
+    pub fn is_structured_binding(&self) -> bool {
+        self.get_structured_binding().is_some()
     }
 }
 

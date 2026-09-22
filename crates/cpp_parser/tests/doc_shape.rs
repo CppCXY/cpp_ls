@@ -353,10 +353,12 @@ fn an_empty_comment_keeps_its_shape() {
 // The block comment's own delimiters
 // ============================================================================
 
-/// The closing `*/` is a sibling of the body, not part of the last command's text.
+/// The closing `*/` is a token of the comment's body, not part of the last command's text.
 ///
-/// Leaving it inside makes `/** @brief B */` report a brief of `B */`, and a consumer rendering that
-/// text prints the comment's terminator.
+/// Leaving it inside the last *command* makes `/** @brief B */` report a brief of `B */`, and a
+/// consumer rendering that text prints the comment's terminator. The body still covers it — the body
+/// covers the whole comment — which is why the check below is on the command's body rather than on
+/// the rendering, where `*/` legitimately appears.
 #[test]
 fn a_block_comment_closer_is_outside_the_body() {
     let shape = doc_shape("/** @brief B */\nint x;\n");
@@ -390,8 +392,8 @@ fn a_block_comment_closer_is_outside_the_body() {
 /// The same for a body that runs across the continuation lines of a block comment.
 ///
 /// The check is on the *body node's* text rather than on the rendering: the comment's closer is a
-/// sibling of the body and does appear in the rendering, so searching the whole shape for `*/` would
-/// fail on a tree that is entirely correct.
+/// token of the comment's own body and does appear in the rendering, so searching the whole shape for
+/// `*/` would fail on a tree that is entirely correct.
 #[test]
 fn a_multiline_block_body_stops_at_the_closer() {
     let tree = parse("/**\n * @brief First\n * second\n */\nint x;\n");

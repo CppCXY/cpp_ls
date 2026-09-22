@@ -290,6 +290,15 @@ pub enum CppSyntaxKind {
     /// e.g.: int[10], char[256]
     ArrayType,
 
+    /// A structured binding's name list (C++17).
+    /// e.g.: the `[a, b]` of `auto [a, b] = pair;`
+    ///
+    /// A node of its own because the names it introduces are *not* declarators: each one binds a
+    /// sub-object of whatever initializes the whole, and none of them has a type of its own. A
+    /// consumer looking for "the things this declaration declares" has to find them here or it
+    /// reports one variable named `[a, b]`.
+    StructuredBinding,
+
     /// Function type - function signature type
     /// e.g.: int(int, int), void()
     FunctionType,

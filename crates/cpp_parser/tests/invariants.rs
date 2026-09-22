@@ -199,8 +199,9 @@ const CORPUS: &[(&str, &str)] = &[
     ),
     (
         // A template-id nested inside another one, with a `>>` that closes both, *and* a non-type
-        // argument after it. Kept in the corpus so the invariant tests cover it; see
-        // `KNOWN_UNPARSED` for why it is not in the "parses cleanly" set.
+        // argument after it. This was the last entry in `known_unparsed`: the angle-bracket lookahead
+        // treated a comma at the top level of the argument list as fatal, which rejected every
+        // multi-argument template-id containing a nested one.
         "nested template-id with non-type argument",
         "Vec<std::vector<int>, 3> v;\n",
     ),
@@ -232,6 +233,34 @@ const CORPUS: &[(&str, &str)] = &[
         "#define GREETING \\\n    \"hi\"\nint x = 1 + \\\n        2;\n",
     ),
     ("unicode identifiers", "int café = 1;\nint λ = 2;\nint \\u00e9 = 3;\n"),
+    (
+        // The `[a, b]` is a binding pattern, not an array declarator: an array's `[` follows its name,
+        // and a declarator that *starts* with one has no other reading. The reference forms put the
+        // pattern after an abstract declarator, which is a different position in the grammar.
+        "structured bindings",
+        concat!(
+            "auto [a, b] = pair;\n",
+            "const auto& [k, v] = map;\n",
+            "auto&& [x, y] = other;\n",
+            "auto [... pack] = rest;\n",
+        ),
+    ),
+    (
+        // `if consteval` takes no condition — the braces follow the keyword directly — so a parser
+        // that asks for one reports `expected (` against perfectly valid C++23.
+        "consteval if",
+        "if consteval { f(); } else { g(); }\nif !consteval { h(); }\nif constexpr (x) {}\n",
+    ),
+    (
+        // `operator""_km` is lexed as one user-defined-literal token, and the declarator reads it as
+        // the operator's name. Kept in the corpus because it is the one operator name that is not a
+        // punctuation token.
+        "literal operator templates",
+        concat!(
+            "long double operator\"\"_km(long double x);\n",
+            "constexpr unsigned long long operator\"\"_km(unsigned long long x) { return x; }\n",
+        ),
+    ),
     (
         "nested-looking block comment",
         "/* /* this does not nest */ int x;\n",
@@ -504,6 +533,12 @@ const MUST_PARSE_CLEANLY: &[&str] = &[
     "hello world",
     "class with access specifiers",
     "templates and nested angles",
+    // Was the last entry in `known_unparsed` until the angle-bracket lookahead stopped treating a
+    // top-level comma in an argument list as fatal.
+    "nested template-id with non-type argument",
+    "structured bindings",
+    "consteval if",
+    "literal operator templates",
     "namespace",
     "using declarations",
     "enums",
@@ -620,17 +655,12 @@ fn known_silent_acceptance_set_is_accurate() {
 /// This is deliberately separate from [`MUST_PARSE_CLEANLY`]: that set is the "do not regress" line,
 /// and it would be dishonest to keep a known-broken construct in it. The invariant tests still cover
 /// these inputs, so they cannot make the tree *invalid* — only imprecise.
-fn known_unparsed() -> [(&'static str, &'static str, &'static str); 1] {
-    [(
-        "nested template-id with non-type argument",
-        "Vec<std::vector<int>, 3> v;",
-        "A `<` is only a template argument list in a template-id, and the parser decides that with a \
-         lookahead over `<`/`>` nesting before descending. The decision is sound for `Vec<A<int>>` \
-         and for `Vec<A<int>, 3>`/`Vec<std::vector<int>, 3>` separately, but not for a list that \
-         both nests a template-id and carries a further argument. The argument reading has to report \
-         where it stopped instead of the caller re-deriving that from the token stream — see \
-         `parse_template_argument`.",
-    )]
+///
+/// Empty, and it should stay that way. It was down to one entry — a template-id nested inside another
+/// with a further non-type argument — until the angle-bracket lookahead stopped treating a comma at
+/// the top level of the argument list as fatal.
+fn known_unparsed() -> [(&'static str, &'static str, &'static str); 0] {
+    []
 }
 
 #[test]

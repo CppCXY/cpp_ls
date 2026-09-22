@@ -276,15 +276,37 @@ fn parse_if_statement(p: &mut CppParser) -> ParseResult {
 
     p.bump(); // Consume 'if'
 
-    // `if constexpr (...)` and `if consteval` (C++23). The latter is a *contextual* keyword, so it
-    // arrives as an identifier and has to be recognised by spelling.
-    if p.current_token() == CppTokenKind::ConstexprKeyword
+    // `if constexpr (...)`, and C++23's `if consteval` / `if !consteval`.
+    //
+    // The two forms could hardly be less alike underneath. `if constexpr` still takes a parenthesised
+    // condition, while `if consteval` takes *no* condition at all: the statement is selected by
+    // whether the evaluation is constant, and the braces follow the keyword directly. So this is not
+    // one flag but two — the keyword says which form, and only `constexpr` is followed by a condition.
+    //
+    // The negation is part of the second form rather than the start of an expression, which is why it
+    // has to be consumed here. Leaving it to `parse_condition` reports `expected (` against a `!` that
+    // is perfectly valid C++23.
+    let consteval_form = if p.current_token() == CppTokenKind::ConstexprKeyword {
+        p.bump();
+        false
+    } else if p.current_token() == CppTokenKind::ConstevalKeyword
         || (p.current_token() == CppTokenKind::Identifier && p.current_token_text() == "consteval")
     {
         p.bump();
-    }
+        true
+    } else if p.current_token() == CppTokenKind::LogicalNot
+        && p.peek_token_kind_at(1..2).as_slice() == [CppTokenKind::ConstevalKeyword]
+    {
+        p.bump(); // `!`
+        p.bump(); // `consteval`
+        true
+    } else {
+        false
+    };
 
-    if let Err(err) = parse_condition(p) {
+    // `if consteval` has no condition to parse. Asking for one would report `expected (` against the
+    // `{` that is really the body, which is worse than useless: it accuses correct code.
+    if !consteval_form && let Err(err) = parse_condition(p) {
         p.close_marks_above(base);
         return Err(err);
     }

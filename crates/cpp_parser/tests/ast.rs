@@ -483,14 +483,15 @@ fn a_realistic_module_unit_yields_its_declarations() {
         Some("shapes".to_string())
     );
 
-    // `export int helper();` is a top-level declaration, outside the namespace. (`export using
-    // Point = ...;` before it is a `UsingDecl`, which is not a `CppDeclaration` — reach it through
-    // `CppStat::cast` if needed.)
+    // `export int helper();` is a top-level declaration, outside the namespace. The `export using
+    // Point = ...;` before it is a `UsingDecl`, which `CppDeclaration::cast` accepts (it declares a
+    // name) even though `get_declarations` never yields one — so both are here, and the alias
+    // reports itself as one rather than as a nameless variable.
     let top_level: Vec<String> = root
         .get_declarations()
         .map(|decl| format!("{} {}", decl.kind_name(), decl.get_name_text().unwrap_or_default()))
         .collect();
-    assert_eq!(top_level, vec!["function helper"]);
+    assert_eq!(top_level, vec!["alias Point", "function helper"]);
 
     let namespace = root.get_namespaces().next().expect("namespace shapes");
     assert_eq!(
@@ -519,4 +520,112 @@ fn a_realistic_module_unit_yields_its_declarations() {
             "function distance",
         ]
     );
+}
+
+// ============================================================================
+// Structured bindings
+// ============================================================================
+
+/// The names of the structured bindings in a source, in order.
+fn binding_names(source: &str) -> Vec<Vec<String>> {
+    let (root, _) = unit(source);
+
+    root.get_declarations()
+        .filter_map(|declaration| declaration.get_init_declarator())
+        .filter_map(|init| init.get_structured_binding())
+        .map(|binding| binding.get_name_texts())
+        .collect()
+}
+
+/// A binding pattern is its own node, and the names in it are the ones a consumer indexes by.
+///
+/// The alternative the tree could have had — one declarator named `[a, b]` — would make "what does
+/// `auto [a, b] = pair;` declare?" answer with a string that is not a name at all.
+#[test]
+fn a_structured_binding_reports_its_names() {
+    assert_eq!(
+        binding_names("auto [a, b] = pair;\n"),
+        vec![vec!["a".to_string(), "b".to_string()]]
+    );
+}
+
+/// The reference forms put the pattern after an abstract declarator, which is a different position in
+/// the grammar — and the one that needed its own entry point in the declarator rule.
+#[test]
+fn a_structured_binding_survives_a_reference_prefix() {
+    for source in [
+        "auto& [k, v] = map;\n",
+        "auto&& [k, v] = map;\n",
+        "const auto& [k, v] = map;\n",
+    ] {
+        assert_eq!(
+            binding_names(source),
+            vec![vec!["k".to_string(), "v".to_string()]],
+            "{source:?}"
+        );
+    }
+}
+
+/// A pack expansion binds the names it names; the `...` is a token, not a name.
+#[test]
+fn a_pack_expansion_binding_reports_its_name() {
+    assert_eq!(
+        binding_names("auto [... xs] = rest;\n"),
+        vec![vec!["xs".to_string()]]
+    );
+    assert_eq!(
+        binding_names("auto [a, ...] = rest;\n"),
+        vec![vec!["a".to_string()]]
+    );
+}
+
+/// An ordinary declarator is not a structured binding, and says so rather than answering with an
+/// empty pattern.
+#[test]
+fn an_ordinary_declarator_is_not_a_structured_binding() {
+    let (root, _) = unit("int arr[3];\nauto [a, b] = pair;\n");
+
+    let kinds: Vec<bool> = root
+        .get_declarations()
+        .filter_map(|declaration| declaration.get_init_declarator())
+        .map(|init| init.is_structured_binding())
+        .collect();
+
+    assert_eq!(kinds, vec![false, true]);
+}
+
+// ============================================================================
+// consteval if
+// ============================================================================
+
+/// `if consteval` parses, and its body is a real block rather than an error.
+///
+/// The form takes no condition, which is what makes it worth a test: a parser that asks for one
+/// reports `expected (` against the `{` that is really the body, and C++23 code then looks broken.
+#[test]
+fn consteval_if_has_a_body_and_no_condition() {
+    for source in [
+        "void f() { if consteval { g(); } }\n",
+        "void f() { if !consteval { g(); } }\n",
+        "void f() { if consteval { g(); } else { h(); } }\n",
+    ] {
+        let (root, tree) = unit(source);
+        assert_eq!(tree.get_errors(), [], "{source:?} must parse cleanly");
+
+        let if_stat = root
+            .get_declarations()
+            .filter_map(|declaration| declaration.get_body())
+            .flat_map(|body| body.get_stats())
+            .find_map(|stat| match stat {
+                CppStat::IfStat(if_stat) => Some(if_stat),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{source:?} has an if statement"));
+
+        let text = if_stat.syntax().text().to_string();
+        assert!(
+            text.contains("consteval"),
+            "the keyword is part of the statement: {text:?}"
+        );
+    }
 }
