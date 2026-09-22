@@ -179,6 +179,18 @@ fn parse_unary_expr(p: &mut CppParser) -> ParseResult {
             parse_unary_expr(p)?; // parse operand recursively
             Ok(m.complete(p))
         }
+        // `co_await e` — a unary operator, and the only one whose operand is an awaitable rather than a value.
+        //
+        // A keyword rather than a punctuation token, which is the whole reason it needed saying: `co_await` was
+        // already in [`is_expression_keyword`] — the list that keeps the *name* branch from swallowing it — but
+        // no rule consumed it, so the expression parser reported `expected primary expression` against a token
+        // it had just been told to expect. Being in that list is a promise that some rule handles it.
+        CppTokenKind::CoAwaitKeyword => {
+            let m = p.mark(CppSyntaxKind::UnaryExpr);
+            p.bump(); // consume 'co_await'
+            parse_unary_expr(p)?; // the awaitable
+            Ok(m.complete(p))
+        }
         CppTokenKind::SizeofKeyword | CppTokenKind::AlignofKeyword => {
             let m = p.mark(CppSyntaxKind::UnaryExpr);
             p.bump(); // consume 'sizeof' / 'alignof'
@@ -302,6 +314,21 @@ fn parse_type_id_or_expression(p: &mut CppParser) -> ParseResult {
 fn is_a_type_in_parentheses(p: &CppParser) -> bool {
     if p.current_token() != CppTokenKind::LeftParen {
         return false;
+    }
+
+    // A `template` disambiguator *inside* the parentheses settles it the other way: `(T::template f<U>)x`
+    // cannot be a cast, because a cast's type-id has no such keyword in it — `template` appears only in a name
+    // being *used*, so the parentheses hold an expression. Without this the `::` in the name would claim the
+    // cast reading and the mode's payload would be reported as a missing operand.
+    //
+    // Only the window up to the matching `)` is scanned, and only for the keyword: a `(` in the window means
+    // the parentheses hold a call like `f(T::template g<U>())`, whose own `::` is not this parenthesis's.
+    for kind in p.peek_token_kind_at(1..64) {
+        match kind {
+            CppTokenKind::RightParen | CppTokenKind::LeftParen => break,
+            CppTokenKind::TemplateKeyword => return false,
+            _ => {}
+        }
     }
 
     match p.peek_token_kind_at(1..2).first() {
@@ -605,8 +632,26 @@ fn parse_postfix_suffixes(p: &mut CppParser, mut expr: crate::parser::CompleteMa
                 let m = expr.precede(p, CppSyntaxKind::IndexExpr);
                 p.bump(); // consume '.' or '->'
 
+                // `decltype(t)::template rebind<U>` and `x.template rebind<U>` are the same disambiguator as the
+                // one in the qualified-name loop below: `template` marks the `<` after the name as the start of
+                // template arguments. It is accepted in both positions or neither, because which of the two a
+                // reader meets depends only on whether the object has a name.
+                if p.current_token() == CppTokenKind::TemplateKeyword
+                    && p.peek_next_token() == CppTokenKind::Identifier
+                {
+                    p.bump(); // `template`
+                }
+
                 if p.current_token() == CppTokenKind::Identifier {
                     p.bump();
+                    // The member's template arguments, when it has any — `x.template f<int>()` needs the
+                    // arguments to be *attached* here, because `f<int>()` read as a comparison would compare
+                    // `x.template f` against `int` and then call `()` on the result.
+                    if super::types::could_start_template_arguments(p)
+                        && let Err(err) = super::types::parse_template_argument_list(p)
+                    {
+                        return Err(err);
+                    }
                 } else {
                     return Err(CppParseError::syntax_error_from(
                         &t!("expected identifier after member access operator"),
@@ -689,6 +734,28 @@ fn parse_primary_expr(p: &mut CppParser) -> ParseResult {
                 // an operator are named — and refusing them is what made `Foo::~Foo()` and `Foo::operator+()`
                 // report `expected a name after '::'` against perfectly ordinary definitions. Both are written
                 // *after* a `::`, so nothing else can be at this position.
+                //
+                // `template` is the third member of that family: a *disambiguator*, not a name. In
+                // `T::template rebind<U>` it says the `<` that follows `rebind` starts template arguments
+                // rather than a comparison, which is the only thing that can be known about a name in a
+                // template before its arguments are known. It is a keyword in this lexer rather than an
+                // identifier, so the segment loop used to refuse it outright.
+                if p.current_token() == CppTokenKind::TemplateKeyword {
+                    p.bump();
+                    // The keyword is followed by the name it qualifies, and by nothing else — `T::template ;` is
+                    // not a name. Requiring the name keeps the keyword from standing in for one.
+                    if !matches!(
+                        p.current_token(),
+                        CppTokenKind::Identifier | CppTokenKind::OperatorKeyword | CppTokenKind::Tilde
+                    ) {
+                        p.close_marks_above(base);
+                        return Err(CppParseError::syntax_error_from(
+                            &t!("expected a name after `template`"),
+                            p.current_token_range(),
+                        ));
+                    }
+                }
+
                 match p.current_token() {
                     CppTokenKind::Identifier => p.bump(),
                     CppTokenKind::Tilde => {
@@ -930,6 +997,13 @@ fn starts_a_lambda(p: &CppParser) -> bool {
 
     // What follows decides, and only two things can: the parameters or the body, with the qualifiers that may
     // sit between them.
+    //
+    // A template parameter list is a third, for a C++20 generic lambda (`[]<typename T>(T t) { }`), and adding
+    // it here is the whole of what that form needed: the list is parsed by the same rule a class template uses.
+    // The reading is greedy — `[x] < y` is a comparison that this will now call a lambda — and that is the same
+    // direction as every other decision in this file: the capture list has to be followed by *something* that
+    // can continue a lambda, and a `<` directly after a `]` in an expression is far more often a lambda's
+    // template head than a comparison against a capture list that nothing has used yet.
     matches!(
         next_after_the_list,
         Some(LeftParen)
@@ -937,6 +1011,7 @@ fn starts_a_lambda(p: &CppParser) -> bool {
             | Some(MutableKeyword)
             | Some(NoexceptKeyword)
             | Some(Arrow)
+            | Some(Less)
     )
 }
 
@@ -951,6 +1026,23 @@ fn parse_lambda(p: &mut CppParser) -> ParseResult {
     if let Err(err) = parse_capture_list(p) {
         p.close_marks_above(base);
         return Err(err);
+    }
+
+    // The template parameter list of a C++20 generic lambda, when it is written: `[]<typename T>(T t) { }`.
+    // It sits between the capture list and the parameters, and it is the same list a class template spells
+    // after `template` — hence the shared rule, and hence the `template` keyword being optional rather than
+    // required here.
+    if matches!(
+        p.current_token(),
+        CppTokenKind::Less | CppTokenKind::TemplateKeyword
+    ) {
+        if p.current_token() == CppTokenKind::TemplateKeyword {
+            p.bump();
+        }
+        if let Err(err) = super::decls::parse_template_parameter_list(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
     }
 
     // The parameter list, when it is written. A lambda's parameters are the same grammar as a function's, and

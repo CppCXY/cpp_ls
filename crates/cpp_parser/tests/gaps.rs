@@ -162,6 +162,9 @@ fn constructs_the_parser_reads() {
             "template <typename... A> void f(A&&... a);",
             "template <typename T = int> struct R { };",
             "template <template <class> class C> struct Q { };",
+            // An **alias template**, which is a `using`-declaration with a template head in front of it.
+            "template <typename U> using rebind = Rebind<U>;",
+            "template <typename... Us> using Pack = std::tuple<int, char>;",
         ],
     );
 
@@ -183,6 +186,24 @@ fn constructs_the_parser_reads() {
             "auto g = [v = 1] { return v; };",
             "auto g = [v = total + 1] { return v; };",
             "auto g = [p = std::move(q)] { };",
+            // A C++20 generic lambda: a template parameter list between the capture list and the parameters,
+            // parsed by the same rule a class template uses.
+            "auto g = []<typename T>(T t) { return t; };",
+            "auto g = []<class T>(T t) { return t; };",
+            "auto g = []<typename... Ts>(Ts... ts) { };",
+            "auto g = []<typename T> { };",
+            // Coroutine statements: `co_return` is `return`, `co_yield` is `throw`'s shape, and `co_await` is a
+            // unary operator.
+            "auto x = co_await f();",
+            "co_await f();",
+            "co_return 1;",
+            "co_return;",
+            "co_yield 1;",
+            // The `template` disambiguator, in the three places a dependent name can be used. It exists to say
+            // that the `<` after the name starts template arguments rather than a comparison.
+            "auto x = T::template f<int>();",
+            "auto x = obj.template f<int>();",
+            "auto x = p->template f<int>();",
             // Braced initialization of a temporary: the `T{...}` form, in every position an expression can
             // stand. This is the rule that made `auto v = Vec<int>{1, 2};` a declaration rather than an error.
             "auto v = Vec<int>{1, 2};",
@@ -247,6 +268,9 @@ fn constructs_the_parser_reads() {
             "~Probe() = delete;",
             "~Probe() noexcept {}",
             "template <typename T> void f(T t);",
+            // A member alias template: the same head-and-`using` shape as the file-scope form, written where
+            // the member rule reaches it.
+            "template <typename U> using rebind = Probe<U>;",
             "struct Nested { int x; };",
             "enum Color { Red, Green };",
             // Bit-fields, including a run of them and a nameless one.
@@ -275,42 +299,52 @@ fn constructs_the_parser_does_not_read_yet() {
         Where::Body,
         &[
             // The same trade as direct-initialisation, seen from the expression side: `MyType` is a type this
-            // file never declares, so `(MyType*)p` is not distinguishable from `(a * b)` and is read as an
-            // expression. Declaring the type anywhere in the file makes it a cast.
+            // file never declares, so `(MyType*)p` is not distinguishable from `(a * b)`. This is the one entry
+            // that is a *decision* rather than a missing rule, and it is not on any list to be fixed.
             (
                 "auto d = (MyType*)p;",
                 "a C-style cast to a pointer of an undeclared type. `*` is both the pointer operator and the \
                  multiplication operator, and the type table is what tells them apart.",
             ),
-            // The following are read now, and used to be entries here:
-            //
-            //   `if (auto q = find(x); q != nullptr)` and its `switch` form — the C++17 initializer, which is
-            //   the condition rule seeing a declaration, a `;` and then an expression;
-            //   `auto v = Vec<int>{1, 2};` — a braced initializer after an expression, which the postfix loop
-            //   now reads.
-            //
-            // They are pinned as *read* in the test above instead, which is where the entries went.
+            // A pack *expansion* — the `...` written after a pattern rather than inside a declaration. The
+            // declaration half of packs works (`template <typename... Ts> void f(Ts... ts);` is in the list
+            // above); what is missing is the `...` that follows an expression, an argument list or a type.
+            // It is one gap, not three: all three are the same rule, "a `...` after a pattern expands it".
             (
-                "auto x = co_await f();",
-                "`co_await` is a keyword the lexer knows and the expression grammar does not: it is not a \
-                 unary operator there. `co_return` and `co_yield` are in the same position.",
+                "g(args...);",
+                "a pack expansion in an argument list. The `...` after the expression has no rule, so the \
+                 argument list stops and the ellipsis is reported as an unexpected token.",
             ),
             (
-                "auto l = []<typename T>(T t) { return t; };",
-                "a C++20 template parameter list on a lambda. The capture list is recognised, and the `<...>` \
-                 after it is not.",
-            ),
-            (
-                "auto x = T::template f<int>();",
-                "the `template` disambiguator. `parse_name` has no rule for it, so the keyword that exists to \
-                 make a dependent name parse is itself unparseable.",
-            ),
-            (
-                "auto x = obj.template f<int>();",
-                "the same disambiguator after a member access.",
+                "auto x = sizeof...(Ts);",
+                "`sizeof...`, the operator that counts a pack. The lexer has no token for it — it produces \
+                 `sizeof` and `...` — and the expression rule has no branch that would join them.",
             ),
         ],
     );
+
+    assert_does_not_read_yet(
+        Where::File,
+        &[
+            (
+                "template <typename... Ts> using T = std::tuple<Ts...>;",
+                "a pack expansion as a template argument. The argument rule reads one type-id and then wants a \
+                 `,` or a `>`, so the `...` is refused — the same missing rule as the argument-list case above.",
+            ),
+        ],
+    );
+
+    // Read now, and used to be entries above:
+    //
+    //   `auto x = co_await f();` — the coroutine keywords, which needed `co_await` in the unary rule and
+    //   `co_return`/`co_yield` in the statement dispatcher;
+    //   `auto l = []<typename T>(T t) { return t; };` — a generic lambda, which needed the template parameter
+    //   list moved out of the template-head rule so a lambda could reach it too;
+    //   `auto x = T::template f<int>();` and `obj.template f<int>()` — the `template` disambiguator, which
+    //   needed a branch in the qualified-name loops of *both* the type grammar and the expression grammar.
+    //
+    // They are pinned as *read* in the test above instead. That test is where a construct goes when it starts
+    // working; this one is for what is still refused.
 
     assert_does_not_read_yet(
         Where::File,

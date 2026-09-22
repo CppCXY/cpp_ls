@@ -79,44 +79,63 @@ fn parse_template_head_inner(p: &mut CppParser) -> ParseResult {
     expect_token(p, CppTokenKind::TemplateKeyword)?;
 
     // C++20 template parameter lists may end in a requires-clause; that comes after the list.
+    if let Err(err) = parse_template_parameter_list(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    Ok(m.complete(p))
+}
+
+/// Parse a template parameter list: the `<` … `>` of `template <typename T>`, and of a C++20 generic
+/// lambda's `[]<typename T>`.
+///
+/// Shared by [`parse_template_head`] and the lambda rule in the expression grammar, because the two
+/// spell the same list and only differ in the keyword in front of it — a lambda has none, its capture
+/// list stands where `template` does. The list is the part with the rules in it (`>>` splitting, packs,
+/// constrained parameters, defaults), so a second copy for lambdas is exactly how generic lambdas would
+/// come to disagree with class templates about what a parameter list is.
+pub fn parse_template_parameter_list(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::TemplateParameterList);
+
     expect_token(p, CppTokenKind::Less)?;
 
     // `template <>` — an explicit specialization has an empty list.
     if p.current_token() == CppTokenKind::Greater {
         p.bump();
-    } else {
-        let parameters = p.mark(CppSyntaxKind::TemplateParameterList);
-        loop {
-            if let Err(err) = parse_template_parameter(p) {
-                p.close_marks_above(base);
-                return Err(err);
-            }
+        return Ok(m.complete(p));
+    }
 
-            match p.current_token() {
-                CppTokenKind::Comma => {
-                    p.bump();
-                    continue;
-                }
-                CppTokenKind::Greater => {
-                    p.bump();
-                    break;
-                }
-                // `>>` closing a nested list, e.g. `template <template <class> class T>`.
-                CppTokenKind::RightShift => {
-                    p.split_current_token(1, CppTokenKind::Greater, CppTokenKind::Greater);
-                    p.bump();
-                    break;
-                }
-                _ => {
-                    p.close_marks_above(base);
-                    return Err(CppParseError::syntax_error_from(
-                        "expected `,` or `>` in template parameter list",
-                        p.current_token_range(),
-                    ));
-                }
+    loop {
+        if let Err(err) = parse_template_parameter(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+
+        match p.current_token() {
+            CppTokenKind::Comma => {
+                p.bump();
+                continue;
+            }
+            CppTokenKind::Greater => {
+                p.bump();
+                break;
+            }
+            // `>>` closing a nested list, e.g. `template <template <class> class T>`.
+            CppTokenKind::RightShift => {
+                p.split_current_token(1, CppTokenKind::Greater, CppTokenKind::Greater);
+                p.bump();
+                break;
+            }
+            _ => {
+                p.close_marks_above(base);
+                return Err(CppParseError::syntax_error_from(
+                    "expected `,` or `>` in template parameter list",
+                    p.current_token_range(),
+                ));
             }
         }
-        parameters.complete(p);
     }
 
     Ok(m.complete(p))
@@ -352,6 +371,31 @@ pub fn parse_declaration(p: &mut CppParser) -> ParseResult {
     {
         p.rollback(checkpoint);
         return Err(err);
+    }
+
+    // The head may be followed by a declaration that *is* its own rule, and those rules begin with a
+    // keyword the specifier sequence cannot read: `template <typename U> using rebind = Rebind<U>;` is an
+    // alias template, and `using` is not a type specifier — the sequence refused it and the declaration
+    // was reported as `expected a type specifier` against the `using` itself.
+    //
+    // Dispatched *after* the head rather than by the match at the top of this function, because at the top
+    // the cursor is on the `template` keyword. The rule is called directly rather than by re-entering this
+    // function: the declaration marker is already open above, and a second one would leave this call's own
+    // marker unpaired — which the translation-unit assertion reports as a rule that unwound past its owner.
+    if p.current_token() == CppTokenKind::UsingKeyword {
+        if let Err(err) = parse_using_declaration(p) {
+            p.rollback(checkpoint);
+            return Err(err);
+        }
+        return Ok(m.complete(p));
+    }
+
+    if p.current_token() == CppTokenKind::TypedefKeyword {
+        if let Err(err) = parse_typedef_declaration(p) {
+            p.rollback(checkpoint);
+            return Err(err);
+        }
+        return Ok(m.complete(p));
     }
 
     let specifiers_from = p.current_event_count();

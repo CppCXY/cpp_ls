@@ -178,6 +178,48 @@ auto make_adder(int base) {
     return [base](int x) mutable constexpr noexcept { return base + x; };
 }
 
+// A C++20 generic lambda: a template parameter list between the capture list and the parameters.
+auto make_identity() {
+    return []<typename T>(T value) { return value; };
+}
+
+auto make_pack_forwarder() {
+    // A parameter pack with a forwarding reference — `Ts&&... args` — in a definition.
+    return []<typename... Ts>(Ts&&... args) { return first_of(args); };
+}
+
+// --- coroutines ------------------------------------------------------------
+template <typename T>
+struct Task {
+    bool await_ready() const noexcept;
+    void await_suspend(Handle handle) noexcept;
+    T await_resume();
+};
+
+Task<int> counter(int limit) {
+    int total = 0;
+    for (int i = 0; i < limit; ++i) {
+        total += co_await fetch(i);
+        co_yield total;
+    }
+    co_return total;
+}
+
+// --- the `template` disambiguator ------------------------------------------
+template <typename T>
+struct Rebind {
+    template <typename U>
+    using rebind = Rebind<U>;
+};
+
+template <typename T>
+void use_dependent_names(T value) {
+    auto one = T::template rebind<int>(value);
+    auto two = value.template rebind<int>(value);
+    auto three = pointer->template rebind<int>(value);
+    typename T::template rebind<int> named;
+}
+
 // --- operators -------------------------------------------------------------
 struct Ops {
     Ops operator+(const Ops&) const;

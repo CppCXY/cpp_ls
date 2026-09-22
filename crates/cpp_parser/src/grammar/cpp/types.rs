@@ -1059,6 +1059,28 @@ pub fn parse_name(p: &mut CppParser) -> ParseResult {
     }
 
     loop {
+        // `template` as a disambiguator rather than a name: `T::template rebind<U>`. It says the `<` after
+        // the name that follows starts template arguments instead of a comparison, which is the one thing
+        // that cannot be known about a dependent name before its arguments are. It is a keyword in this
+        // lexer, so the segment match below — which knows identifiers, `~` and `operator` — refused it, and
+        // a declaration whose type was spelled that way failed with `expected a name`.
+        //
+        // Handled *before* the match rather than in it, because the keyword is not a segment: the name it
+        // qualifies is, and the loop has to come back around to read it.
+        if p.current_token() == CppTokenKind::TemplateKeyword {
+            p.bump();
+            if !matches!(
+                p.current_token(),
+                CppTokenKind::Identifier | CppTokenKind::OperatorKeyword | CppTokenKind::Tilde
+            ) {
+                p.close_marks_above(base);
+                return Err(CppParseError::syntax_error_from(
+                    "expected a name after `template`",
+                    p.current_token_range(),
+                ));
+            }
+        }
+
         match p.current_token() {
             CppTokenKind::Identifier => p.bump(),
             // `operator+`, `operator()`, `operator new`, `operator""_x`...

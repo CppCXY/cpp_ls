@@ -116,6 +116,10 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
         CppTokenKind::SwitchKeyword => parse_switch_statement(p),
         CppTokenKind::TryKeyword => parse_try_statement(p),
         CppTokenKind::ReturnKeyword => parse_return_statement(p),
+        // Coroutine statements. `co_return` is `return` under another name — the same operand, the same optional
+        // value, the same `;` — so it is the same rule through a different keyword rather than a copy of it.
+        CppTokenKind::CoReturnKeyword => parse_return_statement(p),
+        CppTokenKind::CoYieldKeyword => parse_throw_statement(p),
         CppTokenKind::BreakKeyword => parse_keyword_statement(p, CppSyntaxKind::BreakStat),
         CppTokenKind::ContinueKeyword => parse_keyword_statement(p, CppSyntaxKind::ContinueStat),
         CppTokenKind::GotoKeyword => parse_goto_statement(p),
