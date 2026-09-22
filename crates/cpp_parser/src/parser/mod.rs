@@ -1,4 +1,3 @@
-mod cpp_doc_parser;
 mod cpp_parser;
 mod marker;
 mod parser_config;

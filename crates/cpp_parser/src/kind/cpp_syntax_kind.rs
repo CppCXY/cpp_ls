@@ -555,17 +555,76 @@ pub enum CppSyntaxKind {
     EnumeratorDecl,
 
     // ========== Comments and Documentation ==========
-    /// Line comment - // style comment
+    /// A line comment - `//` style comment
     /// e.g.: // This is a comment
     LineComment,
 
-    /// Block comment - /* */ style comment
+    /// Block comment - `/* */` style comment
     /// e.g.: /* This is a block comment */
     BlockComment,
 
-    /// Documentation comment - for generating docs
-    /// e.g.: /// or /** */ style comment
+    /// A run of consecutive comments, parsed as documentation.
+    ///
+    /// The node a consumer of the tree actually walks. One node covers **one or more** adjacent
+    /// comments, because that is the unit a doc comment is written in:
+    ///
+    /// ```text
+    /// /// Computes the area.
+    /// /// @param r  the radius.
+    /// /// @returns  the area.
+    /// ```
+    ///
+    /// Three comments, one document. Splitting them into three nodes would push the job of grouping
+    /// them back onto every consumer.
+    ///
+    /// A `Comment` node also covers ordinary `//` and `/* */` comments — the ones with nothing
+    /// documentation-shaped in them. They are kept in the tree for losslessness, and giving them the
+    /// same node kind means a consumer walking comments sees all of them rather than having to look
+    /// in two places. They simply contain no `DocCommand` children.
+    ///
+    /// Constructs inside it: [`DocCommand`](Self::DocCommand), [`DocInline`](Self::DocInline).
     DocComment,
+
+    /// One Doxygen command and its arguments: `@brief x`, `@param[in] x desc`, `@returns y`.
+    ///
+    /// A single node kind driven by the command's *name* rather than one node kind per command, so
+    /// the grammar is table-driven: adding `@since` is a row in a table, not a new parse function
+    /// and a new kind. The name is the [`CppTokenKind::DocCommandName`] token directly inside.
+    DocCommand,
+
+    /// The body of a documentation comment: everything that is not part of a command.
+    ///
+    /// One of these wraps the whole comment's content, and a second kind of the same name carries a
+    /// command's payload — see [`DocCommandBody`](Self::DocCommandBody). The wrapper exists so that a
+    /// consumer can iterate a comment's commands without also seeing the comment's own delimiters and
+    /// line markers.
+    DocCommentBody,
+
+    /// A command's payload: everything from the end of the command's arguments to the end of its
+    /// line, or to the end of a block comment.
+    ///
+    /// Separate from [`DocCommand`](Self::DocCommand) so that a consumer asking "what does `@param x`
+    /// say about `x`?" has one node to read, whether the payload is a phrase or three paragraphs.
+    DocCommandBody,
+
+    /// A named argument of a command, such as the `x` of `@param[in] x`.
+    ///
+    /// Its own node because it is the part a cross-reference needs: matching `@param x` against the
+    /// parameter named `x` is a lookup by this node's text, and doing that from a token stream means
+    /// re-implementing the argument grammar at every use.
+    DocCommandArg,
+
+    /// An inline reference inside a description: `@ref Foo`, `@p name`, `#member`, `::scope::name`.
+    ///
+    /// Kept as a node rather than plain text because it is a link: it names a declaration, and that
+    /// is what "go to definition" from inside a comment needs.
+    DocInline,
+
+    /// A code block: the lines between `@code` and `@endcode`.
+    ///
+    /// Its contents are *not* parsed as documentation. That is the whole point — code inside a code
+    /// block is full of `@`, `<` and `\`, and treating it as prose turns a snippet into nonsense.
+    DocCodeBlock,
 
     // ========== Declarations (grammar detail) ==========
     /// A preprocessor directive, from `#` to the end of its logical line: `#include <vector>`,

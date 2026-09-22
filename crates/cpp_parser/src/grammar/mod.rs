@@ -1,11 +1,7 @@
 use crate::{parser::CompleteMarker, parser_error::CppParseError};
 
 mod cpp;
-
-// NOTE: the former `doc` module (LDoc comment grammar) now lives in `reference/ldoc-grammar/`,
-// outside the crate's module graph. It does not compile against the current `kind` layer and is
-// kept as a model for the Doxygen comment grammar we will write later. See
-// `reference/README.md`.
+pub mod doc;
 
 /// Outcome of parsing one construct.
 ///

@@ -717,10 +717,7 @@ pub fn parse_class_body(p: &mut CppParser) -> ParseResult {
                 | CppTokenKind::PrivateKeyword
                 | CppTokenKind::ProtectedKeyword
         ) {
-            let access = p.mark(access_specifier_kind(p.current_token()));
-            p.bump();
-            expect_token(p, CppTokenKind::Colon)?;
-            access.complete(p);
+            parse_access_specifier(p)?;
             continue;
         }
 
@@ -753,6 +750,34 @@ fn access_specifier_kind(kind: CppTokenKind) -> CppSyntaxKind {
         CppTokenKind::PrivateKeyword => CppSyntaxKind::PrivateAccess,
         _ => CppSyntaxKind::ProtectedAccess,
     }
+}
+
+/// Parse `public:`, `private:` or `protected:` — the keyword and its colon, and nothing else.
+///
+/// # Why the node is closed by hand
+///
+/// `bump` attaches the trivia *after* a token to whichever node is open, which is usually what you
+/// want: `int  x` keeps its spaces together. For an access specifier it is not. Everything after
+/// `public:` — the newline, an indented `/// doc`, the member below — would then be a child of the
+/// access specifier rather than of the class body, and a consumer asking "which comment documents
+/// this member?" would find nothing, because the only comment in the class body is the one the
+/// access specifier swallowed.
+///
+/// So the keyword and colon are consumed directly and the node is closed before the trailing trivia
+/// is emitted. The trivia still goes into the tree — it is the class body's — which is what keeps
+/// the CST lossless.
+fn parse_access_specifier(p: &mut CppParser) -> ParseResult {
+    let access = p.mark(access_specifier_kind(p.current_token()));
+    p.consume_current_token();
+    p.consume_current_token_if(CppTokenKind::Colon);
+    access.complete(p);
+
+    // Whatever layout followed the colon belongs to the enclosing block, so it is emitted now that
+    // the access node is closed. Only trivia can be here: `bump` is what emits it, and it has not
+    // been called since the colon.
+    p.emit_trivia_after_current_token();
+
+    Ok(CompleteMarker::empty())
 }
 
 /// One class member: a member declaration, or a nested definition.

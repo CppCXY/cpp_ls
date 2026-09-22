@@ -618,14 +618,14 @@ fn parse_base_clause(p: &mut CppParser) -> ParseResult {
         let m = p.mark(CppSyntaxKind::BaseSpecifier);
 
         // Access specifier and `virtual` may appear in either order.
-        loop {
-            match p.current_token() {
-                CppTokenKind::PublicKeyword
+        while matches!(
+            p.current_token(),
+            CppTokenKind::PublicKeyword
                 | CppTokenKind::PrivateKeyword
                 | CppTokenKind::ProtectedKeyword
-                | CppTokenKind::VirtualKeyword => p.bump(),
-                _ => break,
-            }
+                | CppTokenKind::VirtualKeyword
+        ) {
+            p.bump();
         }
 
         if let Err(err) = parse_name(p) {

@@ -159,8 +159,17 @@ impl Marker {
 
         // A node that never produced content carries no information, so drop it. Deregistering the
         // mark is still mandatory, or the open-node stack drifts upwards forever.
+        //
+        // The `NodeEnd` is emitted *anyway*, and that is the whole point rather than an oversight.
+        // The event stream has to pair one-to-one — that is what lets the tree builder translate it
+        // by simply opening on a start and closing on an end — so an empty node that emits only its
+        // `NodeStart` leaves the *next* `NodeEnd`, which belongs to its parent, closing the wrong
+        // node. One short close is enough to re-parent everything that follows, silently.
+        //
+        // Emitting both events keeps the stream a 1:1 mapping at every point in the parse, and
+        // `balance_events` then removes the empty *pair* together, which is where dropping belongs.
         if p.mark_is_open(self.position) && p.get_events().len() == self.position + 1 {
-            p.close_mark(self.position, false);
+            p.close_mark(self.position, true);
             return CompleteMarker {
                 start: EMPTY_NODE_POSITION,
                 kind: CppSyntaxKind::None,

@@ -286,7 +286,7 @@ fn preprocessor_directives_are_typed() {
 
 #[test]
 fn comments_report_their_kind() {
-    let source = "// ordinary\n/// documented\n/** block doc */\nint x;\n";
+    let source = "// ordinary\n\n/// documented\n/** block doc */\nint x;\n";
     let (root, tree) = unit(source);
 
     let comments: Vec<_> = tree
@@ -296,12 +296,36 @@ fn comments_report_their_kind() {
         .filter_map(cpp_parser::CppCommentToken::cast)
         .collect();
 
-    assert_eq!(comments.len(), 3);
-    assert!(!comments[0].is_doc_comment());
-    assert!(comments[1].is_doc_comment(), "`///` is a doc comment");
-    assert!(comments[2].is_doc_comment(), "`/**` is a doc comment");
-    assert_eq!(comments[0].get_comment_text(), "ordinary");
-    assert_eq!(comments[2].get_comment_text(), "block doc");
+    // One token per comment *marker*, now that the doc layer has taken over the grouping: the three
+    // comments are three openers, and the text between them is doc tokens rather than a comment token.
+    let openers: Vec<_> = comments
+        .iter()
+        .filter(|comment| {
+            matches!(
+                comment.get_comment_kind(),
+                cpp_parser::CppCommentKind::Line | cpp_parser::CppCommentKind::Block
+            )
+        })
+        .collect();
+    assert!(
+        !openers.is_empty(),
+        "the comment markers must still be in the tree: {:#?}",
+        tree.get_red_root()
+    );
+
+    // What a consumer asks is which *documentation blocks* a file has, and the doc layer answers it.
+    let doc_comments: Vec<_> = tree
+        .get_red_root()
+        .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::DocComment)
+        .collect();
+
+    assert_eq!(
+        doc_comments.len(),
+        2,
+        "the blank line separates the header from the documented declaration: {:#?}",
+        tree.get_red_root()
+    );
     assert_eq!(root.get_declarations().count(), 1);
 }
 

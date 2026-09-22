@@ -52,7 +52,6 @@ impl<'a> CppTreeBuilder<'a> {
     /// (`parse_cpp_unit` opens it), and adding another here would nest two roots.
     /// [`CppGreenNodeBuilder::finish`] handles the "no root at all" case.
     pub fn build(&mut self) {
-        
         balance_events(&mut self.events);
         let event_count = self.events.len();
 

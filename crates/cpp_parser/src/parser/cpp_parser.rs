@@ -658,23 +658,205 @@ impl<'a> CppParser<'a> {
     /// here rather than at the call site: a file ending in `// comment\n` must keep that comment
     /// in the tree, and a file that is nothing but comments must not produce an empty tree.
     ///
-    /// Comments are emitted as plain tokens for now. Grouping consecutive comment lines into
-    /// documentation blocks belongs to the doc-comment layer (see `reference/README.md`), which
-    /// will consume these tokens; until then the only requirement here is I1 — nothing may be
-    /// dropped or duplicated.
+    /// # Comments are not emitted as tokens
+    ///
+    /// Whitespace and newlines go into the stream as themselves. A comment does not: it is handed to
+    /// the documentation layer ([`crate::grammar::doc::parse_comment_group`]), which re-lexes its text
+    /// with the doc lexer and emits a `DocComment` node — and, in it, the Doxygen commands the comment
+    /// contains. Those events go into this same stream, so a doc node is an ordinary child of whatever
+    /// node was open when the comment was found.
+    ///
+    /// The invariant this must not break is I1: every byte of the file appears exactly once in the
+    /// tree. It holds because the doc lexer tiles a comment's text exactly (asserted in
+    /// `tests/doc_lexer.rs`), so replacing the comment's one token with its doc tokens is a
+    /// lossless rewrite rather than a substitution.
+    ///
+    /// # One node per run of adjacent comments
+    ///
+    /// A document is written across several `///` lines, so the comments that belong together are
+    /// parsed as one group and produce one `DocComment` node. "Adjacent" means nothing but whitespace
+    /// between them and at most one line apart: a blank line ends the run, which is how Doxygen
+    /// separates a declaration's documentation from the block above it.
     fn parse_trivia_tokens(&mut self, start: usize, next_index: usize) {
         let end = next_index.min(self.tokens.len());
+        let mut index = start.min(end);
 
-        for token in &self.tokens[start.min(end)..end] {
+        while index < end {
+            let token = self.tokens[index];
+
+            if !is_comment_kind(token.kind) {
+                self.events.push(MarkEvent::EatToken {
+                    kind: token.kind,
+                    range: token.range,
+                });
+                index += 1;
+                continue;
+            }
+
+            let group = self.comment_group_at(index, end);
+            let sources = self.comment_sources(&group);
+            // The doc parse is total: it cannot fail, and it cannot leave a marker open, so there is
+            // nothing to recover from and nothing to check. Anything it wants to report it reports
+            // through `push_error`.
+            let _ = crate::grammar::doc::parse_comment_group(self, &sources);
+
+            index = *group.last().expect("a group has at least one comment") + 1;
+        }
+    }
+
+    /// Build the doc layer's view of one comment group.
+    ///
+    /// The separators are the trivia *between* the comments, collected here because this is where the
+    /// token list is. They are handed to the doc parser rather than emitted here so that they land
+    /// inside the `DocComment` node — see [`crate::grammar::doc::CommentSource`].
+    fn comment_sources(&self, group: &[usize]) -> Vec<crate::grammar::doc::CommentSource> {
+        let mut sources = Vec::with_capacity(group.len());
+
+        for (position, &token_index) in group.iter().enumerate() {
+            let comment = self.tokens[token_index];
+            let mut source = crate::grammar::doc::CommentSource::first(comment.range);
+
+            if position > 0 {
+                // Everything between the previous comment and this one. The group is built from
+                // comment positions plus the layout between them, so this is that layout — and only
+                // layout, since a non-layout token would have ended the group.
+                let previous_end = self.tokens[group[position - 1]].range.end_offset();
+                for token in self.tokens[..token_index].iter().filter(|token| {
+                    is_line_layout_kind(token.kind) && token.range.start_offset >= previous_end
+                }) {
+                    if source.separator_len < crate::grammar::doc::MAX_SEPARATOR_TOKENS {
+                        source.separator[source.separator_len] = Some(token.range);
+                        source.separator_len += 1;
+                    }
+                }
+            }
+
+            sources.push(source);
+        }
+
+        sources
+    }
+
+    /// The comments forming one documentation group, starting at `start`.
+    ///
+    /// `start` must be a comment. The returned positions are ascending and non-empty, and the first is
+    /// `start`.
+    fn comment_group_at(&self, start: usize, end: usize) -> Vec<usize> {
+        let mut group = vec![start];
+        let mut index = start + 1;
+        let mut previous = self.tokens[start];
+
+        while index < end {
+            let token = self.tokens[index];
+
+            if is_comment_kind(token.kind) {
+                if self.lines_between(previous.range.end_offset(), token.range.start_offset) <= 1 {
+                    group.push(index);
+                    previous = token;
+                    index += 1;
+                    continue;
+                }
+                break;
+            }
+
+            // Only whitespace may separate the comments of a group, and never more than one line.
+            if !is_line_layout_kind(token.kind)
+                || self.lines_between(previous.range.end_offset(), token.range.start_offset) > 1
+            {
+                break;
+            }
+
+            index += 1;
+        }
+
+        group
+    }
+
+    /// How many line breaks separate two offsets?
+    ///
+    /// `0` means "on the same line", which is how `/* a */ /* b */` stays one group. Counting the
+    /// newlines between them rather than asking a line index is both simpler and more accurate here:
+    /// the question is about the gap, not about where the lines are.
+    fn lines_between(&self, from: usize, to: usize) -> usize {
+        if to <= from {
+            return 0;
+        }
+
+        self.text[from..to.min(self.text.len())]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+    }
+
+    pub fn push_error(&mut self, err: CppParseError) {
+        self.errors.push(err);
+    }
+
+    /// Append a token produced by the documentation layer to the event stream.
+    ///
+    /// The doc layer hands over a token that already carries a range in *file* coordinates, so this
+    /// is the whole of the translation between the two layers: no offset arithmetic, no buffering.
+    /// That is what lets doc nodes be ordinary children of the C++ tree.
+    pub(crate) fn push_doc_token(&mut self, kind: CppTokenKind, range: crate::text::SourceRange) {
+        self.events.push(MarkEvent::EatToken { kind, range });
+    }
+
+    /// Emit the current token and move on, **without** attaching the trivia that follows it.
+    ///
+    /// `bump` is the right call almost everywhere: trivia belongs to the construct it sits inside.
+    /// A grammar rule that wants to close its node before that trivia is emitted — because the trivia
+    /// belongs to the *enclosing* construct — advances with this and then calls
+    /// [`CppParser::emit_trivia_after_current_token`].
+    pub fn consume_current_token(&mut self) {
+        let consumed_index = self.token_index;
+
+        if consumed_index < self.tokens.len() && !is_trivia_kind(self.current_token) {
+            let token = self.tokens[consumed_index];
             self.events.push(MarkEvent::EatToken {
                 kind: token.kind,
                 range: token.range,
             });
         }
+
+        self.token_index = consumed_index + 1;
+        self.current_token = self
+            .tokens
+            .get(self.token_index)
+            .map(|token| token.kind)
+            .unwrap_or(CppTokenKind::Eof);
     }
 
-    pub fn push_error(&mut self, err: CppParseError) {
-        self.errors.push(err);
+    /// Consume the current token with [`CppParser::consume_current_token`] if it has this kind.
+    ///
+    /// Returns whether it was consumed. Used for tokens a rule requires but wants to treat as
+    /// optional at the point of consumption, so that a missing one is reported by the caller rather
+    /// than aborting a construct that is otherwise complete.
+    pub fn consume_current_token_if(&mut self, kind: CppTokenKind) -> bool {
+        if self.current_token == kind {
+            self.consume_current_token();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Emit the trivia the cursor is sitting on, without consuming any significant token.
+    ///
+    /// The counterpart to [`CppParser::consume_current_token`]: after a rule has closed its node, the
+    /// layout it left behind still has to reach the tree — the CST is lossless — and this is what puts
+    /// it into whichever node is open now.
+    pub fn emit_trivia_after_current_token(&mut self) {
+        let trivia_start = self.token_index;
+        let mut next_index = trivia_start;
+        self.skip_trivia(&mut next_index);
+        self.parse_trivia_tokens(trivia_start, next_index);
+
+        self.token_index = next_index;
+        self.current_token = self
+            .tokens
+            .get(self.token_index)
+            .map(|token| token.kind)
+            .unwrap_or(CppTokenKind::Eof);
     }
 
     /// Emit a zero-width `MissingNode`, i.e. "a token was expected here but is not present".
@@ -793,12 +975,22 @@ impl<'a> CppParser<'a> {
 /// declaration. The preprocessor layer reads the splices back out of the tree when it needs to know
 /// that a directive continued onto the next line.
 fn is_trivia_kind(kind: CppTokenKind) -> bool {
+    is_comment_kind(kind) || is_line_layout_kind(kind)
+}
+
+/// Is this a comment? These are the tokens the documentation layer takes over.
+fn is_comment_kind(kind: CppTokenKind) -> bool {
+    matches!(kind, CppTokenKind::LineComment | CppTokenKind::BlockComment)
+}
+
+/// Is this layout *within* a line, or the break that ends one?
+///
+/// Layout tokens are what may sit between two comments of the same documentation group. A line
+/// continuation is included because a `\`-spliced comment is still one comment as far as the
+/// preprocessor is concerned.
+fn is_line_layout_kind(kind: CppTokenKind) -> bool {
     matches!(
         kind,
-        CppTokenKind::LineComment
-            | CppTokenKind::BlockComment
-            | CppTokenKind::Newline
-            | CppTokenKind::Whitespace
-            | CppTokenKind::LineContinuation
+        CppTokenKind::Whitespace | CppTokenKind::Newline | CppTokenKind::LineContinuation
     )
 }

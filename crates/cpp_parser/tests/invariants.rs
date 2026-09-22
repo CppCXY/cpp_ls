@@ -156,6 +156,36 @@ const CORPUS: &[(&str, &str)] = &[
     ("whitespace only", "   \n\t\n  "),
     ("comment only", "// just a comment\n/* and a block */\n"),
     (
+        // The documentation layer is a second parser writing into the same event stream, so the
+        // invariants have to cover comment-heavy input: a group of adjacent `///` lines becomes one
+        // node, `@code` spans several of those lines, and a comment sits inside a class body. Getting
+        // any of that wrong re-parents a subtree, which is invisible in the text and only shows up in
+        // the tree's shape — exactly what these invariants check.
+        "documentation comments",
+        "/// Computes the distance.\n\
+         /// @param[in] a  the first point\n\
+         /// @param[in] b  the second point\n\
+         /// @returns the distance\n\
+         /// @code\n\
+         /// double d = distance(p, q);\n\
+         /// @endcode\n\
+         double distance(const Point& a, const Point& b);\n\
+         \n\
+         /** A point.\n *  @brief Short.\n */\n\
+         struct Point { double x; };\n\
+         \n\
+         class C {\npublic:\n    /// documents m\n    int m;\n};\n",
+    ),
+    (
+        // A comment in every position a comment can be: before a declaration, after one on the same
+        // line, between two members, and inside a block.
+        "comments in every position",
+        "int /* before the name */ x;\n\
+         int y; ///< trailing\n\
+         void f() {\n    /// inside a body\n    int z = 1;\n}\n\
+         /* unterminated at the end of the file",
+    ),
+    (
         "hello world",
         "#include <iostream>\n\nint main() {\n    std::cout << \"hi\" << std::endl;\n    return 0;\n}\n",
     ),
@@ -483,6 +513,9 @@ const MUST_PARSE_CLEANLY: &[&str] = &[
     "module partitions and fragments",
     "module and import as ordinary names",
     "labels",
+    // The doc layer writes into the same event stream, so a comment must not turn valid code into a
+    // diagnostic. `@code`, `@param[in]` and a comment inside a class body are the shapes that would.
+    "documentation comments",
 ];
 
 /// Input that is genuinely malformed and must therefore leave a mark: either a diagnostic or an

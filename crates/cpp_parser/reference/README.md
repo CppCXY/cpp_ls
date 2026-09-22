@@ -21,6 +21,23 @@ checkable rather than a matter of memory.
 Their `test.rs` files were dropped rather than moved: they were written against the Lua grammar and
 would not compile even as reference.
 
+## `ldoc-doc-parser/`
+
+The former `src/parser/cpp_doc_parser.rs`: the second-layer parser of the Emmylua design. It was
+entirely commented out and written against the Lua-era API (`LuaDocParser`, `LuaParser`,
+`LuaTokenData`), so it could not be renamed into place — it was the **design source** for the
+Doxygen layer, and its shape is what the live implementation keeps:
+
+- a parser owning a doc *lexer* plus a token cursor, forwarding `mark`/`bump` to the enclosing C++
+  parser so that doc nodes land in the same event stream;
+- `set_state` deciding which lexer state the next token is read in;
+- `bump_to_end` discarding the rest of a line once a construct has been read.
+
+What the live layer changed: the states became prefixes recomputed from the comment text instead of
+a `LuaDocLexerState` carried through the parser, the tag vocabulary is Doxygen's rather than LDoc's,
+and the command grammar is one table-driven loop rather than a `parse_tag_*` function per tag. See
+`src/grammar/doc/`.
+
 ## `ldoc-grammar/`
 
 The former `src/grammar/doc/` module: a LuaDoc/LDoc comment grammar inherited from the upstream Lua
@@ -30,8 +47,8 @@ language server this project was forked from. It parses `---`-style comments and
 
 ### Why it does not compile
 
-It is written against the pre-migration `kind` layer and a `LuaDocParser`/`LuaDocLexer` pair that
-are still commented out in `src/parser/cpp_doc_parser.rs` and `src/lexer/cpp_doc_lexer.rs`. It
+It is written against the pre-migration `kind` layer and a `LuaDocParser`/`LuaDocLexer` pair, both of
+which are now here as reference (`ldoc-doc-parser/`, and the lexer the live layer replaced). It
 references types that no longer exist:
 
 - `crate::lexer::LuaDocLexerState`

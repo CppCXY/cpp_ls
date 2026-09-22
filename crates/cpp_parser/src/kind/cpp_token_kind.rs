@@ -356,6 +356,23 @@ pub enum CppTokenKind {
     /// e.g.: `\` followed by `\n` or `\r\n`
     LineContinuation,
 
+    // ========== Documentation comments ==========
+    /// A Doxygen command name inside a comment, without its introducer: the `param` of `@param x`.
+    ///
+    /// Distinct from [`CppTokenKind::Identifier`] on purpose: inside a comment, `param` is not a name
+    /// that could be declared, and a consumer walking the tree for identifiers must not find it.
+    DocCommandName,
+
+    /// The running text of a documentation comment.
+    DocText,
+
+    /// Structural punctuation inside a comment: `[`, `]`, `,`, `(`, `)`, `.`, `:`, `=`, `::`.
+    ///
+    /// One kind for all of them, because the C++ grammar must treat every one as trivia — a comment
+    /// containing `)` must never close a C++ parameter list. The doc layer tells them apart by
+    /// looking at the text, which it can do because it is reading the comment rather than the code.
+    DocTrivia,
+
     // ========== Special Tokens ==========
     /// End of file
     Eof,
@@ -521,6 +538,9 @@ impl fmt::Display for CppTokenKind {
             Self::Newline => write!(f, "newline"),
             Self::LineComment => write!(f, "line comment"),
             Self::BlockComment => write!(f, "block comment"),
+            Self::DocCommandName => write!(f, "documentation command"),
+            Self::DocText => write!(f, "documentation text"),
+            Self::DocTrivia => write!(f, "comment punctuation"),
             Self::Eof => write!(f, "end of file"),
             Self::Unknown => write!(f, "unknown"),
             Self::Error => write!(f, "error"),
