@@ -7,6 +7,7 @@ members = [
 [workspace.dependencies]
 # local
 cpp_parser = { path = "crates/cpp_parser" }
+cpp_code_analysis = { path = "crates/cpp_code_analysis" }
 
 # external
 lsp-server = "0.7.7"
