@@ -9,20 +9,38 @@
 //! This is *the* ambiguity of C++ parsing, and it cannot be resolved syntactically:
 //!
 //! ```text
-//! a * b;      // declaration of `b` as a pointer to `a`? or multiplication?
-//! T(x);       // declaration of `x`? or a functional cast / function call?
+//! a * b;               declaration of `b` as a pointer to `a`? or multiplication?
+//! T(x);                declaration of `x`? or a functional cast / function call?
+//! Widget w(1, 2, 3);   declaration of `w`? or a call to `w` with three arguments?
 //! ```
 //!
-//! There is no symbol table in a parser that must work on a file being edited, so [`parse_declaration`]
-//! answers the question *speculatively*: try the declaration reading, and if it does not land on a
-//! plausible end (a `;`, a `{`, or an initializer), rewind and let the caller treat the tokens as an
-//! expression. [`super::stats::parse_declaration_or_expression_statement`] does exactly that with
-//! [`CppParser::try_parse`], which is why that primitive exists.
+//! There is no symbol table in a parser that must work on a file being edited, so the question is answered
+//! *speculatively*: [`parse_declaration`] tries the declaration reading, and if it does not land on a
+//! plausible end (a `;`, a `{`, or an initializer), the caller rewinds and treats the tokens as an
+//! expression. [`super::stats::parse_declaration_or_expression_statement`] is that caller.
 //!
-//! The cost is one re-parse of a statement whose first token is ambiguous. The alternative — a
-//! heuristic that guesses from the shape of the first two tokens — gets `T(x);` and `a * b;` wrong
-//! in one direction each, and being wrong here produces a *plausible looking but incorrect tree*,
-//! which is far worse for an editor than paying for a backtrack.
+//! # What breaks the tie inside the declaration reading
+//!
+//! The backtrack settles *whether* a statement is a declaration. It cannot settle where the type ends and the
+//! declarator begins, which is a decision the declaration reading has to make on its own — and that decision
+//! is what [`declarator_starts_with_a_known_type_name`], [`the_arguments_look_like_values`] and
+//! [`the_arguments_look_like_declarators`] answer between them. In order of strength:
+//!
+//! 1. **A keyword type.** `int a(1);` — no expression begins with `int`.
+//! 2. **A name the file declares to be a type.** `struct Widget {}; Widget w(1, 2);` — see
+//!    [`crate::parser::TypeNames`].
+//! 3. **A name, then a second name, then parentheses holding values.** `Widget w(1, 2, 3);` — the shape no
+//!    call has. The second name is the declarator and the parentheses are its initializer.
+//! 4. **File scope, with parentheses holding names.** `Max(a, b);` — a statement at file scope is not a
+//!    call, and bare names are what an initializer most often copies.
+//!
+//! Each rule is strictly weaker than the one before it, and each is refused rather than guessed when the
+//! evidence is absent: a call read as a declaration loses its callee *and* its arguments, while a declaration
+//! read as a call merely leaves a variable unbound. That asymmetry is the whole design, and it is why
+//! `A(B);` stays a call while `Widget w(1, 2, 3);` is a declaration.
+//!
+//! The cost is one re-parse of a statement whose first token is ambiguous, and a handful of documented
+//! readings given up — `tests/gaps.rs` lists them, and `tests/direct_init.rs` pins the rules themselves.
 
 use crate::{
     grammar::ParseResult,
@@ -36,8 +54,8 @@ use super::{
     exprs::parse_expr,
     stats::{parse_compound_stat, parse_stats},
     types::{
-        definitely_ends_a_type, parse_decl_specifier_seq, parse_declarator, parse_declarator_with,
-        parse_name, parse_type_id,
+        definitely_ends_a_type, is_type_specifier_keyword, parse_decl_specifier_seq,
+        parse_declarator, parse_declarator_with, parse_name, parse_type_id,
     },
 };
 /// Parse a template head: `template <typename T, int N>`, or the explicit-specialization
@@ -104,6 +122,19 @@ fn parse_template_head_inner(p: &mut CppParser) -> ParseResult {
     Ok(m.complete(p))
 }
 
+/// Does this token end the part of a template parameter that a declarator could occupy?
+///
+/// [`definitely_ends_a_type`] plus the two tokens a parameter's *list* provides: a `,` before the next
+/// parameter, and the pack marker of `typename... Rest`. A `>` would end it too, and is already in the set —
+/// `>>` is not, because by the time the list is being walked a nested closer has been split.
+fn ends_a_template_parameter_head(kind: CppTokenKind) -> bool {
+    definitely_ends_a_type(kind)
+        || matches!(
+            kind,
+            CppTokenKind::Ellipsis | CppTokenKind::Greater
+        )
+}
+
 /// Parse one template parameter: `typename T`, `class C`, `int N`, `template <...> class T`,
 /// `T...`, or a constrained parameter `C T`.
 fn parse_template_parameter(p: &mut CppParser) -> ParseResult {
@@ -118,6 +149,33 @@ fn parse_template_parameter(p: &mut CppParser) -> ParseResult {
         return Err(err);
     }
 
+    // `typename... Rest` — the one spelling that cannot go through the declaration machinery below, and the
+    // reason is worth recording because the failure it caused was not where it looked. The specifier sequence
+    // sees `typename`, then the `...`, which is not a specifier — so it stops, having consumed only the
+    // keyword, and reports the ellipsis as an unreadable specifier while the *parameter* marker ends up at
+    // `Rest`. What came out was `expected ',' or '>'` against a name the list had never asked for. Consuming
+    // both keywords together here keeps the two halves of the pack in one rule.
+    //
+    // `class... Ts` and `int... Ns` do not need this: there the marker follows a type that is one keyword, and
+    // the specifier loop claims the pair through the pack branch in
+    // [`super::types::parse_one_decl_specifier_inner`].
+    if p.current_token() == CppTokenKind::TypenameKeyword
+        && p.peek_next_token() == CppTokenKind::Ellipsis
+    {
+        let typename_type = p.mark(CppSyntaxKind::TypenameType);
+        p.bump(); // `typename`
+        p.bump(); // `...`
+        typename_type.complete(p);
+
+        if p.current_token() == CppTokenKind::Identifier
+            && let Err(err) = parse_name(p)
+        {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+        return Ok(m.complete(p));
+    }
+
     // The parameter itself is a declaration: `typename T`, `int N`, `auto N`, and a constrained
     // parameter is a type followed by a name. Reusing the declaration machinery keeps the shapes
     // the same as everywhere else.
@@ -126,10 +184,10 @@ fn parse_template_parameter(p: &mut CppParser) -> ParseResult {
         return Err(err);
     }
 
-    // The element name, and a pack expansion marker.
-    if !definitely_ends_a_type(p.current_token())
-        && p.current_token() != CppTokenKind::Comma
-        && p.current_token() != CppTokenKind::Greater
+    // The element name, and a pack expansion marker. The ellipsis is excluded because a parameter can end in
+    // one with no name before it — `int... Ns` — and the declarator rule has nothing to read there.
+    if !ends_a_template_parameter_head(p.current_token())
+        && p.current_token() != CppTokenKind::Ellipsis
         && let Err(err) = parse_declarator(p)
     {
         p.close_marks_above(base);
@@ -138,6 +196,18 @@ fn parse_template_parameter(p: &mut CppParser) -> ParseResult {
 
     if p.current_token() == CppTokenKind::Ellipsis {
         p.bump();
+
+        // The pack's *name* follows the marker in three of the four spellings — `class... Ts`, `int... Ns`,
+        // `typename... Rest` — and only `T...` puts it first. Consuming the marker therefore leaves the
+        // parameter unfinished, and what happens next is the name being left behind: the list loop finds an
+        // identifier where it expects `,` or `>` and reports the parameter as malformed. The two spellings are
+        // indistinguishable at this point, so the rule is the same for both: a name here belongs to the pack.
+        if p.current_token() == CppTokenKind::Identifier
+            && let Err(err) = parse_name(p)
+        {
+            p.close_marks_above(base);
+            return Err(err);
+        }
     }
 
     // A default argument. Which grammar applies depends on the parameter kind, and that is not
@@ -183,6 +253,9 @@ pub fn parse_declaration(p: &mut CppParser) -> ParseResult {
         CppTokenKind::NamespaceKeyword => return parse_namespace_declaration(p),
         CppTokenKind::TypedefKeyword => return parse_typedef_declaration(p),
         CppTokenKind::StaticAssertKeyword => return parse_static_assert(p),
+        CppTokenKind::ExternKeyword if starts_a_linkage_specification(p) => {
+            return parse_linkage_specification(p);
+        }
 
         // `export` heads a module declaration, an export block, or one exported declaration. An
         // `export import` is a re-export, so `import` after `export` routes to the import rule.
@@ -446,8 +519,12 @@ pub fn parse_init_declarator(p: &mut CppParser) -> ParseResult {
     // `Widget widget(1, 2);` parse; it also takes `g(1, 2);` away from the expression reading. The specifier
     // sequence takes `g` for a type, this branch consumes `(1, 2)` as an initializer, and the declaration then
     // declares nothing — so a call statement loses its callee *and* its arguments, which the existing
-    // `CallExpr` test caught immediately. It is handled by the declarator's own suffix loop instead, which is
-    // where the decision can be made from the type name.
+    // `CallExpr` test caught immediately.
+    //
+    // It is handled by the declarator's own suffix loop instead, which is where the decision can be made from
+    // the whole statement rather than from the parentheses alone: the loop runs because the declarator has a
+    // name — `Widget w(…)` — or because the arguments look like declarators at file scope, and never for the
+    // single-name shape a call has.
     if p.current_token() == CppTokenKind::LeftParen && !p.has_declaration_type_name() {
         let checkpoint = p.checkpoint();
         let paren = p.mark(CppSyntaxKind::Declarator);
@@ -482,7 +559,7 @@ pub fn parse_init_declarator(p: &mut CppParser) -> ParseResult {
             // unrecognised — the two mistakes are the same one.
             super::types::eat_function_qualifiers(p);
 
-            if let Err(err) = finish_declarator_suffixes(p) {
+            if let Err(err) = finish_declarator_suffixes(p, declarator_from) {
                 p.close_marks_above(base);
                 return Err(err);
             }
@@ -535,6 +612,24 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
     match p.current_token() {
         CppTokenKind::Assign => {
             p.bump();
+
+            // `= default` and `= delete` — a *defaulted* or *deleted* function definition. Neither keyword
+            // can begin an expression, so the initializer rule has nothing to read and would report
+            // `expected primary expression` against the one token that makes a modern comparison operator
+            // work: `bool operator==(const D&) const = default;` is how C++20 writes one.
+            //
+            // Kept inside the `Initializer` node rather than consumed as a bare token, because that is what it
+            // is: the initializer of a declarator, spelled with a keyword instead of an expression.
+            if matches!(
+                p.current_token(),
+                CppTokenKind::DefaultKeyword | CppTokenKind::DeleteKeyword
+            ) {
+                let init = p.mark(CppSyntaxKind::Initializer);
+                p.bump();
+                init.complete(p);
+                return Ok(m.complete(p));
+            }
+
             let init = p.mark(CppSyntaxKind::Initializer);
             if let Err(err) = parse_initializer_clause(p) {
                 init.undo(p);
@@ -572,14 +667,18 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
 }
 
 /// Continue a declarator after a parenthesized name has been consumed.
-fn finish_declarator_suffixes(p: &mut CppParser) -> ParseResult {
+///
+/// `declarator_from` is the event index where that declarator began, forwarded to
+/// [`parse_function_suffix_or_initializer`] so the rule that decides between a parameter list and a
+/// direct-initialiser can ask whether the declarator named anything.
+fn finish_declarator_suffixes(p: &mut CppParser, declarator_from: usize) -> ParseResult {
     loop {
         match p.current_token() {
             CppTokenKind::LeftParen => {
                 // The same decision the main declarator loop makes, through the same function: a `(` after a
                 // declared name is a parameter list or the parentheses of a direct-initialised variable. Having
                 // two copies of that rule is how they come to disagree.
-                parse_function_suffix_or_initializer(p)?;
+                parse_function_suffix_or_initializer(p, declarator_from)?;
                 if p.current_token() == CppTokenKind::LeftParen {
                     return Ok(CompleteMarker::empty());
                 }
@@ -636,7 +735,12 @@ fn parse_initializer_clause(p: &mut CppParser) -> ParseResult {
 ///
 /// Returns whether it consumed anything, so a caller that reaches this on an expression can leave the
 /// parentheses alone.
-pub fn parse_function_suffix_or_initializer(p: &mut CppParser) -> ParseResult {
+///
+/// `declarator_from` is the event index where the declarator being suffixed began, so the question "did that
+/// declarator name anything?" can be asked of the events it produced. See
+/// [`CppParser::events_contain_any_between`] for why the answer has to come from the event stream rather than
+/// from a parameter.
+pub fn parse_function_suffix_or_initializer(p: &mut CppParser, declarator_from: usize) -> ParseResult {
     let checkpoint = p.checkpoint();
 
     // An untyped list of names has to be claimed *before* the parameter reading is tried, and only here. A
@@ -680,7 +784,7 @@ pub fn parse_function_suffix_or_initializer(p: &mut CppParser) -> ParseResult {
     //
     // The question is settled by asking what the tokens cannot answer — whether the type name is one — using the
     // file's own declarations, plus the scope the statement sits in. See [`a_declaration_is_the_better_reading`].
-    if a_declaration_is_the_better_reading(p) && an_argument_list_follows(p) {
+    if a_declaration_is_the_better_reading(p, declarator_from) && an_argument_list_follows(p) {
         return parse_the_initializer(p);
     }
 
@@ -722,7 +826,7 @@ fn parse_the_initializer(p: &mut CppParser) -> ParseResult {
 /// declaration loses its callee *and* its arguments, and puts a name in scope that was never declared — so a
 /// bare name with no type to back it stays a call. Reading a **declaration** as a call merely leaves the
 /// variable unbound, which is the cheaper mistake, and it is the one made when neither signal is present.
-pub fn a_declaration_is_the_better_reading(p: &CppParser) -> bool {
+pub fn a_declaration_is_the_better_reading(p: &CppParser, declarator_from: usize) -> bool {
     // A keyword type can only begin a declaration: no expression starts with `int`.
     if declarator_starts_with_a_type_keyword(p) {
         return true;
@@ -732,6 +836,26 @@ pub fn a_declaration_is_the_better_reading(p: &CppParser) -> bool {
     // common case — `Widget w(1, 2);` — and it is also what makes `Widget make();` a declaration at file scope.
     if declarator_starts_with_a_known_type_name(p) {
         return p.is_inside_a_body() || p.is_at_file_scope();
+    }
+
+    // Nothing in the file says the leading name is a type — it was declared in a header, or below the point
+    // being edited — but the declarator **named** something and the list at the cursor is unambiguously an
+    // argument list rather than a parameter list. Together those are the shape of direct-initialisation and of
+    // nothing else:
+    //
+    // ```text
+    // Widget w(1, 2, 3);   a variable: `w` is named, and `1` cannot be a parameter's type
+    // Widget w("name");    likewise for a string
+    // g(1, 2, 3);          a call: no name was parsed after the type, so there is nothing to initialise
+    // A(B);                likewise — `B` was left outside the type as an argument, not taken as a name
+    // ```
+    //
+    // The two `true`s are a conjunction and neither is disposable. The name is what separates `Widget w(1)` from
+    // `g(1)`, and the values are what separate `Widget w(1)` from the *parameter* list of a function declaration
+    // whose return type this file has not seen — the reading [`parse_parameter_list`] has already tried and
+    // failed on by the time this is asked.
+    if a_name_was_parsed(p, declarator_from) && the_arguments_look_like_values(p) {
+        return true;
     }
 
     // Nothing in the file says the leading name is a type, but the arguments do not look like values either.
@@ -744,7 +868,246 @@ pub fn a_declaration_is_the_better_reading(p: &CppParser) -> bool {
     // making there. Reading a declaration as a call leaves a variable unbound and is recoverable; reading a
     // call as a declaration loses its callee and invents a binding, so the weaker the evidence the less of the
     // file this is allowed to apply to.
-    p.is_at_file_scope() && the_arguments_look_like_declarators(p, false)
+    p.has_declaration_type_name()
+        && p.is_at_file_scope()
+        && the_arguments_look_like_declarators(p, false)
+}
+
+/// Did the declarator that began at `declarator_from` name anything?
+///
+/// The question [`a_declaration_is_the_better_reading`] has to ask and cannot answer from the type name alone:
+/// in both `Widget w(1)` and `g(1)` a name was recorded in type position — `Widget` and `g` — so
+/// [`CppParser::declaration_type_name`] is `Some` either way, and it is the *second* name that decides.
+///
+/// Read off the event stream rather than tracked as parser state, because the events are what the tree will be
+/// built from: a name that was parsed and then rolled back is not in them, and a name that is in them is one the
+/// declarator really has. The lower bound is what keeps the type's own `NameExpr` — recorded while the specifier
+/// sequence ran, before this point — out of the answer.
+fn a_name_was_parsed(p: &CppParser, declarator_from: usize) -> bool {
+    p.events_contain_any_between(
+        declarator_from,
+        p.current_event_count(),
+        &[CppSyntaxKind::NameExpr],
+    )
+}
+
+/// Does the parenthesised list at the cursor hold values rather than declarations?
+///
+/// The question that separates a direct-initialiser from a parameter list **without** a type table, and the
+/// companion to [`the_arguments_look_like_declarators`]: that one asks whether a list of names is a list of
+/// things being copied, while this one asks whether the list contains anything that can only be a value.
+///
+/// The rule is about the **start of each element**, which is the one position where a declarator and an
+/// expression cannot be confused: a parameter begins with a type, and no type is written as a literal, as a
+/// name that is immediately called, or as an operator that no type contains.
+///
+/// * a **literal** — `1`, `"name"`, `'c'`, `true`, `nullptr`. A parameter is a type and a declarator, and
+///   neither is written as a literal; `Widget w(1, 2, 3)` is decided by the first `1`.
+/// * a **call** — `g()`, `g(a, b)`. A parameter's type is never called: `g()` as a *type* is not a thing, and
+///   the shape [`parse_parameter_list`] would have to read it as — a parameter of type `g` with a default
+///   argument — is what makes `Widget w(g(), h())` fail to parse at all.
+/// * an **operator that cannot begin a type** — `+`, `-`, `!`, `~`, `%`, `|`, `==`, `<<`, `=`, and the rest of
+///   the arithmetic, comparison and assignment families. A parameter's type is built from `*`, `&`, `&&`,
+///   `::`, `<>`, `[]` and `()` and from nothing else, so no parameter's *type* begins with a `+`;
+///   `Widget w(a + 1)` is decided by that.
+///
+/// The operators a type *does* contain are deliberately absent from that list, and `*` and `&` are why it has
+/// to be a list rather than "any operator": `A(B * C)` is a multiplication and `A(B* C)` is a parameter named
+/// `C` of type `B*`, with nothing but the symbol table to tell them apart. Leaving them out keeps such a
+/// statement a call, which is the cheaper mistake — reading a value list as a parameter list leaves a variable
+/// unbound and recoverable, while reading a parameter list as a value list swallows a function declaration and
+/// everything after it.
+fn the_arguments_look_like_values(p: &CppParser) -> bool {
+    if p.current_token() != CppTokenKind::LeftParen {
+        return false;
+    }
+
+    let mut index = p.current_token_index() + 1;
+    let mut depth = 0usize;
+    // Are we at the position where an element begins? A list starts there, a `,` at this depth returns
+    // there, and a nested bracket leaves it.
+    let mut at_element_start = true;
+
+    while index < p.token_count() {
+        let kind = p.token_kind_at(index);
+
+        if is_declaration_trivia(kind) {
+            index += 1;
+            continue;
+        }
+
+        match kind {
+            // The list's own `)` at the outer depth ends it. Anything seen is settled by then.
+            CppTokenKind::RightParen if depth == 0 => return false,
+            CppTokenKind::RightParen
+            | CppTokenKind::RightBracket
+            | CppTokenKind::RightBrace => {
+                depth = depth.saturating_sub(1);
+                at_element_start = false;
+            }
+            CppTokenKind::LeftParen | CppTokenKind::LeftBracket | CppTokenKind::LeftBrace => {
+                // A `(` in element position is a call, which is a value — not a type. Anywhere else it is
+                // nested inside an element that is already under way.
+                if at_element_start && kind == CppTokenKind::LeftParen {
+                    return true;
+                }
+                depth += 1;
+                at_element_start = false;
+            }
+            CppTokenKind::Comma if depth == 0 => at_element_start = true,
+            CppTokenKind::IntegerLiteral
+            | CppTokenKind::FloatingLiteral
+            | CppTokenKind::StringLiteral
+            | CppTokenKind::CharLiteral
+            | CppTokenKind::TrueKeyword
+            | CppTokenKind::FalseKeyword
+            | CppTokenKind::NullptrKeyword
+                if at_element_start =>
+            {
+                return true
+            }
+            // A name, and then whatever follows it. The **next** token is what settles the element: a name
+            // whose follower cannot be part of the declaration it introduces is a value, and no later token of
+            // the element can change that.
+            //
+            // ```text
+            // Inner(1)      a name that is called — a construction, not a type
+            // a + 1         a name followed by an operator no type contains
+            // a, b          a name followed by the list's own `,` — an element of its own
+            // B* C          a name followed by `*`, which a type *does* contain: left alone
+            // ```
+            //
+            // Reading the follower rather than the name is what keeps the last line out of the answer, and it
+            // is why this cannot be decided by looking at the element's first token alone. `B*(C)` — a
+            // multiplication and a parameter of type `B*` — stays a call, which is the cheaper mistake; see the
+            // note on operators below.
+            CppTokenKind::Identifier if at_element_start => {
+                let follower = p.token_kind_at(next_significant_index(p, index));
+                // The followers that keep this a *declaration*: another name (`B C`), a pointer or reference
+                // (`B* c`), a qualified or templated continuation (`B::C`, `B<C>`), the `,` or `)` that ends a
+                // nameless parameter (`void f(B)`), or a bracket or `=` that opens what a declarator carries.
+                //
+                // Everything else makes it a value, and the two that matter most are the `(` of a call and the
+                // operators of an expression. The follower is the first token that is not trivia, so the space
+                // in `int a (b)` is not read as the answer.
+                let keeps_it_a_declaration = matches!(
+                    follower,
+                    CppTokenKind::Identifier
+                        | CppTokenKind::Scope
+                        | CppTokenKind::Less
+                        | CppTokenKind::Star
+                        | CppTokenKind::Ampersand
+                        | CppTokenKind::LogicalAnd
+                        | CppTokenKind::Comma
+                        | CppTokenKind::RightParen
+                        | CppTokenKind::LeftBracket
+                        | CppTokenKind::Assign
+                        | CppTokenKind::Ellipsis
+                        | CppTokenKind::None
+                );
+
+                if !keeps_it_a_declaration {
+                    return true;
+                }
+                at_element_start = false;
+            }
+            // An element that begins with an operator no type contains — `!flag`, `-x`, `~bits`.
+            kind if at_element_start && !can_begin_a_type(kind) => return true,
+            // A `*` or `&` in element position is ambiguous — `A(B* C)` is a parameter of type `B*` and
+            // `A(*p)` is a dereference — and what separates them is whether a name follows. A pointer or
+            // reference *declarator* has one, because `*` and `&` decorate the thing being declared:
+            // `*`, `* const`, `*p`, `&r`. One with nothing but the end of the list after it is arithmetic.
+            //
+            // This is the same question [`can_begin_a_type`] answers for the start of an element, asked one
+            // token later, and it is asked here rather than left to that function because the answer changes
+            // with what follows: a bare `*` cannot begin a type.
+            CppTokenKind::Star | CppTokenKind::Ampersand | CppTokenKind::LogicalAnd
+                if at_element_start =>
+            {
+                let mut after = next_significant_index(p, index);
+                while matches!(
+                    p.token_kind_at(after),
+                    CppTokenKind::ConstKeyword | CppTokenKind::VolatileKeyword
+                ) {
+                    after = next_significant_index(p, after);
+                }
+
+                if !matches!(
+                    p.token_kind_at(after),
+                    CppTokenKind::Identifier
+                        | CppTokenKind::Scope
+                        | CppTokenKind::Star
+                        | CppTokenKind::Ampersand
+                        | CppTokenKind::LogicalAnd
+                        | CppTokenKind::LeftParen
+                ) {
+                    return true;
+                }
+                at_element_start = false;
+            }
+            // The list ended without a `)`, or the statement did: there is no list to judge.
+            CppTokenKind::Semicolon if depth == 0 => return false,
+            CppTokenKind::Eof | CppTokenKind::None => return false,
+            _ => at_element_start = false,
+        }
+
+        index += 1;
+    }
+
+    false
+}
+
+/// Can this token stand at the front of a type?
+///
+/// The set a parameter's type is built from, and nothing else: a specifier keyword, a name, a qualifier or
+/// attribute, a `*`, `&`, `&&`, `...`, `::`, `(`, `[` or a template's `<`. Every token outside it — `+`, `-`,
+/// `!`, `~`, `%`, `^`, `|`, `==`, `<<`, `=`, `?`, `.`, `->`, and the literals — can only be an operator or a
+/// value, which is what [`the_arguments_look_like_values`] reads the answer from.
+///
+/// Written as "everything except the things a type *can* contain" rather than as the list of operators, because
+/// the list of operators is what grows: a new spelling of a type that this does not know about would then be
+/// misread as a value, while a new operator would only be misread as a type — the cheaper direction, and the
+/// one this crate's other heuristics already choose.
+///
+/// # What is deliberately absent
+///
+/// `constexpr`, `mutable`, `virtual` and `explicit` are absent: they are storage and function specifiers, so
+/// they cannot decorate a *parameter's* type, and what they really appear in — `Mutable x(1);` — is a variable
+/// whose type is named `Mutable`. The specifier-sequence rule has already refused any of them followed by a
+/// name in type position, so a `(` after one of them is an initialiser and this answer is the right one.
+///
+/// `~` is absent for the same kind of reason: it starts a destructor's *name*, and a parameter's type has no
+/// name in it. `Widget w(~x)` is a value.
+fn can_begin_a_type(kind: CppTokenKind) -> bool {
+    is_type_specifier_keyword(kind)
+        || matches!(
+            kind,
+            CppTokenKind::Identifier
+                | CppTokenKind::Scope
+                | CppTokenKind::ConstKeyword
+                | CppTokenKind::VolatileKeyword
+                | CppTokenKind::TypenameKeyword
+                | CppTokenKind::Star
+                | CppTokenKind::Ampersand
+                | CppTokenKind::LogicalAnd
+                | CppTokenKind::Ellipsis
+                | CppTokenKind::LeftParen
+                | CppTokenKind::LeftBracket
+                | CppTokenKind::Less
+        )
+}
+
+/// The index of the next significant token after `index`, or one past the end of the stream.
+///
+/// The token list is indexed, not peeked, in the scans above, so a question about the token *after* the one
+/// being looked at has to step over trivia by index. `peek_token_kind_at` cannot answer it: it counts
+/// significant tokens from the cursor, and the cursor is not where these scans are.
+fn next_significant_index(p: &CppParser, index: usize) -> usize {
+    let mut next = index + 1;
+    while next < p.token_count() && is_declaration_trivia(p.token_kind_at(next)) {
+        next += 1;
+    }
+    next
 }
 
 /// Do the parentheses at the cursor hold a list of *declarators* rather than a list of values?
@@ -1133,10 +1496,18 @@ pub fn parse_parameter_list(p: &mut CppParser) -> ParseResult {
             return Err(err);
         }
 
+        // A pack expansion marker belonging to the parameter just parsed: `Args&&... args`, `Ts... rest`. It
+        // comes *before* the name in the first spelling, so it is not something [`parse_parameter`] can attach
+        // — by the time it returns, the cursor is past the name. The trailing `...` of an old-style variadic
+        // function lands here too, which is why it is consumed on every path and not only before a comma.
+        if p.current_token() == CppTokenKind::Ellipsis {
+            p.bump();
+        }
+
         match p.current_token() {
             CppTokenKind::Comma => {
                 p.bump();
-                // A trailing `...` after the last named parameter.
+                // A trailing `...` after the last named parameter: `int f(int a, ...)`.
                 if p.current_token() == CppTokenKind::Ellipsis {
                     p.bump();
                     break;
@@ -1162,12 +1533,30 @@ fn parse_parameter(p: &mut CppParser) -> ParseResult {
     }
 
     // The declarator is optional: `void f(int)` is as valid as `void f(int x)`.
+    //
+    // The ellipsis is excluded because it is not one: in `Args&&... args` the marker comes between the type and
+    // the name, so the name after it is what a declarator would have to be read from — and reading the `...`
+    // as a declarator is what produced `expected a parameter list or an initializer` against these parameters.
     if !definitely_ends_a_type(p.current_token())
         && p.current_token() != CppTokenKind::Comma
+        && p.current_token() != CppTokenKind::Ellipsis
         && let Err(err) = parse_declarator(p)
     {
         p.close_marks_above(base);
         return Err(err);
+    }
+
+    // A pack expansion: `Args&&... args`. The marker belongs to the parameter it expands, so it is consumed
+    // here; the name that follows it belongs to the same parameter and is read as one.
+    if p.current_token() == CppTokenKind::Ellipsis {
+        p.bump();
+
+        if p.current_token() == CppTokenKind::Identifier
+            && let Err(err) = parse_name(p)
+        {
+            p.close_marks_above(base);
+            return Err(err);
+        }
     }
 
     if p.current_token() == CppTokenKind::Assign {
@@ -1507,6 +1896,102 @@ fn parse_stats_block(p: &mut CppParser) -> ParseResult {
         p.bump();
     } else {
         p.emit_missing_node();
+    }
+
+    Ok(m.complete(p))
+}
+
+/// Parse the block of a linkage specification: `extern "C" { void f(); }`.
+///
+/// The linkage itself — the `extern` and its string — has already been consumed as a decl-specifier by
+/// [`super::types::parse_decl_specifier_seq`], so what is left is the block. It is a namespace-shaped
+/// construct rather than a statement block: everything inside is a declaration, and the names it introduces
+/// are visible afterwards, which is why it is parsed by the declaration rule rather than
+/// [`parse_stats_block`].
+pub fn parse_linkage_block(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::CompoundStat);
+
+    expect_token(p, CppTokenKind::LeftBrace)?;
+
+    // A linkage block is a scope, like a namespace body, so a type declared inside it is not a type outside.
+    p.enter_type_name_scope();
+
+    while p.current_token() != CppTokenKind::RightBrace && !p.is_eof() {
+        let member_base = p.open_marks();
+        let before = p.current_token_index();
+        if parse_declaration(p).is_err() {
+            p.close_marks_above(member_base);
+            // Always advance: a declaration that consumed nothing would spin this loop forever.
+            if p.current_token_index() == before {
+                let error = p.mark(CppSyntaxKind::ErrorNode);
+                p.bump();
+                error.complete(p);
+            }
+        }
+    }
+
+    p.leave_type_name_scope();
+
+    if p.current_token() == CppTokenKind::RightBrace {
+        p.bump();
+    } else {
+        p.emit_missing_node();
+    }
+
+    let _ = base;
+    Ok(m.complete(p))
+}
+
+/// Is the cursor on `extern` followed by a string literal — the head of a linkage specification?
+///
+/// Whether the declaration this appears in really is a specifier of one. `extern "C"` is the only form of
+/// `extern` that is followed by a string, so the test is exact rather than a heuristic: an ordinary
+/// `extern int x;` cannot reach it.
+pub fn starts_a_linkage_specification(p: &CppParser) -> bool {
+    p.current_token() == CppTokenKind::ExternKeyword
+        && matches!(
+            p.peek_token_kind_at(1..2).first(),
+            Some(&CppTokenKind::StringLiteral)
+        )
+}
+
+/// Parse a linkage specification: `extern "C" void f();` or `extern "C" { ... }`.
+///
+/// It is a declaration of its own rather than a specifier of the one after it, and that is what this rule
+/// exists to express. Both grammars are legal C++, so the choice is about what the tree means:
+///
+/// * as a **specifier**, the declaration node would wrap a whole nested declaration, so `extern "C" void f();`
+///   would be a `Declaration` whose `DeclSpecifierSeq` contains another `Declaration`, and a consumer walking
+///   top-level declarations would find `f` one level deeper than everything else. The trailing `;` would then
+///   have to be consumed by one of the two, and whichever one did not would report it as missing;
+/// * as a **declaration**, the node says what the construct is — `extern "C"` applies to a declaration — and
+///   the declaration it introduces is its child, so both readings a consumer wants ("what does this linkage
+///   cover?" and "what is declared here?") are one level from the top.
+fn parse_linkage_specification(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::Declaration);
+
+    let specifiers = p.mark(CppSyntaxKind::DeclSpecifierSeq);
+    let linkage = p.mark(CppSyntaxKind::ExternSpec);
+    p.bump(); // `extern`
+    p.bump(); // the string literal
+    linkage.complete(p);
+    specifiers.complete(p);
+
+    if p.current_token() == CppTokenKind::LeftBrace {
+        if let Err(err) = parse_linkage_block(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+        return Ok(m.complete(p));
+    }
+
+    // One declaration shares the linkage, and its own `;` ends the whole construct — which is why nothing
+    // here looks for a second one.
+    if let Err(err) = parse_declaration(p) {
+        p.close_marks_above(base);
+        return Err(err);
     }
 
     Ok(m.complete(p))

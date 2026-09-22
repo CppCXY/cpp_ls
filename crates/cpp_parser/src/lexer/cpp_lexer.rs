@@ -45,6 +45,7 @@ impl<'a> CppLexer<'a> {
         match name {
             // Basic keywords
             "auto" => CppTokenKind::AutoKeyword,
+            "bool" => CppTokenKind::BoolLiteral,
             "break" => CppTokenKind::BreakKeyword,
             "case" => CppTokenKind::CaseKeyword,
             "catch" => CppTokenKind::CatchKeyword,

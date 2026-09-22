@@ -312,7 +312,13 @@ pub enum CppTokenKind {
     /// e.g.: `<iostream>`, `"local.h"`
     HeaderName,
 
-    /// Boolean literal (true/false are defined as keywords)
+    /// The `bool` type keyword.
+    ///
+    /// Named `BoolLiteral` rather than `BoolKeyword` for historical reasons, and the name is misleading: this
+    /// is the *type*, not a literal. The literals are `true` and `false`, which the lexer produces as
+    /// [`TrueKeyword`](Self::TrueKeyword) and [`FalseKeyword`](Self::FalseKeyword). Both readings are accepted
+    /// where they are asked for — see `is_type_keyword` and `is_literal` in `syntax::node::token` — so the
+    /// kind is recognised either way; only the name is unfortunate.
     BoolLiteral,
 
     /// Null pointer literal (nullptr is defined as a keyword)

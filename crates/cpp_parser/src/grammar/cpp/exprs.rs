@@ -179,15 +179,17 @@ fn parse_unary_expr(p: &mut CppParser) -> ParseResult {
             parse_unary_expr(p)?; // parse operand recursively
             Ok(m.complete(p))
         }
-        CppTokenKind::SizeofKeyword => {
+        CppTokenKind::SizeofKeyword | CppTokenKind::AlignofKeyword => {
             let m = p.mark(CppSyntaxKind::UnaryExpr);
-            p.bump(); // consume 'sizeof'
+            p.bump(); // consume 'sizeof' / 'alignof'
 
             if p.current_token() == CppTokenKind::LeftParen {
                 p.bump(); // consume '('
-                parse_expr(p)?; // parse expression or type
+                parse_type_id_or_expression(p)?;
                 expect_token(p, CppTokenKind::RightParen)?;
             } else {
+                // `sizeof x`, `sizeof(int)` without parentheses and `sizeof...` — the operand of the
+                // unparenthesised form is an expression, never a type.
                 parse_unary_expr(p)?;
             }
 
@@ -197,8 +199,32 @@ fn parse_unary_expr(p: &mut CppParser) -> ParseResult {
             let m = p.mark(CppSyntaxKind::UnaryExpr);
             p.bump(); // consume 'typeid'
             expect_token(p, CppTokenKind::LeftParen)?;
-            parse_expr(p)?; // parse expression or type
+            parse_type_id_or_expression(p)?;
             expect_token(p, CppTokenKind::RightParen)?;
+            Ok(m.complete(p))
+        }
+        // A C-style cast, or a parenthesised expression. `(int)x` and `(x)` are the same first three tokens,
+        // and the type reading has to be tried first because it is the one that can be refused: `(x + 1)`
+        // parses as neither a type nor an abstract declarator, so the rollback is what makes it an expression.
+        CppTokenKind::LeftParen if is_a_type_in_parentheses(p) => {
+            let base = p.open_marks();
+            let m = p.mark(CppSyntaxKind::CastExpr);
+            p.bump(); // `(`
+            if let Err(err) = super::types::parse_type_id(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+            if let Err(err) = expect_token(p, CppTokenKind::RightParen) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+
+            // The operand of a cast is a unary expression, which is what keeps `(int)a + b` a sum of a cast
+            // and `b` rather than a cast of `a + b`.
+            if let Err(err) = parse_unary_expr(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
             Ok(m.complete(p))
         }
         CppTokenKind::NewKeyword => {
@@ -219,6 +245,86 @@ fn parse_unary_expr(p: &mut CppParser) -> ParseResult {
             Ok(m.complete(p))
         }
         _ => parse_postfix_expr(p),
+    }
+}
+
+/// Parse what stands inside `sizeof(...)`, `typeid(...)` or a cast's parentheses: a type, or an expression.
+///
+/// The two grammars overlap completely — `(int)`, `(int*)` and `(x)` are all well-formed readings — and the
+/// tokens do not choose between them, so this is a bounded backtrack with a rule for which reading to *try*:
+/// the type goes first, because it is the one that can be refused. A name alone parses as both, and for
+/// `sizeof(x)` the answer barely matters; for `(int)x` it decides whether the construct is a cast at all,
+/// since the expression reading of `(int)` is not an expression and fails.
+///
+/// # Why the type-id must not stop at one name here
+///
+/// [`super::types::parse_type_id`] uses the same sequence as a declaration, where a second name is the
+/// declarator. That is what is wanted: `sizeof(unsigned long)` and `(MyType)x` both need the type to be read
+/// in full, and a `sizeof` of a variable is not a declaration, so there is no declarator to protect.
+fn parse_type_id_or_expression(p: &mut CppParser) -> ParseResult {
+    let checkpoint = p.checkpoint();
+    let before = p.current_token_index();
+
+    if super::types::parse_type_id(p).is_ok() && p.current_token_index() > before {
+        return Ok(crate::parser::CompleteMarker::empty());
+    }
+
+    p.rollback(checkpoint);
+    parse_expr(p)
+}
+
+/// Does the `(` at the cursor open a C-style cast rather than a parenthesised expression?
+///
+/// The question is asked before the parenthesis is consumed, and it is asked precisely, because unlike every
+/// other decision in this grammar the *wrong* answer is not recoverable by the parse itself: `(a)` parses as a
+/// type-id — one name, no declarator — so a rule that tried the type reading whenever it could would turn
+/// every parenthesised variable into a cast of `a`. That is how `x = (a);` came back as `expected primary
+/// expression` against its own `)`, and how `(a && b)` became a cast of `b` to `a&&`.
+///
+/// Two shapes are certain, and only two:
+///
+/// * a **keyword type** — `(int)x`, `(const char*)p`, `(unsigned long)n`. No expression begins with `int`.
+/// * a **name the file declared to be a type**, followed by something a cast can carry — `(MyType)x`,
+///   `(MyType*)p`, `(ns::T)x`, `(Vec<int>)v`. The type table's one job, and the reason it exists.
+///
+/// # The operators that are deliberately not used
+///
+/// `*`, `&` and `&&` after a name look like they discriminate — a cast has a pointer or reference type, and an
+/// expression has an operator — and they do not: `(a && b)` is a conjunction, `(a * b)` a product. All three
+/// tokens mean both things in the two grammars, and C++ settles them by looking the name up, which is what the
+/// type table does. A `(MyType*)p` cast written in a file that never declares `MyType` is therefore read as an
+/// expression; it is the same documented cost as direct-initialisation, in the same direction, and for the same
+/// reason.
+///
+/// Everything else — `(a)`, `(a + 1)`, `((a))`, `(f(x))`, `(a && b)` — belongs to the parenthesised-expression
+/// rule, which is where it now goes.
+fn is_a_type_in_parentheses(p: &CppParser) -> bool {
+    if p.current_token() != CppTokenKind::LeftParen {
+        return false;
+    }
+
+    match p.peek_token_kind_at(1..2).first() {
+        Some(&kind) if super::types::is_type_specifier_keyword(kind) => true,
+        Some(&CppTokenKind::Identifier) => {
+            if !p.is_a_known_type_name(p.peek_token_text_at(1)) {
+                return false;
+            }
+
+            // The name is a type; what follows decides whether the `(` holds a type at all. A cast needs a
+            // type, so `(MyType)x` and `(MyType*)p` qualify — and `(MyType == other)` does not, which is why
+            // the test is a list of what a type continues with rather than "anything but an operator".
+            matches!(
+                p.peek_token_kind_at(2..3).first(),
+                Some(&CppTokenKind::RightParen)
+                    | Some(&CppTokenKind::Star)
+                    | Some(&CppTokenKind::Ampersand)
+                    | Some(&CppTokenKind::LogicalAnd)
+                    | Some(&CppTokenKind::Scope)
+                    | Some(&CppTokenKind::Less)
+            )
+        }
+        Some(&CppTokenKind::Scope) => true,
+        _ => false,
     }
 }
 

@@ -583,6 +583,35 @@ impl<'a> CppParser<'a> {
         self.events.len()
     }
 
+    /// Has a node of one of these kinds been opened between `from_event` and the cursor?
+    ///
+    /// The counterpart to [`CppParser::events_contain_any`], which asks about everything from `from_event`
+    /// *onwards*. This one is bounded on both sides, which is what lets a rule ask a question about the
+    /// declaration it is in the middle of: "has this declarator named anything yet?" is answered by a
+    /// [`CppSyntaxKind::NameExpr`] between where the declarator started and where the cursor stands, and the
+    /// lower bound is what keeps the *type*'s own name — a `NameExpr` inside the specifier sequence, recorded
+    /// before that point — from being mistaken for the declarator's.
+    ///
+    /// This matters because the two questions are asked by the same function for two different statements:
+    /// `Widget w(1, 2, 3);` names `w` and must be a declaration, while `g(1, 2, 3);` names nothing and must
+    /// stay a call. Both have a name in type position; only the first has one after it.
+    pub fn events_contain_any_between(
+        &self,
+        from_event: usize,
+        to_event: usize,
+        kinds: &[crate::kind::CppSyntaxKind],
+    ) -> bool {
+        let from = from_event.min(self.events.len());
+        let to = to_event.min(self.events.len());
+
+        self.events[from..to].iter().any(|event| {
+            matches!(
+                event,
+                MarkEvent::NodeStart { kind, .. } if kinds.contains(kind)
+            )
+        })
+    }
+
     /// Is the cursor inside a template argument list, as far as the grammar has descended?
     ///
     /// Inside one, `>` closes the list instead of comparing, so the expression grammar must not
