@@ -10,6 +10,7 @@ use crate::{
 use super::{
     marker::{MarkEvent, MarkerEventContainer},
     parser_config::ParserConfig,
+    type_names::TypeNames,
 };
 
 /// A resumable point in the parse.
@@ -18,11 +19,37 @@ use super::{
 /// multiplication; `T<U> x` is either a template-id or two comparisons), so the parser must be
 /// able to *try* an interpretation and rewind cheaply. Because the parser is an append-only event
 /// list plus a token cursor, rewinding is just truncating the list and restoring the cursor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checkpoint {
     events_len: usize,
     token_index: usize,
     open_marks: usize,
+    /// The declaration type name in force when the checkpoint was taken.
+    ///
+    /// This is parser state that a rollback must restore, and it is easy to forget because it is
+    /// not in the event stream. A speculative region — the argument list of an apparent call, say —
+    /// parses its own nested "declaration" and calls [`CppParser::begin_declaration_type`], which
+    /// parks the enclosing declaration's type name aside. Rolling the events back without rolling
+    /// this back would silently lose that name, and it is exactly the input
+    /// [`CppParser::is_a_known_type_name`] needs. See [`CppParser::rollback`].
+    declaration_type_name: Option<Box<str>>,
+    previous_declaration_type_name: Option<Box<str>>,
+}
+
+/// A position in the parse, for a question asked later about the tokens around it.
+///
+/// Distinct from [`Checkpoint`], which is for *rewinding* to a position, and from the marker-stack length
+/// [`CppParser::open_marks`] returns, which is for closing nodes. See [`CppParser::anchor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseAnchor {
+    token_index: usize,
+}
+
+impl ParseAnchor {
+    /// The token the cursor stood on when this anchor was taken.
+    pub fn token_index(&self) -> usize {
+        self.token_index
+    }
 }
 
 /// Health of an event stream, used by tests to assert that recovery left the node stack balanced.
@@ -90,6 +117,25 @@ pub struct CppParser<'a> {
     /// discards as a zero-width node, leaving the events of `void f() {}` indistinguishable from
     /// those of `int x {}`. Reading it off the parse directly is the only answer that survives that.
     last_declarator_is_function: bool,
+    /// The names this translation unit declares to be types.
+    ///
+    /// C++ settles several parse questions by looking up a name — `Widget w(1, 2);` against `g(1, 2);` — so a
+    /// parser without this table has to guess. See [`crate::parser::TypeNames`] for what it records and why
+    /// recording too little is the safe direction.
+    type_names: crate::parser::TypeNames,
+    /// The first name written in type position by the declaration being parsed.
+    ///
+    /// `Widget` for `Widget w(1, 2);`, `None` for `int a(1);` — the keyword is not a name. Recorded while the
+    /// specifier sequence is parsed, which is the only place that knows where the type ends and the declarator
+    /// begins; a later walk back over the tokens finds the declarator's name instead.
+    ///
+    /// Read by [`crate::grammar::cpp::decls::a_declaration_is_the_better_reading`].
+    declaration_type_name: Option<Box<str>>,
+    /// The type name `begin_declaration_type` displaced, kept so a rollback can put it back.
+    ///
+    /// A single slot rather than a stack: parsers nest one declaration inside another only through a
+    /// *speculative* region, and the checkpoint taken at the start of that region carries the value back.
+    previous_declaration_type_name: Option<Box<str>>,
     pub parse_config: ParserConfig<'a>,
     pub(crate) errors: &'a mut Vec<CppParseError>,
 }
@@ -188,6 +234,9 @@ impl<'a> CppParser<'a> {
             closed_marks: std::collections::HashMap::new(),
             template_argument_depth: 0,
             last_declarator_is_function: false,
+            type_names: TypeNames::new(),
+            declaration_type_name: None,
+            previous_declaration_type_name: None,
             parse_config: config,
             errors: &mut errors,
         };
@@ -223,6 +272,9 @@ impl<'a> CppParser<'a> {
             closed_marks: std::collections::HashMap::new(),
             template_argument_depth: 0,
             last_declarator_is_function: false,
+            type_names: TypeNames::new(),
+            declaration_type_name: None,
+            previous_declaration_type_name: None,
             parse_config: config,
             errors: &mut errors,
         };
@@ -277,12 +329,34 @@ impl<'a> CppParser<'a> {
         self.text
     }
 
+    /// How many tokens the parser was handed, trivia included.
+    ///
+    /// The bound for a scan that walks the tokens ahead of the cursor by index rather than by
+    /// `peek_token_kind_at`, which counts *significant* tokens and so cannot step past an unknown
+    /// amount of trivia one position at a time.
+    pub fn token_count(&self) -> usize {
+        self.tokens.len()
+    }
+
     pub fn current_token(&self) -> CppTokenKind {
         self.current_token
     }
 
     pub fn current_token_index(&self) -> usize {
         self.token_index
+    }
+
+    /// Mark the current position for a later question about what has been parsed **here**.
+    ///
+    /// Two positions describe a moment in a parse and they are not interchangeable: [`CppParser::open_marks`] is
+    /// a length of the marker stack, for closing the nodes opened since, while [`Checkpoint`] is where the event
+    /// stream and cursor stood. Neither can answer a question about *tokens already consumed* — a marker records
+    /// an event index and the marker stack is not one — and passing the wrong one is a silent mistake rather than
+    /// a loud one, because all three are small integers. That is what this type exists to prevent.
+    pub fn anchor(&self) -> ParseAnchor {
+        ParseAnchor {
+            token_index: self.token_index,
+        }
     }
 
     pub fn current_token_range(&self) -> SourceRange {
@@ -314,6 +388,8 @@ impl<'a> CppParser<'a> {
             events_len: self.events.len(),
             token_index: self.token_index,
             open_marks: self.open_marks.len(),
+            declaration_type_name: self.declaration_type_name.clone(),
+            previous_declaration_type_name: self.previous_declaration_type_name.clone(),
         }
     }
 
@@ -328,6 +404,8 @@ impl<'a> CppParser<'a> {
         // "already closed" bookkeeping must go too — otherwise a future marker reusing the same
         // position would be considered closed and its `NodeEnd` silently skipped.
         self.closed_marks.retain(|p, _| *p < checkpoint.events_len);
+        self.declaration_type_name = checkpoint.declaration_type_name;
+        self.previous_declaration_type_name = checkpoint.previous_declaration_type_name;
         self.token_index = checkpoint.token_index;
         self.current_token = self
             .tokens
@@ -508,8 +586,7 @@ impl<'a> CppParser<'a> {
     /// Is the cursor inside a template argument list, as far as the grammar has descended?
     ///
     /// Inside one, `>` closes the list instead of comparing, so the expression grammar must not
-    /// treat it as an operator. `parse_template_argument_list` is the only place that sets this, via
-    /// [`crate::grammar::cpp::types::TemplateArgumentScope`].
+    /// treat it as an operator. `parse_template_argument_list` is the only place that sets this.
     pub fn is_in_template_arguments(&self) -> bool {
         self.template_argument_depth > 0
     }
@@ -534,6 +611,107 @@ impl<'a> CppParser<'a> {
     /// Did the declarator parsed most recently declare a function?
     pub fn last_declarator_is_function(&self) -> bool {
         self.last_declarator_is_function
+    }
+
+    /// Record that `name` was declared to be a type, at the current scope depth.
+    ///
+    /// Called by the grammar where a name sits in type position: `class Widget`, `typedef ... Integer`,
+    /// `using Alias = ...`. See `TypeNames` for why the parser needs this at all.
+    pub fn declare_type_name(&mut self, name: &str) {
+        self.type_names.declare(name);
+    }
+
+    /// Is `name` a type as far as this file's own declarations say?
+    ///
+    /// The question that separates `Widget w(1, 2);` from `g(1, 2);`. A `false` is not "not a type" but "this
+    /// file does not say it is one" — a type from an included header, a template parameter, or a builtin this
+    /// table never saw. Callers must therefore treat it as one signal among several rather than as the answer.
+    pub fn is_a_known_type_name(&self, name: &str) -> bool {
+        self.type_names.is_a_type(name)
+    }
+
+    /// Enter a braced body, for the table's scope approximation.
+    pub fn enter_type_name_scope(&mut self) {
+        self.type_names.enter_scope();
+    }
+
+    /// Leave a braced body.
+    pub fn leave_type_name_scope(&mut self) {
+        self.type_names.leave_scope();
+    }
+
+    /// The text of the token at `index`, or empty when there is none.
+    ///
+    /// The companion to [`CppParser::token_kind_at`], for the walks that go *backwards* over the tokens already
+    /// consumed — which is how the grammar asks what a declaration began with. `peek_token_text_at` cannot
+    /// answer that: it walks forward from the cursor.
+    pub fn token_text_at(&self, index: usize) -> &str {
+        self.tokens
+            .get(index)
+            .map(|token| {
+                let range = token.range;
+                &self.origin_text()[range.start_offset..range.end_offset()]
+            })
+            .unwrap_or("")
+    }
+
+    /// The table itself, for a consumer that wants to audit what the parse recorded.
+    pub fn type_names(&self) -> &crate::parser::TypeNames {
+        &self.type_names
+    }
+
+    /// Start recording the declaration's leading type name; see the field's documentation.
+    ///
+    /// The name currently in force is parked rather than dropped, because a speculative region may
+    /// run this and then be rolled back — see [`Checkpoint`].
+    pub fn begin_declaration_type(&mut self) {
+        self.previous_declaration_type_name = self.declaration_type_name.take();
+    }
+
+    /// Record a name seen in type position, if none has been recorded for this declaration yet.
+    ///
+    /// Only the first: `unsigned int` has two type words and the declaration's type is the sequence, not either
+    /// word — but what the reader needs is only "is the leading name a type this file declared", and the first
+    /// name is the one a qualifier would precede.
+    pub fn note_declaration_type_name(&mut self, name: String) {
+        if self.declaration_type_name.is_none() && !name.is_empty() {
+            self.declaration_type_name = Some(name.into_boxed_str());
+        }
+    }
+
+    /// The declaration's leading type name, when it has one.
+    pub fn declaration_type_name(&self) -> Option<&str> {
+        self.declaration_type_name.as_deref()
+    }
+
+    /// Has a name been recorded in type position for the declaration being parsed?
+    ///
+    /// The weaker form of [`CppParser::declaration_type_name`], for a caller that only needs to know whether
+    /// the specifier sequence saw a name at all — a declarator left without one is then not an abstract
+    /// declarator but the mark of a name that was taken for a type.
+    pub fn has_declaration_type_name(&self) -> bool {
+        self.declaration_type_name.is_some()
+    }
+
+    /// Is the cursor inside a braced body?
+    ///
+    /// The signal `a_declaration_is_the_better_reading` uses: a function declaration inside a function body is
+    /// vanishingly rare, while a local variable with constructor arguments is everywhere, so a known type name
+    /// inside a body is read as a declaration.
+    ///
+    /// A *parser* depth rather than a C++ scope — a class body counts the same as a function body. That is the
+    /// approximation `TypeNames` documents, and it is on the safe side here: what the answer licenses is the
+    /// declaration reading, which is the cheaper of the two mistakes.
+    pub fn is_inside_a_body(&self) -> bool {
+        self.type_names.depth() > 0
+    }
+
+    /// Is the cursor at file scope, outside every braced body?
+    ///
+    /// Named separately from [`CppParser::is_inside_a_body`] because callers read better for it, and because the
+    /// two together are exhaustive: a statement is either in a body or not.
+    pub fn is_at_file_scope(&self) -> bool {
+        self.type_names.depth() == 0
     }
 
     /// Text of the significant token at relative offset `offset` from the cursor. Empty past the end.

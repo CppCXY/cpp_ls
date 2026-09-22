@@ -156,6 +156,12 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
     // belongs to the type or is the declarator.
     let mut has_specifier = false;
     let mut name_allowed = allow_second_name;
+    // The first name written in type position, recorded for the reader that has to decide whether a `(` after
+    // the declarator is an argument list or a parameter list — see
+    // [`crate::grammar::cpp::decls::a_declaration_is_the_better_reading`]. Captured here because this is the
+    // only place that knows where the type ends and the declarator begins; recovering it later means walking
+    // back over the tokens, which lands on the declarator's name instead.
+    p.begin_declaration_type();
     loop {
         if let Err(err) = parse_one_decl_specifier(p, &mut has_specifier, &mut name_allowed) {
             if specifiers == 0 {
@@ -221,6 +227,10 @@ fn parse_one_decl_specifier_inner(
     name_allowed: &mut bool,
 ) -> ParseResult {
     let base = p.open_marks();
+    // Where this specifier begins, for the backward questions a name specifier has to ask — see
+    // [`super::decls::type_name_at`]. `base` above cannot answer them: it is a marker-stack length, not a
+    // position in the token stream.
+    let type_start = p.anchor();
 
     match p.current_token() {
         // Attributes may be interleaved anywhere a specifier may appear.
@@ -238,10 +248,15 @@ fn parse_one_decl_specifier_inner(
                 // The enum's name is a name specifier, so it spends the allowance: a further name
                 // is the declarator, as in `enum class E e;`.
                 *name_allowed = false;
+                // `enum class E { ... }` declares `E` to be a type, exactly as `class E { ... }` does — this
+                // branch is a second spelling of the same head, so it has to record the same fact or a later
+                // `E e(1);` is read as a call.
+                let declared_name = p.current_token_text().to_string();
                 if let Err(err) = parse_name(p) {
                     p.close_marks_above(base);
                     return Err(err);
                 }
+                p.declare_type_name(&declared_name);
             }
 
             // The underlying type is part of *this* specifier too: `enum class E : unsigned char`.
@@ -392,6 +407,11 @@ fn parse_one_decl_specifier_inner(
             // read as the declarator.
             *name_allowed = false;
 
+            // The first name in type position is the type, and it is worth remembering — see the note where the
+            // loop begins. The whole name is reported, not the first token of it, because a qualified type has to
+            // be recorded under the name a *lookup* would use: `std::string` is the type `string`, qualified.
+            p.note_declaration_type_name(super::decls::type_name_at(p, type_start));
+
             let m = p.mark(CppSyntaxKind::TemplateType);
             if let Err(err) = parse_name(p) {
                 p.close_marks_above(base);
@@ -530,6 +550,14 @@ fn parse_class_like_head(p: &mut CppParser) -> ParseResult {
     p.bump(); // `class` / `struct` / `union` / `enum`
 
     // An optional name. `enum class` is handled before this is reached.
+    // The name is read before it is parsed, because the parser needs it afterwards and re-deriving it from the
+    // event stream would be a second implementation of "what did that name say".
+    let declared_name = if p.current_token() == CppTokenKind::Identifier {
+        Some(p.current_token_text().to_string())
+    } else {
+        None
+    };
+
     if matches!(
         p.current_token(),
         CppTokenKind::Identifier | CppTokenKind::Scope
@@ -537,6 +565,17 @@ fn parse_class_like_head(p: &mut CppParser) -> ParseResult {
     {
         p.close_marks_above(base_marks);
         return Err(err);
+    }
+
+    // `class Widget { ... }` declares `Widget` to be a type, and the parser needs to know that to read
+    // `Widget w(1, 2);` as a declaration rather than as a call.
+    //
+    // Taken from the **first identifier** of the name, which is the entity being declared: `class ns::Widget`
+    // declares `Widget`, and that is what a later declaration spells. A qualified head is therefore recorded
+    // under the name it introduces rather than under its qualifier, which is what makes the lookup useful —
+    // `Widget w(1, 2);` never mentions `ns`.
+    if let Some(name) = declared_name {
+        p.declare_type_name(&name);
     }
 
     // Attributes on the class head: `class C [[deprecated]] { ... }`. They may also be written before
@@ -1071,52 +1110,63 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
     }
 
     // The name, if there is one.
-    if matches!(
+    let named = matches!(
         p.current_token(),
         CppTokenKind::Identifier
             | CppTokenKind::Scope
             | CppTokenKind::OperatorKeyword
             | CppTokenKind::Tilde
-    ) && let Err(err) = parse_name(p)
-    {
+    );
+    if named && let Err(err) = parse_name(p) {
         p.close_marks_above(base);
         return Err(err);
     }
 
     // Suffixes: function parameter lists and array bounds. These bind tighter than pointers, which
     // is why they attach here rather than being folded into the type.
-    loop {
-        match p.current_token() {
-            CppTokenKind::LeftParen => {
-                if let Err(err) = super::decls::parse_parameter_list(p) {
-                    p.close_marks_above(base);
-                    return Err(err);
+    //
+    // A declarator with a name gets them unconditionally. A declarator *without* one gets them only when the
+    // direct-initialisation reading has been chosen, and the question is put to the same rule the main declarator
+    // path would put it to rather than to a proxy for it: `Widget w(1, 2);` opens the loop and reads an
+    // initializer, while the `g(1, 2);` and `Max(a, b);` of a body do not open it at all and keep their
+    // parentheses for the expression reading. An abstract declarator's real reason to exist is a type-id such as
+    // `int(void)`, and that is reached through `parse_type_id`, not here.
+    if named || super::decls::a_declaration_is_the_better_reading(p) {
+        loop {
+            match p.current_token() {
+                CppTokenKind::LeftParen => {
+                    if let Err(err) = super::decls::parse_function_suffix_or_initializer(p) {
+                        p.close_marks_above(base);
+                        return Err(err);
+                    }
+                    // A `(` that is neither a parameter list nor an initializer belongs to whatever comes next,
+                    // and this loop must stop rather than fail: `g(1, 2);` reaches the declaration reading this
+                    // way, and the expression reading is what should have the parentheses.
+                    if p.current_token() == CppTokenKind::LeftParen {
+                        break;
+                    }
                 }
-                // A parameter list is what makes a declarator a function declarator. Recorded here
-                // because an *empty* one leaves no node for a later event-stream check to find.
-                p.set_last_declarator_is_function(true);
-                eat_function_qualifiers(p);
+                CppTokenKind::LeftBracket => {
+                    let array = p.mark(CppSyntaxKind::ArrayType);
+                    p.bump();
+                    // The bound is optional: `int a[]`.
+                    if p.current_token() != CppTokenKind::RightBracket
+                        && !p.is_eof()
+                        && let Err(err) = super::exprs::parse_expr(p)
+                    {
+                        array.undo(p);
+                        p.close_marks_above(base);
+                        return Err(err);
+                    }
+                    if let Err(err) = expect_token(p, CppTokenKind::RightBracket) {
+                        array.undo(p);
+                        p.close_marks_above(base);
+                        return Err(err);
+                    }
+                    array.complete(p);
+                }
+                _ => break,
             }
-            CppTokenKind::LeftBracket => {
-                let array = p.mark(CppSyntaxKind::ArrayType);
-                p.bump();
-                // The bound is optional: `int a[]`.
-                if p.current_token() != CppTokenKind::RightBracket
-                    && !p.is_eof()
-                    && let Err(err) = super::exprs::parse_expr(p)
-                {
-                    array.undo(p);
-                    p.close_marks_above(base);
-                    return Err(err);
-                }
-                if let Err(err) = expect_token(p, CppTokenKind::RightBracket) {
-                    array.undo(p);
-                    p.close_marks_above(base);
-                    return Err(err);
-                }
-                array.complete(p);
-            }
-            _ => break,
         }
     }
 
@@ -1159,14 +1209,6 @@ fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
         if p.current_token() == CppTokenKind::Greater && closer_belongs_to_this_list(p) {
             p.bump();
             return Ok(m.complete(p));
-        }
-
-        if std::env::var_os("CPP_DBG").is_some() {
-            eprintln!(
-                "DBG arg loop: current={:?} belongs={}",
-                p.current_token(),
-                closer_belongs_to_this_list(p)
-            );
         }
 
         let before = p.current_token_index();

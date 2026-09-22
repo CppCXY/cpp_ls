@@ -30,7 +30,7 @@
 //! binding that cannot be placed is dropped, and the resulting gap is visible to a consumer — which is better
 //! than a binding in the wrong scope, and much better than a panic in an editor.
 
-use cpp_parser::{CppSyntaxKind, CppSyntaxNode, CppTokenKind};
+use cpp_parser::{CppAstNode, CppSyntaxKind, CppSyntaxNode, CppTokenKind};
 
 use crate::symbol::{
     Binding, BindingKind, BindingOrigin, DeclName, Name, QualifiedName, ScopeId, ScopeKind,
@@ -441,6 +441,19 @@ impl ScopeWalker {
     /// puts `x` in a scope that can see `T`. For an ordinary declaration the two are the same scope, which is
     /// what `inner` being passed as `outer` means at the call sites.
     fn declaration_parts(&mut self, node: &CppSyntaxNode, outer: ScopeId, inner: ScopeId) {
+        // `f(x);` and `int(x);` have the same token shape, so the grammar reads both as a declaration — the
+        // most vexing parse, and no parser without a table of type names can tell them apart. What it *can* say
+        // is whether any name was declared, and the AST layer already answers that: a real declarator names
+        // itself with a direct token or a `NameExpr` child, while the declarator of a call statement holds only
+        // a parenthesised declarator one level down. A declaration with no name therefore went through the
+        // declaration path without declaring anything, which is what a statement looks like when it lands here.
+        //
+        // This rejects only real declarations that genuinely have no name — `static_assert(...)`, a type
+        // definition with no declarator, an anonymous class — and none of those declares a binding either.
+        if is_unnamed_declaration(node) {
+            return;
+        }
+
         // `friend` declarations declare nothing in this scope: `friend class X;` says X's members may reach
         // into this class, and X itself is declared elsewhere. Binding it here would make a friend class look
         // like a member.
@@ -903,6 +916,31 @@ fn function_binding_kind(name: &Name) -> BindingKind {
         crate::symbol::NameKind::Operator(_) => BindingKind::OperatorFunction,
         crate::symbol::NameKind::Literal(_) => BindingKind::LiteralOperator,
         crate::symbol::NameKind::Identifier(_) => BindingKind::Function,
+    }
+}
+
+/// Did this `Declaration` go through the declaration path without declaring anything?
+///
+/// The question the most vexing parse forces on any parser without a table of type names. `f(x);` — a call —
+/// and `int(x);` — a declaration of `x` — are the same tokens, so the grammar reads both as a declaration; what
+/// distinguishes them at this layer is that the call has **no declarator name**, because the identifier sits in
+/// a parenthesised declarator rather than where a declared name goes.
+///
+/// Answered by asking the AST layer rather than by walking the tree again: `CppDeclaration::get_name` is
+/// already the "which name does this declare" rule, and it looks only where a name may be. A second
+/// implementation here would be free to disagree with the first, and consumers use both.
+///
+/// `false` for every node that is not a `Declaration`, because the other declaration kinds state their name
+/// differently and already handle an absent one — an anonymous namespace, an unnamed `class {}`.
+fn is_unnamed_declaration(node: &CppSyntaxNode) -> bool {
+    if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::Declaration {
+        return false;
+    }
+
+    match cpp_parser::CppDeclaration::cast(node.clone()) {
+        Some(declaration) => declaration.get_name_text().is_none(),
+        // Not castable, so the AST layer has no opinion and this layer should not invent one.
+        None => false,
     }
 }
 

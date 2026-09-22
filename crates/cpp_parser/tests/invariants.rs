@@ -320,6 +320,33 @@ const CORPUS: &[(&str, &str)] = &[
         ),
     ),
     (
+        // Every spelling of the assignment family, plus the statement shapes built on them. `*p = 5` and
+        // `arr[0] = 1` are here because they are the forms whose left side cannot be a type, so the expression
+        // reading is the only one available.
+        "assignment and compound assignment",
+        concat!(
+            "void f() {\n",
+            "    a = b;\n",
+            "    i += 1;\n",
+            "    i -= 1;\n",
+            "    i *= 2;\n",
+            "    i /= 2;\n",
+            "    i %= 2;\n",
+            "    flags &= mask;\n",
+            "    flags |= mask;\n",
+            "    flags ^= mask;\n",
+            "    value <<= 2;\n",
+            "    value >>= 2;\n",
+            "    *p = *q = 5;\n",
+            "    arr[0] = 1;\n",
+            "    arr[0] += 1;\n",
+            "    p->field = 1;\n",
+            "    obj.field = obj.other;\n",
+            "    x = y + z * w;\n",
+            "}\n",
+        ),
+    ),
+    (
         // A `:` after a function declarator is a member initializer list; a `:` after a variable is not. Both
         // readings live in one rule, so both spellings belong in one corpus entry.
         "member initializer lists",
@@ -722,6 +749,10 @@ const MUST_PARSE_CLEANLY: &[&str] = &[
     // here because the fourth — a binding pattern — needed a fix of its own.
     "range-based for",
     "member initializer lists",
+    // The assignment family, which was missing from the binary operator table entirely. Its absence made the
+    // *expression* reading stop at the `=`, so a statement was reported as `expected ; after expression` and
+    // the declaration/expression fallback could not help — the expression reading was the one that failed.
+    "assignment and compound assignment",
     // The doc layer writes into the same event stream, so a comment must not turn valid code into a
     // diagnostic. `@code`, `@param[in]` and a comment inside a class body are the shapes that would.
     "documentation comments",

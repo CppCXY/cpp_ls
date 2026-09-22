@@ -24,7 +24,12 @@ pub(crate) fn parse_compound_stat(p: &mut CppParser) -> ParseResult {
 
     if p.current_token() == CppTokenKind::LeftBrace {
         p.bump();
+        // A name declared inside a brace is not a type name outside it, so the table's scope follows the
+        // braces. This is the approximation the table documents: it counts *parser* depth, which is enough to
+        // keep a local class from being a type name for the next function.
+        p.enter_type_name_scope();
         parse_stats(p);
+        p.leave_type_name_scope();
 
         if p.current_token() == CppTokenKind::RightBrace {
             p.bump();
@@ -178,7 +183,6 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
     }
 
     let checkpoint = p.checkpoint();
-
     match super::decls::parse_declaration(p) {
         Ok(marker) => Ok(marker),
         Err(_) => {
@@ -462,7 +466,7 @@ fn parse_for_statement(p: &mut CppParser) -> ParseResult {
         // The rule is the *for-init* one rather than a whole declaration: the header has no `;` of its own, so
         // a rule expecting one reports "expected `;`" against the range expression.
         if super::decls::parse_for_init_declaration(p).is_err() {
-            p.rollback(checkpoint);
+            p.rollback(checkpoint.clone());
             parse_expr(p)?;
         }
 
@@ -483,7 +487,8 @@ fn parse_for_statement(p: &mut CppParser) -> ParseResult {
             return Ok(m.complete(p));
         }
 
-        // Not a range-for after all; fall through to the C-style reading.
+        // Not a range-for after all; fall through to the C-style reading. The checkpoint was taken before the
+        // range reading, so rewinding here also undoes the optional range declaration that parsed successfully.
         p.rollback(checkpoint);
     }
 

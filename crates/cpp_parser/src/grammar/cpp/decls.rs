@@ -27,7 +27,7 @@
 use crate::{
     grammar::ParseResult,
     kind::{CppSyntaxKind, CppTokenKind},
-    parser::{CompleteMarker, CppParser, Marker, MarkerEventContainer},
+    parser::{CompleteMarker, CppParser, Marker, MarkerEventContainer, ParseAnchor},
     parser_error::CppParseError,
 };
 
@@ -433,11 +433,32 @@ pub fn parse_init_declarator(p: &mut CppParser) -> ParseResult {
 
     // `T(x);` and `int (x);` are parenthesized declarators, not calls. Detecting that here is what
     // keeps the declarator reading from mis-nesting the parentheses.
-    if p.current_token() == CppTokenKind::LeftParen {
+    //
+    // Only when the specifier sequence saw no *name*, though. Once it has, the type is written and everything
+    // after it is the declarator, so a `(` there cannot be a declarator of its own — `Max(a);` is a statement
+    // whose parentheses hold an argument, and reading them as a parenthesized name `a` invented a variable
+    // declaration out of a call. A keyword type is the other way round: `int` is never the declarator, so the
+    // parentheses are all that is left to hold one.
+    //
+    // Direct-initialisation — `Widget widget(1, 2);` — is **not** handled here, and the reason is worth
+    // recording because the obvious fix does not work. Reading the argument list as an initializer whenever the
+    // parentheses hold something other than a single identifier looks right and does make
+    // `Widget widget(1, 2);` parse; it also takes `g(1, 2);` away from the expression reading. The specifier
+    // sequence takes `g` for a type, this branch consumes `(1, 2)` as an initializer, and the declaration then
+    // declares nothing — so a call statement loses its callee *and* its arguments, which the existing
+    // `CallExpr` test caught immediately. It is handled by the declarator's own suffix loop instead, which is
+    // where the decision can be made from the type name.
+    if p.current_token() == CppTokenKind::LeftParen && !p.has_declaration_type_name() {
         let checkpoint = p.checkpoint();
         let paren = p.mark(CppSyntaxKind::Declarator);
         p.bump();
-        if parse_declarator(p).is_err() {
+        // A parenthesized declarator has to *hold* a declarator, and an empty one is not enough. `int (x)`
+        // holds a name and `int (*p)(int)` a pointer; the `(` of `g()` holds neither, because the specifier
+        // sequence has taken `g` for a type and there is nothing left to name. Without this the empty reading
+        // succeeds, the parentheses are consumed as a declarator, and a call statement becomes a declaration of
+        // nothing — losing the callee, the arguments, and the expression.
+        let named_something = starts_a_declarator(p) && parse_declarator(p).is_ok();
+        if !named_something {
             // Not a parenthesized declarator; let the expression reading have it.
             p.rollback(checkpoint);
         } else if p.current_token() == CppTokenKind::RightParen {
@@ -555,10 +576,13 @@ fn finish_declarator_suffixes(p: &mut CppParser) -> ParseResult {
     loop {
         match p.current_token() {
             CppTokenKind::LeftParen => {
-                parse_parameter_list(p)?;
-                // `const`, `noexcept`, `override`, `-> T` and friends belong to the function
-                // declarator, not to whatever comes next.
-                super::types::eat_function_qualifiers(p);
+                // The same decision the main declarator loop makes, through the same function: a `(` after a
+                // declared name is a parameter list or the parentheses of a direct-initialised variable. Having
+                // two copies of that rule is how they come to disagree.
+                parse_function_suffix_or_initializer(p)?;
+                if p.current_token() == CppTokenKind::LeftParen {
+                    return Ok(CompleteMarker::empty());
+                }
             }
             CppTokenKind::LeftBracket => {
                 let array = p.mark(CppSyntaxKind::ArrayType);
@@ -588,6 +612,355 @@ fn parse_initializer_clause(p: &mut CppParser) -> ParseResult {
     }
 
     parse_expr(p)
+}
+
+/// A `(` after a declared name: a parameter list, or the parentheses of a direct-initialised variable.
+///
+/// The two are told apart by what the parentheses can hold:
+///
+/// ```text
+/// int a(b);        a parameter list, because `b` parses as a type — hence a function
+/// int a(1);        not a parameter list: `1` is not a type, so this is a variable initialised with `1`
+/// Widget w(1, 2);  likewise — a variable initialised with two arguments
+/// ```
+///
+/// The parameter reading is tried before the initializer reading in most cases, because it is the one that can
+/// fail on its own: a parameter must have a type, and a literal does not. A failed attempt is rewound, which is
+/// the same bounded backtracking [`crate::grammar::cpp::types::parse_declarator`] already relies on for the same
+/// ambiguity. Trying the initializer reading first would take `int a(b)` away from the function reading, which is
+/// the reading C++ gives it.
+///
+/// **An untyped list of names is the exception**, and it is tried the other way round: `a` is a valid parameter
+/// type as well as a valid argument, so the parameter reading succeeds on `Max(a, b);` and would never be
+/// revisited. At file scope that shape is a declaration, so the initializer gets first refusal there.
+///
+/// Returns whether it consumed anything, so a caller that reaches this on an expression can leave the
+/// parentheses alone.
+pub fn parse_function_suffix_or_initializer(p: &mut CppParser) -> ParseResult {
+    let checkpoint = p.checkpoint();
+
+    // An untyped list of names has to be claimed *before* the parameter reading is tried, and only here. A
+    // parameter must have a type, but a bare name is also a perfectly good type, so `Max(a, b);` parses as a
+    // parameter list — two parameters of type `a` and type `b` — and a reading that succeeds is never revisited.
+    // At file scope that is the wrong answer for a shape that only a declaration can have, so the initializer
+    // reading goes first and the parameter reading is what gets rewound instead. Inside a body the call is the
+    // ordinary reading and the order is left alone; see [`a_declaration_is_the_better_reading`].
+    //
+    // The second form is the same argument one level down: once the leading name *is* a type this file declared,
+    // the parentheses follow a declarator name, and `Inner(1)` in them is a value being constructed rather than
+    // a parameter. That reading is what a parameter list gets wrong — it takes `Inner` for a parameter's type
+    // and then reads `(1)` as that parameter's default argument, which is a declaration of a function nobody
+    // wrote.
+    let declarator_is_named = p.has_declaration_type_name();
+    if (p.is_at_file_scope() && the_arguments_look_like_declarators(p, false)
+        || declarator_is_named && the_arguments_look_like_declarators(p, true))
+        && let Ok(parsed) = parse_the_initializer(p)
+    {
+        return Ok(parsed);
+    }
+
+    if parse_parameter_list(p).is_ok() {
+        // A parameter list is what makes a declarator a function declarator. Recorded here because an *empty*
+        // one leaves no node for a later event-stream check to find.
+        p.set_last_declarator_is_function(true);
+        super::types::eat_function_qualifiers(p);
+        return Ok(CompleteMarker::empty());
+    }
+
+    p.rollback(checkpoint);
+
+    // Direct-initialisation, when the evidence says this is a declaration rather than a call. The two are the
+    // same tokens:
+    //
+    // ```text
+    // int a(1);        a declaration: `int` is a keyword type
+    // Widget w(1, 2);  a declaration, because `Widget` is a type this file declares
+    // g(1, 2);         a call, because `g` is not
+    // ```
+    //
+    // The question is settled by asking what the tokens cannot answer — whether the type name is one — using the
+    // file's own declarations, plus the scope the statement sits in. See [`a_declaration_is_the_better_reading`].
+    if a_declaration_is_the_better_reading(p) && an_argument_list_follows(p) {
+        return parse_the_initializer(p);
+    }
+
+    Ok(CompleteMarker::empty())
+}
+
+/// Read the argument list at the cursor as a direct-initialiser.
+fn parse_the_initializer(p: &mut CppParser) -> ParseResult {
+    let init = p.mark(CppSyntaxKind::Initializer);
+    if let Err(err) = parse_expression_list(p, CppTokenKind::RightParen) {
+        init.undo(p);
+        return Err(err);
+    }
+    init.complete(p);
+    Ok(CompleteMarker::empty())
+}
+
+/// Should `T x(...)` be read as a declaration rather than as a call?
+///
+/// Two kinds of evidence, both from the file being parsed, and both about what real code looks like rather than
+/// about what the grammar permits.
+///
+/// # The type name
+///
+/// A declaration begins with a type, and a call begins with a callee. If the leading name is one this file
+/// declared — `class Widget`, `typedef ... Integer`, `using Alias = ...` — the declaration reading is the one a
+/// compiler would take. [`crate::parser::TypeNames`] is the table; it records only what a declaration spells out,
+/// so a miss costs the declaration reading rather than producing a wrong one.
+///
+/// # The scope
+///
+/// **A function declaration inside a function body is vanishingly rare**, while a local variable with
+/// constructor arguments is everywhere. So the operators, known type names, and member functions declared
+/// *before* the current one are the real cases. The parser's brace depth is a good proxy for this: at depth
+/// zero the file is declaring things, and inside a body it is writing code. Recording too much depth would
+/// make a nested block look like a new file scope, so a single level is treated as "inside a body".
+///
+/// The direction of the guess matters and is the reason this is worth doing at all: reading a **call** as a
+/// declaration loses its callee *and* its arguments, and puts a name in scope that was never declared — so a
+/// bare name with no type to back it stays a call. Reading a **declaration** as a call merely leaves the
+/// variable unbound, which is the cheaper mistake, and it is the one made when neither signal is present.
+pub fn a_declaration_is_the_better_reading(p: &CppParser) -> bool {
+    // A keyword type can only begin a declaration: no expression starts with `int`.
+    if declarator_starts_with_a_type_keyword(p) {
+        return true;
+    }
+
+    // A name this file declared to be a type, wherever the declaration is written. Inside a body this is the
+    // common case — `Widget w(1, 2);` — and it is also what makes `Widget make();` a declaration at file scope.
+    if declarator_starts_with_a_known_type_name(p) {
+        return p.is_inside_a_body() || p.is_at_file_scope();
+    }
+
+    // Nothing in the file says the leading name is a type, but the arguments do not look like values either.
+    // A list of bare identifiers is what a declaration's *initializer* most often looks like — `Max(a, b)` copies
+    // two things that are already in scope — while a call passes values, and a value is written as a literal, a
+    // call, a member access or an operator. See [`the_arguments_look_like_declarators`].
+    //
+    // The scope gate is what keeps this off expressions. At file scope a statement cannot be a call, so the
+    // reading costs nothing; inside a body a call is the ordinary thing to find, and the guess is not worth
+    // making there. Reading a declaration as a call leaves a variable unbound and is recoverable; reading a
+    // call as a declaration loses its callee and invents a binding, so the weaker the evidence the less of the
+    // file this is allowed to apply to.
+    p.is_at_file_scope() && the_arguments_look_like_declarators(p, false)
+}
+
+/// Do the parentheses at the cursor hold a list of *declarators* rather than a list of values?
+///
+/// The question the last heuristic in [`a_declaration_is_the_better_reading`] asks, and it is about shape rather
+/// than about names. Two shapes answer yes, and they are the two things that can legitimately stand where a
+/// direct-initialiser's argument goes:
+///
+/// * a **bare name** — `Max(a, b)`, two things already in scope being copied. A *value*, by contrast, is
+///   written as a literal, a call, a member access or an operator, and none of those is a name;
+/// * a **nested construction** — `Widget w(Inner(1))`, one value being built. A parameter list has no such
+///   element: `Inner(1)` is not a type, and reading it as one is exactly how a constructor argument came out as
+///   a parameter. It is accepted only where the declaration reading is already established, which is what the
+///   `known_type_name` parameter carries — by then a constructed temporary is far likelier than a function whose
+///   parameter is named `Inner` and defaulted from `1`.
+///
+/// Everything else disqualifies the list: a literal, a `::`, a `.`, a `->`, an operator, a bracket. Depth is
+/// tracked so that a nested list terminates an element rather than silently continuing it.
+///
+/// The `)` must close the list. A scan that runs out of tokens answers no, because there is then no list.
+fn the_arguments_look_like_declarators(p: &CppParser, known_type_name: bool) -> bool {
+    if p.current_token() != CppTokenKind::LeftParen {
+        return false;
+    }
+
+    let mut index = p.current_token_index() + 1;
+    let mut saw_one = false;
+    let mut expect_an_element = true;
+    let mut depth = 0usize;
+
+    while index < p.token_count() {
+        let kind = p.token_kind_at(index);
+
+        if is_declaration_trivia(kind) {
+            index += 1;
+            continue;
+        }
+
+        match kind {
+            // The list's own `)`, after one or more complete elements.
+            CppTokenKind::RightParen => return depth == 0 && saw_one && !expect_an_element,
+            CppTokenKind::LeftParen => {
+                // A `(` that follows the name just read turns that name from a bare element into a
+                // construction — but only where the declaration reading is already established, and only as one
+                // level: the element `Inner(1)` is a value, whereas a call nested inside an element is not.
+                if !known_type_name || expect_an_element || depth > 0 {
+                    return false;
+                }
+                depth += 1;
+            }
+            CppTokenKind::Comma if depth == 0 => {
+                if expect_an_element {
+                    return false;
+                }
+                expect_an_element = true;
+            }
+            CppTokenKind::Identifier if depth == 0 => {
+                // A second name with no comma between them is a type and its declarator, which this reading
+                // has no element for.
+                if !expect_an_element {
+                    return false;
+                }
+                // A qualified name is a path to something rather than a name, so it is not a declarator.
+                if p.peek_token_kind_at(1..2).as_slice() == [CppTokenKind::Scope] {
+                    return false;
+                }
+                saw_one = true;
+                expect_an_element = false;
+            }
+            // Inside a nested element: a value. Nothing there is this rule's business.
+            _ if depth > 0 => {}
+            // Anything else at the top level: a literal, an operator, a `::`, a `.`, an unmatched bracket.
+            _ => return false,
+        }
+
+        index += 1;
+    }
+
+    false
+}
+
+/// Did the declaration this declarator belongs to lead with a name this file declared to be a type?
+///
+/// The companion to [`declarator_starts_with_a_type_keyword`], for the other way a type gets written: by name.
+/// The name asked about is the **first** identifier of the declaration, which is what a declaration's type is —
+/// `Widget` in `Widget w(1, 2);`.
+fn declarator_starts_with_a_known_type_name(p: &CppParser) -> bool {
+    p.declaration_type_name()
+        .is_some_and(|name| p.is_a_known_type_name(name))
+}
+
+/// The name a type whose last segment starts at `from` would be looked up under.
+///
+/// The specifier loop that reaches this is called once per *segment* of a qualified name, because
+/// [`parse_name`](super::types::parse_name) stops after each one and the loop walks the `::`. So the answer is
+/// the **last** identifier of the whole thing: `std::string` is the type `string` seen through `std`, and a
+/// lookup that started from `std` would be asking whether a *namespace* is a type.
+///
+/// The scan starts at the segment's own first token — which is the name, the caller having asked before parsing
+/// it — and walks back over identifiers and the `::` between them, stopping at the first thing that is neither.
+/// A nested name specifier is a chain of names, so reading the chain backwards finds its last link without
+/// needing to know where the chain began. Only the identifier is kept, not the qualifiers: the qualifiers say
+/// where to look the name up, which is a question for name resolution rather than for this table.
+///
+/// `""` when there is no such identifier, which the caller treats as "nothing to remember".
+pub fn type_name_at(p: &CppParser, from: ParseAnchor) -> String {
+    let mut index = p.current_token_index();
+
+    loop {
+        let kind = p.token_kind_at(index);
+        if !is_declaration_trivia(kind) {
+            if kind == CppTokenKind::Identifier {
+                return p.token_text_at(index).to_string();
+            }
+            // Something that is neither a name nor the `::` between names: the chain ends here.
+            if !matches!(kind, CppTokenKind::Scope) {
+                return String::new();
+            }
+        }
+
+        if index == from.token_index() {
+            return String::new();
+        }
+        index -= 1;
+    }
+}
+
+/// Did the declaration this declarator belongs to lead with a type **keyword**?
+///
+/// The question that separates `int a(1);` from `g(1, 2);`, and the only part of it that is answerable from the
+/// tokens: a keyword type is written with a keyword, so a declaration beginning with one is a declaration,
+/// while one beginning with a bare name is as likely to be the callee of a call.
+///
+/// Asked of the **first significant token of the declaration**, found by walking back over the tokens consumed
+/// so far to the one that begins it. The walk stops at a `;`, `{` or `}` — no declaration contains one — which
+/// is what keeps it inside this statement: without that, `void f() { g(1); }` would find the `void` of the
+/// enclosing function and call the call a declaration.
+///
+/// Not asked of the event stream, which was the first attempt and does not work: the events reach back to the
+/// beginning of the file, so the `BuiltinType` of an enclosing declaration is indistinguishable from this
+/// one's by node kind alone.
+fn declarator_starts_with_a_type_keyword(p: &CppParser) -> bool {
+    let mut index = p.current_token_index();
+    let mut first = None;
+
+    while index > 0 {
+        index -= 1;
+        let kind = p.token_kind_at(index);
+
+        if matches!(
+            kind,
+            CppTokenKind::Semicolon | CppTokenKind::LeftBrace | CppTokenKind::RightBrace
+        ) {
+            break;
+        }
+        if is_declaration_trivia(kind) {
+            continue;
+        }
+
+        first = Some(kind);
+    }
+
+    // `auto` and `decltype` are deliberately left out of the answer even though they are in
+    // [`super::types::is_type_specifier_keyword`]: both can begin an expression, so `auto(1)` is as readable as
+    // a call as it is as a declaration. Of the two readings, the expression is the one to prefer — reading a
+    // call as a declaration loses its callee *and* its arguments, while reading a declaration as a call merely
+    // leaves a variable unbound.
+    first.is_some_and(|kind| {
+        super::types::is_type_specifier_keyword(kind)
+            && !matches!(
+                kind,
+                CppTokenKind::AutoKeyword | CppTokenKind::DecltypeKeyword
+            )
+    })
+}
+
+/// Does a declarator begin where the cursor stands?
+///
+/// Used to refuse the empty reading of a parenthesized declarator. Only the openings that can start one are
+/// accepted: the `(` of `g()` can start neither a declarator nor a name, so the reading is refused before the
+/// parse is attempted rather than after it fails to say anything.
+fn starts_a_declarator(p: &CppParser) -> bool {
+    matches!(
+        p.current_token(),
+        CppTokenKind::Star
+            | CppTokenKind::Ampersand
+            | CppTokenKind::LogicalAnd
+            | CppTokenKind::Identifier
+            | CppTokenKind::Scope
+            | CppTokenKind::OperatorKeyword
+            | CppTokenKind::Tilde
+    )
+}
+
+/// Token kinds that are not part of a declaration's own text, for the walk above.
+fn is_declaration_trivia(kind: CppTokenKind) -> bool {
+    matches!(
+        kind,
+        CppTokenKind::Whitespace
+            | CppTokenKind::Newline
+            | CppTokenKind::LineContinuation
+            | CppTokenKind::LineComment
+            | CppTokenKind::BlockComment
+            | CppTokenKind::None
+    )
+}
+
+/// Can the `( ` at the cursor open an argument list rather than a parameter list?
+///
+/// True unless the parentheses are **empty**. `T x()` is the most vexing parse's other half — a function
+/// declaration, not a variable — and it is already handled by the parameter-list reading, so the initializer
+/// reading must not take it. Everything else is worth trying as an initializer, and the parameter reading has
+/// already been tried and rewound by the time this is asked.
+fn an_argument_list_follows(p: &CppParser) -> bool {
+    p.current_token() == CppTokenKind::LeftParen
+        && p.peek_token_kind_at(1..2).as_slice() != [CppTokenKind::RightParen]
 }
 
 /// Parse the declaration part of a `for` header, where the `;` belongs to the header rather than to
@@ -818,6 +1191,18 @@ pub fn parse_class_body(p: &mut CppParser) -> ParseResult {
 
     expect_token(p, CppTokenKind::LeftBrace)?;
 
+    // A nested class is a type name inside this body and not outside it, so the table's scope follows the
+    // brace — the same approximation a compound statement makes.
+    p.enter_type_name_scope();
+    let result = parse_class_body_members(p);
+    p.leave_type_name_scope();
+    result?;
+
+    Ok(m.complete(p))
+}
+
+/// The members of a class body, up to its closing brace.
+fn parse_class_body_members(p: &mut CppParser) -> ParseResult {
     while p.current_token() != CppTokenKind::RightBrace && !p.is_eof() {
         let member_base = p.open_marks();
 
@@ -851,7 +1236,7 @@ pub fn parse_class_body(p: &mut CppParser) -> ParseResult {
         p.emit_missing_node();
     }
 
-    Ok(m.complete(p))
+    Ok(CompleteMarker::empty())
 }
 
 fn access_specifier_kind(kind: CppTokenKind) -> CppSyntaxKind {
@@ -962,7 +1347,18 @@ pub fn parse_using_declaration(p: &mut CppParser) -> ParseResult {
         return Ok(m.complete(p));
     }
 
-    // `using Alias = Type;`
+    // `using Alias = Type;` — an alias introduces a type name, and the parser needs it for the same reason a
+    // `class` name is needed: `Alias a(1);` is a declaration and `f(1);` is a call.
+    //
+    // A using-*declaration* (`using ns::f;`) introduces whatever `f` already was, which this table cannot know,
+    // so only the alias form is recorded. Recording the other would be recording a name as a type on the
+    // strength of nothing.
+    let alias_name = if p.current_token() == CppTokenKind::Identifier {
+        Some(p.current_token_text().to_string())
+    } else {
+        None
+    };
+
     if let Err(err) = parse_name(p) {
         p.close_marks_above(base);
         return Err(err);
@@ -970,6 +1366,11 @@ pub fn parse_using_declaration(p: &mut CppParser) -> ParseResult {
 
     if p.current_token() == CppTokenKind::Assign {
         p.bump();
+
+        if let Some(name) = alias_name {
+            p.declare_type_name(&name);
+        }
+
         if let Err(err) = parse_type_id(p) {
             p.close_marks_above(base);
             return Err(err);
@@ -996,9 +1397,22 @@ pub fn parse_typedef_declaration(p: &mut CppParser) -> ParseResult {
         p.close_marks_above(base);
         return Err(err);
     }
+
+    // `typedef int Integer;` makes `Integer` a type name, which is the whole point of the declaration — and the
+    // name is what the declarator introduces, so it is read from there rather than from the specifiers.
+    let defined_name = if p.current_token() == CppTokenKind::Identifier {
+        Some(p.current_token_text().to_string())
+    } else {
+        None
+    };
+
     if let Err(err) = super::types::parse_declarator(p) {
         p.close_marks_above(base);
         return Err(err);
+    }
+
+    if let Some(name) = defined_name {
+        p.declare_type_name(&name);
     }
     if let Err(err) = expect_semicolon(p) {
         p.close_marks_above(base);

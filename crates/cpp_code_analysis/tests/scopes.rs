@@ -8,7 +8,7 @@
 //! Scope is what these tests are about, so the renderings show scopes and the names in them, and nothing else.
 
 use cpp_code_analysis::{BindingKind, ScopeKind, SymbolTable, build_scopes};
-use cpp_parser::{CppParser, ParserConfig};
+use cpp_parser::{CppParser, CppSyntaxKind, ParserConfig};
 
 /// Parse, check the parse is sound, and build the scopes.
 fn scopes(source: &str) -> SymbolTable {
@@ -346,15 +346,32 @@ fn a_range_for_over_a_call_binds_only_its_variable() {
     assert_eq!(shape(&table), "File{f}(Fn(Block{x}(Block)))");
 }
 
-/// A bare expression statement declares nothing, for the statements that parse without a declarator.
+/// A bare expression statement declares nothing — including the statements the grammar reads as declarations.
 ///
-/// `x;`, `a = b;`, `++i;` and `a + b;` all arrive as a `Declaration` with no declarator at all — the grammar's
-/// way of holding a statement whose kind it did not work out — and the scope walker correctly finds no name in
-/// them. Asserted as a **negative** so the property is pinned in the layer that can enforce it: whatever the
-/// parser's node kind says, a name is only read along the declarator path.
+/// The most vexing parse leaves a statement-shaped hole in the declaration grammar: `use(x);` arrives as a
+/// `Declaration` whose declarator names nothing, because `use` was taken for a type and `(x)` for a
+/// parenthesised declarator. What the analysis *can* say is whether a name was declared, and none was.
+///
+/// Without this the cost is not subtle: **every call statement in every function** contributed a binding for
+/// its first argument, so a scope reported names the code only uses. That is why the list is asserted to be
+/// empty rather than the shapes being pinned.
+///
+/// `use(x);` is one of these statements — it parses, and is misread, so it belongs here rather than among the
+/// calls that parse correctly. See `direct_initialisation_of_a_user_type_does_not_parse_yet` for the same
+/// ambiguity from the other side.
 #[test]
-fn a_bare_expression_statement_declares_nothing() {
-    for body in ["x;", "a = b;", "++i;", "a + b;"] {
+fn a_call_statement_declares_nothing() {
+    for body in [
+        "use(x);",
+        "f();",
+        "g(a, b);",
+        "x;",
+        "a = b;",
+        "++i;",
+        "a + b;",
+        "delete p;",
+        "return;",
+    ] {
         let source = format!("void f() {{ {body} }}\n");
         let table = scopes(&source);
         let function = table.scope(table.root().unwrap()).unwrap().children[0];
@@ -374,35 +391,322 @@ fn a_bare_expression_statement_declares_nothing() {
     }
 }
 
-/// A **call statement** is read as a declaration, and the scope walker therefore declares its argument.
+/// The rule that rejects a call's argument does not reject a declaration that has a name.
 ///
-/// Recorded as the current behaviour rather than as correct, because the cause is a parser-level ambiguity this
-/// layer cannot settle: `use(x);` and `int(x);` have the same token shape, and the grammar reads both as a
-/// parenthesized declarator whose name is `x`. The parser is honest about the result — `CppDeclaration` reports
-/// a "variable" with **no name**, and `CppDeclarator::get_name_text` reports `None` for the outer declarator —
-/// but the inner declarator does hold the identifier, so a scope that walks the declarator finds it.
-///
-/// The fix belongs in the parser, where the reading is chosen: a bare `name(...)` at statement position is a
-/// call, and treating it as a declaration is what puts a name in scope that the statement only uses. Pinned
-/// here so that fixing it is a deliberate edit and so the cost is visible: every call statement in every
-/// function currently contributes a spurious binding.
+/// The other half of the same rule, and the half that would break silently: a gate that rejected too much
+/// would leave every function body empty of declarations, which no single test above would notice.
 #[test]
-fn a_call_statement_is_read_as_a_declaration_for_now() {
-    let table = scopes("void f() { use(x); }\n");
-    let function = table.scope(table.root().unwrap()).unwrap().children[0];
-
-    let declared: Vec<String> = table
-        .scope(function)
-        .unwrap()
-        .declared_names()
-        .iter()
-        .map(|name| name.text())
-        .collect();
+fn a_real_declaration_is_still_declared() {
+    let table = scopes(
+        "void f() {\n\
+         int local;\n\
+         int initialised = 1;\n\
+         const char* name = \"x\";\n\
+         auto deduced = 2;\n\
+         Widget widget{1, 2};\n\
+         int direct(1, 2);\n\
+         std::vector<int> values;\n\
+         Foo* pointer = new Foo();\n\
+         }\n",
+    );
 
     assert_eq!(
-        declared,
-        vec!["x"],
-        "the argument is declared — this is the bug, and fixing it should empty this list"
+        shape(&table),
+        "File{f}(Fn{deduced,direct,initialised,local,name,pointer,values,widget})",
+        "every one of these declares a name"
+    );
+}
+
+/// Direct-initialisation — `Type name(args);` — declares a variable.
+///
+/// One of the most common declarations in C++, and it used to fail outright. A `(` after a declared name is a
+/// **parameter list** or the parentheses of a **direct-initialised variable**, and the two are told apart by
+/// what they can hold: `int a(b)` has a parameter, because `b` parses as a type, while `int a(1)` does not,
+/// because `1` is not one.
+///
+/// A keyword type is the case that needs no lookup at all. A **user type** needs the file's own declarations,
+/// which is the other half of the same rule and has its own test below.
+#[test]
+fn direct_initialisation_declares_a_variable() {
+    for source in [
+        "void f() { int a(1); }\n",
+        "void f() { double d(1.5); }\n",
+        "void f() { char c('x'); }\n",
+        "void f() { unsigned int u(1); }\n",
+    ] {
+        let tree = CppParser::parse(source, ParserConfig::default());
+
+        assert_eq!(
+            tree.get_errors(),
+            [],
+            "{source:?} must parse cleanly, got {:?}",
+            tree.get_errors()
+        );
+        assert_eq!(
+            tree.to_source_text(),
+            source,
+            "{source:?} must stay lossless"
+        );
+
+        assert!(
+            tree.get_red_root()
+                .descendants()
+                .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Initializer),
+            "{source:?} declares a variable with an initializer"
+        );
+    }
+}
+
+/// A **call** keeps its parentheses, because a bare name in front of `(` is not a declared type.
+///
+/// The other half of the rule above, and the half a naive fix breaks: reading every `(...)` after a name as an
+/// initializer makes `g(1, 2);` into a declaration that declares nothing, so the statement loses its callee
+/// *and* its arguments — and a name enters scope that was never declared. That is the direction to avoid, so a
+/// name nothing in the file declares to be a type stays a callee.
+///
+/// `g();` is deliberately absent: an empty argument list is the most vexing parse's other half, and `T x()` is
+/// a function declaration, so a call with no arguments is read as one — which is what C++ does with it too.
+#[test]
+fn a_call_keeps_its_argument_list() {
+    for source in [
+        "void f() { g(1); }\n",
+        "void f() { g(1, 2); }\n",
+        "void f() { obj.method(1); }\n",
+        "void f() { p->method(x); }\n",
+        // A file-scope call is not valid C++, but the reading must still not invent a variable out of it.
+        "Max(a, 1);\n",
+    ] {
+        let tree = CppParser::parse(source, ParserConfig::default());
+
+        assert_eq!(
+            tree.get_errors(),
+            [],
+            "{source:?} must parse cleanly, got {:?}",
+            tree.get_errors()
+        );
+        assert!(
+            tree.get_red_root()
+                .descendants()
+                .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CallExpr),
+            "{source:?} is a call, not a declaration"
+        );
+    }
+}
+
+/// Direct-initialisation of a **user-defined** type parses, because the file says the name is a type.
+///
+/// `Widget w(1, 2);` and `g(1, 2);` are the same tokens with different meanings, and which is right depends on
+/// whether `Widget` names a type. C++ settles it by looking the name up, and that is exactly why `int x(2)` is
+/// unambiguous (`int` is a keyword) while `Widget w(1, 2);` is not.
+///
+/// The parser has no symbol table, but it does have the file, so it records the names a class-like head, a
+/// `typedef` or a `using` alias introduces and asks that table. A name it finds is read as a declaration; a name
+/// it does not is left to the expression reading, because the two mistakes are not equally bad — reading a *call*
+/// as a declaration loses its callee and its arguments and puts a name in scope that was never declared, while
+/// reading a *declaration* as a call merely leaves the variable unbound.
+///
+/// This is deliberately a **file-local** judgement: a type from an included header is not in the table, so
+/// `std::string s("x");` stays an expression. Recording what a file declares is not the same claim as resolving
+/// names across files, and the query layer is where that second claim belongs.
+#[test]
+fn direct_initialisation_of_a_user_type_declares_a_variable() {
+    for source in [
+        "struct Widget {};\nvoid f() { Widget w(1, 2); }\n",
+        "class Widget {};\nvoid f() { Widget w(1, 2); }\n",
+        "union Widget {};\nvoid f() { Widget w(1, 2); }\n",
+        "enum class Widget {};\nvoid f() { Widget w(1, 2); }\n",
+        "using Widget = int;\nvoid f() { Widget w(1, 2); }\n",
+        "typedef int Integer;\nvoid f() { Integer i(1); }\n",
+        "struct Outer { struct Inner {}; void m() { Inner i(1); } };\n",
+        "struct Widget {};\nWidget make();\n",
+    ] {
+        let tree = CppParser::parse(source, ParserConfig::default());
+
+        assert_eq!(
+            tree.get_errors(),
+            [],
+            "{source:?} must parse cleanly, got {:?}",
+            tree.get_errors()
+        );
+        assert_eq!(
+            tree.to_source_text(),
+            source,
+            "{source:?} must stay lossless"
+        );
+    }
+
+    // The variables themselves, which is what the scope layer reads off the tree.
+    let table = scopes(
+        "struct Widget {};\nvoid f() {\n  Widget w(1, 2);\n  Widget v;\n}\nstruct Outer { Inner i(1); };\n",
+    );
+
+    assert_eq!(
+        shape(&table),
+        "File{Outer,Widget,f}(Fn{v,w} Class{i})",
+        "both direct-initialised variables are declared"
+    );
+}
+
+/// A user type written **before** its declaration is not a type as far as this file knows.
+///
+/// The table is filled in as the file is read, not resolved afterwards, so a type used above its definition is
+/// missed. That costs the declaration reading and leaves the tokens to the expression, which is the cheap
+/// mistake — the alternative would be a second pass over every file to answer a question the first pass has
+/// already answered for every well-ordered one.
+#[test]
+fn a_user_type_declared_later_is_not_yet_known() {
+    let source = "void f() { Widget w(1, 2); }\nstruct Widget {};\n";
+    let tree = CppParser::parse(source, ParserConfig::default());
+
+    assert!(
+        !tree
+            .get_red_root()
+            .descendants()
+            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Initializer),
+        "a type declared after its use is not in the table yet"
+    );
+    assert_eq!(tree.to_source_text(), source, "and the file stays lossless");
+}
+
+/// A user type the file never declares at all stays an expression.
+///
+/// The cost of a file-local table, pinned so that it cannot be described more broadly than it is: nothing in
+/// this file says `Widget` is a type, so `Widget w(1, 2);` keeps the reading that loses the least.
+#[test]
+fn an_undeclared_type_name_stays_an_expression() {
+    for source in [
+        "void f() { Widget w(1, 2); }\n",
+        "void f() { std::string s(\"x\"); }\n",
+        "void f() { Foo bar(1); }\n",
+    ] {
+        let tree = CppParser::parse(source, ParserConfig::default());
+
+        assert!(
+            !tree
+                .get_red_root()
+                .descendants()
+                .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Initializer),
+            "{source:?} has no evidence that the leading name is a type"
+        );
+        assert_eq!(tree.to_source_text(), source, "{source:?} stays lossless");
+    }
+}
+
+/// `sizeof` of a **builtin** type as a statement does not parse yet.
+///
+/// Narrow, and the shape of the gap is the point: `sizeof(std::vector<int>)` parses, `sizeof(Foo)` parses — as an
+/// expression, since a bare name is one — and only `sizeof(int)` fails. `int` cannot start an expression, so the
+/// parenthesised-type reading is the only one available, and it is the one missing.
+#[test]
+fn sizeof_a_builtin_type_does_not_parse_yet() {
+    for source in [
+        "void f() { sizeof(int); }\n",
+        "void f() { sizeof(unsigned char); }\n",
+    ] {
+        let tree = CppParser::parse(source, ParserConfig::default());
+
+        assert!(
+            !tree.get_errors().is_empty(),
+            "{source:?} now parses — move it into `assignment_operators_parse`"
+        );
+        assert_eq!(tree.to_source_text(), source, "and stays lossless");
+    }
+
+    // The neighbouring spellings that do parse, asserted so the gap cannot be described more broadly than it is.
+    for source in [
+        "void f() { sizeof(std::vector<int>); }\n",
+        "void f() { sizeof(Foo); }\n",
+        "void f() { sizeof x; }\n",
+    ] {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert_eq!(tree.get_errors(), [], "{source:?} parses");
+    }
+}
+
+/// Assignment and compound assignment parse, in every spelling, and the statement forms built on them.
+///
+/// These used to fail with `expected `;` after expression`, and the cause was not in the statement rules at all
+/// but in the **binary operator table**: no assignment operator was in it, so `a = b` parsed as the bare
+/// expression `a` and stopped at the `=`. The expression reading then reported a missing `;`, and the
+/// declaration/expression fallback could not help because the *expression* reading was the one that failed.
+///
+/// Worth a test of its own rather than a line in another: assignments are in nearly every line of real C++, so
+/// their absence made the parser report a syntax error on ordinary code — the false positives that get an
+/// editor-facing tool switched off.
+#[test]
+fn assignment_operators_parse() {
+    for body in [
+        "a = b;",
+        "i += 1;",
+        "i -= 1;",
+        "i *= 2;",
+        "i /= 2;",
+        "i %= 2;",
+        "flags &= mask;",
+        "flags |= mask;",
+        "flags ^= mask;",
+        "value <<= 2;",
+        "value >>= 2;",
+        "a = b = c;",
+        "arr[0] = 1;",
+        "arr[0] += 1;",
+        "p->field = 1;",
+        "p->next = q;",
+        "obj.field = obj.other;",
+        "*p = 5;",
+        "x = y + z * w;",
+    ] {
+        let source = format!("void f() {{ {body} }}\n");
+        let tree = CppParser::parse(&source, ParserConfig::default());
+
+        assert_eq!(
+            tree.get_errors(),
+            [],
+            "{body:?} must parse cleanly, got {:?}",
+            tree.get_errors()
+        );
+        assert_eq!(tree.to_source_text(), source, "{body:?} must stay lossless");
+    }
+}
+
+/// Assignment is right-associative and everything else is left-associative.
+///
+/// The shape rather than the outcome: `*p = *q = 5` is `*p = (*q = 5)`, and reading it left-associatively would
+/// give `(*p = *q) = 5`, which is not a thing anyone writes and is not what the source says. Pinned because the
+/// tree round-trips either way — a wrong associativity is invisible to every losslessness check.
+///
+/// The operands are dereferences on purpose. `a = b = c;` cannot be used: at statement position it is read as a
+/// **declaration** of `a`, because `a` may be a type name and `= b = c` then looks like an initializer. `*p`
+/// cannot be a type, so this statement is unambiguously an expression and the shape under test is the
+/// expression's own.
+#[test]
+fn assignment_is_right_associative() {
+    let source = "void f() { *p = *q = 5; }\n";
+    let tree = CppParser::parse(source, ParserConfig::default());
+
+    assert_eq!(tree.get_errors(), [], "must parse cleanly");
+
+    let outer = tree
+        .get_red_root()
+        .descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::BinaryExpr)
+        .expect("a binary expression");
+
+    assert_eq!(
+        outer.text().to_string(),
+        "*p = *q = 5",
+        "the outer assignment covers the whole chain"
+    );
+
+    let inner = outer
+        .children()
+        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::BinaryExpr)
+        .expect("the right-hand side is itself an assignment");
+
+    assert_eq!(
+        inner.text().to_string(),
+        "*q = 5",
+        "which is what right-associative means here"
     );
 }
 
