@@ -97,21 +97,117 @@ pub fn definitely_ends_a_type(kind: CppTokenKind) -> bool {
 /// stops as soon as the next token cannot continue a type, so the caller can decide what the
 /// remainder means.
 pub fn parse_type_id(p: &mut CppParser) -> ParseResult {
+    parse_type_id_with(p, true)
+}
+
+/// [`parse_type_id`] with the caller's answer to one question: may a bare **name** be a type here?
+///
+/// The question only arises for a type that begins with `(`, where the tokens inside are a parameter list:
+///
+/// ```text
+/// sizeof(void(int))     the `int` is a type, so the parentheses are a parameter list
+/// new (Widget)(1)       `Widget` is not usable as a type here, so `(Widget)` is a placement argument
+/// ```
+///
+/// In a `sizeof`, a cast or a template argument, an identifier in type position *is* a type — nothing else
+/// could be there. In a `new`, the parentheses may be a placement list, and the placement reading is the one
+/// that can be checked against a smaller set: the name has to be one the file declares to be a type, because a
+/// parameter list whose parameter is an unknown name is a guess, while a placement argument is a fact.
+pub fn parse_type_id_with(p: &mut CppParser, a_name_may_be_a_type: bool) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::TypeId);
 
-    if let Err(err) = parse_decl_specifier_seq_stopping_at_one_name(p) {
-        p.close_marks_above(base);
-        return Err(err);
-    }
-
-    // An abstract declarator: pointers, references and cv-qualifiers, but no name.
-    if let Err(err) = parse_abstract_declarator(p) {
+    if let Err(err) = parse_type_id_inner(p, a_name_may_be_a_type) {
         p.close_marks_above(base);
         return Err(err);
     }
 
     Ok(m.complete(p))
+}
+
+/// The body of [`parse_type_id`], so the `TypeId` node is opened once no matter which branch applies.
+///
+/// # The type that begins with a parenthesis
+///
+/// A specifier sequence starts every type, and one form starts with something that is not a specifier at all:
+/// a **function type spelled with its parameter list directly** — `void (int)`, `int (char, double)`. Read
+/// left to right, `(` cannot begin a decl-specifier-seq, so the sequence refuses and the whole type-id fails
+/// with `expected a type specifier` — which is how `new (Widget)(1)` came to report an error against a
+/// statement that is perfectly ordinary C++.
+///
+/// It cannot be handled inside the sequence, because a parameter list is not a specifier. So the parenthesis
+/// is claimed *before* the sequence runs, and only when the sequence would otherwise have nothing to say —
+/// which is what keeps the reading away from a declaration, where a `(` after the specifiers is a declarator's
+/// own parenthesis rather than part of the type.
+///
+/// e.g.: the `(int)` of `void (int)`, as written in `sizeof(void(int))` or `new (Widget)(1)`
+fn parse_type_id_inner(p: &mut CppParser, a_name_may_be_a_type: bool) -> ParseResult {
+    if p.current_token() == CppTokenKind::LeftParen && starts_a_function_type(p, a_name_may_be_a_type) {
+        // An empty specifier sequence, kept so that a consumer asking a type for its specifiers finds an
+        // answer rather than having to special-case this spelling. A function type has no leading type, which
+        // is exactly what "empty" says.
+        let specifiers = p.mark(CppSyntaxKind::DeclSpecifierSeq);
+        specifiers.complete(p);
+
+        let function_type = p.mark(CppSyntaxKind::FunctionType);
+        super::decls::parse_parameter_list(p)?;
+        eat_function_qualifiers(p);
+        // A trailing `(int)` — as in `void (*(int))(int)` — is the rest of the type. It is only read when it
+        // really is a parameter list, so the `(1)` of `new (Widget)(1)` stops here rather than being taken for
+        // one: a parameter list holds types, and `1` is not one.
+        if a_parameter_list_follows(p) {
+            parse_declarator_suffixes(p)?;
+        }
+        function_type.complete(p);
+
+        return Ok(CompleteMarker::empty());
+    }
+
+    parse_decl_specifier_seq_stopping_at_one_name(p)?;
+
+    // An abstract declarator: pointers, references and cv-qualifiers, but no name.
+    //
+    // No name may appear — this is a type-id, not a declarator — which is what makes `(int)` after it a
+    // function type rather than somebody's parameter list. See [`parse_abstract_declarator`].
+    parse_abstract_declarator(p, false)?;
+
+    Ok(CompleteMarker::empty())
+}
+
+/// Do the parentheses at the cursor hold a parameter list?
+///
+/// The companion to [`starts_a_function_type`], asked after a function type has been read to decide whether
+/// the `(` at the cursor continues it. The test is the same one: a parameter list begins with a type, so a
+/// parenthesis whose first token cannot begin one belongs to something else — `(1)`, `(x + 1)`, `(f())`.
+fn a_parameter_list_follows(p: &CppParser) -> bool {
+    starts_a_function_type(p, true)
+}
+
+/// Do the parentheses at the cursor hold a parameter list, making this a function type?
+///
+/// Called when a type-id begins with `(`, and it answers the same question [`a_parameter_list_is_the_type`]
+/// answers one level down: a parameter list begins with a type. A `*` or `&` inside is *not* this — that is
+/// the abstract declarator's own parenthesis, `(*)(int)` — so refusing those here is what sends them down
+/// that path instead.
+///
+/// `a_name_may_be_a_type` is passed through from [`parse_type_id_with`] and only affects the identifier case.
+fn starts_a_function_type(p: &CppParser, a_name_may_be_a_type: bool) -> bool {
+    if p.current_token() != CppTokenKind::LeftParen {
+        return false;
+    }
+
+    match p.peek_token_kind_at(1..2).first() {
+        Some(&kind) if is_type_specifier_keyword(kind) => true,
+        Some(&CppTokenKind::Scope) => true,
+        Some(&CppTokenKind::ConstKeyword) | Some(&CppTokenKind::VolatileKeyword) => true,
+        Some(&CppTokenKind::Identifier) => {
+            // A name is a type when the caller says so, and when it does not, the file's own declarations get
+            // the say: `new (Widget)(1)` is an allocation of a type the file knows, while `new (buf) Widget()`
+            // is placement into a buffer nobody declared as a type.
+            a_name_may_be_a_type || p.is_a_known_type_name(p.peek_token_text_at(1))
+        }
+        _ => false,
+    }
 }
 
 /// Parse a `decl-specifier-seq`: the run of type specifiers, cv-qualifiers and other specifiers at
@@ -1185,7 +1281,17 @@ fn is_overloadable_operator(kind: CppTokenKind) -> bool {
 /// `Declarator` node that `int counter;` needs, so an eager marker here produces
 /// `Declarator(Declarator(NameExpr))` — a redundant level that also breaks the 1:1 pairing of
 /// `NodeStart`/`NodeEnd` events, since the inner one is empty and gets dropped.
-fn parse_abstract_declarator(p: &mut CppParser) -> ParseResult {
+///
+/// # `name_possible`
+///
+/// Whether a declarator's *name* may still appear where this is called, which is what decides one reading:
+/// `int (int)`. A name may appear in the position a declarator stands in — `void f(int)` — and then those
+/// parentheses are a parameter list rather than part of the type, so they are left alone. It may not appear
+/// in a type-id, or inside a parenthesised declarator, and then `(int)` *is* a function type.
+///
+/// The recursive call passes `false`, because an inner declarator's parentheses wrap a declarator and never a
+/// parameter list: `(*f)`, `(* const)`, `(**)`.
+fn parse_abstract_declarator(p: &mut CppParser, name_possible: bool) -> ParseResult {
     let mut container: Option<Marker> = None;
 
     /// Open the `Declarator` node on first use, so an abstract declarator that is not there leaves
@@ -1261,28 +1367,53 @@ fn parse_abstract_declarator(p: &mut CppParser) -> ParseResult {
         }
     }
 
-    // A **parenthesised** abstract declarator: `void (*)(int)`, `int (&)[10]`. The parentheses are what let
-    // the `*` bind to the function rather than to its return type, which is the whole reason the syntax
-    // exists — `void *f(int)` is a function returning a pointer, `void (*f)(int)` a pointer to a function.
+    // A **parenthesised** abstract declarator, or a function type whose parentheses hold the parameter list.
     //
-    // A type-id — a `using` alias, a cast, the target of a `sizeof` — has no name to hang the parentheses on,
-    // so `using Callback = void (*)(int);` reaches the `(` with nothing parsed yet, and without this branch
-    // the alias is left with a specifier sequence and three stray tokens.
+    // The first form is `void (*)(int)`, `int (&)[10]`: the parentheses are what let the `*` bind to the
+    // function rather than to its return type, which is the whole reason the syntax exists — `void *f(int)` is
+    // a function returning a pointer, `void (*f)(int)` a pointer to a function. A type-id — a `using` alias, a
+    // cast, the target of a `sizeof` — has no name to hang the parentheses on, so it reaches this with nothing
+    // parsed yet, and without the branch the alias is left with a specifier sequence and three stray tokens.
     //
-    // The `*` inside is what tells this apart from the `(` of a parameter list, and it is checked *before* the
-    // parenthesis is consumed: `int (int)` is a function type and must be left to whoever asked for a
-    // type-id. The form *with* a name inside — `void (*f)(int)`, a declaration rather than a type-id — never
-    // reaches here: [`parse_declarator_with`] recognizes it first and parses the parentheses as a declarator,
-    // which is the node a consumer wants for `f`.
-    if p.current_token() == CppTokenKind::LeftParen && a_parenthesised_abstract_declarator_follows(p) {
-        let _ = container!();
+    // The second is `void (int)`, `int (char, double)` — a function type, spelled with the parameter list
+    // directly. It is the same shape as the `(*)(int)` form and reached by *dropping* the pointer, which is
+    // how `new (Widget)(1)` writes an allocation whose type is parenthesised. The two are told apart by what
+    // the parentheses hold: a type specifier means the list is a parameter list, and anything else means the
+    // parentheses wrap a declarator.
+    //
+    // Whether the parentheses belong here at all is the question {@link
+    // a_parenthesised_abstract_declarator_follows} answers, and it is asked *before* the parenthesis is
+    // consumed: `int (x)` is a parenthesized declarator for the caller to read, and `void f(int)` has
+    // parentheses that are not this rule's business at all.
+    // Whether the parentheses belong to this declarator is asked before they are consumed, and the answer
+    // depends on something the caller knows and this function does not: whether a **name** may still appear.
+    //
+    // * `void f(int)` — a name may appear next, so `(int)` is the parameter list of `f`, and it is not this
+    //   rule's business at all. Consuming it here would take the whole declaration apart.
+    // * `new (int)(1)` — no name may appear, so the `(int)` *is* the type: a function type spelled with its
+    //   parameter list directly.
+    // * `new (Widget)(1)` — the same, with the parameter list holding a type name.
+    //
+    // Both readings are the same four tokens, so the decision cannot come from them; it comes from who is
+    // asking, which is what `name_possible` carries.
+    if p.current_token() == CppTokenKind::LeftParen {
+        if a_parenthesised_abstract_declarator_follows(p) {
+            let _ = container!();
 
-        expect_token(p, CppTokenKind::LeftParen)?;
-        // The inner abstract declarator, recursively: `(* const)`, `(**)`, `(&)`.
-        parse_abstract_declarator(p)?;
-        expect_token(p, CppTokenKind::RightParen)?;
+            expect_token(p, CppTokenKind::LeftParen)?;
+            // The inner abstract declarator, recursively: `(* const)`, `(**)`, `(&)`.
+            parse_abstract_declarator(p, false)?;
+            expect_token(p, CppTokenKind::RightParen)?;
 
-        parse_declarator_suffixes(p)?;
+            parse_declarator_suffixes(p)?;
+        } else if !name_possible && a_parameter_list_is_the_type(p) {
+            let function_type = p.mark(CppSyntaxKind::FunctionType);
+            super::decls::parse_parameter_list(p)?;
+            eat_function_qualifiers(p);
+            // The `noexcept` of `void () noexcept` and a trailing return type both belong to the type.
+            parse_declarator_suffixes(p)?;
+            function_type.complete(p);
+        }
     }
 
     match container {
@@ -1290,6 +1421,36 @@ fn parse_abstract_declarator(p: &mut CppParser) -> ParseResult {
         // No abstract declarator here at all — the caller's own `Declarator` node covers it.
         None => Ok(CompleteMarker::empty()),
     }
+}
+
+/// Do the parentheses at the cursor hold a parameter list, making them a *function type*?
+///
+/// e.g.: the `(int)` of `new (void(int))()` or of `sizeof(void(int))`
+///
+/// A parameter list begins with a type, so the test is that the first token inside the parentheses can begin
+/// one. That is deliberately weaker than "parses as a parameter list" — the caller parses it and reports
+/// whatever goes wrong — and it is deliberately *not* satisfied by a pointer or reference operator, because
+/// `(*)(int)` is the parenthesised-declarator form and is handled before this is asked.
+///
+/// A `)` is excluded as well: `void ()` is a function type with no parameters, and it is the one case where
+/// the parentheses hold nothing at all. It is admitted only when the `(` follows a complete type, which is
+/// the caller's state rather than this function's, so the trade is made there — see the branch above.
+fn a_parameter_list_is_the_type(p: &CppParser) -> bool {
+    if p.current_token() != CppTokenKind::LeftParen {
+        return false;
+    }
+
+    matches!(
+        p.peek_token_kind_at(1..2).first(),
+        Some(&kind) if is_type_specifier_keyword(kind)
+            || matches!(
+                kind,
+                CppTokenKind::Identifier
+                    | CppTokenKind::Scope
+                    | CppTokenKind::ConstKeyword
+                    | CppTokenKind::VolatileKeyword
+            )
+    )
 }
 
 /// Consume any `const` / `volatile` immediately following a pointer or reference operator.
@@ -1438,7 +1599,12 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
             p.close_marks_above(base);
             return Err(err);
         }
-    } else if let Err(err) = parse_abstract_declarator(p) {
+    } else if let Err(err) = parse_abstract_declarator(
+        p,
+        // A name may follow, which is the position this declarator stands in: `int (x)` names `x` and
+        // `void f(int)` continues with a parameter list, so `(int)` here is never a function type.
+        true,
+    ) {
         p.close_marks_above(base);
         return Err(err);
     }
@@ -1547,7 +1713,10 @@ fn parse_parenthesised_declarator(p: &mut CppParser) -> ParseResult {
     let m = p.mark(CppSyntaxKind::Declarator);
 
     expect_token(p, CppTokenKind::LeftParen)?;
-    parse_abstract_declarator(p)?;
+    // The inner declarator's parentheses wrap a declarator, never a parameter list, so no name may appear
+    // there: `(*f)` is a pointer and `(*f(int))` a pointer to a *function*, whose parameter list is read by
+    // the outer declarator's suffix loop.
+    parse_abstract_declarator(p, false)?;
     parse_name(p)?;
     expect_token(p, CppTokenKind::RightParen)?;
 

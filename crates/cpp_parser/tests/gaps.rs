@@ -178,11 +178,40 @@ fn constructs_the_parser_reads() {
             "auto d = reinterpret_cast<int*>(p);",
             "auto d = (int)1.5;",
             "auto [a, b] = pair;",
+            "auto [a, b] = std::pair<int, int>{1, 2};",
             "for (auto&& [k, v] : m) { }",
             "auto g = [v = 1] { return v; };",
+            "auto g = [v = total + 1] { return v; };",
+            "auto g = [p = std::move(q)] { };",
+            // Braced initialization of a temporary: the `T{...}` form, in every position an expression can
+            // stand. This is the rule that made `auto v = Vec<int>{1, 2};` a declaration rather than an error.
+            "auto v = Vec<int>{1, 2};",
+            "auto s = std::string{\"x\"};",
+            "auto e = Vec<int>{};",
+            "return Vec<int>{1, 2};",
+            "g(Vec<int>{1});",
+            "auto sum = Vec<int>{1} + other;",
             "auto p = new Widget(1, 2);",
+            "auto p = new Widget;",
+            "auto p = new Widget();",
+            "auto p = new int[4];",
+            "auto p = new int[4]{1, 2, 3, 4};",
+            "auto p = new int[];",
+            "auto p = new int[2][3];",
+            "auto p = new std::string(\"x\");",
+            "auto p = new (buf) Widget();",
+            "auto p = new (buf, size) Widget();",
+            "auto p = new (1) Widget();",
+            "auto q = new Widget(1)->run();",
             "delete[] p;",
+            "int n = sizeof(void(int));",
             "auto x = a ? b : c;",
+            // The C++17 initializer in a condition: a declaration, a `;`, and the condition itself.
+            "if (auto q = find(x); q != nullptr) { }",
+            "switch (auto q = f(); q) { }",
+            "if (x > 0) { }",
+            "if (Foo* p = get()) { }",
+            "if (auto q = f(); q) { } else { }",
             "try { } catch (const E& e) { }",
             "goto label; label: ;",
             "int x = {1};",
@@ -233,35 +262,14 @@ fn constructs_the_parser_does_not_read_yet() {
                 "a C-style cast to a pointer of an undeclared type. `*` is both the pointer operator and the \
                  multiplication operator, and the type table is what tells them apart.",
             ),
-            (
-                "auto v = Vec<int>{1, 2};",
-                "a braced initializer after a name. The expression grammar has `f(x)` as a postfix call but no \
-                 rule for `T{...}` as a construction, so the braces are left over.",
-            ),
-            (
-                "auto [a, b] = std::pair<int, int>{1, 2};",
-                "the same missing rule, seen through a structured binding: the initializer is an expression \
-                 whose last element is a braced list.",
-            ),
-            (
-                "auto p = new int[4];",
-                "`new` ignores its type. `parse_unary_expr` parses a postfix expression after `new`, and a \
-                 keyword type is not one, so the type has to be read by the type rules and the array bound \
-                 and initializer attached to it.",
-            ),
-            (
-                "auto p = new int[4]{1, 2, 3, 4};",
-                "the same, plus the braced initializer of `new`.",
-            ),
-            (
-                "if (auto q = find(x); q != nullptr) { }",
-                "a C++17 if-initializer. `parse_condition` reads one declaration or one expression and then \
-                 expects `)`, so the `;` and the condition after it have no rule.",
-            ),
-            (
-                "switch (auto q = f(); q) { }",
-                "the same if-initializer, in a switch.",
-            ),
+            // The following are read now, and used to be entries here:
+            //
+            //   `if (auto q = find(x); q != nullptr)` and its `switch` form — the C++17 initializer, which is
+            //   the condition rule seeing a declaration, a `;` and then an expression;
+            //   `auto v = Vec<int>{1, 2};` — a braced initializer after an expression, which the postfix loop
+            //   now reads.
+            //
+            // They are pinned as *read* in the test above instead, which is where the entries went.
             (
                 "auto x = co_await f();",
                 "`co_await` is a keyword the lexer knows and the expression grammar does not: it is not a \
@@ -271,11 +279,6 @@ fn constructs_the_parser_does_not_read_yet() {
                 "auto l = []<typename T>(T t) { return t; };",
                 "a C++20 template parameter list on a lambda. The capture list is recognised, and the `<...>` \
                  after it is not.",
-            ),
-            (
-                "auto g = [v = total + 1] { return v; };",
-                "an init-capture whose initializer is more than one token. The capture rule reads a name or a \
-                 literal; `[v = 1]` works and `[v = total + 1]` does not.",
             ),
             (
                 "auto x = T::template f<int>();",
@@ -305,13 +308,22 @@ fn constructs_the_parser_does_not_read_yet() {
         &[
             (
                 "int bits : 3;",
-                "a bit-field. The `:` after a member declarator is read as a constructor's member-initializer \
-                 list, and the width after it as an expression, which leaves the declarator without a name.",
+                "a bit-field. The `:` after a member declarator is taken for a constructor's \
+                 member-initializer list — the two are the same token in the same position, and only the fact \
+                 that this is a class body tells them apart — so the width is read as an initializer and the \
+                 declarator is left without a name.",
             ),
             (
                 "using Base::method;",
                 "a using-*declaration* of a base member. `parse_using_declaration` reads a name and then the \
                  `::`-qualified path, but not the `Base::method` shape this needs.",
+            ),
+            (
+                "union Value { int i; ~Value() {} };",
+                "a destructor definition in a union — or in anything else. `~Value() {}` is read as a member \
+                 declarator that never binds `(` to the name, and one error node is left where the braces \
+                 were; the declaration is otherwise read. A *declared* destructor (`~Value();`) works, so the \
+                 gap is in the body.",
             ),
         ],
     );

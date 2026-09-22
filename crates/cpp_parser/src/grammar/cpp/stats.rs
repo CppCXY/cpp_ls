@@ -416,11 +416,32 @@ fn parse_do_while_statement(p: &mut CppParser) -> ParseResult {
 }
 
 /// Parse `( ... )` after `if`/`while`/`switch`/`for`, or a condition declaration.
+///
+/// # The C++17 initializer
+///
+/// `if (auto q = find(x); q != nullptr)` is a *declaration* and then a *condition*, separated by a `;` — two
+/// constructs where the grammar had one. The declaration is read by the for-init rule, which is the same
+/// declaration without the trailing `;` that a header does not own; the `;` is then consumed here and the
+/// condition follows as a plain expression.
+///
+/// The order matters and so does the fallback. A `;` inside the parentheses is what marks the form, and it
+/// cannot be mistaken for anything else: no expression statement's `;` can appear inside a condition's
+/// parentheses, because the condition's own parentheses have not closed. So the scan is a lookahead for a `;`
+/// at depth zero, and when there is none the rule behaves exactly as before.
 fn parse_condition(p: &mut CppParser) -> ParseResult {
     let _ = p.open_marks();
     let m = p.mark(CppSyntaxKind::ParenExpr);
 
     expect_token(p, CppTokenKind::LeftParen)?;
+
+    // `if (init; condition)` — an initializer, then the condition.
+    if a_semicolon_ends_an_initializer(p) {
+        parse_initializer_part(p)?;
+        expect_token(p, CppTokenKind::Semicolon)?;
+        parse_expr(p)?;
+        expect_token(p, CppTokenKind::RightParen)?;
+        return Ok(m.complete(p));
+    }
 
     // A condition may declare a variable: `if (Foo* p = get())`.
     let checkpoint = p.checkpoint();
@@ -431,6 +452,50 @@ fn parse_condition(p: &mut CppParser) -> ParseResult {
 
     expect_token(p, CppTokenKind::RightParen)?;
     Ok(m.complete(p))
+}
+
+/// Is there a `;` at the condition's own depth, making this an `if (init; condition)`?
+///
+/// A lookahead rather than a parse, because the two forms have to be told apart *before* the declaration rule
+/// runs — that rule consumes a `;` as its own terminator and would take this one with it. The scan is bounded
+/// and tracks nesting, so a `;` inside a lambda body or a nested parentheses is not mistaken for the
+/// separator.
+fn a_semicolon_ends_an_initializer(p: &CppParser) -> bool {
+    let mut depth = 0isize;
+
+    for kind in p.peek_token_kind_at(0..64) {
+        match kind {
+            CppTokenKind::LeftParen | CppTokenKind::LeftBracket | CppTokenKind::LeftBrace => {
+                depth += 1
+            }
+            CppTokenKind::RightParen | CppTokenKind::RightBracket | CppTokenKind::RightBrace => {
+                if depth == 0 {
+                    return false;
+                }
+                depth -= 1;
+            }
+            CppTokenKind::Semicolon if depth == 0 => return true,
+            CppTokenKind::Eof | CppTokenKind::None => return false,
+            _ => {}
+        }
+    }
+
+    false
+}
+
+/// Parse the initializer half of `if (init; condition)`, which may be a declaration or an expression.
+///
+/// The same two readings a `for` header's init part has, and the same rule: the declaration is tried first
+/// because it is the one that can be refused, and an expression is what is left when it is.
+fn parse_initializer_part(p: &mut CppParser) -> ParseResult {
+    let checkpoint = p.checkpoint();
+
+    if super::decls::parse_for_init_declaration(p).is_ok() {
+        return Ok(crate::parser::CompleteMarker::empty());
+    }
+    p.rollback(checkpoint);
+
+    parse_expr(p)
 }
 
 /// Parse the body of a control-flow statement: a block, or one statement.
