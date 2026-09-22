@@ -138,6 +138,35 @@ fn constructs_the_parser_reads() {
             "struct S { explicit operator bool() const; };",
             "struct S { bool operator==(const S&) const = default; };",
             "struct S { S& operator=(const S&) = delete; };",
+            // Conversion operators: the name is the type it converts to, and it begins the declaration, so no
+            // specifier sequence runs before it.
+            "struct S { operator int(); };",
+            "struct S { operator bool() const; };",
+            "struct S { operator const char*(); };",
+            "struct S { operator std::string() const; };",
+            "struct S { operator std::vector<int>(); };",
+            "struct S { operator T&(); };",
+            "struct S { operator T&&(); };",
+            "struct S { operator unsigned long long(); };",
+            "struct S { operator int() { return 1; } };",
+            "struct S { operator int() = delete; };",
+            "struct S { operator int() const &; };",
+            "struct S { operator bool() &&; };",
+            "struct S { virtual operator bool() const noexcept; };",
+            // Aliases to array and function types: the type's suffixes have nothing enclosing them here.
+            "using Arr = int[4];",
+            "using Fn = int(char);",
+            "using Ptr = int(*)[4];",
+            // Attributes, in the positions that used to be gaps.
+            "[[nodiscard]] int attributed();",
+            "int attributed2 [[gnu::aligned(16)]];",
+            "int attributed3() [[carries_dependency]];",
+            "void attributed4() [[noreturn]] { for (;;) {} }",
+            "void attributed5(int x [[maybe_unused]]);",
+            "void attributed6([[maybe_unused]] int x);",
+            "using Alias [[deprecated]] = int;",
+            "template <typename T> [[nodiscard]] T attributed7();",
+            "enum class Attributed8 { A [[deprecated]] = 1, B };",
             "enum class E : unsigned char { A, B };",
             "static_assert(sizeof(int) == 4, \"int\");",
             "[[nodiscard]] int f();",
@@ -165,6 +194,8 @@ fn constructs_the_parser_reads() {
             // An **alias template**, which is a `using`-declaration with a template head in front of it.
             "template <typename U> using rebind = Rebind<U>;",
             "template <typename... Us> using Pack = std::tuple<int, char>;",
+            // A pack expansion as a template argument, in a declaration's type rather than in an expression.
+            "template <typename... Ts> using All = std::tuple<Ts...>;",
         ],
     );
 
@@ -204,6 +235,23 @@ fn constructs_the_parser_reads() {
             "auto x = T::template f<int>();",
             "auto x = obj.template f<int>();",
             "auto x = p->template f<int>();",
+            // Pack *expansion* — the use half of a pack, whose declaration half is above. One rule covers all of
+            // it: a `...` after a pattern expands it, wherever the pattern is written.
+            "g(args...);",
+            "g(h(ts)...);",
+            "g(args..., more);",
+            "auto n = sizeof...(Ts);",
+            "auto t = std::tuple<Ts...>();",
+            "auto t = std::tuple<Ts..., Us...>();",
+            "auto s = static_cast<Ts&&>(args)...;",
+            // Fold expressions: the same binary rule with the `...` read as an operand, in all four spellings.
+            "auto n = (ts + ...);",
+            "auto n = (... + ts);",
+            "auto b = (ts && ...);",
+            "auto b = (... && ts);",
+            // A pack expansion in a capture list, which is how a variadic forwarding lambda is written. The
+            // capture rule reads the capture itself rather than an expression, so it needed its own `...`.
+            "auto g = [args...] { return g(args...); };",
             // Braced initialization of a temporary: the `T{...}` form, in every position an expression can
             // stand. This is the rule that made `auto v = Vec<int>{1, 2};` a declaration rather than an error.
             "auto v = Vec<int>{1, 2};",
@@ -306,45 +354,21 @@ fn constructs_the_parser_does_not_read_yet() {
                 "a C-style cast to a pointer of an undeclared type. `*` is both the pointer operator and the \
                  multiplication operator, and the type table is what tells them apart.",
             ),
-            // A pack *expansion* — the `...` written after a pattern rather than inside a declaration. The
-            // declaration half of packs works (`template <typename... Ts> void f(Ts... ts);` is in the list
-            // above); what is missing is the `...` that follows an expression, an argument list or a type.
-            // It is one gap, not three: all three are the same rule, "a `...` after a pattern expands it".
-            (
-                "g(args...);",
-                "a pack expansion in an argument list. The `...` after the expression has no rule, so the \
-                 argument list stops and the ellipsis is reported as an unexpected token.",
-            ),
-            (
-                "auto x = sizeof...(Ts);",
-                "`sizeof...`, the operator that counts a pack. The lexer has no token for it — it produces \
-                 `sizeof` and `...` — and the expression rule has no branch that would join them.",
-            ),
         ],
     );
 
-    assert_does_not_read_yet(
-        Where::File,
-        &[
-            (
-                "template <typename... Ts> using T = std::tuple<Ts...>;",
-                "a pack expansion as a template argument. The argument rule reads one type-id and then wants a \
-                 `,` or a `>`, so the `...` is refused — the same missing rule as the argument-list case above.",
-            ),
-        ],
-    );
-
-    // Read now, and used to be entries above:
+    // Pack expansion used to be here, and it is worth recording what the entries were, because they looked
+    // like three separate gaps and were one rule — "a `...` after a pattern expands it":
     //
-    //   `auto x = co_await f();` — the coroutine keywords, which needed `co_await` in the unary rule and
-    //   `co_return`/`co_yield` in the statement dispatcher;
-    //   `auto l = []<typename T>(T t) { return t; };` — a generic lambda, which needed the template parameter
-    //   list moved out of the template-head rule so a lambda could reach it too;
-    //   `auto x = T::template f<int>();` and `obj.template f<int>()` — the `template` disambiguator, which
-    //   needed a branch in the qualified-name loops of *both* the type grammar and the expression grammar.
+    //   `g(args...)` — an argument list;
+    //   `sizeof...(Ts)` — which additionally needed the lexer's two tokens (`sizeof`, `...`) joined, since it
+    //   has no token of its own;
+    //   `std::tuple<Ts...>` — a template argument, where the type reading stops at the ellipsis and the list's
+    //   loop then read it as an argument of its own.
     //
-    // They are pinned as *read* in the test above instead. That test is where a construct goes when it starts
-    // working; this one is for what is still refused.
+    // The declaration half of packs was never a gap (`template <typename... Ts> void f(Ts... ts);` has been in
+    // the list above since it was written). Fold expressions came with the same change: `(ts + ...)` is the
+    // ordinary binary rule with the `...` read as its right operand.
 
     assert_does_not_read_yet(
         Where::File,

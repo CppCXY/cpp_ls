@@ -290,6 +290,18 @@ pub fn parse_declaration(p: &mut CppParser) -> ParseResult {
         // read as a declaration of `S` with a parameter list and nothing named.
         CppTokenKind::Tilde => return parse_destructor_declaration(p),
 
+        // A **conversion operator** — `operator int();`, `operator std::string() const;`.
+        //
+        // Dispatched here for the same reason as the destructor: the name is written first, so no type
+        // precedes it and the specifier sequence has nothing to read. It used to be dispatched nowhere at
+        // all, and the result was silent: `operator` became an error node, `int` a declaration of a variable
+        // named `int`, and the `()` another error — with no message reported.
+        //
+        // Safe to claim unconditionally, because no *other* declaration begins with `operator`: an overloaded
+        // operator's return type comes first (`Ops operator+(const Ops&)`), so a declaration whose first token
+        // is `operator` can only be a conversion.
+        CppTokenKind::OperatorKeyword => return parse_conversion_operator_declaration(p),
+
         // `export` heads a module declaration, an export block, or one exported declaration.
         CppTokenKind::ExportKeyword => {
             if p.peek_token_kind_at(1..2)[0] == CppTokenKind::LeftBrace {
@@ -366,11 +378,13 @@ pub fn parse_declaration(p: &mut CppParser) -> ParseResult {
     // is a template *declaration* whose payload is the class. Handling it here rather than in a
     // separate rule is what lets templates apply to classes, functions, variables, aliases and
     // concepts without five copies of the same parser.
-    if p.current_token() == CppTokenKind::TemplateKeyword
-        && let Err(err) = parse_template_head(p)
-    {
-        p.rollback(checkpoint);
-        return Err(err);
+    let mut seen_a_template_head = false;
+    if p.current_token() == CppTokenKind::TemplateKeyword {
+        if let Err(err) = parse_template_head(p) {
+            p.rollback(checkpoint);
+            return Err(err);
+        }
+        seen_a_template_head = true;
     }
 
     // The head may be followed by a declaration that *is* its own rule, and those rules begin with a
@@ -396,6 +410,20 @@ pub fn parse_declaration(p: &mut CppParser) -> ParseResult {
             return Err(err);
         }
         return Ok(m.complete(p));
+    }
+
+    // Attributes written *between* the template head and the declaration it wraps:
+    // `template <typename T> [[nodiscard]] T p();`. That position belongs to neither the head nor the
+    // specifier sequence — the head has closed by the time the `[[` appears, and the sequence has not started
+    // — so it was read by the *declarator*, which reported `expected ';'` against the attribute.
+    //
+    // Only when a head was actually consumed: an attribute at the start of an ordinary declaration is a
+    // specifier and the sequence below owns it.
+    if seen_a_template_head
+        && let Err(err) = super::types::parse_attribute_specifiers(p)
+    {
+        p.rollback(checkpoint);
+        return Err(err);
     }
 
     let specifiers_from = p.current_event_count();
@@ -698,6 +726,22 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
                 CppSyntaxKind::TrailingReturnType,
             ],
         );
+
+    // Attributes written **after the declarator**: `int x [[maybe_unused]] = 1;`,
+    // `void f() [[noreturn]];`, `[[nodiscard]] int g() [[deprecated]] { return 1; }`.
+    //
+    // This is the position C++ calls "after the declarator-id and before the initializer", and it is the one
+    // that was missing: the specifier sequence reads the attributes written *before* the type, and the
+    // class-head rule reads the ones written after a class's name, but a `[[` here reached the initializer
+    // rule, which has no notion of an attribute.
+    //
+    // Consumed before the `declarator_is_function` answer is used rather than after, because the token after
+    // the attributes is what decides — `void f() [[noreturn]] { }` has a body, and the brace is one token
+    // further along than the match below would look.
+    if let Err(err) = super::types::parse_attribute_specifiers(p) {
+        m.undo(p);
+        return Err(err);
+    }
 
     match p.current_token() {
         CppTokenKind::Assign => {
@@ -1670,6 +1714,15 @@ fn parse_parameter(p: &mut CppParser) -> ParseResult {
         }
     }
 
+    // Attributes on the parameter: `void f(int x [[maybe_unused]])`, the same position as on a variable. Read
+    // after the declarator and before the default argument, which is the order C++ writes them in — and only
+    // here, so the `[[` of an attribute written *before* the type goes on being read by the specifier sequence,
+    // which is where it belongs.
+    if let Err(err) = super::types::parse_attribute_specifiers(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
     if p.current_token() == CppTokenKind::Assign {
         p.bump();
         let init = p.mark(CppSyntaxKind::Initializer);
@@ -1845,12 +1898,55 @@ pub fn starts_declaration(p: &CppParser) -> bool {
 /// `virtual` or `inline`, because those are specifiers the sequence knows; the tilde after them is what stops
 /// it. That is why this rule starts at the declarator rather than at a type.
 fn parse_destructor_declaration(p: &mut CppParser) -> ParseResult {
+    parse_declaration_starting_at_a_name(p, super::types::parse_declarator)
+}
+
+/// Parse a **conversion** operator declaration: `operator int();`, `operator bool() const;`,
+/// `operator std::string() const &;`, `operator const char*() = delete;`.
+///
+/// Same shape as a destructor declaration, for the same reason and with the same fix: the name is written
+/// first and no type precedes it, so the specifier sequence — which runs first in the general rule — has
+/// nothing to read and refuses the whole declaration.
+///
+/// What it did instead was worse than a refusal. `operator` was left as an error node, `int` was read as a
+/// declaration of a variable named `int` — which also taught the file's type table that `int` is a type
+/// *this file declared* — and the `()` became a further error. No error was reported, so the only symptom
+/// was a member list missing its conversion operator.
+///
+/// Reached from [`parse_declaration`] when the declaration's first token is `operator`, which no other
+/// declaration can begin with: an *overloaded* operator's name is preceded by its return type
+/// (`Ops operator+(const Ops&)`), so by the time this dispatch is reached the payload cannot be one.
+fn parse_conversion_operator_declaration(p: &mut CppParser) -> ParseResult {
+    parse_declaration_starting_at_a_name(p, |p| {
+        // The name, then the declarator's suffixes: the parameter list of the operator, its cv-qualifiers and
+        // its ref-qualifier. `parse_declarator` cannot be used here because it would try to read a *declarator*
+        // at a token that is the name — there is no type in front of it for a declarator to follow.
+        let name = p.mark(CppSyntaxKind::Declarator);
+        if let Err(err) = parse_name(p) {
+            name.undo(p);
+            return Err(err);
+        }
+        name.complete(p);
+        super::types::parse_declarator_function_suffixes(p, p.current_event_count())
+    })
+}
+
+/// The tail every declaration shares: one init-declarator, then a body, then a `;`.
+///
+/// Factored out for exactly two callers — a destructor and a conversion operator — which are the two
+/// declarations whose *name* begins the declaration and which therefore cannot go through the specifier
+/// sequence. Having two copies of "the body or the `;`" is how the first copy of it came to report
+/// `expected ';'` against the `}` of `~S() {}`.
+fn parse_declaration_starting_at_a_name(
+    p: &mut CppParser,
+    parse_the_name: impl FnOnce(&mut CppParser) -> ParseResult,
+) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::Declaration);
 
     let declarator_from = p.current_event_count();
 
-    if let Err(err) = super::types::parse_declarator(p) {
+    if let Err(err) = parse_the_name(p) {
         p.close_marks_above(base);
         return Err(err);
     }
@@ -1859,10 +1955,8 @@ fn parse_destructor_declaration(p: &mut CppParser) -> ParseResult {
         return Err(err);
     }
 
-    // A destructor's body or its `;`, which is the same choice every function declarator gets at the end of
-    // `parse_declaration` — and the reason the first attempt at this rule reported `expected ';'` against the
-    // `}` of `~S() {}`: a declarator whose parameter list has been read is a *function*, and the brace after it
-    // is a definition rather than a braced initializer.
+    // A body, or its `;`. A declarator whose parameter list has been read is a *function*, so the brace after
+    // it is a definition rather than a braced initializer.
     if p.current_token() == CppTokenKind::LeftBrace {
         if let Err(err) = parse_compound_stat(p) {
             p.close_marks_above(base);
@@ -1970,6 +2064,14 @@ pub fn parse_using_declaration(p: &mut CppParser) -> ParseResult {
         return Err(err);
     }
 
+    // An attribute on the alias's name: `using T [[deprecated]] = int;`. Between the name and the `=`, which is
+    // the same position an attribute takes on any other declarator — see `finish_init_declarator` — and the one
+    // this rule does not share with it, because an alias has no declarator node of its own.
+    if let Err(err) = super::types::parse_attribute_specifiers(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
     if p.current_token() == CppTokenKind::Assign {
         p.bump();
 
@@ -1978,6 +2080,23 @@ pub fn parse_using_declaration(p: &mut CppParser) -> ParseResult {
         }
 
         if let Err(err) = parse_type_id(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+
+        // The type's **suffixes**: `using Arr = int[4];`, `using Fn = int(char);`, `using P = int(*)[4];`.
+        //
+        // A type-id reads the abstract declarator — the pointers, references and cv-qualifiers — and stops
+        // before the array and function parts, because everywhere else a type-id appears those belong to
+        // whatever encloses it. In an alias there is nothing enclosing it: the `=` was the last thing before
+        // the type and the `;` is the last thing after it, so anything left is part of the type.
+        //
+        // That asymmetry is why `typedef int Arr[4];` worked while `using Arr = int[4];` did not — the typedef
+        // rule reaches the suffixes through `parse_declarator`, and this rule had no equivalent step.
+        if (p.current_token() == CppTokenKind::LeftBracket
+            || p.current_token() == CppTokenKind::LeftParen)
+            && let Err(err) = super::types::parse_declarator_suffixes(p)
+        {
             p.close_marks_above(base);
             return Err(err);
         }

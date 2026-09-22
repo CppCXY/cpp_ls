@@ -658,7 +658,12 @@ fn parse_switch_statement(p: &mut CppParser) -> ParseResult {
                 let case = p.mark(CppSyntaxKind::CaseStat);
                 p.bump();
                 // A case label may be a constant expression or a range `case 1 ... 5:`.
-                if let Err(err) = parse_expr(p) {
+                //
+                // Read with pack expansion *refused*, because this rule owns the `...` of the range: with the
+                // expansion reading on, `case 2 ... 4:` parsed as a pack expansion of `2` and then reported a
+                // missing `:`. The range is the one construct in a statement where a `...` follows an
+                // expression and is not an expansion.
+                if let Err(err) = super::exprs::parse_expr_without_pack_expansion(p) {
                     p.close_marks_above(base);
                     return Err(err);
                 }

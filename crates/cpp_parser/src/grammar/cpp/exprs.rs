@@ -90,6 +90,35 @@ fn get_operator_precedence(p: &CppParser, token: CppTokenKind) -> Option<u8> {
     }
 }
 
+/// Is this operator one a fold expression can use?
+///
+/// Every binary operator in the table except the assignment family and the comma — neither of which folds — so
+/// the test is written as "is a binary operator" and the exclusions are the ones C++ makes.
+fn is_fold_operator(token: CppTokenKind) -> bool {
+    matches!(
+        token,
+        CppTokenKind::Plus
+            | CppTokenKind::Minus
+            | CppTokenKind::Star
+            | CppTokenKind::Slash
+            | CppTokenKind::Percent
+            | CppTokenKind::Caret
+            | CppTokenKind::Ampersand
+            | CppTokenKind::Pipe
+            | CppTokenKind::LeftShift
+            | CppTokenKind::RightShift
+            | CppTokenKind::Equal
+            | CppTokenKind::NotEqual
+            | CppTokenKind::Less
+            | CppTokenKind::LessEqual
+            | CppTokenKind::Greater
+            | CppTokenKind::GreaterEqual
+            | CppTokenKind::Spaceship
+            | CppTokenKind::LogicalAnd
+            | CppTokenKind::LogicalOr
+    )
+}
+
 /// Is this operator right-associative?
 ///
 /// Only the assignment family is, and getting it wrong is a shape rather than an error: `a = b = c` read as
@@ -113,7 +142,48 @@ fn is_right_associative(token: CppTokenKind) -> bool {
 
 /// 解析表达式的主要入口点
 pub fn parse_expr(p: &mut CppParser) -> ParseResult {
-    parse_ternary_expr(p)
+    parse_expr_with_pack_expansion(p, true)
+}
+
+/// [`parse_expr`] without the trailing-`...` reading, for the one rule that spells the ellipsis itself.
+///
+/// `case 2 ... 4:` is a GNU range whose `...` comes after an expression, exactly where a pack expansion's does.
+/// The case rule reads the low bound, then the `...`, then the high bound — so it has to be given an expression
+/// reader that stops before the ellipsis, or the range's own punctuation is consumed as part of the bound.
+///
+/// Exposed rather than kept private because the caller is in another module, and the alternative — the case rule
+/// looking for a `...` that `parse_expr` has already taken — is not a rule at all.
+pub fn parse_expr_without_pack_expansion(p: &mut CppParser) -> ParseResult {
+    parse_expr_with_pack_expansion(p, false)
+}
+
+/// [`parse_expr`], optionally refusing a trailing `...`.
+///
+/// Two callers refuse it, for two different reasons, and both are recorded where they call it: the
+/// **parenthesised** expression, because inside parentheses the ellipsis belongs to a fold expression, and the
+/// **case label**, because there it belongs to a GNU range.
+fn parse_expr_with_pack_expansion(p: &mut CppParser, pack_expansion: bool) -> ParseResult {
+    let expr = parse_ternary_expr(p)?;
+
+    // A **pack expansion**: `g(args...)`, `std::tuple<Ts...>`, `h(f(x)...)`. The `...` follows the pattern it
+    // expands, and the pattern is an expression — which is why it is read here, at the one place every
+    // expression reaches, rather than in each of the list rules that can contain one.
+    //
+    // The alternative was to teach the argument list, the template argument list and the initializer list to
+    // each look for a `...` after what they read. That is four copies of one rule, and the three that were
+    // written later would be the ones to get it wrong.
+    //
+    // Nothing else is taken away by this. Where a `...` follows an expression and is *not* an expansion — the
+    // `args...` of a declarator, the `...` of an old-style variadic parameter — the expression is not read by
+    // this rule at all: `Args&&... args` has no expression in it, and `int f(int a, ...)` has the ellipsis
+    // after a comma rather than after an expression.
+    if pack_expansion && p.current_token() == CppTokenKind::Ellipsis {
+        let expansion = expr.precede(p, CppSyntaxKind::PackExpansionExpr);
+        p.bump(); // `...`
+        return Ok(expansion.complete(p));
+    }
+
+    Ok(expr)
 }
 
 /// 解析三元表达式 (condition ? true_expr : false_expr)
@@ -137,7 +207,30 @@ fn parse_ternary_expr(p: &mut CppParser) -> ParseResult {
 /// 使用优先级爬升算法解析二元表达式
 /// min_prec: 当前最小优先级
 fn parse_binary_expr_with_precedence(p: &mut CppParser, min_prec: u8) -> ParseResult {
-    let mut left = parse_unary_expr(p)?;
+    let mut left = parse_unary_expr(p, true)?;
+
+    // A **fold expression** whose operator is at the cursor: `(ts + ...)`, `(... + ts)`.
+    //
+    // The `...` is the operator's other operand — the one standing for the rest of the pack — and `ts + ...`
+    // is therefore one binary expression rather than a binary expression missing its right side. Read here,
+    // before the ordinary operator loop, because that loop would consume the `+` and then fail to find an
+    // operand at the `...`.
+    //
+    // `(... + ts)` needs nothing: the `...` is read as the *left* operand by the primary rule, and the loop
+    // below then sees the `+` and builds the same shape with the sides swapped — which is exactly what a left
+    // fold is.
+    if is_fold_operator(p.current_token())
+        && p.peek_next_token() == CppTokenKind::Ellipsis
+        && let Some(prec) = get_operator_precedence(p, p.current_token())
+        && prec >= min_prec
+    {
+        let m = left.precede(p, CppSyntaxKind::BinaryExpr);
+        p.bump(); // the operator
+        let fold = p.mark(CppSyntaxKind::FoldExpr);
+        p.bump(); // `...`
+        fold.complete(p);
+        return Ok(m.complete(p));
+    }
 
     while let Some(prec) = get_operator_precedence(p, p.current_token()) {
         if prec < min_prec {
@@ -164,7 +257,10 @@ fn parse_binary_expr_with_precedence(p: &mut CppParser, min_prec: u8) -> ParseRe
 }
 
 /// 解析一元表达式
-fn parse_unary_expr(p: &mut CppParser) -> ParseResult {
+///
+/// `fold_operand` says whether a bare `...` may be read as a fold expression's operand here. It is true only
+/// inside parentheses, which is where a fold is written; see the `Ellipsis` arm of [`parse_primary_expr`].
+fn parse_unary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
     match p.current_token() {
         CppTokenKind::LogicalNot
         | CppTokenKind::Tilde
@@ -176,7 +272,7 @@ fn parse_unary_expr(p: &mut CppParser) -> ParseResult {
         | CppTokenKind::Ampersand => {
             let m = p.mark(CppSyntaxKind::UnaryExpr);
             p.bump(); // consume unary operator
-            parse_unary_expr(p)?; // parse operand recursively
+            parse_unary_expr(p, fold_operand)?; // parse operand recursively
             Ok(m.complete(p))
         }
         // `co_await e` — a unary operator, and the only one whose operand is an awaitable rather than a value.
@@ -188,21 +284,33 @@ fn parse_unary_expr(p: &mut CppParser) -> ParseResult {
         CppTokenKind::CoAwaitKeyword => {
             let m = p.mark(CppSyntaxKind::UnaryExpr);
             p.bump(); // consume 'co_await'
-            parse_unary_expr(p)?; // the awaitable
+            parse_unary_expr(p, fold_operand)?; // the awaitable
             Ok(m.complete(p))
         }
         CppTokenKind::SizeofKeyword | CppTokenKind::AlignofKeyword => {
             let m = p.mark(CppSyntaxKind::UnaryExpr);
             p.bump(); // consume 'sizeof' / 'alignof'
 
+            // `sizeof...(Ts)` — the operator that counts a pack, and the one spelling where a `...` sits
+            // between the keyword and its parentheses. The lexer produces `sizeof` and `...` as two tokens
+            // rather than one, which is why this needed saying: the `...` was reported as an unexpected token
+            // after a `sizeof` that had already finished reading its operand.
+            //
+            // The operand is always parenthesised, and it is a *name* rather than a type — `sizeof...(int)` is
+            // not a thing. It goes through the parenthesised-expression rule, so the tree says the operand is
+            // an expression, which is what it is.
+            let counts_a_pack = p.current_token() == CppTokenKind::Ellipsis;
+            if counts_a_pack {
+                p.bump(); // `...`
+            }
+
             if p.current_token() == CppTokenKind::LeftParen {
                 p.bump(); // consume '('
                 parse_type_id_or_expression(p)?;
                 expect_token(p, CppTokenKind::RightParen)?;
-            } else {
-                // `sizeof x`, `sizeof(int)` without parentheses and `sizeof...` — the operand of the
-                // unparenthesised form is an expression, never a type.
-                parse_unary_expr(p)?;
+            } else if !counts_a_pack {
+                // `sizeof x` — the operand of the unparenthesised form is an expression, never a type.
+                parse_unary_expr(p, fold_operand)?;
             }
 
             Ok(m.complete(p))
@@ -233,7 +341,7 @@ fn parse_unary_expr(p: &mut CppParser) -> ParseResult {
 
             // The operand of a cast is a unary expression, which is what keeps `(int)a + b` a sum of a cast
             // and `b` rather than a cast of `a + b`.
-            if let Err(err) = parse_unary_expr(p) {
+            if let Err(err) = parse_unary_expr(p, fold_operand) {
                 p.close_marks_above(base);
                 return Err(err);
             }
@@ -254,10 +362,10 @@ fn parse_unary_expr(p: &mut CppParser) -> ParseResult {
                 p.bump(); // consume '['
                 expect_token(p, CppTokenKind::RightBracket)?;
             }
-            parse_unary_expr(p)?;
+            parse_unary_expr(p, fold_operand)?;
             Ok(m.complete(p))
         }
-        _ => parse_postfix_expr(p),
+        _ => parse_postfix_expr(p, fold_operand),
     }
 }
 
@@ -586,8 +694,8 @@ fn parse_new_initializer(p: &mut CppParser) -> ParseResult {
 }
 
 /// 解析后缀表达式 (函数调用、数组访问、成员访问、后增后减等)
-fn parse_postfix_expr(p: &mut CppParser) -> ParseResult {
-    let expr = parse_primary_expr(p)?;
+fn parse_postfix_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
+    let expr = parse_primary_expr(p, fold_operand)?;
     parse_postfix_suffixes(p, expr)
 }
 
@@ -701,7 +809,10 @@ fn parse_postfix_suffixes(p: &mut CppParser, mut expr: crate::parser::CompleteMa
 }
 
 /// 解析主表达式 (标识符、字面量、括号表达式等)
-fn parse_primary_expr(p: &mut CppParser) -> ParseResult {
+///
+/// `fold_operand` is threaded down from [`parse_parenthesized_expression`] and is what licenses a bare `...` to
+/// be an operand; anywhere else it is refused so that the constructs which spell `...` themselves keep it.
+fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
     match p.current_token() {
         // 字面量
         CppTokenKind::IntegerLiteral
@@ -816,7 +927,7 @@ fn parse_primary_expr(p: &mut CppParser) -> ParseResult {
                 .and_then(|_| expect_token(p, CppTokenKind::RightParen))
                 // The operand of a cast is a unary expression, which is what keeps `(int)a + b` a sum of a cast
                 // and `b` rather than a cast of `a + b`.
-                .and_then(|_| parse_unary_expr(p));
+                .and_then(|_| parse_unary_expr(p, false));
 
             match parsed {
                 Ok(_) => Ok(m.complete(p)),
@@ -857,6 +968,29 @@ fn parse_primary_expr(p: &mut CppParser) -> ParseResult {
             Ok(m.complete(p))
         }
 
+        // A `...` in operand position. There is exactly one construct that writes it there — a **fold
+        // expression** — and in both of its spellings the ellipsis is an operand of the binary operator beside
+        // it: `(ts + ...)` reads as `BinaryExpr(ts, +, FoldExpr(...))` and `(... + ts)` as
+        // `BinaryExpr(FoldExpr(...), +, ts)`.
+        //
+        // Read as a primary expression rather than special-cased in the binary rule, which is what makes both
+        // spellings work through one piece of code: the left fold needs no handling at all once the `...` can
+        // be an operand.
+        //
+        // # Why the flag
+        //
+        // A `...` as an operand is only legal inside the parentheses of a fold, and reading it anywhere else
+        // takes tokens away from constructs that spell the same three dots. `case 2 ... 4:` is the one that
+        // proved it: the case rule reads an expression and *then* looks for the range's `...`, and with this arm
+        // unconditional the ellipsis was swallowed as part of the first expression — the range syntax broke,
+        // and it broke in the corpus rather than in a test, which is where a regression like this should
+        // surface.
+        CppTokenKind::Ellipsis if fold_operand => {
+            let m = p.mark(CppSyntaxKind::FoldExpr);
+            p.bump();
+            Ok(m.complete(p))
+        }
+
         _ => Err(CppParseError::syntax_error_from(
             &t!("expected primary expression"),
             p.current_token_range(),
@@ -869,10 +1003,14 @@ fn parse_primary_expr(p: &mut CppParser) -> ParseResult {
 /// Shared by the two paths that reach a `(` in expression position: the plain parenthesised expression, and a
 /// cast attempt that failed and has to be read that way instead. Two copies of this rule would be how they
 /// come to disagree about what a parenthesised expression is.
+///
+/// This is also the only place a **fold expression** can be written, so it is the only place that licenses a
+/// bare `...` as an operand. The trailing-`...` *expansion* reading is refused here for the reason given on
+/// [`parse_expr_with_pack_expansion`]: inside the parentheses the ellipsis belongs to the fold.
 fn parse_parenthesized_expression(p: &mut CppParser) -> ParseResult {
     let m = p.mark(CppSyntaxKind::ParenExpr);
     expect_token(p, CppTokenKind::LeftParen)?;
-    if let Err(err) = parse_expr(p) {
+    if let Err(err) = parse_expr_with_pack_expansion(p, true) {
         m.undo(p);
         return Err(err);
     }
@@ -1124,6 +1262,14 @@ fn parse_capture(p: &mut CppParser) -> ParseResult {
             | CppTokenKind::Assign
             | CppTokenKind::Identifier
     ) {
+        p.bump();
+    }
+
+    // A pack expansion in the capture list: `[args...]`, the spelling a variadic forwarding lambda needs. The
+    // `...` follows the name it expands, which is the same shape an expression's expansion has — but this rule
+    // reads the capture itself rather than an expression, so the `...` of `args...` reached the list's `]` unmet
+    // and the whole `[` was read as a subscript instead.
+    if p.current_token() == CppTokenKind::Ellipsis {
         p.bump();
     }
 

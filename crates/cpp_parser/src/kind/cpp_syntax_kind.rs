@@ -281,6 +281,31 @@ pub enum CppSyntaxKind {
     /// Compound literal expression
     /// e.g.: (struct Point){.x = 1, .y = 2}
     CompoundLiteralExpr,
+
+    /// A pack expansion (C++11): a pattern followed by `...`.
+    /// e.g.: `args...` in `g(args...)`, `Ts...` in `std::tuple<Ts...>`, `(ts + ...)` in a fold expression
+    ///
+    /// A node of its own because the `...` is not an operator applied to an operand — it is the marker that says
+    /// the operand stands for a *pack*, expanded once per element. `UnaryExpr(..., args)` would say the
+    /// ellipsis is a prefix operator, which is the one reading that is certainly wrong.
+    ///
+    /// The declaration half of packs needs no node of its own: `Ts... ts` is a declarator, and its `...` is part
+    /// of the declaration. This is the *use* half, where the pattern is an expression or a type-id.
+    PackExpansionExpr,
+
+    /// The `...` operand of a **fold expression** (C++17).
+    /// e.g.: the `...` of `(ts + ...)`, `(... && bs)`, `(f(args) + ...)`
+    ///
+    /// The `...` in a fold is not an expansion marker sitting after a pattern — it is an *operand*, the one
+    /// standing for "the rest of the pack". It is read as a primary expression so that the ordinary binary rule
+    /// builds `BinaryExpr(ts, +, FoldExpr(...))`, which leaves the pattern the user wrote intact as the left
+    /// side instead of turning the whole fold into an operator-less blob.
+    ///
+    /// A node rather than a bare token inside the binary expression, because an expression grammar's operands
+    /// are nodes everywhere else and a consumer walking the tree for the pack would otherwise have to inspect
+    /// raw tokens of one specific operator.
+    FoldExpr,
+
     // ========== Types ==========
     /// Built-in type - C++ basic types
     /// e.g.: int, char, float, double, bool, void

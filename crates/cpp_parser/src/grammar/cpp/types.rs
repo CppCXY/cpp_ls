@@ -1016,6 +1016,14 @@ fn parse_enumerator_body(p: &mut CppParser) -> ParseResult {
 
         let enumerator = p.mark(CppSyntaxKind::EnumeratorDecl);
         p.bump();
+
+        // Attributes on the enumerator: `enum E { A [[deprecated]] = 1, B };`. Written after the name and
+        // before the `=`, so the initializer rule below would otherwise meet a `[[` it has no rule for.
+        if let Err(err) = parse_attribute_specifiers(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+
         if p.current_token() == CppTokenKind::Assign {
             p.bump();
             if let Err(err) = super::exprs::parse_expr(p) {
@@ -1215,6 +1223,34 @@ fn a_matching_angle_bracket_follows(p: &CppParser) -> bool {
 }
 
 /// Parse an operator name after the `operator` keyword.
+/// Is the `&&` at the cursor a **ref-qualifier** rather than part of a conversion operator's type?
+///
+/// `operator T&&()` names an rvalue reference and `operator bool() &&` qualifies the member function. Both are
+/// a `&&` followed by a `(`, so the tokens alone do not separate them — one more thing does, and it is the one
+/// a *reader* uses: whether the two are written together.
+///
+/// ```text
+/// operator T&&()      the `&&` and the `(` touch     -> the type continues
+/// operator bool() &&  the `&&` and the `(` do not    -> the function is qualified
+/// operator bool() &&; nothing follows but the `;`    -> the function is qualified
+/// ```
+///
+/// Reading the tokens as the source wrote them is exactly the kind of context-free evidence this parser is
+/// allowed to use. The failure mode if someone writes `operator bool()&&` with no space is a name that runs one
+/// token long and a declaration that then reports a missing `;` — loud, local, and one edit away from working.
+fn a_ref_qualifier_is_here(p: &CppParser) -> bool {
+    match p.peek_token_kind_at(1..2).first() {
+        // A `;` after the `&&` can only be a qualifier: no type is spelled that way.
+        Some(&CppTokenKind::Semicolon) => true,
+        Some(&CppTokenKind::LeftParen) => {
+            let rvalue_ref = p.current_token_range();
+            let parameter_list = p.peek_token_range_at(1);
+            rvalue_ref.end_offset() != parameter_list.start_offset
+        }
+        _ => false,
+    }
+}
+
 /// Parse an operator name after the `operator` keyword.
 ///
 /// Exposed for the expression grammar, which reads the same names in the same position: `Foo::operator+()` is an
@@ -1248,28 +1284,65 @@ fn parse_operator_name(p: &mut CppParser) -> ParseResult {
             expect_token(p, CppTokenKind::LeftBracket)?;
             expect_token(p, CppTokenKind::RightBracket)?;
         }
-        // `operator bool`, `operator int`, `operator MyType` — a *conversion* operator, which is spelled with
-        // the type it converts to rather than with a symbol. A keyword type is as ordinary here as a class
-        // name is, which is why this case has to be in the list: without it `explicit operator bool()` reports
-        // the keyword as an operator name it does not recognize.
-        kind if is_type_specifier_keyword(kind) || is_class_like_keyword(kind) => {
-            p.bump();
+        // `operator bool`, `operator int`, `operator MyType`, `operator std::string`,
+        // `operator const char*` — a **conversion** operator, which is spelled with the type it converts to
+        // rather than with a symbol. A keyword type is as ordinary here as a class name is.
+        //
+        // Read as one flat run of tokens rather than by the type grammar, and the reason is that the type
+        // grammar would *own* the name. `parse_type_id` reads a declarator, and a declarator is where a name
+        // is recorded — so `operator int()` came out as a declaration of a variable called `int`, and the
+        // file's type table learned that `int` is a type this file declared. An operator name is a
+        // declaration's *name*, and nothing may claim it on the way past.
+        //
+        // The run is delimited by what a conversion-type-id cannot contain: an identifier, a `::`, a
+        // qualified or template-id name, the qualifiers and the pointer/reference operators, and the
+        // keywords that name a type. It stops at the `(` of the parameter list and at the `;` of a
+        // declaration, which is what keeps it from walking into the rest of the file.
+        //
+        // `const` and `volatile` are in the *entry* test as well as in the loop, and the first version of
+        // this arm had them only in the loop — which is a bug with no symptom until it is written down:
+        // `operator char()` parsed and `operator const char()` did not, because the guard decides on the
+        // token the name *begins* with and `const` is not a type specifier.
+        kind if is_type_specifier_keyword(kind)
+            || is_class_like_keyword(kind)
+            || matches!(
+                kind,
+                CppTokenKind::Identifier
+                    | CppTokenKind::Scope
+                    | CppTokenKind::ConstKeyword
+                    | CppTokenKind::VolatileKeyword
+            ) =>
+        {
+            loop {
+                if p.current_token() == CppTokenKind::LogicalAnd
+                    && a_ref_qualifier_is_here(p)
+                {
+                    break;
+                }
 
-            // A composed name: `operator unsigned long`, `operator const char*`. Consumed here because the
-            // operator's own tokens are the whole name — a caller looking for it would otherwise have to
-            // re-derive where a type ends, and this rule is already at that position.
-            while is_type_specifier_keyword(p.current_token())
-                || matches!(
-                    p.current_token(),
-                    CppTokenKind::ConstKeyword | CppTokenKind::VolatileKeyword
-                )
-            {
-                p.bump();
-            }
-            while p.current_token() == CppTokenKind::Star
-                || p.current_token() == CppTokenKind::Ampersand
-            {
-                p.bump();
+                match p.current_token() {
+                    kind if is_type_specifier_keyword(kind)
+                        || is_class_like_keyword(kind)
+                        || matches!(
+                            kind,
+                            CppTokenKind::Identifier
+                                | CppTokenKind::ConstKeyword
+                                | CppTokenKind::VolatileKeyword
+                                | CppTokenKind::Scope
+                                | CppTokenKind::Star
+                                | CppTokenKind::Ampersand
+                                | CppTokenKind::LogicalAnd
+                        ) =>
+                    {
+                        p.bump();
+                    }
+                    // `operator std::vector<int>` — the template arguments belong to the name, and skipping
+                    // them is what keeps a nested `>` from being read as an operator somewhere else.
+                    CppTokenKind::Less if could_start_template_arguments(p) => {
+                        parse_template_argument_list(p)?;
+                    }
+                    _ => break,
+                }
             }
         }
         // `operator""_suffix` — a user-defined literal operator. The literal is already one token.
@@ -1599,7 +1672,10 @@ fn a_parenthesised_declarator_with_a_name_follows(p: &CppParser) -> bool {
 /// driven by a declarator's *name* and by the declaration/expression decision, and neither exists in a
 /// type-id. What the two share is the rule for what a suffix is — `(` starts a parameter list and `[` an
 /// array bound — and that is small enough to state twice rather than to parameterise.
-fn parse_declarator_suffixes(p: &mut CppParser) -> ParseResult {
+///
+/// Exposed for the alias rule, which needs it for the same reason the type-id does: `using Arr = int[4];`
+/// writes a type whose array part has nothing enclosing it to attach to.
+pub fn parse_declarator_suffixes(p: &mut CppParser) -> ParseResult {
     loop {
         match p.current_token() {
             CppTokenKind::LeftParen => {
@@ -1768,6 +1844,18 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
                         break;
                     }
                 }
+                // A `[[` here is an **attribute**, not an array bound: `int x [[maybe_unused]];`.
+                //
+                // The two share their first token, and reading it as an array bound is what made the whole
+                // declaration fail — the bound's expression rule met `[` where an operand should be, the
+                // declarator was refused, and the statement was re-read as an expression. The check is the same
+                // one [`parse_attribute_specifiers`] uses, and it can be made here without lookahead beyond the
+                // next token because no array declarator is spelled `[[`.
+                CppTokenKind::LeftBracket
+                    if p.peek_next_token() == CppTokenKind::LeftBracket =>
+                {
+                    break;
+                }
                 CppTokenKind::LeftBracket => {
                     let array = p.mark(CppSyntaxKind::ArrayType);
                     p.bump();
@@ -1840,14 +1928,14 @@ fn parse_destructor_name(p: &mut CppParser) -> ParseResult {
 
 /// Parse the parameter list and qualifiers of a declarator whose name has already been read.
 ///
-/// For the destructor above, whose name is claimed before the usual declarator path runs. The loop is the same
-/// shape as the one in [`parse_declarator_with`], and it is a second copy for the same reason the first is not
-/// reusable there: that loop is driven by the declaration/expression decision, which a destructor has already
-/// answered by existing.
+/// For the destructor and the conversion operator, whose names are claimed before the usual declarator path
+/// runs. The loop is the same shape as the one in [`parse_declarator_with`], and it is a second copy for the
+/// same reason the first is not reusable there: that loop is driven by the declaration/expression decision,
+/// which both of these have already answered by existing.
 ///
 /// The `last_declarator_is_function` flag is set for the same reason it is set everywhere else — it is what
 /// makes a `{` after the declarator a *body* rather than a braced initializer, and `~S() {}` is a definition.
-fn parse_declarator_function_suffixes(
+pub fn parse_declarator_function_suffixes(
     p: &mut CppParser,
     declarator_from: usize,
 ) -> ParseResult {
@@ -2064,6 +2152,23 @@ fn parse_template_argument(p: &mut CppParser) -> ParseResult {
 
     let type_read = parse_type_id(p);
 
+    // `std::tuple<Ts...>` — a **pack expansion as a template argument**. The type reading stops at the
+    // ellipsis, because a `...` is not something a type-id can continue with; what it means is that the type
+    // just read is the *pattern* of an expansion.
+    //
+    // The ellipsis is consumed here, as part of this argument, and it has to be: the list's own loop would
+    // otherwise come back around, read the `...` as an argument of its own and report it as one it cannot
+    // parse — which is exactly how `std::tuple<Ts...>` came to fail while the same spelling in an argument
+    // list (`g(args...)`) had just started working.
+    //
+    // It stays a bare token rather than becoming a `PackExpansionExpr`, because the type reading has already
+    // closed its node by the time the ellipsis is seen and re-parenting it here would mean reopening a
+    // completed node. A consumer asking whether the argument is a pack finds the ellipsis in its tokens,
+    // which is the same answer the expression path gives through its node kind.
+    if type_read.is_ok() && p.current_token() == CppTokenKind::Ellipsis {
+        p.bump(); // `...`
+    }
+
     // Did the type reading get anywhere, and stop somewhere a type can end?
     //
     // The test is deliberately *not* a comparison of `<>` nesting depths. Depth recomputed on either
@@ -2154,6 +2259,25 @@ pub fn eat_function_qualifiers(p: &mut CppParser) {
             _ => return,
         }
     }
+}
+
+/// Parse a run of attribute specifiers `[[...]]` at the cursor, consuming as many as are written.
+///
+/// A *run*, because C++ lets attributes repeat — `[[nodiscard]] [[deprecated]] int f();` — and because the
+/// grammar writes them as a list of specifiers rather than as one.
+///
+/// Silent when there is nothing to read: this is called at positions where an attribute is *allowed* rather
+/// than required, so `p.current_token() != LeftBracket` returns without touching the cursor and without an
+/// error. The `[[` test is what keeps it away from the forms where a `[` means something else — an array
+/// bound, a lambda capture, a structured binding, an index.
+pub fn parse_attribute_specifiers(p: &mut CppParser) -> ParseResult {
+    while p.current_token() == CppTokenKind::LeftBracket
+        && p.peek_next_token() == CppTokenKind::LeftBracket
+    {
+        parse_attribute_specifier(p)?;
+    }
+
+    Ok(CompleteMarker::empty())
 }
 
 /// Parse an attribute specifier `[[...]]`.

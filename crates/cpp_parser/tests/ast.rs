@@ -695,6 +695,16 @@ fn attribute_lists_consume_both_closing_brackets() {
         "struct A { [[nodiscard]] virtual int q() const; };\n",
         "export module mod [[deprecated]];\n",
         "import std [[deprecated]];\n",
+        // After the declarator and before the `;` — a member function, a variable, and a parameter.
+        "int h() [[carries_dependency]];\n",
+        "void r() [[noreturn]] { for (;;) {} }\n",
+        "void s(int x [[maybe_unused]]);\n",
+        "void t(int x [[maybe_unused]] = 1);\n",
+        // On an alias's name, and between a template head and the declaration it wraps.
+        "using T [[deprecated]] = int;\n",
+        "template <typename T> [[nodiscard]] T p();\n",
+        // On an enumerator.
+        "enum class F { A [[deprecated]] = 1, B };\n",
     ];
 
     for source in sources {
@@ -727,26 +737,20 @@ fn attribute_lists_consume_both_closing_brackets() {
 
 /// Attribute positions that do **not** parse yet, recorded so the gap is visible rather than rediscovered.
 ///
-/// All four are standard positions, and all four fail the same way: the declaration parses far enough to
-/// report something, then the attribute is met where a declarator or a `;` was expected, so the error
-/// points at the attribute rather than at anything wrong with the code. They are unrelated to the bracket
-/// accounting above — a leading attribute in the same declaration parses — and fixing them means teaching
-/// the declarator, class-head, and alias rules to consume an attribute list, which is a change to those
-/// rules rather than to this one.
+/// One position is left, and it is the odd one out: between the `namespace` keyword and its name. Every other
+/// position this test used to list is read now — after the declarator, on an alias, between a template head and
+/// the declaration it wraps, on a parameter, on an enumerator — and they moved into
+/// `attribute_lists_consume_both_closing_brackets` above.
 ///
 /// The test asserts the *current* behaviour so that fixing the gap is a deliberate edit here rather than a
 /// silent change, which is the same reason the parser's other limitation lists exist.
 #[test]
 fn known_unparsed_attribute_positions() {
     let still_broken = [
-        // Attribute after the declarator, before the `;`.
-        "int h() [[carries_dependency]];\n",
-        // Attribute between the `namespace` keyword and its name.
+        // Attribute between the `namespace` keyword and its name. The namespace rule reads `namespace` and then
+        // a name, and the attribute sits in between; unlike the other positions, there is no declarator and no
+        // specifier sequence here to hang it on.
         "namespace [[deprecated]] n { int x; }\n",
-        // Attribute on an alias declaration.
-        "using T [[deprecated]] = int;\n",
-        // Attribute on a template declaration, between the parameter list and the type.
-        "template <typename T> [[nodiscard]] T p();\n",
     ];
 
     for source in still_broken {

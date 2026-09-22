@@ -832,6 +832,32 @@ impl<'a> CppParser<'a> {
         self.type_names.depth() == 0
     }
 
+    /// Source range of the significant token at relative offset `offset` from the cursor.
+    ///
+    /// The third of the `peek_token_*_at` family, and it exists for the questions that are about the *source*
+    /// rather than about the tokens: whether two things are written together or apart. `operator T&&()` and
+    /// `operator bool() &&` are the same three tokens in the same order, and only the spacing separates the
+    /// type from the ref-qualifier.
+    ///
+    /// A zero-width range at the end of input, mirroring [`CppParser::current_token_range`], so a caller
+    /// comparing offsets never has to handle absence separately.
+    pub fn peek_token_range_at(&self, offset: usize) -> SourceRange {
+        let mut index = self.token_index;
+
+        for current in 0..=offset {
+            self.skip_trivia(&mut index);
+            if current == offset {
+                return match self.tokens.get(index) {
+                    Some(token) => token.range,
+                    None => SourceRange::EMPTY,
+                };
+            }
+            index += 1;
+        }
+
+        SourceRange::EMPTY
+    }
+
     /// Text of the significant token at relative offset `offset` from the cursor. Empty past the end.
     ///
     /// The companion to [`CppParser::peek_token_kind_at`], needed because `module` and `import` are

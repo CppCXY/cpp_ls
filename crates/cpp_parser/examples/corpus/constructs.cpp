@@ -220,6 +220,69 @@ void use_dependent_names(T value) {
     typename T::template rebind<int> named;
 }
 
+// --- conversion operators --------------------------------------------------
+struct Ratio {
+    Ratio(int numerator, int denominator);
+    // A conversion operator's name is the type it converts to, and it begins the declaration — there is no
+    // return type in front of it.
+    operator double() const;
+    operator bool() const noexcept;
+    operator const char*() = delete;
+    explicit operator std::string() const;
+};
+
+struct RefQualified {
+    operator int() const &;
+    operator bool() &&;
+};
+
+Ratio::operator double() const { return 1.0; }
+
+// --- packs, expansions and folds -------------------------------------------
+template <typename... Ts>
+void forward_all(Ts&&... args) {
+    // A pack expansion, in the three places one can be written.
+    consume(count_of(args)...);
+    auto counted = sizeof...(Ts);
+    auto held = std::tuple<Ts...>();
+}
+
+template <typename... Ts>
+using TupleOf = std::tuple<Ts...>;
+
+template <typename... Ts>
+auto sum_all(Ts... values) {
+    // Fold expressions, in all four spellings.
+    auto right = (values + ...);
+    auto left = (... + values);
+    auto all = (values && ...);
+    auto any = (... || values);
+    return right + left + (all ? 1 : 0) + (any ? 1 : 0);
+}
+
+// --- alias types with suffixes ---------------------------------------------
+using Buffer = char[256];
+using Handler = int(const char*);
+using HandlerPtr = int (*)(const char*);
+using Matrix = int (*)[4];
+
+// --- attributes, in every position that reads them -------------------------
+[[nodiscard]] int attributed();
+
+struct Attributed {
+    [[nodiscard]] int pure() const;
+    void sink(int value [[maybe_unused]]);
+    using Size [[deprecated]] = unsigned long;
+    enum class Mode { Fast [[deprecated]] = 1, Slow };
+};
+
+int aligned_global [[gnu::aligned(16)]] = 0;
+int carrying() [[carries_dependency]];
+void never() [[noreturn]] { for (;;) {} }
+
+template <typename T>
+[[nodiscard]] T identity(T value) { return value; }
+
 // --- operators -------------------------------------------------------------
 struct Ops {
     Ops operator+(const Ops&) const;
