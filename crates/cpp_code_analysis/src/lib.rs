@@ -48,6 +48,8 @@ pub mod guard;
 pub mod guards;
 pub mod include;
 pub mod macros;
+pub mod module_info;
+pub mod modules;
 pub mod paths;
 pub mod preprocess;
 pub mod token;
@@ -74,6 +76,11 @@ pub use guard::{Branch, Guard, GuardStack, Region, Visibility};
 pub use guards::{FileGuard, GuardAnalysis, analyse_guards, detect_guard};
 pub use include::{FoundIn, IncludeResolver, Resolution, Resolved, Unresolved};
 pub use macros::{MacroBody, MacroDef, MacroTable, Parameter, ParameterKind};
+pub use module_info::{ImportDeclaration, ImportTarget, ModuleInfo, ModuleUnit};
+pub use modules::{
+    ImportEdge, ImportOutcome, MAX_IMPORT_DEPTH, ModuleGraph, ModuleScanner, ModuleUnitEntry,
+    scan_imports,
+};
 pub use paths::{
     DiskFiles, FileId, FileProvider, MemoryFiles, OverlayFiles, PathInterner, join_normalized,
     normalize_path, parent_normalized,

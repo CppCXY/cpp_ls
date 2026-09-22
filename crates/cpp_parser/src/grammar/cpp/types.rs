@@ -543,6 +543,19 @@ fn parse_class_like_head(p: &mut CppParser) -> ParseResult {
             return Err(err);
         }
 
+    // Attributes on the class head: `class C [[deprecated]] { ... }`. They may also be written before
+    // the keyword, and that form is consumed as a leading decl-specifier by the caller — so both
+    // spellings reach the body, and skipping this one makes the class look as though it ended at the
+    // attribute. `enum class E [[deprecated]]` already worked, which is exactly why the gap here was
+    // easy to miss.
+    while p.current_token() == CppTokenKind::LeftBracket
+        && p.peek_next_token() == CppTokenKind::LeftBracket
+    {
+        if parse_attribute_specifier(p).is_err() {
+            break;
+        }
+    }
+
     // An enum's underlying type: `enum E : unsigned char { ... }`.
     if keyword == CppTokenKind::EnumKeyword && p.current_token() == CppTokenKind::Colon {
         p.bump();
@@ -1372,7 +1385,15 @@ pub fn parse_attribute_specifier(p: &mut CppParser) -> ParseResult {
     expect_token(p, CppTokenKind::LeftBracket)?;
     expect_token(p, CppTokenKind::LeftBracket)?;
 
-    let mut depth = 1usize;
+    // `depth` counts the `]` still owed for the two `[` consumed above, so it starts at two and each
+    // unmatched `[` inside the attribute list adds one. It must not start lower: one bracket short makes the
+    // rule return early, leaving the last `]` for the enclosing rule — which is how a well-formed
+    // `[[nodiscard]]` ends up reporting an error on the token *after* it rather than on itself.
+    //
+    // The `?` on the two `expect_token` calls matters for the same reason it does everywhere else: without
+    // it, a caller that is not looking at an attribute list walks the loop below and swallows the rest of
+    // the file into it.
+    let mut depth = 2usize;
     while !p.is_eof() {
         match p.current_token() {
             CppTokenKind::LeftBracket => {

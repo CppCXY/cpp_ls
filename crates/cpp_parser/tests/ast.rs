@@ -629,3 +629,157 @@ fn consteval_if_has_a_body_and_no_condition() {
         );
     }
 }
+
+/// An attribute list consumes **both** of its closing brackets.
+///
+/// The off-by-one this pins was invisible in the error list and showed up as damage to the *following*
+/// token instead: `[[nodiscard]] int f();` left the last `]` unconsumed, so the enclosing rule met `]`
+/// where it wanted `int` and produced an `ErrorNode` — a stray syntax error in perfectly ordinary code,
+/// pointing at a token that had nothing wrong with it.
+///
+/// Written as a property over many placements rather than one case, because the same rule parses
+/// attributes everywhere they can appear and the bug was in the rule, not in any one caller.
+///
+/// # Placements that are not covered here
+///
+/// Attributes are allowed in more positions than these, and a few of them do not parse yet — see
+/// `known_unparsed_attribute_positions` below. They are absent from this list deliberately: a failing
+/// case in a passing test says nothing about the bug being pinned, and these gaps are a separate piece
+/// of work from the bracket accounting.
+#[test]
+fn attribute_lists_consume_both_closing_brackets() {
+    let sources = [
+        "[[nodiscard]] int f();\n",
+        "[[noreturn]] void g();\n",
+        "class C [[deprecated]] { int x; };\n",
+        "enum class E [[deprecated]] { A };\n",
+        "struct S { [[maybe_unused]] int x; };\n",
+        "[[nodiscard, deprecated]] int i();\n",
+        "[[gnu::always_inline]] inline void j();\n",
+        "void k([[maybe_unused]] int x);\n",
+        "[[nodiscard]] int l() { return 1; }\n",
+        "int m [[gnu::aligned(16)]];\n",
+        "struct A { [[nodiscard]] virtual int q() const; };\n",
+        "export module mod [[deprecated]];\n",
+        "import std [[deprecated]];\n",
+    ];
+
+    for source in sources {
+        let (_, tree) = unit(source);
+
+        assert_eq!(tree.get_errors(), [], "{source:?} must parse cleanly");
+        assert_eq!(tree.to_source_text(), source, "{source:?} must stay lossless");
+
+        // Every `[[` in the source is matched by a `]]` inside an `AttributeList`, so none is left over for
+        // an enclosing rule to trip over.
+        let attribute_text: String = tree
+            .get_red_root()
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::AttributeList)
+            .map(|node| node.text().to_string())
+            .collect();
+
+        let opened = source.matches("[[").count();
+        let closed = attribute_text.matches("]]").count();
+        assert_eq!(
+            closed, opened,
+            "{source:?}: {opened} attribute list(s) opened but {closed} closed — got {attribute_text:?}"
+        );
+    }
+}
+
+/// Attribute positions that do **not** parse yet, recorded so the gap is visible rather than rediscovered.
+///
+/// All four are standard positions, and all four fail the same way: the declaration parses far enough to
+/// report something, then the attribute is met where a declarator or a `;` was expected, so the error
+/// points at the attribute rather than at anything wrong with the code. They are unrelated to the bracket
+/// accounting above — a leading attribute in the same declaration parses — and fixing them means teaching
+/// the declarator, class-head, and alias rules to consume an attribute list, which is a change to those
+/// rules rather than to this one.
+///
+/// The test asserts the *current* behaviour so that fixing the gap is a deliberate edit here rather than a
+/// silent change, which is the same reason the parser's other limitation lists exist.
+#[test]
+fn known_unparsed_attribute_positions() {
+    let still_broken = [
+        // Attribute after the declarator, before the `;`.
+        "int h() [[carries_dependency]];\n",
+        // Attribute between the `namespace` keyword and its name.
+        "namespace [[deprecated]] n { int x; }\n",
+        // Attribute on an alias declaration.
+        "using T [[deprecated]] = int;\n",
+        // Attribute on a template declaration, between the parameter list and the type.
+        "template <typename T> [[nodiscard]] T p();\n",
+    ];
+
+    for source in still_broken {
+        let (_, tree) = unit(source);
+
+        assert!(
+            !tree.get_errors().is_empty(),
+            "{source:?} now parses cleanly — move it into `attribute_lists_consume_both_closing_brackets`"
+        );
+        assert_eq!(
+            tree.to_source_text(),
+            source,
+            "{source:?} must stay lossless even while it does not parse"
+        );
+    }
+}
+
+/// A nested attribute list balances too, and the brackets inside it are counted rather than the rule
+/// stopping at the first `]`.
+#[test]
+fn a_nested_attribute_list_balances_its_brackets() {
+    let source = "[[outer([[inner]])]] int f();\n";
+    let (_, tree) = unit(source);
+
+    assert_eq!(tree.get_errors(), [], "must parse cleanly");
+    assert_eq!(tree.to_source_text(), source);
+
+    let text: String = tree
+        .get_red_root()
+        .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::AttributeList)
+        .map(|node| node.text().to_string())
+        .collect();
+
+    assert_eq!(text.matches("]]").count(), 2, "both lists closed: {text:?}");
+}
+
+/// An attribute list opened and never closed is reported, and the rest of the file does not become
+/// declarations.
+///
+/// Recorded as the behaviour rather than as a defect, because the alternative is worse. `[[nodiscard` at
+/// the start of a line is genuinely ambiguous — `[[` also opens a **lambda capture list**, and `[[x](int
+/// y){...}]` and `[[nodiscard]]` agree on everything up to the first identifier. So there is no point at
+/// which a recovery could say where the attribute was meant to end, and a wrong guess turns one half-typed
+/// `[[` into a cascade of spurious errors on code that is fine.
+///
+/// The two things that do matter are asserted instead: the parse stays lossless, and an error is reported.
+/// The message is deliberately *not* pinned — which rule ends up reporting the ambiguity is an
+/// implementation detail, and the useful property is that the input is not silently accepted.
+#[test]
+fn an_unterminated_attribute_list_is_reported_and_consumes_the_rest() {
+    let source = "[[nodiscard\nint f();\nint g;\n";
+    let (root, tree) = unit(source);
+
+    assert_eq!(tree.to_source_text(), source, "still lossless");
+    assert!(
+        !tree.get_errors().is_empty(),
+        "the input is not silently accepted"
+    );
+
+    // Nothing after the `[[` is a declaration, because all of it was taken by the construct that opened
+    // there. This is the part worth pinning: a broken attribute must not leave the *following* code
+    // looking well-formed when it was never parsed as code at all.
+    let declarations: Vec<String> = root
+        .get_declarations()
+        .map(|decl| decl.get_name_text().unwrap_or_default())
+        .collect();
+
+    assert!(
+        declarations.is_empty(),
+        "the rest of the file is inside the unclosed construct: {declarations:?}"
+    );
+}
