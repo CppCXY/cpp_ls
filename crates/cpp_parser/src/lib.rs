@@ -9,7 +9,7 @@ mod text;
 pub use grammar::doc::{DocCommandArgs, DocCommandKind, command_args, command_kind};
 pub use kind::*;
 pub use lexer::{
-    CppLexer, DocCommentStyle, DocToken, DocTokenKind, LexerConfig, is_block_comment,
+    CppLexer, CppTokenData, DocCommentStyle, DocToken, DocTokenKind, LexerConfig, is_block_comment,
     is_doc_whitespace, is_documentation_comment, lex_comment,
 };
 pub use parser::{Checkpoint, CppParser, EventStreamAudit, MarkEvent, ParserConfig};

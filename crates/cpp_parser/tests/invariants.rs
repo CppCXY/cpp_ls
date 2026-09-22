@@ -15,7 +15,9 @@
 //! These are checked against a corpus that deliberately includes broken, truncated and
 //! macro-heavy C++ — the inputs an editor actually sees.
 
-use cpp_parser::{CppParser, CppSyntaxKind, CppSyntaxNode, CppSyntaxTree, ParserConfig};
+use cpp_parser::{
+    CppParser, CppSyntaxKind, CppSyntaxNode, CppSyntaxTree, CppTokenKind, ParserConfig, is_trivia,
+};
 
 /// Collects `(kind, start, end, depth)` for every node in the tree, in pre-order.
 fn collect_nodes(root: &CppSyntaxNode) -> Vec<(CppSyntaxKind, usize, usize, usize)> {
@@ -439,6 +441,132 @@ fn trivia_is_preserved() {
             "trivia {needle:?} was dropped from the tree"
         );
     }
+}
+
+/// **Trivia is present as tokens, at its own position, and every byte of the file is covered.**
+///
+/// The weaker statement — "the tree's text equals the source" — does not imply this. Trivia that had
+/// been *folded into another token* would still round-trip: a comment whose text ended up inside an
+/// identifier's range produces the same string while the tree has lost the fact that it was a comment.
+/// So this asserts the stronger property, which is the one every consumer actually needs:
+///
+/// * the tokens' ranges are **strictly ascending and contiguous** — no gaps, so no byte is accounted
+///   for by anything other than a token, and no overlaps;
+/// * **every byte the lexer called trivia is trivia in the tree**, and is present.
+///
+/// Whitespace and newlines are the reason this matters rather than being pedantry: they are the only
+/// record of line structure the tree has, so a formatter or a fold cannot recover them from anywhere
+/// else, and "it still round-trips" would stay true the whole time they were missing.
+///
+/// # Why the check is per byte and not per token
+///
+/// A comment is the one piece of trivia that legitimately does *not* arrive as the lexer spelled it: the
+/// documentation layer re-lexes it, so `// just a comment` becomes a `LineComment` of `//`, a
+/// whitespace, and a `DocText` — which is the whole point of that layer, and its ranges still tile the
+/// comment exactly. Comparing token-for-token would fail on that, so the comparison is on *coverage*:
+/// each byte the lexer called trivia must belong to a token of the tree that is also trivia. That is
+/// the property a consumer relies on, and it survives the re-lexing.
+#[test]
+fn trivia_tokens_tile_the_source_exactly() {
+    for (name, source) in CORPUS {
+        let tree = assert_parses(source);
+
+        let tokens: Vec<(usize, usize, CppTokenKind)> = tree
+            .get_red_root()
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .map(|token| {
+                let range = token.text_range();
+                (
+                    u32::from(range.start()) as usize,
+                    u32::from(range.end()) as usize,
+                    CppTokenKind::from(token.kind()),
+                )
+            })
+            .collect();
+
+        // Contiguity, and the two ends of the file.
+        let mut expected = 0usize;
+        for (start, end, kind) in &tokens {
+            assert_eq!(
+                *start, expected,
+                "{name}: the token {kind:?} at {start}..{end} leaves a hole or overlaps at {expected}"
+            );
+            assert!(
+                end > start || source.is_empty(),
+                "{name}: the token {kind:?} at {start}..{end} covers nothing"
+            );
+            expected = *end;
+        }
+        assert_eq!(
+            expected,
+            source.len(),
+            "{name}: the tree's tokens cover {expected} of {} bytes",
+            source.len()
+        );
+
+        // Every byte the lexer called trivia must still be covered by **some** token of the tree. The
+        // claim is that no trivia is dropped, not that it is spelled the same way: a comment is
+        // deliberately re-lexed by the documentation layer into finer tokens — `// x` becomes `//`, a
+        // space, and the text of the comment — which is what makes `@param` addressable at all.
+        //
+        // The contiguity check above already proves no byte is unaccounted for; this proves that the
+        // bytes which *were* trivia are not now part of something else. Without it, folding a comment's
+        // text into a neighbouring identifier would pass, because the bytes still round-trip.
+        for lexed in lex_source(source).iter().filter(|token| is_trivia(token.kind)) {
+            for offset in lexed.range.start_offset..lexed.range.end_offset() {
+                let covering = tokens
+                    .iter()
+                    .find(|(start, end, _)| *start <= offset && offset < *end);
+
+                assert!(
+                    covering.is_some(),
+                    "{name}: byte {offset} is {:?} at {}..{} in the file and no token in the tree \
+                     covers it",
+                    lexed.kind,
+                    lexed.range.start_offset,
+                    lexed.range.end_offset()
+                );
+            }
+        }
+
+        // And the trivia the *documentation* layer does not take over is present verbatim: whitespace,
+        // newlines and splices are the layout a formatter and a fold depend on, and unlike a comment
+        // there is no other layer that could be holding them.
+        let in_tree: std::collections::HashSet<(usize, usize, CppTokenKind)> =
+            tokens.iter().copied().collect();
+
+        for lexed in lex_source(source).iter().filter(|token| {
+            matches!(
+                token.kind,
+                CppTokenKind::Whitespace | CppTokenKind::Newline | CppTokenKind::LineContinuation
+            )
+        }) {
+            assert!(
+                in_tree.contains(&(
+                    lexed.range.start_offset,
+                    lexed.range.end_offset(),
+                    lexed.kind
+                )),
+                "{name}: the {:?} at {}..{} is layout in the file but is spelled differently or \
+                 missing in the tree",
+                lexed.kind,
+                lexed.range.start_offset,
+                lexed.range.end_offset()
+            );
+        }
+    }
+}
+
+/// Lex a file without parsing it, for tests that need to know what the *lexer* saw.
+///
+/// The lexer is the only place the file's trivia is enumerated independently of the tree, which is what
+/// makes it usable as the reference in a comparison: a check that reads trivia out of the tree and
+/// compares it with itself would agree no matter what was thrown away.
+fn lex_source(source: &str) -> Vec<cpp_parser::CppTokenData> {
+    let mut errors = Vec::new();
+    let mut lexer = cpp_parser::CppLexer::new(source, cpp_parser::LexerConfig::default(), &mut errors);
+    lexer.tokenize()
 }
 
 /// The event stream must come out of recovery balanced: no node left open, and never a `NodeEnd`

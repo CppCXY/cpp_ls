@@ -202,21 +202,20 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
 fn parse_preprocessor_directive(p: &mut CppParser) -> ParseResult {
     let m = p.mark(CppSyntaxKind::PreprocessorDirective);
 
-    // A directive runs to the end of its (spliced) line.
+    // A directive runs to the end of its **logical** line, and a `\`-newline splice does not end one.
     //
-    // The boundary has to be computed as an *offset*, not looked for as a `Newline` token: the
-    // newline is trivia, and `bump` skips trivia while attaching it to the current node. So after
-    // consuming the last real token of the line the cursor is already on the next line's first
-    // token, a `Newline` is never seen, and a loop that waits for one consumes the whole file.
-    // That failure is not local — every declaration after the first directive disappears into it.
-    let line_end = p
-        .origin_text()
-        .get(p.current_token_range().start_offset..)
-        .map(|rest| match rest.find('\n') {
-            Some(offset) => p.current_token_range().start_offset + offset,
-            None => p.origin_text().len(),
-        })
-        .unwrap_or_else(|| p.origin_text().len());
+    // The boundary has to be computed as an *offset*, not looked for as a `Newline` token: the newline
+    // is trivia, and `bump` skips trivia while attaching it to the current node. So after consuming the
+    // last real token of the line the cursor is already on the next line's first token, a `Newline` is
+    // never seen, and a loop that waits for one consumes the whole file. That failure is not local —
+    // every declaration after the first directive disappears into it.
+    //
+    // A splice is the other half of the same problem. `#define F(a, b) \` followed by the body on the
+    // next line is one directive, and a boundary taken at the first newline byte cuts the body off
+    // after the `\` — leaving a macro whose replacement list is empty while the file still round-trips,
+    // which is the kind of wrong that no losslessness check can see.
+    let text = p.origin_text();
+    let mut line_end = logical_line_end(text, p.current_token_range().start_offset);
 
     p.bump(); // `#`
 
@@ -233,6 +232,13 @@ fn parse_preprocessor_directive(p: &mut CppParser) -> ParseResult {
     let mut header_name_expected = directive_is_include;
 
     while !p.is_eof() && p.current_token_range().start_offset < line_end {
+        if p.current_token() == CppTokenKind::LineContinuation {
+            // The directive continues on the line after the splice, so the boundary moves with it.
+            p.bump();
+            line_end = logical_line_end(text, p.current_token_range().start_offset);
+            continue;
+        }
+
         if header_name_expected {
             header_name_expected = false;
             if p.try_lex_header_name() {
@@ -243,6 +249,39 @@ fn parse_preprocessor_directive(p: &mut CppParser) -> ParseResult {
     }
 
     Ok(m.complete(p))
+}
+
+/// The offset at which the logical line containing `start` ends.
+///
+/// A newline does not end a logical line when the byte before it is a `\` — that is a splice, and
+/// translation phase 2 has already removed it by the time a directive's extent matters. Only the
+/// backslash immediately before the newline counts, which is what the standard says and what keeps a
+/// `\\` at the end of a line from swallowing the next one.
+fn logical_line_end(text: &str, start: usize) -> usize {
+    let Some(rest) = text.get(start..) else {
+        return text.len();
+    };
+
+    let bytes = rest.as_bytes();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == b'\n' {
+            // Look back for the splice. `\r\n` is one line ending, so the check skips a `\r`.
+            let before = if index > 0 && bytes[index - 1] == b'\r' {
+                index.checked_sub(2)
+            } else {
+                index.checked_sub(1)
+            };
+            let spliced = before.is_some_and(|at| bytes[at] == b'\\');
+            if !spliced {
+                return start + index;
+            }
+        }
+        index += 1;
+    }
+
+    text.len()
 }
 
 /// Parse an expression statement: `expr ;`.
