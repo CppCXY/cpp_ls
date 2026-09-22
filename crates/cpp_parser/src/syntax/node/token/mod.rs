@@ -1,9 +1,5 @@
-mod number_analyzer;
-mod string_analyzer;
-mod test;
+//! Typed token wrappers and the token predicates the grammar and AST both rely on.
+
 mod tokens;
 
-pub use number_analyzer::{float_token_value, int_token_value};
-pub use string_analyzer::string_token_value;
-#[allow(unused)]
 pub use tokens::*;

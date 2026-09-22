@@ -898,6 +898,10 @@ impl<'a> CppLexer<'a> {
                     state = NumberState::Int;
                 }
                 '.' => {
+                    // `0.5` and `0.` — the dot has to be consumed here. Leaving it to the loop does
+                    // not work: the `Float` state has no rule for `.`, so the scan would stop with
+                    // the dot unconsumed and the caller would read `0` and `.5` as two literals.
+                    self.reader.bump();
                     state = NumberState::Float;
                 }
                 _ => {
@@ -905,8 +909,9 @@ impl<'a> CppLexer<'a> {
                 }
             }
         } else if first == '.' {
-            // Float starting with a decimal point. The scanner for `.` has already consumed it
-            // and delegated here, so there is nothing left to bump.
+            // A float starting with a decimal point: `.5`. The dispatcher has already consumed the
+            // dot and delegated here, because a `.` is only a number when a digit follows it —
+            // otherwise it is member access.
             state = NumberState::Float;
         } else {
             // Regular decimal number

@@ -45,6 +45,15 @@ use super::{
 /// The head is kept as its own node so a consumer can ask "is this declaration templated?" without
 /// re-scanning tokens, and so the parameter list keeps its own children.
 fn parse_template_head(p: &mut CppParser) -> ParseResult {
+    // A template parameter list has the same `>`-closes-the-list property an argument list has:
+    // `template <int N = 3>` must not read the `>` as "greater than". Restored on every exit path.
+    let previous_depth = p.enter_template_arguments();
+    let result = parse_template_head_inner(p);
+    p.leave_template_arguments(previous_depth);
+    result
+}
+
+fn parse_template_head_inner(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::TemplateDecl);
 
@@ -101,12 +110,11 @@ fn parse_template_parameter(p: &mut CppParser) -> ParseResult {
     let m = p.mark(CppSyntaxKind::TemplateParameter);
 
     // A template template parameter: `template <typename> class C`.
-    if p.current_token() == CppTokenKind::TemplateKeyword {
-        if let Err(err) = parse_template_head(p) {
+    if p.current_token() == CppTokenKind::TemplateKeyword
+        && let Err(err) = parse_template_head(p) {
             p.close_marks_above(base);
             return Err(err);
         }
-    }
 
     // The parameter itself is a declaration: `typename T`, `int N`, `auto N`, and a constrained
     // parameter is a type followed by a name. Reusing the declaration machinery keeps the shapes
@@ -120,23 +128,39 @@ fn parse_template_parameter(p: &mut CppParser) -> ParseResult {
     if !definitely_ends_a_type(p.current_token())
         && p.current_token() != CppTokenKind::Comma
         && p.current_token() != CppTokenKind::Greater
-    {
-        if let Err(err) = parse_declarator(p) {
+        && let Err(err) = parse_declarator(p) {
             p.close_marks_above(base);
             return Err(err);
         }
-    }
 
     if p.current_token() == CppTokenKind::Ellipsis {
         p.bump();
     }
 
-    // A default argument: `typename T = int`.
+    // A default argument. Which grammar applies depends on the parameter kind, and that is not
+    // known here: `typename T = std::vector<int>` defaults a *type*, while `int N = 3` defaults a
+    // *value*. Trying the type first and falling back to an expression resolves it without tracking
+    // which kind of parameter this is — and the type reading must be tried first, because
+    // `std::vector<int>` is also a perfectly good (if nonsensical) expression and reading it that
+    // way would lose the template argument list.
+    //
+    // "Did it parse?" is not enough to decide: `parse_type_id` can succeed having consumed
+    // *nothing*, which is the correct answer for a type-id that is absent. Without the progress
+    // check below, `3` in `int N = 3` leaves a successful, empty type-id behind, the list loop then
+    // sees `=` where it expects `,` or `>`, and the whole declaration unwinds into an error node.
     if p.current_token() == CppTokenKind::Assign {
-        let checkpoint = p.checkpoint();
         p.bump();
-        if parse_type_id(p).is_err() {
-            p.rollback(checkpoint);
+
+        let type_checkpoint = p.checkpoint();
+        let before = p.current_token_index();
+        let parsed_a_type = parse_type_id(p).is_ok() && p.current_token_index() > before;
+        if !parsed_a_type {
+            p.rollback(type_checkpoint);
+
+            if let Err(err) = parse_expr(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
         }
     }
 
@@ -173,7 +197,20 @@ pub fn parse_declaration(p: &mut CppParser) -> ParseResult {
             }
             // `export declaration` — consume the keyword and parse what it exports. Whether a
             // declaration is exported is a property the semantic layer reads off the token.
+            //
+            // What follows is a full declaration, and the general rule below does not cover all of
+            // them: `using` and `template` are not specifiers it can start from. Dispatching them
+            // here keeps `export using Point = shapes::Point;` — an everyday spelling in a module
+            // interface — from being re-read as an expression and reported as broken.
             p.bump();
+
+            match p.current_token() {
+                CppTokenKind::UsingKeyword => return parse_using_declaration(p),
+                CppTokenKind::NamespaceKeyword => return parse_namespace_declaration(p),
+                CppTokenKind::TypedefKeyword => return parse_typedef_declaration(p),
+                CppTokenKind::StaticAssertKeyword => return parse_static_assert(p),
+                _ => {}
+            }
         }
         _ => {}
     }
@@ -199,12 +236,11 @@ pub fn parse_declaration(p: &mut CppParser) -> ParseResult {
     // is a template *declaration* whose payload is the class. Handling it here rather than in a
     // separate rule is what lets templates apply to classes, functions, variables, aliases and
     // concepts without five copies of the same parser.
-    if p.current_token() == CppTokenKind::TemplateKeyword {
-        if let Err(err) = parse_template_head(p) {
+    if p.current_token() == CppTokenKind::TemplateKeyword
+        && let Err(err) = parse_template_head(p) {
             p.rollback(checkpoint);
             return Err(err);
         }
-    }
 
     let specifiers_from = p.current_event_count();
 
@@ -313,6 +349,9 @@ fn declaration_opens_a_body(p: &CppParser) -> bool {
 pub fn parse_init_declarator(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::InitDeclarator);
+    // Where the declarator's own events start, so `finish_init_declarator` can tell whether it had a
+    // parameter list.
+    let declarator_from = p.current_event_count();
 
     // `T(x);` and `int (x);` are parenthesized declarators, not calls. Detecting that here is what
     // keeps the declarator reading from mis-nesting the parentheses.
@@ -330,7 +369,7 @@ pub fn parse_init_declarator(p: &mut CppParser) -> ParseResult {
                 p.close_marks_above(base);
                 return Err(err);
             }
-            return finish_init_declarator(p, m);
+            return finish_init_declarator(p, m, declarator_from);
         } else {
             p.rollback(checkpoint);
         }
@@ -341,81 +380,61 @@ pub fn parse_init_declarator(p: &mut CppParser) -> ParseResult {
         return Err(err);
     }
 
-    finish_init_declarator(p, m)
-}
-
-/// Does a `{` at the cursor open a *brace-or-equal initializer*, or a function body?
-///
-/// Both spellings end in a brace, and the difference is what is *inside* it:
-///
-/// ```text
-/// int x{1};               // initializer: `1` can start an initializer clause
-/// int f() { return 1; }   // body: `return` can only be a statement
-/// ```
-///
-/// Getting this wrong is not a local error. Reading a function body as an initializer puts the
-/// statements inside an `InitListExpr` and then reports "expected primary expression" at `return`,
-/// which is exactly the kind of diagnostic that makes a user stop trusting the parser.
-///
-/// The test is on the first token after the brace, which is decisive: no initializer clause can
-/// begin with a statement keyword, and no statement can begin with a literal or a designator.
-fn is_braced_initializer(p: &CppParser) -> bool {
-    let first = p.peek_token_kind_at(1..2)[0];
-
-    // A jump, a declaration or another statement can only be a body.
-    !matches!(
-        first,
-        CppTokenKind::ReturnKeyword
-            | CppTokenKind::IfKeyword
-            | CppTokenKind::ForKeyword
-            | CppTokenKind::WhileKeyword
-            | CppTokenKind::DoKeyword
-            | CppTokenKind::SwitchKeyword
-            | CppTokenKind::BreakKeyword
-            | CppTokenKind::ContinueKeyword
-            | CppTokenKind::GotoKeyword
-            | CppTokenKind::ThrowKeyword
-            | CppTokenKind::TryKeyword
-            | CppTokenKind::TypedefKeyword
-            | CppTokenKind::ClassKeyword
-            | CppTokenKind::StructKeyword
-            | CppTokenKind::UnionKeyword
-            | CppTokenKind::EnumKeyword
-            | CppTokenKind::NamespaceKeyword
-            | CppTokenKind::StaticAssertKeyword
-            | CppTokenKind::UsingKeyword
-            | CppTokenKind::LeftBrace
-            | CppTokenKind::Semicolon
-    )
+    finish_init_declarator(p, m, declarator_from)
 }
 
 /// The part after the declarator proper: an initializer, a constructor body, or nothing.
-fn finish_init_declarator(p: &mut CppParser, m: Marker) -> ParseResult {
-    // `= initializer` or a brace-or-equal initializer or a constructor body.
+///
+/// `declarator_from` is an event index taken before the declarator was parsed, used to ask whether
+/// that declarator had a parameter list. It is the only reliable way to tell a brace-or-equal
+/// initializer from a function body:
+///
+/// ```text
+/// int x{1};                 // no parameter list -> the brace is an initializer
+/// int f() { again: ; }      // parameter list    -> the brace is the function's body
+/// ```
+///
+/// Looking at the token after `{` instead does not work, and the failure is not subtle: a label
+/// (`again:`) starts with an identifier, exactly like an initializer clause, so a function whose
+/// first statement is a label was read as an `InitListExpr` and then reported "expected primary
+/// expression" at its own first statement.
+fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) -> ParseResult {
+    // A declarator with a parameter list can only declare a function, so a `{` after it opens a
+    // body no matter what is inside. `parse_declaration` handles the body; this rule must not
+    // consume it.
+    //
+    // `declarator_from` is only a fallback for callers that did not go through
+    // `parse_declarator`; the flag it can be read from records that an *empty* parameter list was
+    // seen, which the event stream cannot express because an empty node is dropped.
+    let declarator_is_function = p.last_declarator_is_function()
+        || p.events_contain_any(
+            declarator_from,
+            &[CppSyntaxKind::ParameterList, CppSyntaxKind::TrailingReturnType],
+        );
+
     match p.current_token() {
         CppTokenKind::Assign => {
             p.bump();
             let init = p.mark(CppSyntaxKind::Initializer);
             if let Err(err) = parse_initializer_clause(p) {
-                let _ = init.undo(p);
+                init.undo(p);
                 return Err(err);
             }
             init.complete(p);
         }
-        CppTokenKind::LeftBrace if is_braced_initializer(p) => {
+        CppTokenKind::LeftBrace if !declarator_is_function => {
             // Brace-or-equal initializer on a variable: `Point p{1, 2};`.
             let init = p.mark(CppSyntaxKind::Initializer);
             if let Err(err) = parse_braced_initializer(p) {
-                let _ = init.undo(p);
+                init.undo(p);
                 return Err(err);
             }
             init.complete(p);
         }
         CppTokenKind::Colon => {
-            // A constructor's member initializer list: `Foo() : a(1), b(2) {}`.
-            if let Err(err) = parse_member_initializer_list(p) {
-                return Err(err);
-            }
+            // A constructor's member initializer list: `Foo() : a(1), b(2) {}`. A `:` only follows a
+            // function declarator, so this is unambiguous.
+            parse_member_initializer_list(p)?;
         }
         _ => {}
     }
@@ -428,9 +447,7 @@ fn finish_declarator_suffixes(p: &mut CppParser) -> ParseResult {
     loop {
         match p.current_token() {
             CppTokenKind::LeftParen => {
-                if let Err(err) = parse_parameter_list(p) {
-                    return Err(err);
-                }
+                parse_parameter_list(p)?;
                 // `const`, `noexcept`, `override`, `-> T` and friends belong to the function
                 // declarator, not to whatever comes next.
                 super::types::eat_function_qualifiers(p);
@@ -438,14 +455,13 @@ fn finish_declarator_suffixes(p: &mut CppParser) -> ParseResult {
             CppTokenKind::LeftBracket => {
                 let array = p.mark(CppSyntaxKind::ArrayType);
                 p.bump();
-                if p.current_token() != CppTokenKind::RightBracket && !p.is_eof() {
-                    if let Err(err) = parse_expr(p) {
-                        let _ = array.undo(p);
+                if p.current_token() != CppTokenKind::RightBracket && !p.is_eof()
+                    && let Err(err) = parse_expr(p) {
+                        array.undo(p);
                         return Err(err);
                     }
-                }
                 if let Err(err) = expect_token(p, CppTokenKind::RightBracket) {
-                    let _ = array.undo(p);
+                    array.undo(p);
                     return Err(err);
                 }
                 array.complete(p);
@@ -664,18 +680,18 @@ fn parse_parameter(p: &mut CppParser) -> ParseResult {
     }
 
     // The declarator is optional: `void f(int)` is as valid as `void f(int x)`.
-    if !definitely_ends_a_type(p.current_token()) && p.current_token() != CppTokenKind::Comma {
-        if let Err(err) = parse_declarator(p) {
+    if !definitely_ends_a_type(p.current_token())
+        && p.current_token() != CppTokenKind::Comma
+        && let Err(err) = parse_declarator(p) {
             p.close_marks_above(base);
             return Err(err);
         }
-    }
 
     if p.current_token() == CppTokenKind::Assign {
         p.bump();
         let init = p.mark(CppSyntaxKind::Initializer);
         if let Err(err) = parse_initializer_clause(p) {
-            let _ = init.undo(p);
+            init.undo(p);
             p.close_marks_above(base);
             return Err(err);
         }

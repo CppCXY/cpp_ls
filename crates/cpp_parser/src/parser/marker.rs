@@ -91,6 +91,17 @@ pub(crate) trait MarkerEventContainer {
     /// Has a `NodeEnd` already been emitted for the node opened at `position`?
     fn mark_has_end_event(&self, position: usize) -> bool;
 
+    /// Was this node closed *without* emitting its `NodeEnd`?
+    ///
+    /// This is distinct from "not open" and the distinction is load-bearing. Recovery detaches a
+    /// node without an event, on the understanding that its owner will emit the event when it
+    /// reaches its own `complete()`. But the owner may instead be dropped as empty and emit
+    /// nothing at all — and then the *grandparent* emits an event that pairs with nothing, which
+    /// silently closes an unrelated ancestor in the tree builder.
+    ///
+    /// [`Marker::complete`] therefore asks this question rather than "is it open?".
+    fn mark_was_detached(&self, position: usize) -> bool;
+
     /// Is the node opened at `position` still open?
     fn mark_is_open(&self, position: usize) -> bool;
 }
@@ -120,8 +131,7 @@ impl Marker {
             _ => unreachable!(),
         };
 
-        // Already closed with an event (normal double-complete, or recovery followed by the owner
-        // catching up): nothing left to do.
+        // Already closed with an event: nothing left to do.
         if p.mark_has_end_event(self.position) {
             return CompleteMarker {
                 start: self.position,
@@ -129,11 +139,17 @@ impl Marker {
             };
         }
 
-        // Detached by recovery without an event. That event is still owed — the tree builder pairs
-        // it with the `NodeStart`. Emitting it here closes *this* node rather than the innermost
-        // one, because by the time `complete` runs its owner has already closed everything that was
-        // opened inside it.
-        if !p.mark_is_open(self.position) {
+        // Detached by recovery without an event. That event is still owed, and the reason is not
+        // obvious: recovery detaches a node on the understanding that its owner will emit the event
+        // when it reaches its own `complete()`. If that owner is then *dropped as empty*, it emits
+        // nothing, and the grandparent's own event — emitted on the assumption that its children
+        // paired up — ends up closing an unrelated ancestor instead. The tree stays well formed;
+        // only its nesting is wrong, which is the failure mode this whole marker stack exists to
+        // make impossible.
+        //
+        // So a detached node always gets its event, even when it looks empty: the emptiness is
+        // exactly what the owner is about to be wrong about.
+        if p.mark_was_detached(self.position) {
             p.close_mark(self.position, true);
             return CompleteMarker {
                 start: self.position,
@@ -143,7 +159,7 @@ impl Marker {
 
         // A node that never produced content carries no information, so drop it. Deregistering the
         // mark is still mandatory, or the open-node stack drifts upwards forever.
-        if p.get_events().len() == self.position + 1 {
+        if p.mark_is_open(self.position) && p.get_events().len() == self.position + 1 {
             p.close_mark(self.position, false);
             return CompleteMarker {
                 start: EMPTY_NODE_POSITION,
@@ -178,7 +194,7 @@ impl Marker {
             };
         }
 
-        if !p.mark_is_open(self.position) {
+        if p.mark_was_detached(self.position) {
             p.close_mark(self.position, true);
             return CompleteMarker {
                 start: self.position,

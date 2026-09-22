@@ -1,7 +1,25 @@
 # Reference material (not compiled)
 
 This directory is **excluded from the crate's module graph** and is not built or tested. It is
-checked in so we can consult it while implementing the C++ comment/documentation layer.
+checked in so we can consult it while implementing the C++ comment/documentation layer, and so the
+API style of the Lua language server this project was ported from stays visible.
+
+## `node-lua/`, `node-doc/`, `node-token/`
+
+The Lua-era halves of `src/syntax/node/`, moved out when the C++ node layer was written. They are
+the **style reference** for the live code: `CppAstNode` / `CppAstToken` / `CppAstChildren`, the
+`cast` / `can_cast` pair, `get_*` accessors returning `Option`, and one sum type per node family
+(`CppExpr`, `CppStat`). Keeping them here is what makes "we use it the same way as the Lua code"
+checkable rather than a matter of memory.
+
+- `node-lua/` — `LuaAstNode` implementations for expressions, statements and paths.
+- `node-doc/` — LDoc comment nodes (the ancestor of a future Doxygen layer).
+- `node-token/` — `number_analyzer.rs` and `string_analyzer.rs`: literal value extraction
+  (hex floats, escape sequences). Worth consulting if the C++ layer ever needs literal *values*
+  rather than literal text, though C++ adds digit separators and raw strings on top.
+
+Their `test.rs` files were dropped rather than moved: they were written against the Lua grammar and
+would not compile even as reference.
 
 ## `ldoc-grammar/`
 

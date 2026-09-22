@@ -256,6 +256,14 @@ const CORPUS: &[(&str, &str)] = &[
         "enums",
         "enum Color { Red, Green = 2 };\n",
     ),
+    (
+        "scoped enum with underlying type",
+        "enum class Color : unsigned char { Red, Green = 2 };\n",
+    ),
+    (
+        "preprocessor directives",
+        "#include <vector>\n#include \"local.h\"\n#define MAX 10\nint x;\n",
+    ),
     ("missing closing brace", "int main() {\n    return 0;\n"),
     ("missing semicolon", "int x = 1\nint y = 2;\n"),
     ("stray closing brace", "int f() { return 1; } }\nint g();\n"),
@@ -397,6 +405,33 @@ fn recovery_leaves_the_event_stream_balanced() {
             audit.is_balanced(),
             "{name}: event stream is not balanced: {audit:?}"
         );
+
+        // `unclosed` only catches starts without ends. The mirror-image defect — an end without a
+        // start, which the tree builder pairs against an unrelated ancestor — is just as damaging
+        // and just as invisible, so the raw stream is counted too.
+        let (_, events) = CppParser::parse_with_events(source, ParserConfig::default());
+        let mut starts = 0isize;
+        let mut ends = 0isize;
+        for event in &events {
+            match event {
+                cpp_parser::MarkEvent::NodeStart {
+                    kind: cpp_parser::CppSyntaxKind::None,
+                    ..
+                } => {}
+                cpp_parser::MarkEvent::NodeStart { .. } => starts += 1,
+                cpp_parser::MarkEvent::NodeEnd => ends += 1,
+                _ => {}
+            }
+        }
+        // An unpaired `NodeEnd` is the defect that matters here: it closes an unrelated ancestor,
+        // and — unlike an unpaired `NodeStart` — nothing else in the suite would notice. A start
+        // with no end is only ever the translation unit dropped as a zero-width node, which
+        // `unclosed` above already accounts for.
+        assert!(
+            ends <= starts,
+            "{name}: {ends} node end(s) but only {starts} start(s); the extra ones close the \
+             wrong node"
+        );
     }
 }
 
@@ -442,9 +477,12 @@ const MUST_PARSE_CLEANLY: &[&str] = &[
     "namespace",
     "using declarations",
     "enums",
+    "scoped enum with underlying type",
+    "preprocessor directives",
     "modules",
     "module partitions and fragments",
     "module and import as ordinary names",
+    "labels",
 ];
 
 /// Input that is genuinely malformed and must therefore leave a mark: either a diagnostic or an
@@ -549,29 +587,17 @@ fn known_silent_acceptance_set_is_accurate() {
 /// This is deliberately separate from [`MUST_PARSE_CLEANLY`]: that set is the "do not regress" line,
 /// and it would be dishonest to keep a known-broken construct in it. The invariant tests still cover
 /// these inputs, so they cannot make the tree *invalid* — only imprecise.
-fn known_unparsed() -> [(&'static str, &'static str, &'static str); 2] {
-    [
-        (
-            "nested template-id with non-type argument",
-            "Vec<std::vector<int>, 3> v;",
-            "A `<` is only a template argument list in a template-id, and the parser decides that \
-             with a lookahead over `<`/`>` nesting before descending. The decision is sound for \
-             `Vec<A<int>>` and for `Vec<A<int>, 3>`/`Vec<std::vector<int>, 3>` separately, but not \
-             for a list that both nests a template-id and carries a further argument. The argument \
-             reading has to report where it stopped instead of the caller re-deriving that from the \
-             token stream — see `parse_template_argument`.",
-        ),
-        (
-            "a label inside a function body",
-            "void f() {\nagain:\n    goto again;\n}\n",
-            "`parse_stat` dispatches `identifier :` to the label rule, and a bare `a: goto a;` at \
-             top level parses. Nested inside a function body the same tokens do not reach that rule, \
-             so the enclosing function definition fails and the whole file falls back to the \
-             expression reading. The label rule sits after the module check (which needs to come \
-             first for `module : private;`), so the likely cause is in how the compound-statement \
-             loop reaches `parse_stat` rather than in the label rule itself.",
-        ),
-    ]
+fn known_unparsed() -> [(&'static str, &'static str, &'static str); 1] {
+    [(
+        "nested template-id with non-type argument",
+        "Vec<std::vector<int>, 3> v;",
+        "A `<` is only a template argument list in a template-id, and the parser decides that with a \
+         lookahead over `<`/`>` nesting before descending. The decision is sound for `Vec<A<int>>` \
+         and for `Vec<A<int>, 3>`/`Vec<std::vector<int>, 3>` separately, but not for a list that \
+         both nests a template-id and carries a further argument. The argument reading has to report \
+         where it stopped instead of the caller re-deriving that from the token stream — see \
+         `parse_template_argument`.",
+    )]
 }
 
 #[test]

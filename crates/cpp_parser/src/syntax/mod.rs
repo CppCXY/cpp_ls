@@ -1,7 +1,9 @@
 mod id;
+pub mod node;
 mod tree;
 
 pub use id::CppSyntaxId;
+pub use node::*;
 pub use tree::{CppGreenNodeBuilder, CppSyntaxTree, CppTreeBuilder};
 
 // Re-exported so that `rowan` users of this crate can name the node/token types and the

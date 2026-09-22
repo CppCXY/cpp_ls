@@ -15,7 +15,7 @@
 use crate::{
     grammar::ParseResult,
     kind::{CppSyntaxKind, CppTokenKind},
-    parser::{CompleteMarker, CppParser, MarkerEventContainer},
+    parser::{CompleteMarker, CppParser, Marker, MarkerEventContainer},
     parser_error::CppParseError,
 };
 
@@ -48,6 +48,26 @@ pub fn is_type_specifier_keyword(kind: CppTokenKind) -> bool {
             | CppTokenKind::TypenameKeyword
             | CppTokenKind::NullptrKeyword
     )
+}
+
+/// The syntax kind for a storage-class or function specifier, if this token is one.
+///
+/// Kept as a lookup rather than an inline `match` so the guard and the node kind cannot drift apart:
+/// the specifier loop asks twice — once to decide, once to build the node.
+fn storage_or_function_specifier(kind: CppTokenKind) -> Option<CppSyntaxKind> {
+    Some(match kind {
+        CppTokenKind::StaticKeyword => CppSyntaxKind::StaticSpec,
+        CppTokenKind::ExternKeyword => CppSyntaxKind::ExternSpec,
+        CppTokenKind::ThreadLocalKeyword => CppSyntaxKind::ThreadLocalSpec,
+        CppTokenKind::MutableKeyword => CppSyntaxKind::MutableSpec,
+        CppTokenKind::InlineKeyword => CppSyntaxKind::InlineSpec,
+        CppTokenKind::VirtualKeyword => CppSyntaxKind::VirtualSpec,
+        CppTokenKind::ExplicitKeyword => CppSyntaxKind::ExplicitSpec,
+        CppTokenKind::ConstexprKeyword
+        | CppTokenKind::ConstevalKeyword
+        | CppTokenKind::ConstinitKeyword => CppSyntaxKind::ConstexprSpec,
+        _ => return None,
+    })
 }
 
 /// Does this token *end* a decl-specifier-seq / type-id beyond doubt?
@@ -120,6 +140,13 @@ fn parse_decl_specifier_seq_stopping_at_one_name(p: &mut CppParser) -> ParseResu
 /// would never reach the declarator. But that same tolerance is wrong for a type-id — a template
 /// argument or the target of a cast — where the sequence must end at the type. Both readings are
 /// grammatical; only the caller knows which applies.
+///
+/// Inside the loop, `has_specifier` and `name_allowed` carry the rest of the decision. It is made
+/// from what the loop has *consumed* rather than from the surrounding tokens, because the tokens
+/// cannot answer it: "is there a specifier before this name?" is true for both `const Point` (where
+/// the name is still part of the type) and `Point p` (where it is the declarator), and guessing
+/// wrong there loses the whole declaration — once the loop eats `p` as part of the type there is no
+/// declarator left and the `;` never matches.
 fn parse_decl_specifier_seq_with(
     p: &mut CppParser,
     allow_second_name: bool,
@@ -128,8 +155,12 @@ fn parse_decl_specifier_seq_with(
     let m = p.mark(CppSyntaxKind::DeclSpecifierSeq);
 
     let mut specifiers = 0usize;
+    // See `name_joins_the_type`: what the loop has consumed so far decides whether the next name
+    // belongs to the type or is the declarator.
+    let mut has_specifier = false;
+    let mut name_allowed = allow_second_name;
     loop {
-        if let Err(err) = parse_one_decl_specifier(p, allow_second_name) {
+        if let Err(err) = parse_one_decl_specifier(p, &mut has_specifier, &mut name_allowed) {
             if specifiers == 0 {
                 p.close_marks_above(base);
                 return Err(err);
@@ -169,7 +200,29 @@ pub fn is_class_like_keyword(kind: CppTokenKind) -> bool {
 
 /// One specifier of a decl-specifier-seq. Returns `Err` without consuming anything when the
 /// current token cannot start one, which is how the enclosing loop knows to stop.
-fn parse_one_decl_specifier(p: &mut CppParser, allow_second_name: bool) -> ParseResult {
+///
+/// This is a wrapper around [`parse_one_decl_specifier_inner`] whose only job is the bookkeeping
+/// the inner function's dozen early returns would otherwise each have to remember: a specifier was
+/// consumed, so [`name_joins_the_type`] must know it.
+fn parse_one_decl_specifier(
+    p: &mut CppParser,
+    has_specifier: &mut bool,
+    name_allowed: &mut bool,
+) -> ParseResult {
+    let result = parse_one_decl_specifier_inner(p, has_specifier, name_allowed);
+
+    if result.is_ok() {
+        *has_specifier = true;
+    }
+
+    result
+}
+
+fn parse_one_decl_specifier_inner(
+    p: &mut CppParser,
+    has_specifier: &mut bool,
+    name_allowed: &mut bool,
+) -> ParseResult {
     let base = p.open_marks();
 
     match p.current_token() {
@@ -185,17 +238,61 @@ fn parse_one_decl_specifier(p: &mut CppParser, allow_second_name: bool) -> Parse
             p.bump();
             p.bump();
             if p.current_token() == CppTokenKind::Identifier {
+                // The enum's name is a name specifier, so it spends the allowance: a further name
+                // is the declarator, as in `enum class E e;`.
+                *name_allowed = false;
                 if let Err(err) = parse_name(p) {
                     p.close_marks_above(base);
                     return Err(err);
                 }
             }
+
+            // The underlying type is part of *this* specifier too: `enum class E : unsigned char`.
+            // Leaving it to the specifier loop instead would make `unsigned char` a second
+            // specifier of the same type, and the `{` after it would then be read as a body with no
+            // declaration to belong to — which is how this spelling ended up as an `ErrorNode`.
+            if p.current_token() == CppTokenKind::Colon {
+                p.bump();
+                if let Err(err) = parse_type_id(p) {
+                    p.close_marks_above(base);
+                    return Err(err);
+                }
+            }
+
+            // `enum class E { ... }` — the body belongs to the specifier, exactly as it does for a
+            // plain `enum E { ... }`.
+            if p.current_token() == CppTokenKind::LeftBrace
+                && let Err(err) = parse_enumerator_body(p)
+            {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+
             return Ok(m.complete(p));
         }
 
-        // `class Foo : public Bar { ... };` — the whole head, because the base clause and the body
-        // cannot be parsed by a specifier loop that does not know where the declarator would be.
-        kind if is_class_like_keyword(kind) => return parse_class_like_head(p),
+        // A class-like *definition* head: `class Foo : public Bar { ... };`.
+        //
+        // Only when a body really follows. In a template parameter list, `class T` is a type
+        // parameter and `template <class> class C` is a template template parameter — neither has a
+        // body, and reading `template <class T, int N>` as the start of a class definition is how
+        // the whole rest of the file ends up in an error node.
+        kind if is_class_like_keyword(kind) && a_body_follows_the_class_head(p) => {
+            return parse_class_like_head(p);
+        }
+
+        // `typename T` in a template parameter list, with no name to introduce. The general branch
+        // below expects a name after `typename` and would fail on the `,` that ends this parameter.
+        CppTokenKind::TypenameKeyword
+            if matches!(
+                p.peek_token_kind_at(1..2).first(),
+                Some(&CppTokenKind::Comma) | Some(&CppTokenKind::Greater)
+            ) =>
+        {
+            let m = p.mark(CppSyntaxKind::TypenameType);
+            p.bump();
+            return Ok(m.complete(p));
+        }
 
         // `decltype(expr)`, `noexcept(expr)` — a keyword with its own parenthesized payload.
         CppTokenKind::DecltypeKeyword | CppTokenKind::NoexceptKeyword => {
@@ -214,6 +311,9 @@ fn parse_one_decl_specifier(p: &mut CppParser, allow_second_name: bool) -> Parse
             let m = p.mark(CppSyntaxKind::TypenameType);
             p.bump();
             if !definitely_ends_a_type(p.current_token()) {
+                // The name after `typename` is part of this specifier, so a further name is the
+                // declarator, as in `typename T::value_type v;`.
+                *name_allowed = false;
                 if let Err(err) = parse_name(p) {
                     p.close_marks_above(base);
                     return Err(err);
@@ -234,25 +334,66 @@ fn parse_one_decl_specifier(p: &mut CppParser, allow_second_name: bool) -> Parse
             return Ok(m.complete(p));
         }
 
+        // `friend` is a declaration of its own, not a specifier of one: `friend class X;` declares
+        // `X` to be a friend, it does not declare a class. Wrapping the whole thing keeps the
+        // declaration node from claiming the friend is a variable of type `void`.
+        CppTokenKind::FriendKeyword => {
+            let m = p.mark(CppSyntaxKind::FriendDecl);
+            p.bump();
+            if let Err(err) = super::decls::parse_declaration(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+            return Ok(m.complete(p));
+        }
+
+        // Storage-class and function specifiers: `static`, `extern`, `inline`, `constexpr`, ...
+        //
+        // These say nothing about the *type*, so they are their own node rather than part of the
+        // type specifier — but they must be accepted here or the specifier loop stops before the
+        // type and every declaration carrying one is misread. `inline constexpr int kMax = 16;` is
+        // the common case: without this the loop gives up at `inline`, the declaration is not
+        // recognised, and the tokens are re-read as an expression.
+        kind if storage_or_function_specifier(kind).is_some() => {
+            let m = p.mark(storage_or_function_specifier(kind).expect("checked by the guard"));
+            p.bump();
+
+            // `explicit` may carry a condition in C++20: `explicit(false) T(int);`.
+            if p.current_token() == CppTokenKind::LeftParen {
+                p.bump();
+                if let Err(err) = super::exprs::parse_expr(p) {
+                    p.close_marks_above(base);
+                    return Err(err);
+                }
+                expect_token(p, CppTokenKind::RightParen)?;
+            }
+
+            return Ok(m.complete(p));
+        }
+
         // A qualified or unqualified name, possibly a template-id. This is the case that needs a
         // symbol table to be certain about; the grammar accepts it and lets the caller decide.
         CppTokenKind::Identifier | CppTokenKind::Scope => {
-            // A name specifier ends the type when what follows cannot continue it. The important
-            // case is a second name after a complete one: in `T U`, `U` cannot be part of the same
-            // specifier, it names the entity. In `std::vector<int>` the segments are separated by
-            // `::`, which *is* part of the same specifier.
+            // A name specifier ends the type when it cannot be part of it. Two forms are ambiguous
+            // from the tokens alone, and both are grammatical:
             //
-            // Without this distinction the specifier loop keeps going, because `T` and `U` are both
-            // perfectly good type names and the two forms are indistinguishable from the tokens
-            // alone.
-            if specifier_already_present(p)
-                && !(allow_second_name && continues_a_qualified_name(p))
-            {
+            //     T x        // a type `T` and the declarator `x`
+            //     std::vector<int> v
+            //
+            // The rule below resolves them the way the corpus needs. A name may join the type only
+            // while no *name* has joined it yet and the specifier before it is not already a
+            // complete type; the `::` of a qualified name is walked by this loop one segment at a
+            // time, so each later segment is still the same name.
+            if !name_joins_the_type(p, *has_specifier, *name_allowed) {
                 return Err(CppParseError::syntax_error_from(
                     "expected a declarator name",
                     p.current_token_range(),
                 ));
             }
+
+            // A name that ends here has joined the type; the allowance is spent so the next one is
+            // read as the declarator.
+            *name_allowed = false;
 
             let m = p.mark(CppSyntaxKind::TemplateType);
             if let Err(err) = parse_name(p) {
@@ -308,14 +449,45 @@ fn continues_a_qualified_name(p: &CppParser) -> bool {
     result
 }
 
-/// Is the cursor on the second name of a declaration, i.e. does a type specifier sit immediately
-/// before it?
+/// May the name at the cursor still be part of the type being parsed, rather than the declarator?
 ///
-/// `const Foo x` and `Foo x` both have a specifier before the declarator name; `Foo` on its own does
-/// not. Distinguishing them from the token stream is what keeps `Foo x;` from being read as a type
-/// named `Foo x`.
-fn specifier_already_present(p: &CppParser) -> bool {
-    // Walk back over trivia to the previous significant token.
+/// This is *the* ambiguity of a declaration, and it cannot be settled by looking at one token:
+///
+/// ```text
+/// T x;                    // type `T`, declarator `x`      -> the name joins the type
+/// const Point p;          // type `const Point`, `p`       -> the name joins the type
+/// std::vector<int> v;     // type `std::vector<int>`, `v`  -> the name is the declarator
+/// void f();               // type `void`, declarator `f`   -> the name is the declarator
+/// ```
+///
+/// Three conditions, and each covers a case the others get wrong:
+///
+/// * `has_specifier` — false only at the very start, where a lone name is certainly a type (`Foo`
+///   in `Foo x`); nothing precedes it for it to be a declarator *of*.
+/// * `continues_a_qualified_name` — the loop walks `std::vector` one segment per iteration and every
+///   segment is part of the same name.
+/// * `name_allowed` — whether a name may still join. `T x` lets `x` in and then spends the
+///   allowance; `void f` never spends it, because `void` is a keyword and a keyword can never be
+///   the declarator. That is the whole reason `T x;` and `void f();` can both be right.
+/// * `type_is_already_complete` — the sequence so far stands on its own as a type, so a following
+///   name must be the declarator even though the allowance is unspent. Without this `void f;` reads
+///   `f` as a second word of the type.
+fn name_joins_the_type(p: &CppParser, has_specifier: bool, name_allowed: bool) -> bool {
+    if !has_specifier || continues_a_qualified_name(p) {
+        return true;
+    }
+    if type_is_already_complete(p) {
+        return false;
+    }
+    name_allowed
+}
+
+/// Does the specifier just consumed already stand on its own as a complete type?
+///
+/// Asked by walking back to the previous significant token. A *qualifier* is not a type — `const`
+/// alone is not one, so `const Point p` still has room for `Point` to join — while every keyword
+/// that names a type, and every template-id's closing `>`, ends one.
+fn type_is_already_complete(p: &CppParser) -> bool {
     let mut index = p.current_token_index();
     while index > 0 {
         index -= 1;
@@ -331,26 +503,9 @@ fn specifier_already_present(p: &CppParser) -> bool {
             continue;
         }
 
-        return matches!(
+        return !matches!(
             kind,
-            CppTokenKind::Identifier
-                | CppTokenKind::Greater
-                | CppTokenKind::RightShift
-                | CppTokenKind::ConstKeyword
-                | CppTokenKind::VolatileKeyword
-                | CppTokenKind::AutoKeyword
-                | CppTokenKind::DecltypeKeyword
-                | CppTokenKind::TypenameKeyword
-                | CppTokenKind::VoidKeyword
-                | CppTokenKind::BoolLiteral
-                | CppTokenKind::CharKeyword
-                | CppTokenKind::ShortKeyword
-                | CppTokenKind::IntKeyword
-                | CppTokenKind::LongKeyword
-                | CppTokenKind::FloatKeyword
-                | CppTokenKind::DoubleKeyword
-                | CppTokenKind::SignedKeyword
-                | CppTokenKind::UnsignedKeyword
+            CppTokenKind::ConstKeyword | CppTokenKind::VolatileKeyword
         );
     }
 
@@ -382,12 +537,11 @@ fn parse_class_like_head(p: &mut CppParser) -> ParseResult {
     if matches!(
         p.current_token(),
         CppTokenKind::Identifier | CppTokenKind::Scope
-    ) {
-        if let Err(err) = parse_name(p) {
+    )
+        && let Err(err) = parse_name(p) {
             p.close_marks_above(base_marks);
             return Err(err);
         }
-    }
 
     // An enum's underlying type: `enum E : unsigned char { ... }`.
     if keyword == CppTokenKind::EnumKeyword && p.current_token() == CppTokenKind::Colon {
@@ -403,21 +557,19 @@ fn parse_class_like_head(p: &mut CppParser) -> ParseResult {
     if keyword != CppTokenKind::EnumKeyword
         && p.current_token() == CppTokenKind::Colon
         && a_brace_follows_the_base_clause(p)
-    {
-        if let Err(err) = parse_base_clause(p) {
+        && let Err(err) = parse_base_clause(p) {
             p.close_marks_above(base_marks);
             return Err(err);
         }
-    }
 
     // The body.
     if p.current_token() == CppTokenKind::LeftBrace {
-        if keyword == CppTokenKind::EnumKeyword {
-            if let Err(err) = parse_enumerator_body(p) {
-                p.close_marks_above(base_marks);
-                return Err(err);
-            }
-        } else if let Err(err) = super::decls::parse_class_body(p) {
+        let body = if keyword == CppTokenKind::EnumKeyword {
+            parse_enumerator_body(p)
+        } else {
+            super::decls::parse_class_body(p)
+        };
+        if let Err(err) = body {
             p.close_marks_above(base_marks);
             return Err(err);
         }
@@ -433,6 +585,16 @@ fn parse_class_like_head(p: &mut CppParser) -> ParseResult {
 /// Used to tell a base clause (`class D : public B {`) from a bit-field (`int x : 3;`) without
 /// lookahead support in the grammar itself.
 fn a_brace_follows_the_base_clause(p: &CppParser) -> bool {
+    a_body_follows_the_class_head(p)
+}
+
+/// Does a class-like head at the cursor actually open a body?
+///
+/// This is the difference between `class Foo { ... };` and `template <class T> ...`: both start with
+/// the `class` keyword, and only the first has a body. It is answered by looking ahead for a `{`
+/// that no `;` or `}` intervenes — which is exactly what "the head is followed by a definition"
+/// means.
+fn a_body_follows_the_class_head(p: &CppParser) -> bool {
     let mut depth = 0isize;
     for kind in p.peek_token_kind_at(0..64) {
         match kind {
@@ -571,12 +733,11 @@ pub fn parse_name(p: &mut CppParser) -> ParseResult {
         // the matching `>`. Deciding *before* descending matters: parsing the arguments and rolling
         // back on failure would throw away the argument nodes that were already built, and the
         // caller only ever sees "this was not a name after all" instead of "the name ended here".
-        if p.current_token() == CppTokenKind::Less && a_matching_angle_bracket_follows(p) {
-            if let Err(err) = parse_template_argument_list(p) {
+        if p.current_token() == CppTokenKind::Less && a_matching_angle_bracket_follows(p)
+            && let Err(err) = parse_template_argument_list(p) {
                 p.close_marks_above(base);
                 return Err(err);
             }
-        }
         if p.current_token() == CppTokenKind::Scope {
             p.bump();
             continue;
@@ -606,11 +767,18 @@ pub fn could_start_template_arguments(p: &CppParser) -> bool {
 /// The scan is deliberately shallow — it tracks `<`/`>` nesting but does not understand expressions
 /// — so it can be fooled by `a < b > c` written without spaces. That form is rare, and the failure
 /// mode is benign: the tokens are still parsed, just as a template-id rather than a comparison.
+///
+/// Where it must **not** be shallow is the stop set below. The scan starts at a `<` and looks for
+/// the matching `>`; if it is willing to run past a `)` or a `,`, it will find a `>` belonging to
+/// something else entirely later in the file and report a template-id that is not there. That is
+/// not a rare form — `double f(const Point a) { return a; }` contains a `>`-less declaration whose
+/// only `<`…`>` pair is nowhere near it, and reading `Point a` as `Point<a>` swallows the parameter
+/// name and then the whole declaration.
 fn a_matching_angle_bracket_follows(p: &CppParser) -> bool {
     // Relative offsets: `0` is the `<` at the cursor, so the scan starts at `1`.
     let mut depth = 1isize;
 
-    let result = 'scan: {
+    'scan: {
         for kind in p.peek_token_kind_at(1..128) {
             match kind {
                 CppTokenKind::Less => depth += 1,
@@ -627,11 +795,19 @@ fn a_matching_angle_bracket_follows(p: &CppParser) -> bool {
                         break 'scan true;
                     }
                 }
-                // Anything that cannot appear between `<` and its `>`, including the structural
-                // boundaries of the enclosing declaration.
+                // Anything that cannot appear between a `<` and its `>`, including the structural
+                // boundaries of the enclosing declaration. `)` and `,` are the load-bearing ones:
+                // a template argument list never contains an unmatched one, so reaching either
+                // means this `<` was a less-than after all.
                 CppTokenKind::Semicolon
                 | CppTokenKind::LeftBrace
                 | CppTokenKind::RightBrace
+                | CppTokenKind::RightParen
+                | CppTokenKind::RightBracket
+                | CppTokenKind::Comma
+                | CppTokenKind::Colon
+                | CppTokenKind::Assign
+                | CppTokenKind::Arrow
                 | CppTokenKind::Eof
                 | CppTokenKind::None
                 | CppTokenKind::LineComment
@@ -640,9 +816,7 @@ fn a_matching_angle_bracket_follows(p: &CppParser) -> bool {
             }
         }
         false
-    };
-
-    result
+    }
 }
 
 /// Parse an operator name after the `operator` keyword.
@@ -736,8 +910,25 @@ fn is_overloadable_operator(kind: CppTokenKind) -> bool {
 /// Parse the part of a declarator that has no name: pointers, references and cv-qualifiers.
 ///
 /// e.g.: `*`, `* const`, `&`, `&&`, `* const*`
+/// The abstract part of a declarator: pointer and reference operators, each with the cv-qualifiers
+/// that belong to *that* operator.
+///
+/// The node is created lazily, because "no abstract declarator" is the common case rather than an
+/// edge case: in `int counter;` there is no pointer, so demanding a node here would put an empty
+/// `Declarator` inside every single declarator in the program. `parse_declarator` already opens the
+/// `Declarator` node that `int counter;` needs, so an eager marker here produces
+/// `Declarator(Declarator(NameExpr))` — a redundant level that also breaks the 1:1 pairing of
+/// `NodeStart`/`NodeEnd` events, since the inner one is empty and gets dropped.
 fn parse_abstract_declarator(p: &mut CppParser) -> ParseResult {
-    let m = p.mark(CppSyntaxKind::Declarator);
+    let mut container: Option<Marker> = None;
+
+    /// Open the `Declarator` node on first use, so an abstract declarator that is not there leaves
+    /// no node behind.
+    macro_rules! container {
+        () => {
+            *container.get_or_insert_with(|| p.mark(CppSyntaxKind::Declarator))
+        };
+    }
 
     // A pointer or reference operator, then any cv-qualifiers belonging to *that* operator.
     // `int * const p` is a const pointer; `const int * p` is a pointer to const. Reading the
@@ -745,24 +936,32 @@ fn parse_abstract_declarator(p: &mut CppParser) -> ParseResult {
     loop {
         match p.current_token() {
             CppTokenKind::Star => {
+                let _ = container!();
                 let op = p.mark(CppSyntaxKind::PointerType);
                 p.bump();
                 eat_cv_qualifiers(p);
                 op.complete(p);
             }
             CppTokenKind::Ampersand => {
+                let _ = container!();
                 let op = p.mark(CppSyntaxKind::ReferenceType);
                 p.bump();
                 eat_cv_qualifiers(p);
                 op.complete(p);
             }
             CppTokenKind::LogicalAnd => {
+                let _ = container!();
                 let op = p.mark(CppSyntaxKind::RValueReferenceType);
                 p.bump();
                 eat_cv_qualifiers(p);
                 op.complete(p);
             }
             // `Class::*` — a pointer to member.
+            //
+            // The node is only opened once the `*` has actually been seen: opening it up front and
+            // rewinding on failure leaves a registered marker behind, which suppresses the
+            // `container!` call on the next iteration and can spin this loop forever on a
+            // qualified name.
             CppTokenKind::Scope
                 if matches!(
                     p.peek_next_token(),
@@ -770,25 +969,22 @@ fn parse_abstract_declarator(p: &mut CppParser) -> ParseResult {
                 ) =>
             {
                 let checkpoint = p.checkpoint();
-                let op = p.mark(CppSyntaxKind::PointerType);
-                let mut is_member_pointer = false;
-                if expect_token(p, CppTokenKind::Scope).is_ok() {
-                    // `Ident :: *` is a member pointer; a bare `::*` cannot occur, so a failure
-                    // here means this `::` belonged to a qualified name instead.
-                    if p.current_token() == CppTokenKind::Identifier
-                        && p.peek_next_token() == CppTokenKind::Scope
-                    {
-                        p.bump(); // the class name
-                        p.bump(); // `::`
-                    }
-                    if p.current_token() == CppTokenKind::Star {
-                        p.bump();
-                        eat_cv_qualifiers(p);
-                        is_member_pointer = true;
-                    }
+                p.bump(); // `::`
+
+                // `Ident :: *` is a member pointer; a bare `::*` cannot occur, so falling through
+                // here means this `::` belonged to a qualified name instead.
+                if p.current_token() == CppTokenKind::Identifier
+                    && p.peek_next_token() == CppTokenKind::Scope
+                {
+                    p.bump(); // the class name
+                    p.bump(); // `::`
                 }
 
-                if is_member_pointer {
+                if p.current_token() == CppTokenKind::Star {
+                    let _ = container!();
+                    let op = p.mark(CppSyntaxKind::PointerType);
+                    p.bump();
+                    eat_cv_qualifiers(p);
                     op.complete(p);
                 } else {
                     p.rollback(checkpoint);
@@ -799,7 +995,11 @@ fn parse_abstract_declarator(p: &mut CppParser) -> ParseResult {
         }
     }
 
-    Ok(m.complete(p))
+    match container {
+        Some(m) => Ok(m.complete(p)),
+        // No abstract declarator here at all — the caller's own `Declarator` node covers it.
+        None => Ok(CompleteMarker::empty()),
+    }
 }
 
 /// Consume any `const` / `volatile` immediately following a pointer or reference operator.
@@ -820,6 +1020,9 @@ pub fn parse_declarator(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::Declarator);
 
+    // The answer for the declarator about to be parsed; each way of becoming a function sets it.
+    p.set_last_declarator_is_function(false);
+
     if let Err(err) = parse_abstract_declarator(p) {
         p.close_marks_above(base);
         return Err(err);
@@ -832,11 +1035,10 @@ pub fn parse_declarator(p: &mut CppParser) -> ParseResult {
             | CppTokenKind::Scope
             | CppTokenKind::OperatorKeyword
             | CppTokenKind::Tilde
-    ) {
-        if let Err(err) = parse_name(p) {
-            p.close_marks_above(base);
-            return Err(err);
-        }
+    ) && let Err(err) = parse_name(p)
+    {
+        p.close_marks_above(base);
+        return Err(err);
     }
 
     // Suffixes: function parameter lists and array bounds. These bind tighter than pointers, which
@@ -848,21 +1050,23 @@ pub fn parse_declarator(p: &mut CppParser) -> ParseResult {
                     p.close_marks_above(base);
                     return Err(err);
                 }
+                // A parameter list is what makes a declarator a function declarator. Recorded here
+                // because an *empty* one leaves no node for a later event-stream check to find.
+                p.set_last_declarator_is_function(true);
                 eat_function_qualifiers(p);
             }
             CppTokenKind::LeftBracket => {
                 let array = p.mark(CppSyntaxKind::ArrayType);
                 p.bump();
                 // The bound is optional: `int a[]`.
-                if p.current_token() != CppTokenKind::RightBracket && !p.is_eof() {
-                    if let Err(err) = super::exprs::parse_expr(p) {
-                        let _ = array.undo(p);
+                if p.current_token() != CppTokenKind::RightBracket && !p.is_eof()
+                    && let Err(err) = super::exprs::parse_expr(p) {
+                        array.undo(p);
                         p.close_marks_above(base);
                         return Err(err);
                     }
-                }
                 if let Err(err) = expect_token(p, CppTokenKind::RightBracket) {
-                    let _ = array.undo(p);
+                    array.undo(p);
                     p.close_marks_above(base);
                     return Err(err);
                 }
@@ -882,6 +1086,16 @@ pub fn parse_declarator(p: &mut CppParser) -> ParseResult {
 /// has to be split back out here. Doing it in the parser rather than the lexer is deliberate: in
 /// `a >> b` the same token really is a shift, and only the parser knows which context it is in.
 pub fn parse_template_argument_list(p: &mut CppParser) -> ParseResult {
+    // Inside the list, `>` closes it instead of comparing, so the expression grammar has to be told.
+    // The depth is restored on every exit — including the error returns inside the helper — because
+    // leaving it set would make every later `a > b` in the file parse as a template closer.
+    let previous_depth = p.enter_template_arguments();
+    let result = parse_template_argument_list_inner(p);
+    p.leave_template_arguments(previous_depth);
+    result
+}
+
+fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::TemplateArgumentList);
 
@@ -906,7 +1120,7 @@ pub fn parse_template_argument_list(p: &mut CppParser) -> ParseResult {
         let before = p.current_token_index();
         let argument = p.mark(CppSyntaxKind::TemplateArgument);
         if parse_template_argument(p).is_err() {
-            let _ = argument.undo(p);
+            argument.undo(p);
             p.close_marks_above(base);
             return Err(CppParseError::syntax_error_from(
                 "expected a template argument",
@@ -1098,15 +1312,19 @@ pub fn eat_function_qualifiers(p: &mut CppParser) {
                 p.bump()
             }
             CppTokenKind::Arrow => {
-                let trailing = p.mark(CppSyntaxKind::TypeId);
-                p.bump();
+                // The `->` goes in a `TrailingReturnType` wrapper rather than inside the `TypeId`,
+                // so the type node's text is the type the user wrote (`int*`) and not the arrow that
+                // introduced it. Without the wrapper every consumer of a trailing return type would
+                // have to strip the `->` itself, and most would forget.
+                let trailing = p.mark(CppSyntaxKind::TrailingReturnType);
+                p.bump(); // `->`
                 let parsed = parse_type_id(p);
                 if parsed.is_err() {
-                    let _ = trailing.undo(p);
+                    trailing.undo(p);
                     return;
                 }
-                trailing.complete(p);
-            }
+                p.set_last_declarator_is_function(true);
+                trailing.complete(p);            }
             _ => return,
         }
     }

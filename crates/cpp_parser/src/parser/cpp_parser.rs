@@ -73,6 +73,23 @@ pub struct CppParser<'a> {
     /// `complete()` and owe that event. Collapsing the two into one set is what makes the event
     /// stream go unbalanced in ways that are invisible in the tree.
     closed_marks: std::collections::HashMap<usize, bool>,
+    /// How many template argument lists the cursor is inside, syntactically.
+    ///
+    /// Inside one, `>` closes the list rather than comparing: `Vec<A<B>>`, `Vec<1, 2>`. The
+    /// expression grammar cannot know that, so it asks. A counter rather than a flag because the
+    /// lists nest, and the innermost closer belongs to the innermost list.
+    template_argument_depth: usize,
+    /// Did the declarator parsed most recently declare a function?
+    ///
+    /// Set by [`crate::grammar::cpp::types::parse_declarator`] and read by
+    /// [`crate::grammar::cpp::decls::finish_init_declarator`], which has to decide whether the `{`
+    /// at the cursor opens a function body or a brace initializer.
+    ///
+    /// This is recorded rather than inferred from the event stream because the distinguishing
+    /// event can be *dropped*: `void f()` has an empty `ParameterList`, which `Marker::complete`
+    /// discards as a zero-width node, leaving the events of `void f() {}` indistinguishable from
+    /// those of `int x {}`. Reading it off the parse directly is the only answer that survives that.
+    last_declarator_is_function: bool,
     pub parse_config: ParserConfig<'a>,
     pub(crate) errors: &'a mut Vec<CppParseError>,
 }
@@ -111,6 +128,10 @@ impl MarkerEventContainer for CppParser<'_> {
         self.closed_marks.get(&position).copied().unwrap_or(false)
     }
 
+    fn mark_was_detached(&self, position: usize) -> bool {
+        matches!(self.closed_marks.get(&position), Some(false))
+    }
+
     fn mark_is_open(&self, position: usize) -> bool {
         self.open_marks.contains(&position)
     }
@@ -141,6 +162,49 @@ impl<'a> CppParser<'a> {
         Self::parse_inner(text, config)
     }
 
+    /// Like [`CppParser::parse`], but also returns the raw event stream.
+    ///
+    /// The event stream is the parser's real output and the tree is a fold of it, so when a tree is
+    /// wrongly nested the stream is where the cause is visible. Kept public because diagnosing a
+    /// shape bug otherwise means adding a temporary `println!` inside the parser.
+    pub fn parse_with_events(
+        text: &'a str,
+        config: ParserConfig<'a>,
+    ) -> (CppSyntaxTree, Vec<MarkEvent>) {
+        let mut errors: Vec<CppParseError> = Vec::new();
+
+        let tokens = {
+            let mut lexer = CppLexer::new(text, config.lexer_config(), &mut errors);
+            lexer.tokenize()
+        };
+
+        let mut parser = CppParser {
+            text,
+            events: Vec::new(),
+            tokens,
+            token_index: 0,
+            current_token: CppTokenKind::None,
+            open_marks: Vec::new(),
+            closed_marks: std::collections::HashMap::new(),
+            template_argument_depth: 0,
+            last_declarator_is_function: false,
+            parse_config: config,
+            errors: &mut errors,
+        };
+
+        parse_cpp_unit(&mut parser);
+
+        let events = std::mem::take(&mut parser.events);
+        let root = {
+            let mut builder = crate::syntax::CppTreeBuilder::new(text, events.clone(), None);
+            builder.build();
+            builder.finish()
+        };
+
+        let tree = CppSyntaxTree::new(root, errors);
+        (tree, events)
+    }
+
     fn parse_inner(
         text: &'a str,
         config: ParserConfig<'a>,
@@ -160,6 +224,8 @@ impl<'a> CppParser<'a> {
             current_token: CppTokenKind::None,
             open_marks: Vec::new(),
             closed_marks: std::collections::HashMap::new(),
+            template_argument_depth: 0,
+            last_declarator_is_function: false,
             parse_config: config,
             errors: &mut errors,
         };
@@ -439,6 +505,37 @@ impl<'a> CppParser<'a> {
     /// Number of events recorded so far, for use as a `from_event` bound.
     pub fn current_event_count(&self) -> usize {
         self.events.len()
+    }
+
+    /// Is the cursor inside a template argument list, as far as the grammar has descended?
+    ///
+    /// Inside one, `>` closes the list instead of comparing, so the expression grammar must not
+    /// treat it as an operator. `parse_template_argument_list` is the only place that sets this, via
+    /// [`crate::grammar::cpp::types::TemplateArgumentScope`].
+    pub fn is_in_template_arguments(&self) -> bool {
+        self.template_argument_depth > 0
+    }
+
+    /// Enter a template argument list. Returns the previous depth so the caller can restore it.
+    pub fn enter_template_arguments(&mut self) -> usize {
+        let previous = self.template_argument_depth;
+        self.template_argument_depth += 1;
+        previous
+    }
+
+    /// Leave a template argument list, restoring the depth `enter_template_arguments` returned.
+    pub fn leave_template_arguments(&mut self, previous: usize) {
+        self.template_argument_depth = previous;
+    }
+
+    /// Record whether the declarator just parsed declared a function. See the field's docs.
+    pub fn set_last_declarator_is_function(&mut self, is_function: bool) {
+        self.last_declarator_is_function = is_function;
+    }
+
+    /// Did the declarator parsed most recently declare a function?
+    pub fn last_declarator_is_function(&self) -> bool {
+        self.last_declarator_is_function
     }
 
     /// Text of the significant token at relative offset `offset` from the cursor. Empty past the end.

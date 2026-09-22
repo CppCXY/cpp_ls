@@ -106,8 +106,7 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
 
     let result = match p.current_token() {
         // Control flow statements
-        CppTokenKind::IfKeyword => parse_if_statement(p),
-        CppTokenKind::WhileKeyword => parse_while_statement(p),
+        CppTokenKind::IfKeyword => parse_if_statement(p),        CppTokenKind::WhileKeyword => parse_while_statement(p),
         CppTokenKind::DoKeyword => parse_do_while_statement(p),
         CppTokenKind::ForKeyword => parse_for_statement(p),
         CppTokenKind::SwitchKeyword => parse_switch_statement(p),
@@ -203,6 +202,22 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
 fn parse_preprocessor_directive(p: &mut CppParser) -> ParseResult {
     let m = p.mark(CppSyntaxKind::PreprocessorDirective);
 
+    // A directive runs to the end of its (spliced) line.
+    //
+    // The boundary has to be computed as an *offset*, not looked for as a `Newline` token: the
+    // newline is trivia, and `bump` skips trivia while attaching it to the current node. So after
+    // consuming the last real token of the line the cursor is already on the next line's first
+    // token, a `Newline` is never seen, and a loop that waits for one consumes the whole file.
+    // That failure is not local — every declaration after the first directive disappears into it.
+    let line_end = p
+        .origin_text()
+        .get(p.current_token_range().start_offset..)
+        .map(|rest| match rest.find('\n') {
+            Some(offset) => p.current_token_range().start_offset + offset,
+            None => p.origin_text().len(),
+        })
+        .unwrap_or_else(|| p.origin_text().len());
+
     p.bump(); // `#`
 
     // The directive name is a plain identifier (`include`, `define`, `if`, ...); the null directive
@@ -213,11 +228,11 @@ fn parse_preprocessor_directive(p: &mut CppParser) -> ParseResult {
         p.bump();
     }
 
-    // A directive runs to the end of its (spliced) line. Reading it token by token keeps the text in
-    // the tree; the preprocessor layer re-reads these tokens when it needs their real meaning.
+    // Reading the rest token by token keeps the text in the tree; the preprocessor layer re-reads
+    // these tokens when it needs their real meaning.
     let mut header_name_expected = directive_is_include;
 
-    while !p.is_eof() && p.current_token() != CppTokenKind::Newline {
+    while !p.is_eof() && p.current_token_range().start_offset < line_end {
         if header_name_expected {
             header_name_expected = false;
             if p.try_lex_header_name() {
@@ -261,10 +276,11 @@ fn parse_if_statement(p: &mut CppParser) -> ParseResult {
 
     p.bump(); // Consume 'if'
 
-    // `if constexpr (...)` and `if consteval` (C++23).
-    if p.current_token() == CppTokenKind::ConstexprKeyword {
-        p.bump();
-    } else if matches!(p.current_token_text(), "consteval") {
+    // `if constexpr (...)` and `if consteval` (C++23). The latter is a *contextual* keyword, so it
+    // arrives as an identifier and has to be recognised by spelling.
+    if p.current_token() == CppTokenKind::ConstexprKeyword
+        || (p.current_token() == CppTokenKind::Identifier && p.current_token_text() == "consteval")
+    {
         p.bump();
     }
 
@@ -551,12 +567,11 @@ fn parse_try_statement(p: &mut CppParser) -> ParseResult {
         let handler = p.mark(CppSyntaxKind::CatchStat);
         p.bump();
 
-        if p.current_token() == CppTokenKind::LeftParen {
-            if let Err(err) = parse_parameter_list_inline(p) {
+        if p.current_token() == CppTokenKind::LeftParen
+            && let Err(err) = parse_parameter_list_inline(p) {
                 p.close_marks_above(base);
                 return Err(err);
             }
-        }
 
         if let Err(err) = parse_compound_stat(p) {
             p.close_marks_above(base);
@@ -580,12 +595,11 @@ fn parse_return_statement(p: &mut CppParser) -> ParseResult {
     p.bump(); // Consume 'return'
 
     // `return;` and `co_return;` are complete statements.
-    if p.current_token() != CppTokenKind::Semicolon && !p.is_eof() {
-        if let Err(err) = parse_return_value(p) {
+    if p.current_token() != CppTokenKind::Semicolon && !p.is_eof()
+        && let Err(err) = parse_return_value(p) {
             p.close_marks_above(base);
             return Err(err);
         }
-    }
 
     if p.current_token() == CppTokenKind::Semicolon {
         p.bump();
@@ -645,12 +659,11 @@ fn parse_throw_statement(p: &mut CppParser) -> ParseResult {
     let m = p.mark(CppSyntaxKind::ThrowStat);
 
     p.bump(); // Consume 'throw'
-    if p.current_token() != CppTokenKind::Semicolon {
-        if let Err(err) = parse_expr(p) {
+    if p.current_token() != CppTokenKind::Semicolon
+        && let Err(err) = parse_expr(p) {
             p.close_marks_above(base);
             return Err(err);
         }
-    }
     if let Err(err) = expect_token(p, CppTokenKind::Semicolon) {
         p.close_marks_above(base);
         return Err(err);

@@ -403,3 +403,46 @@ fn token_stream_is_always_lossless() {
         assert_lossless(source);
     }
 }
+
+/// Numeric literals are scanned as one token, or not at all.
+///
+/// The cases here are the ones where the scanner has more than one reason to stop, so getting one
+/// wrong splits a number in two and hands the tail to the parser as a *separate* literal. That
+/// corruption is invisible in the token kinds — `0.0` came out as `0` then `.0`, both of which are
+/// numbers — and it is what a `0.0` field initialiser in a class body tripped over.
+#[test]
+fn numeric_literals_are_single_tokens() {
+    let cases = [
+        "0.0",
+        "0.",
+        ".5",
+        "1.5",
+        "07",
+        "0",
+        "1e5",
+        "1.0e-3",
+        "0x1p3",
+        "0x1f",
+        "0b1010",
+        "1'000'000",
+        "42_km",
+    ];
+
+    for source in cases {
+        let lexed = tokens(source);
+        let significant: Vec<&(CppTokenKind, String)> = lexed
+            .iter()
+            .filter(|(kind, _)| !matches!(kind, CppTokenKind::Whitespace | CppTokenKind::Newline))
+            .collect();
+
+        assert_eq!(
+            significant.len(),
+            1,
+            "{source:?} was split into {significant:?}"
+        );
+        assert_eq!(
+            significant[0].1, source,
+            "{source:?} was not scanned as a whole literal"
+        );
+    }
+}

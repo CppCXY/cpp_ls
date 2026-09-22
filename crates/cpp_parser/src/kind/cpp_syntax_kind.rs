@@ -644,11 +644,25 @@ pub enum CppSyntaxKind {
     /// e.g.: `x`, `*p`, `&r`, `arr[10]`, `f(int)`, `ns::C::operator+`
     Declarator,
 
-    /// A type on its own, as it appears after `sizeof`, in a cast, in a parameter or as a
-    /// `type-id`.
+    /// A `friend` declaration: `friend class X;`, `friend void f();`, `friend bool operator==(...)`.
+    ///
+    /// `friend` is not a specifier of the declaration that follows it; it *is* the declaration, which
+    /// is why this is a separate node rather than a specifier inside the friend's own declaration.
+    FriendDecl,
+
+    /// A type on its own, as it appears after `sizeof`, in a cast, in a parameter or as a    /// `type-id`.
     ///
     /// e.g.: `int`, `const char*`, `std::vector<int>`
     TypeId,
+
+    /// A trailing return type after `->`.
+    ///
+    /// This gets its own kind rather than reusing [`CppSyntaxKind::TypeId`] because it is also the
+    /// declarator's "this is a function" marker: a declarator whose events contain one can only be a
+    /// function, which is how a `{` after it is recognised as a body rather than an initializer.
+    ///
+    /// e.g.: the `-> T*` in `auto begin() -> T*`
+    TrailingReturnType,
 
     // ========== Error Recovery ==========
     /// Error node - for error recovery in parsing

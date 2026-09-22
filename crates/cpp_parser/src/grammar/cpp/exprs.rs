@@ -9,7 +9,24 @@ use super::expect_token;
 
 /// 操作符优先级定义
 /// 数值越高，优先级越高
-fn get_operator_precedence(token: CppTokenKind) -> Option<u8> {
+///
+/// `p` is consulted for one thing: inside a template argument list, `>` does not mean "greater
+/// than". `Vec<1 > 2>` is not a thing, but `Vec<A<B>>` and `Vec<1, 2>` are, and the closing angle
+/// must reach the template-argument reader rather than being eaten as an operator. See
+/// [`crate::parser::CppParser::is_in_template_arguments`].
+fn get_operator_precedence(p: &CppParser, token: CppTokenKind) -> Option<u8> {
+    if p.is_in_template_arguments()
+        && matches!(
+            token,
+            CppTokenKind::Greater
+                | CppTokenKind::RightShift
+                | CppTokenKind::GreaterEqual
+                | CppTokenKind::RightShiftAssign
+        )
+    {
+        return None;
+    }
+
     match token {
         // 乘法、除法、模运算 - 最高优先级
         CppTokenKind::Star | CppTokenKind::Slash | CppTokenKind::Percent => Some(13),
@@ -75,7 +92,7 @@ fn parse_ternary_expr(p: &mut CppParser) -> ParseResult {
 fn parse_binary_expr_with_precedence(p: &mut CppParser, min_prec: u8) -> ParseResult {
     let mut left = parse_unary_expr(p)?;
 
-    while let Some(prec) = get_operator_precedence(p.current_token()) {
+    while let Some(prec) = get_operator_precedence(p, p.current_token()) {
         if prec < min_prec {
             break;
         }
@@ -254,12 +271,10 @@ fn parse_primary_expr(p: &mut CppParser) -> ParseResult {
 
                 // A template-id: `vector<int>`.
                 if p.current_token() == CppTokenKind::Less && super::types::could_start_template_arguments(p)
-                {
-                    if let Err(err) = super::types::parse_template_argument_list(p) {
+                    && let Err(err) = super::types::parse_template_argument_list(p) {
                         p.close_marks_above(base);
                         return Err(err);
                     }
-                }
 
                 if p.current_token() == CppTokenKind::Scope {
                     p.bump();

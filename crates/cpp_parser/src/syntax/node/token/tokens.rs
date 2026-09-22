@@ -1,19 +1,25 @@
+//! Typed token wrappers.
+//!
+//! A token type exists when the token has behaviour beyond its kind: a name has text, a number has a
+//! value, an operator has a precedence. Tokens that carry nothing extra use [`CppGeneralToken`].
+//!
+//! The shape follows the reference implementation (`reference/README.md`): a newtype over a
+//! [`CppSyntaxToken`] plus a `CppAstToken` impl, with accessors as inherent methods.
+
 use crate::{
-    kind::{BinaryOperator, CppTokenKind, UnaryOperator},
-    syntax::traits::LuaAstToken,
-    LuaOpKind, LuaSyntaxToken, LuaTypeBinaryOperator, LuaTypeUnaryOperator, LuaVersionNumber,
-    VisibilityKind,
+    kind::{CppKind, CppSyntaxKind, CppTokenKind},
+    syntax::traits::CppAstToken,
+    CppSyntaxToken,
 };
 
-use super::{float_token_value, int_token_value, string_token_value};
-
+/// Any token. The fallback for tokens with no special behaviour.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LuaGeneralToken {
-    token: LuaSyntaxToken,
+pub struct CppGeneralToken {
+    token: CppSyntaxToken,
 }
 
-impl LuaAstToken for LuaGeneralToken {
-    fn syntax(&self) -> &LuaSyntaxToken {
+impl CppAstToken for CppGeneralToken {
+    fn syntax(&self) -> &CppSyntaxToken {
         &self.token
     }
 
@@ -24,21 +30,28 @@ impl LuaAstToken for LuaGeneralToken {
         true
     }
 
-    fn cast(syntax: LuaSyntaxToken) -> Option<Self>
+    fn cast(syntax: CppSyntaxToken) -> Option<Self>
     where
         Self: Sized,
     {
-        Some(LuaGeneralToken { token: syntax })
+        Some(CppGeneralToken { token: syntax })
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LuaNameToken {
-    token: LuaSyntaxToken,
+impl CppGeneralToken {
+    pub fn get_text(&self) -> &str {
+        self.token.text()
+    }
 }
 
-impl LuaAstToken for LuaNameToken {
-    fn syntax(&self) -> &LuaSyntaxToken {
+/// An identifier: a name being declared or referenced.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CppNameToken {
+    token: CppSyntaxToken,
+}
+
+impl CppAstToken for CppNameToken {
+    fn syntax(&self) -> &CppSyntaxToken {
         &self.token
     }
 
@@ -46,34 +59,35 @@ impl LuaAstToken for LuaNameToken {
     where
         Self: Sized,
     {
-        kind == CppTokenKind::TkName
+        kind == CppTokenKind::Identifier
     }
 
-    fn cast(syntax: LuaSyntaxToken) -> Option<Self>
+    fn cast(syntax: CppSyntaxToken) -> Option<Self>
     where
         Self: Sized,
     {
         if Self::can_cast(syntax.kind().into()) {
-            Some(LuaNameToken { token: syntax })
+            Some(CppNameToken { token: syntax })
         } else {
             None
         }
     }
 }
 
-impl LuaNameToken {
+impl CppNameToken {
     pub fn get_name_text(&self) -> &str {
         self.token.text()
     }
 }
 
+/// A keyword token, for the handful of places that need to look at one directly.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LuaStringToken {
-    token: LuaSyntaxToken,
+pub struct CppKeywordToken {
+    token: CppSyntaxToken,
 }
 
-impl LuaAstToken for LuaStringToken {
-    fn syntax(&self) -> &LuaSyntaxToken {
+impl CppAstToken for CppKeywordToken {
+    fn syntax(&self) -> &CppSyntaxToken {
         &self.token
     }
 
@@ -81,34 +95,147 @@ impl LuaAstToken for LuaStringToken {
     where
         Self: Sized,
     {
-        kind == CppTokenKind::TkString || kind == CppTokenKind::TkLongString
+        is_keyword(kind)
     }
 
-    fn cast(syntax: LuaSyntaxToken) -> Option<Self>
+    fn cast(syntax: CppSyntaxToken) -> Option<Self>
     where
         Self: Sized,
     {
         if Self::can_cast(syntax.kind().into()) {
-            Some(LuaStringToken { token: syntax })
+            Some(CppKeywordToken { token: syntax })
         } else {
             None
         }
     }
 }
 
-impl LuaStringToken {
-    pub fn get_value(&self) -> String {
-        string_token_value(&self.token).unwrap_or_default()
+impl CppKeywordToken {
+    pub fn get_keyword_text(&self) -> &str {
+        self.token.text()
+    }
+
+    pub fn get_keyword_kind(&self) -> CppKind {
+        self.token.kind()
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LuaNumberToken {
-    token: LuaSyntaxToken,
+/// Is this token kind one of the keyword kinds?
+///
+/// `false` for `final` and `override`: they *look* like keywords but are identifiers with special
+/// meaning, which is why the parser matches them by text.
+pub fn is_keyword(kind: CppTokenKind) -> bool {
+    matches!(
+        kind,
+        CppTokenKind::AutoKeyword
+            | CppTokenKind::BreakKeyword
+            | CppTokenKind::CaseKeyword
+            | CppTokenKind::CatchKeyword
+            | CppTokenKind::CharKeyword
+            | CppTokenKind::ClassKeyword
+            | CppTokenKind::ConstKeyword
+            | CppTokenKind::ConstexprKeyword
+            | CppTokenKind::ConstevalKeyword
+            | CppTokenKind::ConstinitKeyword
+            | CppTokenKind::ContinueKeyword
+            | CppTokenKind::DecltypeKeyword
+            | CppTokenKind::DefaultKeyword
+            | CppTokenKind::DeleteKeyword
+            | CppTokenKind::DoKeyword
+            | CppTokenKind::DoubleKeyword
+            | CppTokenKind::ElseKeyword
+            | CppTokenKind::EnumKeyword
+            | CppTokenKind::ExplicitKeyword
+            | CppTokenKind::ExportKeyword
+            | CppTokenKind::ExternKeyword
+            | CppTokenKind::FalseKeyword
+            | CppTokenKind::FloatKeyword
+            | CppTokenKind::ForKeyword
+            | CppTokenKind::FriendKeyword
+            | CppTokenKind::GotoKeyword
+            | CppTokenKind::IfKeyword
+            | CppTokenKind::InlineKeyword
+            | CppTokenKind::IntKeyword
+            | CppTokenKind::LongKeyword
+            | CppTokenKind::MutableKeyword
+            | CppTokenKind::NamespaceKeyword
+            | CppTokenKind::NewKeyword
+            | CppTokenKind::NoexceptKeyword
+            | CppTokenKind::NullptrKeyword
+            | CppTokenKind::OperatorKeyword
+            | CppTokenKind::PrivateKeyword
+            | CppTokenKind::ProtectedKeyword
+            | CppTokenKind::PublicKeyword
+            | CppTokenKind::RegisterKeyword
+            | CppTokenKind::ReturnKeyword
+            | CppTokenKind::ShortKeyword
+            | CppTokenKind::SignedKeyword
+            | CppTokenKind::SizeofKeyword
+            | CppTokenKind::StaticKeyword
+            | CppTokenKind::StaticAssertKeyword
+            | CppTokenKind::StructKeyword
+            | CppTokenKind::SwitchKeyword
+            | CppTokenKind::TemplateKeyword
+            | CppTokenKind::ThisKeyword
+            | CppTokenKind::ThreadLocalKeyword
+            | CppTokenKind::ThrowKeyword
+            | CppTokenKind::TrueKeyword
+            | CppTokenKind::TryKeyword
+            | CppTokenKind::TypedefKeyword
+            | CppTokenKind::TypeidKeyword
+            | CppTokenKind::TypenameKeyword
+            | CppTokenKind::UnionKeyword
+            | CppTokenKind::UnsignedKeyword
+            | CppTokenKind::UsingKeyword
+            | CppTokenKind::VirtualKeyword
+            | CppTokenKind::VoidKeyword
+            | CppTokenKind::VolatileKeyword
+            | CppTokenKind::WhileKeyword
+            | CppTokenKind::AlignasKeyword
+            | CppTokenKind::AlignofKeyword
+            | CppTokenKind::ConceptKeyword
+            | CppTokenKind::RequiresKeyword
+            | CppTokenKind::CoAwaitKeyword
+            | CppTokenKind::CoReturnKeyword
+            | CppTokenKind::CoYieldKeyword
+    )
 }
 
-impl LuaAstToken for LuaNumberToken {
-    fn syntax(&self) -> &LuaSyntaxToken {
+/// Is this token kind a type specifier keyword?
+///
+/// `class`, `struct`, `union` and `enum` are included: they name a type, and `Foo` in
+/// `class Foo;` is a class *type*.
+pub fn is_type_keyword(kind: CppTokenKind) -> bool {
+    matches!(
+        kind,
+        CppTokenKind::VoidKeyword
+            | CppTokenKind::CharKeyword
+            | CppTokenKind::ShortKeyword
+            | CppTokenKind::IntKeyword
+            | CppTokenKind::LongKeyword
+            | CppTokenKind::FloatKeyword
+            | CppTokenKind::DoubleKeyword
+            | CppTokenKind::SignedKeyword
+            | CppTokenKind::UnsignedKeyword
+            | CppTokenKind::BoolLiteral
+            | CppTokenKind::AutoKeyword
+            | CppTokenKind::DecltypeKeyword
+            | CppTokenKind::ClassKeyword
+            | CppTokenKind::StructKeyword
+            | CppTokenKind::UnionKeyword
+            | CppTokenKind::EnumKeyword
+            | CppTokenKind::TypenameKeyword
+    )
+}
+
+/// An operator token, in either a unary or a binary position.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CppOperatorToken {
+    token: CppSyntaxToken,
+}
+
+impl CppAstToken for CppOperatorToken {
+    fn syntax(&self) -> &CppSyntaxToken {
         &self.token
     }
 
@@ -116,52 +243,86 @@ impl LuaAstToken for LuaNumberToken {
     where
         Self: Sized,
     {
-        kind == CppTokenKind::TkFloat || kind == CppTokenKind::TkInt
+        is_operator(kind)
     }
 
-    fn cast(syntax: LuaSyntaxToken) -> Option<Self>
+    fn cast(syntax: CppSyntaxToken) -> Option<Self>
     where
         Self: Sized,
     {
         if Self::can_cast(syntax.kind().into()) {
-            Some(LuaNumberToken { token: syntax })
+            Some(CppOperatorToken { token: syntax })
         } else {
             None
         }
     }
 }
 
-impl LuaNumberToken {
-    pub fn is_float(&self) -> bool {
-        self.token.kind() == CppTokenKind::TkFloat.into()
+impl CppOperatorToken {
+    pub fn get_operator_text(&self) -> &str {
+        self.token.text()
     }
 
-    pub fn is_int(&self) -> bool {
-        self.token.kind() == CppTokenKind::TkInt.into()
-    }
-
-    pub fn get_float_value(&self) -> f64 {
-        if !self.is_float() {
-            return 0.0;
-        }
-        float_token_value(&self.token).unwrap_or(0.0)
-    }
-
-    pub fn get_int_value(&self) -> i64 {
-        if !self.is_int() {
-            return 0;
-        }
-        int_token_value(&self.token).unwrap_or_default()
+    pub fn get_operator_kind(&self) -> CppKind {
+        self.token.kind()
     }
 }
 
+/// Is this token kind an operator?
+pub fn is_operator(kind: CppTokenKind) -> bool {
+    matches!(
+        kind,
+        CppTokenKind::Plus
+            | CppTokenKind::Minus
+            | CppTokenKind::Star
+            | CppTokenKind::Slash
+            | CppTokenKind::Percent
+            | CppTokenKind::Assign
+            | CppTokenKind::PlusAssign
+            | CppTokenKind::MinusAssign
+            | CppTokenKind::StarAssign
+            | CppTokenKind::SlashAssign
+            | CppTokenKind::PercentAssign
+            | CppTokenKind::Equal
+            | CppTokenKind::NotEqual
+            | CppTokenKind::Less
+            | CppTokenKind::LessEqual
+            | CppTokenKind::Greater
+            | CppTokenKind::GreaterEqual
+            | CppTokenKind::Spaceship
+            | CppTokenKind::LogicalAnd
+            | CppTokenKind::LogicalOr
+            | CppTokenKind::LogicalNot
+            | CppTokenKind::Ampersand
+            | CppTokenKind::Pipe
+            | CppTokenKind::Caret
+            | CppTokenKind::Tilde
+            | CppTokenKind::LeftShift
+            | CppTokenKind::RightShift
+            | CppTokenKind::AmpersandAssign
+            | CppTokenKind::PipeAssign
+            | CppTokenKind::CaretAssign
+            | CppTokenKind::LeftShiftAssign
+            | CppTokenKind::RightShiftAssign
+            | CppTokenKind::PlusPlus
+            | CppTokenKind::MinusMinus
+            | CppTokenKind::Dot
+            | CppTokenKind::Arrow
+            | CppTokenKind::DotStar
+            | CppTokenKind::ArrowStar
+            | CppTokenKind::Scope
+            | CppTokenKind::Question
+    )
+}
+
+/// A punctuation token.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LuaBinaryOpToken {
-    token: LuaSyntaxToken,
+pub struct CppPunctuationToken {
+    token: CppSyntaxToken,
 }
 
-impl LuaAstToken for LuaBinaryOpToken {
-    fn syntax(&self) -> &LuaSyntaxToken {
+impl CppAstToken for CppPunctuationToken {
+    fn syntax(&self) -> &CppSyntaxToken {
         &self.token
     }
 
@@ -169,34 +330,48 @@ impl LuaAstToken for LuaBinaryOpToken {
     where
         Self: Sized,
     {
-        LuaOpKind::to_binary_operator(kind) != BinaryOperator::OpNop
+        is_punctuation(kind)
     }
 
-    fn cast(syntax: LuaSyntaxToken) -> Option<Self>
+    fn cast(syntax: CppSyntaxToken) -> Option<Self>
     where
         Self: Sized,
     {
         if Self::can_cast(syntax.kind().into()) {
-            Some(LuaBinaryOpToken { token: syntax })
+            Some(CppPunctuationToken { token: syntax })
         } else {
             None
         }
     }
 }
 
-impl LuaBinaryOpToken {
-    pub fn get_op(&self) -> BinaryOperator {
-        LuaOpKind::to_binary_operator(self.token.kind().into())
-    }
+/// Is this token kind a delimiter?
+pub fn is_punctuation(kind: CppTokenKind) -> bool {
+    matches!(
+        kind,
+        CppTokenKind::LeftParen
+            | CppTokenKind::RightParen
+            | CppTokenKind::LeftBrace
+            | CppTokenKind::RightBrace
+            | CppTokenKind::LeftBracket
+            | CppTokenKind::RightBracket
+            | CppTokenKind::Semicolon
+            | CppTokenKind::Comma
+            | CppTokenKind::Colon
+            | CppTokenKind::Ellipsis
+            | CppTokenKind::Hash
+            | CppTokenKind::HashHash
+    )
 }
 
+/// A literal token: a number, character, string, boolean or `nullptr`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LuaUnaryOpToken {
-    token: LuaSyntaxToken,
+pub struct CppLiteralToken {
+    token: CppSyntaxToken,
 }
 
-impl LuaAstToken for LuaUnaryOpToken {
-    fn syntax(&self) -> &LuaSyntaxToken {
+impl CppAstToken for CppLiteralToken {
+    fn syntax(&self) -> &CppSyntaxToken {
         &self.token
     }
 
@@ -204,334 +379,83 @@ impl LuaAstToken for LuaUnaryOpToken {
     where
         Self: Sized,
     {
-        LuaOpKind::to_unary_operator(kind) != UnaryOperator::OpNop
+        is_literal(kind)
     }
 
-    fn cast(syntax: LuaSyntaxToken) -> Option<Self>
+    fn cast(syntax: CppSyntaxToken) -> Option<Self>
     where
         Self: Sized,
     {
         if Self::can_cast(syntax.kind().into()) {
-            Some(LuaUnaryOpToken { token: syntax })
+            Some(CppLiteralToken { token: syntax })
         } else {
             None
         }
     }
 }
 
-impl LuaUnaryOpToken {
-    pub fn get_op(&self) -> UnaryOperator {
-        LuaOpKind::to_unary_operator(self.token.kind().into())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LuaKeywordToken {
-    token: LuaSyntaxToken,
-}
-
-impl LuaAstToken for LuaKeywordToken {
-    fn syntax(&self) -> &LuaSyntaxToken {
-        &self.token
-    }
-
-    fn can_cast(kind: CppTokenKind) -> bool
-    where
-        Self: Sized,
-    {
-        match kind {
-            CppTokenKind::TkAnd
-            | CppTokenKind::TkBreak
-            | CppTokenKind::TkDo
-            | CppTokenKind::TkElse
-            | CppTokenKind::TkElseIf
-            | CppTokenKind::TkEnd
-            | CppTokenKind::TkFalse
-            | CppTokenKind::TkFor
-            | CppTokenKind::TkFunction
-            | CppTokenKind::TkGoto
-            | CppTokenKind::TkIf
-            | CppTokenKind::TkIn
-            | CppTokenKind::TkLocal
-            | CppTokenKind::TkNil
-            | CppTokenKind::TkNot
-            | CppTokenKind::TkOr
-            | CppTokenKind::TkRepeat
-            | CppTokenKind::TkReturn
-            | CppTokenKind::TkThen
-            | CppTokenKind::TkTrue
-            | CppTokenKind::TkUntil
-            | CppTokenKind::TkWhile => true,
-            _ => false,
-        }
-    }
-
-    fn cast(syntax: LuaSyntaxToken) -> Option<Self>
-    where
-        Self: Sized,
-    {
-        if Self::can_cast(syntax.kind().into()) {
-            Some(LuaKeywordToken { token: syntax })
-        } else {
-            None
-        }
-    }
-}
-
-impl LuaKeywordToken {
-    pub fn get_keyword(&self) -> CppTokenKind {
-        self.token.kind().into()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LuaBoolToken {
-    token: LuaSyntaxToken,
-}
-
-impl LuaAstToken for LuaBoolToken {
-    fn syntax(&self) -> &LuaSyntaxToken {
-        &self.token
-    }
-
-    fn can_cast(kind: CppTokenKind) -> bool
-    where
-        Self: Sized,
-    {
-        kind == CppTokenKind::TkTrue || kind == CppTokenKind::TkFalse
-    }
-
-    fn cast(syntax: LuaSyntaxToken) -> Option<Self>
-    where
-        Self: Sized,
-    {
-        if Self::can_cast(syntax.kind().into()) {
-            Some(LuaBoolToken { token: syntax })
-        } else {
-            None
-        }
-    }
-}
-
-impl LuaBoolToken {
-    pub fn is_true(&self) -> bool {
-        self.token.kind() == CppTokenKind::TkTrue.into()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LuaNilToken {
-    token: LuaSyntaxToken,
-}
-
-impl LuaAstToken for LuaNilToken {
-    fn syntax(&self) -> &LuaSyntaxToken {
-        &self.token
-    }
-
-    fn can_cast(kind: CppTokenKind) -> bool
-    where
-        Self: Sized,
-    {
-        kind == CppTokenKind::TkNil
-    }
-
-    fn cast(syntax: LuaSyntaxToken) -> Option<Self>
-    where
-        Self: Sized,
-    {
-        if Self::can_cast(syntax.kind().into()) {
-            Some(LuaNilToken { token: syntax })
-        } else {
-            None
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum LuaLiteralToken {
-    String(LuaStringToken),
-    Number(LuaNumberToken),
-    Bool(LuaBoolToken),
-    Nil(LuaNilToken),
-    Dots(LuaGeneralToken),
-    Question(LuaGeneralToken),
-}
-
-impl LuaAstToken for LuaLiteralToken {
-    fn syntax(&self) -> &LuaSyntaxToken {
-        match self {
-            LuaLiteralToken::String(token) => token.syntax(),
-            LuaLiteralToken::Number(token) => token.syntax(),
-            LuaLiteralToken::Bool(token) => token.syntax(),
-            LuaLiteralToken::Nil(token) => token.syntax(),
-            LuaLiteralToken::Dots(token) => token.syntax(),
-            LuaLiteralToken::Question(token) => token.syntax(),
-        }
-    }
-
-    fn can_cast(kind: CppTokenKind) -> bool
-    where
-        Self: Sized,
-    {
-        match kind {
-            CppTokenKind::TkInt
-            | CppTokenKind::TkFloat
-            | CppTokenKind::TkComplex
-            | CppTokenKind::TkNil
-            | CppTokenKind::TkTrue
-            | CppTokenKind::TkFalse
-            | CppTokenKind::TkDots
-            | CppTokenKind::TkString
-            | CppTokenKind::TkLongString
-            | CppTokenKind::TkDocQuestion => true,
-            _ => false,
-        }
-    }
-
-    fn cast(syntax: LuaSyntaxToken) -> Option<Self>
-    where
-        Self: Sized,
-    {
-        match syntax.kind().into() {
-            CppTokenKind::TkString | CppTokenKind::TkLongString => {
-                LuaStringToken::cast(syntax).map(LuaLiteralToken::String)
-            }
-            CppTokenKind::TkFloat | CppTokenKind::TkInt | CppTokenKind::TkComplex => {
-                LuaNumberToken::cast(syntax).map(LuaLiteralToken::Number)
-            }
-            CppTokenKind::TkTrue | CppTokenKind::TkFalse => {
-                LuaBoolToken::cast(syntax).map(LuaLiteralToken::Bool)
-            }
-            CppTokenKind::TkNil => LuaNilToken::cast(syntax).map(LuaLiteralToken::Nil),
-            CppTokenKind::TkDots => LuaGeneralToken::cast(syntax).map(LuaLiteralToken::Dots),
-            CppTokenKind::TkDocQuestion => {
-                LuaGeneralToken::cast(syntax).map(LuaLiteralToken::Question)
-            }
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LuaSpaceToken {
-    token: LuaSyntaxToken,
-}
-
-impl LuaAstToken for LuaSpaceToken {
-    fn syntax(&self) -> &LuaSyntaxToken {
-        &self.token
-    }
-
-    fn can_cast(kind: CppTokenKind) -> bool
-    where
-        Self: Sized,
-    {
-        match kind {
-            CppTokenKind::TkWhitespace | CppTokenKind::TkEndOfLine => true,
-            _ => false,
-        }
-    }
-
-    fn cast(syntax: LuaSyntaxToken) -> Option<Self>
-    where
-        Self: Sized,
-    {
-        if Self::can_cast(syntax.kind().into()) {
-            Some(LuaSpaceToken { token: syntax })
-        } else {
-            None
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LuaIndexToken {
-    token: LuaSyntaxToken,
-}
-
-impl LuaAstToken for LuaIndexToken {
-    fn syntax(&self) -> &LuaSyntaxToken {
-        &self.token
-    }
-
-    fn can_cast(kind: CppTokenKind) -> bool
-    where
-        Self: Sized,
-    {
-        kind == CppTokenKind::TkDot
-            || kind == CppTokenKind::TkColon
-            || kind == CppTokenKind::TkLeftBracket
-    }
-
-    fn cast(syntax: LuaSyntaxToken) -> Option<Self>
-    where
-        Self: Sized,
-    {
-        if Self::can_cast(syntax.kind().into()) {
-            Some(LuaIndexToken { token: syntax })
-        } else {
-            None
-        }
-    }
-}
-
-impl LuaIndexToken {
-    pub fn is_dot(&self) -> bool {
-        self.token.kind() == CppTokenKind::TkDot.into()
-    }
-
-    pub fn is_colon(&self) -> bool {
-        self.token.kind() == CppTokenKind::TkColon.into()
-    }
-
-    pub fn is_left_bracket(&self) -> bool {
-        self.token.kind() == CppTokenKind::TkLeftBracket.into()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LuaDocDetailToken {
-    token: LuaSyntaxToken,
-}
-
-impl LuaAstToken for LuaDocDetailToken {
-    fn syntax(&self) -> &LuaSyntaxToken {
-        &self.token
-    }
-
-    fn can_cast(kind: CppTokenKind) -> bool
-    where
-        Self: Sized,
-    {
-        kind == CppTokenKind::TkDocDetail
-    }
-
-    fn cast(syntax: LuaSyntaxToken) -> Option<Self>
-    where
-        Self: Sized,
-    {
-        if Self::can_cast(syntax.kind().into()) {
-            Some(LuaDocDetailToken { token: syntax })
-        } else {
-            None
-        }
-    }
-}
-
-impl LuaDocDetailToken {
-    pub fn get_detail(&self) -> &str {
+impl CppLiteralToken {
+    pub fn get_literal_text(&self) -> &str {
         self.token.text()
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LuaDocVisibilityToken {
-    token: LuaSyntaxToken,
+/// Is this token kind a literal?
+pub fn is_literal(kind: CppTokenKind) -> bool {
+    matches!(
+        kind,
+        CppTokenKind::IntegerLiteral
+            | CppTokenKind::FloatingLiteral
+            | CppTokenKind::CharLiteral
+            | CppTokenKind::StringLiteral
+            | CppTokenKind::UserDefinedLiteral
+            | CppTokenKind::BoolLiteral
+            | CppTokenKind::NullptrLiteral
+            | CppTokenKind::TrueKeyword
+            | CppTokenKind::FalseKeyword
+            | CppTokenKind::NullptrKeyword
+    )
 }
 
-impl LuaAstToken for LuaDocVisibilityToken {
-    fn syntax(&self) -> &LuaSyntaxToken {
+/// Is this token kind a comment?
+pub fn is_comment(kind: CppTokenKind) -> bool {
+    matches!(kind, CppTokenKind::LineComment | CppTokenKind::BlockComment)
+}
+
+/// The kind of a comment token, for the comment section of the AST.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CppCommentKind {
+    Line,
+    Block,
+}
+
+impl From<CppKind> for CppCommentKind {
+    fn from(kind: CppKind) -> Self {
+        match kind {
+            CppKind::Token(CppTokenKind::BlockComment) => CppCommentKind::Block,
+            _ => CppCommentKind::Line,
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl From<CppTokenKind> for CppCommentKind {
+    fn from(kind: CppTokenKind) -> Self {
+        match kind {
+            CppTokenKind::BlockComment => CppCommentKind::Block,
+            _ => CppCommentKind::Line,
+        }
+    }
+}
+
+/// A comment token.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CppCommentToken {
+    token: CppSyntaxToken,
+}
+
+impl CppAstToken for CppCommentToken {
+    fn syntax(&self) -> &CppSyntaxToken {
         &self.token
     }
 
@@ -539,34 +463,68 @@ impl LuaAstToken for LuaDocVisibilityToken {
     where
         Self: Sized,
     {
-        kind == CppTokenKind::TkDocVisibility || kind == CppTokenKind::TkTagVisibility
+        is_comment(kind)
     }
 
-    fn cast(syntax: LuaSyntaxToken) -> Option<Self>
+    fn cast(syntax: CppSyntaxToken) -> Option<Self>
     where
         Self: Sized,
     {
         if Self::can_cast(syntax.kind().into()) {
-            Some(LuaDocVisibilityToken { token: syntax })
+            Some(CppCommentToken { token: syntax })
         } else {
             None
         }
     }
 }
 
-impl LuaDocVisibilityToken {
-    pub fn get_visibility(&self) -> VisibilityKind {
-        VisibilityKind::to_visibility_kind(self.token.text())
+impl CppCommentToken {
+    pub fn get_comment_kind(&self) -> CppCommentKind {
+        CppCommentKind::from(self.token.kind())
+    }
+
+    /// The comment text without its delimiters, and without the leading `*` most block comments put
+    /// on continuation lines.
+    pub fn get_comment_text(&self) -> String {
+        let raw = self.token.text();
+        match self.get_comment_kind() {
+            CppCommentKind::Line => raw.trim_start_matches('/').trim().to_string(),
+            CppCommentKind::Block => {
+                let inner = raw
+                    .strip_prefix("/*")
+                    .and_then(|it| it.strip_suffix("*/"))
+                    .unwrap_or(raw);
+                inner
+                    .lines()
+                    .map(|line| line.trim().trim_start_matches('*').trim())
+                    .filter(|line| !line.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+    }
+
+    /// Is this a documentation comment (`///`, `//!`, `/**`, `/*!`)?
+    ///
+    /// The distinction matters because only these are handed to the Doxygen layer; an ordinary
+    /// comment is trivia and nothing more.
+    pub fn is_doc_comment(&self) -> bool {
+        let raw = self.token.text();
+        match self.get_comment_kind() {
+            CppCommentKind::Line => raw.starts_with("///") || raw.starts_with("//!"),
+            CppCommentKind::Block => raw.starts_with("/**") || raw.starts_with("/*!"),
+        }
     }
 }
 
+/// The `::` in a qualified name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LuaDocVersionNumberToken {
-    token: LuaSyntaxToken,
+pub struct CppScopeToken {
+    token: CppSyntaxToken,
 }
 
-impl LuaAstToken for LuaDocVersionNumberToken {
-    fn syntax(&self) -> &LuaSyntaxToken {
+impl CppAstToken for CppScopeToken {
+    fn syntax(&self) -> &CppSyntaxToken {
         &self.token
     }
 
@@ -574,140 +532,21 @@ impl LuaAstToken for LuaDocVersionNumberToken {
     where
         Self: Sized,
     {
-        kind == CppTokenKind::TkDocVersionNumber
+        kind == CppTokenKind::Scope
     }
 
-    fn cast(syntax: LuaSyntaxToken) -> Option<Self>
+    fn cast(syntax: CppSyntaxToken) -> Option<Self>
     where
         Self: Sized,
     {
         if Self::can_cast(syntax.kind().into()) {
-            Some(LuaDocVersionNumberToken { token: syntax })
+            Some(CppScopeToken { token: syntax })
         } else {
             None
         }
     }
 }
 
-impl LuaDocVersionNumberToken {
-    pub fn get_version_number(&self) -> Option<LuaVersionNumber> {
-        let text = self.token.text();
-        LuaVersionNumber::from_str(text)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LuaDocTypeBinaryToken {
-    token: LuaSyntaxToken,
-}
-
-impl LuaAstToken for LuaDocTypeBinaryToken {
-    fn syntax(&self) -> &LuaSyntaxToken {
-        &self.token
-    }
-
-    fn can_cast(kind: CppTokenKind) -> bool
-    where
-        Self: Sized,
-    {
-        kind == CppTokenKind::TkDocOr
-            || kind == CppTokenKind::TkDocAnd
-            || kind == CppTokenKind::TkDocExtends
-            || kind == CppTokenKind::TkDocIn
-            || kind == CppTokenKind::TkDocContinueOr
-            || kind == CppTokenKind::TkPlus
-            || kind == CppTokenKind::TkMinus
-    }
-
-    fn cast(syntax: LuaSyntaxToken) -> Option<Self>
-    where
-        Self: Sized,
-    {
-        if Self::can_cast(syntax.kind().into()) {
-            Some(LuaDocTypeBinaryToken { token: syntax })
-        } else {
-            None
-        }
-    }
-}
-
-impl LuaDocTypeBinaryToken {
-    pub fn get_op(&self) -> LuaTypeBinaryOperator {
-        LuaOpKind::to_type_binary_operator(self.token.kind().into())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LuaDocTypeUnaryToken {
-    token: LuaSyntaxToken,
-}
-
-impl LuaAstToken for LuaDocTypeUnaryToken {
-    fn syntax(&self) -> &LuaSyntaxToken {
-        &self.token
-    }
-
-    fn can_cast(kind: CppTokenKind) -> bool
-    where
-        Self: Sized,
-    {
-        kind == CppTokenKind::TkDocKeyOf || kind == CppTokenKind::TkMinus
-    }
-
-    fn cast(syntax: LuaSyntaxToken) -> Option<Self>
-    where
-        Self: Sized,
-    {
-        if Self::can_cast(syntax.kind().into()) {
-            Some(LuaDocTypeUnaryToken { token: syntax })
-        } else {
-            None
-        }
-    }
-}
-
-impl LuaDocTypeUnaryToken {
-    pub fn get_op(&self) -> LuaTypeUnaryOperator {
-        LuaOpKind::to_type_unary_operator(self.token.kind().into())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LuaPathToken {
-    token: LuaSyntaxToken,
-}
-
-impl LuaAstToken for LuaPathToken {
-    fn syntax(&self) -> &LuaSyntaxToken {
-        &self.token
-    }
-
-    fn can_cast(kind: CppTokenKind) -> bool
-    where
-        Self: Sized,
-    {
-        kind == CppTokenKind::TKDocPath
-    }
-
-    fn cast(syntax: LuaSyntaxToken) -> Option<Self>
-    where
-        Self: Sized,
-    {
-        if Self::can_cast(syntax.kind().into()) {
-            Some(LuaPathToken { token: syntax })
-        } else {
-            None
-        }
-    }
-}
-
-impl LuaPathToken {
-    pub fn get_path(&self) -> &str {
-        let text = self.token.text();
-        if text.starts_with('\"') || text.starts_with('\'') {
-            &text[1..text.len() - 1]
-        } else {
-            text
-        }
-    }
-}
+/// Nodes have no tokens of their own; this alias exists so `CppAstToken` implementations can name
+/// the syntax kind of a token's parent without importing rowan.
+pub type CppTokenParentKind = CppSyntaxKind;
