@@ -252,6 +252,9 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
     // See `name_joins_the_type`: what the loop has consumed so far decides whether the next name
     // belongs to the type or is the declarator.
     let mut has_specifier = false;
+    // Whether a **type** has been named, as opposed to merely a specifier consumed. `alignas` is why the two
+    // questions are separate — see [`name_joins_the_type`].
+    let mut has_type_specifier = false;
     let mut name_allowed = allow_second_name;
     // The first name written in type position, recorded for the reader that has to decide whether a `(` after
     // the declarator is an argument list or a parameter list — see
@@ -266,7 +269,13 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
     loop {
         let specifier_seen = specifiers > 0;
         if let Err(err) =
-            parse_one_decl_specifier(p, &mut has_specifier, &mut name_allowed, specifier_seen)
+            parse_one_decl_specifier(
+                p,
+                &mut has_specifier,
+                &mut has_type_specifier,
+                &mut name_allowed,
+                specifier_seen,
+            )
         {
             if specifiers == 0 {
                 p.close_marks_above(base);
@@ -314,13 +323,46 @@ pub fn is_class_like_keyword(kind: CppTokenKind) -> bool {
 fn parse_one_decl_specifier(
     p: &mut CppParser,
     has_specifier: &mut bool,
+    has_type_specifier: &mut bool,
     name_allowed: &mut bool,
     specifier_seen: bool,
 ) -> ParseResult {
-    let result = parse_one_decl_specifier_inner(p, has_specifier, name_allowed, specifier_seen);
+    let result = parse_one_decl_specifier_inner(p, has_type_specifier, name_allowed, specifier_seen);
 
     if result.is_ok() {
         *has_specifier = true;
+
+        // Did that specifier name a **type**? `alignas` is why the distinction exists: `alignas(16) MyType value;`
+        // has consumed a specifier and named no type, so a flag meaning "something was consumed" made `MyType` a
+        // second name of a finished type and left `value` with nowhere to be a declarator. See
+        // [`name_joins_the_type`].
+        //
+        // Asked of the last token the specifier consumed, which is where its own name stands: a type keyword for
+        // `int`, an identifier for a class name, `::` for a qualified one — and a `>` for `std::vector<int>`,
+        // whose argument list the *name* rule consumes, so the specifier ends on the closing angle rather than on
+        // the name. `alignas(16)` ends in `)`, so it answers no, which is the whole point of the distinction.
+        //
+        // Asking the *tokens* rather than threading a boolean through the dozen branches of the rule below is
+        // deliberate: the branches that forgot the boolean would be the silent ones. Two were found this way and
+        // neither by an `alignas` test — `std::vector<int> values;`, whose specifier ends on `>`, and `friend`,
+        // whose payload is the whole declaration that follows it.
+        //
+        // `friend` is the one specifier the question cannot be asked of, and for the reason it is special: its
+        // payload *is* the declaration that follows — `friend void swap(D&, D&);` — so by the time it returns, the
+        // cursor is on the *next* member and "the last token consumed" describes that member's start rather than
+        // this specifier. The answer there is "a type was named", because a friend declaration always names one,
+        // and the flag it leaves is what the next member's declarator reads.
+        if p.take_declaration_ended_inside_specifiers() {
+            *has_type_specifier = true;
+        } else {
+            *has_type_specifier = p.last_consumed_token_kind().is_some_and(|kind| {
+                matches!(
+                    kind,
+                    CppTokenKind::Identifier | CppTokenKind::Scope | CppTokenKind::Greater
+                ) || is_type_specifier_keyword(kind)
+                    || is_class_like_keyword(kind)
+            });
+        }
     }
 
     result
@@ -328,7 +370,7 @@ fn parse_one_decl_specifier(
 
 fn parse_one_decl_specifier_inner(
     p: &mut CppParser,
-    has_specifier: &mut bool,
+    has_type_specifier: &mut bool,
     name_allowed: &mut bool,
     specifier_seen: bool,
 ) -> ParseResult {
@@ -522,6 +564,35 @@ fn parse_one_decl_specifier_inner(
             return Ok(m.complete(p));
         }
 
+        // `alignas(16)`, `alignas(int)`, `alignas(64) struct A { };`.
+        //
+        // A specifier of its own rather than a type specifier: it says nothing about the *type*, and putting it
+        // in [`is_type_specifier_keyword`] would make `can_begin_a_type` claim a declaration that begins with it
+        // — which is asked in three places that are all about types. The specifier loop is the one place it has
+        // to be accepted, and the payload is what makes it a node rather than a keyword.
+        CppTokenKind::AlignasKeyword => {
+            let m = p.mark(CppSyntaxKind::AlignasSpec);
+            p.bump(); // `alignas`
+
+            // The parentheses are required by the grammar, and a missing one is reported rather than skipped:
+            // `alignas 16 struct A { };` is not a thing, and consuming the `16` as if it were would leave the
+            // declaration to fail somewhere further along with a message about the wrong token.
+            expect_token(p, CppTokenKind::LeftParen)?;
+
+            // The payload is a constant-expression **or** a type-id, and the two overlap completely on the
+            // tokens: `alignas(16)` is a value and `alignas(int)` a type, while `alignas(alignof(int))` is a
+            // value again. Read by the same rule `sizeof(...)` uses, which is the same ambiguity and the same
+            // answer — try the type first, because a type-id is the reading that can be *refused*, and read an
+            // expression when it is. That rule is shared rather than copied, so this cannot drift from it.
+            if let Err(err) = super::exprs::parse_type_id_or_expression(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+            expect_token(p, CppTokenKind::RightParen)?;
+
+            return Ok(m.complete(p));
+        }
+
         // An `operator` name where a type specifier would go. It is never one: `operator` names a *function*,
         // and the whole point of the spelling is that it stands where a declarator's name stands. Letting the
         // specifier loop take it — which the "a name may join the type" rule does, since `operator` arrives as
@@ -569,7 +640,7 @@ fn parse_one_decl_specifier_inner(
             // while no *name* has joined it yet and the specifier before it is not already a
             // complete type; the `::` of a qualified name is walked by this loop one segment at a
             // time, so each later segment is still the same name.
-            if !name_joins_the_type(p, *has_specifier, *name_allowed) {
+            if !name_joins_the_type(p, *has_type_specifier, *name_allowed) {
                 return Err(CppParseError::syntax_error_from(
                     "expected a declarator name",
                     p.current_token_range(),
@@ -651,8 +722,11 @@ fn continues_a_qualified_name(p: &CppParser) -> bool {
 ///
 /// Three conditions, and each covers a case the others get wrong:
 ///
-/// * `has_specifier` — false only at the very start, where a lone name is certainly a type (`Foo`
-///   in `Foo x`); nothing precedes it for it to be a declarator *of*.
+/// * `has_type_specifier` — false while nothing has named a *type*, where a lone name is certainly the type
+///   (`Foo` in `Foo x`, `T` in `alignas(16) T x`). A specifier that is not a type — `alignas`, `const`,
+///   `static` — leaves this false on purpose: it says nothing about the type, so the next name still has room
+///   to be one. Reading it as "a specifier was consumed" is what made `alignas(16) MyType value;` take `MyType`
+///   for the declarator and leave `value` with nowhere to go.
 /// * `continues_a_qualified_name` — the loop walks `std::vector` one segment per iteration and every
 ///   segment is part of the same name.
 /// * `name_allowed` — whether a name may still join. `T x` lets `x` in and then spends the
@@ -665,8 +739,12 @@ fn continues_a_qualified_name(p: &CppParser) -> bool {
 ///   way, so it is the declarator and the parentheses are what initialises it. See
 ///   [`a_parenthesis_follows_the_name`] for the whole argument; it is what makes `Widget w(1, 2, 3);`
 ///   a declaration without asking the type table.
-fn name_joins_the_type(p: &CppParser, has_specifier: bool, name_allowed: bool) -> bool {
-    if !has_specifier || continues_a_qualified_name(p) {
+fn name_joins_the_type(p: &CppParser, has_type_specifier: bool, name_allowed: bool) -> bool {
+    // No type yet, so this name can only be the type.
+    if !has_type_specifier {
+        return true;
+    }
+    if continues_a_qualified_name(p) {
         return true;
     }
     if type_is_already_complete(p) || a_parenthesis_follows_the_name(p) {
@@ -785,8 +863,45 @@ fn a_parenthesis_follows_the_name(p: &CppParser) -> bool {
 /// The keyword is not left unrecognised: the branch above that parses a class-like head takes `struct Foo {`
 /// and `struct Foo;` before this is ever asked, and `enum class E` is handled there too. What reaches here is
 /// the bare keyword of a declaration whose name and declarator are still to come.
+/// # What the walk steps over
+/// # What the walk steps over
+///
+/// A run of `alignas(…)` specifiers, payloads and keywords alike: it is the one specifier whose tokens end in a
+/// bracket, and neither its payload nor its keyword finishes a type. Stepping over the whole run is what keeps
+/// `alignas(16) MyType value;` from reading `MyType` as a second name of a *finished* type.
+///
+/// Everything else that finishes no type is in the exclusion list at the end, and the walk is bounded by the
+/// statement's own tokens — a `;`, a brace, or the start of the file.
+///
+/// # Why the indices are raw
+///
+/// [`CppParser::current_token_index`] is what the walk starts from, and it indexes the source text's token array.
+/// [`CppParser::token_kind_at`] and [`CppParser::token_text_at`] index the same array, so every index here is raw
+/// and every question is asked with the same accessor family. Mixing in an index counted over *significant* tokens
+/// is the mistake this walk is most prone to, and it is invisible in the arithmetic.
 fn type_is_already_complete(p: &CppParser) -> bool {
     let mut index = p.current_token_index();
+
+    // Step back over any alignments written here, so the token judged is what the declaration began with.
+    while index > 0 {
+        let previous = index - 1;
+        match p.token_kind_at(previous) {
+            CppTokenKind::RightParen => {
+                let Some(keyword) = the_alignas_introducing_the_payload_ending_at(p, previous) else {
+                    break;
+                };
+                if keyword == 0 {
+                    return false;
+                }
+                index = keyword;
+            }
+            CppTokenKind::AlignasKeyword => {
+                index = previous;
+            }
+            _ => break,
+        }
+    }
+
     while index > 0 {
         index -= 1;
         let kind = p.token_kind_at(index);
@@ -801,6 +916,19 @@ fn type_is_already_complete(p: &CppParser) -> bool {
             continue;
         }
 
+        // A statement boundary means the walk ran out of *this* declaration without finding a type, which is the
+        // opposite of finding a complete one.
+        if matches!(
+            kind,
+            CppTokenKind::Semicolon
+                | CppTokenKind::LeftBrace
+                | CppTokenKind::RightBrace
+                | CppTokenKind::Eof
+                | CppTokenKind::None
+        ) {
+            return false;
+        }
+
         return !matches!(
             kind,
             CppTokenKind::ConstKeyword
@@ -813,6 +941,64 @@ fn type_is_already_complete(p: &CppParser) -> bool {
     }
 
     false
+}
+
+/// The raw index of the `alignas` keyword introducing the payload whose `)` is at `raw_index`, if that is what
+/// the parenthesis is.
+///
+/// Walks back over the payload's own brackets to its `(` and answers only when the token before it is the
+/// keyword. Bounded by the first token that cannot be inside an alignment — a `;`, a brace, or the start of the
+/// file — so a parenthesis belonging to something else cannot make this walk run away.
+fn the_alignas_introducing_the_payload_ending_at(
+    p: &CppParser,
+    raw_index: usize,
+) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut cursor = raw_index;
+
+    loop {
+        match p.token_kind_at(cursor) {
+            CppTokenKind::RightParen => depth += 1,
+            CppTokenKind::LeftParen => {
+                depth -= 1;
+                if depth == 0 {
+                    let keyword = the_significant_token_before(p, cursor)?;
+                    return (p.token_kind_at(keyword) == CppTokenKind::AlignasKeyword)
+                        .then_some(keyword);
+                }
+            }
+            CppTokenKind::Semicolon
+            | CppTokenKind::LeftBrace
+            | CppTokenKind::RightBrace
+            | CppTokenKind::Eof
+            | CppTokenKind::None => return None,
+            _ => {}
+        }
+
+        if cursor == 0 {
+            return None;
+        }
+        cursor -= 1;
+    }
+}
+
+/// The raw index of the nearest non-trivia token before `raw_index`, or `None` at the start of the file.
+fn the_significant_token_before(p: &CppParser, raw_index: usize) -> Option<usize> {
+    let mut cursor = raw_index;
+    while cursor > 0 {
+        cursor -= 1;
+        if !matches!(
+            p.token_kind_at(cursor),
+            CppTokenKind::Whitespace
+                | CppTokenKind::Newline
+                | CppTokenKind::LineContinuation
+                | CppTokenKind::LineComment
+                | CppTokenKind::BlockComment
+        ) {
+            return Some(cursor);
+        }
+    }
+    None
 }
 
 /// Is the cursor on `enum` followed by `class` or `struct`?

@@ -167,6 +167,15 @@ fn constructs_the_parser_reads() {
             "using Alias [[deprecated]] = int;",
             "template <typename T> [[nodiscard]] T attributed7();",
             "enum class Attributed8 { A [[deprecated]] = 1, B };",
+            // `alignas`, which is a specifier whose payload is a constant-expression *or* a type-id.
+            "alignas(16) struct Aligned { int x; };",
+            "alignas(16) int aligned_global;",
+            "alignas(int) int aligned_to_int;",
+            "alignas(16) alignas(32) int doubly_aligned;",
+            "struct Aligned2 { alignas(16) int member; };",
+            "alignas(16) Aligned2 aligned_object;",
+            "void aligned_param(alignas(16) int x);",
+            "alignas(16) char aligned_buffer[64];",
             "enum class E : unsigned char { A, B };",
             "static_assert(sizeof(int) == 4, \"int\");",
             "[[nodiscard]] int f();",
@@ -334,6 +343,11 @@ fn constructs_the_parser_reads() {
             // out of tokens and turned everything into error nodes.
             "friend void swap(Probe&, Probe&); int after = 0;",
             "friend class Other; int later = 0;",
+            // The same shape with a *declarator* after it rather than another whole declaration, which is the
+            // half the first pair does not reach: `Probe& method();` is a type, a reference and a name, and the
+            // specifier sequence has to know that the type was named even though the friend consumed it.
+            "friend void swap(Probe&, Probe&); Probe& method();",
+            "friend class Other; Probe& method2();",
         ],
     );
 }
@@ -370,16 +384,14 @@ fn constructs_the_parser_does_not_read_yet() {
     // the list above since it was written). Fold expressions came with the same change: `(ts + ...)` is the
     // ordinary binary rule with the `...` read as its right operand.
 
-    assert_does_not_read_yet(
-        Where::File,
-        &[
-            (
-                "alignas(16) struct A { int x; };",
-                "`alignas` is not a decl-specifier: the specifier loop has no branch for it, so the `(` is \
-                 read as an expression and the declaration reading is refused.",
-            ),
-        ],
-    );
+    // `alignas` used to be here, with the note that "the specifier loop has no branch for it, so the `(` is read
+    // as an expression and the declaration reading is refused".
+    //
+    // What it actually needed was three things, and only the first was the missing branch: the specifier itself
+    // (`AlignasSpec`, holding a payload that is a constant-expression *or* a type-id), `alignas` as a declaration
+    // anchor, and — the one that was not obvious — the specifier loop's "has a specifier been seen?" flag split
+    // into "has a **type** been seen?", because `alignas(16) MyType value;` consumes a specifier and names no
+    // type. Without the split the name was read as a second word of a finished type.
 
     assert_does_not_read_yet(
         Where::Class,

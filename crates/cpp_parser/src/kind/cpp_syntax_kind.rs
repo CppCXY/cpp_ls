@@ -458,6 +458,15 @@ pub enum CppSyntaxKind {
     /// e.g.: void func() noexcept;
     NoexceptSpec,
 
+    /// Alignment specifier - the `alignas` of `alignas(16) struct A { };`
+    /// e.g.: alignas(16), alignas(int), alignas(64)
+    ///
+    /// A node of its own rather than a bare keyword because the parentheses are its *payload* and the two
+    /// spellings hold different things: a constant expression (`alignas(16)`) or a type-id (`alignas(int)`),
+    /// and a type-id here may be a template-id or qualified name. A consumer asking "what alignment?" reads the
+    /// node; the token alone says only that some alignment was asked for.
+    AlignasSpec,
+
     /// CV qualifier - const/volatile qualifier for types
     /// e.g.: const int x;
     ConstQual,

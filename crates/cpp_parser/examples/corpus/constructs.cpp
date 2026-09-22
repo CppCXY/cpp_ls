@@ -283,6 +283,25 @@ void never() [[noreturn]] { for (;;) {} }
 template <typename T>
 [[nodiscard]] T identity(T value) { return value; }
 
+// --- alignment -------------------------------------------------------------
+struct Aligned {
+    alignas(16) int first;
+    alignas(32) alignas(16) int second;
+    alignas(double) char buffer[8];
+};
+
+alignas(16) int aligned_global = 0;
+alignas(16) alignas(64) Aligned doubly_aligned;
+
+// A named type after the alignment, which is the case that reads the *type* out of the specifiers rather than
+// taking the name for a declarator.
+alignas(16) Aligned aligned_object;
+
+struct Empty { };
+alignas(1) Empty after_a_declaration;
+
+void take_aligned(alignas(16) int value);
+
 // --- operators -------------------------------------------------------------
 struct Ops {
     Ops operator+(const Ops&) const;

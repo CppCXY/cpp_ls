@@ -382,7 +382,10 @@ fn parse_unary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
 /// [`super::types::parse_type_id`] uses the same sequence as a declaration, where a second name is the
 /// declarator. That is what is wanted: `sizeof(unsigned long)` and `(MyType)x` both need the type to be read
 /// in full, and a `sizeof` of a variable is not a declaration, so there is no declarator to protect.
-fn parse_type_id_or_expression(p: &mut CppParser) -> ParseResult {
+///
+/// Exposed for the grammar of `alignas`, which has the same ambiguity in the same place: `alignas(int)` holds a
+/// type-id and `alignas(16)` an expression, and nothing in the tokens tells them apart without trying.
+pub fn parse_type_id_or_expression(p: &mut CppParser) -> ParseResult {
     let checkpoint = p.checkpoint();
     let before = p.current_token_index();
 

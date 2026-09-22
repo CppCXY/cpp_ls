@@ -51,13 +51,19 @@ struct S {
 - 引用限定符 `operator bool() &&` 与右值引用类型 `operator T&&()` 共用 `&&`。判据是**源码相邻性**：`T&&(` 贴在一起是类型，`() &&` 分开是限定符（`types.rs::a_ref_qualifier_is_here`，新增 `CppParser::peek_token_range_at`）。
 - `parse_declaration` 里模板头之后直接调 `parse_using_declaration`（而非递归 `parse_declaration`），否则多开一层 `Declaration` marker，harness 断言 `a grammar rule unwound past the translation unit marker` 会 panic。
 
-### A2. 成员位置的 `alignas`
+### A2. 成员位置的 `alignas` —— 已修复
 
 ```cpp
 struct S { alignas(16) int x; };     // 4 个 ErrorNode，0 报错
 ```
 
-**性质**：缺规则。**成因**：`alignas` 根本不是 decl-specifier，specifier 循环没有分支，成员规则把它当表达式读。**处置**：需要新的 `CppSyntaxKind::AlignasSpec` 节点，并把 `alignas` 加进 `is_type_specifier_keyword`，这样 `can_begin_a_type` 才认它。与 B1 是同一件事。
+**性质**：缺规则。**成因**：`alignas` 不是 decl-specifier，specifier 循环没有分支，成员规则把它当表达式读。
+
+**修复**（`types.rs`）：新增 `CppSyntaxKind::AlignasSpec`，specifier 循环里加 `AlignasKeyword` 分支，载荷用 `parse_type_id_or_expression` 读（`alignas(16)` 是常量表达式、`alignas(int)` 是类型、`alignas(alignof(int))` 又是表达式——与 `sizeof(...)` 是同一个歧义，所以共用同一条规则）。
+
+**但真正的工作量在第三件事**：specifier 循环的「见过 specifier 了吗」这个标志必须拆成「见过**类型**了吗」。`alignas(16) MyType value;` 消费了一个 specifier 而**没有**命名类型，旧标志让 `MyType` 被读成完整类型的第二个名字，`value` 就没地方当声明符了。见下文。
+
+**过程中的教训**：我先用「回退扫描时跳过 alignas 载荷」的办法打补丁，改了四轮，每一轮都只修好一部分——`struct E { }; alignas(16) E e;` 好了，`alignas(16) alignas(32) E e;` 又坏了。根因是那个扫描本身就不该被问这个问题。**当补丁开始需要第二个补丁时，该换的是问题而不是答案。** 换成 `has_type_specifier` 之后，回退扫描里所有 alignas 相关代码都删掉了，一行不剩。
 
 ### A3. C++23 显式对象参数
 
@@ -71,13 +77,15 @@ struct S { void f(this S& self); };  // 6 个 ErrorNode，0 报错
 
 ## B 类：报错拒收，成本低
 
-### B1. `alignas`
+### B1. `alignas` —— 已修复
 
-```cpp
-alignas(16) struct A { int x; };     // expected primary expression @0..7
+见 A2。两处是同一件事，`alignas` 加进 `starts_declaration` 的锚点列表：
+
+```rust
+CppTokenKind::AlignasKeyword => true,
 ```
 
-**性质**：缺规则。**成因**：同 A2。**处置**：新增 `AlignasSpec` 节点 + `alignas` 进 `is_type_specifier_keyword`。成本 1–2 天。
+那个锚点不是优化。没有它，`alignas(16) E e;`（类型是**未限定名**）会走「试着读声明、失败、改读表达式」的弯路，最后在 `alignas` 上报 `expected primary expression`——一个 specifier 循环刚刚学会读的 token。带类型的名字（`alignas(16) int a;`）不走那条路，所以缺口只在未限定名下露出来。
 
 ### B2. 别名声明的数组/函数类型 —— 已修复
 
@@ -244,13 +252,22 @@ operator bool() &&  // && 和 ( 分开     -> 这是成员函数的引用限定�
 | 1 | 转换运算符（含限定名、引用限定符） | A1 | 半天 | **完成** |
 | 2 | 包展开（含折叠表达式、`sizeof...`、捕获列表） | C2 | 一天 | **完成** |
 | 3 | 别名 `using` 的数组/函数类型 + 属性位置 | B2, B3 | 一天 | **完成** |
-| 4 | `alignas`（含成员位置） | A2, B1 | 1–2 天 | 待办 |
+| 4 | `alignas`（含成员位置） | A2, B1 | 1–2 天 | **完成** |
 | 5 | concept / requires | C1 | 1–2 周 | 待办 |
 | — | `namespace` 与名字之间的属性 | B3 残留 | 半天 | 待办 |
 | — | 显式对象参数 | A3 | 中等 | 待办（低） |
 | — | 逗号运算符、`void()` | B4, B5 | 中等/低 | 待办（低） |
 | — | `(MyType*)p` | T1 | — | **不做** |
 | — | `asm volatile`、`__attribute__` | D | — | **不做** |
+
+## 一个反复出现的教训
+
+第 1、2、4 项都撞上了同一件事，值得单独记下来：**改一个公共入口的读法，会同时改掉所有"自己拼这串 token"的规则，而 `cargo test` 全绿不代表没坏。**
+
+- 第 2 项（让 `...` 在 `parse_expr` 里多一种含义）弄坏了 GNU case 区间和 lambda 捕获列表——两个都是语料库和抽查发现的。
+- 第 4 项（把「见过 specifier」拆成「见过类型」）弄坏了 `std::vector<int> values;`（specifier 以 `>` 结束）和 `friend` 之后的成员（friend 的载荷就是后面整个声明）。
+
+两个都是**同一个标志的两种边界**，而且都不是 `alignas` 测试能覆盖的。所以维护约定第 5 条不是形式主义：改这类规则时，先把"哪些地方自己拼这串 token"列出来，逐个验证。
 
 ## 维护约定
 

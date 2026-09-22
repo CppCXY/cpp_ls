@@ -700,6 +700,25 @@ impl<'a> CppParser<'a> {
         self.type_names.leave_scope();
     }
 
+    /// The kind of the token the parser consumed most recently, skipping the trivia after it.
+    ///
+    /// The answer to "what did the rule that just ran end on?", which the cursor cannot give: after a `bump` the
+    /// cursor is on the *next* token, so a rule that has to describe its own last token has to walk back. Used by
+    /// the specifier sequence, which asks the question of the specifier it just consumed.
+    ///
+    /// `None` at the start of the file, where nothing has been consumed.
+    pub fn last_consumed_token_kind(&self) -> Option<CppTokenKind> {
+        let mut index = self.token_index;
+        while index > 0 {
+            index -= 1;
+            let kind = self.tokens.get(index).map(|token| token.kind)?;
+            if !is_trivia_kind(kind) {
+                return Some(kind);
+            }
+        }
+        None
+    }
+
     /// The text of the token at `index`, or empty when there is none.
     ///
     /// The companion to [`CppParser::token_kind_at`], for the walks that go *backwards* over the tokens already

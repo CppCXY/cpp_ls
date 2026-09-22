@@ -1870,6 +1870,15 @@ pub fn starts_declaration(p: &CppParser) -> bool {
         | CppTokenKind::EnumKeyword
         | CppTokenKind::ConceptKeyword => true,
 
+        // `alignas` cannot begin an expression either — its parentheses hold an alignment, not a value being
+        // used — so a declaration that starts with it is a declaration and does not need the speculative pass.
+        //
+        // The anchor is not an optimisation here. Without it the declaration reading is *tried and abandoned*:
+        // `alignas(16) E e;` with an unqualified name for the type reaches the expression rule, fails at
+        // `alignas`, and reports `expected primary expression` against a token the specifier loop had just
+        // learned to read.
+        CppTokenKind::AlignasKeyword => true,
+
         // These are specifiers, but several of them also begin expressions: `const` cannot,
         // `static` cannot, `auto` cannot — while `decltype(x)` and `noexcept(...)` can.
         CppTokenKind::ConstKeyword
