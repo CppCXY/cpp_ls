@@ -90,6 +90,7 @@ pub struct MemoryFiles {
     files: HashMap<String, String>,
     case_insensitive: bool,
     reads: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    probes: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl MemoryFiles {
@@ -117,6 +118,26 @@ impl MemoryFiles {
         self.reads
             .lock()
             .expect("the read log is not poisoned")
+            .clone()
+    }
+
+    /// How many times a path has been **looked for**, by normalized key.
+    ///
+    /// The counterpart of [`MemoryFiles::reads_of`], and the question it answers is the one the resolver asks: a
+    /// candidate path is probed once per `#include` that could name it. So "did anything search for this header"
+    /// is answerable here and nowhere else — a cache hit that never calls `exists` is a hit that never resolved
+    /// an include, which is a hit that never built a summary.
+    pub fn exists_of(&self, path: impl AsRef<Path>) -> usize {
+        let wanted = normalize_path(path.as_ref(), self.case_insensitive);
+        let probes = self.probes.lock().expect("the probe log is not poisoned");
+        probes.iter().filter(|probe| **probe == wanted).count()
+    }
+
+    /// Every path looked for, in order.
+    pub fn probes(&self) -> Vec<String> {
+        self.probes
+            .lock()
+            .expect("the probe log is not poisoned")
             .clone()
     }
 
@@ -161,8 +182,14 @@ impl FileProvider for MemoryFiles {
     }
 
     fn exists(&self, path: &Path) -> bool {
-        self.files
-            .contains_key(&normalize_path(path, self.case_insensitive))
+        let key = normalize_path(path, self.case_insensitive);
+
+        self.probes
+            .lock()
+            .expect("the probe log is not poisoned")
+            .push(key.clone());
+
+        self.files.contains_key(&key)
     }
 
     fn is_case_insensitive(&self) -> bool {
@@ -402,6 +429,28 @@ mod tests {
         assert_eq!(first, again, "two spellings of one path are one file");
         assert_ne!(first, other);
         assert_eq!(interner.len(), 2);
+    }
+
+    #[test]
+    fn a_read_and_a_search_are_counted_separately() {
+        // The two questions this double exists to answer, and they are not the same one: a file that was *read*
+        // was parsed or hashed, and a path that was *looked for* was a candidate of some `#include`. A cache hit
+        // is the case where the second number stays put.
+        let files = MemoryFiles::new().with_file("/p/a.h", "int x;\n");
+
+        assert_eq!(files.exists_of("/p/a.h"), 0);
+        assert!(files.exists(Path::new("/p/a.h")));
+        assert!(files.exists(Path::new("/p/./a.h")), "spellings fold");
+        assert_eq!(files.exists_of("/p/a.h"), 2);
+        assert_eq!(
+            files.reads_of("/p/a.h"),
+            0,
+            "looking for a file is not reading it"
+        );
+
+        assert_eq!(files.read(Path::new("/p/a.h")).as_deref(), Some("int x;\n"));
+        assert_eq!(files.reads_of("/p/a.h"), 1);
+        assert_eq!(files.probes().len(), 2, "and the two logs are separate");
     }
 
     #[test]

@@ -14,7 +14,7 @@
 //! table when the caller has one.
 //!
 //! Nothing is reported as an error either. A directive whose arguments do not parse is
-//! [`Directive::Malformed`], not a diagnostic: a file mid-edit has directives without arguments, and an
+//! [`Directive::Other`], not a diagnostic: a file mid-edit has directives without arguments, and an
 //! editor that flags `#if` on the line the user is still typing is worse than one that stays quiet.
 
 use cpp_parser::{CppSyntaxKind, CppSyntaxNode, CppTokenKind, SourceRange};

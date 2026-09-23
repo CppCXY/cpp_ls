@@ -30,12 +30,11 @@
 //! An `#include` written inside an `#if` is a fact about the text, not about a compilation: whether the compiler
 //! took that branch depends on macros the index does not have. So a declaration reached only through a
 //! **guarded** include is reported as [`Known::Unknown`] rather than as visible or invisible — the same rule the
-//! rest of the crate follows, and the reason [`IncludeFact`] carries a guard at all.
+//! rest of the crate follows, and the reason [`IncludeFact`](crate::summary::IncludeFact) carries a guard at all.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::cache::MacroEnvironment;
 use crate::include::paths::normalize_path;
 use crate::summary::{DeclFact, FactGuard, FileSummary};
 use crate::symbol::{Known, UnknownReason};
@@ -191,43 +190,6 @@ impl ProjectIndex {
             .get(&normalize(path))
             .map(|includers| includers.iter().map(PathBuf::from).collect())
             .unwrap_or_default()
-    }
-
-    /// The macro environment a file is entered with, for the cache key.
-    ///
-    /// The walk covers the file itself and everything it transitively includes, adding the content hash of each
-    /// one that defines a macro. See [`MacroEnvironment`] for why the answer is a set of files rather than a set
-    /// of macros, and why a file that defines nothing is deliberately absent.
-    ///
-    /// A file the index has never seen contributes nothing and stops nothing: its own includes are unknown, so
-    /// the environment is *incomplete* — which is what the caller must treat it as, because a summary keyed on
-    /// an incomplete environment would be reused in a context where it is wrong.
-    pub fn macro_environment(&self, path: &Path) -> (MacroEnvironment, bool) {
-        let mut environment = MacroEnvironment::new();
-        let mut visited = HashSet::new();
-        let mut complete = true;
-        let mut pending = vec![normalize(path)];
-
-        while let Some(current) = pending.pop() {
-            if !visited.insert(current.clone()) {
-                continue;
-            }
-
-            let Some(summary) = self.summaries.get(&current) else {
-                // The file is not indexed, so nothing is known about what it defines or includes. The caller is
-                // told rather than given a key that looks complete.
-                complete = false;
-                continue;
-            };
-
-            environment.add(summary.key.content_hash, !summary.macros.is_empty());
-
-            for target in include_targets(summary) {
-                pending.push(target);
-            }
-        }
-
-        (environment, complete)
     }
 
     /// The files in which `name` is visible, in insertion order.
@@ -471,7 +433,7 @@ mod tests {
         for (path, source) in files {
             // The includes are resolved by hand here rather than through a `FileProvider`, because what these
             // tests are about is the graph that results — not the search that produced it.
-            let mut summary = summarize(Path::new(path), source, SummaryKey::new(0, 0, 0));
+            let mut summary = summarize(Path::new(path), source, SummaryKey::new(0, 0));
             for include in &mut summary.includes {
                 include.resolved = Some(std::path::PathBuf::from(format!("/p/{}", include.spelling)));
             }
@@ -685,7 +647,7 @@ mod tests {
 
         assert!(index.includers_of(Path::new("/p/widget.h")).len() == 1);
 
-        let mut edited = summarize(Path::new("/p/main.cpp"), "void f() { }\n", SummaryKey::new(1, 0, 0));
+        let mut edited = summarize(Path::new("/p/main.cpp"), "void f() { }\n", SummaryKey::new(1, 0));
         for include in &mut edited.includes {
             include.resolved = Some(std::path::PathBuf::from(format!("/p/{}", include.spelling)));
         }
@@ -702,40 +664,6 @@ mod tests {
             ),
             "and the name is no longer visible there"
         );
-    }
-
-    #[test]
-    fn the_macro_environment_covers_the_included_files_that_define_macros() {
-        let index = index(&[
-            ("/p/config.h", "#define FEATURE 1\n"),
-            ("/p/plain.h", "// nothing defined here\n"),
-            (
-                "/p/main.cpp",
-                "#include \"config.h\"\n#include \"plain.h\"\nint x;\n",
-            ),
-        ]);
-
-        let (environment, complete) = index.macro_environment(Path::new("/p/main.cpp"));
-
-        assert!(complete, "every file on the chain is indexed");
-        assert_eq!(
-            environment.len(),
-            1,
-            "only the file that defines a macro is part of the environment"
-        );
-        assert!(!environment.is_empty());
-    }
-
-    #[test]
-    fn an_unindexed_file_makes_the_environment_incomplete() {
-        // The key must not be built as though the answers were known: a summary keyed on a partial environment
-        // would be reused in a context where it is wrong.
-        let index = index(&[("/p/main.cpp", "#include \"unknown.h\"\nint x;\n")]);
-
-        let (environment, complete) = index.macro_environment(Path::new("/p/main.cpp"));
-
-        assert!(!complete, "a header that is not indexed is not a complete answer");
-        assert!(environment.is_empty());
     }
 
     #[test]
@@ -775,7 +703,7 @@ mod tests {
 
         // The file being queried is indexed too, and its summary must describe the same text whose tree is used
         // below — otherwise the two would disagree about offsets, and the tests would pass for the wrong reason.
-        let mut summary = summarize(Path::new(from), source, SummaryKey::new(0, 0, 0));
+        let mut summary = summarize(Path::new(from), source, SummaryKey::new(0, 0));
         for include in &mut summary.includes {
             include.resolved = Some(std::path::PathBuf::from(format!("/p/{}", include.spelling)));
         }

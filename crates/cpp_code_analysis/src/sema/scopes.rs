@@ -1537,8 +1537,8 @@ pub fn macro_origin(
 /// The syntax kinds this layer reads a declaration out of, for a consumer auditing coverage.
 ///
 /// Returned rather than documented so that a test can assert the set has not silently shrunk, which is the
-/// failure mode of a match with a catch-all arm: a construct added to the grammar lands in
-/// [`ScopeWalker::descend`] and contributes nothing, and nothing complains.
+/// failure mode of a match with a catch-all arm: a construct added to the grammar reaches the walker's
+/// `descend` and contributes nothing, and nothing complains.
 pub fn declaring_kinds() -> &'static [CppSyntaxKind] {
     &[
         CppSyntaxKind::NamespaceDecl,

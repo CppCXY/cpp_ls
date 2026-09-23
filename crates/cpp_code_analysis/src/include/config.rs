@@ -16,7 +16,11 @@
 //! a plausible guess: an empty configuration makes `#if` conditions `Unknown`, which is honest, while a
 //! guessed one makes them wrong, which is not.
 //!
-//! [`CompilerDatabase`]: crate::include::CompilerDatabase
+//! A caller with a build system reads it from the project's [`compile_commands.json`] rather than writing it
+//! down twice — see [`parse_compile_commands`], which turns a translation unit's command line into exactly these
+//! fields.
+//!
+//! [`compile_commands.json`]: https://clang.llvm.org/docs/JSONCompilationDatabase.html
 
 use std::path::{Path, PathBuf};
 

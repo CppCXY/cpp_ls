@@ -50,7 +50,14 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// It is written into the file as well as into the key, because a decoder can be handed a file it did not
 /// choose: a caller that computed a key with the wrong format version, or a stale directory. Reading the number
 /// back is what makes that a rejected read instead of a misread one.
-pub const CODEC_VERSION: u32 = 1;
+///
+/// # Version 2
+///
+/// The key lost its `macro_env_hash`, so the header record lost a `u64`. `FORMAT_VERSION` deliberately did **not**
+/// move with it: removing a component from the key can only make an old entry unreachable, never mis-served,
+/// because the stored key is compared against a freshly computed one before the summary is used. The two numbers
+/// move for different reasons, and that is the reason this one exists.
+pub const CODEC_VERSION: u32 = 2;
 
 /// Write a summary as bytes.
 ///
@@ -64,7 +71,6 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
     put_u32(&mut out, summary.key.format_version);
     put_u64(&mut out, summary.key.content_hash);
     put_u64(&mut out, summary.key.context_hash);
-    put_u64(&mut out, summary.key.macro_env_hash);
 
     put_path(&mut out, &summary.path);
 
@@ -129,7 +135,6 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
         format_version: reader.u32()?,
         content_hash: reader.u64()?,
         context_hash: reader.u64()?,
-        macro_env_hash: reader.u64()?,
     };
     let path = reader.path()?;
 
@@ -203,7 +208,7 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
 /// caller is reading something it should not touch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeError {
-    /// The file does not begin with [`MAGIC`].
+    /// The file does not begin with the format's magic number.
     NotASummary,
     /// The byte format is not [`CODEC_VERSION`].
     UnsupportedVersion,
@@ -499,7 +504,7 @@ fn symbol_kind_code(kind: SymbolKind) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{CODEC_VERSION, DecodeError, MAGIC, decode, encode};
+    use super::{CODEC_VERSION, DecodeError, MAGIC, decl_kind_code, decode, encode};
     use crate::cache::SummaryKey;
     use crate::preprocess::directive::IncludeForm;
     use crate::summary::{
@@ -515,7 +520,7 @@ mod tests {
     fn every_field() -> FileSummary {
         FileSummary {
             path: std::path::PathBuf::from("/project/src/widget.cpp"),
-            key: SummaryKey::new(0x1111_2222_3333_4444, 7, 0xaaaa_bbbb_cccc_dddd),
+            key: SummaryKey::new(0x1111_2222_3333_4444, 0xaaaa_bbbb_cccc_dddd),
             declarations: vec![
                 DeclFact {
                     name: "Widget".to_string(),
@@ -585,7 +590,7 @@ mod tests {
 
     #[test]
     fn an_empty_summary_round_trips() {
-        let original = FileSummary::empty("/p/empty.h", SummaryKey::new(0, 0, 0));
+        let original = FileSummary::empty("/p/empty.h", SummaryKey::new(0, 0));
         let decoded = decode(&encode(&original)).expect("an empty summary is still a summary");
 
         assert_eq!(decoded, original);
@@ -637,10 +642,11 @@ mod tests {
     fn an_implausible_count_is_rejected_without_allocating() {
         // A count read out of a corrupt file can be four billion. The decoder must notice that the file cannot
         // possibly hold that many records before it reserves room for them.
-        let mut bytes = encode(&every_field());
+        let summary = every_field();
+        let mut bytes = encode(&summary);
 
         // Overwrite the declaration count with a number larger than the remaining length.
-        let count_at = MAGIC.len() + 4 + 4 + 8 + 8 + 8 + 4 + every_field().path.as_os_str().len();
+        let count_at = declaration_count_at(&summary);
         bytes[count_at..count_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
 
         assert_eq!(decode(&bytes).unwrap_err(), DecodeError::Implausible);
@@ -648,24 +654,44 @@ mod tests {
 
     #[test]
     fn a_field_outside_its_vocabulary_is_rejected() {
-        let mut bytes = encode(&every_field());
+        let summary = every_field();
+        let mut bytes = encode(&summary);
 
-        // The first declaration's kind, which is one byte somewhere after the header and the path. Finding it by
-        // construction rather than by a fixed offset keeps this test from breaking when the header changes.
-        let kind_at = bytes
-            .windows(1)
-            .enumerate()
-            .skip(MAGIC.len())
-            .find_map(|(index, window)| {
-                // `DeclKind::Type` is 1 and it is the first one-byte field after the name and scope.
-                (window[0] == 1).then_some(index)
-            })
-            .expect("the encoding contains the kind byte");
-
+        // The first declaration's kind, found by adding up the layout rather than by scanning for a byte that
+        // looks like it. The scanning version passed for a while by corrupting a byte inside a hash: it found the
+        // first `1` after the magic, which is not a field at all once the header's shape changes.
+        let kind_at = first_declaration_kind_at(&summary);
+        assert_eq!(bytes[kind_at], decl_kind_code(summary.declarations[0].kind));
         bytes[kind_at] = 99;
 
-        // Either the byte picked out was the kind (rejected) or it was part of a length (also rejected, as
-        // implausible). Both are the contract: a corrupt file never decodes into a summary.
-        assert!(decode(&bytes).is_err());
+        assert_eq!(
+            decode(&bytes).unwrap_err(),
+            DecodeError::BadDiscriminant,
+            "a vocabulary byte outside its vocabulary is a reject, not a default"
+        );
+    }
+
+    /// The offset of the declaration count in an encoded summary.
+    ///
+    /// Spelled out from the layout `encode` writes: the magic and version, the key, the path, then the count.
+    /// It assumes the fixture's path is ASCII, which is what makes the path's byte length its `char` count. Keep
+    /// it in step with `encode` — a test that computes an offset has to be told when the layout moves.
+    fn declaration_count_at(summary: &FileSummary) -> usize {
+        const HEADER: usize = MAGIC.len() + 4 + 4 + 8 + 8;
+
+        HEADER + 4 + summary.path.to_string_lossy().len()
+    }
+
+    /// The offset of the first declaration's kind byte: past its name and its optional scope.
+    fn first_declaration_kind_at(summary: &FileSummary) -> usize {
+        let first = &summary.declarations[0];
+        let mut at = declaration_count_at(summary) + 4 + 4 + first.name.len();
+
+        at += match &first.scope {
+            Some(scope) => 1 + 4 + scope.len(),
+            None => 1,
+        };
+
+        at
     }
 }

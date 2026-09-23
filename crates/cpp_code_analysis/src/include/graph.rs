@@ -426,8 +426,8 @@ pub fn walk_scoped<F: FileProvider>(
 ///
 /// The degraded analysis for a header whose translation unit is not known — see [`WalkScope::FileOnly`]. It
 /// reads `source`, reads no other file, and reports what the file says about itself: its guard, the macros it
-/// defines, and its `#include` edges, which are recorded as [`Visit::Skipped(SkipReason::OutOfScope)`] rather
-/// than resolved. The result is the same shape as [`walk`]'s, so a consumer can swap one for the other
+/// defines, and its `#include` edges, which are recorded as [`Visit::Skipped`] with
+/// [`SkipReason::OutOfScope`] rather than resolved. The result is the same shape as [`walk`]'s, so a consumer can swap one for the other
 /// without a second code path, and every entry it produces reports
 /// [`FileEntry::context_is_complete`] as `false`.
 pub fn file_only<F: FileProvider>(
@@ -930,7 +930,7 @@ fn record(graph: &mut FileGraph, file: FileId, entry: FileEntry) {
 ///
 /// Names, not definitions, and deliberately so. Two questions need answering at this stage — "is `FOO`
 /// defined" for an `#ifdef`, and "start this file off with these names" for the chain — and both are about
-/// names. A macro's *value* matters once expansion runs, and that is [`crate::expand`]'s job with a real
+/// names. A macro's *value* matters once expansion runs, and that is [`crate::expand::expand`]'s job with a real
 /// [`crate::macros::MacroTable`]; carrying values here would duplicate the table without the ordering rules
 /// that make it correct.
 ///

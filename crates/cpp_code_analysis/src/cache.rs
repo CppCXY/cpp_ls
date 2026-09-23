@@ -13,8 +13,7 @@
 //!
 //! ```text
 //! content_hash     what the file says          — a change here changes the summary
-//! context_hash     compiler settings, -D, include paths, and the file's own directory; see below
-//! macro_env_hash   the macros visible when the file is entered — the hard one; see below
+//! context_hash     compiler settings and the file's own directory; see below
 //! format_version   the producer               — a parser or schema change makes every summary wrong
 //! ```
 //!
@@ -31,11 +30,28 @@
 //! different parser is not "probably still fine", it is a **silent** wrong answer. Bumping the number is the one
 //! invalidation that must never be forgotten, so it lives in the key rather than in a migration step.
 //!
-//! `macro_env_hash` is the subtle one. It is *not* the set of macro values in scope — that would change with every
-//! `#define` in every header and make the cache useless. It is the **set of content hashes of the files that
-//! define macros on the way in**, with include-guarded repeats collapsed: that set changes exactly when something
-//! that could change the macros changes, and `detect_guard` is what keeps it from growing a duplicate per
-//! inclusion path.
+//! # Why the macro environment is *not* in the key
+//!
+//! A fourth part used to be here: the set of content hashes of the files that define macros on the way in. It was
+//! the one part that could not be computed from the text and the path — the file's own `#define`s and its own
+//! `#include`s are products of the parse — and that had a consequence the design did not intend: **a lookup could
+//! not happen until after the parse**, so the disk cache never saved the thing it exists to save. It saved writes.
+//!
+//! It is also not needed, and the evidence is a chain of three facts about the producer:
+//!
+//! * [`crate::build_scopes`] takes only the syntax tree, so declarations are collected from the whole file;
+//! * [`crate::build_facts`] takes the preprocessing state to find **where the directives are**, not to decide
+//!   which branch was taken — every fact records the `#if` it was written in as a [`crate::FactGuard`] and lets
+//!   the consumer decide, which is the whole reason guards are stored rather than applied;
+//! * `#include MACRO` — the one directive whose meaning depends on expansion — is **never** resolved
+//!   (`crate::include`'s resolver returns `Unresolved` for it, and says so), so a file that writes one is not
+//!   stored at all.
+//!
+//! So a summary is a function of the text, the directory, the configuration and which candidate headers exist —
+//! not of which macros were in force. **If that ever stops being true** — macro expansion inside declarations, or
+//! pruning the untaken branch of an `#if` — the environment has to come back here *and* [`FORMAT_VERSION`] has to
+//! be bumped in the same change, because summaries already on disk would be silently stale rather than merely
+//! unreachable.
 //!
 //! # Why the hash is written here rather than taken from `std`
 //!
@@ -63,36 +79,37 @@ pub const CACHE_DIRECTORY: &str = ".cppls";
 
 /// Everything that determines what a summary of one file contains.
 ///
-/// Built by the caller, which is the only place that knows the compiler configuration, the macro environment and
-/// the directory the file is compiled in; this type's job is to turn them into one stable key.
+/// Built by the caller, which is the only place that knows the compiler configuration and the directory the file
+/// is compiled in; this type's job is to turn them into one stable key.
+///
+/// There is no macro-environment part, and the module documentation gives the evidence for why. The practical
+/// consequence is the one that matters: **every part of this key is computable from the text and the path**, so a
+/// lookup can happen before the file has been parsed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SummaryKey {
     pub content_hash: u64,
     pub context_hash: u64,
-    pub macro_env_hash: u64,
     pub format_version: u32,
 }
 
 impl SummaryKey {
     /// The key of a file whose text and compilation context are known.
-    pub fn new(content_hash: u64, context_hash: u64, macro_env_hash: u64) -> Self {
+    pub fn new(content_hash: u64, context_hash: u64) -> Self {
         SummaryKey {
             content_hash,
             context_hash,
-            macro_env_hash,
             format_version: FORMAT_VERSION,
         }
     }
 
     /// The key, as the hex string the file name is built from.
     ///
-    /// The four parts are hashed **together** rather than concatenated as text: the file name stays one fixed
-    /// width, so a directory holds a predictable number of entries and nothing has to be parsed back out.
+    /// The parts are hashed **together** rather than concatenated as text: the file name stays one fixed width, so
+    /// a directory holds a predictable number of entries and nothing has to be parsed back out.
     pub fn file_stem(self) -> String {
-        let mut bytes = Vec::with_capacity(32);
+        let mut bytes = Vec::with_capacity(24);
         bytes.extend_from_slice(&self.content_hash.to_le_bytes());
         bytes.extend_from_slice(&self.context_hash.to_le_bytes());
-        bytes.extend_from_slice(&self.macro_env_hash.to_le_bytes());
         bytes.extend_from_slice(&self.format_version.to_le_bytes());
         format!("{:016x}", fnv1a64(&bytes))
     }
@@ -139,85 +156,9 @@ pub fn content_hash(text: &str) -> u64 {
     fnv1a64(text.as_bytes())
 }
 
-/// The macros that were in force when a file was entered, as the cache keys on them.
-///
-/// # Why this is a set of files rather than a set of macros
-///
-/// The obvious key would be "the name and value of every macro defined on the way in", and it cannot be used: a
-/// header that defines one more macro would change the key of every file below it *and* of every file below
-/// those, so one keystroke in one header invalidates the whole project — which is exactly what the cache exists
-/// to avoid.
-///
-/// What is stored instead is the set of **content hashes of the files that define macros** along the way. That
-/// set changes when something that could change the macros changes, and it changes for one file at a time: a
-/// header edited in a comment has a new content hash, so the files below it are rebuilt, while a file that
-/// defines nothing new is not in the set at all and does not propagate anything.
-///
-/// # What it deliberately does not include
-///
-/// A file with no `#define` contributes nothing, even though it may `#include` something that does. Its own
-/// includes are added by the walk, so the macros it brings in are accounted for by the file that wrote them —
-/// adding the includer as well would make every file in a chain part of every key below it.
-///
-/// # Cycles
-///
-/// A file is added at most once, so `a.h` including `b.h` including `a.h` terminates. That is not a special
-/// case: an include guard means the compiler reads the second visit's *nothing*, so the set of files that
-/// contributed macros is the same either way.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MacroEnvironment {
-    /// The content hashes of the files that define macros, deduplicated.
-    defining_files: std::collections::BTreeSet<u64>,
-}
-
-impl MacroEnvironment {
-    pub fn new() -> Self {
-        MacroEnvironment::default()
-    }
-
-    /// Add a file that defines macros, if it defines any.
-    ///
-    /// `defines_any_macro` is a fact about the file — whether any of its facts is a macro — and a file that
-    /// defines none is deliberately not recorded. See the type's documentation.
-    pub fn add(&mut self, content_hash: u64, defines_any_macro: bool) {
-        if defines_any_macro {
-            self.defining_files.insert(content_hash);
-        }
-    }
-
-    /// How many files contributed.
-    pub fn len(&self) -> usize {
-        self.defining_files.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.defining_files.is_empty()
-    }
-
-    /// The hash a [`SummaryKey`] records.
-    ///
-    /// Built from the **sorted** set, so that the same files in a different include order give the same key: two
-    /// orders that see the same macro definitions produce the same summary, and making them differ would throw
-    /// away a cache hit for a difference that does not change any answer.
-    ///
-    /// `BTreeSet` is what makes that ordering free rather than something to remember.
-    pub fn hash(&self) -> u64 {
-        let mut bytes = Vec::with_capacity(self.defining_files.len() * 8);
-
-        for hash in &self.defining_files {
-            bytes.extend_from_slice(&hash.to_le_bytes());
-        }
-
-        // A domain separator, so that a file whose content hash happens to equal the hash of an empty set cannot
-        // be confused with an environment that has no defining files.
-        bytes.extend_from_slice(b"cppls-macro-env");
-        fnv1a64(&bytes)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{CACHE_DIRECTORY, FORMAT_VERSION, MacroEnvironment, SummaryKey, content_hash, fnv1a64};
+    use super::{CACHE_DIRECTORY, FORMAT_VERSION, SummaryKey, content_hash, fnv1a64};
     use std::path::Path;
 
     #[test]
@@ -232,17 +173,12 @@ mod tests {
 
     #[test]
     fn every_part_of_the_key_changes_the_key() {
-        let base = SummaryKey::new(1, 2, 3);
-        assert_eq!(
-            base,
-            SummaryKey::new(1, 2, 3),
-            "the same inputs are the same key"
-        );
+        let base = SummaryKey::new(1, 2);
+        assert_eq!(base, SummaryKey::new(1, 2), "the same inputs are the same key");
 
         let variants = [
-            SummaryKey::new(9, 2, 3),
-            SummaryKey::new(1, 9, 3),
-            SummaryKey::new(1, 2, 9),
+            SummaryKey::new(9, 2),
+            SummaryKey::new(1, 9),
             SummaryKey {
                 format_version: FORMAT_VERSION + 1,
                 ..base
@@ -265,7 +201,7 @@ mod tests {
         assert_eq!(content_hash("int x;\n"), content_hash("int x;\n"));
         assert_ne!(content_hash("int x;\n"), content_hash("int y;\n"));
 
-        let key = SummaryKey::new(content_hash("int x;\n"), 7, 11);
+        let key = SummaryKey::new(content_hash("int x;\n"), 7);
         let from_one_root = key.path_under(Path::new("/one/project"));
         let from_another = key.path_under(Path::new("D:/elsewhere/checkout"));
         assert_eq!(
@@ -277,7 +213,7 @@ mod tests {
 
     #[test]
     fn the_layout_is_sharded_and_inside_the_project() {
-        let key = SummaryKey::new(0, 0, 0);
+        let key = SummaryKey::new(0, 0);
         let path = key.path_under(Path::new("/p"));
         let text = path.to_string_lossy().replace('\\', "/");
 
@@ -296,75 +232,5 @@ mod tests {
             16,
             "one fixed-width name, nothing to parse back"
         );
-    }
-
-    #[test]
-    fn a_file_that_defines_nothing_is_not_part_of_the_environment() {
-        // The property the whole design rests on: a header that merely *includes* things does not become part of
-        // every key below it, so editing it in a way that changes no macro changes no summary.
-        let mut environment = MacroEnvironment::new();
-        environment.add(content_hash("// just a comment\n"), false);
-
-        assert!(environment.is_empty());
-        assert_eq!(environment.len(), 0);
-    }
-
-    #[test]
-    fn a_file_that_defines_a_macro_is_part_of_it() {
-        let mut environment = MacroEnvironment::new();
-        environment.add(content_hash("#define A 1\n"), true);
-
-        assert_eq!(environment.len(), 1);
-        assert!(!environment.is_empty());
-    }
-
-    #[test]
-    fn the_same_files_in_any_order_hash_the_same() {
-        // Two include orders that see the same macro definitions produce the same summary — making them differ
-        // would throw away a cache hit for a difference that changes no answer.
-        let one = content_hash("#define A 1\n");
-        let two = content_hash("#define B 2\n");
-
-        let mut forwards = MacroEnvironment::new();
-        forwards.add(one, true);
-        forwards.add(two, true);
-
-        let mut backwards = MacroEnvironment::new();
-        backwards.add(two, true);
-        backwards.add(one, true);
-
-        assert_eq!(forwards.hash(), backwards.hash());
-    }
-
-    #[test]
-    fn a_different_set_of_files_is_a_different_hash() {
-        let one = content_hash("#define A 1\n");
-        let two = content_hash("#define A 2\n");
-
-        let mut first = MacroEnvironment::new();
-        first.add(one, true);
-
-        let mut second = MacroEnvironment::new();
-        second.add(two, true);
-
-        assert_ne!(
-            first.hash(),
-            second.hash(),
-            "one character in one header must change the key of everything below it"
-        );
-        assert_ne!(first.hash(), MacroEnvironment::new().hash());
-    }
-
-    #[test]
-    fn adding_the_same_file_twice_counts_once() {
-        // What makes a cycle terminate, and what keeps an include-guarded header included twice from changing
-        // the key: the second visit contributes nothing new.
-        let mut environment = MacroEnvironment::new();
-        let hash = content_hash("#define A 1\n");
-
-        environment.add(hash, true);
-        environment.add(hash, true);
-
-        assert_eq!(environment.len(), 1);
     }
 }

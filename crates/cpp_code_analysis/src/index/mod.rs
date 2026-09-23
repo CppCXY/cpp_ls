@@ -35,12 +35,14 @@ use cpp_parser::{CppParser, CppSyntaxTree, ParserConfig};
 
 pub mod project;
 pub mod store;
+pub mod worklist;
 
 pub use project::{
     IncludeVisibility, ProjectDefinition, ProjectIndex, VisibleDeclaration,
     definition_across_files,
 };
 pub use store::{StoreStats, SummaryStore};
+pub use worklist::{Priority, Step, StepOutcome, Worklist};
 
 use crate::cache::{SummaryKey, content_hash};
 use crate::include::config::CompilerConfig;
@@ -70,17 +72,16 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
 
     /// Build the summary of the file at `path`, whose text is `source`.
     ///
-    /// `key` is the caller's, because only the caller knows the configuration hash and the macro environment —
-    /// see [`SummaryKey`]. It is stored in the summary rather than recomputed, so that a loaded entry can be
-    /// checked against the file it claims to describe.
+    /// `key` is the caller's, because only the caller knows the compilation context — the configuration and the
+    /// directory the file sits in. It is stored in the summary rather than recomputed, so that a loaded entry can
+    /// be checked against the file it claims to describe.
     ///
     /// # The one part of the key that is *not* the caller's
     ///
-    /// `key.content_hash` is **replaced** by the hash of `source`. That is not a courtesy: [`crate::SummaryStore`]
-    /// has to build a file before it can know the file's environment, so it passes a placeholder key, and storing
-    /// the placeholder verbatim made every summary in a project record content hash `0` — one cache entry for the
-    /// whole project, and a macro environment hashed from a set of zeroes. `source` is the same text that was just
-    /// parsed and no caller can describe it more accurately than hashing it, so the authority is here.
+    /// `key.content_hash` is **replaced** by the hash of `source`. `source` is the same text that was just parsed,
+    /// and no caller can describe it more accurately than hashing it — while a caller that got it wrong would
+    /// store a summary under a name that does not describe its own text, which is a wrong answer rather than a
+    /// cache miss. The authority is here because the text is here.
     pub fn index(&self, path: &Path, source: &str, key: SummaryKey) -> FileSummary {
         let tree = CppParser::parse(source, ParserConfig::default());
         self.index_tree(path, source, &tree, key)
@@ -97,9 +98,9 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         tree: &CppSyntaxTree,
         key: SummaryKey,
     ) -> FileSummary {
-        // See `index`: the content part of the key is the text, always. The caller supplies the two parts that
-        // describe the *compilation* — the configuration and the macros in force on the way in.
-        let key = SummaryKey::new(content_hash(source), key.context_hash, key.macro_env_hash);
+        // See `index`: the content part of the key is the text, always. The caller supplies the part that
+        // describes the *compilation* — the configuration and the directory the file sits in.
+        let key = SummaryKey::new(content_hash(source), key.context_hash);
 
         let root = tree.get_red_root();
         let preprocessing = preprocess(&root);
@@ -495,7 +496,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     fn key() -> SummaryKey {
-        SummaryKey::new(0, 0, 0)
+        SummaryKey::new(0, 0)
     }
 
     fn summary(source: &str) -> crate::summary::FileSummary {

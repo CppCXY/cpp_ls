@@ -40,7 +40,7 @@
 //! # Extracting module unit kinds
 //!
 //! [`ModuleUnit::InterfaceUnit`] is the one unit that answers an `import m;` from outside, which is why
-//! [`ModuleInfo::exports_to_importers`] is the predicate a resolver needs and `is_interface` is not enough
+//! [`ModuleUnit::exports_to_importers`] is the predicate a resolver needs and `is_interface` is not enough
 //! on its own: a partition interface unit is an interface *and* not importable by name.
 
 use cpp_parser::{CppSyntaxKind, CppSyntaxNode, CppTokenKind};

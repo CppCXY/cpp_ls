@@ -2,7 +2,7 @@
 //!
 //! This is the producer [`crate::summary`] was defined for. It reads a file's scopes and its preprocessor
 //! state together, which is the join nothing else in this crate performs — [`crate::build_scopes`] never sees a
-//! directive and [`crate::preprocess`] never sees a declaration.
+//! directive and [`crate::preprocess::preprocess`] never sees a declaration.
 //!
 //! # What a fact is, and what it deliberately is not
 //!
@@ -45,8 +45,9 @@ use cpp_parser::SourceRange;
 /// Declarations come from the **scope tree**, which is the layer that already decided what a declaration
 /// declares — the alternative would be a second walk of the syntax tree implementing the same rules, free to
 /// disagree with the first about `class Widget;` or about a qualified name. The cost is stated rather than
-/// hidden: a declaration the scope walker deliberately does not bind is absent here too, and
-/// [`crate::summary::build_declarations`] has the same property for the same reason.
+/// hidden: a declaration the scope walker deliberately does not bind is absent here too, and that absence is
+/// deliberate on both sides — see [`crate::scopes::declaring_kinds`], which exists so that the set of
+/// constructs the walker does read cannot silently shrink.
 pub fn build_facts(scopes: &ScopeTree, preprocessing: &FilePreprocessing) -> (Vec<DeclFact>, SummaryGuards) {
     let file = DeclarationFacts::new(scopes, preprocessing);
     file.build()

@@ -32,9 +32,9 @@
 //! that demanded a scan would be too expensive to run per keystroke.
 //!
 //! Both are tried, in that order, and the outcome records which one worked. When neither does, the answer is
-//! [`ModuleResolution::Unresolved`] and never a guess: an unresolved import means "this analysis does not
-//! know what that module contains", which is a state a consumer renders differently from "the module is
-//! empty". See [`ImportOutcome`] for the one case where the distinction is subtler than it looks.
+//! [`Resolution::Unresolved`] and never a guess: an unresolved import means "this analysis does not know what
+//! that module contains", which is a state a consumer renders differently from "the module is empty". See
+//! [`ImportOutcome`] for the one case where the distinction is subtler than it looks.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
