@@ -193,6 +193,24 @@ pub enum UnknownReason {
     /// Boxed spelling, like the other reasons that carry a name, so that this type stays small enough to sit in
     /// a `Known<T>` that is almost always `Yes`.
     Ambiguous(Box<str>),
+    /// The name was a macro above this point and an `#undef` has ended it.
+    ///
+    /// A positive finding rather than a gap: the name is an ordinary identifier *here*, and the answer a consumer
+    /// wants is "there is nothing to jump to, and here is why" — which is why it is not [`UnknownReason::No`] and
+    /// not a pointer at the `#define` that is no longer in force. It is `Unknown` rather than `Known::No` because
+    /// the index sees a subset of the translation unit: a header included after the `#undef` could define the name
+    /// again.
+    ///
+    /// [`UnknownReason::No`]: crate::Known::No
+    UndefinedHere(Box<str>),
+    /// The type of an expression could not be worked out.
+    ///
+    /// The first reason in this vocabulary that is about a *type* rather than a name, and it arrived with the
+    /// first query that needs one: `widget.size` cannot be answered without knowing what `widget` is, and the
+    /// spelling is carried so that a message can say which expression it gave up on. Distinct from the name
+    /// reasons because the fix is different — nothing is missing from the index, the analysis simply does not
+    /// infer types for this shape yet.
+    UnknownType(Box<str>),
 }
 
 impl UnknownReason {
@@ -235,6 +253,13 @@ impl UnknownReason {
             UnknownReason::Ambiguous(name) => format!(
                 "`{name}` is declared more than once in what this file can see, and nothing here chooses \
                  between the declarations"
+            ),
+            UnknownReason::UndefinedHere(name) => format!(
+                "`{name}` is a macro that an `#undef` above this point has ended, so this is an ordinary \
+                 identifier"
+            ),
+            UnknownReason::UnknownType(written) => format!(
+                "the type of `{written}` is not known here, so what its members are is not known either"
             ),
         }
     }
@@ -973,6 +998,24 @@ impl ScopeTree {
         }
 
         chain
+    }
+
+    /// The scope a `::`-qualified spelling names: `ns::C` for the body of `namespace ns { struct C { … }; }`.
+    ///
+    /// The counterpart of [`ScopeTree::qualified_name_of`], and the reason a *qualified* name can be resolved at
+    /// all: `ns::C::f` is not a name to look up, it is a scope to find and then a name to look up **in it**. The
+    /// spelling is compared against the joined segments rather than parsed, so `namespace a::b {` and
+    /// `namespace a { namespace b {` — which produce the same spelling — are found by the same query.
+    ///
+    /// A linear scan, which is what a per-file table of a few hundred scopes can afford: a query asks this once
+    /// per segment of one name, and building an index for it would cost more than the scans it saves.
+    ///
+    /// `None` when no scope bears that name — including for the empty spelling, which no scope records: the file
+    /// scope has no name of its own and is reached through [`ScopeTree::root`].
+    pub fn scope_with_qualified_name(&self, name: &str) -> Option<ScopeId> {
+        (0..self.scopes.len())
+            .map(ScopeId)
+            .find(|id| self.qualified_name_of(*id).as_deref() == Some(name))
     }
 }
 

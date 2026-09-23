@@ -150,6 +150,16 @@ impl<'a, F: FileProvider> SummaryStore<'a, F> {
         &self.index
     }
 
+    /// The configuration every summary in this store is keyed against.
+    ///
+    /// Exposed because a caller cannot always reconstruct it: the watcher asks which files would search a given
+    /// directory ([`crate::index::watch`]), and only the configuration knows. Read-only, and it has to stay that
+    /// way — changing it under a store would leave summaries keyed against a context that is no longer the one
+    /// being asked about, which is the state [`crate::SummaryKey`] exists to make impossible.
+    pub fn config(&self) -> &CompilerConfig {
+        &self.config
+    }
+
     /// The summary for `path` **as it is now**, from disk when there is one.
     ///
     /// `None` when the file cannot be read: a deleted file, a path that is not a file. That is not an error a cache
@@ -158,14 +168,16 @@ impl<'a, F: FileProvider> SummaryStore<'a, F> {
     /// the parser is tolerant, and a summary of a file with errors is still what a partially working editor needs.
     ///
     /// The lookup is a single `read` of the entry named by [`SummaryStore::context_hash`] and the text's hash, and
-    /// it is done before anything is parsed. On a hit the file itself is read and nothing else happens: no parse,
-    /// no include search, no write.
+    /// it is done before anything is parsed. On a hit the file itself is read, and the stored summary is
+    /// **re-checked** against the filesystem — see `resolution_still_holds` below — which is the one thing about a
+    /// summary that its key cannot name. What a hit does not do is parse, search for a *new* include, or write.
     pub fn get(&mut self, path: &Path) -> Option<&FileSummary> {
         let source = self.files.read(path)?;
         let key = SummaryKey::new(content_hash(&source), self.context_hash(path));
 
         if let Ok(stored) = read_summary(&key.path_under(&self.root))
             && stored.key == key
+            && self.resolution_still_holds(path, &stored)
         {
             self.stats.reused += 1;
             // Filed under the path that asked, which is not necessarily the one recorded in the entry: the key
@@ -191,6 +203,50 @@ impl<'a, F: FileProvider> SummaryStore<'a, F> {
         self.index.summary(path)
     }
 
+    /// Forget everything the store holds about `path`, because the file is gone.
+    ///
+    /// The disk entry is **not** removed: it is keyed by the text, so if the file comes back with the text it had,
+    /// the entry is exactly the summary it needs, and deleting it would throw away a hit for no reason. What this
+    /// drops is the in-memory summary, so that a query stops finding declarations in a file that no longer exists.
+    ///
+    /// Returns whether there was anything to forget.
+    pub fn forget(&mut self, path: &Path) -> bool {
+        self.index.forget(path)
+    }
+
+    /// Does a stored summary still describe what the filesystem says *now*?
+    ///
+    /// The one question its key cannot answer. Everything else a summary depends on is in the key — the text, the
+    /// configuration, the directory — but `#include "x.h"` resolving to `/p/x.h` is a fact about **which candidate
+    /// paths exist**, and a key that had to name that could not be computed from the text, which is what the whole
+    /// lookup-before-parse design rests on.
+    ///
+    /// So a stored summary is a *candidate*, and this is the check that makes it an answer: every include is
+    /// resolved again, and the summary is used only if each one resolves exactly where it did before. The
+    /// alternative — trusting the entry and letting the watcher repair things — would make correctness depend on
+    /// never missing a filesystem event, and a watcher can always miss one: a queue overflows, a network filesystem
+    /// reports nothing, an editor writes in a way nobody anticipated. This way the watcher is an optimisation (it
+    /// refreshes things *promptly*) rather than a load-bearing part of the design.
+    ///
+    /// The cost is a handful of `exists` calls per include on a hit, against a parse. `examples/measure.rs` is
+    /// where that trade is measured rather than assumed.
+    fn resolution_still_holds(&self, path: &Path, summary: &FileSummary) -> bool {
+        // A summary with no includes has nothing that could have moved, which is the common case for a `.cpp` and
+        // costs nothing to recognise.
+        if summary.includes.is_empty() {
+            return true;
+        }
+
+        let directory = path.parent().unwrap_or(Path::new("."));
+        let resolver = crate::include::IncludeResolver::new(self.files, &self.config);
+        let mut interner = crate::include::paths::PathInterner::new(cfg!(windows));
+
+        summary.includes.iter().all(|fact| {
+            let now = resolver.resolve(&fact.as_include(), directory, None, &mut interner);
+            now.resolved().map(|found| found.path.as_path()) == fact.resolved.as_deref()
+        })
+    }
+
     /// The work set when `path` changes: the file, and everything that transitively includes it.
     ///
     /// The reverse include edges are the whole point of having them. A change to a header can change the meaning
@@ -203,6 +259,11 @@ impl<'a, F: FileProvider> SummaryStore<'a, F> {
     ///
     /// Note what this does **not** say: that the returned files need rebuilding. Their keys are computed from
     /// their own text, so a file whose text did not change is a cache hit, and asking is cheaper than deciding.
+    /// That is also why the *watcher* ([`crate::index::watch`]) does not call this for an ordinary edit: a file's
+    /// summary does not depend on the contents of what it includes, so an edited header is one file to re-read,
+    /// not fifty. What does invalidate a summary without its text changing is a file **appearing or
+    /// disappearing**, because a summary records where its includes *resolved* — and that is what this walk is
+    /// for, since the files that resolved to the one that moved are exactly its includers.
     pub fn invalidate(&self, path: &Path) -> Vec<PathBuf> {
         let mut work = Vec::new();
         let mut visited: HashSet<String> = HashSet::new();
@@ -719,11 +780,12 @@ mod tests {
     }
 
     #[test]
-    fn a_hit_does_not_even_look_for_the_includes() {
-        // "The disk saves the parse" is this module's claim, and `StoreStats` is the module's own accounting of
-        // it — a counter that could be moved. This checks the behaviour instead: resolving an `#include` asks the
-        // provider whether each candidate exists, so a second `get` that asks nothing is a `get` that never built
-        // a summary, because `FileIndexer` is the only thing in the crate that resolves an include.
+    fn a_hit_re_checks_the_includes_without_parsing_them() {
+        // "The disk saves the parse" is this module's claim, and `StoreStats` is the module's own accounting of it
+        // — a counter that could be moved. This checks the behaviour instead, by counting what the provider was
+        // asked: a hit reads the file once, to hash it, and asks about each **stored** include exactly once, to
+        // check that it still resolves where it did. Nothing is read but the file itself, and no include is
+        // *searched for* beyond the ones the summary already lists.
         let files = MemoryFiles::new()
             .with_file("/p/widget.h", "struct Widget { int size; };\n")
             .with_file(
@@ -733,17 +795,72 @@ mod tests {
         let (mut store, root) = store("no-search-on-hit", &files);
 
         store.get(Path::new("/p/main.cpp")).expect("the file reads");
-        let after_first = files.exists_of("/p/widget.h");
-        assert!(after_first > 0, "the first get searched for the header");
+        let after_build = files.exists_of("/p/widget.h");
+        assert_eq!(after_build, 1, "one candidate, probed once while resolving");
 
         let mut reopened = SummaryStore::with_provider(&root, CompilerConfig::default(), &files);
         reopened.get(Path::new("/p/main.cpp")).expect("the file reads");
 
         assert_eq!(reopened.stats().reused, 1);
+        assert_eq!(reopened.stats().rebuilt, 0, "the parser was not asked");
+        assert_eq!(
+            files.reads_of("/p/main.cpp"),
+            2,
+            "the file was read once per get, and nothing else was read at all"
+        );
         assert_eq!(
             files.exists_of("/p/widget.h"),
-            after_first,
-            "and the second did not search at all: the entry was the whole answer"
+            after_build + 1,
+            "and the header was probed once more — the re-check, not a search"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_stored_summary_whose_include_no_longer_resolves_is_rebuilt() {
+        // The one fact about a summary that its key cannot name: which candidate paths *exist*. A stored
+        // `resolved` is a claim about the filesystem, so it is checked before it is believed — and the check is
+        // what keeps correctness from depending on a watcher never missing an event.
+        let files = MemoryFiles::new()
+            .with_file("/p/widget.h", "struct Widget { int size; };\n")
+            .with_file(
+                "/p/main.cpp",
+                "#include \"widget.h\"\nvoid f() { Widget w; }\n",
+            );
+        let (mut store, root) = store("stale-resolution", &files);
+        let built = store
+            .get(Path::new("/p/main.cpp"))
+            .expect("the file reads")
+            .clone();
+        assert_eq!(built.includes[0].resolved.as_deref(), Some(Path::new("/p/widget.h")));
+
+        // The header is gone, and nothing tells the store so: no event, no invalidation, no forget. The entry is
+        // still there, under a key that has not moved.
+        let without = MemoryFiles::new().with_file(
+            "/p/main.cpp",
+            "#include \"widget.h\"\nvoid f() { Widget w; }\n",
+        );
+        let mut reopened = SummaryStore::with_provider(&root, CompilerConfig::default(), &without);
+        let rebuilt = reopened
+            .get(Path::new("/p/main.cpp"))
+            .expect("the file reads")
+            .clone();
+
+        assert_eq!(
+            reopened.stats().reused,
+            0,
+            "the entry named a file that is not there, so it was not an answer"
+        );
+        assert_eq!(reopened.stats().rebuilt, 1);
+        assert_eq!(
+            rebuilt.includes[0].resolved, None,
+            "and the rebuilt summary records the search that now fails"
+        );
+        assert_eq!(
+            reopened.stats().unstored,
+            1,
+            "so it is not stored, which is what makes the change recoverable"
         );
 
         let _ = std::fs::remove_dir_all(&root);

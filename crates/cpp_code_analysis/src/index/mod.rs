@@ -35,20 +35,22 @@ use cpp_parser::{CppParser, CppSyntaxTree, ParserConfig};
 
 pub mod project;
 pub mod store;
+pub mod watch;
 pub mod worklist;
 
 pub use project::{
-    IncludeVisibility, ProjectDefinition, ProjectIndex, VisibleDeclaration,
-    definition_across_files,
+    IncludeVisibility, ProjectDefinition, ProjectIndex, ProjectMacro, VisibleDeclaration,
+    definition_across_files, macro_across_files,
 };
 pub use store::{StoreStats, SummaryStore};
+pub use watch::{ChangeBatch, EventKind, FileEvent, Response, WatchFilter};
 pub use worklist::{Priority, Step, StepOutcome, Worklist};
 
 use crate::cache::{SummaryKey, content_hash};
 use crate::include::config::CompilerConfig;
 use crate::include::paths::{FileProvider, PathInterner};
 use crate::include::IncludeResolver;
-use crate::preprocess::directive::Directive;
+use crate::preprocess::directive::{Directive, SpannedDirective};
 use crate::preprocess::preprocess;
 use crate::sema::declarations::{assign_guards, build_facts};
 use crate::sema::scopes::build_scopes;
@@ -105,12 +107,12 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         let root = tree.get_red_root();
         let preprocessing = preprocess(&root);
         let scopes = build_scopes(&root);
-        let (declarations, mut guards) = build_facts(&scopes, &preprocessing);
+        let (declarations, mut guards) = build_facts(&scopes, &preprocessing, &root);
 
         let mut macros: Vec<MacroFact> = preprocessing
             .directives
             .iter()
-            .filter_map(|spanned| macro_fact(&spanned.directive))
+            .filter_map(macro_fact)
             .collect();
 
         // The interner is local: resolving an include mints an id as a side effect, and the id is discarded
@@ -188,23 +190,44 @@ pub fn summarize(path: &Path, source: &str, key: SummaryKey) -> FileSummary {
     FileIndexer::new(&NoFiles, &CompilerConfig::default()).index(path, source, key)
 }
 
-/// The [`MacroFact`] for a `#define`, or `None` for every other directive.
-fn macro_fact(directive: &Directive) -> Option<MacroFact> {
-    let Directive::Define(define) = directive else {
-        return None;
-    };
-    let definition = define.macro_def.as_ref()?;
+/// The [`MacroFact`] for a `#define` or an `#undef`, or `None` for every other directive.
+///
+/// Both are facts about the same name's history, and a query needs both to be answerable: a name `#undef`ed above
+/// the cursor is not a macro, and a table that only remembers definitions would point at a `#define` that is no
+/// longer in force. See [`crate::MacroKind`].
+///
+/// `spanned` rather than the bare directive because an `#undef`'s *name* position is not tracked by the directive
+/// reader — it keeps the name and no range — so the fact carries the directive's range, which is the line to show
+/// a user asking where a macro stops being one.
+fn macro_fact(spanned: &SpannedDirective) -> Option<MacroFact> {
+    match &spanned.directive {
+        Directive::Define(define) => {
+            let definition = define.macro_def.as_ref()?;
 
-    Some(MacroFact {
-        name: definition.name.to_string(),
-        function_like: definition.is_function_like(),
-        body: macro_body_shape(definition),
-        // The *name's* range, not the directive's: "go to macro definition" is a jump to the name a user can
-        // see, and a rename edits it. The guard sweep reads this fact's offset too, and the name is inside the
-        // same conditional region as the directive that wrote it — a `#define` cannot span an `#endif`.
-        range: definition.name_range,
-        guard: crate::summary::FactGuard::Unconditional,
-    })
+            Some(MacroFact {
+                name: definition.name.to_string(),
+                kind: crate::summary::MacroKind::Definition,
+                function_like: definition.is_function_like(),
+                body: macro_body_shape(definition),
+                // The *name's* range, not the directive's: "go to macro definition" is a jump to the name a user
+                // can see, and a rename edits it. The guard sweep reads this fact's offset too, and the name is
+                // inside the same conditional region as the directive that wrote it — a `#define` cannot span an
+                // `#endif`.
+                range: definition.name_range,
+                guard: crate::summary::FactGuard::Unconditional,
+            })
+        }
+        Directive::Undef { name: Some(name) } => Some(MacroFact {
+            name: name.to_string(),
+            kind: crate::summary::MacroKind::Undefinition,
+            function_like: false,
+            // Nothing to say about a body, and saying `Unknown` is the honest way to say it.
+            body: cpp_parser::MacroBody::Unknown,
+            range: spanned.range,
+            guard: crate::summary::FactGuard::Unconditional,
+        }),
+        _ => None,
+    }
 }
 
 /// The shape of a macro's body, in the vocabulary the parser's rules ask about.
@@ -426,6 +449,7 @@ fn include_fact<F: FileProvider>(
         form: include.form,
         spelling: include.target.to_string(),
         resolved,
+        is_next: include.is_next,
         range,
         guard: crate::summary::FactGuard::Unconditional,
     })

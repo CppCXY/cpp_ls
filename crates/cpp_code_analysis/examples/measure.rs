@@ -44,13 +44,11 @@ fn main() {
     let (path, synthetic) = match path {
         Some(path) => (path, false),
         None => {
-            // Two files, because a fixture whose includes do not resolve is a fixture whose summary is *never*
-            // stored, and the measurement would end up comparing a build against another build. The header sits
-            // beside the source, which is how a quoted include resolves.
-            let header = root.join("synthetic.h");
+            // Three files, because a fixture whose includes do not resolve is a fixture whose summary is *never*
+            // stored — the rule `store.rs` documents — and the measurement would end up comparing a build against
+            // another build. The headers sit beside the source, which is how a quoted include resolves.
             let source = root.join("synthetic.cpp");
-            std::fs::write(&header, "struct Neighbour { int x; };\n").expect("the fixture writes");
-            std::fs::write(&source, synthetic_unit(2_000)).expect("the fixture writes");
+            std::fs::write(&source, synthetic_unit(2_000, 100)).expect("the fixture writes");
             (source, true)
         }
     };
@@ -125,10 +123,24 @@ fn main() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// A file of the shape a real one has: an include, macros with guards, and a class per section.
-fn synthetic_unit(sections: usize) -> String {
-    let mut source = String::from("#pragma once\n#include \"synthetic.h\"\n\n");
-    source.push_str("#if defined(PLATFORM_WINDOWS)\n#define API __declspec(dllexport)\n#else\n#define API\n#endif\n\n");
+/// A file of the shape a real one has: includes, macros with guards, and a class per section.
+///
+/// The includes are written to disk beside the source and are real files, because a hit now **re-checks** every
+/// stored include against the filesystem (`SummaryStore::get`) — so this is where the cost of that check is
+/// measured rather than assumed. A translation unit with a hundred includes is ordinary.
+fn synthetic_unit(sections: usize, includes: usize) -> String {
+    let mut source = String::from("#pragma once\n");
+
+    for index in 0..includes {
+        let header = std::env::temp_dir()
+            .join("cppls-measure")
+            .join(format!("include_{index}.h"));
+        std::fs::write(&header, format!("struct Neighbour{index} {{ int x; }};\n"))
+            .expect("the fixture writes");
+        source.push_str(&format!("#include \"include_{index}.h\"\n"));
+    }
+
+    source.push_str("\n#if defined(PLATFORM_WINDOWS)\n#define API __declspec(dllexport)\n#else\n#define API\n#endif\n\n");
 
     for index in 0..sections {
         source.push_str(&format!(
@@ -137,7 +149,7 @@ fn synthetic_unit(sections: usize) -> String {
              struct API Widget{index} {{\n\
              \x20 int size;\n\
              \x20 const char* name;\n\
-             \x20 Neighbour neighbour;\n\
+             \x20 Neighbour0 neighbour;\n\
              \x20 int compute(int factor) const;\n\
              }};\n\n\
              enum class Kind{index} {{ One, Two, Three }};\n\n\

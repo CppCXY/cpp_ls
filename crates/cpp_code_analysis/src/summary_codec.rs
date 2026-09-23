@@ -30,7 +30,7 @@ use cpp_parser::SymbolKind;
 use crate::cache::SummaryKey;
 use crate::preprocess::directive::IncludeForm;
 use crate::summary::{
-    DeclFact, DeclKind, FactGuard, FileSummary, IncludeFact, MacroFact, SummaryGuards,
+    DeclFact, DeclKind, FactGuard, FileSummary, IncludeFact, MacroFact, MacroKind, SummaryGuards,
 };
 
 /// The eight bytes a summary file starts with.
@@ -57,7 +57,25 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// move with it: removing a component from the key can only make an old entry unreachable, never mis-served,
 /// because the stored key is compared against a freshly computed one before the summary is used. The two numbers
 /// move for different reasons, and that is the reason this one exists.
-pub const CODEC_VERSION: u32 = 2;
+///
+/// # Version 3
+///
+/// An include fact gained `is_next`, so a `#include` record gained a flag. It is stored for one reason: a stored
+/// `resolved` is re-checked against the filesystem before it is used — the key cannot name which candidate paths
+/// exist — and a re-check that skipped candidates differently from the search that produced the answer would be
+/// checking something else. See [`crate::summary::IncludeFact::as_include`].
+///
+/// # Version 4
+///
+/// A macro fact gained `kind`: an `#undef` is a fact about a macro name's history in exactly the way a `#define`
+/// is, and a table that only remembers definitions cannot answer "is this name a macro here" — it can only
+/// answer "was it ever one".
+///
+/// # Version 5
+///
+/// A declaration fact gained `type_of`: the type a variable was written with, which is what a member access has
+/// to know to get from `widget` to `Widget`.
+pub const CODEC_VERSION: u32 = 6;
 
 /// Write a summary as bytes.
 ///
@@ -79,6 +97,11 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
         put_str(&mut out, &fact.name);
         put_opt_str(&mut out, fact.scope.as_deref());
         put_u8(&mut out, decl_kind_code(fact.kind));
+        put_opt_str(&mut out, fact.type_of.as_deref());
+        put_u32(&mut out, fact.bases.len() as u32);
+        for base in &fact.bases {
+            put_str(&mut out, base);
+        }
         put_range(&mut out, fact.range);
         put_range(&mut out, fact.name_range);
         put_u32(&mut out, guard_code(fact.guard));
@@ -87,6 +110,7 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
     put_u32(&mut out, summary.macros.len() as u32);
     for fact in &summary.macros {
         put_str(&mut out, &fact.name);
+        put_u8(&mut out, macro_kind_code(fact.kind));
         put_u8(&mut out, u8::from(fact.function_like));
         put_u8(&mut out, macro_body_code(fact.body));
         put_range(&mut out, fact.range);
@@ -97,6 +121,7 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
     for fact in &summary.includes {
         put_u8(&mut out, include_form_code(fact.form));
         put_str(&mut out, &fact.spelling);
+        put_u8(&mut out, u8::from(fact.is_next));
         match &fact.resolved {
             Some(path) => {
                 put_u8(&mut out, 1);
@@ -144,6 +169,14 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
             name: reader.string()?,
             scope: reader.optional_string()?,
             kind: decl_kind_from(reader.u8()?)?,
+            type_of: reader.optional_string()?,
+            bases: {
+                let mut bases = Vec::new();
+                for _ in 0..reader.count()? {
+                    bases.push(reader.string()?);
+                }
+                bases
+            },
             range: reader.range()?,
             name_range: reader.range()?,
             guard: guard_from(reader.u32()?)?,
@@ -154,6 +187,7 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
     for _ in 0..reader.count()? {
         macros.push(MacroFact {
             name: reader.string()?,
+            kind: macro_kind_from(reader.u8()?)?,
             function_like: reader.u8()? != 0,
             body: macro_body_from(reader.u8()?)?,
             range: reader.range()?,
@@ -165,6 +199,11 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
     for _ in 0..reader.count()? {
         let form = include_form_from(reader.u8()?)?;
         let spelling = reader.string()?;
+        let is_next = match reader.u8()? {
+            0 => false,
+            1 => true,
+            _ => return Err(DecodeError::BadDiscriminant),
+        };
         let resolved = match reader.u8()? {
             0 => None,
             1 => Some(reader.path()?),
@@ -174,6 +213,7 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
             form,
             spelling,
             resolved,
+            is_next,
             range: reader.range()?,
             guard: guard_from(reader.u32()?)?,
         });
@@ -428,6 +468,21 @@ fn decl_kind_from(code: u8) -> Result<DeclKind, DecodeError> {
     })
 }
 
+fn macro_kind_code(kind: MacroKind) -> u8 {
+    match kind {
+        MacroKind::Definition => 1,
+        MacroKind::Undefinition => 2,
+    }
+}
+
+fn macro_kind_from(code: u8) -> Result<MacroKind, DecodeError> {
+    Ok(match code {
+        1 => MacroKind::Definition,
+        2 => MacroKind::Undefinition,
+        _ => return Err(DecodeError::BadDiscriminant),
+    })
+}
+
 fn guard_code(guard: FactGuard) -> u32 {
     match guard {
         FactGuard::Unconditional => u32::MAX,
@@ -505,6 +560,7 @@ fn symbol_kind_code(kind: SymbolKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{CODEC_VERSION, DecodeError, MAGIC, decl_kind_code, decode, encode};
+    use crate::summary::MacroKind;
     use crate::cache::SummaryKey;
     use crate::preprocess::directive::IncludeForm;
     use crate::summary::{
@@ -526,6 +582,10 @@ mod tests {
                     name: "Widget".to_string(),
                     scope: None,
                     kind: DeclKind::Type,
+                    // A class declares no type in `type_of`'s sense, so the `None` branch is covered here.
+                    type_of: None,
+                    // A base list, so that branch of the format is covered too: two bases, one of them qualified.
+                    bases: vec!["Base".to_string(), "ns::Other".to_string()],
                     range: range(10, 20),
                     name_range: range(17, 6),
                     guard: FactGuard::Unconditional,
@@ -534,6 +594,10 @@ mod tests {
                     name: "member".to_string(),
                     scope: Some("ns::Widget".to_string()),
                     kind: DeclKind::Variable,
+                    // A qualified spelling with a template argument list, because the field is stored as text and
+                    // a decoder that mangled one would only be caught by a value like this.
+                    type_of: Some("ns::Container<int>".to_string()),
+                    bases: Vec::new(),
                     range: range(40, 15),
                     name_range: range(48, 6),
                     guard: FactGuard::Region(3),
@@ -542,6 +606,8 @@ mod tests {
                     name: String::new(),
                     scope: None,
                     kind: DeclKind::Other,
+                    type_of: None,
+                    bases: Vec::new(),
                     range: range(60, 8),
                     name_range: range(60, 0),
                     guard: FactGuard::Unconditional,
@@ -549,6 +615,7 @@ mod tests {
             ],
             macros: vec![MacroFact {
                 name: "MY_API".to_string(),
+                kind: MacroKind::Definition,
                 function_like: false,
                 body: MacroBody::Specifier,
                 range: range(80, 30),
@@ -559,6 +626,7 @@ mod tests {
                     form: IncludeForm::Angle,
                     spelling: "vector".to_string(),
                     resolved: Some(std::path::PathBuf::from("/usr/include/c++/13/vector")),
+                    is_next: false,
                     range: range(1, 18),
                     guard: FactGuard::Unconditional,
                 },
@@ -566,6 +634,10 @@ mod tests {
                     form: IncludeForm::Quote,
                     spelling: "missing.h".to_string(),
                     resolved: None,
+                    // The one field no other part of the crate reads, and `every_field` exists so that the codec is
+                    // tested on values a test wrote down rather than on values a round trip happened to produce: a
+                    // field the encoder drops and the decoder defaults would round-trip a *default* and look fine.
+                    is_next: true,
                     range: range(120, 20),
                     guard: FactGuard::Region(1),
                 },

@@ -60,10 +60,10 @@ pub use cache::{CACHE_DIRECTORY, FORMAT_VERSION, SummaryKey, content_hash, fnv1a
 pub use file::token;
 pub use include::{config, graph, paths};
 pub use preprocess::{condition, directive, expand, guards, macros};
-pub use sema::declarations::{build_facts, by_name, scope_of};
+pub use sema::declarations::{build_facts, by_name, declared_type_of, scope_of};
 pub use sema::{module_info, modules, parser_symbols, scopes, symbol};
 pub use summary::{
-    DeclFact, DeclKind, FactGuard, FileSummary, IncludeFact, MacroFact, SummaryGuards,
+    DeclFact, DeclKind, FactGuard, FileSummary, IncludeFact, MacroFact, MacroKind, SummaryGuards,
 };
 // `guard` is the exception: `preprocess::guard` and `preprocess::guards` differ by one letter, which is exactly
 // the hazard the folders are meant to remove, so the *analysis* keeps the plural name and the types are reached
@@ -96,9 +96,10 @@ pub use include::{FoundIn, IncludeResolver, Resolution, Resolved, Unresolved};
 // reader benefits from. `index::summary` is not here — the *shape* of a summary is `summary`, and one type with
 // two paths is worse than a longer import.
 pub use index::{
-    FileIndexer, IncludeVisibility, Priority, ProjectDefinition, ProjectIndex, Step, StepOutcome,
-    StoreStats, SummaryReadError, SummaryStore, VisibleDeclaration, Worklist,
-    definition_across_files, read_summary, summarize, write_summary,
+    ChangeBatch, EventKind, FileEvent, FileIndexer, IncludeVisibility, Priority,
+    ProjectDefinition, ProjectIndex, ProjectMacro, Response, Step, StepOutcome, StoreStats,
+    SummaryReadError, SummaryStore, VisibleDeclaration, WatchFilter, Worklist,
+    definition_across_files, macro_across_files, read_summary, summarize, write_summary,
 };
 pub use macros::{MacroBody, MacroDef, MacroTable, Parameter, ParameterKind};
 pub use module_info::{ImportDeclaration, ImportTarget, ModuleInfo, ModuleUnit};

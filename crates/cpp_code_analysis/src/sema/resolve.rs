@@ -8,6 +8,7 @@
 //!
 //! ```text
 //! asked:      which declaration does the name under this offset refer to, within this file?
+//!             — including a `::`-qualified one, whose qualifier is resolved as a scope
 //! not asked:  base classes, argument-dependent lookup, overload selection, `using` of a base member,
 //!             anything reached through an `#include`
 //! ```
@@ -28,7 +29,7 @@
 use cpp_parser::{CppSyntaxKind, CppSyntaxNode, SourceRange};
 
 use crate::sema::symbol::{
-    Binding, BindingKind, Known, Name, NameKind, Scope, ScopeId, ScopeTree, UnknownReason,
+    Binding, BindingKind, Known, Name, Scope, ScopeId, ScopeTree, UnknownReason,
 };
 
 /// The name written at `offset`, if the offset is inside one.
@@ -129,6 +130,183 @@ pub fn name_at(root: &CppSyntaxNode, offset: usize) -> Option<(String, SourceRan
     ))
 }
 
+/// The name the cursor is on as the file **writes** it, which is what a lookup has to be given: `ns::Widget` for
+/// an offset on `Widget` in `ns::Widget w;`, and `Widget` for one on a bare name.
+///
+/// # Why the qualifier has to be carried
+///
+/// `ns::Widget` is not a name to look up, it is a *scope* to find and then a name to look up in it — a different
+/// question with a different answer, and one the index can answer too, because a declaration fact records the
+/// qualified spelling of the scope it was written in. Dropping the qualifier would look for `Widget` among all the
+/// names in scope, which is where a wrong jump comes from: `a::Widget` and `b::Widget` are both "a `Widget` in
+/// scope" and only one of them is the one the user pointed at.
+///
+/// # The two spellings that are not a chain
+///
+/// A leading `::` is part of the spelling and is kept: `::Widget` asks about the global name space, and the
+/// lookup honours it. Template arguments after the name are ignored, because they qualify the entity rather than
+/// name it — the cursor on `Widget` in `ns::Widget<int>` asks about `ns::Widget`.
+pub fn qualified_name_at(root: &CppSyntaxNode, offset: usize) -> Option<(String, SourceRange)> {
+    let node = name_node_at(root, offset)?;
+    let token = identifier_token_at(&node, offset)?;
+
+    let mut written = String::new();
+    let mut global = false;
+
+    // The chain is written as flat tokens of one name node — see `identifier_written_at` — so this walks them in
+    // order and stops at the identifier the cursor is on, which is what makes a cursor on a *qualifier* mean the
+    // qualifier: `a::b::c` with the cursor on `b` asks about `a::b`.
+    for element in node.children_with_tokens() {
+        let Some(child) = element.into_token() else {
+            continue;
+        };
+
+        match cpp_parser::CppTokenKind::from(child.kind()) {
+            cpp_parser::CppTokenKind::Identifier => {
+                if !written.is_empty() {
+                    written.push_str("::");
+                }
+                written.push_str(child.text());
+
+                if contains_token(&child, offset) {
+                    return Some((
+                        spell(global, &written),
+                        cpp_parser::source_range(token.text_range()),
+                    ));
+                }
+            }
+            // A `::` before any identifier is a leading one, which is what asks about the global name space.
+            cpp_parser::CppTokenKind::Scope if written.is_empty() => global = true,
+            _ => {}
+        }
+    }
+
+    // The cursor's identifier was not among the tokens, which cannot happen for a node that `identifier_token_at`
+    // found it in — but returning the identifier alone is a better answer than `None` if it ever does.
+    Some((
+        spell(global, token.text()),
+        cpp_parser::source_range(token.text_range()),
+    ))
+}
+
+/// The name as written, with the leading `::` of a global name put back.
+fn spell(global: bool, written: &str) -> String {
+    if global {
+        format!("::{written}")
+    } else {
+        written.to_string()
+    }
+}
+
+/// A member access the cursor is in: `widget` and `size` of `widget.size`.
+///
+/// The first query in this crate that has to ask about a **type** rather than a name. `size` is not looked up
+/// anywhere: it is looked up *in the type of `widget`*, so the answer needs the object, its type, and the member
+/// — and this is the half that reads the shape off the syntax.
+#[derive(Debug, Clone)]
+pub struct MemberAccess {
+    /// The expression left of the `.` or `->`: the thing whose type decides what the member is.
+    pub object: CppSyntaxNode,
+    /// The member's spelling, as written.
+    pub member: String,
+    /// The member's range, for a selection or a rename.
+    pub member_range: SourceRange,
+}
+
+/// The member access the cursor at `offset` is in, if it is in one.
+///
+/// The **innermost** one, which is what makes `a.b.c` answer about `c`: the tree nests `(a.b).c`, and a cursor on
+/// the last name is asking about the member of the member.
+///
+/// `None` for every other position — a plain name, an operator, a declaration — which is the ordinary answer for
+/// most cursor positions.
+pub fn member_access_at(root: &CppSyntaxNode, offset: usize) -> Option<MemberAccess> {
+    let node = member_node_at(root, offset)?;
+    let access = member_access_of(&node)?;
+
+    // A cursor on the *object* of `a.b` is asking about `a`, which is the name query's question rather than this
+    // one's — so the offset decides whether this is an answer at all, and the node only decides what the shape is.
+    contains_range(access.member_range, SourceRange::new(offset, 0)).then_some(access)
+}
+
+/// The shape of a node that **is** a member access: its object, its member, and where the member was written.
+///
+/// Separate from [`member_access_at`] because the question comes in two forms: a *cursor* is on a member of some
+/// node (`offset` decides which), while an *expression* that is being typed is a node of its own. The second form
+/// is what makes inference recursive — `a.b.size` needs the shape of `a.b` with nobody's cursor on it.
+///
+/// `None` for a node that is not a member access: `arr[0]` is the same node kind with brackets instead of a dot.
+pub fn member_access_of(node: &CppSyntaxNode) -> Option<MemberAccess> {
+    let elements: Vec<cpp_parser::CppSyntaxElement> = node.children_with_tokens().collect();
+
+    // The operator, found by its text rather than by a token kind: the grammar gives `.` and `->` kinds of their
+    // own, and a shape reader that had to know their names would be a second place to update if either changed.
+    let operator = elements.iter().position(|element| {
+        element
+            .as_token()
+            .is_some_and(|token| token.text() == "." || token.text() == "->")
+    })?;
+    let operator_range = elements[operator].as_token()?.text_range();
+
+    // The object is the first **node** before the operator. A node rather than a token, because that is what a
+    // type has to be inferred *from*: `(*p)`, `make()` and `a.b` are all nodes, and the inference decides which
+    // shapes it can type.
+    let object = elements[..operator]
+        .iter()
+        .find_map(|element| element.as_node().cloned())?;
+
+    // The member is the identifier **after** the operator — the last one in text order, because the object of a
+    // nested access is itself a member access and its identifiers come first.
+    let after_operator: Vec<cpp_parser::CppSyntaxToken> = node
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .filter(|token| {
+            cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::Identifier
+                && token.text_range().start() >= operator_range.end()
+        })
+        .collect();
+    let member_token = after_operator.into_iter().next_back()?;
+
+    Some(MemberAccess {
+        object,
+        member: member_token.text().to_string(),
+        member_range: cpp_parser::source_range(member_token.text_range()),
+    })
+}
+
+/// The innermost member-access node holding `offset`.
+///
+/// Three kinds, because the grammar reaches a member access in three ways and only one of them is named for it:
+/// `MemberExpr` and `ArrowExpr` exist, and the parser also produces an **`IndexExpr`** for `w.size` — the same
+/// node it uses for `arr[0]`, with a `.` where the brackets would be. What makes a node a member access is
+/// therefore the *operator*, which is why the caller checks for it by text rather than trusting the kind.
+fn member_node_at(root: &CppSyntaxNode, offset: usize) -> Option<CppSyntaxNode> {
+    let mut found = None;
+    let mut node = root.clone();
+
+    loop {
+        if !contains(&node, offset) {
+            return found;
+        }
+
+        if matches!(
+            CppSyntaxKind::from(node.kind()),
+            CppSyntaxKind::MemberExpr | CppSyntaxKind::ArrowExpr | CppSyntaxKind::IndexExpr
+        ) {
+            found = Some(node.clone());
+        }
+
+        match node
+            .children_with_tokens()
+            .find(|element| contains_element(element, offset))
+            .and_then(|element| element.into_node())
+        {
+            Some(child) => node = child,
+            None => return found,
+        }
+    }
+}
+
 /// Which declaration the name written at `offset` refers to.
 ///
 /// The go-to-definition question, answered within one file's scope tree. See the module documentation for what
@@ -143,18 +321,40 @@ pub fn name_at(root: &CppSyntaxNode, offset: usize) -> Option<(String, SourceRan
 ///
 /// So `void f(); void f(int);` jumps to the first, and a local `x` shadowing a member `x` jumps to the local,
 /// which is what a reader expects of each.
+///
+/// # A qualified name is a different question
+///
+/// `ns::Widget` is not looked for among the names in scope: the qualifier is a **scope** to find
+/// ([`ScopeTree::scope_with_qualified_name`]) and `Widget` is then a name to look up *in it*. Doing it the other
+/// way — dropping the qualifier and looking for `Widget` — is not a smaller version of the right answer, it is a
+/// wrong one: `a::Widget` and `b::Widget` are both "a `Widget` in scope", and only one of them is the one the
+/// cursor is on.
+///
+/// A **relative** qualifier is tried against each enclosing scope in turn, innermost first, which is the shape of
+/// C++'s own rule (the first component is found by ordinary lookup, and the rest descends from it). Where it
+/// differs is stated rather than hidden: the language looks up only the *first component* outward and then
+/// descends without further outward search, while this tries the whole qualifier per enclosing scope — which can
+/// find a declaration the language would not, and cannot miss one it would.
+///
+/// Nothing found locally is reported as [`UnknownReason::NotDeclaredHere`] carrying the **qualified** spelling,
+/// which is what lets the cross-file layer answer: a declaration fact records the qualified name of the scope it
+/// was written in, so `ns::Widget` is a spelling an index can be asked about.
 pub fn definition_at(scopes: &ScopeTree, root: &CppSyntaxNode, offset: usize) -> Known<Binding> {
-    let Some((written, _)) = name_at(root, offset) else {
+    let Some((written, _)) = qualified_name_at(root, offset) else {
         return Known::Unknown(UnknownReason::UnparsableName);
     };
-
-    let name = Name::identifier(written.clone());
 
     // The scope chain starts at the innermost scope *containing the offset*, and the scopes that merely enclose
     // the position are added as well — see `scopes_to_search` for why both.
     let Some(innermost) = scopes.scope_at(offset) else {
         return Known::No;
     };
+
+    if written.contains("::") {
+        return qualified_definition_at(scopes, innermost, &written);
+    }
+
+    let name = Name::identifier(written.clone());
 
     // The scopes a `using namespace` directive brings into view, resolved **once** before the walk: a directive
     // names a namespace, and finding which scope that namespace is has nothing to do with where the search has
@@ -190,7 +390,62 @@ pub fn definition_at(scopes: &ScopeTree, root: &CppSyntaxNode, offset: usize) ->
 
     // The name is not in any scope reachable from here, which within one file is the end of the road: it is
     // declared in another file, and no include has been followed. `No` would be a claim this layer cannot make.
-    Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(written_name_text(&name))))
+    Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(written)))
+}
+
+/// Which declaration a `::`-qualified name written at a position refers to, within one file.
+///
+/// `written` is the spelling as the file writes it, with a leading `::` for the global name space. See
+/// [`definition_at`] for the rule and for where it is deliberately wider than the language.
+fn qualified_definition_at(scopes: &ScopeTree, innermost: ScopeId, written: &str) -> Known<Binding> {
+    // A leading `::` asks about the global name space, which is the file scope and nothing else — so there is
+    // exactly one spelling to try rather than one per enclosing scope.
+    let (global, spelling) = match written.strip_prefix("::") {
+        Some(rest) => (true, rest),
+        None => (false, written),
+    };
+
+    let segments: Vec<&str> = spelling.split("::").collect();
+    let (last, qualifier) = match segments.split_last() {
+        Some((last, rest)) if !rest.is_empty() => (*last, rest.join("::")),
+        // A spelling with no qualifier is not this function's question, and `a::` cannot be written.
+        _ => return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(written))),
+    };
+
+    // The scopes to anchor the qualifier in, innermost first: the scopes that contain the cursor, or the file
+    // scope alone when the spelling asked for the global one.
+    let anchors: Vec<Option<String>> = if global {
+        vec![None]
+    } else {
+        scopes
+            .scope_chain(innermost)
+            .into_iter()
+            .map(|scope| scopes.qualified_name_of(scope))
+            .collect()
+    };
+
+    let name = Name::identifier(last.to_string());
+
+    for anchor in anchors {
+        let candidate = match anchor {
+            Some(prefix) => format!("{prefix}::{qualifier}"),
+            None => qualifier.clone(),
+        };
+
+        let Some(scope) = scopes.scope_with_qualified_name(&candidate) else {
+            continue;
+        };
+        let Some(scope_data) = scopes.scope(scope) else {
+            continue;
+        };
+
+        if let Some(binding) = first_binding_of(scope_data, &name) {
+            return Known::Yes(binding.clone());
+        }
+    }
+
+    // Nothing here declares it, so the qualified spelling goes to the layer that can look outside this file.
+    Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(written)))
 }
 
 /// The namespace scopes that a `using namespace <name>;` directive makes visible, if this file writes one.
@@ -327,17 +582,9 @@ fn contains_range(outer: SourceRange, inner: SourceRange) -> bool {
     outer.start_offset <= inner.start_offset && outer.end_offset() >= inner.end_offset()
 }
 
-/// The text a [`Name`] was written as, for a message.
-fn written_name_text(name: &Name) -> String {
-    match &name.kind {
-        NameKind::Identifier(text) => text.clone(),
-        other => other.text(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{definition_at, identifier_written_at, name_at, name_node_at};
+    use super::{definition_at, identifier_written_at, name_at, name_node_at, qualified_name_at};
     use crate::sema::scopes::build_scopes;
     use crate::sema::symbol::{BindingKind, Known, UnknownReason};
     use cpp_parser::{CppParser, ParserConfig};
@@ -479,17 +726,150 @@ mod tests {
     }
 
     #[test]
-    fn a_qualified_name_from_outside_its_namespace_is_unknown_rather_than_wrong() {
-        // `ns::count` from file scope. Resolving it needs the qualifier walked segment by segment, which this
-        // layer does not do yet — and the answer must say so rather than jump to a `count` that happens to be in
-        // *some* scope. This test is what will fail when qualified resolution lands, which is the point: the
-        // change will be deliberate.
+    fn the_written_name_is_the_whole_qualifier_up_to_the_cursor() {
+        // What the lookup is given, asserted directly: this function decides which question every other test in
+        // this file is asking, and getting it wrong is not a crash but a different question with a different
+        // answer — `Widget` instead of `ns::Widget` is exactly the jump to the wrong entity.
+        let source = "namespace ns {\n  struct Widget { int x; };\n}\n\
+                      ::Global g;\n\
+                      ns::Widget<int> w;\n";
+        let root = tree(source).get_red_root();
+
+        let at_widget = |needle: &str| {
+            let offset = at(source, needle);
+            qualified_name_at(&root, offset).map(|(written, _)| written)
+        };
+
+        assert_eq!(
+            at_widget("Widget<int> w;").as_deref(),
+            Some("ns::Widget"),
+            "the template argument list is not part of the name"
+        );
+        assert_eq!(
+            at_widget("ns::Widget<int>").as_deref(),
+            Some("ns"),
+            "a cursor on the qualifier asks about the qualifier"
+        );
+        assert_eq!(
+            at_widget("Global g;").as_deref(),
+            Some("::Global"),
+            "a leading `::` is part of the spelling: it asks about the global name space"
+        );
+        assert_eq!(
+            at_widget("x; };").as_deref(),
+            Some("x"),
+            "and a bare name is still a bare name"
+        );
+    }
+
+    #[test]
+    fn a_qualified_name_resolves_into_its_namespace() {
+        // This test used to assert the opposite, on purpose: it was written to fail the day qualified resolution
+        // landed, so that the change could not happen by accident. It landed, and this is what it bought —
+        // `ns::count` from file scope used to be `Unknown`, and it is now the declaration it names.
         let source = "namespace ns {\n  int count = 0;\n}\nvoid f() {\n  ns::count = 1;\n}\n";
         let found = definition_of(source, "count = 1;");
 
+        let Known::Yes(binding) = found else {
+            panic!("the qualifier names a namespace this file declares: {found:?}");
+        };
+        assert_eq!(binding.name.identifier_text(), Some("count"));
         assert!(
-            matches!(found, Known::Unknown(_)),
-            "a qualifier this layer cannot walk is unknown, not guessed: {found:?}"
+            binding.range.start_offset < at(source, "void f"),
+            "and the jump goes into the namespace, not to the use"
+        );
+    }
+
+    #[test]
+    fn a_qualifier_picks_the_right_namespace_when_the_name_is_in_two_of_them() {
+        // The reason qualification is not a detail: `Widget` is declared in both, so an implementation that dropped
+        // the qualifier and looked for `Widget` would answer with whichever came first in the file. That is a wrong
+        // jump rather than a missing one, which is the class of answer this project refuses to give.
+        let source = "namespace a {\n  struct Widget { int from_a; };\n}\n\
+                      namespace b {\n  struct Widget { int from_b; };\n}\n\
+                      void f() {\n  b::Widget w;\n}\n";
+        let found = definition_of(source, "Widget w;");
+
+        let Known::Yes(binding) = found else {
+            panic!("`b::Widget` is the one in `b`");
+        };
+        assert!(
+            binding.range.start_offset > at(source, "namespace b"),
+            "the jump lands in `b`, not in `a`: {:?}",
+            binding.range
+        );
+    }
+
+    #[test]
+    fn a_nested_qualifier_walks_every_segment() {
+        let source = "namespace a {\n  namespace b {\n    int count = 0;\n  }\n}\n\
+                      void f() {\n  a::b::count = 1;\n}\n";
+        let found = definition_of(source, "count = 1;");
+
+        let Known::Yes(binding) = found else {
+            panic!("both segments name scopes this file declares: {found:?}");
+        };
+        assert_eq!(binding.name.identifier_text(), Some("count"));
+    }
+
+    #[test]
+    fn a_relative_qualifier_is_anchored_in_the_enclosing_scope() {
+        // `b::count` written *inside* `a` means `a::b::count`: the qualifier is relative to where it is written,
+        // which is why the search tries each enclosing scope rather than only the whole spelling.
+        let source = "namespace a {\n  namespace b {\n    int count = 0;\n  }\n  void f() {\n    b::count = 1;\n  }\n}\n";
+        let found = definition_of(source, "count = 1;");
+
+        let Known::Yes(binding) = found else {
+            panic!("a relative qualifier is resolved from the enclosing scope: {found:?}");
+        };
+        assert_eq!(binding.name.identifier_text(), Some("count"));
+    }
+
+    #[test]
+    fn a_cursor_on_the_qualifier_asks_about_the_qualifier() {
+        // `ns::count` with the cursor on `ns` is a question about `ns`, not about `count`: the spelling the file
+        // writes up to the cursor is `ns`. Getting this wrong sends a user to the wrong entity from a position
+        // they can plainly see is the namespace.
+        let source = "namespace ns {\n  int count = 0;\n}\nvoid f() {\n  ns::count = 1;\n}\n";
+        let found = definition_of(source, "ns::count");
+
+        let Known::Yes(binding) = found else {
+            panic!("the qualifier is a name this file declares: {found:?}");
+        };
+        assert_eq!(binding.name.identifier_text(), Some("ns"));
+    }
+
+    #[test]
+    fn a_qualifier_that_names_nothing_is_unknown_rather_than_guessed() {
+        let source = "namespace ns {\n  int count = 0;\n}\nvoid f() {\n  nope::count = 1;\n}\n";
+        let found = definition_of(source, "count = 1;");
+
+        assert!(
+            matches!(found, Known::Unknown(UnknownReason::NotDeclaredHere(_))),
+            "and the reason must carry the qualified spelling, which is what the cross-file layer looks up: \
+             {found:?}"
+        );
+
+        let Known::Unknown(UnknownReason::NotDeclaredHere(written)) = found else {
+            unreachable!("just checked");
+        };
+        assert_eq!(&*written, "nope::count");
+    }
+
+    #[test]
+    fn an_out_of_line_definition_resolves_to_the_declaration_in_the_class() {
+        // The everyday C++ pair: the declaration in the class, the definition in a `.cpp`. Both are `C::value`,
+        // and the jump a user wants is from either to the declaration.
+        let source = "struct C {\n  int value() const;\n};\nint C::value() const {\n  return 0;\n}\n";
+        let found = definition_of(source, "value() const {");
+
+        let Known::Yes(binding) = found else {
+            panic!("`C::value` names the member declared in `C`: {found:?}");
+        };
+        assert_eq!(binding.name.identifier_text(), Some("value"));
+        assert!(
+            binding.range.start_offset < at(source, "int C::value"),
+            "and the jump goes to the declaration, not to the definition it is standing on"
         );
     }
 

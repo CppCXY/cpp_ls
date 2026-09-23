@@ -32,10 +32,11 @@ use std::collections::HashMap;
 
 use crate::preprocess::directive::{Directive, DirectiveKind, SpannedDirective};
 use crate::preprocess::FilePreprocessing;
-use crate::sema::symbol::{Binding, ScopeId, ScopeTree};
+use crate::sema::symbol::{Binding, BindingKind, ScopeId, ScopeTree};
 use crate::summary::{DeclFact, DeclKind, FactGuard, SummaryGuards};
+use cpp_parser::CppSyntaxKind;
 
-use cpp_parser::SourceRange;
+use cpp_parser::{CppSyntaxNode, SourceRange};
 
 /// Build a file's declaration facts, and the guard regions they refer to.
 ///
@@ -48,16 +49,201 @@ use cpp_parser::SourceRange;
 /// hidden: a declaration the scope walker deliberately does not bind is absent here too, and that absence is
 /// deliberate on both sides — see [`crate::scopes::declaring_kinds`], which exists so that the set of
 /// constructs the walker does read cannot silently shrink.
-pub fn build_facts(scopes: &ScopeTree, preprocessing: &FilePreprocessing) -> (Vec<DeclFact>, SummaryGuards) {
-    let file = DeclarationFacts::new(scopes, preprocessing);
+///
+/// `root` is needed for one field: the **type** a variable was declared with, which is a fact about the syntax
+/// and not about the scope tree. Taking it from the root's text rather than from a node keeps the walker out of
+/// this module's business — the binding already says where the declaration and its name are, and what lies
+/// between them is the type as the file spells it.
+pub fn build_facts(
+    scopes: &ScopeTree,
+    preprocessing: &FilePreprocessing,
+    root: &CppSyntaxNode,
+) -> (Vec<DeclFact>, SummaryGuards) {
+    let file = DeclarationFacts::new(scopes, preprocessing, root);
     file.build()
+}
+
+/// The type a variable-like declaration was written with, as it is spelled before the name.
+///
+/// # Why it is read out of the text
+///
+/// A `DeclFact` is built from a [`Binding`], which knows the declaration's range and its name's range and nothing
+/// about the syntax in between — so the type is whatever the file wrote there. That is a *feature* here: it is
+/// the spelling a consumer has to resolve anyway, and copying it out of the text cannot disagree with the file
+/// about how it was written.
+///
+/// # What it strips, and what it keeps
+///
+/// Declaration **specifiers** go — they are not part of a type's name, and a lookup by name is what this is for.
+/// So `static const Widget` records `Widget`, and a member access through it finds `Widget`'s members rather
+/// than looking for a class called `static`. What stays is anything that names or shapes a type, which includes
+/// `unsigned`/`long`/`short` (the words *are* the type) and `struct` (an elaborated specifier that does name
+/// one). A `*` or `&` written before the name stays too: it does not change which class the type names.
+///
+/// # Why it is public
+///
+/// The *query* layer needs the same answer without going through a summary: a member access on a variable declared
+/// in the file being edited asks its question of the tree in front of it, not of a cache. One implementation, so
+/// that the two cannot come to disagree about what `static const Widget` declares.
+///
+/// `None` for a declaration that declares no type: a class, a namespace, a function, an alias. See
+/// [`DeclFact::type_of`].
+pub fn declared_type_of(root: &CppSyntaxNode, binding: &Binding) -> Option<String> {
+    // The kinds that have a type in this sense. A field and a parameter are `Variable` too — they are what a
+    // member access is asked *from* — while a class and a function are not: a class *is* a type and a function
+    // *returns* one, and those spellings come from a different part of the syntax.
+    if binding.kind != BindingKind::Variable {
+        return None;
+    }
+
+    // The declaration's own specifier sequence, found by **descending to where the binding is** and keeping the
+    // last one passed on the way down.
+    //
+    // Not "the text before the name", which is what this started as and what a `Binding`'s range makes tempting:
+    // a binding's range is the *declarator* (`w` in `Widget w;`) rather than the whole declaration, so the text in
+    // front of it is empty and every variable's type came out as `None`. Descending from the root costs one walk
+    // down the spine and asks the tree a structural question instead of reading text and hoping about geometry.
+    let mut node = root.clone();
+    let mut found = None;
+
+    loop {
+        if let Some(specifiers) = node
+            .children()
+            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq)
+        {
+            found = Some(specifiers.text().to_string());
+        }
+
+        match node
+            .children_with_tokens()
+            .find(|element| {
+                element
+                    .as_node()
+                    .is_some_and(|child| holds(child, binding.range.start_offset))
+            })
+            .and_then(|element| element.into_node())
+        {
+            Some(child) => node = child,
+            None => break,
+        }
+    }
+
+    let spelling = strip_declaration_specifiers(&found?);
+
+    (!spelling.is_empty()).then_some(spelling)
+}
+
+/// Is `offset` inside this node?
+fn holds(node: &CppSyntaxNode, offset: usize) -> bool {
+    let range = node.text_range();
+    offset >= usize::from(range.start()) && offset < usize::from(range.end())
+}
+
+/// The base classes a class-like declaration was written with, in declaration order.
+///
+/// Public for the same reason [`declared_type_of`] is: the query layer needs it for a class in the file being
+/// edited, and a second implementation would be a second answer to "what does `class D : public B` inherit from".
+///
+/// The `BaseSpecifier` children of the class definition, each read as the text of its **name node** — so
+/// `public B`, `private ns::C` and `virtual Base<int>` come back as `B`, `ns::C` and `Base<int>`. Taking the whole
+/// specifier's text instead would read the access keyword as part of the base's name.
+///
+/// Empty for anything that is not a class, and for a class with no bases.
+pub fn declared_bases_of(root: &CppSyntaxNode, binding: &Binding) -> Vec<String> {
+    if binding.kind != BindingKind::Class {
+        return Vec::new();
+    }
+
+    // The class definition the binding is inside — the last one passed on the way down to it, which is the walk
+    // `declared_type_of` makes and for the same reason: a binding's range does not cover the construct that
+    // declared it, so the *tree* is asked where the declaration is rather than the geometry of a range.
+    let mut node = root.clone();
+    let mut owner = None;
+
+    loop {
+        if matches!(
+            CppSyntaxKind::from(node.kind()),
+            CppSyntaxKind::ClassDef | CppSyntaxKind::StructDef | CppSyntaxKind::EnumDef
+        ) {
+            owner = Some(node.clone());
+        }
+
+        match node
+            .children_with_tokens()
+            .find(|element| {
+                element
+                    .as_node()
+                    .is_some_and(|child| holds(child, binding.range.start_offset))
+            })
+            .and_then(|element| element.into_node())
+        {
+            Some(child) => node = child,
+            None => break,
+        }
+    }
+
+    let Some(owner) = owner else {
+        return Vec::new();
+    };
+
+    owner
+        .children()
+        .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::BaseSpecifier)
+        .filter_map(|specifier| {
+            specifier
+                .children()
+                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)
+        })
+        .map(|name| name.text().to_string().trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// The specifier keywords that can precede a type without being part of it.
+///
+/// Deliberately *not* in this list: `unsigned`, `signed`, `long`, `short`, `struct`, `class`, `enum`, `typename`.
+/// The first four are the type itself; the last four name one, and stripping `struct` from `struct Widget` would
+/// leave nothing to look up.
+const DECLARATION_SPECIFIERS: &[&str] = &[
+    "static",
+    "extern",
+    "inline",
+    "virtual",
+    "explicit",
+    "friend",
+    "mutable",
+    "register",
+    "thread_local",
+    "constexpr",
+    "consteval",
+    "constinit",
+    "typedef",
+    "const",
+    "volatile",
+];
+
+/// Remove declaration specifiers from the front of a type spelling, and trim what is left.
+fn strip_declaration_specifiers(spelling: &str) -> String {
+    let mut rest = spelling.trim();
+
+    loop {
+        let Some(word) = rest.split_whitespace().next() else {
+            return String::new();
+        };
+
+        if !DECLARATION_SPECIFIERS.contains(&word) || word.len() == rest.len() {
+            return rest.trim().to_string();
+        }
+
+        rest = rest[word.len()..].trim_start();
+    }
 }
 
 /// One fact, or `None` for a binding the index has no use for.
 ///
 /// A free function rather than a method so that the borrow of the fact list and the borrow of the scope tree
 /// cannot be confused for each other while the walk is filling one from the other.
-fn fact_for(binding: &Binding, scope: Option<String>) -> Option<DeclFact> {
+fn fact_for(root: &CppSyntaxNode, binding: &Binding, scope: Option<String>) -> Option<DeclFact> {
     // A binding with no identifier is a destructor, an operator, or a conversion function: real declarations,
     // but ones whose *name* is not a name a lookup can be keyed on. They are stored with an empty name and the
     // kind `Other` rather than dropped, because "there is a declaration here" is still the answer a
@@ -72,6 +258,8 @@ fn fact_for(binding: &Binding, scope: Option<String>) -> Option<DeclFact> {
         kind: DeclKind::from_binding_kind(binding.kind),
         name,
         scope,
+        type_of: declared_type_of(root, binding),
+        bases: declared_bases_of(root, binding),
         range: binding.range,
         name_range: binding.name_range,
         // Filled in by `assign_guards`, which is the only place that knows where the directives are.
@@ -83,25 +271,34 @@ fn fact_for(binding: &Binding, scope: Option<String>) -> Option<DeclFact> {
 struct DeclarationFacts<'a> {
     scopes: &'a ScopeTree,
     preprocessing: &'a FilePreprocessing,
+    /// The tree, which is where a declared type's spelling comes from.
+    root: &'a CppSyntaxNode,
     guards: SummaryGuards,
     /// Every fact, in the order the scopes hold them — sorted by offset once, before the guard sweep.
     facts: Vec<DeclFact>,
 }
 
 impl<'a> DeclarationFacts<'a> {
-    fn new(scopes: &'a ScopeTree, preprocessing: &'a FilePreprocessing) -> Self {
+    fn new(
+        scopes: &'a ScopeTree,
+        preprocessing: &'a FilePreprocessing,
+        root: &'a CppSyntaxNode,
+    ) -> Self {
         DeclarationFacts {
             scopes,
             preprocessing,
+            root,
             guards: SummaryGuards::default(),
             facts: Vec::new(),
         }
     }
 
     fn build(mut self) -> (Vec<DeclFact>, SummaryGuards) {
-        // Moved out up front so that the walk below borrows two fields of `self` separately rather than all of it.
+        // Moved out up front so that the walk below borrows three fields of `self` separately rather than all of
+        // it — the loop pushes into `self.facts` while reading the other two.
         let preprocessing = self.preprocessing;
         let scopes = self.scopes;
+        let root = self.root;
 
         for (index, scope) in scopes.scopes().iter().enumerate() {
             // The prefix is what a declaration written *here* is qualified by, which is the scope's own name
@@ -110,7 +307,7 @@ impl<'a> DeclarationFacts<'a> {
             let prefix = scopes.qualification_prefix_of(ScopeId(index));
 
             for binding in &scope.bindings {
-                if let Some(fact) = fact_for(binding, prefix.clone()) {
+                if let Some(fact) = fact_for(root, binding, prefix.clone()) {
                     self.facts.push(fact);
                 }
             }
@@ -348,7 +545,7 @@ mod tests {
         assert_eq!(tree.get_errors(), [], "the input must parse cleanly");
 
         let root = tree.get_red_root();
-        build_facts(&build_scopes(&root), &preprocess(&root))
+        build_facts(&build_scopes(&root), &preprocess(&root), &root)
     }
 
     fn qualified(source: &str) -> Vec<String> {

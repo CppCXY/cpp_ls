@@ -50,6 +50,37 @@ pub struct DeclFact {
     /// [`ScopeId`]: crate::ScopeId
     pub scope: Option<String>,
     pub kind: DeclKind,
+    /// The type a variable-like declaration was written with, as the file spells it.
+    ///
+    /// The first field in a fact that is not simply "what the file says about this name" but "what the file says
+    /// about the *type* of it", and it exists for one query: `widget.size` is answered by finding `Widget` and
+    /// then `size` inside it, and nothing else in a fact says how to get from `widget` to `Widget`.
+    ///
+    /// Three limits, all deliberate:
+    ///
+    /// * **As written, not resolved.** `Widget`, `ns::Widget` and `std::vector<int>` are stored as spelled, so a
+    ///   consumer resolves them with the qualified-name machinery that already exists — and gets `Unknown` where
+    ///   that machinery cannot go, rather than a guess.
+    /// * **Only for variables, fields and parameters.** A class or a function declares no type in this sense: a
+    ///   class *is* one and a function *returns* one, and those spellings live in a different part of the syntax.
+    ///   `None` is the honest answer for them.
+    /// * **Declaration specifiers are stripped.** `static const Widget` records `Widget`, because a specifier is
+    ///   not part of the type's name and a lookup by name is what this is for. `unsigned long` survives, because
+    ///   there the words *are* the type.
+    pub type_of: Option<String>,
+    /// For a class-like declaration, the base classes it was written with, in declaration order.
+    ///
+    /// Spelled as written — `B`, `ns::C`, `Base<int>` — for the same reason [`DeclFact::type_of`] is: a consumer
+    /// resolves them with the machinery that already exists, and `Unknown` where it cannot go beats a guess.
+    ///
+    /// Empty for a class with no bases **and** for everything that is not a class, which is one answer because it
+    /// is the same answer to the question a consumer is asking: a member that is not here is not inherited from
+    /// anywhere this declaration knows about.
+    ///
+    /// Access and `virtual` are not recorded. They decide whether a member is *reachable* and how the class is
+    /// laid out, and this is a fact about the text rather than a semantic property — a lookup that used them would
+    /// be the first thing here to need real semantics, and it would need the whole of them.
+    pub bases: Vec<String>,
     /// The whole declaration, for a "go to definition" highlight.
     pub range: cpp_parser::SourceRange,
     /// Just the name, which is what a reference search matches. Separate from `range` for the reason
@@ -113,11 +144,35 @@ pub enum DeclKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MacroFact {
     pub name: String,
+    /// Whether this is the name becoming a macro or ceasing to be one.
+    pub kind: MacroKind,
     pub function_like: bool,
     pub body: cpp_parser::MacroBody,
-    /// Where the definition is, for "go to macro definition".
+    /// Where the fact is, for "go to macro definition".
     pub range: cpp_parser::SourceRange,
     pub guard: FactGuard,
+}
+
+/// Which of the two things a macro name's history is made of.
+///
+/// `#undef` is stored because a query that answers "where is this macro defined" has to be able to answer "it is
+/// not a macro here" instead: a name `#undef`ed above the cursor is an ordinary identifier, and pointing at the
+/// `#define` it used to have would be a wrong answer rather than a missing one. Both are *facts about the text* —
+/// they say what the file does, not what any compilation concludes — so the same ordering rule settles them
+/// together: whichever comes last in translation order wins, and it can be either kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MacroKind {
+    /// `#define NAME ...`
+    Definition,
+    /// `#undef NAME`
+    Undefinition,
+}
+
+impl MacroKind {
+    /// Is this fact the name becoming a macro?
+    pub fn is_definition(self) -> bool {
+        matches!(self, MacroKind::Definition)
+    }
 }
 
 /// An `#include`, resolved or not.
@@ -134,8 +189,31 @@ pub struct IncludeFact {
     pub spelling: String,
     /// Where the include resolved to, when the resolver found it.
     pub resolved: Option<std::path::PathBuf>,
+    /// Whether the directive was `#include_next`.
+    ///
+    /// Stored, although no *query* has ever wanted it, because the answer has to be **re-derivable**: a summary
+    /// that says where an include resolved can only be trusted while re-running the search gives the same answer,
+    /// and a search that skipped candidates differently is a different search. See [`IncludeFact::as_include`].
+    pub is_next: bool,
     pub range: cpp_parser::SourceRange,
     pub guard: FactGuard,
+}
+
+impl IncludeFact {
+    /// The directive this fact was made from, as the resolver takes one.
+    ///
+    /// The round trip back from a fact to a directive is what makes a stored `resolved` **checkable**: `#include`
+    /// resolution depends on which paths *exist*, and that is a fact about the filesystem which no key computed
+    /// from the text can name — so a cached summary is a candidate that has to be re-verified against the
+    /// filesystem before it is used. That check is only faithful if every field the search reads is here, which is
+    /// why [`is_next`](Self::is_next) is stored and not dropped.
+    pub fn as_include(&self) -> crate::preprocess::directive::Include {
+        crate::preprocess::directive::Include {
+            form: self.form,
+            target: Box::from(self.spelling.as_str()),
+            is_next: self.is_next,
+        }
+    }
 }
 
 /// `#include "local.h"` against `#include <system.h>`.
