@@ -25,7 +25,6 @@
 //! file was entered with — which is exactly what the summary's key records.
 
 use crate::cache::SummaryKey;
-use crate::paths::FileId;
 
 /// A declaration the file writes: enough to find it, name it, and say what kind of thing it is.
 ///
@@ -35,8 +34,21 @@ use crate::paths::FileId;
 pub struct DeclFact {
     /// The name as written, without qualification: `Widget` in `ns::Widget`.
     pub name: String,
-    /// The qualifier as written, when the declaration spelled one: `ns` in `ns::Widget`. `None` for a plain name.
-    pub qualifier: Option<String>,
+    /// The **qualified** name of the scope the declaration was written in, without the name itself: `ns::C` for a
+    /// member of that class.
+    ///
+    /// The one field that makes a flat list of declarations indexable. A name alone does not identify a
+    /// declaration — two files may each declare `Widget`, and one file may declare `f` at file scope and again as
+    /// a member — so a lookup needs the scope, and the qualified spelling is the scope's identity that survives
+    /// being written to disk. A [`ScopeId`] would not: it is only meaningful inside the tree it came from.
+    ///
+    /// `None` for a declaration at file scope, which is what distinguishes `f` from `ns::C::f`. It is also `None`
+    /// for a declaration inside a construct that has no qualified name — a local in a function body, a member of an
+    /// anonymous class — because those genuinely have none, and an empty string would be a name that matches
+    /// nothing while looking like an answer.
+    ///
+    /// [`ScopeId`]: crate::ScopeId
+    pub scope: Option<String>,
     pub kind: DeclKind,
     /// The whole declaration, for a "go to definition" highlight.
     pub range: cpp_parser::SourceRange,
@@ -44,6 +56,37 @@ pub struct DeclFact {
     /// [`crate::Binding`] documents: collapsing them renames whole declarations.
     pub name_range: cpp_parser::SourceRange,
     pub guard: FactGuard,
+}
+
+impl DeclFact {
+    /// The declaration's full name, qualified by the scope it was written in.
+    ///
+    /// What a symbol search shows and what a lookup keys on. Joining is done here rather than stored, so the two
+    /// halves cannot disagree — and a caller that wants the segments separately still has them.
+    pub fn qualified_name(&self) -> String {
+        match &self.scope {
+            Some(scope) if !self.name.is_empty() => format!("{scope}::{}", self.name),
+            Some(scope) => scope.clone(),
+            None => self.name.clone(),
+        }
+    }
+
+    /// The segments of [`DeclFact::qualified_name`], outermost first.
+    ///
+    /// For a consumer that needs to walk a qualification rather than print it — resolving `ns::C::f` one segment
+    /// at a time is the ordinary case, and splitting a joined string at every step would be work done per query.
+    pub fn qualified_segments(&self) -> Vec<&str> {
+        let mut segments: Vec<&str> = Vec::new();
+
+        if let Some(scope) = &self.scope {
+            segments.extend(scope.split("::"));
+        }
+        if !self.name.is_empty() {
+            segments.push(&self.name);
+        }
+
+        segments
+    }
 }
 
 /// What kind of declaration a [`DeclFact`] is.
@@ -79,16 +122,18 @@ pub struct MacroFact {
 
 /// An `#include`, resolved or not.
 ///
-/// The *target* is stored as the id the resolver produced, which is what the graph is built from; a header that did
-/// not resolve keeps its spelling, because "this project includes something we cannot find" is a fact a consumer
-/// wants to see rather than a gap to hide.
+/// The *target* is stored as the **path** the resolver found, for the same reason [`FileSummary::path`] is: an
+/// id is an index into a run's interner and means nothing once that run is over, while the path is what a
+/// consumer opens and what a reverse-include map is built from. A header that did not resolve keeps its
+/// spelling, because "this project includes something we cannot find" is a fact a consumer wants to see rather
+/// than a gap to hide.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncludeFact {
     pub form: IncludeForm,
     /// The spelling between the delimiters, as written.
     pub spelling: String,
-    /// The resolved file, when the resolver found one.
-    pub resolved: Option<FileId>,
+    /// Where the include resolved to, when the resolver found it.
+    pub resolved: Option<std::path::PathBuf>,
     pub range: cpp_parser::SourceRange,
     pub guard: FactGuard,
 }
@@ -128,7 +173,16 @@ pub struct SummaryGuards {
 /// a claim the index never made. See `Known` in [`crate::symbol`] for the vocabulary that keeps those apart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileSummary {
-    pub file: FileId,
+    /// Where the file is, as the path it was read from.
+    ///
+    /// A path rather than a [`FileId`], and the reason is what survives a restart: a `FileId` is an index into a
+    /// [`PathInterner`] that is built fresh every run, so an id written to disk means something different — or
+    /// nothing at all — when it is read back. The path is also what a consumer needs anyway: a "go to
+    /// definition" in another file opens it by name.
+    ///
+    /// [`FileId`]: crate::FileId
+    /// [`PathInterner`]: crate::PathInterner
+    pub path: std::path::PathBuf,
     /// What this summary was built from — see [`SummaryKey`]. Stored so that a loaded entry can be *checked*
     /// against the file it claims to describe rather than trusted because it was found.
     pub key: SummaryKey,
@@ -139,10 +193,10 @@ pub struct FileSummary {
 }
 
 impl FileSummary {
-    /// A summary with no facts, for `file`, built under `key`.
-    pub fn empty(file: FileId, key: SummaryKey) -> Self {
+    /// A summary with no facts, for the file at `path`, built under `key`.
+    pub fn empty(path: impl Into<std::path::PathBuf>, key: SummaryKey) -> Self {
         FileSummary {
-            file,
+            path: path.into(),
             key,
             declarations: Vec::new(),
             macros: Vec::new(),
@@ -200,43 +254,9 @@ impl DeclKind {
     }
 }
 
-/// Build the **declaration facts** of one file from its scope tree.
-///
-/// Declarations only: the macros and includes come from the directive reader, which is a separate walk with its own
-/// vocabulary, and mixing the two here would make this function's contract "whatever the index happens to hold".
-///
-/// Two things this deliberately does *not* do:
-///
-/// * **resolve anything** — the name is stored as written (`identifier_text`), and a declaration whose name is not
-///   a plain identifier (a destructor's `~S`, an `operator+`) is stored with the kind `Other` and no name, rather
-///   than with a guess;
-/// * **decide whether the declaration is visible** — that is a query over scopes and the include graph, and it needs
-///   the environment the file was entered with.
-///
-/// The guard of every fact is `Unconditional` for now: region tracking needs the conditional walk that the include
-/// facts come from, and claiming a fact is unconditional when it is not would be exactly the silent wrong answer
-/// `docs/index-design.md` forbids — so it is recorded as a gap here rather than filled with a default.
-pub fn build_declarations(scopes: &crate::ScopeTree) -> Vec<DeclFact> {
-    let mut facts = Vec::new();
-
-    for scope in scopes.scopes() {
-        for binding in &scope.bindings {
-            let name = binding
-                .name
-                .identifier_text()
-                .map(str::to_string)
-                .unwrap_or_default();
-
-            facts.push(DeclFact {
-                name,
-                qualifier: None,
-                kind: DeclKind::from_binding_kind(binding.kind),
-                range: binding.range,
-                name_range: binding.name_range,
-                guard: FactGuard::Unconditional,
-            });
-        }
-    }
-
-    facts
-}
+// Declaration facts are built by [`crate::declarations::build_facts`], in the `sema` layer rather than here, and
+// the reason is worth knowing before looking for it: a fact has to say which `#if` it was written in, which means
+// the walk needs the *preprocessor* state as well as the scopes — and this module is the shape of what gets
+// stored, not a place that knows about directives. There was a `build_declarations` here that took only a scope
+// tree and filled every guard with `Unconditional`; it was deleted rather than kept, because a function whose
+// contract is "the guards are wrong" is one a caller reaches for by accident.

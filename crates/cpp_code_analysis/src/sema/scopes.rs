@@ -187,24 +187,116 @@ impl ScopeWalker {
         }
     }
 
-    /// `namespace ns { ... }`, and the anonymous form.
+    /// `namespace ns { ... }`, the nested spelling `namespace a::b { ... }`, and the anonymous form.
     fn namespace(&mut self, node: &CppSyntaxNode, parent: ScopeId) {
-        let scope = self.table.create_scope(
-            ScopeKind::Namespace,
-            Some(parent),
-            Some(cpp_parser::source_range(node.text_range())),
-        );
+        let range = cpp_parser::source_range(node.text_range());
 
-        // An anonymous namespace has no name to bind, and that is a fact about the program rather than a
-        // failure: its contents are visible in this file and nowhere else. Binding nothing is right.
+        // The body, found before anything is created, because the scope chain below has to know whether the
+        // declaration has one at all.
+        let body = first_child(node, CppSyntaxKind::CompoundStat);
+
+        // `namespace a::b { }` is one declaration that introduces **both** names, and it is the same construct
+        // as the spelled-out nesting. One scope per segment is what makes the two produce the same qualified
+        // name, and the bindings follow the scopes: `a` goes in the enclosing scope and `b` inside `a`, because
+        // that is where each becomes usable.
         //
-        // The name goes in the **enclosing** scope, as a class's does: `namespace ns { }` makes `ns` usable from
-        // outside, and a namespace declared inside itself would be reachable only from within it.
-        if let Some((name, name_range)) = declared_name(node) {
-            self.bind(parent, name, BindingKind::Namespace, node, name_range);
-        }
+        // An anonymous namespace has no segments at all, which is a fact about the program rather than a
+        // failure: its contents are visible in this file and nowhere else, and no qualified name runs through it.
+        let segments = namespace_segments(node);
+        let segment_ranges = namespace_segment_ranges(node);
+
+        let scope = match (segments.as_slice(), body) {
+            // Anonymous. Nothing to name and nothing to make reachable.
+            ([], _) => self.table.create_scope(ScopeKind::Namespace, Some(parent), Some(range)),
+            (segments, Some(_)) => self.open_namespace_chain(segments, parent, range),
+            // A namespace declaration with no body — `namespace ns;` is not legal C++, but the grammar can
+            // produce one from malformed input, and naming a scope that has nothing in it is better than
+            // opening a chain the walk then has to explain.
+            (segments, None) => self.table.create_named_scope(
+                ScopeKind::Namespace,
+                Some(parent),
+                Some(range),
+                segments.last().map(String::as_str),
+            ),
+        };
+
+        self.bind_namespace_segments(&segments, &segment_ranges, scope, parent, node, range);
 
         self.items_in_scope(node, scope, &[CppSyntaxKind::CompoundStat]);
+    }
+
+    /// Bind each segment of a namespace name in the scope that segment becomes usable in.
+    ///
+    /// `inner` is the innermost scope the declaration opened, and the bindings are placed by walking *outward*
+    /// from it: the last segment goes in the innermost scope, and the first goes in `parent` — which is what
+    /// makes `namespace a::b` and `namespace a { namespace b {` introduce the same two names in the same two
+    /// places. That is each name being where it is usable: `a` from the enclosing scope, `b` from inside `a`.
+    ///
+    /// [`declared_name`] cannot answer this: it refuses a qualified name, which is right for every other
+    /// declaration (`int ns::count;` declares a member of `ns`, not a name here) and wrong for this one, where
+    /// the `::` *is* a nesting the declaration creates.
+    fn bind_namespace_segments(
+        &mut self,
+        segments: &[String],
+        ranges: &[cpp_parser::SourceRange],
+        inner: ScopeId,
+        parent: ScopeId,
+        node: &CppSyntaxNode,
+        whole: cpp_parser::SourceRange,
+    ) {
+        // Innermost first, and each name lands one scope *outside* its own: `a` is usable from the scope that
+        // encloses it, so that is where it is declared. `enclosing` therefore starts at the innermost scope's
+        // parent, which for a single-segment name is already the answer.
+        let mut enclosing = self
+            .table
+            .scope(inner)
+            .and_then(|scope| scope.parent)
+            .unwrap_or(parent);
+
+        for index in (0..segments.len()).rev() {
+            let name_range = ranges.get(index).copied().unwrap_or(whole);
+            self.bind(
+                enclosing,
+                Name::identifier(&segments[index]),
+                BindingKind::Namespace,
+                node,
+                name_range,
+            );
+
+            enclosing = self
+                .table
+                .scope(enclosing)
+                .and_then(|scope| scope.parent)
+                .unwrap_or(parent);
+        }
+    }
+
+    /// Open one namespace scope per segment of a nested namespace name, returning the innermost.
+    ///
+    /// The intermediate scopes are the reason this is a chain rather than one scope with a compound name: a
+    /// qualified name is built one segment at a time by [`ScopeTree::qualified_name_of`], so `a::b` has to be
+    /// two scopes or `a::b::C` cannot be produced. Each takes the namespace declaration's range, because the
+    /// whole declaration is what introduced all of them.
+    ///
+    /// A single-segment name goes through here too, which keeps one rule for where the body lands.
+    fn open_namespace_chain(
+        &mut self,
+        segments: &[String],
+        parent: ScopeId,
+        range: cpp_parser::SourceRange,
+    ) -> ScopeId {
+        let mut enclosing = parent;
+
+        for segment in segments {
+            enclosing = self.table.create_named_scope(
+                ScopeKind::Namespace,
+                Some(enclosing),
+                Some(range),
+                Some(segment),
+            );
+        }
+
+        enclosing
     }
 
     /// A class, struct, or union, in either its definition or its declaration form.
@@ -224,7 +316,10 @@ impl ScopeWalker {
         inner: ScopeId,
         kind: BindingKind,
     ) {
-        if let Some((name, name_range)) = declared_name(node) {
+        let declared = declared_name(node);
+        let declared_text = declared.as_ref().map(|(name, _)| name.kind.text());
+
+        if let Some((name, name_range)) = declared {
             self.bind(outer, name, kind, node, name_range);
         }
 
@@ -241,10 +336,11 @@ impl ScopeWalker {
             return;
         }
 
-        let scope = self.table.create_scope(
+        let scope = self.table.create_named_scope(
             ScopeKind::Class,
             Some(inner),
             Some(cpp_parser::source_range(node.text_range())),
+            declared_text.as_deref(),
         );
 
         // The body is this scope, so its members land here rather than in a block inside it.
@@ -258,13 +354,17 @@ impl ScopeWalker {
     /// which is a second binding rather than a different one, and is left to the lookup step to model, because
     /// adding it here would make the enum scope report names it does not own.
     fn enum_like(&mut self, node: &CppSyntaxNode, outer: ScopeId, inner: ScopeId) {
-        let scope = self.table.create_scope(
+        let declared = declared_name(node);
+        let declared_text = declared.as_ref().map(|(name, _)| name.kind.text());
+
+        let scope = self.table.create_named_scope(
             ScopeKind::Enum,
             Some(inner),
             Some(cpp_parser::source_range(node.text_range())),
+            declared_text.as_deref(),
         );
 
-        if let Some((name, name_range)) = declared_name(node) {
+        if let Some((name, name_range)) = declared {
             self.bind(outer, name, BindingKind::Enum, node, name_range);
         }
 
@@ -1066,6 +1166,64 @@ fn declared_name(node: &CppSyntaxNode) -> Option<(Name, cpp_parser::SourceRange)
     let name = name_from_text(text, node)?;
 
     Some((name, cpp_parser::source_range(token.text_range())))
+}
+
+/// The `NameExpr` naming a declarator, following only the nodes that carry a declared name.
+///
+/// The segments of a namespace's name, outermost first: `["a", "b"]` for `namespace a::b { }`.
+///
+/// Empty for an anonymous namespace, and for one whose name could not be read — both mean "this construct
+/// introduces nothing", which is the same answer [`declared_name`] gives by returning `None`.
+///
+/// # Why the top-level identifiers are the answer
+///
+/// `namespace a::b` parses as **one** `NamespaceDecl` whose `NameExpr` holds both identifiers, while
+/// `namespace a { namespace b {` parses as two declarations and therefore two `NameExpr`s. Reading the direct
+/// identifier tokens of the name node is what makes the two agree, and it is the only reading that does: the
+/// last identifier alone gives `a::b` the single segment `b`, the first alone gives it `a`, and neither can
+/// produce `a::b::C`.
+///
+/// A **class** name is deliberately not read this way. `struct a::C { int member; };` is an out-of-line
+/// definition of a class `a::C`, so its scope's qualified name is `a::C` — but `a` is a namespace that already
+/// exists, a segment this declaration does not introduce and must not claim as its own scope. Namespaces are
+/// the one construct where a `::` in the name *is* a nesting the declaration creates.
+fn namespace_segments(node: &CppSyntaxNode) -> Vec<String> {
+    namespace_segments_with_ranges(node)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// [`namespace_segments`] with the range each segment was written at.
+///
+/// A binding's `name_range` is what a rename edits and what a reference search matches, so it has to be the
+/// segment's own span and not the whole declaration's: collapsing them is the difference between renaming `b`
+/// in `namespace a::b` and renaming the entire namespace declaration.
+fn namespace_segment_ranges(node: &CppSyntaxNode) -> Vec<cpp_parser::SourceRange> {
+    namespace_segments_with_ranges(node)
+        .into_iter()
+        .map(|(_, range)| range)
+        .collect()
+}
+
+/// The segments of a namespace's name with their ranges, outermost first.
+fn namespace_segments_with_ranges(node: &CppSyntaxNode) -> Vec<(String, cpp_parser::SourceRange)> {
+    let Some(name) = first_child(node, CppSyntaxKind::NameExpr) else {
+        // `namespace { }` — anonymous. No node at all rather than an empty one, because there is no name to
+        // have written.
+        return Vec::new();
+    };
+
+    name.children_with_tokens()
+        .filter_map(|child| child.into_token())
+        .filter(|token| CppTokenKind::from(token.kind()) == CppTokenKind::Identifier)
+        .map(|token| {
+            (
+                token.text().to_string(),
+                cpp_parser::source_range(token.text_range()),
+            )
+        })
+        .collect()
 }
 
 /// The `NameExpr` naming a declarator, following only the nodes that carry a declared name.

@@ -94,6 +94,19 @@ fn kind_of(
         .map(|binding| binding.kind)
 }
 
+/// A scope's qualified name, for the scope of kind `want` that introduces `name`.
+///
+/// `name` is `None` for the scopes that introduce nothing. `None` back means either no such scope or no
+/// qualified name for it, which is why the callers that care about the difference pass a name that exists.
+fn qualified_of(table: &ScopeTree, want: ScopeKind, name: Option<&str>) -> Option<String> {
+    let id = table
+        .scopes()
+        .iter()
+        .position(|scope| scope.kind == want && scope.name.as_deref() == name)?;
+
+    table.qualified_name_of(cpp_code_analysis::ScopeId(id))
+}
+
 /// All bindings of a name in a scope, as `(kind, name_range)` pairs.
 fn bindings_of(
     table: &ScopeTree,
@@ -1199,4 +1212,133 @@ fn a_bindings_name_range_covers_just_the_name() {
         binding.name_range.length < binding.range.length,
         "the name is a part of the declarator, not the whole of it"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Qualified names
+//
+// A scope records the name it introduces, which is the only way `ns::C::f` can be produced: the *binding* of
+// `f` says `f` is in the class scope, and the class scope is the only thing that knows it is called `C`.
+// ---------------------------------------------------------------------------------------------
+
+/// The name a scope introduces is what makes a qualified name reachable, segment by segment.
+#[test]
+fn a_scope_records_the_name_it_introduces() {
+    let table = scopes("namespace ns { struct C { int member; }; }\n");
+
+    assert_eq!(
+        qualified_of(&table, ScopeKind::Namespace, Some("ns")).as_deref(),
+        Some("ns")
+    );
+    assert_eq!(
+        qualified_of(&table, ScopeKind::Class, Some("C")).as_deref(),
+        Some("ns::C"),
+        "the class's qualified name includes the namespace it was written in"
+    );
+}
+
+/// A nested `namespace a::b` and the spelled-out form are the same thing, and must produce the same name.
+///
+/// The two are one construct in C++11 and later, and a consumer that stored only the *written* spelling would
+/// answer differently for them — which is the kind of difference that only shows up in a rename.
+#[test]
+fn a_nested_namespace_spelling_is_the_same_name() {
+    let compact = scopes("namespace a::b { struct C { int member; }; }\n");
+    let spelled = scopes("namespace a { namespace b { struct C { int member; }; } }\n");
+
+    for table in [&compact, &spelled] {
+        assert_eq!(
+            qualified_of(table, ScopeKind::Class, Some("C")).as_deref(),
+            Some("a::b::C"),
+            "both spellings name the same class"
+        );
+    }
+}
+
+/// A scope that introduces no name contributes nothing, and stops nothing.
+///
+/// This is what makes `void ns::f() {` and `void f() {` agree: the function body is transparent either way,
+/// and only the namespace the function was written in is part of the answer. Getting this wrong would give
+/// `ns::f`'s locals the qualified name `ns::f::local`, which is not a name anything can be referred to by.
+#[test]
+fn an_unnamed_scope_is_transparent() {
+    let table = scopes("namespace ns { void f() { int local = 0; } }\n");
+
+    let function = table
+        .scopes()
+        .iter()
+        .position(|scope| scope.kind == ScopeKind::Function)
+        .expect("the function body has a scope");
+    let function = cpp_code_analysis::ScopeId(function);
+
+    assert_eq!(
+        table.qualified_name_of(function).as_deref(),
+        Some("ns"),
+        "the function body contributes no segment but does not cut the namespace off"
+    );
+    assert_eq!(
+        table.scope(function).expect("the scope").name,
+        None,
+        "and it really is unnamed rather than named `f`"
+    );
+}
+
+/// An unnamed class is a dead end: a member of it is reachable by no qualified name at all.
+#[test]
+fn an_unnamed_class_cuts_the_qualified_name_off() {
+    let table = scopes("namespace ns { struct { int member; } value; }\n");
+
+    let class = table
+        .scopes()
+        .iter()
+        .position(|scope| scope.kind == ScopeKind::Class)
+        .expect("the class body has a scope");
+
+    assert_eq!(
+        table.qualified_name_of(cpp_code_analysis::ScopeId(class)),
+        None,
+        "`ns::member` is not a name, and neither is `member`"
+    );
+}
+
+/// A member's qualified name comes from its class scope, not from the binding it sits beside.
+#[test]
+fn a_member_is_found_under_its_class() {
+    let table = scopes("namespace ns { struct C { void method(); int field; }; }\n");
+
+    let class = table
+        .scopes()
+        .iter()
+        .position(|scope| scope.kind == ScopeKind::Class)
+        .expect("the class body has a scope");
+    let class = cpp_code_analysis::ScopeId(class);
+
+    let members: Vec<String> = table
+        .scope(class)
+        .expect("the scope")
+        .bindings
+        .iter()
+        .map(|binding| {
+            format!(
+                "{}::{}",
+                table.qualified_name_of(class).expect("the class is named"),
+                binding.name.text()
+            )
+        })
+        .collect();
+
+    assert_eq!(members, ["ns::C::field", "ns::C::method"]);
+}
+
+/// A scope with no name of its own has no qualified name, rather than an empty one.
+///
+/// The distinction matters to a consumer: `Some("")` would be a name that matches nothing while looking like
+/// an answer, where `None` says "there is no qualified name here".
+#[test]
+fn the_file_scope_has_no_qualified_name() {
+    let table = scopes("int x;\n");
+
+    let root = table.root().expect("a non-empty file has a file scope");
+    assert_eq!(table.scope(root).expect("the scope").name, None);
+    assert_eq!(table.qualified_name_of(root), None);
 }

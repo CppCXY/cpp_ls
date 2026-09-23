@@ -1,1 +1,6 @@
 /target
+
+# The index cache. `docs/index-design.md` puts it inside the project on purpose — it travels with a
+# checkout so CI gets the same warm cache as a developer — but it is derived data, so it never belongs in
+# a commit. Deleting it is always safe: every entry is rebuilt from the file it describes.
+.cppls/

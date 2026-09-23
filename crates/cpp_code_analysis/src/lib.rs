@@ -41,9 +41,11 @@
 pub mod cache;
 pub mod file;
 pub mod include;
+pub mod index;
 pub mod preprocess;
 pub mod sema;
 pub mod summary;
+pub mod summary_codec;
 
 // The four folders above are the *organisation*; the modules inside them keep their own names, and they are
 // re-exported here so that every path written before the reorganisation still resolves — `crate::directive::…`
@@ -53,11 +55,14 @@ pub mod summary;
 // * `file`     — one file analysed, and the token of the expanded stream
 // * `preprocess` — directives, macros, conditions, guards, expansion (the entry point is this module itself)
 // * `include`  — include paths and compiler settings, the file provider, the resolver, the graph
-// * `sema`     — names, scopes and C++20 modules
-pub use cache::{CACHE_DIRECTORY, FORMAT_VERSION, SummaryKey, content_hash, fnv1a64};
+// * `sema`     — names, scopes, the index's declaration facts, and C++20 modules
+pub use cache::{
+    CACHE_DIRECTORY, FORMAT_VERSION, MacroEnvironment, SummaryKey, content_hash, fnv1a64,
+};
 pub use file::token;
 pub use include::{config, graph, paths};
 pub use preprocess::{condition, directive, expand, guards, macros};
+pub use sema::declarations::{build_facts, by_name, scope_of};
 pub use sema::{module_info, modules, parser_symbols, scopes, symbol};
 pub use summary::{
     DeclFact, DeclKind, FactGuard, FileSummary, IncludeFact, MacroFact, SummaryGuards,

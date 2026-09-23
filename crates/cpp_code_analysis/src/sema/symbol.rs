@@ -174,6 +174,25 @@ pub enum UnknownReason {
     /// [`crate::graph::FileEntry::missing_context`]. A name that the includer might define must not be
     /// reported as absent.
     IncompleteMacroContext,
+    /// The name is not declared anywhere this file can see, so the declaration is in another file.
+    ///
+    /// The everyday reason for a single-file analysis, and the one that keeps "not here" apart from "nowhere":
+    /// `values.push_back(1)` where `values` is a `std::vector` has an answer, and it is not in this translation
+    /// unit. It carries the spelling so that a message can name what was not resolved.
+    ///
+    /// Distinct from [`UnknownReason::UnresolvedInclude`], which is about a *specific* `#include` that could not
+    /// be found: here nothing is broken, the file simply does not contain the declaration — and an analysis that
+    /// had followed its includes might well have found it.
+    NotDeclaredHere(Box<str>),
+    /// Several declarations are visible and nothing chooses between them.
+    ///
+    /// Overloads, a name declared in two headers a file includes, a bare name declared in two namespaces. The
+    /// answer is not "the first one": picking would make a definition jump silently land on one of several
+    /// entities, and a consumer that wants to *show* the choice needs the set, not one member of it.
+    ///
+    /// Boxed spelling, like the other reasons that carry a name, so that this type stays small enough to sit in
+    /// a `Known<T>` that is almost always `Yes`.
+    Ambiguous(Box<str>),
 }
 
 impl UnknownReason {
@@ -210,6 +229,13 @@ impl UnknownReason {
             UnknownReason::IncompleteMacroContext => {
                 "this file's macro environment is not fully known".to_string()
             }
+            UnknownReason::NotDeclaredHere(name) => format!(
+                "`{name}` is not declared in this file, so its declaration is in a file that was not read"
+            ),
+            UnknownReason::Ambiguous(name) => format!(
+                "`{name}` is declared more than once in what this file can see, and nothing here chooses \
+                 between the declarations"
+            ),
         }
     }
 }
@@ -631,6 +657,19 @@ pub struct Scope {
     pub parent: Option<ScopeId>,
     pub children: Vec<ScopeId>,
     pub kind: ScopeKind,
+    /// The name this scope *introduces*: `ns` for `namespace ns { }`, `Widget` for `struct Widget { }`.
+    ///
+    /// A property of the scope rather than of the binding, because the two answer different questions. The
+    /// binding says "`Widget` is declared in the enclosing scope" — which is where a consumer looks the name
+    /// up — while this says "inside here, the current entity is `Widget`". Only the second can produce a
+    /// **qualified** name, and a qualified name is what an index keys on: `ns::C::f` cannot be recovered from
+    /// the binding of `f` alone, and it cannot be recovered from the enclosing scope either, because the
+    /// scope does not know what it is called.
+    ///
+    /// `None` where the construct introduces no name: a function body, a statement block, a template parameter
+    /// list, a lambda, an anonymous namespace, and the translation unit. Those are exactly the scopes that
+    /// contribute nothing to a qualified name, which is why [`ScopeTree::qualified_name_of`] skips them.
+    pub name: Option<Box<str>>,
     /// The syntax node this scope came from, as a range. `None` for a scope the model synthesised, such as
     /// the file scope of an empty file.
     pub range: Option<SourceRange>,
@@ -731,11 +770,32 @@ impl ScopeTree {
     ///
     /// The file scope is recognised by having no parent, so a caller cannot create two of them by accident —
     /// a second root would make "the file's declarations" ambiguous.
+    ///
+    /// This is the **unnamed** form: the scope introduces nothing, which is right for a function body, a block,
+    /// a lambda and a template parameter list. A scope that introduces a name — `namespace ns`, `struct Widget`
+    /// — is created with [`ScopeTree::create_named_scope`], because the name is what makes a qualified name
+    /// reachable and there is no moment at which a scope is usefully nameless-but-shouldn't-be.
     pub fn create_scope(
         &mut self,
         kind: ScopeKind,
         parent: Option<ScopeId>,
         range: Option<SourceRange>,
+    ) -> ScopeId {
+        self.create_named_scope(kind, parent, range, None)
+    }
+
+    /// [`ScopeTree::create_scope`] for a scope that **introduces a name**: `namespace ns`, `struct Widget`.
+    ///
+    /// The name is the *introduced* segment, not a `::`-qualified spelling: `namespace a::b` creates one scope
+    /// per level and each records its own part, which is what makes `namespace a::b {` and
+    /// `namespace a { namespace b {` produce the same qualified name. Joining the segments is
+    /// [`ScopeTree::qualified_name_of`]'s job.
+    pub fn create_named_scope(
+        &mut self,
+        kind: ScopeKind,
+        parent: Option<ScopeId>,
+        range: Option<SourceRange>,
+        name: Option<&str>,
     ) -> ScopeId {
         let id = ScopeId(self.scopes.len());
 
@@ -743,6 +803,7 @@ impl ScopeTree {
             parent,
             children: Vec::new(),
             kind,
+            name: name.map(Box::from),
             range,
             bindings: Vec::new(),
         });
@@ -761,6 +822,55 @@ impl ScopeTree {
         }
 
         id
+    }
+
+    /// The `::`-qualified name of what a scope introduces, outermost segment first.
+    ///
+    /// `Some("ns::C")` for the body of `namespace ns { struct C { … }; }`, and `None` for a scope that
+    /// introduces no name at all: a function body, a block, a lambda, the translation unit.
+    ///
+    /// # Which scopes contribute a segment
+    ///
+    /// A name-bearing scope contributes its own name; a scope that bears no name contributes nothing *and
+    /// stops nothing* — walking past it continues to whatever encloses it. That is what makes `void ns::f() {`
+    /// and `void f() {` agree: the function body is transparent in both, and only the namespace the function
+    /// was written in is part of the answer.
+    ///
+    /// The one kind that must **stop** the walk rather than pass through is an unnamed [`ScopeKind::Class`] or
+    /// [`ScopeKind::Enum`]: what a member declares is `C::m` and never `ns::m`, so a class with no name of its
+    /// own is a dead end — it has no segment to contribute and none to inherit, and continuing past it would
+    /// invent a qualification that does not exist.
+    pub fn qualified_name_of(&self, scope: ScopeId) -> Option<String> {
+        let mut segments: Vec<&str> = Vec::new();
+        let mut seen = HashSet::new();
+        let mut current = Some(scope);
+
+        while let Some(id) = current {
+            // A cycle cannot occur in a table this type builds, but a hand-constructed one could — the same
+            // guard `scope_chain` carries, for the same reason.
+            if !seen.insert(id) {
+                break;
+            }
+
+            let Some(scope) = self.scopes.get(id.index()) else {
+                break;
+            };
+
+            match &scope.name {
+                Some(name) => segments.push(name),
+                None if matches!(scope.kind, ScopeKind::Class | ScopeKind::Enum) => break,
+                None => {}
+            }
+
+            current = scope.parent;
+        }
+
+        if segments.is_empty() {
+            return None;
+        }
+
+        segments.reverse();
+        Some(segments.join("::"))
     }
 
     /// Add a binding to a scope.
@@ -786,6 +896,35 @@ impl ScopeTree {
 
         target.bindings.insert(position, binding);
         true
+    }
+
+    /// The prefix a declaration written **in** this scope is qualified by: the scope's own qualified name,
+    /// for a scope that is part of a qualified name at all.
+    ///
+    /// The difference from [`ScopeTree::qualified_name_of`] is one question: does the scope's own name count?
+    /// For the scope that *introduces* an entity it does — `namespace ns` introduces `ns`, so a declaration
+    /// written in it is `ns::x`. For a scope that merely *holds* declarations it does not: a member of
+    /// `struct C` is `C::member` and not `C::C::member`, and a local in `void f()` is `local` and not `f::local`
+    /// — or worse, `ns::f::local`, since a function body's name is not a scope a name can be written from.
+    ///
+    /// So the same set of transparent scopes is skipped, and the answer is then used as a **prefix** rather
+    /// than as the name itself. A file scope and a function body both end up with `None`, which is the same
+    /// answer and for the same reason: neither contributes a segment, and neither has a name to start from.
+    pub fn qualification_prefix_of(&self, scope: ScopeId) -> Option<String> {
+        match self.scopes.get(scope.index())?.kind {
+            // A scope whose own name is the first segment of everything written inside it.
+            ScopeKind::Namespace | ScopeKind::Class | ScopeKind::Enum => {
+                self.qualified_name_of(scope)
+            }
+            // A file, a function body, a block, a lambda, a template parameter list: declarations written here
+            // are not qualified by anything this scope knows, and walking outward would attribute them to an
+            // enclosing entity they are not part of.
+            ScopeKind::TranslationUnit
+            | ScopeKind::Function
+            | ScopeKind::Block
+            | ScopeKind::Lambda
+            | ScopeKind::TemplateParameters => None,
+        }
     }
 
     /// The scope that contains `offset`, innermost first.
