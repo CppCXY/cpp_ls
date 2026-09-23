@@ -1,6 +1,6 @@
 use crate::{
     grammar::parse_cpp_unit,
-    kind::CppTokenKind,
+    kind::{CppSyntaxKind, CppTokenKind},
     lexer::{CppLexer, CppTokenData},
     parser_error::CppParseError,
     syntax::{CppSyntaxTree, CppTreeBuilder},
@@ -1320,6 +1320,31 @@ impl<'a> CppParser<'a> {
     /// code should use the tree.
     pub fn events(&self) -> &[MarkEvent] {
         &self.events
+    }
+
+    /// Is a node of this `kind` **open** at the cursor — one of the nodes being parsed right now?
+    ///
+    /// [`CppParser::open_marks`] is the parser's own record of what is open: the event positions of the nodes that
+    /// have been started and not finished. The positions are private but the events are not, so the question is
+    /// answered from both.
+    ///
+    /// It is asked by rules that need to know **where they are** rather than what they are parsing. A template
+    /// argument list is the case it exists for: inside a constraint the `<` is read one way at the constraint's
+    /// top level (where a *declaration* follows the whole constraint) and another way inside parentheses (where
+    /// the constraint itself continues). See [`crate::grammar::cpp::exprs`].
+    ///
+    /// An empty node does not count: `Marker::complete` drops a node with nothing after its `NodeStart`, which is
+    /// the same exclusion [`CppParser::audit_events`] makes.
+    pub fn is_open(&self, kind: CppSyntaxKind) -> bool {
+        let end_of_stream = self.events.len();
+
+        self.open_marks.iter().any(|position| {
+            *position + 1 != end_of_stream
+                && matches!(
+                    &self.events[*position],
+                    MarkEvent::NodeStart { kind: started, .. } if *started == kind
+                )
+        })
     }
 
     /// Note that a `NodeStart` with no children legitimately has **no** matching `NodeEnd`:

@@ -206,7 +206,9 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
 ///
 /// One directive gets special treatment: `#include` is followed by a header name, which the lexer
 /// only produces on request because `<` and `>` are far too common to guess at.
-fn parse_preprocessor_directive(p: &mut CppParser) -> ParseResult {
+/// Exposed to the initializer rule, which meets directives between the elements of a table rather than between
+/// statements — see [`super::decls::parse_braced_initializer`].
+pub(super) fn parse_preprocessor_directive(p: &mut CppParser) -> ParseResult {
     let m = p.mark(CppSyntaxKind::PreprocessorDirective);
 
     // A directive runs to the end of its **logical** line, and a `\`-newline splice does not end one.

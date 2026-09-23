@@ -54,6 +54,15 @@ fn sizeof_reads_an_operand_that_is_not_a_bare_name() {
         "void f() { auto n = sizeof(const char*); }\n",
         "void f() { auto n = sizeof(unsigned long); }\n",
         "void f() { auto n = sizeof(std::vector<int>); }\n",
+        // An **elaborated type specifier** is a type in a type-id, and it used to be read as the keyword alone:
+        // the name after `struct` was refused because a type-id allows only one name, so `sizeof(struct S)` never
+        // reached its `)`. The keyword and its name are one specifier — this is C's spelling of a type.
+        "void f() { auto n = sizeof(struct S); }\n",
+        "void f() { auto n = sizeof(union U); }\n",
+        "void f() { auto n = sizeof(enum E); }\n",
+        "void f() { auto n = sizeof(struct S*); }\n",
+        "void f() { auto n = (struct S*)p; }\n",
+        "void f() { struct S* p = 0; p = (struct S*)q; }\n",
         "void f() { auto n = sizeof x; }\n",
         "void f() { auto n = sizeof...(Ts); }\n",
         "void f() { auto n = alignof(a[0]); }\n",
@@ -70,6 +79,128 @@ fn sizeof_reads_an_operand_that_is_not_a_bare_name() {
         .get_errors()
         .is_empty(),
         "a truncated operand is still reported"
+    );
+}
+
+#[test]
+fn a_directive_inside_a_literal_run_is_read_as_a_directive() {
+    // A message whose middle is conditional is how a generated file writes "this compiler's spelling of X", and
+    // the preprocessor removes the directives before the string is concatenated:
+    //
+    // ```c
+    // const char* info = "INFO" ":" "extensions["
+    // #if defined(__clang__)
+    //   "ON"
+    // #else
+    //   "OFF"
+    // #endif
+    //   "]";
+    // ```
+    //
+    // A `#` in the middle of a string-literal run cannot be anything else, so it is read as the directive node it
+    // is and the run continues. Everywhere else in an expression a `#` is still an error, which is the half that
+    // keeps this from hiding real ones.
+    parses(
+        "void f() { const char* s = \"a\"\n#if X\n  \"b\"\n#else\n  \"c\"\n#endif\n  \"d\"; }\n",
+    );
+
+    let conditional = "void f() { const char* s = \"a\"\n#if X\n  \"b\"\n#endif\n  \"c\"; }\n";
+    assert_eq!(
+        count(conditional, CppSyntaxKind::LiteralExpr),
+        1,
+        "the run is one literal"
+    );
+    assert_eq!(
+        count(conditional, CppSyntaxKind::PreprocessorDirective),
+        2,
+        "and both directives are in the tree"
+    );
+
+    assert!(
+        !CppParser::parse("void f() { x = 1 # 2; }\n", ParserConfig::default())
+            .get_errors()
+            .is_empty(),
+        "a stray `#` in an expression is still reported"
+    );
+}
+
+/// An **array type** as the operand of `sizeof`, and the same tokens as an *index*.
+///
+/// `sizeof(int[4])` and `sizeof(a[0])` are the same shape, and only name lookup tells them apart — is `a` a type?
+/// The type-id reader asks the file's own table, which is the bounded evidence the rest of the type grammar uses:
+/// where the answer is missing the brackets are left alone and the **expression** reading applies, which is the
+/// useful one for `a[0]` and never invents an array type.
+#[test]
+fn an_array_type_is_read_as_a_type_and_an_index_as_an_expression() {
+    for source in [
+        "void f() { auto n = sizeof(int[4]); }\n",
+        "void f() { auto n = sizeof(char[256]); }\n",
+        "void f() { auto n = sizeof(int[2][3]); }\n",
+        "void f() { auto n = sizeof(int[]); }\n",
+        "void f() { auto n = sizeof(int*[4]); }\n",
+        // …and the shapes that must stay expressions.
+        "void f() { auto n = sizeof(a[0]); }\n",
+        "void f() { auto n = sizeof(a.b); }\n",
+        "void f() { auto x = a[b < c]; }\n",
+    ] {
+        parses(source);
+    }
+
+    // The type reading reaches the brackets, and the argument-list lookahead does not mistake the `]` for a
+    // boundary: `Vec<int[4]>` is a template-id whose argument is an array type.
+    for source in [
+        "void f() { Vec<int[4]> v; }\n",
+        "void f() { auto v = Vec<int[4]>{}; }\n",
+        "void f() { g<Vec<int[4]>>(); }\n",
+        "void f() { Vec<arr[0]> v; }\n",
+    ] {
+        parses(source);
+    }
+
+    assert_eq!(
+        count(
+            "void f() { auto n = sizeof(int[4]); }\n",
+            CppSyntaxKind::ArrayType
+        ),
+        1,
+        "the bound is part of the type"
+    );
+    assert_eq!(
+        count(
+            "void f() { auto n = sizeof(a[0]); }\n",
+            CppSyntaxKind::ArrayType
+        ),
+        0,
+        "an index is not an array type"
+    );
+    assert_eq!(
+        count(
+            "void f() { auto n = sizeof(a[0]); }\n",
+            CppSyntaxKind::IndexExpr
+        ),
+        1
+    );
+
+    // A `new` reads its own bounds, and they must stay out of the type: `new int[4]` is an allocation whose
+    // declarator holds the `[4]`, and a type-id that swallowed it would move the `ArrayType` into the `TypeId`.
+    assert_eq!(
+        count(
+            "void f() { auto p = new int[4]; }\n",
+            CppSyntaxKind::ArrayType
+        ),
+        1
+    );
+    let new_expr = "void f() { auto p = new int[4]; }\n";
+    let tree = CppParser::parse(new_expr, ParserConfig::default());
+    let type_id = tree
+        .get_red_root()
+        .descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::TypeId)
+        .expect("the allocation names a type");
+    assert_eq!(
+        type_id.text().to_string().trim(),
+        "int",
+        "the bounds are the new-declarator's, not the type's"
     );
 }
 

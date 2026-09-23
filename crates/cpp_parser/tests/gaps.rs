@@ -550,6 +550,42 @@ fn constructs_the_parser_reads() {
             "auto n = sizeof(int*);",
             "auto n = sizeof(unsigned long);",
             "auto n = typeid(a[0]);",
+            // An **elaborated type specifier** in a type-id: `struct S` is one specifier, so the name after the
+            // keyword belongs to the type even where a type-id allows only one name — which is why `sizeof(struct
+            // S)` and `(struct S*)p` used to leave the name behind and never reach the `)`.
+            "auto n = sizeof(struct S);",
+            "auto n = sizeof(union U);",
+            "auto n = (struct S*)p;",
+            "using A = struct S;",
+            // An **array type** in a type-id, and the same tokens as an index — the file's own table is what tells
+            // them apart. Beside them the shapes that must stay expressions.
+            "auto n = sizeof(int[4]);",
+            "auto n = sizeof(char[256]);",
+            "auto n = sizeof(int[2][3]);",
+            "auto n = sizeof(int*[4]);",
+            "auto n = sizeof(int[]);",
+            "Vec<int[4]> v;",
+            "auto v = Vec<int[4]>{};",
+            "auto x = a[b < c];",
+            // A **cv-qualifier after the type**: `char const w[]` used to read `w` into the type and turn the
+            // declarator into a structured binding of nothing — silently — and `char const w[2]` reported it.
+            "char const w[] = { 'a' };",
+            "char const w[2] = { 'a' };",
+            "int const x = 1;",
+            "unsigned const int y = 1;",
+            "struct S const s;",
+            // **Qualified declarator names**: a definition's name is folded into the type, so its parentheses are
+            // a parameter list and nothing else — with and without a storage specifier in front, and with a
+            // template-id in the name. The questions that decide this used to be asked of the declaration's first
+            // token, which a `static` pushes out of the way.
+            "static void A::f<int>(int);",
+            "inline void A::f<int>(int);",
+            "extern void A::f<int>(int);",
+            "static void A<int>::f<int>(int);",
+            "static void A::f<int>(int) { }",
+            "static void Widget::draw(T) { }",
+            "void Widget::draw(T) { }",
+            "void ns::C::method() { }",
             // `<` as a **comparison** rather than a template-id opener — the reading is speculative, and what
             // decides it is the token after the list (see `operators.rs`). `if (n < 0 || n > 100000)` is how a
             // range check is written, and the old lookahead paired the `<` of the first comparison with the `>`
@@ -640,6 +676,11 @@ fn constructs_the_parser_reads() {
             // conjunction of primary expressions: `requires (N > 0)` is valid and `requires N > 0` is not.
             "template <typename T> requires (sizeof(T) > 1) && (sizeof(T) < 64) void h(T t);",
             "template <int N> requires ((N >> 1) > 0) void h();",
+            // …and a comparison **inside parentheses** in a clause, where the operand after the `>` belongs to
+            // the constraint rather than to the declaration that follows the clause.
+            "template <int N> requires (N < 0 || N > 3) void f();",
+            "template <int N> requires (N > 0) void f();",
+            "template <typename T> requires (C<T>) T value = T{};",
             "template <typename T> void f(T t) requires C<T> && C2<T> { }",
             // A function whose parameter is **unnamed**: `void f(T)`, not `void f(T t)`. The same tokens as a
             // direct-initialised variable, and at file scope the variable reading used to win — silently, since
@@ -1122,6 +1163,33 @@ fn modern_constructs_produce_the_right_nodes() {
             "void f() { for (;; i++, k++) { } }",
             CppSyntaxKind::ExpressionStat,
         ),
+        // An elaborated type specifier reaches the *type* reading: a `TypeId` in the payload is the assertion, and
+        // the expression reading could not produce one.
+        ("auto n = sizeof(struct S);", CppSyntaxKind::TypeId),
+        ("auto n = (struct S*)p;", CppSyntaxKind::CastExpr),
+        // A qualified declarator name is a definition head: the parameter list is the assertion, because the wrong
+        // reading made it an initializer (or nothing at all).
+        ("static void A::f<int>(int);", CppSyntaxKind::ParameterList),
+        (
+            "static void Widget::draw(T) { }",
+            CppSyntaxKind::ParameterList,
+        ),
+        (
+            "static void Widget::draw(T) { }",
+            CppSyntaxKind::CompoundStat,
+        ),
+        // A cv-qualifier after the type: the name is the declarator's, so there is an `InitDeclarator` and an
+        // `ArrayType` — the wrong reading put the name in the type and made the declarator a structured binding of
+        // nothing, silently.
+        ("char const w[2];", CppSyntaxKind::InitDeclarator),
+        ("char const w[2];", CppSyntaxKind::ArrayType),
+        // An array type in a type-id, and an index that must not become one — the *absence* of an `ArrayType`
+        // for `a[0]` is asserted in `expressions.rs`, since this helper asserts presence.
+        ("auto n = sizeof(int[4]);", CppSyntaxKind::ArrayType),
+        ("auto n = sizeof(a[0]);", CppSyntaxKind::IndexExpr),
+        // A `new` reads its own bounds: the `ArrayType` is the new-declarator's, so the `TypeId` is bare.
+        ("auto p = new int[4];", CppSyntaxKind::TypeId),
+        ("auto p = new int[4];", CppSyntaxKind::ArrayType),
     ]);
 
     // Exactly one parameter: the silent version produced zero here and a phantom member beside it.

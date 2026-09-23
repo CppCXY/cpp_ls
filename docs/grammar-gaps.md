@@ -103,6 +103,30 @@ Syntax(Declaration)
 
 **护栏**：`direct_init.rs::an_unnamed_parameter_of_an_unknown_type_is_a_parameter`（9 条必须读成形参列表的写法、4 条必须保持原读法的写法、1 条已知缺口的报错断言）；`gaps.rs` 已支持清单 5 条、形状断言 3 条（`Parameter` 的**计数**是关键——错误读法下它是 0）。
 
+### A0-4. 类型后面的 cv 限定符把声明符的名字吃进类型 —— 已修复
+
+```cpp
+char const w[] = { 'a' };   // 0 报错、0 ErrorNode —— 类型被读成 `char const w`，声明符成了 `[]`
+int const x = 1;            // 同上：类型 `int const x`，声明符空
+char const w[2] = { 'a' };  // 报错（同一个读法，只是下标让它露出来）
+char const* p = 0;          // 一直读得出 —— `*` 在名字之前就把说明符序列结束了
+```
+
+**现象**：`char const w[] = { 'a' };` 读成"类型 `char const w` + 一个**空的**结构化绑定 `[]`"——良构、无损、**零报错**。`w` 这个名字从未进入声明符，所以作用域层拿到的名字集合是错的（少一个 `w`，多一个空绑定）。`char const w[2]` 是同一个读法撞上数字下标，才响亮报错。
+
+**性质**：缺规则，而且是**两个缺陷叠在一起**——第二个遮住了第一个，所以修一个不够：
+
+1. **`type_is_already_complete` 问错了对象**：它判断名字**紧邻的前一个 token**，而 cv 限定符给出的答案是"类型还没完"。但限定符既不完成一个类型、也不*取消*一个类型——`const char w` 与 `char const w` 是同一个类型。现在它**跨过限定符**，去判断限定符前面的东西（`char const w` 看到 `char` → 类型已完成）。
+2. **`has_type_specifier` 是"赋值"而不是"累积"**：这个标志的语义是"**这个说明符序列里出现过类型**"，但每次说明符跑完都**整体覆盖**它。cv 限定符不命名类型，于是把它清成了 false —— 到了 `w` 那里，`name_joins_the_type` 的第一句就是"还没有类型，那这个名字只能是类型"。
+
+**只修第一处的后果**：`type_is_already_complete` 答"已完成"了，但 `has_type_specifier` 仍然说"还没有类型"，判据在**更早的一句**上返回——同一个错树，换条路走。这正是本文档反复出现的"修好一处，另一处还在"：**当一个标志的语义是"序列里出现过 X"，它就必须累积**。
+
+**为什么一直没被发现**：最常见的写法 `char const* p` 不受影响——`*` 在名字之前就把说明符序列结束了。要露出来必须"限定符后面直接跟名字"，也就是 `char const w`、`int const x` 这种**把 const 写在类型后面**的写法：C 里常见（`char const *` 是同一件事的另一种写法），而在本项目的语料里恰好没有。
+
+**发现经过**：追 B23 的 CMake 生成文件时撞上的。那份文件里 `char const info_version[] = { ... };` 是**主要错误来源**：修掉这两处之后，`CMakeCCompilerId.c` 从 10 条报错降到 4 条。**又一次印证维护约定第 11 条**——真实文件（哪怕是生成的文件）会撞出手写清单想都想不到的形状。
+
+**护栏**：`direct_init.rs::a_cv_qualifier_after_the_type_does_not_swallow_the_name`（12 条必须读成"一个 InitDeclarator、零个 StructuredBinding"，外加 `ArrayType`/`Declarator` 的形状断言）；`gaps.rs` 已支持清单 5 条 + 形状断言 2 条。
+
 ### A0-3. requires-clause 写在类头上时类体被丢到文件作用域 —— 已修复（见 C1）
 
 `template <typename T> struct S requires C<T> { };` 曾经读成"结构体声明 + 文件作用域上的一个 `CompoundStat`"：类体不再属于类。它同时是**非标准写法**（标准里类头没有 requires-clause 的位置），所以修法是**拒收**而不是补规则——详见 C1 条目。
@@ -395,43 +419,47 @@ template 其它    显式实例化，消费掉 `template`，走普通声明
 
 **护栏**：`modern.rs::an_explicit_instantiation_without_extern_parses`（12 条：函数名、类头、变量名三种位置，外加与模板自身声明并排）、`modern.rs::a_template_head_is_not_an_explicit_instantiation`（14 条：模板头、别名模板、变量模板、concept、受约束函数、部分特化、显式特化都必须保持原读法，并断言显式实例化**没有** `TemplateDecl` 节点）；`gaps.rs` 已支持清单 9 条。
 
-### B14. 限定名 + 无名裸类型形参
+### B14. 限定名 + 无名裸类型形参 —— 已修复
 
 ```cpp
-void Widget::draw(T) { }        // expected primary expression —— 报错
-void Widget::draw(int) { }      // 读得出
-void Widget::draw(Canvas&) { }  // 读得出
-void Widget::f(T t) { }         // 读得出
-void Widget::f(T);              // 读得出
+void Widget::draw(T) { }        // 曾报 expected primary expression
+static void Widget::draw(T) { } // 同上（还叠着 B15）
+void Widget::draw(int) { }      // 一直读得出
+void Widget::draw(Canvas&) { }  // 一直读得出
+void Widget::f(T t) { }         // 一直读得出
 ```
 
-**性质**：缺规则（与 A0-2 同源，但这一支是响亮的）。**成因**：限定名 `Widget::draw` 被 specifier 序列整段当成类型吃掉（`a_qualified_name_is_the_type`），声明符**自己没有名字**；无名声明符 + 裸类型无名形参这一组合下，形参读法失败而初始化器读法也不成立，于是整条声明回退、语句层再失败。
+**性质**：缺规则（与 A0-2 同源：都是"括号该读成什么"的判据不够）。**成因**：限定名 `Widget::draw` 被 specifier 序列整段当成类型吃掉，声明符**自己没有名字**；而括号偏偏是 `(T)` —— **一串裸名字**，正是直接初始化与形参列表**唯一共享**的形状。于是那条"裸名字列表优先读初始化器"的偏好（它是为 `Max(a, b);` 写的）赢了，`(T)` 成了初始化器，接着函数体的 `{` 无处可去。
 
-**为什么先不动**：这是 A0-2 那条判据够不到的角落——A0-2 修的是"有类型关键字时不许走初始化器优先"，而这里有类型但类型是**限定名**（不是关键字），另外还叠着"无名声明符"这个状态。要修得先想清楚无名声明符的形参列表该挂在哪里，属于 A0-1 那个"声明符没名字"家族的后续。
+**修复**：判据是**"这条声明头上有 `::`，且这个声明符什么都没命名"**——那么它只能是**定义的头部**，括号只能是形参列表，没有第二种读法。在 `parse_function_suffix_or_initializer` 的最前面加这一条（形参读法先试，失败照旧回退，`ns::C::method(1, 2);` 这种调用不受影响）。
+
+**与 B15 是同一条判据的两半**：B14 缺的是"知道头上是限定名"，B15 缺的是"知道头上有类型"。两半一起修，见下。
 
 **处置**：半天。级别 B（报错，无静默风险）。
 
-### B15. 前导存储说明符 + 限定声明符名里的 template-id
+### B15. 前导存储说明符 + 限定声明符名里的 template-id —— 已修复
 
 ```cpp
-void A::f<int>(int);            // 读得出
-static void A::f<int>(int);     // expected `;` —— 报错
-inline void A::f<int>(int);     // 同上
-extern void A::f<int>(int);     // 同上
+void A::f<int>(int);            // 一直读得出
+static void A::f<int>(int);     // 曾报 expected `;`
+inline / extern / constexpr     // 同上
+static void A<int>::f<int>(int);// 同上
 template void A::f<int>(int);   // 同上（B13 修好之后才走到这里）
-void A<int>::f<int>(int);       // 读得出
-static void A<int>::f<int>(int);// 报错
 ```
 
-**性质**：缺规则。**成因**：限定名 `A::f<int>` 被 specifier 序列整段吃掉（和 B14 同一个机制），声明符**自己没有名字**，于是它的后缀（那个 `(int)`）要不要读，取决于 `parse_declarator_with` 里那道门：`named || a_qualified_name_is_the_type(p) || a_declaration_is_the_better_reading(p, …)`。三个都为假时后缀根本不被读，`(int)` 留在原地，声明报 `expected ;`。
+**性质**：缺规则（判据问错了对象）。**成因**：限定名 `A::f<int>` 被 specifier 序列整段吃掉（和 B14 同一个机制），声明符**自己没有名字**，于是它的后缀（那个 `(int)`）要不要读，取决于 `parse_declarator_with` 里那道门：`named || a_qualified_name_is_the_type(p) || a_declaration_is_the_better_reading(p, …)`。三个都为假时后缀根本不被读，`(int)` 留在原地，声明报 `expected ;`。
 
-而三者都靠**往回走找声明的第一个 token** 来判断类型：`declarator_starts_with_a_type_keyword` 一路退到 `;`/`{`/`}` 之前，取**最早**的那个显著 token。`void A::f<int>(int);` 退到 `void` → 是类型关键字 → 门开；`static void A::f<int>(int);` 退到 `static` → 不是类型关键字 → 门关。**一个存储说明符就足以把类型关键字从判据的视野里挤出去**，而 `a_qualified_name_is_the_type` 在这里也是假——specifier 虽然吃掉了限定名，却没有把 `A` 记进 `declaration_type_name`。
+而那三个判据都靠**往回走找声明的第一个 token**：`declarator_starts_with_a_type_keyword` 一路退到 `;`/`{`/`}` 之前，取**最早**的那个显著 token。`void A::f<int>(int);` 退到 `void` → 类型关键字 → 门开；`static void A::f<int>(int);` 退到 `static` → 门关。**一个存储说明符就足以把类型关键字从判据的视野里挤出去**。
 
-**为什么先不动**：这与 B14 是同一道门的两个症状，而修法要动的是那道门本身（"往回找到的第一个 token 是不是类型"这种问法，遇到 `static`/`inline`/`extern`/`template` 这种**可以出现在类型前面**的说明符就不成立）。正确的问题应该是"**这条声明里有类型吗**"，而不是"它的第一个 token 是类型吗"——`the_declaration_has_a_type` 已经在 A0-1 里问过一次同类问题，两处该合并成一条判据。这属于"改公共入口"的改动，要按维护约定第 5 条先把调用点列出来。
+调试时还发现第二层原因，值得单独记：**`a_qualified_name_is_the_type` 在这种情况下本来就是假**。它要的是 specifier 序列记下来的 `declaration_type_name`，而那个记录是**往回走找一个 Identifier**——`A::f<int>` 的最后一个 token 是 `>`，走不到名字，记下来的是**空**。所以门的两条限定名判据在这条形状上**同时失效**，只剩"第一个 token 是类型关键字"这一个偶然成立的理由。
 
-**发现经过**：做 B13 时探针撞上的。它**不是** B13 引进的——`static void A::f<int>(int);` 与 `template` 无关，在 B13 之前就一样报错；B13 只是让 `template void A::f<int>(int);` 也走到这道门前（此前它在更早的地方就失败了）。
+**修复**：新增 `the_head_of_the_declaration_is_qualified(p)` —— **问整条声明的头部，而不是它的第一个 token**：往回走到声明的开头（遇 `;`/`{`/`}` 停），路上有没有 `::`。这是**看 token**，不依赖任何记录下来的状态，所以 `A::f<int>` 这种"记录为空"的名字也能判对。它同时接进那道门（B15）和形参优先那条规则（B14）。
 
-**处置**：半天到一天。级别 B（报错，无静默风险）。
+**方法论**：这是本文档里第 N 次出现同一个错误形状——**"第一个 token 是什么"被当成了"这条声明是什么"**（A0-2 的 `declarator_starts_with_a_type_keyword` 已经栽过一次，见维护约定第 9 条）。这次的修法是把它换成"**整条声明的形状里有没有某个东西**"，而这类问题在 token 里是可以回答的。
+
+**护栏**：`direct_init.rs::a_qualified_declarator_behind_a_storage_specifier_is_still_a_definition`（10 条 + 形参列表计数 + template-id 仍在类型里）、`direct_init.rs::an_unnamed_parameter_of_an_unknown_type_is_a_parameter` 里那 5 条形参列表断言（原先是"已知缺口"断言，现在翻成正向）；`gaps.rs` 已支持清单 8 条 + 形状断言 3 条。
+
+**处置**：半天。级别 B（报错，无静默风险）。
 
 ### B16. 相邻字符串字面量 —— 已修复
 
@@ -484,7 +512,33 @@ auto x = "a"_km;      // 同上
 
 **B16 的补充（宏在字符串中间）**：`"compiler[" COMPILER_ID "]"` —— 字符串 run 里出现**标识符**也算同一串。这不是文法规则，是关于**预处理**的陈述：展开之后它就是一个字符串，而"字符串后面跟一个名字"在别的读法下根本不是合法 C++。parser 不跑预处理器，所以这是它必须接受的形状——CMake 生成的编译器识别文件全是这个。`parse_primary_expr` 的 run 循环因此也接受 `Identifier`。
 
-### B23. 构造**中间**的预处理条件行
+### B22. clause 里**带括号**的比较 —— 已修复
+
+```cpp
+template <int N> requires (N < 0 || N > 3) void f();   // 曾报 expected ), but get integer literal
+template <typename T> requires (C<T>) T value = T{};    // 修 B22 时牵出的同族问题
+```
+
+**性质**：缺规则（B21 留下的边界，靠一个**新判据**解决而不是靠调停表）。**成因**：B21 的第二层（"后面跟着操作数就不是 template-id"）在 clause 内被关掉了，否则约束后面的**声明**会被当成操作数——而这里的操作数**在括号里面**，属于约束本身。两种情况需要区分。
+
+**修复**：区分它们的是**括号是否还开着**，而且这是可判定的，不是猜的：
+
+* `ParenExpr` 还开着 → **约束本身还没结束**，那个操作数不可能是声明 → 第二层照常生效；
+* clause 顶层（没有括号开着）→ 操作数只能是跟着 clause 的声明 → 第二层不生效。
+
+新增 `CppParser::is_open(kind)`：`open_marks` 是 parser 自己记的"还开着的节点的**事件位置**"，位置是私有的但事件流是公开的（`events()`），两者一拼就能回答"某个 kind 现在开着吗"。**没有加字段**——`open_marks` 里找 kind 就够了，代价是 O(开着的节点数)。
+
+**顺带修掉同族的一个**：cast 的operand 判据（T1）在 clause 里也会误伤——`requires (C<T>) T value = T{};` 里 `(C<T>)` 后面跟着 `T`，被读成 `(C<T>)T` 这个 **cast**，于是声明没了名字、报 `expected a declarator name`。两条规则问的是同一个问题，所以抽成 **`an_operand_is_decisive`** 一处：
+
+```rust
+!p.is_in_a_constraint() || p.is_open(CppSyntaxKind::ParenExpr)
+```
+
+**这一条是"两处规则共用一条判据"的第三次**（前两次：`starts_an_operand` 共用于 cast 与 template-id；`Level` 共用于所有列表读取器）。写第二次的时候把它抽出来，就不会有第三次的漏改。
+
+**护栏**：`concepts.rs::a_constraint_keeps_its_template_id_when_a_declaration_follows`（原先是"已知缺口"断言，现在翻成正向：5 条约束后的声明 + 5 条括号内比较 + 形状断言 `BinaryExpr == 3`、`TemplateArgumentList == 0`）；`gaps.rs` 已支持清单 3 条。
+
+### B23. 构造**中间**的预处理条件行 —— 已修复（两种形状）
 
 ```c
 char const info_version[] = {
@@ -499,9 +553,28 @@ char const info_version[] = {
 
 **性质**：缺规则，但根源是"不做预处理"这个立场本身留下的边界。**唯一证据来源**：CMake 生成的 `CMakeCCompilerId.c`（真实项目里到处都有这个文件），B21 修好之后它是 `luajit-dll` 里唯一还有报错的文件（10 条，全部集中在条件行及其级联）。手写的 C 文件（`main.c`、`extensions.c`）和 lua 的头文件**全部 0 报错**。
 
-**为什么不当场修**：两条路都要动公共入口——(a) 让*所有*规则在任何位置都能跳过整条指令行（相当于把指令当 trivia，但这会让"指令必须是节点、树要无损"这条既有决定作废）；(b) 只在"表达式读不下去且游标在 `#` 上"时兜底跳过 —— 影响面小，但**会掩盖真正的错误**（`x = #if` 这种也会被吞掉）。倾向 (b) 的一个受限版本：**只在已有未闭合的 `{`/`(` 内部**才吞。属于"改公共入口"，按维护约定第 5 条先列调用点。
+**修复**：在**两个具体位置**接管，都不是"到处都能跳指令"那种大改：
 
-**处置**：一天。级别 C（成体系的子语法：条件编译的配对与嵌套）。**优先级低于 B20/B22**——手写代码里指令几乎都在语句边界上，落在构造中间的主要是生成代码。
+1. **花括号初始化列表的元素之间**（`parse_braced_initializer`）：循环顶上见到 `#` 就读成指令节点（树仍然无损、消费者仍然看得到），而且**元素后面的逗号检查也接受 `#`**——整行元素都可能是条件编译出来的，那种写法没有逗号。
+2. **字符串字面量串中间**（`parse_primary_expr` 的字面量分支）：
+   ```c
+   const char* info = "INFO" ":" "extensions["
+   #if defined(__clang__)
+     "ON"
+   #else
+     "OFF"
+   #endif
+     "]";
+   ```
+   串里见到 `#` 就把指令读成节点再继续串。**一个 `#` 在这里不可能是别的意思**——"字符串字面量后面跟指令"在任何读法下都不是 C++；而**别处的 `#` 仍然报错**（`x = 1 # 2;` 依旧报），这一条是防止定点接管掩盖真错误的关键。
+
+**为什么不做"任何位置都能跳指令"**：那等于把指令当 trivia，会让"指令必须是节点、树要无损"这条既有决定作废，而且会吞掉真正的错误（`x = #if` 也会被跳过）。按维护约定第 5 条，这种改动要先列调用点；而真实代码里被撞到的**只有上面两种形状**，定点修完就够——`CMakeCCompilerId.c` 的指令类报错从 10 条降到 **0** 条。
+
+**仍不支持的**（真实文件里没碰到，登记备查）：指令出现在**任意两个表达式 token 之间**，例如 `int x = 1 +` 换行 `#ifdef A` … `2;` … `#endif`。支持它要让表达式规则在运算符边界跳指令，风险同上。
+
+**护栏**：`expressions.rs::a_directive_inside_a_literal_run_is_read_as_a_directive`（2 条 + "一个 `LiteralExpr`" + "两个指令节点都在树里" + "别处的 `#` 仍报错"）；语料与真实文件探针。
+
+**顺带**：`CMakeCCompilerId.c` 剩下的 3 条是 **K&R 风格函数定义**（`int main(argc, argv) int argc; char *argv[];`），那是**另一个缺口**，与本条无关，见实施顺序表。
 
 ### B19. `sizeof` 的操作数只要不是裸名字就失败 —— 已修复
 
@@ -523,19 +596,34 @@ sizeof(unsigned long);  // 一直能读
 
 **护栏**：`expressions.rs::sizeof_reads_an_operand_that_is_not_a_bare_name`（16 条 + 截断操作数仍报错）。
 
-### B20. `sizeof` 的两种类型操作数：数组类型与 elaborated type
+### B20. `sizeof` 的两种类型操作数 —— 已修复
 
 ```cpp
-sizeof(int[4]);      // expected primary expression —— 数组类型
-sizeof(struct S);    // expected primary expression —— elaborated type specifier
-using A = int[4];    // 读得出 —— 声明侧的同一种类型
+sizeof(struct S);    // 曾报 expected primary expression —— elaborated 型说明符（C 里最常写的类型拼法）
+(struct S*)p;        // 曾报 expected ) —— 同上
+using A = struct S;  // 曾报 expected `;` —— 同上
+sizeof(int[4]);      // 曾报 expected primary expression —— 数组类型
+sizeof(int*[4]);     // 曾报 —— 指针数组
+Vec<int[4]> v;       // 曾报 —— 数组类型作模板实参
+sizeof(a[0]);        // 一直是表达式（下标），现在仍然必须是
 ```
 
-**性质**：缺规则，在**类型文法**里而不是在 `sizeof` 里。**成因**：两个操作数都要求 type-id 读法能吃下它们，而它在这个入口吃不下：`int[4]` 的数组后缀要么是声明符的一部分（声明侧走的是带声明符的入口），要么 `struct S` 需要 elaborated-type-specifier 那条读法。判据（B19 加的那条"必须停在 `)`"）**没有让它们变糟**——它们本来就失败，只是失败的报错换了个位置。
+**成因（两半是同一个入口的两个问题）**：两个操作数都要求 type-id 读法能吃下它们。
 
-**为什么单列而不顺手修**：修的是 type-id 的入口，而 `parse_type_id` 被 cast、`sizeof`、`decltype`、`alignas`、模板实参、参数、别名……几十处共用，属于"改公共入口"，要按维护约定第 5 条先列调用点。级别 B（报错，无静默风险）。
+**第一半：elaborated 型说明符。** `struct S` 是**一个**说明符（elaborated-type-specifier），但 specifier 序列在 type-id 里只允许**一个名字**（那是给 `T x` 留的额度），而额度已经被 `struct` 这个关键字花掉了——于是 `S` 被拒，type-id 只剩 `struct`，载荷永远到不了 `)`。修法是在 `name_joins_the_type` 里加一条：**前一个被消费的 token 是 class 类关键字时，这个名字无条件加入类型**。判据用现成的 `last_consumed_token_kind()`，不加字段、不加状态。
 
-**处置**：半天。**建议与 B15 一起做**——两者都指向"类型读法的入口太窄"。
+**第二半：数组类型。** 抽象声明符读完之后，type-id 还要读**数组后缀**（`[4]`、`[2][3]`、`[4]` of `int*[4]`）。三个决定：
+
+1. **只在 type-id 里读，不在抽象声明符里读**。抽象声明符与**声明符**共用，而声明符路径上一个 `[` 可能是**结构化绑定**（`auto [a, b] = pair`）——在那里读数组后缀会把结构化绑定吃掉。
+2. **判据是"前面那个类型是本文件能证明的类型吗"**：关键字类型（说明符序列产出了 `BuiltinType`）✓，本文件声明过的类型名 ✓，裸的未知名字 ✗。`sizeof(int[4])` 与 `sizeof(a[0])` 是同一串 token，只有名字查找能分开；答不上来时**不动括号**，于是表达式读法（下标）自然接管——这是安全方向，也是 B19 那条"类型读法必须停在 `)`"能继续管用的原因。
+3. **`new` 不读**。标准把 `new int[4]` 的界放在 **new-declarator** 里而不是类型里，`parse_new_declarator_suffixes` 就是读它的规则。type-id 若抢先吃掉，`ArrayType` 会从分配表达式的声明符里搬到 `TypeId` 里——**一个不会被任何报错发现的树形变化**。所以新入口 `parse_type_id_for_an_allocation` 明确关掉这一半（它的另一个参数 `a_name_may_be_a_type = false` 也是 `new` 特有的，理由见函数文档）。
+
+**调试中发现的两处连带问题**（都不是设计的一部分，而是做的时候撞出来的）：
+
+* **守卫问错了对象**：第一版守卫用 `last_consumed_token_kind()` 判断"前面是不是类型"，而抽象声明符可能刚吃掉一个 `*`——`sizeof(int*[4])` 于是被判成"前面不是类型"。修法是把这个问题**在说明符序列刚跑完时**就问掉（读它产出的 `BuiltinType` 事件），把答案作为参数传下去。**又是"第一个/最后一个 token 被当成了整条声明"**（维护约定第 9 条）。
+* **`a_matching_angle_bracket_follows` 把 `]` 当成了边界**：它的停表里有 `RightBracket`，于是 `Vec<int[4]>` 里的 `<` 被判成"没有配对的 `>`"，模板实参读法根本没被尝试。修法是给扫描加一个**括号配对计数**：`[` +1、配对的 `]` -1，**只有落单的 `]` 才结束扫描**——`a[b < c]`（停表存在的理由：那里的 `<` 是下标里的比较）仍然正确。
+
+**护栏**：`expressions.rs::an_array_type_is_read_as_a_type_and_an_index_as_an_expression`（8 条类型读法 + 4 条模板实参 + 形状断言：`sizeof(int[4])` 有 `ArrayType`、`sizeof(a[0])` **没有**而有 `IndexExpr`、`new int[4]` 的 `TypeId` 文本恰好是 `"int"`）；`direct_init.rs` 的 elaborated 与 cv 两组；`gaps.rs` 已支持清单 15 条 + 形状断言 5 条。
 
 ### B21. `a < b || c > d` 被读成 template-id，然后**报错** —— 已修复
 
@@ -562,24 +650,6 @@ lookahead **保留，但降级为"快速否"**：`a < b;` 这种常见比较不�
 **一处刻意的例外**：**在 clause 内部，第二层不生效**。clause 后面跟着它约束的**声明**，而声明以类型开头——`template <typename T> requires C<T> T value = T{};`、`requires C<T> std::vector<int> v;`。把 `C<T>` 还回去，clause 就会读成 `C < T`，然后拿声明自己的类型当比较的右操作数。代价见下条。
 
 **护栏**：`operators.rs::a_less_than_between_two_names_is_a_comparison`（11 条比较读法、断言 `TemplateArgumentList` 为 0、`a < b > c` 的形状是三个 `BinaryExpr`）、`operators.rs::a_genuine_template_id_keeps_its_reading`（12 条模板读法，另一侧）；`concepts.rs::a_constraint_keeps_its_template_id_when_a_declaration_follows`（5 条约束后的声明）；`gaps.rs` 已支持清单 11 条 + 形状断言 2 条。
-
-### B22. clause 里**带括号**的比较仍然躲在 `<`…`>` 后面
-
-```cpp
-template <int N> requires (N < 0 || N > 3) void f();   // expected ), but get integer literal
-template <int N> requires N < 0 || N > 3 void f();     // 本来就非法（标准要求加括号），不管
-```
-
-**性质**：缺规则（B21 留下的边界）。**成因**：B21 的第二层在 clause 内被刻意关掉了（否则约束后的声明会被当成"操作数"，见上条），而这里的操作数**在括号里面**，属于约束本身。要区分这两种情况，需要知道那个操作数是不是位于"clause 开始之后才打开的括号"里——也就是**括号深度**。parser 现在没有这个量：`is_in_a_constraint` 是"在不在约束里"，`constraint_depth` 是约束的嵌套层数，都不是括号深度。
-
-**修法（两个选择，都要动公共入口，故单列）**：
-
-1. 在 `bump()` 里维护一个全局括号深度（`(` +1、`)` -1），clause 开始时记下基准值，操作数在更深一层时第二层照常生效。代价：改 `cpp_parser.rs` 的核心路径（每个 token 都过 `bump()`），要确认 `split_current_token` 之类不经过 `bump()` 的地方是否需要同步。
-2. 用**标记栈高度**代替：`parse_constraint_expr` 记下 `p.open_marks()`，比较 `<` 处的值与它——更深说明在括号（或别的子节点）里。同样需要存一个 field，但不动 `bump()`。
-
-**为什么值得修**：`requires (N > 0)` 这种写法在真实 concept 代码里并不少见，而里面套一个比较就会挂。
-
-**处置**：半天。级别 B（报错，无静默风险）。
 
 ---
 
@@ -837,11 +907,13 @@ operator bool() &&  // && 和 ( 分开     -> 这是成员函数的引用限定�
 | 16 | 真实 C 文件暴露的四件：裸名字 cast、相邻字符串字面量、`for` 步进、用户自定义字面量 | T1, B16, B17, B18 | 半天 | **完成** |
 | 17 | 同项目第二个文件暴露的：`sizeof` 操作数只要不是裸名字就失败 | B19 | 半天 | **完成** |
 | 18 | `<` 是模板实参表还是比较：试读 + 用"后面那个 token"验证 | B21 | 半天 | **完成** |
-| — | clause 里带括号的比较（B21 的边界） | B22 | 半天 | 待办 |
-| — | 构造中间的预处理条件行（生成代码） | B23 | 一天 | 待办（优先级低） |
-| — | `sizeof(int[4])`、`sizeof(struct S)`：类型读法入口太窄 | B20 | 半天 | 待办（与 B15 一起） |
-| — | 限定名 + 无名裸类型形参 `void Widget::draw(T) { }` | B14 | 半天 | 待办 |
-| — | 前导存储说明符 + 限定名里的 template-id `static void A::f<int>(int);` | B15 | 半天–一天 | 待办 |
+| 19 | clause 内的括号深度判据（含 cast 判据的同族误伤） | B22 | 半天 | **完成** |
+| 20 | 限定名那一族：定义头部的形参列表（含前导存储说明符） | B14, B15 | 一天 | **完成** |
+| 21 | elaborated type specifier 进类型读法（`sizeof(struct S)`、`(struct S*)p`） | B20 的一半 | 半天 | **完成** |
+| 22 | 类型后的 cv 限定符（两个叠加缺陷；修完 CMake 文件 10→4 条） | **A0-4** | 半天 | **完成** |
+| 23 | 数组类型进类型读法（`sizeof(int[4])`、`Vec<int[4]>`；含 `new` 的开关与方括号配对的扫描） | B20 的另一半 | 半天 | **完成** |
+| 24 | 构造中间的预处理条件行（初始化列表元素之间 + 字符串字面量串中间） | B23 | 一天 | **完成** |
+| — | K&R 风格函数定义 `int main(argc, argv) int argc; ...` | 新缺口 | 半天 | 待办 |
 | — | `namespace` 与名字之间的属性 | B3 残留 | 半天 | 待办 |
 | — | `void()` 作表达式 | B5 | 半天 | 待办（很少见） |
 | — | `asm volatile`、`__attribute__` | D | — | **不做** |
@@ -886,3 +958,4 @@ operator bool() &&  // && 和 ( 分开     -> 这是成员函数的引用限定�
     * template-id 读完之后**不能跟操作数**（B21）。
     
     写新规则时先问这两句：**它应该在哪个 token 上收尾？收尾之后那个 token 允许是什么？** 只写"解析成功就接受"的规则，在这个容错 parser 里迟早会在垃圾输入上"成功"。
+14. **同一条判据的第二处用法，当场抽出来，别写第二遍**（B22）。"后面跟着操作数"这条证据先用在 cast 上（T1），后来用在 template-id 上（B21），两处都需要同一条例外（clause 内不生效）——第二次直接改的时候漏了 cast 那处，是**新写的测试用例**（`requires (C<T>) T value = T{};`）把它抓出来的。抽成 `an_operand_is_decisive` 之后，例外只有一处实现。**"这条例外要加在哪里"是比"这条例外是什么"更容易错的问题**：只要同一个判据出现两次，例外就有两处可能被漏。

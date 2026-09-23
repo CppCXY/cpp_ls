@@ -1218,6 +1218,28 @@ pub fn parse_function_suffix_or_initializer(
 ) -> ParseResult {
     let checkpoint = p.checkpoint();
 
+    // A declarator that named **nothing**, in a declaration whose head is a **qualified** name, is the head of a
+    // definition — `static void Widget::draw(T)`, `void A::f<int>(int)` — so its parentheses are a parameter list
+    // and nothing else.
+    //
+    // The initializer reading is for `Widget w(T)`, where the declarator *holds* the name `w`; here it holds
+    // nothing, and the preference below is what got it wrong: `(T)` is a list of bare names, which is exactly the
+    // shape the initializer reading claims, so the definition came out with no parameter list at all — and then
+    // the `{` of its body had no declaration to belong to. A qualified name in type position is a definition
+    // head, and the suffix reader is the only one that can say so.
+    //
+    // The parameter reading can still fail — `ns::C::method(1, 2);` is a *call* on a qualified name, and `1` is
+    // not a type — and the rewind below hands those tokens back to the readings that follow.
+    if !a_name_was_parsed(p, declarator_from) && the_head_of_the_declaration_is_qualified(p) {
+        let before_the_parameters = p.checkpoint();
+        if parse_parameter_list(p).is_ok() {
+            p.set_last_declarator_is_function(true);
+            super::types::eat_function_qualifiers(p);
+            return Ok(CompleteMarker::empty());
+        }
+        p.rollback(before_the_parameters);
+    }
+
     // An untyped list of names has to be claimed *before* the parameter reading is tried, and only here. A
     // parameter must have a type, but a bare name is also a perfectly good type, so `Max(a, b);` parses as a
     // parameter list — two parameters of type `a` and type `b` — and a reading that succeeds is never revisited.
@@ -1804,6 +1826,44 @@ pub fn type_name_at(p: &CppParser, from: ParseAnchor) -> String {
     }
 }
 
+/// Did the declaration being parsed write a **qualified** name in type position?
+///
+/// ```text
+/// void A::f<int>(int);          the head is `void A::f<int>`
+/// static void Widget::draw(T);  the head is `static void Widget::draw`
+/// int x = A::b;                 …and this is not a head with a qualified *type*, which the `;` and `=`
+///                               before it are what rule out
+/// ```
+///
+/// Asked of the **tokens** rather than of the name the specifier sequence recorded, because the record is empty
+/// for the spelling that needs this most: `A::f<int>` ends in a template argument list, so the walk that recovers
+/// a name stops on the `>` and reports nothing — and a declaration whose head names a qualified type is the head
+/// of a *definition*, whose parentheses are a parameter list and whose declarator has no name of its own.
+///
+/// The walk is the one the other readers of a declaration's head use: backwards from the cursor to the start of
+/// the declaration, stopping at a `;`, `{` or `}`, so it cannot run out of this declaration and answer for the
+/// one before it. Trivia needs no skipping — none of it is a `::`.
+pub fn the_head_of_the_declaration_is_qualified(p: &CppParser) -> bool {
+    let mut index = p.current_token_index();
+
+    while index > 0 {
+        index -= 1;
+        let kind = p.token_kind_at(index);
+
+        if matches!(
+            kind,
+            CppTokenKind::Semicolon | CppTokenKind::LeftBrace | CppTokenKind::RightBrace
+        ) {
+            return false;
+        }
+        if kind == CppTokenKind::Scope {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Did the declaration this declarator belongs to lead with a type **keyword**?
 ///
 /// The question that separates `int a(1);` from `g(1, 2);`, and the only part of it that is answerable from the
@@ -2016,6 +2076,30 @@ pub fn parse_braced_initializer(p: &mut CppParser) -> ParseResult {
     expect_token(p, CppTokenKind::LeftBrace)?;
 
     while p.current_token() != CppTokenKind::RightBrace && !p.is_eof() {
+        // A **preprocessor directive** between the elements. The statement rule reads a directive when it meets
+        // one at the start of a statement, but an initializer is not a statement list — and a table whose rows are
+        // conditional is exactly what conditional compilation is for:
+        //
+        // ```c
+        // char const info_version[] = {
+        //   'I', 'N', 'F', 'O', ':',
+        // #ifdef COMPILER_VERSION
+        //   COMPILER_VERSION,
+        // #endif
+        //   '\0' };
+        // ```
+        //
+        // It is read as the node it is — the tree stays lossless and a consumer can still see the directive —
+        // rather than reported as a missing element. Only *here* is the directive claimed: in an expression proper
+        // a `#` is still an error, so nothing that used to be reported stops being reported.
+        if p.current_token() == CppTokenKind::Hash {
+            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+            continue;
+        }
+
         // A designated initializer: `.field = 1` (C++20) or `[index] = 1`.
         if p.current_token() == CppTokenKind::Dot || p.current_token() == CppTokenKind::LeftBracket
         {
@@ -2045,7 +2129,9 @@ pub fn parse_braced_initializer(p: &mut CppParser) -> ParseResult {
 
         if p.current_token() == CppTokenKind::Comma {
             p.bump();
-        } else {
+        } else if p.current_token() != CppTokenKind::Hash {
+            // A directive needs no comma in front of it: `'a',\n#ifdef X\n'b',` has one, but
+            // `'a'\n#ifdef X\n#endif\n, 'b'` is a row that is *entirely* conditional and has none.
             break;
         }
     }

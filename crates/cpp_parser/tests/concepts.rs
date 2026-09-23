@@ -272,15 +272,30 @@ fn a_constraint_keeps_its_template_id_when_a_declaration_follows() {
         "the constraint kept its template-id — the initialiser is a braced one, not a template-id"
     );
 
-    // The cost of that suspension, pinned so it is a known boundary rather than a surprise: a comparison written
-    // *inside parentheses* in a clause still hides behind a `<`…`>` pair. Telling it from the shapes above needs
-    // to know whether the operand is inside parentheses opened within the clause, which is a depth the parser does
-    // not track; registered in `docs/grammar-gaps.md`.
-    assert!(
-        !tree("template <int N> requires (N < 0 || N > 3) void f();\n")
-            .get_errors()
-            .is_empty(),
-        "a parenthesised comparison in a clause is a known gap"
+    // Parentheses are what tell the two apart, and the clause reads them the same way an expression does: inside
+    // them the *constraint* is still going, so an operand there cannot be the declaration that follows the clause.
+    // This used to be the boundary of the rule — a comparison inside parentheses in a clause hid behind the
+    // `<`…`>` pair — and it is fixed by asking whether parentheses are still open rather than by guessing.
+    for source in [
+        "template <int N> requires (N < 0 || N > 3) void f();\n",
+        "template <int N> requires (N > 0) void f();\n",
+        "template <int N> requires (N == 3) void f();\n",
+        "template <typename T> requires (C<T> && D<T>) void f(T t);\n",
+        "template <typename T> requires (C<T>) T value = T{};\n",
+    ] {
+        parses(source);
+    }
+
+    let compared = "template <int N> requires (N < 0 || N > 3) void f();\n";
+    assert_eq!(
+        count(compared, CppSyntaxKind::BinaryExpr),
+        3,
+        "`<`, `||` and `>` are operators, not a template argument list"
+    );
+    assert_eq!(
+        count(compared, CppSyntaxKind::TemplateArgumentList),
+        0,
+        "and nothing was read as template arguments"
     );
 }
 

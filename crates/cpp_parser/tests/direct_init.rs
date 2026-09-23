@@ -430,6 +430,62 @@ fn a_qualified_declarator_keeps_its_reading() {
     }
 }
 
+/// A **cv-qualifier after the type** must not push the declarator's name into the type.
+///
+/// `char const w[] = { 'a' };` used to read the type as `char const w` and the declarator as `[]` — which then
+/// became a **structured binding**, with no diagnostic at all. `char const w[2] = { 'a' };` was the same reading
+/// with a bound in it, and that is where it was finally reported.
+///
+/// Two defects were stacked, and the second hid the first:
+///
+/// 1. `type_is_already_complete` judged the token immediately before the name, and a cv-qualifier answered "not
+///    complete" — but a qualifier neither finishes a type nor unfinishes one, and `const char w` and
+///    `char const w` are the same type. It now steps over qualifiers and judges what is in front of them;
+/// 2. `has_type_specifier` — the flag saying "a *type* has been named in this sequence" — was **assigned** per
+///    specifier rather than accumulated, so a cv-qualifier cleared it. Fixing only the first leaves the second
+///    answering "no type yet", which is the same wrong reading by a different route.
+///
+/// `char const* p` was never affected: the `*` ends the specifier sequence before any name is seen, which is why
+/// the common spelling hid the defect.
+#[test]
+fn a_cv_qualifier_after_the_type_does_not_swallow_the_name() {
+    for source in [
+        "char const w[] = { 'a' };\n",
+        "char const w[2] = { 'a' };\n",
+        "char const w[2];\n",
+        "int const x = 1;\n",
+        "int const x;\n",
+        "static char const w[2] = { 'a' };\n",
+        "unsigned const int y = 1;\n",
+        "struct S const s;\n",
+        "char const *p = 0;\n",
+        "const char w[] = { 'a' };\n",
+        "alignas(16) const MyType value;\n",
+        "void f() { char const buf[4] = { 0 }; }\n",
+    ] {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert_eq!(
+            tree.get_errors(),
+            [],
+            "{source:?} must parse cleanly, got {:?}",
+            tree.get_errors()
+        );
+        assert!(
+            count_of(source, CppSyntaxKind::InitDeclarator) >= 1,
+            "{source:?}: the declaration has a declarator"
+        );
+        assert_eq!(
+            count_of(source, CppSyntaxKind::StructuredBinding),
+            0,
+            "{source:?}: and the declarator is not a structured binding of nothing"
+        );
+    }
+
+    // The array bound belongs to the declarator, which is what the wrong reading moved into the type.
+    assert_eq!(count_of("char const w[2];\n", CppSyntaxKind::ArrayType), 1);
+    assert_eq!(count_of("char const w[2];\n", CppSyntaxKind::Declarator), 1);
+}
+
 /// Count the nodes of one kind in `source`.
 fn count_of(source: &str, kind: CppSyntaxKind) -> usize {
     CppParser::parse(source, ParserConfig::default())
@@ -515,19 +571,92 @@ fn an_unnamed_parameter_of_an_unknown_type_is_a_parameter() {
         "the same reading inside a body — one for `f`, one for `a`"
     );
 
-    // Still a gap, and a **loud** one, so it is registered rather than fixed here: a qualified declarator name
-    // with an unnamed parameter of a bare unknown type. The name is folded into the type by the specifier
-    // sequence (`void Widget::draw`), so the declarator has no name of its own, and the parameter reading of
-    // `(T)` fails where it succeeds for `(int)`, for `(Canvas&)` and for `(std::vector<int>)`.
-    //
-    //   void Widget::draw(T) { }        refused
-    //   void Widget::draw(int) { }      read
-    //   void Widget::draw(Canvas&) { }  read
-    let refused = "void Widget::draw(T) { }\n";
-    assert!(
-        !CppParser::parse(refused, ParserConfig::default())
-            .get_errors()
-            .is_empty(),
-        "{refused:?} is a known gap: it is reported, not silently misread"
+    // A qualified declarator name with an unnamed parameter of a bare unknown type used to be a gap, and a loud
+    // one: the name is folded into the type by the specifier sequence (`void Widget::draw`), so the declarator has
+    // no name of its own, and `(T)` was read as an *initializer* — a list of bare names is the one shape the two
+    // readings share — leaving the definition without a parameter list. It is fixed by the same signal that
+    // identifies the shape: a qualified name in type position is the head of a definition, so its parentheses are
+    // a parameter list and nothing else. These are the spellings where it must hold.
+    for source in [
+        "void Widget::draw(T) { }\n",
+        "static void Widget::draw(T) { }\n",
+        "void Widget::draw(int) { }\n",
+        "void Widget::draw(Canvas&) { }\n",
+        "void ns::C::method() { }\n",
+    ] {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert_eq!(
+            tree.get_errors(),
+            [],
+            "{source:?} must parse cleanly, got {:?}",
+            tree.get_errors()
+        );
+        assert_eq!(
+            count_of(source, CppSyntaxKind::ParameterList),
+            1,
+            "{source:?}: the parentheses are a parameter list"
+        );
+    }
+
+    assert_eq!(
+        count_of("void Widget::draw(T) { }\n", CppSyntaxKind::Parameter),
+        1,
+        "the unnamed parameter is read"
+    );
+}
+
+/// A qualified declarator name behind a **storage specifier**, with a template-id in the name.
+///
+/// `void A::f<int>(int);` always read — the declaration's first token is the type keyword `void`. `static void
+/// A::f<int>(int);` did not, and neither did `static void Widget::draw(T) { }`, because the questions that decide
+/// whether a nameless declarator's parentheses are a parameter list were asked of the declaration's **first**
+/// token: with `static` in front, the walk back found a storage specifier instead of the type and answered no.
+///
+/// The question is now asked of the whole head rather than its first token — "does this declaration name a
+/// *qualified* type?" — which is the shape that actually matters: a qualified name in type position is the head
+/// of a definition, and its declarator has no name of its own for the suffixes to attach to.
+#[test]
+fn a_qualified_declarator_behind_a_storage_specifier_is_still_a_definition() {
+    for source in [
+        "static void A::f<int>(int);\n",
+        "inline void A::f<int>(int);\n",
+        "extern void A::f<int>(int);\n",
+        "constexpr void A::f<int>(int) { }\n",
+        "static void A<int>::f<int>(int);\n",
+        "static void A::f<int>(int) { }\n",
+        "void A::f<int>(int) { }\n",
+        "static void A::f(int);\n",
+        "static void Widget::draw(T) { }\n",
+        "static void Widget::draw(Canvas&) { }\n",
+    ] {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert_eq!(
+            tree.get_errors(),
+            [],
+            "{source:?} must parse cleanly, got {:?}",
+            tree.get_errors()
+        );
+        assert_eq!(
+            count_of(source, CppSyntaxKind::ParameterList),
+            1,
+            "{source:?}: the parentheses are a parameter list"
+        );
+    }
+
+    // The template-id stays in the *type*, which is where a definition's qualified name belongs: the specifier
+    // sequence walks `A::f<int>` as one name, so the declarator holds nothing.
+    assert_eq!(
+        count_of(
+            "static void A::f<int>(int);\n",
+            CppSyntaxKind::TemplateArgumentList
+        ),
+        1
+    );
+    assert_eq!(
+        count_of(
+            "static void A::f<int>(int);\n",
+            CppSyntaxKind::InitDeclarator
+        ),
+        1
     );
 }

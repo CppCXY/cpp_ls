@@ -114,10 +114,34 @@ pub fn parse_type_id(p: &mut CppParser) -> ParseResult {
 /// that can be checked against a smaller set: the name has to be one the file declares to be a type, because a
 /// parameter list whose parameter is an unknown name is a guess, while a placement argument is a fact.
 pub fn parse_type_id_with(p: &mut CppParser, a_name_may_be_a_type: bool) -> ParseResult {
+    parse_type_id_here(p, a_name_may_be_a_type, true)
+}
+
+/// [`parse_type_id`] for a `new`, where the **array bounds are not the type's**.
+///
+/// `new int[4]` is the case: the standard puts the `[4]` in the *new-declarator* rather than in the type, and the
+/// rule that reads those bounds is [`super::exprs`]' own
+/// [`crate::grammar::cpp::exprs::parse_new_declarator_suffixes`]. A type-id that swallowed them would move the
+/// `ArrayType` node out of the allocation's declarator and into its `TypeId` — a shape that no consumer of a `new`
+/// expression expects, and one nothing would report.
+///
+/// `a_name_may_be_a_type` is `false` for the same call, and for its own reason: the parentheses before the type may
+/// be a **placement list**. See [`parse_type_id_with`].
+pub fn parse_type_id_for_an_allocation(p: &mut CppParser) -> ParseResult {
+    parse_type_id_here(p, false, false)
+}
+
+/// Open the `TypeId` node and read the type in it, with the caller's answers to the two questions that decide how
+/// far it reaches.
+fn parse_type_id_here(
+    p: &mut CppParser,
+    a_name_may_be_a_type: bool,
+    read_array_suffixes: bool,
+) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::TypeId);
 
-    if let Err(err) = parse_type_id_inner(p, a_name_may_be_a_type) {
+    if let Err(err) = parse_type_id_inner(p, a_name_may_be_a_type, read_array_suffixes) {
         p.close_marks_above(base);
         return Err(err);
     }
@@ -141,7 +165,11 @@ pub fn parse_type_id_with(p: &mut CppParser, a_name_may_be_a_type: bool) -> Pars
 /// own parenthesis rather than part of the type.
 ///
 /// e.g.: the `(int)` of `void (int)`, as written in `sizeof(void(int))` or `new (Widget)(1)`
-fn parse_type_id_inner(p: &mut CppParser, a_name_may_be_a_type: bool) -> ParseResult {
+fn parse_type_id_inner(
+    p: &mut CppParser,
+    a_name_may_be_a_type: bool,
+    read_array_suffixes: bool,
+) -> ParseResult {
     if p.current_token() == CppTokenKind::LeftParen
         && starts_a_function_type(p, a_name_may_be_a_type)
     {
@@ -165,13 +193,75 @@ fn parse_type_id_inner(p: &mut CppParser, a_name_may_be_a_type: bool) -> ParseRe
         return Ok(CompleteMarker::empty());
     }
 
+    // Where the specifiers begin, so "did they name a type?" can be asked of what they produced — see
+    // [`read_array_suffixes_of_a_type_id`], which needs the answer and cannot ask it later: by then an abstract
+    // declarator may have run, and its `*` is the last token.
+    let specifiers_from = p.current_event_count();
+
     parse_decl_specifier_seq_stopping_at_one_name(p)?;
+
+    // Did those specifiers name a **type**, or only a name this file has never heard of? Two sources, and the
+    // first is decisive on its own: a `BuiltinType` node is produced by exactly the branches that name a keyword
+    // type. A name needs the file's table, because a bare unknown name is what a *variable* looks like.
+    let the_type_is_known = p.events_contain_any(specifiers_from, &[CppSyntaxKind::BuiltinType])
+        || p.declaration_type_name()
+            .is_some_and(|name| p.is_a_known_type_name(name));
 
     // An abstract declarator: pointers, references and cv-qualifiers, but no name.
     //
     // No name may appear — this is a type-id, not a declarator — which is what makes `(int)` after it a
     // function type rather than somebody's parameter list. See [`parse_abstract_declarator`].
     parse_abstract_declarator(p, false)?;
+
+    // An **array suffix**: the `[4]` of `int[4]`, the `[2][3]` of `int[2][3]`, the `[4]` of `int*[4]`.
+    //
+    // It is read here rather than in the abstract declarator because that rule is shared with the *declarator*
+    // path, where a `[` after the specifiers is a **structured binding** (`auto [a, b] = pair`) rather than a
+    // bound. A type-id has no such reading: `int[4]` is a type and nothing else can be meant by it.
+    if read_array_suffixes {
+        read_array_suffixes_of_a_type_id(p, the_type_is_known)?;
+    }
+
+    Ok(CompleteMarker::empty())
+}
+
+/// Read the array suffixes of a type-id, when the type in front is one this file can **prove** is a type.
+///
+/// ```text
+/// sizeof(int[4])     `int` is a keyword type          -> the brackets are a bound
+/// sizeof(MyType[4])  …or a name the file declared     -> likewise
+/// sizeof(a[0])       `a` is neither                   -> an *index*, and the expression rule owns it
+/// ```
+///
+/// The difference is not visible in the tokens, so the file's own table answers it — the same bounded evidence the
+/// rest of the type grammar uses, and the reason [`crate::parser::TypeNames`] exists. A miss costs the type
+/// reading, and the expression reading is the one that then applies, which is the safe direction here: `a[0]` is
+/// far more often an index than a type.
+///
+/// `the_type_is_known` is decided by the caller, which is where the specifier sequence is: by the time this runs,
+/// an abstract declarator may have consumed a `*`, and *that* is the last token — which is how `sizeof(int*[4])`
+/// came to be left alone, the guard having judged the `*` rather than the `int`.
+///
+/// An empty bound is legal (`int[]`) and so is a run of them (`int[2][3]`).
+fn read_array_suffixes_of_a_type_id(p: &mut CppParser, the_type_is_known: bool) -> ParseResult {
+    if !the_type_is_known {
+        return Ok(CompleteMarker::empty());
+    }
+
+    while p.current_token() == CppTokenKind::LeftBracket
+        // `[[` is an attribute, not a bound — the declarator's own loop asks the same question.
+        && p.peek_next_token() != CppTokenKind::LeftBracket
+    {
+        let array = p.mark(CppSyntaxKind::ArrayType);
+        p.bump(); // `[`
+
+        if p.current_token() != CppTokenKind::RightBracket && !p.is_eof() {
+            super::exprs::parse_expr(p)?;
+        }
+        expect_token(p, CppTokenKind::RightBracket)?;
+
+        array.complete(p);
+    }
 
     Ok(CompleteMarker::empty())
 }
@@ -370,8 +460,27 @@ fn parse_one_decl_specifier(
             // `BuiltinType` is the marker because it is produced by exactly the branches that name a keyword
             // type — and a rule that *forgot* to set a flag is the mistake this whole function exists to avoid,
             // so the record is read back from what the rule actually produced.
-            *has_type_specifier = p
-                .events_contain_any(events_before, &[CppSyntaxKind::BuiltinType])
+            // **Sticky**, and that word is the whole of the fix for a defect this flag had for as long as it has
+            // existed: the answer is "has a *type* been named in this sequence", not "did the specifier that just
+            // ran name one". A cv-qualifier names no type, but it does not *unname* one either — and assigning
+            // rather than accumulating let it do exactly that:
+            //
+            // ```text
+            // char const w[]   after `const` the flag said "no type yet", so `w` could only *be* the type: the
+            //                  type came out as `char const w`, the declarator was left with `[]`, and that became
+            //                  a structured binding — no diagnostic at all. `char const w[2]` was the same
+            //                  reading with a bound in it, which is where it was reported.
+            // int x const …    the same shape in C++: `int const x = 1;` declared `x` as part of the type.
+            // ```
+            //
+            // `char const* p` escaped it only because the `*` after the qualifier ends the specifier sequence
+            // before any name is seen.
+            //
+            // Accumulating changes nothing for a specifier that *does* name a type (the disjunction already held
+            // it true) and nothing for `alignas(16) MyType value;` (the flag was false before the alignment and
+            // stays false after it, so `MyType` still joins).
+            *has_type_specifier = *has_type_specifier
+                || p.events_contain_any(events_before, &[CppSyntaxKind::BuiltinType])
                 || p.last_consumed_token_kind().is_some_and(|kind| {
                     matches!(
                         kind,
@@ -781,6 +890,25 @@ fn name_joins_the_type(p: &CppParser, has_type_specifier: bool, name_allowed: bo
     if !has_type_specifier {
         return true;
     }
+    // An **elaborated type specifier**: `struct S`, `union U`, `enum class E`. The keyword is not the type — the
+    // name after it is — so this name joins the type whatever the caller said about a *second* name:
+    //
+    // ```text
+    // struct S *p;          a declaration, where a second name is allowed
+    // sizeof(struct S)      a type-id, where it is not
+    // using A = struct S;
+    // (struct S *)p;
+    // ```
+    //
+    // In a type-id the allowance had already been spent on the keyword, so `S` was refused and the type-id came
+    // out as `struct` on its own: the payload never reached its `)`, and `sizeof(struct S)` — an ordinary thing to
+    // write in C — was reported as `expected primary expression`. The keyword and its name are one specifier, so
+    // the allowance never applied to this name in the first place.
+    if p.last_consumed_token_kind()
+        .is_some_and(is_class_like_keyword)
+    {
+        return true;
+    }
     if continues_a_qualified_name(p) {
         return true;
     }
@@ -921,30 +1049,11 @@ fn a_parenthesis_follows_the_name(p: &CppParser) -> bool {
 fn type_is_already_complete(p: &CppParser) -> bool {
     let mut index = p.current_token_index();
 
-    // Step back over any alignments written here, so the token judged is what the declaration began with.
-    while index > 0 {
-        let previous = index - 1;
-        match p.token_kind_at(previous) {
-            CppTokenKind::RightParen => {
-                let Some(keyword) = the_alignas_introducing_the_payload_ending_at(p, previous)
-                else {
-                    break;
-                };
-                if keyword == 0 {
-                    return false;
-                }
-                index = keyword;
-            }
-            CppTokenKind::AlignasKeyword => {
-                index = previous;
-            }
-            _ => break,
-        }
-    }
-
     while index > 0 {
         index -= 1;
         let kind = p.token_kind_at(index);
+
+        // Trivia is not a token of the declaration.
         if matches!(
             kind,
             CppTokenKind::Whitespace
@@ -953,6 +1062,43 @@ fn type_is_already_complete(p: &CppParser) -> bool {
                 | CppTokenKind::LineComment
                 | CppTokenKind::BlockComment
         ) {
+            continue;
+        }
+
+        // A **cv-qualifier** neither finishes a type nor unfinishes one, and *where* it sits is what tells the two
+        // spellings apart:
+        //
+        // ```text
+        // const char w[]      the `const` comes *before* the type…
+        // char const w[]      …and here it comes after, so the type was already finished when it arrived
+        // ```
+        //
+        // Both are a qualified `char`, and in both the declarator is `w`. Judging the qualifier itself answered
+        // "not complete" for the second spelling, so `w` joined the *type*: the declaration came out with no
+        // declarator at all, and `char const w[2] = { 'a' };` was reported as a broken expression. (`char const* p`
+        // was unaffected only because the `*` follows the qualifier and stops the sequence first.)
+        //
+        // So the walk steps over it and judges what is in front.
+        if matches!(
+            kind,
+            CppTokenKind::ConstKeyword | CppTokenKind::VolatileKeyword
+        ) {
+            continue;
+        }
+
+        // A run of `alignas(…)` specifiers, payloads and keyword alike: it is the one specifier whose tokens end
+        // in a bracket, and neither its payload nor its keyword finishes a type. Stepping over the whole run is
+        // what keeps `alignas(16) MyType value;` from reading `MyType` as a second name of a *finished* type.
+        if kind == CppTokenKind::AlignasKeyword {
+            continue;
+        }
+        if kind == CppTokenKind::RightParen
+            && let Some(keyword) = the_alignas_introducing_the_payload_ending_at(p, index)
+        {
+            if keyword == 0 {
+                return false;
+            }
+            index = keyword;
             continue;
         }
 
@@ -969,11 +1115,11 @@ fn type_is_already_complete(p: &CppParser) -> bool {
             return false;
         }
 
+        // A class keyword names a *kind* of type and is not a type by itself — what it introduces still has to be
+        // named or given a body. See the note above about `struct Foo f;`.
         return !matches!(
             kind,
-            CppTokenKind::ConstKeyword
-                | CppTokenKind::VolatileKeyword
-                | CppTokenKind::ClassKeyword
+            CppTokenKind::ClassKeyword
                 | CppTokenKind::StructKeyword
                 | CppTokenKind::UnionKeyword
                 | CppTokenKind::EnumKeyword
@@ -1405,11 +1551,17 @@ pub fn could_start_template_arguments(p: &CppParser) -> bool {
 fn a_matching_angle_bracket_follows(p: &CppParser) -> bool {
     // Relative offsets: `0` is the `<` at the cursor, so the scan starts at `1`.
     let mut depth = 1isize;
+    // A **bracket** pair inside the arguments is not a boundary: `Vec<int[4]>` is an array type as an argument
+    // and `Vec<arr[0]>` a subscript in a non-type one. Only an *unmatched* `]` ends the scan, which is the case
+    // the stop set exists for — `a[b < c]`, where the `<` is a comparison inside an index.
+    let mut brackets = 0isize;
 
     'scan: {
         for kind in p.peek_token_kind_at(1..128) {
             match kind {
                 CppTokenKind::Less => depth += 1,
+                CppTokenKind::LeftBracket => brackets += 1,
+                CppTokenKind::RightBracket if brackets > 0 => brackets -= 1,
                 CppTokenKind::Greater | CppTokenKind::RightShift => {
                     // `>>` closes two levels at once; a lone `>` closes one. Both arrive here because
                     // the amount is all that differs.
@@ -2116,6 +2268,7 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
     // `int(void)`, and that is reached through `parse_type_id`, not here.
     if named
         || a_qualified_name_is_the_type(p)
+        || super::decls::the_head_of_the_declaration_is_qualified(p)
         || super::decls::a_declaration_is_the_better_reading(p, declarator_from)
     {
         loop {

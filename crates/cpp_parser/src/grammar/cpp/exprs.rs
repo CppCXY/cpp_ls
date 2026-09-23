@@ -775,7 +775,7 @@ fn is_a_type_in_parentheses(p: &CppParser) -> bool {
     // * `(` — `(f)(x)` is a call, and reading it as a cast of `x` to `f` is the one reading that loses the callee;
     // * `*`, `&`, `+`, `-`, `++`, `--` — every one of them is a binary operator too, so `(a) - b` is a subtraction;
     // * `[` — `(a)[b]` is an index of the parenthesised expression.
-    if an_operand_follows_the_parentheses(p) {
+    if an_operand_is_decisive(p) && an_operand_follows_the_parentheses(p) {
         return true;
     }
 
@@ -794,6 +794,30 @@ fn is_a_type_in_parentheses(p: &CppParser) -> bool {
         Some(&CppTokenKind::Scope) => true,
         _ => false,
     }
+}
+
+/// Is the "an operand follows" evidence **usable here**?
+///
+/// Two rules consult that evidence — the cast's `)` ([`is_a_type_in_parentheses`]) and the template-id's `>`
+/// ([`parse_primary_expr`]'s name branch) — and both need the same exception, which is why the question is asked
+/// once, here.
+///
+/// Inside a **clause**, the token after the construct may be the *declaration* the clause constrains rather than
+/// a stray operand, and that declaration usually begins with a type — an identifier or a keyword:
+///
+/// ```text
+/// template <typename T> requires C<T> T value = T{};       after the template-id
+/// template <typename T> requires (C<T>) T value = T{};     after the parenthesised constraint
+/// ```
+///
+/// Reading `C<T>` back, or taking `(C<T>) T` for a cast, leaves the clause eating the declaration's own type.
+///
+/// **Parentheses are what tell the two cases apart**, and it is not a guess: a `ParenExpr` that is still open means
+/// the *constraint itself* is still going, so an operand there cannot be a declaration —
+/// `requires (N < 0 || N > 3)` is the shape — while at the clause's top level the operand can only be what
+/// follows the clause.
+fn an_operand_is_decisive(p: &CppParser) -> bool {
+    !p.is_in_a_constraint() || p.is_open(CppSyntaxKind::ParenExpr)
 }
 
 /// Does a token that can only **begin an operand** follow the `)` matching the `(` at the cursor?
@@ -1024,7 +1048,7 @@ fn parse_new_type_and_initializer(p: &mut CppParser) -> ParseResult {
 fn parse_a_type_here(p: &mut CppParser) -> ParseResult {
     let before = p.current_token_index();
 
-    super::types::parse_type_id_with(p, false)?;
+    super::types::parse_type_id_for_an_allocation(p)?;
     if p.current_token_index() == before {
         return Err(CppParseError::syntax_error_from(
             "expected a type to allocate",
@@ -1333,13 +1357,36 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
             // and a string literal followed by a name is not valid C++ in any other reading. This parser does not
             // run the preprocessor, so a macro in the middle of a message is the shape it has to accept — it is
             // how every CMake-generated and hand-written diagnostic string is spelled.
+            // A **directive inside the run** is skipped the way the preprocessor would, and it is the shape a
+            // generated file writes a message with a conditional middle in:
+            //
+            // ```c
+            // const char* info = "[" 
+            // #if defined(__clang__)
+            //   "ON"
+            // #else
+            //   "OFF"
+            // #endif
+            //   "]";
+            // ```
+            //
+            // The directive is emitted as the node it is — the tree stays lossless and a consumer can see it — and
+            // the run continues past it. Nothing else can be meant by a `#` *here*: a string literal followed by a
+            // directive is not C++ in any other reading, while a stray `#` anywhere else in an expression is still
+            // reported, which is what keeps this from hiding real errors.
             while is_a_string
                 && matches!(
                     p.current_token(),
-                    CppTokenKind::StringLiteral | CppTokenKind::Identifier
+                    CppTokenKind::StringLiteral
+                        | CppTokenKind::Identifier
+                        | CppTokenKind::Hash
                 )
             {
-                p.bump();
+                if p.current_token() == CppTokenKind::Hash {
+                    super::stats::parse_preprocessor_directive(p)?;
+                } else {
+                    p.bump();
+                }
             }
 
             Ok(m.complete(p))
@@ -1431,23 +1478,11 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
                     let before_the_arguments = p.checkpoint();
                     let read = super::types::parse_template_argument_list(p);
 
-                    // The operand rule is suspended **inside a clause**, and only there. A clause is followed by
-                    // the declaration it constrains, and that declaration usually begins with a type — which is
-                    // an identifier or a keyword, the very tokens the rule reads as "an operand":
-                    //
-                    //     template <typename T> requires C<T> T value = T{};      the declaration follows the clause
-                    //     template <typename T> requires C<T> std::vector<int> v;
-                    //
-                    // Giving `C<T>` back there would leave the clause reading `C < T` and then eat the
-                    // declaration's own type as the comparison's right operand.
-                    //
-                    // What this costs is the shape where a *parenthesised* comparison inside a clause hides behind
-                    // a `<`…`>` pair: `requires (N < 0 || N > 3)` reads `N<0 || N>` as a template-id and then
-                    // trips on the `3`. Telling that from the case above needs to know whether the operand is
-                    // inside parentheses opened *within* the clause, which is a depth the parser does not track —
-                    // it is registered in `docs/grammar-gaps.md` rather than half-solved here.
+                    // The operand rule is suspended **inside a clause**, except when the operand is inside
+                    // parentheses that are still open — see [`an_operand_is_decisive`], which is the same question
+                    // the cast rule asks about its own `)`.
                     let an_operand_ends_the_constraint =
-                        !p.is_in_a_constraint() && starts_an_operand(p, 0);
+                        an_operand_is_decisive(p) && starts_an_operand(p, 0);
 
                     if read.is_err() || an_operand_ends_the_constraint {
                         // Not a template-id after all: the name ends here and the `<` belongs to the comparison
