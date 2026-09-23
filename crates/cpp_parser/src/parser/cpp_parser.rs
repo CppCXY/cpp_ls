@@ -82,6 +82,20 @@ impl EventStreamAudit {
     }
 }
 
+/// Which kind of braced body a `{` opened, for [`CppParser::is_at_class_member_level`].
+///
+/// Two kinds rather than a counter, because the rule that asks needs the *innermost* brace and the two answer
+/// differently: `int bits : 3;` is a member only when the class's own body is the one being filled, while
+/// everything inside a function body — a `for` header's `:`, a label — is a statement however many class bodies
+/// enclose it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BodyKind {
+    /// A class-like body: `class`, `struct`, `union`. Its members may declare bit-fields.
+    Class,
+    /// A statement or declaration block: a function body, a nested `{ … }`, an `extern "C" { … }`.
+    Block,
+}
+
 pub struct CppParser<'a> {
     text: &'a str,
     events: Vec<MarkEvent>,
@@ -174,10 +188,18 @@ pub struct CppParser<'a> {
     /// taken. An unqualified name gets no such reading, which is what keeps `Foo(1, 2);` a call. See
     /// `a_qualified_name_is_the_type` in the type grammar.
     declaration_type_is_qualified: bool,
-    /// How many class bodies are open, for the one declaration rule that has to know: a `:` after a member
-    /// declarator is a **bit-field**'s width, while after a function declarator it is a constructor's
-    /// member-initializer list. See [`CppParser::is_in_class_body`].
-    class_body_depth: usize,
+    /// The braced bodies currently open, **innermost last**, by the kind of brace each one is.
+    ///
+    /// For the one declaration rule that has to know: a `:` after a member declarator is a **bit-field**'s width,
+    /// while after a function declarator it is a constructor's member-initializer list. See
+    /// [`CppParser::is_at_class_member_level`].
+    ///
+    /// A *stack* rather than the counter this used to be, because the question is not "is a class body one of the
+    /// enclosing braces" but "is the **innermost** one a class body". `int bits : 3;` is a member only at member
+    /// level, and the counter answered yes for a statement inside a member function's body — so
+    /// `for (auto &v: vec)` in a header's inline member was read as a bit-field of width `vec`, and a label
+    /// (`again:`) was read as one too.
+    open_bodies: Vec<BodyKind>,
     /// Did the specifier sequence just parsed finish a whole declaration, `;` and all?
     ///
     /// Exactly one specifier does: `friend`, whose payload *is* the declaration that follows it. The flag lets
@@ -289,7 +311,7 @@ impl<'a> CppParser<'a> {
             declaration_type_name: None,
             previous_declaration_type_name: None,
             declaration_type_is_qualified: false,
-            class_body_depth: 0,
+            open_bodies: Vec::new(),
             declaration_ended_inside_specifiers: false,
             parse_config: config,
             errors: &mut errors,
@@ -332,7 +354,7 @@ impl<'a> CppParser<'a> {
             declaration_type_name: None,
             previous_declaration_type_name: None,
             declaration_type_is_qualified: false,
-            class_body_depth: 0,
+            open_bodies: Vec::new(),
             declaration_ended_inside_specifiers: false,
             parse_config: config,
             errors: &mut errors,
@@ -840,12 +862,20 @@ impl<'a> CppParser<'a> {
 
     /// Enter a class body, for the declaration rule that distinguishes a bit-field from a member initializer.
     ///
-    /// A *count* rather than a flag because class bodies nest — a member class inside a class — and the depth
-    /// has to come back to what it was once the inner body closes. Deliberately not part of [`Checkpoint`]: no
-    /// speculative region opens a class body and then rewinds past it, since the braces it would be rewinding
-    /// over are its own rather than a guess.
+    /// Pushed on a **stack** rather than counted, because what the rule needs is the innermost brace: see
+    /// [`CppParser::is_at_class_member_level`]. Deliberately not part of [`Checkpoint`]: no speculative region
+    /// opens a brace and then rewinds past it, since the braces it would be rewinding over are its own rather
+    /// than a guess.
     pub fn enter_class_body(&mut self) {
-        self.class_body_depth += 1;
+        self.open_bodies.push(BodyKind::Class);
+    }
+
+    /// Enter a **statement or declaration block** — a function body, a nested `{ … }`, an `extern "C" { … }`.
+    ///
+    /// The other half of the stack above: a `:` inside one of these is never a bit-field's width, whatever class
+    /// body encloses it.
+    pub fn enter_block_body(&mut self) {
+        self.open_bodies.push(BodyKind::Block);
     }
 
     /// Record that the specifier sequence finished a whole declaration — which only `friend` does.
@@ -866,18 +896,28 @@ impl<'a> CppParser<'a> {
 
     /// Leave a class body.
     pub fn leave_class_body(&mut self) {
-        self.class_body_depth = self.class_body_depth.saturating_sub(1);
+        self.open_bodies.pop();
     }
 
-    /// Is the cursor inside a class body?
+    /// Leave a statement or declaration block.
+    pub fn leave_block_body(&mut self) {
+        self.open_bodies.pop();
+    }
+
+    /// Is the cursor at the **member level** of a class body — the innermost brace being the class's own?
     ///
     /// The question `finish_init_declarator` puts to it: `int bits : 3;` and `S() : a(1) {}` have a `:` in the
     /// same position, and only the enclosing construct says which they are — a member declarator's `:`
     /// introduces a width, while a *function* declarator's introduces the member-initializer list of a
     /// constructor. The function case is decided first and does not need this; what does is the member that
     /// names no function.
-    pub fn is_in_class_body(&self) -> bool {
-        self.class_body_depth > 0
+    ///
+    /// **The innermost brace is what matters, not "is a class body somewhere above".** Asking the weaker question
+    /// meant that everything inside a member function's body counted as member level, which turned
+    /// `for (auto &v: vec)` in a header's inline member into a bit-field of width `vec` — and the same for a
+    /// label (`again:`) or any other statement whose first name a declaration reading could take.
+    pub fn is_at_class_member_level(&self) -> bool {
+        matches!(self.open_bodies.last(), Some(BodyKind::Class))
     }
 
     /// The declaration's leading type name, when it has one.

@@ -378,12 +378,24 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
         //   forgot to set a flag is a silent one. A name-based type specifier is a `TemplateType`.
         let a_further_name_may_join = allow_second_name
             && p.events_contain_any(specifiers_from, &[CppSyntaxKind::TemplateType]);
+        // …and has the sequence written a **class-like definition**, body and all?
+        //
+        // That body is a complete type, and the backward walk [`type_is_already_complete`] makes cannot see it: it
+        // meets the `}` that closes the body and answers "no type yet", which is the right answer for the *other*
+        // meaning of a `}` — the end of an enclosing block. So the question is asked of the events instead, and
+        // the name that follows a definition is the declarator rather than one more word of the type. See
+        // [`name_joins_the_type`].
+        let a_class_definition_was_written = p.events_contain_any(
+            specifiers_from,
+            &[CppSyntaxKind::ClassBody, CppSyntaxKind::EnumDef],
+        );
         if let Err(err) = parse_one_decl_specifier(
             p,
             &mut has_specifier,
             &mut has_type_specifier,
             &mut name_allowed,
             a_further_name_may_join,
+            a_class_definition_was_written,
             specifier_seen,
         ) {
             if specifiers == 0 {
@@ -435,6 +447,7 @@ fn parse_one_decl_specifier(
     has_type_specifier: &mut bool,
     name_allowed: &mut bool,
     a_further_name_may_join: bool,
+    a_class_definition_was_written: bool,
     specifier_seen: bool,
 ) -> ParseResult {
     let events_before = p.current_event_count();
@@ -443,6 +456,7 @@ fn parse_one_decl_specifier(
         has_type_specifier,
         name_allowed,
         a_further_name_may_join,
+        a_class_definition_was_written,
         specifier_seen,
     );
 
@@ -524,6 +538,7 @@ fn parse_one_decl_specifier_inner(
     has_type_specifier: &mut bool,
     name_allowed: &mut bool,
     a_further_name_may_join: bool,
+    a_class_definition_was_written: bool,
     specifier_seen: bool,
 ) -> ParseResult {
     let base = p.open_marks();
@@ -817,6 +832,7 @@ fn parse_one_decl_specifier_inner(
                 *has_type_specifier,
                 *name_allowed,
                 a_further_name_may_join,
+                a_class_definition_was_written,
             ) {
                 return Err(CppParseError::syntax_error_from(
                     "expected a declarator name",
@@ -986,11 +1002,16 @@ fn pointer_to_member_operator_length(p: &CppParser, at: usize) -> Option<usize> 
 ///   way, so it is the declarator and the parentheses are what initialises it. See
 ///   [`a_parenthesis_follows_the_name`] for the whole argument; it is what makes `Widget w(1, 2, 3);`
 ///   a declaration without asking the type table.
+/// * `a_class_definition_was_written` — the sequence has a **body** in it, and a body is a complete type:
+///   `struct S { … } x;`, `struct { … } x;`, `enum E { A } e;`, `typedef struct { … } Alias;`. The walk
+///   [`type_is_already_complete`] makes cannot see it — it meets the `}` and answers "no type yet", which is the
+///   right answer for the other meaning of a `}` — so the name that follows a definition must be the declarator.
 fn name_joins_the_type(
     p: &CppParser,
     has_type_specifier: bool,
     name_allowed: bool,
     a_further_name_may_join: bool,
+    a_class_definition_was_written: bool,
 ) -> bool {
     // No type yet, so this name can only be the type.
     if !has_type_specifier {
@@ -1042,6 +1063,23 @@ fn name_joins_the_type(
     // expressions in any grammar, so the only statements that change are the ones that had no reading at all.
     if a_further_name_may_join && a_declarator_still_follows_the_name(p) {
         return true;
+    }
+    // A **class-like definition** is a complete type, body and all, and the name after it is the declarator:
+    //
+    // ```text
+    // struct S { int a; } x;          declares `x`
+    // struct { int a; } x[] = { … };  the C idiom this was found in — an unnamed struct and its variable
+    // enum E { A } e;                 the same for an enum
+    // typedef struct { … } Alias;     the body is the type, `Alias` is the name
+    // ```
+    //
+    // Read the other way the name joined the *type*, so the declaration had no declarator at all: silently for
+    // `struct S { … } x;` (a well-formed declaration of nothing, no diagnostic), and loudly as soon as the
+    // declarator carried anything — `x = { 1 }` reported `expected a declarator name` against the `=`, and
+    // `x[2]` reported `expected ], but get integer literal`. `LuaDefine.h` in the first real C++ project is the
+    // third shape, 45 diagnostics from one declaration.
+    if a_class_definition_was_written {
+        return false;
     }
     let complete = type_is_already_complete(p);
     let called = a_parenthesis_follows_the_name(p);
@@ -1741,6 +1779,20 @@ fn a_matching_angle_bracket_follows(p: &CppParser) -> bool {
     // and `Vec<arr[0]>` a subscript in a non-type one. Only an *unmatched* `]` ends the scan, which is the case
     // the stop set exists for — `a[b < c]`, where the `<` is a comparison inside an index.
     let mut brackets = 0isize;
+    // …and neither is a **parenthesis** pair, for the same reason and with a case that is everywhere in real
+    // code: a function type is a template argument —
+    //
+    // ```text
+    // std::function<bool(TokenKind)>                 a predicate parameter
+    // std::function<void(const std::string &)>       the same, with a parameter's own type inside
+    // ```
+    //
+    // — and the parentheses around that parameter list are *matched*, so they belong to the list. Stopping at the
+    // first `)` meant the template-id was never attempted at all: `sizeof(A<bool(T)>)` failed, `using F =
+    // A<bool(T)>;` reported `expected ;` against its own `<`, and at file scope `A<bool(T)> x;` came out as the
+    // **comparison** `A < bool(T) > x` — a declaration read as an expression, with no diagnostic anywhere, which
+    // is the A0 shape this file exists to prevent.
+    let mut parens = 0isize;
 
     'scan: {
         for kind in p.peek_token_kind_at(1..128) {
@@ -1748,6 +1800,8 @@ fn a_matching_angle_bracket_follows(p: &CppParser) -> bool {
                 CppTokenKind::Less => depth += 1,
                 CppTokenKind::LeftBracket => brackets += 1,
                 CppTokenKind::RightBracket if brackets > 0 => brackets -= 1,
+                CppTokenKind::LeftParen => parens += 1,
+                CppTokenKind::RightParen if parens > 0 => parens -= 1,
                 CppTokenKind::Greater | CppTokenKind::RightShift => {
                     // `>>` closes two levels at once; a lone `>` closes one. Both arrive here because
                     // the amount is all that differs.
@@ -1807,6 +1861,8 @@ fn a_bare_template_id_is_here(p: &CppParser) -> bool {
     // Offsets are relative to the cursor: the `<` is at 1, which the depth above counts, so the scan starts at
     // 2 — the first token *inside* the list — and the answer is read one past the matching `>`.
     let mut depth = 1isize;
+    // See the stop set below: an *unmatched* `)` ends the scan, a matched pair does not.
+    let mut parens = 0isize;
 
     for (index, kind) in p.peek_token_kind_at(2..128).iter().enumerate() {
         match kind {
@@ -1830,7 +1886,6 @@ fn a_bare_template_id_is_here(p: &CppParser) -> bool {
             CppTokenKind::Semicolon
             | CppTokenKind::LeftBrace
             | CppTokenKind::RightBrace
-            | CppTokenKind::RightParen
             | CppTokenKind::RightBracket
             | CppTokenKind::Colon
             | CppTokenKind::Assign
@@ -1839,6 +1894,12 @@ fn a_bare_template_id_is_here(p: &CppParser) -> bool {
             | CppTokenKind::None
             | CppTokenKind::LineComment
             | CppTokenKind::BlockComment => return false,
+            // An **unmatched** `)`, exactly as in [`a_matching_angle_bracket_follows`]: a *matched* pair is a
+            // function type as a template argument (`F<bool(T)>`), which this scan has to see past for the same
+            // reason the other one does.
+            CppTokenKind::LeftParen => parens += 1,
+            CppTokenKind::RightParen if parens > 0 => parens -= 1,
+            CppTokenKind::RightParen => return false,
             _ => {}
         }
     }

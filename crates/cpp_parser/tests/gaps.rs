@@ -396,6 +396,11 @@ fn constructs_the_parser_reads() {
             "TEST(FormatPerformance, 1k_row) { }",
             "TEST(A, B) { int x = 1; }",
             "namespace n { TEST(A, B) { } }",
+            // A **conditional handler**: a directive can land at either joint of a `try`, and the first one is the
+            // one that used to break the statement — with `try` separated from its block, the block was not the
+            // try's block at all, and the `catch` became a statement with no statement before it.
+            "#if !defined(_DEBUG)\ntry\n#endif\n{\n    g();\n}\n#if !defined(_DEBUG)\ncatch (const E& e) {\n    h();\n}\n#endif",
+            "void f() {\ntry {\n    g();\n}\n#if !defined(_DEBUG)\ncatch (const E& e) {\n#endif\n    h();\n}\n}",
         ],
     );
 
@@ -754,6 +759,32 @@ fn constructs_the_parser_reads() {
             // macro-definition shape itself is in the file-scope list above: inside a body it is a call followed
             // by a block, which is a real error and is refused on purpose.
             "auto x = 1k_row;",
+            // A **macro invocation used where a definition goes, inside a function body** — `IF_EXIST(k) { … }`,
+            // which is how a "set this option if it is configured" block is written. Inside a body the same shape
+            // is also a real mistake (a call whose `;` is missing, followed by a block), so the reading is taken
+            // only for a name spelled the way a macro is — see the negative pin in the list of what is not read
+            // yet, which is the other half of this one.
+            "IF_EXIST(k) { g(); }",
+            "TEST(A, B) { g(); }",
+            // A **function type as a template argument** — a predicate parameter, in a declaration, an alias and a
+            // `sizeof`. The angle-matching scan stopped at the first `)`, so the template-id was never attempted:
+            // `A<bool(T)> x;` came out as the *comparison* `A < bool(T) > x`, with no diagnostic at all.
+            "A<bool(T)> x;",
+            "std::function<bool(TokenKind)> pred;",
+            "using F = A<bool(T)>;",
+            "auto n = sizeof(A<bool(T)>);",
+            "void h(A<bool(T)> x);",
+            // A **class-like definition followed by its declarator** — `struct S { … } x;`, and the C idiom
+            // `static const struct { … } name[] = { … };`. The body is a complete type, but the backward walk for
+            // "is the type complete?" only saw the `}`, so the declarator's name joined the *type* instead: the
+            // declaration declared nothing, silently, and reported `expected a declarator name` as soon as the
+            // declarator carried anything (`x = { 1 }`, `x[2]`).
+            "struct S { int a; } x;",
+            "struct { int a; } x[] = { { 1 } };",
+            "static const struct { unsigned char left; } priority[] = { { 1 } };",
+            "typedef struct { int a; } Alias;",
+            "enum E { A } e;",
+            "class C { int a; } c = {};",
             // A **global-qualified name in parentheses** is an expression; the `::` used to make it a cast type.
             "auto y = (::x);",
             "auto y = (::abs(x) > 1);",
@@ -778,6 +809,11 @@ fn constructs_the_parser_reads() {
             "virtual ~S() = default;",
             "void f() override;",
             "static inline int count = 0;",
+            // Inside a **member function's body** the class body is no longer the innermost brace, and a `:` there
+            // is never a bit-field's width: a range-`for`'s separator and a label were both read as widths, which
+            // cost a whole header in a real project.
+            "void f() { for (auto &v: vec) { } }",
+            "void f() { again: g(); }",
             "Probe(int v) : a(v) {}",
             "Probe() : a(1) {}",
             "Probe() : b{2} {}",
@@ -858,6 +894,19 @@ fn constructs_the_parser_does_not_read_yet() {
             // the cast reading would take working code apart. See `an_operand_after_the_parentheses_decides_the_
             // cast_and_nothing_else_does` in `operators.rs`.
         ],
+    );
+
+    // …and the shapes that are **still errors**, which is the other half of the macro reading: inside a
+    // function body a call whose `;` is missing, followed by a block, is not a macro definition — the name is
+    // not spelled like one — and reporting it is the point. The convention buys the macro case and keeps the
+    // typo.
+    assert_does_not_read_yet(
+        Where::Body,
+        &[(
+            "g(x) { }",
+            "a call with its `;` missing, followed by a block — not a macro, since the name is not spelled \
+                 like one; see B36 in docs/grammar-gaps.md",
+        )],
     );
 
     // `decltype` in **type position** used to be here, and the record of what it looked like is worth keeping
@@ -973,6 +1022,29 @@ fn constructs_are_read_as_the_right_node() {
         // what settles the reading. See `expressions.rs`.
         shape("C<T> && C2<T>;", Where::Body, CppSyntaxKind::ExpressionStat),
         shape("x = 1;", Where::File, CppSyntaxKind::ExpressionStat),
+        // A **function type as a template argument**, where the wrong reading is invisible: the angle-matching scan
+        // stopped at the parameter list's `)`, the template-id was never attempted, and `A<bool(T)> x;` came out as
+        // the comparison `A < bool(T) > x` — an `ExpressionStat` that a consumer reads as "a statement with no
+        // declaration in it", with nothing reported. The declaration reading is the assertion.
+        shape("A<bool(T)> x;", Where::File, CppSyntaxKind::Declaration),
+        shape(
+            "std::function<bool(TokenKind)> pred;",
+            Where::File,
+            CppSyntaxKind::Declaration,
+        ),
+        // A **class-like definition in front of its declarator**: `struct S { … } x;` swallowed `x` into the type
+        // and declared nothing — silently when the declarator was bare, loudly as `expected a declarator name` as
+        // soon as it carried an initializer or a bound.
+        shape(
+            "struct S { int a; } x;",
+            Where::File,
+            CppSyntaxKind::Declaration,
+        ),
+        shape(
+            "static const struct { int a; } priority[] = { { 1 } };",
+            Where::File,
+            CppSyntaxKind::Declaration,
+        ),
         // The other side of the same gate: a declaration *is* a declaration, and a qualified declarator keeps
         // its declaration reading even though it names nothing for the declarator rule to take — the name was
         // folded into the type.
@@ -1367,6 +1439,44 @@ fn modern_constructs_produce_the_right_nodes() {
         body.text().to_string(),
         "{ int x = 1; }",
         "and its own declarations are inside it"
+    );
+
+    // The **named** spelling of the same shape, asked of the tree because the typed layer's `get_name_text`
+    // answers with the class's own name — the class is what the declaration is *about* — and the question here is
+    // whether the declarator exists at all. The defect was that it did not: the name had joined the type.
+    let source = "static const struct { int a; } priority[] = { { 1 } };";
+    let named = CppParser::parse(source, ParserConfig::default())
+        .get_red_root()
+        .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::InitDeclarator)
+        .flat_map(|declarator| declarator.descendants())
+        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr)
+        .map(|name| name.text().to_string())
+        .any(|name| name == "priority");
+    assert!(
+        named,
+        "the declarator is named `priority`, not part of the type"
+    );
+
+    // The `:` of a range-`for` inside a **member function** is the range separator, and the assertion is the
+    // statement kind — the wrong reading produced a well-formed bit-field declaration whose width was the range
+    // expression, with no diagnostic at all in the version that had a `,` after it.
+    let source = "struct S { void f() { for (auto &v: vec) { } } };";
+    assert!(
+        contains(source, CppSyntaxKind::RangeForStat),
+        "a range-for inside a member function is a range-for, not a bit-field"
+    );
+    // …and the same for a label, which is the other statement whose first token a declaration reading can take.
+    let source = "struct S { void f() { again: g(); } };";
+    assert!(
+        contains(source, CppSyntaxKind::LabelStat),
+        "a label inside a member function is a label"
+    );
+    // The bit-field itself is unchanged, at the member level it belongs to.
+    let source = "struct S { int bits : 3; };";
+    assert!(
+        contains(source, CppSyntaxKind::Initializer),
+        "a member's `:` is still a bit-field width"
     );
 
     // **How many enumerators an enum has.** This is the assertion the A0 defect of B26 needed and did not have:    // with the initializer read at the comma-operator level, `enum E { A = 0, B };` came out as *one*

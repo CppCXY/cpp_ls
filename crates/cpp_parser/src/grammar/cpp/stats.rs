@@ -28,7 +28,11 @@ pub(crate) fn parse_compound_stat(p: &mut CppParser) -> ParseResult {
         // braces. This is the approximation the table documents: it counts *parser* depth, which is enough to
         // keep a local class from being a type name for the next function.
         p.enter_type_name_scope();
+        // …and this brace is a *block*, whatever class body encloses it: a `:` in here is never a bit-field's
+        // width. See `CppParser::is_at_class_member_level`.
+        p.enter_block_body();
         parse_stats(p);
+        p.leave_block_body();
         p.leave_type_name_scope();
 
         if p.current_token() == CppTokenKind::RightBrace {
@@ -712,7 +716,41 @@ fn parse_try_statement(p: &mut CppParser) -> ParseResult {
     let m = p.mark(CppSyntaxKind::TryStat);
 
     p.bump(); // Consume 'try'
+
+    // **Directives at every joint of a `try`.** A handler that exists in a debug build and not in a release one
+    // is a real spelling, and the directive that decides it can land between any two tokens of the statement —
+    // between `try` and its block, and between the block and the `catch`:
+    //
+    // ```cpp
+    // #if !defined(_DEBUG)
+    //     try
+    // #endif
+    //     {
+    //         …
+    //     }
+    // #if !defined(_DEBUG)
+    //     catch (std::exception &e) { … }
+    // #endif
+    // ```
+    //
+    // That is `IOSession.cpp` in the first real C++ project, and the shape is worth reading carefully because
+    // the *first* of the two joints is the one that breaks the statement: with `try` followed by `#endif`, the
+    // block was not the try's block at all, so the statement ended there and the `catch` became a statement with
+    // no statement before it — reported as `expected }` against the `catch`.
+    //
+    // Read as the nodes they are, exactly as B23, B24 and the three other places `docs/grammar-gaps.md` records
+    // for the same argument; a `#` anywhere it cannot be a directive is still an error.
+    if let Err(err) = eat_preprocessor_directives(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
     if let Err(err) = parse_compound_stat(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    if let Err(err) = eat_preprocessor_directives(p) {
         p.close_marks_above(base);
         return Err(err);
     }
@@ -728,14 +766,38 @@ fn parse_try_statement(p: &mut CppParser) -> ParseResult {
             return Err(err);
         }
 
+        // The same joint, one handler along: `catch (E& e)` and its block.
+        if let Err(err) = eat_preprocessor_directives(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+
         if let Err(err) = parse_compound_stat(p) {
             p.close_marks_above(base);
             return Err(err);
         }
         handler.complete(p);
+
+        if let Err(err) = eat_preprocessor_directives(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
     }
 
     Ok(m.complete(p))
+}
+
+/// Read the preprocessor directives at the cursor as nodes, and stop at the first thing that is not one.
+///
+/// For the constructs whose parts a conditional can separate — see [`parse_try_statement`], and B23/B24 in
+/// `docs/grammar-gaps.md` for the same reading in an initializer, in a string-literal run, and between a
+/// function's head and its body. The directives stay in the tree, so nothing is lost and a consumer can see
+/// which branch each one guards.
+fn eat_preprocessor_directives(p: &mut CppParser) -> ParseResult {
+    while p.current_token() == CppTokenKind::Hash {
+        parse_preprocessor_directive(p)?;
+    }
+    Ok(crate::parser::CompleteMarker::empty())
 }
 
 /// Parse a catch clause's parameter list, reusing the declaration grammar.

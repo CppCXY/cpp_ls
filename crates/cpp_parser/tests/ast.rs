@@ -73,6 +73,28 @@ fn an_export_macro_before_the_type_leaves_the_declarator_last() {
     assert_eq!(decl_names("std::string name;\n"), vec!["name"]);
 }
 
+/// A **class-like definition followed by its declarator**: the body is the type, and the name after it is what
+/// the declaration declares.
+///
+/// `type_is_already_complete` walks *backwards* from the name, and a `}` makes it answer "no type yet" — right for
+/// the other meaning of a `}`, the end of an enclosing block, and wrong for this one, where the brace closes a
+/// body that is part of this very declaration. Read that way the name joined the type and the declaration named
+/// nothing: silently for `struct S { … } x;`, and loudly as `expected a declarator name` once the declarator
+/// carried an initializer or an array bound. `LuaDefine.h`'s
+/// `static const struct { … } priority[] = { … };` is the shape, 45 diagnostics from one declaration.
+#[test]
+fn a_class_definition_leaves_the_name_to_the_declarator() {
+    // The **unnamed** spellings, where the declaration's name can only be the declarator's: a named class reports
+    // its own name through `get_name_text` (the class *is* what the declaration is about), which is why the named
+    // cases are pinned on the tree instead — in `gaps.rs`, where the `InitDeclarator` is the assertion.
+    assert_eq!(decl_names("struct { int a; } x;\n"), vec!["x"]);
+    assert_eq!(decl_names("union { int a; } u;\n"), vec!["u"]);
+    assert_eq!(
+        decl_names("static const struct { int a; } priority[] = { { 1 } };\n"),
+        vec!["priority"]
+    );
+}
+
 #[test]
 fn variable_declaration_exposes_type_and_initializer() {
     let (root, _) = unit("int counter = 42;\n");

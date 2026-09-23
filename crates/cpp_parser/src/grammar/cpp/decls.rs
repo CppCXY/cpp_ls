@@ -1164,7 +1164,7 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
         // Read as a member-initializer list, as it was, `int bits : 3` came out as a declarator with no name at
         // all: the width was consumed as an initializer, the member was nameless, and a consumer asking the
         // class for its fields found nothing where the field was.
-        CppTokenKind::Colon if p.is_in_class_body() => {
+        CppTokenKind::Colon if p.is_at_class_member_level() => {
             let width = p.mark(CppSyntaxKind::Initializer);
             p.bump(); // `:`
 
@@ -1460,8 +1460,9 @@ pub fn parse_function_suffix_or_initializer(
 /// * **not a qualified head**: `void Widget::draw(T) { }` has no declarator name either (the specifier sequence
 ///   took the whole qualified name), and its parentheses *are* a parameter list. A `::` in the head is what
 ///   tells the two apart, and the definitions of out-of-line members are far too common to lose;
-/// * **not inside a function body**, where a call followed by a block is a real error;
-/// * a **balanced** group with a `{` right after it.
+/// * a **balanced** group with a `{` right after it;
+/// * and, **inside a function body**, a name written the way a macro is written — see
+///   [`looks_like_a_macro_name`] for why that half is a convention and which mistake it keeps.
 ///
 /// Exposed because the declarator's suffix loop has to ask it *before* it opens at all: its other reasons to open
 /// are all answers to the declaration/expression question, and this shape has none of them — which is why
@@ -1470,8 +1471,41 @@ pub fn parse_function_suffix_or_initializer(
 pub(super) fn a_macro_definition_follows(p: &CppParser, declarator_from: usize) -> bool {
     !a_name_was_parsed(p, declarator_from)
         && !the_head_of_the_declaration_is_qualified(p)
-        && !p.is_inside_a_body()
         && a_block_follows_the_group(p)
+        // At *declaration* level the shape has no other reading at all, so any name will do. Inside a **body**
+        // it competes with a real mistake — a call whose `;` is missing, followed by a block — so only a name
+        // spelled like a macro is taken, which is what `IF_EXIST(indent_style) { … }` is.
+        && (!p.is_inside_a_body()
+            || p.declaration_type_name().is_some_and(looks_like_a_macro_name))
+}
+
+/// Is this name written the way a **macro** is written: `TEST`, `IF_EXIST`, `CHECK_EQ`?
+///
+/// This is a *convention* rather than a grammar rule, and it is used in exactly one place: the "macro invocation
+/// used where a definition goes" shape of [`a_macro_definition_follows`], and only where a name could otherwise
+/// be a real mistake. Two cases, and they need different answers:
+///
+/// ```text
+/// IF_EXIST(indent_style) { … }   a macro — the block is its body, and there is no other valid reading
+/// g(x) { }                       a call with its `;` missing, followed by a block — a syntax error
+/// ```
+///
+/// Both are "a name, a parenthesised group, a block", and no grammar rule separates them: the second is *not*
+/// valid C++ at all, so reading it as a macro would silently accept a mistake a reader has to fix. What separates
+/// them is how the name is spelled, and it is the same signal a reader uses. `EmmyLuaCodeStyle`'s
+/// `IF_EXIST(...) { … }` is the case that made the inside-of-a-body half necessary — 68 diagnostics from the
+/// macro invocations in one file.
+fn looks_like_a_macro_name(name: &str) -> bool {
+    let mut characters = name.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    if !(first.is_ascii_uppercase() || first == '_') {
+        return false;
+    }
+    name.chars().all(|character| {
+        character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+    })
 }
 
 /// Is the `(` at the cursor a **balanced** group with a `{` immediately after it?
@@ -3212,6 +3246,9 @@ pub fn parse_linkage_block(p: &mut CppParser) -> ParseResult {
 
     // A linkage block is a scope, like a namespace body, so a type declared inside it is not a type outside.
     p.enter_type_name_scope();
+    // A *block* rather than a class body: `extern "C" { int bits : 3; }` is not a member declaration, and the
+    // innermost brace is what the bit-field rule asks about.
+    p.enter_block_body();
 
     while p.current_token() != CppTokenKind::RightBrace && !p.is_eof() {
         let member_base = p.open_marks();
@@ -3227,6 +3264,7 @@ pub fn parse_linkage_block(p: &mut CppParser) -> ParseResult {
         }
     }
 
+    p.leave_block_body();
     p.leave_type_name_scope();
 
     if p.current_token() == CppTokenKind::RightBrace {
