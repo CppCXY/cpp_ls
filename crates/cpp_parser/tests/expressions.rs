@@ -31,6 +31,144 @@ fn count(source: &str, kind: CppSyntaxKind) -> usize {
 }
 
 #[test]
+fn sizeof_reads_an_operand_that_is_not_a_bare_name() {
+    // `sizeof` and `typeid` accept a type-id *or* an expression, and the type reading is tried first because it
+    // is the one that can be refused. But a type-id can **stop early** — a name on its own is a complete one — so
+    // "it parsed and consumed something" was not enough: `sizeof(a[0])` was read as the type `a`, the cursor was
+    // left on the `[`, and `expected )` was reported against it. Every operand but a bare name or a keyword type
+    // failed, which in C is most of the `sizeof`s there are.
+    //
+    // What settles it is where the reading **stopped**: the payload ends at the `)`, so a type-id that did not
+    // reach it was not the reading at all.
+    for source in [
+        "void f() { auto n = sizeof(a[0]); }\n",
+        "void f() { auto n = sizeof(a.b); }\n",
+        "void f() { auto n = sizeof(a->b); }\n",
+        "void f() { auto n = sizeof(a + b); }\n",
+        "void f() { auto n = sizeof(a()); }\n",
+        "void f() { auto n = sizeof(*p); }\n",
+        "void f() { auto n = sizeof(names) / sizeof(names[0]); }\n",
+        "void f() { auto n = typeid(a[0]); }\n",
+        "void f() { auto n = sizeof(int); }\n",
+        "void f() { auto n = sizeof(int*); }\n",
+        "void f() { auto n = sizeof(const char*); }\n",
+        "void f() { auto n = sizeof(unsigned long); }\n",
+        "void f() { auto n = sizeof(std::vector<int>); }\n",
+        "void f() { auto n = sizeof x; }\n",
+        "void f() { auto n = sizeof...(Ts); }\n",
+        "void f() { auto n = alignof(a[0]); }\n",
+    ] {
+        parses(source);
+    }
+
+    // A truncated operand is still reported: the fallback is the expression rule, not silence.
+    assert!(
+        !CppParser::parse(
+            "void f() { auto n = sizeof(a +); }\n",
+            ParserConfig::default()
+        )
+        .get_errors()
+        .is_empty(),
+        "a truncated operand is still reported"
+    );
+}
+
+#[test]
+fn adjacent_string_literals_are_one_literal() {
+    // Not a grammar rule but a translation phase: `"a" "b"` concatenates, and the run of literals is one string.
+    // Reading the first and stopping left the rest for whatever came next, so `const char *s = "a" "b";` ended its
+    // initialiser after `"a"` and reported `expected ;` against `"b"`.
+    //
+    // The shape is everywhere in C and C++ — it is how a long message is wrapped across lines — and it was found
+    // in a real file, ten of them in one initialiser. The last two sources here are that shape.
+    for source in [
+        "void f() { const char *s = \"a\"; }\n",
+        "void f() { const char *s = \"a\" \"b\"; }\n",
+        "void f() { const char *s = \"a\" \"b\" \"c\"; }\n",
+        "void f() { g(\"a\" \"b\", 1); }\n",
+        "void f() { auto s = \"a\" \"b\"; }\n",
+        "void f() { if (s == \"a\" \"b\") { } }\n",
+        "const char *file_scope = \"a\" \"b\";\n",
+        "void f() {\n    const char *msg =\n        \"line one\\n\"\n        \"line two\\n\"\n        \"line three\\n\";\n}\n",
+        // An **identifier** in the run is a macro, and this parser does not run the preprocessor: after expansion
+        // `"compiler[" COMPILER_ID "]"` is one string, and a string literal followed by a name is not valid C++ in
+        // any other reading. It is how every diagnostic message with a version in it is spelled — CMake's
+        // compiler-id file is nothing but these.
+        "void f() { const char *s = \"INFO\" \":\" \"compiler[\" COMPILER_ID \"]\"; }\n",
+        "void f() { const char *s = \"a\" MACRO \"b\" OTHER \"c\"; }\n",
+        "void f() { char c = 'a'; auto n = 1 + 2; auto b = true; }\n",
+    ] {
+        parses(source);
+    }
+
+    // One node, because one string is what they produce: a consumer reading the initialiser finds a single
+    // literal rather than a row of them to join itself.
+    assert_eq!(
+        count(
+            "const char *s = \"a\" \"b\" \"c\";\n",
+            CppSyntaxKind::LiteralExpr
+        ),
+        1
+    );
+
+    // A literal with a **user-defined suffix** is a different kind of thing — a call to `operator""` rather than a
+    // string — so it ends the run rather than joining it. The plain literal before it is still one literal.
+    parses("void f() { auto x = \"a\"_km; }\n");
+    assert_eq!(
+        count(
+            "void f() { auto x = \"a\"_km; }\n",
+            CppSyntaxKind::LiteralExpr
+        ),
+        1
+    );
+
+    // Nothing else concatenates: two literals of other kinds in a row is a syntax error, as it should be.
+    assert!(
+        !CppParser::parse("void f() { auto x = 1 2; }\n", ParserConfig::default())
+            .get_errors()
+            .is_empty(),
+        "`1 2` is not a literal run"
+    );
+}
+
+#[test]
+fn a_for_header_reads_its_step_as_an_expression() {
+    // A `for` header has no `;` of its own, so a *declaration* reading that consumed only a type and named nothing
+    // had nothing left to fail on: `for (;; i++)` read `i` as the type, produced an empty declarator, and then
+    // reported `expected )` against the `++` — the step was never read as an expression at all. The ordinary
+    // statement path is saved by its own `;`; the header is the one place the question has to be asked directly.
+    for source in [
+        "void f() { for (;; i++) { } }\n",
+        "void f() { for (;; ++i) { } }\n",
+        "void f() { for (;; i++, k++) { } }\n",
+        "void f() { for (i = 0; i < n; i++) { } }\n",
+        "void f() { for (i = 0, k = 0; i < n; i++, k++) { } }\n",
+        "void f() { for (int i = 0; i < n; i++) { } }\n",
+        "void f() { for (int i = 0, k = 0; i < n; i++, k++) { } }\n",
+        "void f() { for (auto x : items) { } }\n",
+        "void f() { for (v : items) { } }\n",
+        "void f() { for (;;) { } }\n",
+    ] {
+        parses(source);
+    }
+
+    // The step is an expression, so it is an `ExpressionStat` and not a `Declaration` — which is the shape the
+    // wrong reading produced, a declaration that named nothing.
+    let source = "void f() { for (;; i++, k++) { } }\n";
+    assert_eq!(count(source, CppSyntaxKind::ExpressionStat), 1);
+    assert_eq!(
+        count(source, CppSyntaxKind::ForStat),
+        1,
+        "the header is still a for statement"
+    );
+    assert_eq!(
+        count(source, CppSyntaxKind::Declaration),
+        1,
+        "only the function definition is a declaration"
+    );
+}
+
+#[test]
 fn a_parenthesized_expression_is_its_own_node() {
     // The parentheses are kept rather than dropped: they are not redundant, since a consumer that rewrites the
     // expression has to know where the grouping was.

@@ -245,6 +245,46 @@ fn a_refused_clause_leaves_the_class_body_with_the_class() {
 }
 
 #[test]
+fn a_constraint_keeps_its_template_id_when_a_declaration_follows() {
+    // The `<` in a clause opens a template-id, and the token *after* it cannot decide the reading the way it does
+    // in an expression: a clause is followed by the declaration it constrains, and that declaration begins with a
+    // type — an identifier like `T`, or a qualified name like `std::vector<int>`. An "an operand follows" test
+    // reads both as stray operands, gives `C<T>` back, and then lets the comparison eat the declaration's own type
+    // as its right operand.
+    //
+    // So the operand rule is suspended inside a clause. These are the shapes where it must be.
+    for source in [
+        "template <typename T> requires C<T> T value = T{};\n",
+        "template <typename T> requires C<T> std::vector<int> values;\n",
+        "template <typename T> requires C<T> T f();\n",
+        "template <typename T> requires C<T> && D<T> T value = T{};\n",
+        "template <typename T> requires C<T> void f();\n",
+    ] {
+        parses(source);
+    }
+
+    assert_eq!(
+        count(
+            "template <typename T> requires C<T> T value = T{};\n",
+            CppSyntaxKind::TemplateArgumentList
+        ),
+        1,
+        "the constraint kept its template-id — the initialiser is a braced one, not a template-id"
+    );
+
+    // The cost of that suspension, pinned so it is a known boundary rather than a surprise: a comparison written
+    // *inside parentheses* in a clause still hides behind a `<`…`>` pair. Telling it from the shapes above needs
+    // to know whether the operand is inside parentheses opened within the clause, which is a depth the parser does
+    // not track; registered in `docs/grammar-gaps.md`.
+    assert!(
+        !tree("template <int N> requires (N < 0 || N > 3) void f();\n")
+            .get_errors()
+            .is_empty(),
+        "a parenthesised comparison in a clause is a known gap"
+    );
+}
+
+#[test]
 fn the_two_words_are_ordinary_names_everywhere_else() {
     // `requires` and `concept` are **contextual keywords**: the standard gives them a meaning in particular
     // positions and leaves them as perfectly good identifiers everywhere else. The lexer used to hand both over as

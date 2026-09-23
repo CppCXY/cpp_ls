@@ -1,6 +1,9 @@
 use rowan::GreenNode;
 
-use crate::{kind::CppSyntaxKind, parser_error::CppParseError, syntax::CppSyntaxNode};
+use crate::{
+    CppAstNode, CppTranslationUnit, kind::CppSyntaxKind, parser_error::CppParseError,
+    syntax::CppSyntaxNode,
+};
 
 /// The parse result for one source file.
 ///
@@ -24,6 +27,10 @@ impl CppSyntaxTree {
 
     pub fn get_green_root(&self) -> &GreenNode {
         &self.root
+    }
+
+    pub fn get_unit(&self) -> CppTranslationUnit {
+        CppTranslationUnit::cast(self.get_red_root()).unwrap()
     }
 
     pub fn get_errors(&self) -> &[CppParseError] {

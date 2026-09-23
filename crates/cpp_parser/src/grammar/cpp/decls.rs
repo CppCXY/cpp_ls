@@ -544,8 +544,8 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
 
     let m = p.mark(CppSyntaxKind::Declaration);
 
-    // `extern template struct S<int>;` — an **explicit instantiation declaration**, which says the instantiation
-    // is defined in another translation unit.
+    // `extern template void f<int>(int);` — an **explicit instantiation declaration**, which says the
+    // instantiation is defined in another translation unit.
     //
     // Not a linkage specification, which is the other thing `extern` introduces: that one is followed by a
     // string literal. This one is followed by `template`, and the declaration after it is an ordinary
@@ -553,12 +553,17 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
     // run is the whole fix. Without it the specifier sequence claims `extern`, stops at `template`, and reports
     // `expected ;`.
     //
-    // Consumed **inside** the declaration node, and only when what follows the `template` could begin a
-    // declaration: `extern template` is otherwise not this construct at all, and eating the keyword would leave
-    // the rest with nothing to be a specifier.
+    // Consumed **inside** the declaration node rather than at the dispatch above: a token is emitted at the moment
+    // it is consumed, so consuming it before the marker existed would put `extern template` beside the
+    // declaration instead of in it, and "is this declaration an instantiation rather than a definition?" is
+    // answered by reading the declaration's own tokens.
+    //
+    // The two words together are unambiguous — nothing else in C++ spells `extern template` — so no third
+    // condition is asked. There used to be one, and it was wrong in a way that is easy to miss: it required a
+    // *keyword* type after the `template`, so `extern template MyType f<int>(int);` — legal C++, with a return
+    // type the file names itself — was refused while `extern template void f<int>(int);` was read.
     if p.current_token() == CppTokenKind::ExternKeyword
-        && p.peek_token_kind_at(1..2).as_slice() == [CppTokenKind::TemplateKeyword]
-        && super::types::is_type_specifier_keyword(p.peek_token_kind_at(2..3)[0])
+        && p.peek_next_token() == CppTokenKind::TemplateKeyword
     {
         p.bump(); // `extern`
         p.bump(); // `template`
@@ -566,6 +571,24 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
         // What follows names the instantiation, and for a function that name is a **template-id**:
         // `extern template void f<int>(int);`. Recorded for the declarator rule, which otherwise refuses one —
         // correctly, since a declarator's name may not have template arguments in any other declaration.
+        p.set_in_an_explicit_instantiation(true);
+    }
+
+    // The same construct **without** `extern`: `template void f<int>(int);`, `template class C<int>;`,
+    // `template int v<int>;`.
+    //
+    // The standard writes the two spellings as one production — `explicit-instantiation: extern(opt) template
+    // declaration` — and the only visible difference is the keyword that may be absent. What made this the harder
+    // half is that a bare `template` is otherwise the start of a **template head**, which requires a `<`: the
+    // head rule was entered, failed on the type specifier that followed, and took the whole declaration down with
+    // it. So the `<` is what tells the two apart, and it is asked here, where both readings are still available.
+    //
+    // A `template` followed by `<` is a head and is left to the rule below; a `template` followed by anything else
+    // cannot be one, because a parameter list is not optional.
+    if p.current_token() == CppTokenKind::TemplateKeyword
+        && p.peek_next_token() != CppTokenKind::Less
+    {
+        p.bump(); // `template`
         p.set_in_an_explicit_instantiation(true);
     }
 
@@ -583,6 +606,24 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
     // concepts without five copies of the same parser.
     let mut seen_a_template_head = false;
     if p.current_token() == CppTokenKind::TemplateKeyword {
+        // An **empty** head — `template <>` — introduces an explicit *specialization* rather than a template, and
+        // the declaration it introduces is named by a template-id in exactly the way an explicit instantiation is:
+        //
+        // ```text
+        // template <> void f<int>(int);      a function specialization
+        // template <> int v<int>;            a variable specialization
+        // ```
+        //
+        // The flag that permits such a name therefore covers this spelling too. Without it the declaration was
+        // refused by the rule that stops a *bare* template-id from being a declarator's name — a rule written for
+        // the ambiguity between a name and a type, which has no ambiguity to resolve here: a specialization must
+        // say which specialization it is.
+        if p.peek_next_token() == CppTokenKind::Less
+            && p.peek_token_kind_at(2..3).as_slice() == [CppTokenKind::Greater]
+        {
+            p.set_in_an_explicit_instantiation(true);
+        }
+
         if let Err(err) = parse_template_head(p) {
             p.rollback(checkpoint);
             return Err(err);
@@ -1922,6 +1963,10 @@ pub fn parse_for_init_declaration(p: &mut CppParser) -> ParseResult {
         return Err(err);
     }
 
+    // Where the declarators begin. "Did this declaration name anything?" has to be asked of the events *they*
+    // produced — the type's own name is already in the stream behind this bound, and it would answer for them.
+    let declarator_from = p.current_event_count();
+
     if let Err(err) = parse_init_declarator(p) {
         p.close_marks_above(base);
         return Err(err);
@@ -1933,6 +1978,31 @@ pub fn parse_for_init_declaration(p: &mut CppParser) -> ParseResult {
             p.close_marks_above(base);
             return Err(err);
         }
+    }
+
+    // A `for` header has no `;` of its own, so a declaration that consumed only a **type** and named nothing has
+    // nothing left to fail on:
+    //
+    // ```text
+    // for (;; i++) { }     `i` was read as the type, the declarator came out empty, and the header then reported
+    //                      `expected )` against the `++` — the increment was never read as an expression at all
+    // ```
+    //
+    // The ordinary statement path cannot reach that state: its declaration reading has a `;` to insist on, so
+    // `i++;` fails there at the `++` and the expression reading takes over. The header is the one place the
+    // question has to be asked directly, and it is asked the same way `an_initializer_needs_a_name` asks it —
+    // of the events the declarators produced.
+    //
+    // Nothing legitimate is refused: a `for` init that declares something always names it (`int i = 0`,
+    // `Widget w(1)`, `auto [a, b] = pair`), and a type on its own declares nothing to loop over. What the
+    // refusal buys is the *fallback*: the caller rewinds and reads the header as an expression, which is what
+    // `i++`, `i++, k++` and `v` in `for (v : m)` all are.
+    if !a_name_was_parsed(p, declarator_from) {
+        p.close_marks_above(base);
+        return Err(CppParseError::syntax_error_from(
+            "expected a declaration that names something",
+            p.current_token_range(),
+        ));
     }
 
     Ok(m.complete(p))

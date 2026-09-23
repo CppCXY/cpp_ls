@@ -245,6 +245,105 @@ fn an_explicit_instantiation_declaration_parses() {
     assert!(text.starts_with("extern template"), "got {text:?}");
 }
 
+/// The same construct **without** `extern`: `template void f<int>(int);`.
+///
+/// The standard writes the two spellings as one production — `explicit-instantiation: extern(opt) template
+/// declaration` — and only the keyword may be absent. What made this the harder half is that a bare `template`
+/// is otherwise the start of a *template head*, which requires a `<`: the head rule was entered, failed on the
+/// type specifier that followed, and took the whole declaration down with it. The `<` is what tells the two
+/// apart, and it is one token of lookahead.
+///
+/// Each form is a different question about where the template-id stands: a function's **name**, a class's
+/// **head**, and a variable's **name**.
+#[test]
+fn an_explicit_instantiation_without_extern_parses() {
+    for source in [
+        // A function: the template-id is the declarator's name.
+        "template void f<int>(int);\n",
+        "template void f<int>(int) { }\n",
+        "template void f<int>();\n",
+        "template void g<3>();\n",
+        "template MyType f<int>(int);\n",
+        // A class: no declarator at all, and the template-id is the class-head name.
+        "template class C<int>;\n",
+        "template struct S<int>;\n",
+        "template union U<int>;\n",
+        "template struct S<int, char>;\n",
+        // A variable template.
+        "template int v<int>;\n",
+        // Side by side with the declaration and the definition of the template itself.
+        "template <typename T> void h();\ntemplate void h<int>();\n",
+        "template <typename T> struct V { };\ntemplate struct V<int>;\n",
+    ] {
+        parses(source);
+    }
+
+    // The keyword is inside the declaration, as it is for the `extern` spelling: the declaration's own tokens
+    // are what a consumer reads to tell an instantiation from a definition.
+    let tree = CppParser::parse("template void f<int>(int);\n", ParserConfig::default());
+    let declaration = tree
+        .get_red_root()
+        .descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration)
+        .expect("a declaration");
+    let text = declaration.text().to_string();
+    assert!(text.starts_with("template void f<int>"), "got {text:?}");
+
+    assert_eq!(
+        count("template class C<int>;\n", CppSyntaxKind::Declaration),
+        1
+    );
+    assert_eq!(
+        count("template void f<int>(int);\n", CppSyntaxKind::ParameterList),
+        1
+    );
+}
+
+/// A `template` that is followed by `<` is a **head**, and every head must keep its reading.
+///
+/// This is the other side of the `<` that separates the two: the arm that reads an explicit instantiation must
+/// not take a template declaration, an explicit specialization, or a constrained one.
+#[test]
+fn a_template_head_is_not_an_explicit_instantiation() {
+    for source in [
+        "template <typename T> void f(T t);\n",
+        "template <typename T> struct S { };\n",
+        "template <typename T> using Alias = T;\n",
+        "template <typename T> T value = T{};\n",
+        "template <int N> void g();\n",
+        "template <typename T> concept C = true;\n",
+        "template <typename T> requires C<T> void f(T t);\n",
+        "template <typename T> void f(T t) requires C<T> { }\n",
+        "template <typename T, int N = 3> struct Both { };\n",
+        "template <typename T> struct S<T*> { };\n",
+        // An **empty** head is the explicit-specialization spelling, and it is a head: it has the `<`, so it is
+        // read as one. The declaration it introduces names a specialization, which is why the declarator may be
+        // named by a template-id here — a fact the two `<>` lines below are the test for.
+        "template <> void f<int>(int);\n",
+        "template <> void f<int>(int) { }\n",
+        "template <> int v<int>;\n",
+        "template <> struct S<int>;\n",
+        "template <> class C<int> { };\n",
+    ] {
+        parses(source);
+    }
+
+    // A head wraps the declaration it introduces, so the tree says which construct it was; an explicit
+    // instantiation has no head at all.
+    assert_eq!(
+        count(
+            "template <typename T> void f(T t);\n",
+            CppSyntaxKind::TemplateDecl
+        ),
+        1
+    );
+    assert_eq!(
+        count("template void f<int>(int);\n", CppSyntaxKind::TemplateDecl),
+        0,
+        "an explicit instantiation has no template head"
+    );
+}
+
 #[test]
 fn an_inline_namespace_parses() {
     for source in [

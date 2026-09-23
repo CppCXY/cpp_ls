@@ -94,7 +94,7 @@ impl CppLanguageLevel {
 
     /// Get the default language level used when no build configuration is known.
     pub const fn default_level() -> Self {
-        CppLanguageLevel::Cpp17
+        CppLanguageLevel::Cpp23
     }
 
     /// Parse language level from a `-std=` style spelling.

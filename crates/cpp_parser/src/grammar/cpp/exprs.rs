@@ -678,7 +678,23 @@ pub fn parse_type_id_or_expression(p: &mut CppParser) -> ParseResult {
     let checkpoint = p.checkpoint();
     let before = p.current_token_index();
 
-    if super::types::parse_type_id(p).is_ok() && p.current_token_index() > before {
+    // "It parsed and consumed something" is not enough to accept the type reading: a type-id can **stop early**,
+    // and a name on its own is a complete type-id. `sizeof(a[0])` was read as the type `a` — the reading
+    // succeeded, the cursor was left on the `[`, and the caller then reported `expected )` against it. The same
+    // for `sizeof(a.b)`, `sizeof(a + b)`, `sizeof(a())` and `typeid(a[0])`: every `sizeof` whose operand is
+    // anything but a bare name or a keyword type failed, which in C is most of them.
+    //
+    // What settles it is where the reading *stopped*: the payload ends at the `)`, so a type-id that did not
+    // reach it was not the reading. Anything else — an operator, an index, a member access, a call — is an
+    // expression, and the rollback hands it to that rule.
+    //
+    // A type-id that *does* swallow the whole payload stays the type reading, which is the case the rule exists
+    // for: `sizeof(int[4])` is an array type rather than an index, and `sizeof(unsigned long)` is two keywords
+    // rather than a comparison.
+    if super::types::parse_type_id(p).is_ok()
+        && p.current_token_index() > before
+        && p.current_token() == CppTokenKind::RightParen
+    {
         return Ok(crate::parser::CompleteMarker::empty());
     }
 
@@ -739,21 +755,124 @@ fn is_a_type_in_parentheses(p: &CppParser) -> bool {
         return true;
     }
 
+    // The fourth certain shape, and the one the type table was standing in for: **an operand follows the
+    // parentheses**. Two operands in a row is not an expression in any grammar, so if the token after the `)` can
+    // only *begin* one, the parentheses cannot have been a parenthesised expression at all — they held a type:
+    //
+    // ```text
+    // (size_t)size     the `)` is followed by an identifier
+    // (MyType)1.5      … or by a literal
+    // (T)new U         … or by a keyword no binary operator spells
+    // ```
+    //
+    // This is what makes a cast to a name the file never declares readable without lookup, and the shapes it adds
+    // are the common ones in C: `(size_t)size`, `(char *)malloc(...)`, `(lua_State *)L`. It was recorded as a
+    // deliberate trade-off ("only name lookup tells `(MyType)` from `(MyType)`") and that judgement was wrong for
+    // the same reason the pointer form's was: what follows the `)` is evidence, and it needs no table.
+    //
+    // Three exclusions, each because the token *is* ambiguous rather than because it is inconvenient:
+    //
+    // * `(` — `(f)(x)` is a call, and reading it as a cast of `x` to `f` is the one reading that loses the callee;
+    // * `*`, `&`, `+`, `-`, `++`, `--` — every one of them is a binary operator too, so `(a) - b` is a subtraction;
+    // * `[` — `(a)[b]` is an index of the parenthesised expression.
+    if an_operand_follows_the_parentheses(p) {
+        return true;
+    }
+
     match p.peek_token_kind_at(1..2).first() {
         Some(&kind) if super::types::is_type_specifier_keyword(kind) => true,
         Some(&CppTokenKind::Identifier) => {
             // The name must be one the file declares to be a type: a name alone is the token a type and an
             // expression share, and reading every `(a)` as a cast is the mistake this check exists to avoid.
             //
-            // Nothing further is asked. The token after the `)` looks like it could discriminate — a `(` there
-            // means an allocation rather than a cast — and the *parse* is what settles that instead: a cast
-            // whose operand fails to parse is rewound and read as a parenthesised expression, which is both
-            // more accurate and one rule fewer. See the cast branch in `parse_primary_expr`.
+            // The `)` above already answered this for the shapes where an operand follows it; what is left here is
+            // a name in front of something a *cast* carries and an expression does not — and the *parse* settles
+            // the rest: a cast whose operand fails to parse is rewound and read as a parenthesised expression. See
+            // the cast branch in `parse_primary_expr`.
             p.is_a_known_type_name(p.peek_token_text_at(1))
         }
         Some(&CppTokenKind::Scope) => true,
         _ => false,
     }
+}
+
+/// Does a token that can only **begin an operand** follow the `)` matching the `(` at the cursor?
+///
+/// See [`is_a_type_in_parentheses`], which is the only caller: the answer is what turns `(size_t)size` into a cast
+/// without a type table. The scan is bounded and depth-tracked: it walks to the `)` that closes *this* `(`, so a
+/// nested call or a parenthesised subexpression inside does not end it early.
+fn an_operand_follows_the_parentheses(p: &CppParser) -> bool {
+    let mut depth = 0isize;
+
+    for (index, kind) in p.peek_token_kind_at(1..128).iter().enumerate() {
+        match kind {
+            CppTokenKind::LeftParen => depth += 1,
+            CppTokenKind::RightParen => {
+                depth -= 1;
+                if depth < 0 {
+                    // This is the `)` that closes the cursor's `(`; the token after it is the question.
+                    return starts_an_operand(p, index + 2);
+                }
+            }
+            CppTokenKind::Eof | CppTokenKind::None => return false,
+            _ => {}
+        }
+    }
+
+    false
+}
+
+/// Does the significant token `offset` places ahead of the cursor **begin an operand**?
+///
+/// The one question two decisions share, and in both it is the deciding evidence rather than a hint:
+///
+/// * a **cast** — `(size_t)size`: an operand after the `)` means the parentheses held a type, because two
+///   operands in a row is not an expression in any grammar;
+/// * a **template-id** — `a < b > c`: an operand after the `>` means the `<` was a comparison, because a
+///   template-id cannot be followed by one either.
+///
+/// The set is deliberately narrow: a token that can begin an operand *and* appear as an infix operator is left
+/// out, because in that case both readings are valid expressions and the cast or template reading would take
+/// working code apart. What is left is a token that has no other job:
+///
+/// * an **identifier** and a **literal** — `x`, `1.5`, `"s"`, `'c'`, `true`, `nullptr`, `1_km`;
+/// * a **keyword that is only ever a prefix** — `sizeof`, `new`, `throw`, `noexcept(...)`, `co_await`;
+/// * `!`, `~`, `this` — unary, and `this` is an operand.
+///
+/// Left out, with the reason each one needs:
+///
+/// | token | why not |
+/// |---|---|
+/// | `(` | `(f)(x)` is a call, and `A<B>(x)` a functional cast — both are continuations |
+/// | `*` `&` `+` `-` `++` `--` | each is a binary operator as well as a prefix — `(a) - b` is a subtraction |
+/// | `[` | `(a)[b]` is an index, and `A<B>[0]`… is not, but the token itself cannot say so |
+/// | `,` `;` `)` `]` `}` `:` `?` | they *end* something rather than begin an operand |
+fn starts_an_operand(p: &CppParser, offset: usize) -> bool {
+    matches!(
+        p.peek_token_kind_at(offset..offset + 1).first(),
+        Some(
+            CppTokenKind::Identifier
+                | CppTokenKind::IntegerLiteral
+                | CppTokenKind::FloatingLiteral
+                | CppTokenKind::StringLiteral
+                | CppTokenKind::CharLiteral
+                | CppTokenKind::UserDefinedLiteral
+                | CppTokenKind::TrueKeyword
+                | CppTokenKind::FalseKeyword
+                | CppTokenKind::NullptrKeyword
+                | CppTokenKind::ThisKeyword
+                | CppTokenKind::LogicalNot
+                | CppTokenKind::Tilde
+                | CppTokenKind::SizeofKeyword
+                | CppTokenKind::AlignofKeyword
+                | CppTokenKind::TypeidKeyword
+                | CppTokenKind::NewKeyword
+                | CppTokenKind::DeleteKeyword
+                | CppTokenKind::ThrowKeyword
+                | CppTokenKind::CoAwaitKeyword
+                | CppTokenKind::NoexceptKeyword
+        )
+    )
 }
 
 /// Do the parentheses at the cursor close with a `*`, `&` or `&&` that a **type** ended with?
@@ -956,6 +1075,7 @@ fn placement_arguments_at(p: &CppParser) -> bool {
             | CppTokenKind::FloatingLiteral
             | CppTokenKind::StringLiteral
             | CppTokenKind::CharLiteral
+            | CppTokenKind::UserDefinedLiteral
             | CppTokenKind::TrueKeyword
             | CppTokenKind::FalseKeyword
             | CppTokenKind::NullptrKeyword
@@ -1106,10 +1226,18 @@ fn parse_postfix_suffixes(
                     // The member's template arguments, when it has any — `x.template f<int>()` needs the
                     // arguments to be *attached* here, because `f<int>()` read as a comparison would compare
                     // `x.template f` against `int` and then call `()` on the result.
-                    if super::types::could_start_template_arguments(p)
-                        && let Err(err) = super::types::parse_template_argument_list(p)
-                    {
-                        return Err(err);
+                    //
+                    // The same `<` ambiguity as in the name branch, decided the same way: read them, and keep them
+                    // only if what follows can follow a template-id. `a.b < c > d` is a comparison written after a
+                    // member access, and the member is `b` — so the rollback here rewinds to just after the name,
+                    // not to the `.b`, and the comparison rule then sees the whole `a.b < c > d`.
+                    if super::types::could_start_template_arguments(p) {
+                        let before_the_arguments = p.checkpoint();
+                        let read = super::types::parse_template_argument_list(p);
+
+                        if read.is_err() || starts_an_operand(p, 0) {
+                            p.rollback(before_the_arguments);
+                        }
                     }
                 } else {
                     return Err(CppParseError::syntax_error_from(
@@ -1176,9 +1304,44 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
         | CppTokenKind::CharLiteral
         | CppTokenKind::TrueKeyword
         | CppTokenKind::FalseKeyword
-        | CppTokenKind::NullptrKeyword => {
+        | CppTokenKind::NullptrKeyword
+        // A **user-defined literal** — `1_km`, `"a"_km`, `'c'_x` — is a literal like any other here. The lexer
+        // produces the kind precisely so the parser will not read it as a plain number, and nothing was reading
+        // it at all: the arm was missing, so `auto x = 1_km;` reported `expected primary expression` against a
+        // token the lexer had gone out of its way to name.
+        | CppTokenKind::UserDefinedLiteral => {
             let m = p.mark(CppSyntaxKind::LiteralExpr);
+            let is_a_string = p.current_token() == CppTokenKind::StringLiteral;
             p.bump();
+
+            // **Adjacent string literals are one literal**, which is translation phase 6 rather than a grammar
+            // rule: `"a" "b"` concatenates, and the standard writes the run as a single *string-literal* sequence.
+            // Reading the first and stopping left the rest for whatever came next, so
+            //
+            //     const char *s = "a" "b";
+            //
+            // ended its initialiser after `"a"` and reported `expected ;` against `"b"`. Nothing about the shape
+            // is rare — it is how every long message in C and C++ is wrapped across lines, which is where this was
+            // found (a LuaJIT host file, ten adjacent literals in one initialiser).
+            //
+            // They stay inside the one `LiteralExpr` node, because one string is what they produce. A literal
+            // carrying a **user-defined suffix** is a different kind of thing — `"a"_km` is a call to
+            // `operator""_km` rather than a string — so it ends the run instead of joining it.
+            //
+            // An **identifier** joins the run as well, and that is a statement about the preprocessor rather than
+            // about the grammar: `"compiler[" COMPILER_ID "]"` is one string once `COMPILER_ID` has been expanded,
+            // and a string literal followed by a name is not valid C++ in any other reading. This parser does not
+            // run the preprocessor, so a macro in the middle of a message is the shape it has to accept — it is
+            // how every CMake-generated and hand-written diagnostic string is spelled.
+            while is_a_string
+                && matches!(
+                    p.current_token(),
+                    CppTokenKind::StringLiteral | CppTokenKind::Identifier
+                )
+            {
+                p.bump();
+            }
+
             Ok(m.complete(p))
         }
 
@@ -1247,12 +1410,51 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
                 }
 
                 // A template-id: `vector<int>`.
+                //
+                // The `<` is also the less-than operator, and the two readings are told apart **speculatively**:
+                // read the argument list, and keep it only if it is a template-id in more than the sense of
+                // having parsed.
+                //
+                // "It parsed" is not evidence enough, and that is the whole subtlety. `n < 0 || n > 100000` reads
+                // perfectly well as the template-id `n<0 || n>` — the argument is the expression `0 || n` and the
+                // `>` closes the list — so a rule that fell back only on *failure* kept the wrong reading and then
+                // reported the leftover `100000` as an error. The token **after** the list is what settles it: an
+                // operand there cannot follow a template-id, exactly as one after a `)` cannot follow a
+                // parenthesised expression. See [`starts_an_operand`].
+                //
+                // The lookahead stays, as a cheap *rejection*: `a < b;` is a comparison and there is no reason to
+                // build and throw away an argument list to find that out. Correctness does not rest on it —
+                // everything it accepts is checked below — which also means it no longer has to be exact.
                 if p.current_token() == CppTokenKind::Less
                     && super::types::could_start_template_arguments(p)
-                    && let Err(err) = super::types::parse_template_argument_list(p)
                 {
-                    p.close_marks_above(base);
-                    return Err(err);
+                    let before_the_arguments = p.checkpoint();
+                    let read = super::types::parse_template_argument_list(p);
+
+                    // The operand rule is suspended **inside a clause**, and only there. A clause is followed by
+                    // the declaration it constrains, and that declaration usually begins with a type — which is
+                    // an identifier or a keyword, the very tokens the rule reads as "an operand":
+                    //
+                    //     template <typename T> requires C<T> T value = T{};      the declaration follows the clause
+                    //     template <typename T> requires C<T> std::vector<int> v;
+                    //
+                    // Giving `C<T>` back there would leave the clause reading `C < T` and then eat the
+                    // declaration's own type as the comparison's right operand.
+                    //
+                    // What this costs is the shape where a *parenthesised* comparison inside a clause hides behind
+                    // a `<`…`>` pair: `requires (N < 0 || N > 3)` reads `N<0 || N>` as a template-id and then
+                    // trips on the `3`. Telling that from the case above needs to know whether the operand is
+                    // inside parentheses opened *within* the clause, which is a depth the parser does not track —
+                    // it is registered in `docs/grammar-gaps.md` rather than half-solved here.
+                    let an_operand_ends_the_constraint =
+                        !p.is_in_a_constraint() && starts_an_operand(p, 0);
+
+                    if read.is_err() || an_operand_ends_the_constraint {
+                        // Not a template-id after all: the name ends here and the `<` belongs to the comparison
+                        // rule. The argument list's nodes go back with the rollback.
+                        p.rollback(before_the_arguments);
+                        break;
+                    }
                 }
 
                 if p.current_token() == CppTokenKind::Scope {

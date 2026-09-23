@@ -262,8 +262,9 @@ fn a_parenthesised_name_is_not_a_cast() {
 
 #[test]
 fn a_call_of_a_parenthesised_expression_is_still_a_call() {
-    // `(f)(x)` and `(T)(x)` are the same tokens, and the call reading is the one that keeps the arguments. A
-    // cast to a bare undeclared name is therefore the documented trade-off, and this is the other side of it.
+    // `(f)(x)` and `(T)(x)` are the same tokens, and the call reading is the one that keeps the arguments — the
+    // one place the two readings really are silent, because a call is a perfectly good expression. It is the
+    // boundary of the operand rule below, which is why it is pinned beside it.
     for source in [
         "void f() { auto d = (f)(x); }\n",
         "void f() { auto d = (T)(x); }\n",
@@ -273,6 +274,173 @@ fn a_call_of_a_parenthesised_expression_is_still_a_call() {
             count(source, CppSyntaxKind::CallExpr),
             1,
             "{source:?} keeps its argument list"
+        );
+    }
+}
+
+#[test]
+fn a_less_than_between_two_names_is_a_comparison() {
+    // `<` is both the less-than operator and the opener of a template argument list, and the tokens alone do not
+    // choose: `a < b > c` is a comparison **and** a well-formed template-id followed by an operand.
+    //
+    // What settles it is the token after the list — an operand cannot follow a template-id, exactly as one cannot
+    // follow a `)` in a cast. The reading is speculative: the argument list is parsed, and given back if it turns
+    // out not to be one.
+    //
+    // These all used to be errors. `if (n < 0 || n > 100000)` is the one that mattered: it is how a range check is
+    // written, and the lookahead happily paired the `<` of the first comparison with the `>` of the second.
+    let templated = "void f() { if (n < 0 || n > 100000) { } }\n";
+    parses(templated);
+    assert_eq!(
+        count(templated, CppSyntaxKind::TemplateArgumentList),
+        0,
+        "no template-id in a range check"
+    );
+    assert_eq!(
+        count(templated, CppSyntaxKind::BinaryExpr),
+        3,
+        "three operators"
+    );
+
+    for source in [
+        "void f() { x = a < b > c; }\n",
+        "void f() { x = a < b || c > d; }\n",
+        "bool g() { return a < b || c > d; }\n",
+        "void f() { if (n < 0 || n > 100000) { } }\n",
+        "void f() { while (i < n && j > k) { } }\n",
+        "void f() { x = (a < b) ? 1 : 2; }\n",
+        "void f() { x = a.b < c > d; }\n",
+        "void f() { x = p->m < q > r; }\n",
+        "void f() { g(a < b, c > d); }\n",
+        "void f() { x = a < b; }\n",
+        "void f() { x = a < b && c > d; }\n",
+    ] {
+        parses(source);
+        assert_eq!(
+            count(source, CppSyntaxKind::TemplateArgumentList),
+            0,
+            "{source:?} compares rather than instantiates"
+        );
+    }
+
+    // The shape of the reading, not just the absence of an error: `x = a < b > c` is `x = ((a < b) > c)` —
+    // left-associative like every other comparison — so there are three binary expressions: the assignment and
+    // the two comparisons. A template-id reading would have produced one `IdentifierExpr` and a dangling `c`.
+    let chained = "void f() { x = a < b > c; }\n";
+    assert_eq!(count(chained, CppSyntaxKind::BinaryExpr), 3);
+}
+
+#[test]
+fn a_genuine_template_id_keeps_its_reading() {
+    // The other side of the same decision, and the reason the reading is speculative rather than eager: every one
+    // of these is a template-id, and giving one back would break working code. What separates them from the
+    // comparisons above is what follows the `>` — an operator, a delimiter or a `::`, never an operand.
+    for source in [
+        "void f() { auto n = A<B>::value; }\n",
+        "void f() { auto n = std::vector<int>::size_type{}; }\n",
+        "void f() { g<int>(1); }\n",
+        "void f() { x.template f<int>(1); }\n",
+        "void f() { auto p = new A<B>(); }\n",
+        "void f() { auto n = sizeof(A<B>); }\n",
+        "void f() { auto v = std::vector<int>{}; }\n",
+        "void f() { std::vector<int> v; }\n",
+        "void f() { Foo<int> x; }\n",
+        "void f() { auto n = f<A>(1) + g<B>(2); }\n",
+        "void f() { auto n = a < b; }\n",
+        "void f() { for (Foo<int> v : m) { } }\n",
+    ] {
+        parses(source);
+    }
+
+    assert_eq!(
+        count(
+            "void f() { auto n = A<B>::value; }\n",
+            CppSyntaxKind::TemplateArgumentList
+        ),
+        1
+    );
+    assert_eq!(
+        count("void f() { g<int>(1); }\n", CppSyntaxKind::CallExpr),
+        1,
+        "the call survives the decision"
+    );
+    assert_eq!(
+        count(
+            "void f() { std::vector<int> v; }\n",
+            CppSyntaxKind::Declaration
+        ),
+        2,
+        "the function definition and the variable it declares"
+    );
+}
+
+#[test]
+fn a_cast_to_a_name_the_file_never_declares_is_a_cast() {
+    // What decides these is the token **after** the `)`: two operands in a row is not an expression in any
+    // grammar, so if the next token can only begin an operand, the parentheses held a type. That is evidence in
+    // the tokens, not a lookup — which retires the trade-off this shape was recorded as:
+    //
+    //     auto d = (MyType)1.5;     a cast: `1.5` cannot follow an expression
+    //     auto d = (MyType)x;       a cast: neither can `x`
+    //     auto d = (size_t)size;    the same shape, and the reason it was found — a C file full of them
+    for source in [
+        "void f() { auto d = (MyType)1.5; }\n",
+        "void f() { auto d = (MyType)x; }\n",
+        "void f() { auto d = (size_t)size; }\n",
+        "void f() { auto d = (size_t)size + 1; }\n",
+        "void f() { buf = (char *)malloc((size_t)size + 1); }\n",
+        "void f() { auto d = (MyType)new T; }\n",
+        "void f() { auto d = (MyType)sizeof(T); }\n",
+        "void f() { auto d = (MyType)!ok; }\n",
+        "void f() { auto d = (MyType)~mask; }\n",
+        "void f() { auto d = (MyType)'c'; }\n",
+        "void f() { auto d = (MyType)\"s\"; }\n",
+        "void f() { auto d = (MyType)true; }\n",
+        "void f() { auto d = (MyType)nullptr; }\n",
+        "void f() { auto d = (MyType)this; }\n",
+        "void f() { g((size_t)size, (char *)p); }\n",
+        "void f() { auto d = (size_t)size + (size_t)other; }\n",
+    ] {
+        parses(source);
+        assert!(
+            count(source, CppSyntaxKind::CastExpr) >= 1,
+            "{source:?} is a cast"
+        );
+    }
+}
+
+#[test]
+fn an_operand_after_the_parentheses_decides_the_cast_and_nothing_else_does() {
+    // The other side of the rule. Every token left out of the operand set means something in an expression as
+    // well, and each of the shapes below is a **valid expression** that must keep its reading:
+    //
+    //     (a) - b     subtraction        `-` is binary too
+    //     (a) * b     multiplication     `*` is binary too
+    //     (a) & b     bitwise and        `&` is binary too
+    //     (a)[b]      index              `[` continues the expression
+    //     (a)(b)      a call             `(` continues the expression
+    //     (a), b      comma              `,` continues the expression
+    //
+    // This is what separates them from the casts above: those are *not* expressions at all, so the cast reading
+    // takes nothing away. These are, so it would.
+    for source in [
+        "void f() { auto d = (a) - b; }\n",
+        "void f() { auto d = (a) + b; }\n",
+        "void f() { auto d = (a) * b; }\n",
+        "void f() { auto d = (a) & b; }\n",
+        "void f() { auto d = (a)[b]; }\n",
+        "void f() { auto d = (a)++ ; }\n",
+        "void f() { auto d = (a), b; }\n",
+        "void f() { auto d = (a)(b); }\n",
+        "void f() { auto d = (MyType)-1; }\n",
+        "void f() { auto d = (MyType)*p; }\n",
+        "void f() { auto d = (MyType)&x; }\n",
+    ] {
+        parses(source);
+        assert_eq!(
+            count(source, CppSyntaxKind::CastExpr),
+            0,
+            "{source:?} is a parenthesised expression"
         );
     }
 }

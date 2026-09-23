@@ -506,8 +506,9 @@ fn constructs_the_parser_reads() {
             "for (a = 0, b = 0; ; ) { }",
             "g(a, (b, c));",
             // The **C-style cast**. `(T*)p` needs no type table, because a `*` that closes the parentheses has
-            // no right operand and therefore cannot be a multiplication. The bare-name form, `(MyType)1.5`, is
-            // the half that stays a documented trade-off and lives in the list below.
+            // no right operand and therefore cannot be a multiplication. The bare-name form, `(MyType)1.5`, was
+            // the half that stayed a documented trade-off for longer — what retires it is the token *after* the
+            // `)`: an operand there cannot follow an expression, so the parentheses held a type.
             "auto d = (T*)p;",
             "auto d = (MyType*)p;",
             "auto d = (T&)x;",
@@ -517,6 +518,53 @@ fn constructs_the_parser_reads() {
             "auto d = (T*)p->q;",
             "auto d = (T*)p + 1;",
             "g((T*)p, (U*)q);",
+            "auto d = (MyType)1.5;",
+            "auto d = (MyType)x;",
+            "auto d = (size_t)size;",
+            "buf = (char *)malloc((size_t)size + 1);",
+            "auto d = (MyType)new T;",
+            "auto d = (MyType)sizeof(T);",
+            // **Adjacent string literals**, which are one literal rather than a grammar rule — translation phase
+            // 6. Reading one and stopping ended the initialiser after the first, so this is how every long message
+            // wrapped across lines used to fail.
+            "auto s = \"a\" \"b\";",
+            "auto s = \"a\" \"b\" \"c\";",
+            "g(\"a\" \"b\", 1);",
+            // A **user-defined literal** in an expression: the lexer named the kind so the parser would not read
+            // it as a plain number, and no rule was reading it at all.
+            "auto x = 1_km;",
+            "auto x = \"a\"_km;",
+            // A `for` header's **step**, which is an expression: the declaration reading had no `;` to fail on
+            // and consumed the name as a type, so `i++` was never read at all.
+            "for (;; i++) { }",
+            "for (;; i++, k++) { }",
+            "for (i = 0, k = 0; i < n; i++, k++) { }",
+            // A **`sizeof` whose operand is not a bare name**. The type reading was accepted as soon as it parsed
+            // and consumed something, and a type-id can stop early — a name alone is a complete one — so the
+            // cursor was left on the `[` and `expected )` was reported against it. Everything but a bare name and
+            // a keyword type failed, which in C is most of the `sizeof`s there are.
+            "auto n = sizeof(a[0]);",
+            "auto n = sizeof(a.b);",
+            "auto n = sizeof(a + b);",
+            "auto n = sizeof(a());",
+            "auto n = sizeof(int*);",
+            "auto n = sizeof(unsigned long);",
+            "auto n = typeid(a[0]);",
+            // `<` as a **comparison** rather than a template-id opener — the reading is speculative, and what
+            // decides it is the token after the list (see `operators.rs`). `if (n < 0 || n > 100000)` is how a
+            // range check is written, and the old lookahead paired the `<` of the first comparison with the `>`
+            // of the second. Beside them: the template-ids that must keep their reading.
+            "x = a < b > c;",
+            "x = a < b || c > d;",
+            "if (n < 0 || n > 100000) { }",
+            "while (i < n && j > k) { }",
+            "g(a < b, c > d);",
+            "auto n = A<B>::value;",
+            "g<int>(1);",
+            "auto p = new A<B>();",
+            "auto v = std::vector<int>{};",
+            "std::vector<int> v;",
+            "Foo<int> x;",
             // **Alternative operator spellings** — the `<iso646.h>` names, which are real C++ rather than an
             // extension. They arrive as identifiers, because the lexer has no keyword for them.
             "auto x = a and b;",
@@ -542,6 +590,19 @@ fn constructs_the_parser_reads() {
             "extern template struct S<int>;",
             "extern template class C<int>;",
             "extern template void f<int>(int);",
+            // …and the same construct **without** `extern`, which the standard writes as one production:
+            // `explicit-instantiation: extern(opt) template declaration`. A function's template-id is its *name*,
+            // a class's is its *head*, and a variable template's is its name again.
+            "template void f<int>(int);",
+            "template void f<int>(int) { }",
+            "template class C<int>;",
+            "template struct S<int>;",
+            "template int v<int>;",
+            // **Explicit specializations**, whose empty head is what tells them from a template declaration. The
+            // declaration they introduce names a specialization, so its declarator is a template-id too.
+            "template <> void f<int>(int);",
+            "template <> int v<int>;",
+            "template <> struct S<int>;",
             // **Inline namespaces**, whose members are also members of the enclosing namespace.
             "inline namespace v1 { }",
             "inline namespace v1 { int x; }",
@@ -667,13 +728,12 @@ fn constructs_the_parser_does_not_read_yet() {
     assert_does_not_read_yet(
         Where::Body,
         &[
-            // A C-style cast whose type is a **plain undeclared name**, which is the residue of what used to be
-            // the whole of T1. `(MyType)` is a valid parenthesised expression *and* a valid type-id, and only
-            // name lookup tells them apart — the same trade as direct-initialisation, in the same direction.
+            // Nothing is left of the C-style cast that used to be here, and the record of why is worth keeping —
+            // it is the third time a "deliberate trade-off" turned out to be a missing rule.
             //
-            // The whole *pointer* form used to be here as well, described as "the canonical example of a
-            // deliberate trade-off: `*` is both the pointer operator and the multiplication operator, and the
-            // type table is what tells them apart". That claim was wrong twice over:
+            // The **pointer form** was here first, described as "the canonical example of a deliberate trade-off:
+            // `*` is both the pointer operator and the multiplication operator, and the type table is what tells
+            // them apart". That claim was wrong twice over:
             //
             //   `(a * b)` and `(MyType*)p` are not the same shape — `a * b` has an operand on both sides of the
             //   `*`, `MyType*` has nothing on its left — so the difference **is** visible in the tokens; and
@@ -681,18 +741,16 @@ fn constructs_the_parser_does_not_read_yet() {
             //   a `*` immediately before the `)` cannot be a binary operator at all, because a binary operator
             //   needs a right operand.
             //
-            // So the pointer form was a missing **rule** and not a missing type table. It reads now — see
-            // `closes_with_a_pointer_operator` in `exprs.rs` and the entries in the list above. What is left
-            // here is the one case where the tokens really are silent.
-            (
-                "auto d = (MyType)1.5;",
-                "a C-style cast to an undeclared type. `(MyType)` is a valid parenthesised expression and a \
-                 valid type-id, and only name lookup tells them apart.",
-            ),
-            (
-                "auto d = (MyType)x;",
-                "the same ambiguity with a name as the operand.",
-            ),
+            // The **bare-name form** — `(MyType)1.5`, `(MyType)x` — was the second half of the same entry, and
+            // the same argument retires it: what *follows* the `)` decides. Two operands in a row is not an
+            // expression in any grammar, so `)` followed by an identifier, a literal or a prefix keyword means the
+            // parentheses held a type. It was found in a real C file, where `(size_t)size` is not exotic but
+            // routine.
+            //
+            // What genuinely remains is the token that means something in *both* grammars, and it is not a gap:
+            // `(a)*p` is a multiplication, `(a)-b` a subtraction, `(a)(b)` a call. All are valid expressions, so
+            // the cast reading would take working code apart. See `an_operand_after_the_parentheses_decides_the_
+            // cast_and_nothing_else_does` in `operators.rs`.
         ],
     );
 
@@ -1038,6 +1096,32 @@ fn modern_constructs_produce_the_right_nodes() {
         ("void f() { concept(); }", CppSyntaxKind::CallExpr),
         ("void f() { concept = 2; }", CppSyntaxKind::ExpressionStat),
         ("void f() { requires = 1; }", CppSyntaxKind::ExpressionStat),
+        // A C-style cast to a name the file never declares — the reading the `)` decides. See `operators.rs`.
+        ("auto d = (MyType)1.5;", CppSyntaxKind::CastExpr),
+        ("auto d = (size_t)size;", CppSyntaxKind::CastExpr),
+        (
+            "buf = (char *)malloc((size_t)size + 1);",
+            CppSyntaxKind::CastExpr,
+        ),
+        // …and the shapes that must *not* become casts, because they are valid expressions.
+        ("auto d = (a) - b;", CppSyntaxKind::ParenExpr),
+        ("auto d = (a)(b);", CppSyntaxKind::CallExpr),
+        // `<` decided by what follows the list: an operand means it was a comparison, and the shape says so —
+        // `x = a < b > c` is `x = ((a < b) > c)`, so the *absence* of a `TemplateArgumentList` is the assertion
+        // and it lives in `operators.rs` (this helper asserts presence, not absence). What is pinned here is the
+        // other side: a genuine template-id keeps its argument list.
+        ("void f() { x = a < b > c; }", CppSyntaxKind::BinaryExpr),
+        (
+            "void f() { auto n = A<B>::value; }",
+            CppSyntaxKind::TemplateArgumentList,
+        ),
+        // Adjacent string literals are one literal, so the initialiser holds one node. See `expressions.rs`.
+        ("auto s = \"a\" \"b\" \"c\";", CppSyntaxKind::LiteralExpr),
+        // A `for` header's step is an expression, not a declaration that named nothing.
+        (
+            "void f() { for (;; i++, k++) { } }",
+            CppSyntaxKind::ExpressionStat,
+        ),
     ]);
 
     // Exactly one parameter: the silent version produced zero here and a phantom member beside it.
