@@ -254,6 +254,14 @@ pub enum CppSyntaxKind {
     /// e.g.: this, this->member
     ThisExpr,
 
+    /// Throw expression (C++17 made it one; it has always been one in operand position).
+    /// e.g.: `x = throw 1;`, `cond ? throw E{} : 2`
+    ///
+    /// Distinct from [`CppSyntaxKind::ThrowStat`], which is the *statement* form `throw e;`. The two are
+    /// different nodes because they are different constructs: a rethrow is only a statement, and a throw whose
+    /// value is used is only an expression.
+    ThrowExpr,
+
     /// Lambda expression (C++11)
     /// e.g.: [capture](params) -> return_type { body }
     LambdaExpr,

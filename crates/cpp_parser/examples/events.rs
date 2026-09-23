@@ -69,7 +69,9 @@ fn main() {
                         println!("event {index}: NodeEnd with nothing open");
                     }
                 }
-                MarkEvent::EatToken { kind, range } if *kind == cpp_parser::CppTokenKind::ExportKeyword => {
+                MarkEvent::EatToken { kind, range }
+                    if *kind == cpp_parser::CppTokenKind::ExportKeyword =>
+                {
                     println!(
                         "export at {}: open = {:?}",
                         range.start_offset,

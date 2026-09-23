@@ -15,6 +15,12 @@ use super::expect_token;
 /// must reach the template-argument reader rather than being eaten as an operator. See
 /// [`crate::parser::CppParser::is_in_template_arguments`].
 fn get_operator_precedence(p: &CppParser, token: CppTokenKind) -> Option<u8> {
+    // A C++ **alternative operator spelling** arrives as an `Identifier`, because the lexer has no keyword for
+    // it — so it is recognised by its text and then treated as the operator it stands for. Doing it here, at the
+    // one place that asks "is this a binary operator", is what makes `and`, `bitand` and the rest work without
+    // a token kind each; see [`the_alternative_operator`].
+    let token = the_alternative_operator(p, token).unwrap_or(token);
+
     if p.is_in_template_arguments()
         && matches!(
             token,
@@ -90,33 +96,69 @@ fn get_operator_precedence(p: &CppParser, token: CppTokenKind) -> Option<u8> {
     }
 }
 
+/// The operator a C++ **alternative spelling** stands for, when the cursor is on one.
+///
+/// `<iso646.h>` and the standard's own table give every operator an alphabetic spelling, and they are real C++ —
+/// not an extension — so a parser that ignores them rejects code that compiles. They arrive as `Identifier`
+/// tokens because the lexer has no keyword for them, and this is where the text becomes the operator.
+///
+/// Recognised at the two places that need it rather than by rewriting the token stream: the binary table
+/// ([`get_operator_precedence`], which every caller reaches) and the unary and primary rules, which must know
+/// that `not` and `compl` are operators before they try to read a name. Rewriting the tokens would be one place
+/// instead of three, and it would also change what the token *is* — `and` would report itself as `&&`, and a
+/// consumer printing the operator would print a token the file never contained. The tree keeps the text either
+/// way, so the shape is what has to be got right.
+///
+/// The two primary-position names, `not_eq` and the assignment spellings, are here so that the table and the
+/// unary rule answer consistently; `not_eq(a, b)` is the one that *looked* like it already worked, and only
+/// because `not_eq` was being read as a function name.
+fn the_alternative_operator(p: &CppParser, token: CppTokenKind) -> Option<CppTokenKind> {
+    if token != CppTokenKind::Identifier {
+        return None;
+    }
+
+    Some(match p.current_token_text() {
+        "and" => CppTokenKind::LogicalAnd,
+        "or" => CppTokenKind::LogicalOr,
+        "not" => CppTokenKind::LogicalNot,
+        "bitand" => CppTokenKind::Ampersand,
+        "bitor" => CppTokenKind::Pipe,
+        "xor" => CppTokenKind::Caret,
+        "compl" => CppTokenKind::Tilde,
+        "not_eq" => CppTokenKind::NotEqual,
+        "and_eq" => CppTokenKind::AmpersandAssign,
+        "or_eq" => CppTokenKind::PipeAssign,
+        "xor_eq" => CppTokenKind::CaretAssign,
+        _ => return None,
+    })
+}
+
+/// Does this `throw` have no operand — the `throw;` of a rethrow, or one ending a construct?
+///
+/// The operand is optional in exactly the positions where a `throw` can end: before a `;`, a `)`, a `]`, a `}`,
+/// a `,`, a `:`, or the end of the file. Anywhere else an operand is written and has to be read.
+fn throw_has_no_operand(p: &CppParser) -> bool {
+    matches!(
+        p.current_token(),
+        CppTokenKind::Semicolon
+            | CppTokenKind::RightParen
+            | CppTokenKind::RightBracket
+            | CppTokenKind::RightBrace
+            | CppTokenKind::Comma
+            | CppTokenKind::Colon
+            | CppTokenKind::Eof
+            | CppTokenKind::None
+    )
+}
+
 /// Is this operator one a fold expression can use?
 ///
-/// Every binary operator in the table except the assignment family and the comma — neither of which folds — so
-/// the test is written as "is a binary operator" and the exclusions are the ones C++ makes.
-fn is_fold_operator(token: CppTokenKind) -> bool {
-    matches!(
-        token,
-        CppTokenKind::Plus
-            | CppTokenKind::Minus
-            | CppTokenKind::Star
-            | CppTokenKind::Slash
-            | CppTokenKind::Percent
-            | CppTokenKind::Caret
-            | CppTokenKind::Ampersand
-            | CppTokenKind::Pipe
-            | CppTokenKind::LeftShift
-            | CppTokenKind::RightShift
-            | CppTokenKind::Equal
-            | CppTokenKind::NotEqual
-            | CppTokenKind::Less
-            | CppTokenKind::LessEqual
-            | CppTokenKind::Greater
-            | CppTokenKind::GreaterEqual
-            | CppTokenKind::Spaceship
-            | CppTokenKind::LogicalAnd
-            | CppTokenKind::LogicalOr
-    )
+/// Every binary operator in the table except the assignment family — which does not fold — so the test is
+/// written as "is a binary operator with a precedence above the assignment family", and the exclusions are the
+/// ones C++ makes. Deriving it from the table rather than listing the operators a second time is what keeps the
+/// two from disagreeing, and it is why `and`, `bitand` and the rest fold without being mentioned here.
+fn is_fold_operator(p: &CppParser, token: CppTokenKind) -> bool {
+    matches!(get_operator_precedence(p, token), Some(precedence) if precedence > 1)
 }
 
 /// Is this operator right-associative?
@@ -142,7 +184,24 @@ fn is_right_associative(token: CppTokenKind) -> bool {
 
 /// 解析表达式的主要入口点
 pub fn parse_expr(p: &mut CppParser) -> ParseResult {
-    parse_expr_with_pack_expansion(p, true)
+    parse_expr_up_to(p, Level::Full, true)
+}
+
+/// An expression **without** the comma operator, for a rule that spells the commas itself.
+///
+/// The comma is the one operator whose separators belong to the *container* rather than to the expression, so
+/// every rule that reads a comma-separated list has to use a reader that stops below it. The complete list of
+/// those rules is kept with [`Level`], which is also where the reason the comma is not in the operator table is
+/// written down.
+///
+/// It is the same shape of exclusion as [`parse_expr_without_pack_expansion`], one operator along: that one
+/// exists because a rule spells a `...` itself, this one because a rule spells a `,`.
+///
+/// The **pack expansion is still read**, and that half is not symmetry — it is required. `g(args...)` is a pack
+/// expansion *as an element of an argument list*, so an element reader that stopped at the ellipsis would leave
+/// the `...` for the list to trip over. That is exactly what happened when this was first written without it.
+pub fn parse_assignment_expr(p: &mut CppParser) -> ParseResult {
+    parse_expr_up_to(p, Level::Assignment, true)
 }
 
 /// [`parse_expr`] without the trailing-`...` reading, for the one rule that spells the ellipsis itself.
@@ -154,16 +213,88 @@ pub fn parse_expr(p: &mut CppParser) -> ParseResult {
 /// Exposed rather than kept private because the caller is in another module, and the alternative — the case rule
 /// looking for a `...` that `parse_expr` has already taken — is not a rule at all.
 pub fn parse_expr_without_pack_expansion(p: &mut CppParser) -> ParseResult {
-    parse_expr_with_pack_expansion(p, false)
+    parse_expr_up_to(p, Level::Full, false)
 }
 
-/// [`parse_expr`], optionally refusing a trailing `...`.
+/// How far up the precedence ladder an expression reader goes.
 ///
-/// Two callers refuse it, for two different reasons, and both are recorded where they call it: the
-/// **parenthesised** expression, because inside parentheses the ellipsis belongs to a fold expression, and the
-/// **case label**, because there it belongs to a GNU range.
-fn parse_expr_with_pack_expansion(p: &mut CppParser, pack_expansion: bool) -> ParseResult {
-    let expr = parse_ternary_expr(p)?;
+/// The ladder, loosest first: `,` then the assignment family then `?:` then the binary operators then the unary
+/// and postfix ones. A *container* — an argument list, a braced initializer, a capture list — separates its
+/// elements with a comma, and the comma is the only operator whose separators belong to the container rather
+/// than to the expression. So every such rule reads **one element** at [`Level::Assignment`], and
+/// [`Level::Full`] is reserved for the positions where a comma really is an operator.
+///
+/// # Why the comma is not in `get_operator_precedence`
+///
+/// Because that table is consulted by `parse_binary_expr_with_precedence`, which every list rule reaches
+/// through its elements. A comma in it would make `f(a, b)` one argument and `{1, 2}` one element — the
+/// containers have no way to opt out, so the operator has to live above the level they stop at.
+///
+/// # The rules that read one element
+///
+/// This list is the deliverable of the maintenance convention about shared entry points: changing what an
+/// expression reader consumes changes every rule that spells that token itself, and `cargo test` being green
+/// does not prove none of them broke.
+///
+/// | Rule | The list it separates |
+/// |---|---|
+/// | `parse_postfix_suffixes` (call arm) | call arguments |
+/// | `decls::parse_expression_list` | parenthesised initialisers, base clauses, member initialisers |
+/// | `decls::parse_initializer_clause` | braced-initializer elements |
+/// | `exprs::parse_capture` | lambda init-capture initialisers |
+/// | `decls::finish_init_declarator` (bit-field arm) | bit-field widths |
+/// | `decls::parse_template_parameter` (default-argument arm) | template parameters |
+/// | `types::parse_template_argument` (expression fallback) | template arguments |
+///
+/// **Every entry after the first four was added because something failed**, which is the argument for writing
+/// this table before changing the reader rather than after it:
+///
+/// * the **bit-field width** is not a list of expressions in the usual sense — `int bits : 3;` is one
+///   constant-expression — but the *members* are comma-separated, so `unsigned flags : 1, spare : 7;` is two
+///   fields and a width reader that took the comma swallowed the second;
+/// * the **default argument of a template parameter** is the same shape one level down:
+///   `template <typename T, int N = 3, typename... Rest>` is three parameters, and the third disappeared into
+///   the default of the second. Found by the **corpus** rather than by a test, and the diagnostic pointed at the
+///   `typename` of the *first* parameter — three declarations away from the comma that was eaten;
+/// * a **template argument**'s expression fallback is the third of the shape: `Grid<T, 3>::fill` is a qualified
+///   name whose template arguments are comma-separated, and a fallback reader that took the comma left the list
+///   without its second argument. This one contradicts what the next paragraph used to claim about template
+///   arguments — the *type* reading does stop at a comma, and the *expression* fallback did not.
+///
+/// Deliberately **not** on the list, with the reason each one differs:
+///
+/// * Structured binding name lists, declarator lists, parameter lists, `using`-declarator lists, enumerator
+///   lists — no expressions, so they never reach either reader.
+/// * `alignas(...)`, `decltype(...)`, `noexcept(...)`, `explicit(...)`, array bounds, the GNU case range — the
+///   payload *is* a full expression, and an array bound or a case label with a comma in it is the author's
+///   problem rather than the grammar's.
+/// * `parse_expression_statement` and the `for` header — a comma there is the comma operator, which is the
+///   whole point.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Level {
+    /// Everything, including the comma operator.
+    Full,
+    /// Up to and including the assignment family — one element of a comma-separated list.
+    Assignment,
+}
+
+/// Read an expression down to `level`, optionally reading a trailing `...` as a pack expansion.
+fn parse_expr_up_to(p: &mut CppParser, level: Level, pack_expansion: bool) -> ParseResult {
+    let mut expr = parse_ternary_expr(p)?;
+
+    if level == Level::Full {
+        // The comma operator: the loosest of all, left-associative, and a `BinaryExpr` like every other
+        // operator. Folded left in a loop rather than given a precedence number, for the reason in [`Level`].
+        //
+        // The right operand is a **ternary** expression and not another comma one, which is what makes the
+        // operator left-associative: `a, b, c` folds as `(a, b), c`.
+        while p.current_token() == CppTokenKind::Comma {
+            let m = expr.precede(p, CppSyntaxKind::BinaryExpr);
+            p.bump(); // `,`
+            parse_ternary_expr(p)?;
+            expr = m.complete(p);
+        }
+    }
 
     // A **pack expansion**: `g(args...)`, `std::tuple<Ts...>`, `h(f(x)...)`. The `...` follows the pattern it
     // expands, and the pattern is an expression — which is why it is read here, at the one place every
@@ -177,6 +308,8 @@ fn parse_expr_with_pack_expansion(p: &mut CppParser, pack_expansion: bool) -> Pa
     // `args...` of a declarator, the `...` of an old-style variadic parameter — the expression is not read by
     // this rule at all: `Args&&... args` has no expression in it, and `int f(int a, ...)` has the ellipsis
     // after a comma rather than after an expression.
+    //
+    // It applies at **both levels**, because an element of a list can be a pack expansion: `g(args...)` is one.
     if pack_expansion && p.current_token() == CppTokenKind::Ellipsis {
         let expansion = expr.precede(p, CppSyntaxKind::PackExpansionExpr);
         p.bump(); // `...`
@@ -219,7 +352,7 @@ fn parse_binary_expr_with_precedence(p: &mut CppParser, min_prec: u8) -> ParseRe
     // `(... + ts)` needs nothing: the `...` is read as the *left* operand by the primary rule, and the loop
     // below then sees the `+` and builds the same shape with the sides swapped — which is exactly what a left
     // fold is.
-    if is_fold_operator(p.current_token())
+    if is_fold_operator(p, p.current_token())
         && p.peek_next_token() == CppTokenKind::Ellipsis
         && let Some(prec) = get_operator_precedence(p, p.current_token())
         && prec >= min_prec
@@ -261,7 +394,12 @@ fn parse_binary_expr_with_precedence(p: &mut CppParser, min_prec: u8) -> ParseRe
 /// `fold_operand` says whether a bare `...` may be read as a fold expression's operand here. It is true only
 /// inside parentheses, which is where a fold is written; see the `Ellipsis` arm of [`parse_primary_expr`].
 fn parse_unary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
-    match p.current_token() {
+    // An **alternative spelling** of a unary operator — `not x`, `compl x` — reaches here as an identifier, so
+    // it is mapped before the match. In operand position a name would otherwise start a primary expression, and
+    // `not x` would be read as two adjacent expressions.
+    let token = the_alternative_operator(p, p.current_token()).unwrap_or(p.current_token());
+
+    match token {
         CppTokenKind::LogicalNot
         | CppTokenKind::Tilde
         | CppTokenKind::Plus
@@ -287,6 +425,30 @@ fn parse_unary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
             parse_unary_expr(p, fold_operand)?; // the awaitable
             Ok(m.complete(p))
         }
+        // A **throw-expression**: `x = throw 1;`, `cond ? throw 1 : 2`, `return throw 1;`.
+        //
+        // `throw` is a unary operator in these positions, and it is the one whose operand may be **absent** —
+        // `throw;` rethrows, and that spelling is a *statement* whose rule already existed. Having both is not
+        // redundancy: the statement rule reads a throw at the start of a statement and produces a `ThrowStat`,
+        // which is the node a consumer wants there; this arm reads one wherever a *value* is expected, which is
+        // every other position, and produces an expression.
+        //
+        // Without it the expression parser reported `expected primary expression` at `throw` — a keyword it had
+        // been told to expect by [`is_expression_keyword`] and for which no expression rule existed. Being on
+        // that list is a promise that some rule handles it; see also `co_await`, which was missing for the same
+        // reason.
+        CppTokenKind::ThrowKeyword => {
+            let m = p.mark(CppSyntaxKind::ThrowExpr);
+            p.bump(); // `throw`
+
+            // The operand is optional: `throw;` is a rethrow. An operand is read only when one is there, so that
+            // `cond ? throw 1 : 2` does not look for a `1` that belongs to some other rule.
+            if !throw_has_no_operand(p) {
+                parse_unary_expr(p, fold_operand)?;
+            }
+            Ok(m.complete(p))
+        }
+
         CppTokenKind::SizeofKeyword | CppTokenKind::AlignofKeyword => {
             let m = p.mark(CppSyntaxKind::UnaryExpr);
             p.bump(); // consume 'sizeof' / 'alignof'
@@ -411,17 +573,21 @@ pub fn parse_type_id_or_expression(p: &mut CppParser) -> ParseResult {
 /// * a **name the file declared to be a type**, followed by something a cast can carry — `(MyType)x`,
 ///   `(MyType*)p`, `(ns::T)x`, `(Vec<int>)v`. The type table's one job, and the reason it exists.
 ///
-/// # The operators that are deliberately not used
+/// # The third shape, and why the operators are otherwise not used
 ///
 /// `*`, `&` and `&&` after a name look like they discriminate — a cast has a pointer or reference type, and an
-/// expression has an operator — and they do not: `(a && b)` is a conjunction, `(a * b)` a product. All three
-/// tokens mean both things in the two grammars, and C++ settles them by looking the name up, which is what the
-/// type table does. A `(MyType*)p` cast written in a file that never declares `MyType` is therefore read as an
-/// expression; it is the same documented cost as direct-initialisation, in the same direction, and for the same
-/// reason.
+/// expression has an operator — and on their own they do not: `(a && b)` is a conjunction, `(a * b)` a product.
+/// All three tokens mean both things in the two grammars, and C++ settles them by looking the name up, which is
+/// what the type table does.
 ///
-/// Everything else — `(a)`, `(a + 1)`, `((a))`, `(f(x))`, `(a && b)` — belongs to the parenthesised-expression
-/// rule, which is where it now goes.
+/// But **a pointer operator has nothing on its left**, and that is visible. In `(MyType*)p` the `*` sits
+/// immediately before the `)`, so it cannot be a binary operator — there is no right operand. `(a * b)` and
+/// `(a* b)` both have one. So a `*`, `&` or `&&` **closing** the parentheses is the third certain shape, and it
+/// needs no type table at all: this is what makes `(MyType*)p` readable in a file that never declares `MyType`,
+/// and it is a **rule** rather than the trade-off it was once recorded as.
+///
+/// Everything else — `(a)`, `(a + 1)`, `((a))`, `(f(x))`, `(a && b)`, `(a * b)` — belongs to the
+/// parenthesised-expression rule, which is where it now goes.
 fn is_a_type_in_parentheses(p: &CppParser) -> bool {
     if p.current_token() != CppTokenKind::LeftParen {
         return false;
@@ -442,6 +608,10 @@ fn is_a_type_in_parentheses(p: &CppParser) -> bool {
         }
     }
 
+    if closes_with_a_pointer_operator(p) {
+        return true;
+    }
+
     match p.peek_token_kind_at(1..2).first() {
         Some(&kind) if super::types::is_type_specifier_keyword(kind) => true,
         Some(&CppTokenKind::Identifier) => {
@@ -457,6 +627,51 @@ fn is_a_type_in_parentheses(p: &CppParser) -> bool {
         Some(&CppTokenKind::Scope) => true,
         _ => false,
     }
+}
+
+/// Do the parentheses at the cursor close with a `*`, `&` or `&&` that a **type** ended with?
+///
+/// The one shape that decides a cast without the type table, and it is decided by what is *missing*: a binary
+/// operator needs a right operand, so a pointer or reference operator immediately before the `)` cannot be one.
+///
+/// ```text
+/// (MyType*)p    `*` closes the parentheses  -> no right operand -> a type
+/// (a * b)       `*` has `b` after it        -> an operator       -> an expression
+/// (a* b)        same, however it is spaced
+/// ```
+///
+/// The name in front still has to look like a name, which is what the second half checks: `(a*)` with `a` a
+/// plain undeclared name is the same shape as `(MyType*)`, and the two cannot be told apart — so it takes the
+/// same reading, and a cast of a name is far likelier there than a multiplication with its right operand
+/// missing, which is not well formed at all.
+fn closes_with_a_pointer_operator(p: &CppParser) -> bool {
+    // The window up to the matching `)`. A `(` inside it means the parentheses hold a call, whose own tokens are
+    // not this parenthesis's business.
+    let mut contents = Vec::new();
+    for kind in p.peek_token_kind_at(1..64) {
+        match kind {
+            CppTokenKind::RightParen => break,
+            CppTokenKind::LeftParen => return false,
+            other => contents.push(other),
+        }
+    }
+
+    // `*`, `&`, `&&` and the cv-qualified spellings `* const`, `& const`.
+    let mut last = contents.len();
+    while last > 0
+        && matches!(
+            contents[last - 1],
+            CppTokenKind::ConstKeyword | CppTokenKind::VolatileKeyword
+        )
+    {
+        last -= 1;
+    }
+
+    last > 0
+        && matches!(
+            contents[last - 1],
+            CppTokenKind::Star | CppTokenKind::Ampersand | CppTokenKind::LogicalAnd
+        )
 }
 
 /// Parse a `new` expression: `new T`, `new T[4]`, `new T(1, 2)`, `new T{1}`, `new (buf) T()`.
@@ -619,7 +834,7 @@ fn placement_arguments_at(p: &CppParser) -> bool {
             | CppTokenKind::NullptrKeyword
                 if at_element_start(&scan, position) =>
             {
-                return true
+                return true;
             }
             CppTokenKind::Eof | CppTokenKind::None => return false,
             _ => {}
@@ -674,9 +889,7 @@ fn parse_new_initializer(p: &mut CppParser) -> ParseResult {
     match p.current_token() {
         CppTokenKind::LeftParen => {
             let init = p.mark(CppSyntaxKind::Initializer);
-            if let Err(err) =
-                super::decls::parse_expression_list(p, CppTokenKind::RightParen)
-            {
+            if let Err(err) = super::decls::parse_expression_list(p, CppTokenKind::RightParen) {
                 init.undo(p);
                 return Err(err);
             }
@@ -710,7 +923,10 @@ fn parse_postfix_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
 /// is how the two would come to disagree about what a suffix is.
 ///
 /// `expr` must be a completed node; it is re-parented by whichever suffix is found.
-fn parse_postfix_suffixes(p: &mut CppParser, mut expr: crate::parser::CompleteMarker) -> ParseResult {
+fn parse_postfix_suffixes(
+    p: &mut CppParser,
+    mut expr: crate::parser::CompleteMarker,
+) -> ParseResult {
     loop {
         match p.current_token() {
             CppTokenKind::LeftParen => {
@@ -718,12 +934,13 @@ fn parse_postfix_suffixes(p: &mut CppParser, mut expr: crate::parser::CompleteMa
                 let m = expr.precede(p, CppSyntaxKind::CallExpr);
                 p.bump(); // consume '('
 
-                // 解析参数列表
+                // 解析参数列表。Each argument is read *below* the comma operator, because the commas here are
+                // the list's own — see [`parse_assignment_expr`].
                 if p.current_token() != CppTokenKind::RightParen {
-                    parse_expr(p)?;
+                    parse_assignment_expr(p)?;
                     while p.current_token() == CppTokenKind::Comma {
                         p.bump(); // consume ','
-                        parse_expr(p)?;
+                        parse_assignment_expr(p)?;
                     }
                 }
 
@@ -860,7 +1077,9 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
                     // not a name. Requiring the name keeps the keyword from standing in for one.
                     if !matches!(
                         p.current_token(),
-                        CppTokenKind::Identifier | CppTokenKind::OperatorKeyword | CppTokenKind::Tilde
+                        CppTokenKind::Identifier
+                            | CppTokenKind::OperatorKeyword
+                            | CppTokenKind::Tilde
                     ) {
                         p.close_marks_above(base);
                         return Err(CppParseError::syntax_error_from(
@@ -1008,12 +1227,13 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
 /// come to disagree about what a parenthesised expression is.
 ///
 /// This is also the only place a **fold expression** can be written, so it is the only place that licenses a
-/// bare `...` as an operand. The trailing-`...` *expansion* reading is refused here for the reason given on
-/// [`parse_expr_with_pack_expansion`]: inside the parentheses the ellipsis belongs to the fold.
+/// bare `...` as an operand — see the `Ellipsis` arm of [`parse_primary_expr`]. The trailing-`...` *expansion*
+/// reading is still available, because the two are told apart by position rather than by a flag: a fold's `...`
+/// is an **operand**, so it arrives at the primary rule, while an expansion's follows a completed expression.
 fn parse_parenthesized_expression(p: &mut CppParser) -> ParseResult {
     let m = p.mark(CppSyntaxKind::ParenExpr);
     expect_token(p, CppTokenKind::LeftParen)?;
-    if let Err(err) = parse_expr_with_pack_expansion(p, true) {
+    if let Err(err) = parse_expr_up_to(p, Level::Full, true) {
         m.undo(p);
         return Err(err);
     }
@@ -1060,11 +1280,11 @@ fn is_expression_keyword(p: &CppParser) -> bool {
 fn starts_a_lambda(p: &CppParser) -> bool {
     use CppTokenKind::{
         Ampersand, Arrow, Assign, Caret, CharLiteral, Colon, Comma, Dot, Ellipsis, Equal,
-        FalseKeyword, FloatingLiteral, Greater, GreaterEqual, Identifier, IntegerLiteral, LeftBrace,
-        LeftBracket, LeftParen, LeftShift, Less, LessEqual, LogicalAnd, LogicalNot, LogicalOr, Minus,
-        MinusMinus, MutableKeyword, NoexceptKeyword, NotEqual, NullptrKeyword, Percent, Pipe, Plus,
-        PlusPlus, Question, RightBracket, RightParen, RightShift, Scope, Slash, Star, StringLiteral,
-        ThisKeyword, Tilde, TrueKeyword,
+        FalseKeyword, FloatingLiteral, Greater, GreaterEqual, Identifier, IntegerLiteral,
+        LeftBrace, LeftBracket, LeftParen, LeftShift, Less, LessEqual, LogicalAnd, LogicalNot,
+        LogicalOr, Minus, MinusMinus, MutableKeyword, NoexceptKeyword, NotEqual, NullptrKeyword,
+        Percent, Pipe, Plus, PlusPlus, Question, RightBracket, RightParen, RightShift, Scope,
+        Slash, Star, StringLiteral, ThisKeyword, Tilde, TrueKeyword,
     };
 
     // The capture list's own contents, so that a malformed one stops the reading rather than swallowing the
@@ -1223,6 +1443,8 @@ fn parse_capture_list(p: &mut CppParser) -> ParseResult {
     }
 
     while p.current_token() != CppTokenKind::RightBracket && !p.is_eof() {
+        // A capture is a name or `name = initializer`. The initializer is read below the comma operator for the
+        // same reason an argument is: the commas separate captures. See [`parse_assignment_expr`].
         if let Err(err) = parse_capture(p) {
             p.close_marks_above(base);
             return Err(err);
@@ -1276,10 +1498,11 @@ fn parse_capture(p: &mut CppParser) -> ParseResult {
         p.bump();
     }
 
-    // An init-capture: `x = std::move(other)`, or `...args = pack`.
+    // An init-capture: `x = std::move(other)`, or `...args = pack`. Read below the comma operator, since the
+    // comma after it separates the next capture.
     if p.current_token() == CppTokenKind::Assign {
         p.bump();
-        if let Err(err) = parse_expr(p) {
+        if let Err(err) = parse_assignment_expr(p) {
             p.close_marks_above(base);
             return Err(err);
         }

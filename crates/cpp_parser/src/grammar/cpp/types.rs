@@ -142,7 +142,9 @@ pub fn parse_type_id_with(p: &mut CppParser, a_name_may_be_a_type: bool) -> Pars
 ///
 /// e.g.: the `(int)` of `void (int)`, as written in `sizeof(void(int))` or `new (Widget)(1)`
 fn parse_type_id_inner(p: &mut CppParser, a_name_may_be_a_type: bool) -> ParseResult {
-    if p.current_token() == CppTokenKind::LeftParen && starts_a_function_type(p, a_name_may_be_a_type) {
+    if p.current_token() == CppTokenKind::LeftParen
+        && starts_a_function_type(p, a_name_may_be_a_type)
+    {
         // An empty specifier sequence, kept so that a consumer asking a type for its specifiers finds an
         // answer rather than having to special-case this spelling. A function type has no leading type, which
         // is exactly what "empty" says.
@@ -268,15 +270,13 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
     p.begin_declaration_type();
     loop {
         let specifier_seen = specifiers > 0;
-        if let Err(err) =
-            parse_one_decl_specifier(
-                p,
-                &mut has_specifier,
-                &mut has_type_specifier,
-                &mut name_allowed,
-                specifier_seen,
-            )
-        {
+        if let Err(err) = parse_one_decl_specifier(
+            p,
+            &mut has_specifier,
+            &mut has_type_specifier,
+            &mut name_allowed,
+            specifier_seen,
+        ) {
             if specifiers == 0 {
                 p.close_marks_above(base);
                 return Err(err);
@@ -327,7 +327,9 @@ fn parse_one_decl_specifier(
     name_allowed: &mut bool,
     specifier_seen: bool,
 ) -> ParseResult {
-    let result = parse_one_decl_specifier_inner(p, has_type_specifier, name_allowed, specifier_seen);
+    let events_before = p.current_event_count();
+    let result =
+        parse_one_decl_specifier_inner(p, has_type_specifier, name_allowed, specifier_seen);
 
     if result.is_ok() {
         *has_specifier = true;
@@ -355,13 +357,28 @@ fn parse_one_decl_specifier(
         if p.take_declaration_ended_inside_specifiers() {
             *has_type_specifier = true;
         } else {
-            *has_type_specifier = p.last_consumed_token_kind().is_some_and(|kind| {
-                matches!(
-                    kind,
-                    CppTokenKind::Identifier | CppTokenKind::Scope | CppTokenKind::Greater
-                ) || is_type_specifier_keyword(kind)
-                    || is_class_like_keyword(kind)
-            });
+            // A specifier that produced a **`BuiltinType` node** named a type, and saying so from the event
+            // rather than from the last token is what closes the one case the token test cannot see.
+            //
+            // The token test reads "the last token this specifier consumed", and asks whether that token is a
+            // name or a type keyword. For `decltype(a)` the last token is the `)` of its payload — the very same
+            // token `alignas(16)` ends on, and the one the test exists to answer *no* for. So `decltype(a) x;`
+            // left `has_type_specifier` false, [`name_joins_the_type`] answered "this name can only be the
+            // type", and the declarator's name was taken into the type: the declaration came out with no
+            // declarator, the declaration reading failed, and the statement fell back to an expression.
+            //
+            // `BuiltinType` is the marker because it is produced by exactly the branches that name a keyword
+            // type — and a rule that *forgot* to set a flag is the mistake this whole function exists to avoid,
+            // so the record is read back from what the rule actually produced.
+            *has_type_specifier = p
+                .events_contain_any(events_before, &[CppSyntaxKind::BuiltinType])
+                || p.last_consumed_token_kind().is_some_and(|kind| {
+                    matches!(
+                        kind,
+                        CppTokenKind::Identifier | CppTokenKind::Scope | CppTokenKind::Greater
+                    ) || is_type_specifier_keyword(kind)
+                        || is_class_like_keyword(kind)
+                });
         }
     }
 
@@ -473,13 +490,33 @@ fn parse_one_decl_specifier_inner(
             return Ok(m.complete(p));
         }
 
-        // `decltype(expr)`, `noexcept(expr)` — a keyword with its own parenthesized payload.
+        // `decltype(expr)`, `decltype(auto)`, `noexcept(expr)` — a keyword with its own parenthesized payload.
+        //
+        // The type is *complete* once the payload is read, and that is recorded through the `BuiltinType` node
+        // this branch produces rather than by a flag set here — see [`parse_one_decl_specifier`], where the
+        // record is read back. The distinction matters because the payload ends on a `)`, the same token
+        // `alignas(16)` ends on, so "did this specifier name a type?" cannot be asked of the last token alone.
+        // Without the record, `has_type_specifier` stayed false, [`name_joins_the_type`] answered "this name can
+        // only be the type", and the **declarator's** name was taken into the type: the declaration came out
+        // with no declarator, the declaration reading failed, and the statement fell back to an expression. That
+        // is why `decltype(a) x;` parsed while `decltype(a) x = 1;` did not — the difference was never the
+        // initializer, it was the name.
         CppTokenKind::DecltypeKeyword | CppTokenKind::NoexceptKeyword => {
             let m = p.mark(CppSyntaxKind::BuiltinType);
             p.bump();
             if p.current_token() == CppTokenKind::LeftParen {
                 expect_token(p, CppTokenKind::LeftParen)?;
-                super::exprs::parse_expr(p)?;
+
+                // The payload is an expression — `decltype(a + b)`, `noexcept(f())` — with **one exception**:
+                // `decltype(auto)` holds a type, and `auto` is a keyword that no expression rule accepts, so
+                // the expression reading reported `expected primary expression` against it. The two readings
+                // are told apart by the one token that cannot be an expression.
+                if p.current_token() == CppTokenKind::AutoKeyword {
+                    parse_type_id(p)?;
+                } else {
+                    super::exprs::parse_expr(p)?;
+                }
+
                 expect_token(p, CppTokenKind::RightParen)?;
             }
             return Ok(m.complete(p));
@@ -747,7 +784,9 @@ fn name_joins_the_type(p: &CppParser, has_type_specifier: bool, name_allowed: bo
     if continues_a_qualified_name(p) {
         return true;
     }
-    if type_is_already_complete(p) || a_parenthesis_follows_the_name(p) {
+    let complete = type_is_already_complete(p);
+    let called = a_parenthesis_follows_the_name(p);
+    if complete || called {
         return false;
     }
     name_allowed
@@ -887,7 +926,8 @@ fn type_is_already_complete(p: &CppParser) -> bool {
         let previous = index - 1;
         match p.token_kind_at(previous) {
             CppTokenKind::RightParen => {
-                let Some(keyword) = the_alignas_introducing_the_payload_ending_at(p, previous) else {
+                let Some(keyword) = the_alignas_introducing_the_payload_ending_at(p, previous)
+                else {
                     break;
                 };
                 if keyword == 0 {
@@ -949,10 +989,7 @@ fn type_is_already_complete(p: &CppParser) -> bool {
 /// Walks back over the payload's own brackets to its `(` and answers only when the token before it is the
 /// keyword. Bounded by the first token that cannot be inside an alignment — a `;`, a brace, or the start of the
 /// file — so a parenthesis belonging to something else cannot make this walk run away.
-fn the_alignas_introducing_the_payload_ending_at(
-    p: &CppParser,
-    raw_index: usize,
-) -> Option<usize> {
+fn the_alignas_introducing_the_payload_ending_at(p: &CppParser, raw_index: usize) -> Option<usize> {
     let mut depth = 0usize;
     let mut cursor = raw_index;
 
@@ -1500,9 +1537,7 @@ fn parse_operator_name(p: &mut CppParser) -> ParseResult {
             ) =>
         {
             loop {
-                if p.current_token() == CppTokenKind::LogicalAnd
-                    && a_ref_qualifier_is_here(p)
-                {
+                if p.current_token() == CppTokenKind::LogicalAnd && a_ref_qualifier_is_here(p) {
                     break;
                 }
 
@@ -1616,7 +1651,7 @@ fn is_overloadable_operator(kind: CppTokenKind) -> bool {
 ///
 /// The recursive call passes `false`, because an inner declarator's parentheses wrap a declarator and never a
 /// parameter list: `(*f)`, `(* const)`, `(**)`.
-fn parse_abstract_declarator(p: &mut CppParser, name_possible: bool) -> ParseResult {
+pub fn parse_abstract_declarator(p: &mut CppParser, name_possible: bool) -> ParseResult {
     let mut container: Option<Marker> = None;
 
     /// Open the `Declarator` node on first use, so an abstract declarator that is not there leaves
@@ -1909,7 +1944,6 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::Declarator);
 
-
     // Where this declarator's own events begin. The suffix loop below asks "has this declarator named
     // anything yet?" of the event stream, and this is the bound that keeps the *type*'s name — recorded before
     // it, by the specifier sequence — out of the answer.
@@ -1974,7 +2008,10 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
                 | CppTokenKind::OperatorKeyword
                 | CppTokenKind::Tilde
         );
-    if named && !named_inside_parentheses && let Err(err) = parse_name(p) {
+    if named
+        && !named_inside_parentheses
+        && let Err(err) = parse_name(p)
+    {
         p.close_marks_above(base);
         return Err(err);
     }
@@ -2037,9 +2074,7 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
                 // declarator was refused, and the statement was re-read as an expression. The check is the same
                 // one [`parse_attribute_specifiers`] uses, and it can be made here without lookahead beyond the
                 // next token because no array declarator is spelled `[[`.
-                CppTokenKind::LeftBracket
-                    if p.peek_next_token() == CppTokenKind::LeftBracket =>
-                {
+                CppTokenKind::LeftBracket if p.peek_next_token() == CppTokenKind::LeftBracket => {
                     break;
                 }
                 CppTokenKind::LeftBracket => {

@@ -81,31 +81,37 @@ fn the_conditional_operator_parses_around_a_parenthesized_condition() {
 }
 
 #[test]
-fn a_conditional_is_weaker_than_assignment() {
-    // `x = a ? b : c` assigns the conditional, not the other way round: the conditional sits inside whatever
-    // holds the assignment. C++ reads it that way because the conditional binds tighter than the assignment
-    // family.
+fn an_assignment_containing_a_conditional_is_an_expression() {
+    // The statement is an **expression**, not a declaration, and that is the half worth asserting: `x = ...;`
+    // used to be read as a declaration of a variable whose declarator named nothing — a silent wrong tree, since
+    // the shape was perfectly well formed and nothing was reported. Every assignment whose left-hand side the
+    // file had not seen a type for came out that way. See `an_assignment_is_not_a_declaration` in `direct_init`.
     //
-    // The assignment is *not* asserted to be a `BinaryExpr` here, and the reason is worth recording: `x = ...;`
-    // at the start of a statement is read as a **declaration** of a variable named `x` of an unknown type, with
-    // an `Initializer` — the same file-local-table limitation that keeps `Widget w(1, 2);` an expression, seen
-    // from the other side. `a ? b : c` is then the initialiser, and that is what is pinned.
+    // The *shape* of the conditional is C++'s and not the naive one: in `a ? b : c` the `?`'s left operand is a
+    // full expression, so an assignment written there is nested **inside** the `TernaryExpr` — `(x = a) ? b : c`
+    // — rather than the conditional sitting on the assignment's right-hand side. That is the grammar, unusual as
+    // it looks, and pinning it keeps someone from "fixing" it later.
     let tree = CppParser::parse("void f() { x = a ? b : c; }\n", ParserConfig::default());
     let root = tree.get_red_root();
-    let initializer = root
+    let ternary = root
         .descendants()
-        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Initializer)
-        .expect("the conditional is an initialiser");
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::TernaryExpr)
+        .expect("the conditional is a ternary expression");
 
     assert!(
-        initializer
+        ternary
             .descendants()
-            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::TernaryExpr),
-        "the conditional has to be inside the initialiser"
+            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::BinaryExpr),
+        "the assignment is the conditional's condition"
     );
     assert_eq!(
         count("void f() { x = a ? b : c; }\n", CppSyntaxKind::TernaryExpr),
         1
+    );
+    assert_eq!(
+        count("void f() { x = a ? b : c; }\n", CppSyntaxKind::Initializer),
+        0,
+        "an assignment has no initialiser"
     );
 }
 

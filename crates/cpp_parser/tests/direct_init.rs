@@ -321,3 +321,120 @@ fn a_call_nested_inside_an_element_is_not_a_construction() {
         "a call nested inside an element should not make the list a declarator list"
     );
 }
+
+/// An assignment is an **expression**, not a declaration with a nameless declarator.
+///
+/// The mirror image of everything above, and the more dangerous direction: `x = 1;` used to come out as
+/// `Declaration(DeclSpecifierSeq(x), InitDeclarator(=, Initializer(1)))` — a well-formed tree of the right size,
+/// with **no error, no `ErrorNode` and no `MissingNode`**, describing a variable whose declarator named nothing.
+/// Every assignment to a name this file had not seen a type for was read that way, which inside a function body
+/// is most of them.
+///
+/// It was invisible to all three of the checks this project had: losslessness and well-formedness hold for a
+/// wrong tree as much as for a right one, `gaps.rs` looks for errors and error nodes, and the scope walker
+/// *already* declines to bind a declarator that named nothing — so the false tree and the true one produced the
+/// same (empty) set of names.
+///
+/// The gate is that an initializer needs something to initialise. It cannot be "no name was parsed", because a
+/// **qualified** declarator is read by the specifier sequence rather than by the declarator rule —
+/// `int ns::count = 0;` folds `ns::count` into the type and names nothing either. That shape keeps its
+/// declaration reading, and `a_qualified_declarator_keeps_its_reading` pins it.
+#[test]
+fn an_assignment_is_not_a_declaration() {
+    for source in [
+        "void f() { x = 1; }\n",
+        "void f() { x = a; }\n",
+        "void f() { x = a + b; }\n",
+        "void f() { x = a ? b : c; }\n",
+        "void f() { x = f(); }\n",
+        "void f() { value = other; }\n",
+        "void f() { count = 0; }\n",
+        "void f() { result = compute(); }\n",
+        "void f() { cache = table[key]; }\n",
+        "x = 1;\n",
+    ] {
+        let tree = CppParser::parse(source, ParserConfig::default());
+
+        assert_eq!(
+            tree.get_errors(),
+            [],
+            "{source:?} is valid code and must parse cleanly"
+        );
+
+        // The statement is an `ExpressionStat`. Asserted on the *statement* rather than on the absence of a
+        // declaration, because `void f() { ... }` is one: the statement is the node child of the `CompoundStat`
+        // that holds it — a leaf token has no children, so the filter picks out the constructs.
+        let statement = CppParser::parse(source, ParserConfig::default())
+            .get_red_root()
+            .descendants()
+            .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CompoundStat)
+            .and_then(|body| {
+                body.children()
+                    .filter(|child| child.children().next().is_some())
+                    .last()
+            })
+            .map(|node| CppSyntaxKind::from(node.kind()))
+            // A file-scope input has no body; the statement is the root's own child.
+            .or_else(|| {
+                CppParser::parse(source, ParserConfig::default())
+                    .get_red_root()
+                    .children()
+                    .next()
+                    .map(|node| CppSyntaxKind::from(node.kind()))
+            });
+
+        assert_eq!(
+            statement,
+            Some(CppSyntaxKind::ExpressionStat),
+            "{source:?} is an assignment, so its statement must be an expression"
+        );
+        assert_eq!(
+            count_of(source, CppSyntaxKind::Initializer),
+            0,
+            "{source:?} has no initialiser — an initialiser needs a declarator name"
+        );
+    }
+}
+
+/// A qualified declarator keeps its declaration reading, because the name folded into the type.
+///
+/// `int ns::count = 0;` runs the specifier sequence over `ns::count` and leaves nothing for the declarator rule
+/// to name — the same "no name was parsed" state as `x = 1;` has. What separates them is that `ns::count` is
+/// written as a type: a qualified name needs at least two segments, and a bare undeclared `x` is one.
+///
+/// This is C++'s own reading when `count` is a static member, and `int ns::Widget::count = 0;` has parsed that
+/// way for as long as the file-local table has existed.
+#[test]
+fn a_qualified_declarator_keeps_its_reading() {
+    for source in [
+        "int ns::count = 0;\n",
+        "int ns::Widget::count = 0;\n",
+        "int A::b = 1;\n",
+        "int Outer::Inner::value = 42;\n",
+    ] {
+        let tree = CppParser::parse(source, ParserConfig::default());
+
+        assert_eq!(
+            tree.get_errors(),
+            [],
+            "{source:?} must parse cleanly, got {:?}",
+            tree.get_errors()
+        );
+        assert_eq!(tree.to_source_text(), source, "{source:?} stays lossless");
+        assert!(
+            tree.get_red_root()
+                .descendants()
+                .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration),
+            "{source:?} declares something"
+        );
+    }
+}
+
+/// Count the nodes of one kind in `source`.
+fn count_of(source: &str, kind: CppSyntaxKind) -> usize {
+    CppParser::parse(source, ParserConfig::default())
+        .get_red_root()
+        .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == kind)
+        .count()
+}

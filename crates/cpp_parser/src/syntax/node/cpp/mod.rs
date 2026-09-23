@@ -180,7 +180,9 @@ impl CppDeclaration {
         let specifiers = self.get_decl_specifiers()?;
 
         let builtin = specifiers.get_builtin_type();
-        let has_class_keyword = builtin.as_ref().is_some_and(|builtin| builtin.is_class_like());
+        let has_class_keyword = builtin
+            .as_ref()
+            .is_some_and(|builtin| builtin.is_class_like());
         if !has_class_keyword {
             return None;
         }
@@ -413,7 +415,11 @@ impl CppBuiltinType {
     /// body or a base clause follows and the keyword is the head of a definition.
     pub fn is_class_like(&self) -> bool {
         matches!(
-            self.syntax().children_with_tokens().next().and_then(|element| element.into_token()).map(|token| token.kind()),
+            self.syntax()
+                .children_with_tokens()
+                .next()
+                .and_then(|element| element.into_token())
+                .map(|token| token.kind()),
             Some(CppKind::Token(CppTokenKind::ClassKeyword))
                 | Some(CppKind::Token(CppTokenKind::StructKeyword))
                 | Some(CppKind::Token(CppTokenKind::UnionKeyword))

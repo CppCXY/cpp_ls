@@ -111,6 +111,188 @@ fn assert_does_not_read_yet(place: Where, constructs: &[(&str, &str)]) {
     );
 }
 
+/// A construct and the node kind its **statement** has to come out as.
+///
+/// The two lists above this one answer "does it parse?", and that question has a blind spot wide enough to hide a
+/// whole class of defect. A tree can be well formed, lossless, free of every diagnostic and of every `ErrorNode`,
+/// and still describe the wrong construct:
+///
+/// ```text
+/// void f() { x = 1; }
+///
+/// Syntax(Declaration)              <- an assignment, read as a declaration
+///   Syntax(DeclSpecifierSeq)  x
+///   Syntax(InitDeclarator)
+///     Token(Assign) "="
+///     Syntax(Initializer) 1
+/// ```
+///
+/// Nothing above catches that. Well-formedness holds for a wrong tree as much as a right one; `reads` looks for
+/// errors and error nodes, and there are none; and the scope layer *already* declines to bind a declarator that
+/// named nothing, so the false tree and the true one yield the same (empty) set of names. It was found by hand,
+/// while probing something else.
+///
+/// So this list asks the question the others cannot: **what did it read it as?** Each entry names the construct
+/// and the kind of the statement it must produce, and the statement is taken as the child of the enclosing body
+/// — a leaf token has no children, so the constructs are exactly the nodes that do.
+///
+/// A statement kind is not enough on its own for an operator, though: `f(a, b)` and `f((a, b))` are both
+/// `ExpressionStat`, and the whole difference between them is *inside*. So an entry may also name an expression
+/// node that the construct must contain, and whether it is required or forbidden. That is what pins the comma
+/// operator — the defect it could cause is a call with one argument instead of two, which no statement-level
+/// assertion can see.
+struct Shape {
+    construct: &'static str,
+    /// File scope input, or a fragment to place inside `void f() { ... }`.
+    place: Where,
+    /// The kind the statement node must have.
+    kind: CppSyntaxKind,
+    /// An expression node the construct must contain, or must not contain.
+    expression: Option<(CppSyntaxKind, Presence)>,
+}
+
+/// Whether the expression named by a [`Shape`] has to be there or has to be absent.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Presence {
+    /// The construct is this — a comma expression, a cast.
+    Required,
+    /// The construct must **not** be this: the tokens that look like it belong to something else — the comma of
+    /// an argument list, the `*` of a multiplication.
+    Forbidden,
+}
+
+/// The statement a fragment comes out as: the child of the body that holds it, or the root's own child at file
+/// scope.
+///
+/// The statement is picked out by **kind**, not by "has children": a `return;` is two tokens and no child nodes
+/// at all, so a filter on having children skips it and answers with the function declaration that encloses it.
+fn statement_kind(source: &str) -> Option<CppSyntaxKind> {
+    let tree = CppParser::parse(source, ParserConfig::default());
+    let root = tree.get_red_root();
+
+    /// The kinds a fragment is allowed to be read as. Tokens are `None`, which is what filters the trivia out.
+    fn statement_kind_of(kind: CppSyntaxKind) -> Option<CppSyntaxKind> {
+        matches!(
+            kind,
+            CppSyntaxKind::Declaration
+                | CppSyntaxKind::ExpressionStat
+                | CppSyntaxKind::ReturnStat
+                | CppSyntaxKind::IfStat
+                | CppSyntaxKind::ForStat
+                | CppSyntaxKind::RangeForStat
+                | CppSyntaxKind::WhileStat
+                | CppSyntaxKind::DoWhileStat
+                | CppSyntaxKind::SwitchStat
+                | CppSyntaxKind::TryStat
+                | CppSyntaxKind::ThrowStat
+                | CppSyntaxKind::BreakStat
+                | CppSyntaxKind::ContinueStat
+                | CppSyntaxKind::CompoundStat
+                | CppSyntaxKind::LabelStat
+                | CppSyntaxKind::EmptyStat
+        )
+        .then_some(kind)
+    }
+
+    root.descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CompoundStat)
+        .and_then(|body| {
+            body.children()
+                .filter_map(|child| statement_kind_of(CppSyntaxKind::from(child.kind())))
+                .last()
+        })
+        .or_else(|| {
+            root.children()
+                .next()
+                .and_then(|node| statement_kind_of(CppSyntaxKind::from(node.kind())))
+        })
+}
+
+/// Is there a node of this kind anywhere in the parsed fragment?
+fn contains(source: &str, kind: CppSyntaxKind) -> bool {
+    CppParser::parse(source, ParserConfig::default())
+        .get_red_root()
+        .descendants()
+        .any(|node| CppSyntaxKind::from(node.kind()) == kind)
+}
+
+/// A construct whose statement kind is all that is asserted.
+fn shape(construct: &'static str, place: Where, kind: CppSyntaxKind) -> Shape {
+    Shape {
+        construct,
+        place,
+        kind,
+        expression: None,
+    }
+}
+
+/// A construct that must come out as `kind` **and** contain an expression of `expression`.
+fn requiring(shape: Shape, expression: CppSyntaxKind) -> Shape {
+    Shape {
+        expression: Some((expression, Presence::Required)),
+        ..shape
+    }
+}
+
+/// A construct that must come out as `kind` and must **not** contain an expression of `expression` — for the
+/// tokens that look like an operator but belong to the construct around them.
+fn forbidding(shape: Shape, expression: CppSyntaxKind) -> Shape {
+    Shape {
+        expression: Some((expression, Presence::Forbidden)),
+        ..shape
+    }
+}
+
+#[track_caller]
+fn assert_statement_kind(shapes: &[Shape]) {
+    let wrong: Vec<String> = shapes
+        .iter()
+        .filter_map(|shape| {
+            let source = match shape.place {
+                Where::File => shape.construct.to_string(),
+                Where::Body => format!("void probe() {{ {} }}", shape.construct),
+                Where::Class => format!("struct Probe {{ {} }};", shape.construct),
+            };
+
+            match statement_kind(&source) {
+                Some(kind) if kind != shape.kind => Some(format!(
+                    "  {}\n      read as {kind:?}, must be {:?}",
+                    shape.construct, shape.kind
+                )),
+                None => Some(format!(
+                    "  {}\n      no statement node at all",
+                    shape.construct
+                )),
+                Some(_) => match shape.expression {
+                    None => None,
+                    Some((want, Presence::Required)) if contains(&source, want) => None,
+                    Some((want, Presence::Required)) => {
+                        Some(format!("  {}\n      no {want:?} in it", shape.construct))
+                    }
+                    Some((unwanted, Presence::Forbidden)) if contains(&source, unwanted) => {
+                        Some(format!(
+                            "  {}\n      contains {unwanted:?}, which belongs to something else",
+                            shape.construct
+                        ))
+                    }
+                    Some(_) => None,
+                },
+            }
+        })
+        .collect();
+
+    assert!(
+        wrong.is_empty(),
+        "{} of {} constructs were read as the wrong node:{}",
+        wrong.len(),
+        shapes.len(),
+        wrong
+            .iter()
+            .map(|failure| format!("\n{failure}"))
+            .collect::<String>()
+    );
+}
+
 #[test]
 fn constructs_the_parser_reads() {
     // Declarations, including the ones this file's own history made possible.
@@ -299,6 +481,65 @@ fn constructs_the_parser_reads() {
             "x = (a + b);",
             "x = ((a));",
             "x = a * (b + c);",
+            // The **comma operator**, in the positions where a comma really is an operator rather than
+            // punctuation. The container positions are pinned by `a_comma_in_a_container_is_still_a_separator`
+            // in `operators.rs`, because those are the ones this could take away.
+            "auto x = (a, b);",
+            "x = 1, y = 2;",
+            "return 1, 2;",
+            "for (a = 0, b = 0; ; ) { }",
+            "g(a, (b, c));",
+            // The **C-style cast**. `(T*)p` needs no type table, because a `*` that closes the parentheses has
+            // no right operand and therefore cannot be a multiplication. The bare-name form, `(MyType)1.5`, is
+            // the half that stays a documented trade-off and lives in the list below.
+            "auto d = (T*)p;",
+            "auto d = (MyType*)p;",
+            "auto d = (T&)x;",
+            "auto d = (ns::T*)p;",
+            "auto d = (T<int>*)p;",
+            "auto d = (const T*)p;",
+            "auto d = (T*)p->q;",
+            "auto d = (T*)p + 1;",
+            "g((T*)p, (U*)q);",
+            // **Alternative operator spellings** — the `<iso646.h>` names, which are real C++ rather than an
+            // extension. They arrive as identifiers, because the lexer has no keyword for them.
+            "auto x = a and b;",
+            "auto x = a or b;",
+            "auto x = not a;",
+            "auto x = a bitand b;",
+            "auto x = a bitor b;",
+            "auto x = a xor b;",
+            "auto x = compl a;",
+            "auto x = a not_eq b;",
+            "a and_eq b;",
+            "a or_eq b;",
+            "a xor_eq b;",
+            "if (a and b) { }",
+            "while (not done) { }",
+            // **throw-expressions**: `throw` where a *value* is expected, as opposed to the statement form. The
+            // two are different nodes; see `modern.rs`.
+            "x = throw 1;",
+            "auto y = cond ? throw 1 : 2;",
+            "return throw 1;",
+            "g(throw 1);",
+            // **Explicit instantiation declarations**, which are `extern template`, not a linkage specification.
+            "extern template struct S<int>;",
+            "extern template class C<int>;",
+            "extern template void f<int>(int);",
+            // **Inline namespaces**, whose members are also members of the enclosing namespace.
+            "inline namespace v1 { }",
+            "inline namespace v1 { int x; }",
+            "inline namespace v1 = a::b;",
+            // **`decltype` in type position**, in every position a type can be written. The tricky part is not
+            // the payload but what follows it: a `)` ends the specifier, and the declarator's name comes after.
+            "decltype(x) y;",
+            "decltype(x) y = 1;",
+            "decltype(auto) y;",
+            "decltype(auto) x = f();",
+            "decltype(x)* p;",
+            "decltype(x) v[2];",
+            "noexcept(f()) g();",
+            "const decltype(x) y = 1;",
         ],
     );
 
@@ -348,6 +589,16 @@ fn constructs_the_parser_reads() {
             // specifier sequence has to know that the type was named even though the friend consumed it.
             "friend void swap(Probe&, Probe&); Probe& method();",
             "friend class Other; Probe& method2();",
+            // An **explicit object parameter** (C++23). It was a *silent* gap: the member came out as nothing
+            // and the tokens after the `this` were read as a second, phantom member, with no diagnostic — which
+            // is why this list could not see it and a census of common C++ found it.
+            "void f(this Probe& self);",
+            "void f(this Probe&& self) &&;",
+            "void f(this auto&& self) {}",
+            "void g(this Probe& self, int x);",
+            "void h(this Probe& self) const;",
+            "void i(this Probe&);",
+            "void j(this Probe& self) { self.x = 1; }",
         ],
     );
 }
@@ -360,16 +611,69 @@ fn constructs_the_parser_does_not_read_yet() {
     assert_does_not_read_yet(
         Where::Body,
         &[
-            // The same trade as direct-initialisation, seen from the expression side: `MyType` is a type this
-            // file never declares, so `(MyType*)p` is not distinguishable from `(a * b)`. This is the one entry
-            // that is a *decision* rather than a missing rule, and it is not on any list to be fixed.
+            // A C-style cast whose type is a **plain undeclared name**, which is the residue of what used to be
+            // the whole of T1. `(MyType)` is a valid parenthesised expression *and* a valid type-id, and only
+            // name lookup tells them apart — the same trade as direct-initialisation, in the same direction.
+            //
+            // The whole *pointer* form used to be here as well, described as "the canonical example of a
+            // deliberate trade-off: `*` is both the pointer operator and the multiplication operator, and the
+            // type table is what tells them apart". That claim was wrong twice over:
+            //
+            //   `(a * b)` and `(MyType*)p` are not the same shape — `a * b` has an operand on both sides of the
+            //   `*`, `MyType*` has nothing on its left — so the difference **is** visible in the tokens; and
+            //
+            //   a `*` immediately before the `)` cannot be a binary operator at all, because a binary operator
+            //   needs a right operand.
+            //
+            // So the pointer form was a missing **rule** and not a missing type table. It reads now — see
+            // `closes_with_a_pointer_operator` in `exprs.rs` and the entries in the list above. What is left
+            // here is the one case where the tokens really are silent.
             (
-                "auto d = (MyType*)p;",
-                "a C-style cast to a pointer of an undeclared type. `*` is both the pointer operator and the \
-                 multiplication operator, and the type table is what tells them apart.",
+                "auto d = (MyType)1.5;",
+                "a C-style cast to an undeclared type. `(MyType)` is a valid parenthesised expression and a \
+                 valid type-id, and only name lookup tells them apart.",
+            ),
+            (
+                "auto d = (MyType)x;",
+                "the same ambiguity with a name as the operand.",
             ),
         ],
     );
+
+    // `decltype` in **type position** used to be here, and the record of what it looked like is worth keeping
+    // because the symptom pointed at the wrong thing entirely:
+    //
+    //   `decltype(x) y;`          read
+    //   `decltype(x) y = 1;`      did NOT — "expected primary expression" against the `decltype`
+    //   `decltype(auto) x = f();` did NOT
+    //
+    // Two defects were stacked, and neither was where the message pointed:
+    //
+    //   1. `decltype` was not a declaration anchor, so the declaration reading was never taken from it at all;
+    //   2. once it was, the specifier loop asked "did this specifier name a type?" of the **last token it
+    //      consumed** — which for `decltype(a)` is the `)` of its payload, the very token `alignas(16)` ends on
+    //      and the one that question exists to answer *no* for. So the type was left unfinished as far as the
+    //      loop was concerned, the **declarator's own name** was taken into the type, the declaration came out
+    //      with no declarator, and the statement fell back to an expression. The initializer had nothing to do
+    //      with it.
+    //
+    // Both are fixed; the entries are in the list above, and `modern.rs` pins the shapes. What remains is the
+    // **expression** side, which is the one place the tokens really are silent:
+    //
+    //   `decltype(x);`      refuses — a `decltype` is not a value
+    //   `decltype(x) + 1;`  refuses — likewise
+    //
+    // Those are refused rather than misread, which is the cheaper direction and the one this file registers.
+
+    // The record of how the pointer form was resolved, kept because the *reason* it was mis-filed for so long
+    // is the useful part: it was judged by how hard it looked rather than by whether it needed information from
+    // outside the file.
+    //
+    //   `auto d = (MyType*)p;`   — reads: the `*` closes the parentheses, so it is a type
+    //   `auto d = (T*)p;`        — likewise
+    //   `auto d = (int)1.5;`     — reads through the keyword-type path
+    //   `auto d = (a * b);`      — reads as a multiplication, and must keep doing so
+    //   `auto d = (a* b);`       — likewise
 
     // Pack expansion used to be here, and it is worth recording what the entries were, because they looked
     // like three separate gaps and were one rule — "a `...` after a pattern expands it":
@@ -408,5 +712,221 @@ fn constructs_the_parser_does_not_read_yet() {
             // They are pinned as *read* in the test above instead, and this list is kept — rather than deleted —
             // so that the next gap has a place to go.
         ],
+    );
+}
+
+/// What the parser read each construct **as**, not merely whether it read it.
+///
+/// The third question, and the one the other two are blind to. See [`Shape`] for why a well-formed, lossless,
+/// diagnostic-free tree can still be the wrong construct, and for the case that was found that way.
+///
+/// The entries below are the statement kinds that matter to a consumer. They are deliberately not "every
+/// statement parses": each line is a reading that a defect could silently change, so the list grows when a new
+/// ambiguity is settled rather than when a new construct is added.
+#[test]
+fn constructs_are_read_as_the_right_node() {
+    assert_statement_kind(&[
+        // The defect this list exists for. An assignment to a name the file has no type for used to come out as
+        // a `Declaration` whose declarator named nothing — the same reading as `int x = 1;`, which is a
+        // *declaration*, so the two had to be told apart by whether an initialiser has something to initialise.
+        shape("x = 1;", Where::Body, CppSyntaxKind::ExpressionStat),
+        shape("x = a + b;", Where::Body, CppSyntaxKind::ExpressionStat),
+        shape("value = other;", Where::Body, CppSyntaxKind::ExpressionStat),
+        shape("x = f();", Where::Body, CppSyntaxKind::ExpressionStat),
+        shape("x = a ? b : c;", Where::Body, CppSyntaxKind::ExpressionStat),
+        shape("x = 1;", Where::File, CppSyntaxKind::ExpressionStat),
+        // The other side of the same gate: a declaration *is* a declaration, and a qualified declarator keeps
+        // its declaration reading even though it names nothing for the declarator rule to take — the name was
+        // folded into the type.
+        shape("int x = 1;", Where::Body, CppSyntaxKind::Declaration),
+        shape(
+            "int ns::count = 0;",
+            Where::File,
+            CppSyntaxKind::Declaration,
+        ),
+        shape(
+            "int ns::Widget::count = 0;",
+            Where::File,
+            CppSyntaxKind::Declaration,
+        ),
+        // Direct-initialisation, the reading the whole file-local type table exists for.
+        shape("Widget w(1, 2);", Where::Body, CppSyntaxKind::Declaration),
+        shape(
+            "std::string s(\"x\");",
+            Where::Body,
+            CppSyntaxKind::Declaration,
+        ),
+        // A call keeps its parentheses, which is the direction a naive fix breaks.
+        shape("g(1, 2);", Where::Body, CppSyntaxKind::ExpressionStat),
+        shape("use(x);", Where::Body, CppSyntaxKind::ExpressionStat),
+        // Statements that are not declarations at all, pinned so that a future gate cannot claim them.
+        shape("++i;", Where::Body, CppSyntaxKind::ExpressionStat),
+        shape("delete p;", Where::Body, CppSyntaxKind::ExpressionStat),
+        shape("if (x) { }", Where::Body, CppSyntaxKind::IfStat),
+        shape("for (;;) { break; }", Where::Body, CppSyntaxKind::ForStat),
+        shape("return;", Where::Body, CppSyntaxKind::ReturnStat),
+        // **The comma operator**, on both sides. The required half is that the comma really is an operator
+        // where it is an operator; the forbidden half is the defect it could cause — a container's commas read
+        // as one expression, so `g(a, b)` becomes a call with one argument. The statement kind is the same in
+        // both readings, which is exactly why the expression assertion exists.
+        //
+        // `auto x = (a, b);` would *not* do for these: `auto` is a type keyword, so the whole thing is a
+        // declaration and the statement kind says nothing about the comma. The parenthesised form is used
+        // instead, where the expression *is* the statement.
+        requiring(
+            shape("(a, b);", Where::Body, CppSyntaxKind::ExpressionStat),
+            CppSyntaxKind::BinaryExpr,
+        ),
+        requiring(
+            shape("x = 1, y = 2;", Where::Body, CppSyntaxKind::ExpressionStat),
+            CppSyntaxKind::BinaryExpr,
+        ),
+        requiring(
+            shape("return 1, 2;", Where::Body, CppSyntaxKind::ReturnStat),
+            CppSyntaxKind::BinaryExpr,
+        ),
+        forbidding(
+            shape("g(a, b);", Where::Body, CppSyntaxKind::ExpressionStat),
+            CppSyntaxKind::BinaryExpr,
+        ),
+        forbidding(
+            shape("g(a, b, c);", Where::Body, CppSyntaxKind::ExpressionStat),
+            CppSyntaxKind::BinaryExpr,
+        ),
+        // **The C-style cast**, on both sides. `(T*)p` is a cast because a `*` that closes the parentheses has
+        // no right operand; `(a * b)` is a product because its `*` has one. Both parse, so only the shape can
+        // tell them apart.
+        requiring(
+            shape("(T*)p;", Where::Body, CppSyntaxKind::ExpressionStat),
+            CppSyntaxKind::CastExpr,
+        ),
+        requiring(
+            shape("(MyType*)p;", Where::Body, CppSyntaxKind::ExpressionStat),
+            CppSyntaxKind::CastExpr,
+        ),
+        forbidding(
+            shape("(a * b);", Where::Body, CppSyntaxKind::ExpressionStat),
+            CppSyntaxKind::CastExpr,
+        ),
+        forbidding(
+            shape("(a* b);", Where::Body, CppSyntaxKind::ExpressionStat),
+            CppSyntaxKind::CastExpr,
+        ),
+        // `(a)` parses as a type-id — one name, no declarator — so a rule that tried the type reading whenever
+        // it could would turn every parenthesised variable into a cast.
+        forbidding(
+            shape("(a);", Where::Body, CppSyntaxKind::ExpressionStat),
+            CppSyntaxKind::CastExpr,
+        ),
+        // And a call of a parenthesised name keeps its arguments, which is the price of the bare-name cast
+        // staying unread.
+        forbidding(
+            shape("(f)(x);", Where::Body, CppSyntaxKind::ExpressionStat),
+            CppSyntaxKind::CastExpr,
+        ),
+        // **throw** has two forms and they are different nodes. A consumer looking for one must not find the
+        // other, and the statement form would look plausible in either position.
+        requiring(
+            shape("x = throw 1;", Where::Body, CppSyntaxKind::ExpressionStat),
+            CppSyntaxKind::ThrowExpr,
+        ),
+        requiring(
+            shape("throw 1;", Where::Body, CppSyntaxKind::ThrowStat),
+            CppSyntaxKind::ThrowStat,
+        ),
+        forbidding(
+            shape("x = throw 1;", Where::Body, CppSyntaxKind::ExpressionStat),
+            CppSyntaxKind::ThrowStat,
+        ),
+        // An **alternative spelling** is the operator, so the node is the one the punctuation would produce.
+        requiring(
+            shape("auto x = a and b;", Where::Body, CppSyntaxKind::Declaration),
+            CppSyntaxKind::BinaryExpr,
+        ),
+        requiring(
+            shape("auto x = not a;", Where::Body, CppSyntaxKind::Declaration),
+            CppSyntaxKind::UnaryExpr,
+        ),
+        // A name that merely looks like a spelling stays a name.
+        forbidding(
+            shape("auto x = android;", Where::Body, CppSyntaxKind::Declaration),
+            CppSyntaxKind::BinaryExpr,
+        ),
+        // `this` as an **argument** is an expression; only a parameter position makes it a type.
+        forbidding(
+            shape("g(this);", Where::Body, CppSyntaxKind::ExpressionStat),
+            CppSyntaxKind::Parameter,
+        ),
+        // `decltype` in type position is a **declaration**, and the tricky half is that the spelling alone does
+        // not say so — `decltype(x) + 1;` is an expression. The anchor asks whether a declarator follows.
+        requiring(
+            shape(
+                "decltype(x) y = 1;",
+                Where::File,
+                CppSyntaxKind::Declaration,
+            ),
+            CppSyntaxKind::DeclSpecifierSeq,
+        ),
+        requiring(
+            shape("decltype(auto) y;", Where::File, CppSyntaxKind::Declaration),
+            CppSyntaxKind::DeclSpecifierSeq,
+        ),
+    ]);
+}
+
+/// A construct that must contain a node of `kind`, with the statement kind it must have.
+#[track_caller]
+fn assert_fragment_contains(fragments: &[(&str, CppSyntaxKind)]) {
+    let missing: Vec<String> = fragments
+        .iter()
+        .filter(|(fragment, kind)| !contains(&format!("void probe() {{ {fragment} }}"), *kind))
+        .map(|(fragment, kind)| format!("  {fragment}\n      no {kind:?} in it"))
+        .collect();
+
+    assert!(
+        missing.is_empty(),
+        "{} of {} fragments are missing a node:{}",
+        missing.len(),
+        fragments.len(),
+        missing
+            .iter()
+            .map(|failure| format!("\n{failure}"))
+            .collect::<String>()
+    );
+}
+
+/// The node kinds the C++23 and C++20 constructs must produce, where the *statement* kind says nothing.
+///
+/// A parameter, a namespace and a `this` are not statements, so [`assert_statement_kind`] cannot reach them —
+/// and the two that matter most here are exactly the ones a wrong reading would keep well formed:
+///
+/// * an **explicit object parameter** was silently read as *nothing*, with the tokens after the `this` forming a
+///   phantom second member. The parameter count is the assertion that catches it;
+/// * an **alternative spelling** must be the operator rather than a name, and the difference between `a and b`
+///   and `a android` is one the shape has to see.
+#[test]
+fn modern_constructs_produce_the_right_nodes() {
+    assert_fragment_contains(&[
+        ("void f(this S& self);", CppSyntaxKind::Parameter),
+        ("void f(this S& self);", CppSyntaxKind::ThisExpr),
+        ("void f(this auto&& self);", CppSyntaxKind::Parameter),
+        // The statement and the expression form, in the two positions they are written.
+        ("throw 1;", CppSyntaxKind::ThrowStat),
+        ("x = throw 1;", CppSyntaxKind::ThrowExpr),
+        ("auto y = cond ? throw 1 : 2;", CppSyntaxKind::ThrowExpr),
+        // An inline namespace is a namespace, not a declaration of something called `namespace`.
+        ("inline namespace v1 { }", CppSyntaxKind::NamespaceDecl),
+    ]);
+
+    // Exactly one parameter: the silent version produced zero here and a phantom member beside it.
+    let source = "struct Probe { void f(this S& self); };";
+    assert_eq!(
+        CppParser::parse(source, ParserConfig::default())
+            .get_red_root()
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Parameter)
+            .count(),
+        1,
+        "an explicit object parameter is one parameter"
     );
 }
