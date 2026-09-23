@@ -15,8 +15,13 @@ fn main() {
         let line_index = LineIndex::parse(&content);
         eprintln!("Errors found while parsing the file:");
         for error in errors {
-            let (line, col) = line_index.get_line_col(error.range.start(), &content).unwrap();
-            eprintln!("Error at line {}, column {}: {:?}", line, col, error.message);
+            let (line, col) = line_index
+                .get_line_col(error.range.start(), &content)
+                .unwrap();
+            eprintln!(
+                "Error at line {}, column {}: {:?}",
+                line, col, error.message
+            );
         }
     } else {
         println!("{}", tree.get_unit().dump());
