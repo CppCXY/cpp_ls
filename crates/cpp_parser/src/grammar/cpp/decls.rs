@@ -1549,7 +1549,7 @@ fn a_block_follows_the_group(p: &CppParser) -> bool {
 /// For the one shape that has no grammar behind it: the arguments of a macro invocation, whose tokens are the
 /// macro's own. They are kept in the tree as they were written — lossless, and available to a consumer that wants
 /// to show them — while nothing pretends to know what they mean.
-fn parse_balanced_token_group(p: &mut CppParser, kind: CppSyntaxKind) -> ParseResult {
+pub(super) fn parse_balanced_token_group(p: &mut CppParser, kind: CppSyntaxKind) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(kind);
 

@@ -168,6 +168,13 @@ pub struct CppParser<'a> {
     /// parser without this table has to guess. See [`crate::parser::TypeNames`] for what it records and why
     /// recording too little is the safe direction.
     type_names: crate::parser::TypeNames,
+    /// The names this translation unit **`#define`s**.
+    ///
+    /// A macro is gone by the time the grammar runs, so what an invocation leaves behind is whatever the macro
+    /// expanded to — a specifier, a statement, a whole block. The one thing the parser *can* know is the name, and
+    /// knowing it is the difference between reading `BOOL_OPTION(x)` (a macro whose body supplies the `;`) and
+    /// reading `g(x)` with its `;` missing (a typo). See [`crate::parser::MacroNames`].
+    macro_names: crate::parser::MacroNames,
     /// The first name written in type position by the declaration being parsed.
     ///
     /// `Widget` for `Widget w(1, 2);`, `None` for `int a(1);` — the keyword is not a name. Recorded while the
@@ -308,6 +315,7 @@ impl<'a> CppParser<'a> {
             in_an_explicit_instantiation: false,
             last_declarator_is_function: false,
             type_names: TypeNames::new(),
+            macro_names: crate::parser::MacroNames::new(),
             declaration_type_name: None,
             previous_declaration_type_name: None,
             declaration_type_is_qualified: false,
@@ -351,6 +359,7 @@ impl<'a> CppParser<'a> {
             in_an_explicit_instantiation: false,
             last_declarator_is_function: false,
             type_names: TypeNames::new(),
+            macro_names: crate::parser::MacroNames::new(),
             declaration_type_name: None,
             previous_declaration_type_name: None,
             declaration_type_is_qualified: false,
@@ -823,6 +832,33 @@ impl<'a> CppParser<'a> {
     /// The table itself, for a consumer that wants to audit what the parse recorded.
     pub fn type_names(&self) -> &crate::parser::TypeNames {
         &self.type_names
+    }
+
+    /// Record that `name` is defined as a macro, or — through [`CppParser::undefine_macro_name`] — no longer is.
+    ///
+    /// Called by the directive rule where a `#define` writes its name. See [`crate::parser::MacroNames`] for what
+    /// the table answers and what its absence means.
+    pub fn declare_macro_name(&mut self, name: &str) {
+        self.macro_names.define(name);
+    }
+
+    /// Record an `#undef`.
+    pub fn undefine_macro_name(&mut self, name: &str) {
+        self.macro_names.undefine(name);
+    }
+
+    /// Does this file `#define` a macro called `name`?
+    ///
+    /// A `false` is "this file does not say so", not "this is not a macro" — a macro from an included header is
+    /// invisible here, and a caller must keep whatever weaker evidence it has. See
+    /// [`crate::parser::MacroNames`].
+    pub fn is_a_known_macro_name(&self, name: &str) -> bool {
+        self.macro_names.is_a_macro(name)
+    }
+
+    /// The table itself, for a consumer that wants to audit what the parse recorded.
+    pub fn macro_names(&self) -> &crate::parser::MacroNames {
+        &self.macro_names
     }
 
     /// Start recording the declaration's leading type name; see the field's documentation.

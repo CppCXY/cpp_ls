@@ -759,6 +759,11 @@ fn constructs_the_parser_reads() {
             // macro-definition shape itself is in the file-scope list above: inside a body it is a call followed
             // by a block, which is a real error and is refused on purpose.
             "auto x = 1k_row;",
+            // A **macro whose body is a whole statement**, invoked without a `;`. The `#define` in the fragment is
+            // what makes it a macro rather than a call whose `;` is missing — `macros.rs` owns both halves of that
+            // test, and the negative half is pinned in the list of what is not read yet.
+            "#define NUMBER_OPTION(op) if (auto v = Get(op); !v.empty()) { }\nNUMBER_OPTION(tab_width)",
+            "#define IF_EXIST(op) if (!Get(op).empty())\nIF_EXIST(a) { g(); }",
             // A **macro invocation used where a definition goes, inside a function body** — `IF_EXIST(k) { … }`,
             // which is how a "set this option if it is configured" block is written. Inside a body the same shape
             // is also a real mistake (a call whose `;` is missing, followed by a block), so the reading is taken
@@ -902,11 +907,18 @@ fn constructs_the_parser_does_not_read_yet() {
     // typo.
     assert_does_not_read_yet(
         Where::Body,
-        &[(
-            "g(x) { }",
-            "a call with its `;` missing, followed by a block — not a macro, since the name is not spelled \
+        &[
+            (
+                "g(x) { }",
+                "a call with its `;` missing, followed by a block — not a macro, since the name is not spelled \
                  like one; see B36 in docs/grammar-gaps.md",
-        )],
+            ),
+            (
+                "NUMBER_OPTION(tab_width)\ng(x)",
+                "a call with its `;` missing and **no `#define` in the file**: the macro reading needs that \
+                 evidence, and a spelling convention is not enough for it; see B41 and `macros.rs`",
+            ),
+        ],
     );
 
     // `decltype` in **type position** used to be here, and the record of what it looked like is worth keeping

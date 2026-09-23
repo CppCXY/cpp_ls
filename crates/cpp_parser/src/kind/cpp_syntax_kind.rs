@@ -534,6 +534,28 @@ pub enum CppSyntaxKind {
     /// e.g.: func(arg1, arg2, arg3)
     ArgumentList,
 
+    /// A **macro invocation used as a statement or a definition**: `BOOL_OPTION(flag)`,
+    /// `IF_EXIST(op) { … }`, `TEST(A, B) { … }`.
+    ///
+    /// ```text
+    /// MacroCall
+    ///   NameExpr            the macro's name
+    ///   ArgumentList        its arguments, as raw balanced tokens — a macro's parameters are pasted into
+    ///                       identifiers and types alike, so nothing here is interpreted
+    ///   CompoundStat        …and the block, when the macro's body is a statement or a definition
+    /// ```
+    ///
+    /// A macro is expanded in translation phase 4, so by the time the grammar runs an invocation has left behind
+    /// whatever the macro expanded to — a specifier, a statement, a whole block, or nothing. This node is how the
+    /// parser says "this is a macro, and its meaning is not knowable here" **visibly**, instead of dressing the
+    /// tokens up as a declaration that happens to have a strange shape. A consumer can then skip it, highlight it,
+    /// or ask for the macro's definition elsewhere, and a reader of the tree can see which parts of a file are
+    /// untouched by the grammar.
+    ///
+    /// Only the shapes with no other reading are read this way, and a *statement* is only read this way when the
+    /// name is one this file `#define`s — see `parser::MacroNames`.
+    MacroCall,
+
     // ========== Legacy Support (for migration compatibility) ==========
     /// Parameter list (legacy name for compatibility)
     ParamList,

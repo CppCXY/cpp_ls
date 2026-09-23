@@ -143,6 +143,12 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
             super::decls::parse_declaration(p)
         }
 
+        // A **macro invocation used as a statement**: `BOOL_OPTION(tab_width)`, `IF_EXIST(k) { … }`.
+        //
+        // Claimed here, before the declaration/expression question is even asked, and only for a name this file
+        // **`#define`s** — evidence rather than a convention. See [`at_a_macro_call_statement`].
+        _ if at_a_macro_call_statement(p) => parse_macro_call(p),
+
         // A label: `foo:` at the start of a statement.
         CppTokenKind::Identifier
             if p.peek_token_kind_at(1..2).as_slice() == [CppTokenKind::Colon] =>
@@ -166,6 +172,62 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
     }
 
     result
+}
+
+/// Does a **macro invocation used as a statement** start at the cursor?
+///
+/// The shape is a name, a parenthesised group, and then whatever the macro's body supplies — nothing at all for
+/// `#define NUMBER_OPTION(op) if (…) { … }`, a block for `#define IF_EXIST(op) if (…)`, a `;` for an ordinary
+/// function-like macro. What makes the reading available is that the name is one this file **`#define`s**, and
+/// that is the whole point of [`crate::parser::MacroNames`]:
+///
+/// ```text
+/// #define BOOL_OPTION(op) … ;   BOOL_OPTION(flag)      a macro whose body is a whole statement — read as one
+///                                g(flag)               a call with its `;` missing — still an error
+/// ```
+///
+/// The two are the same tokens up to the name. A *spelling* convention (all caps) would accept both, which is why
+/// it is **not** used here: taking this reading means accepting a statement that is not valid C++ unless the macro
+/// supplies the rest, so it needs evidence rather than a guess. The convention stays where it was — as the
+/// fallback for a macro from a header, in [`super::decls::a_macro_definition_follows`], where the alternative is a
+/// syntax error either way.
+fn at_a_macro_call_statement(p: &CppParser) -> bool {
+    p.current_token() == CppTokenKind::Identifier
+        && p.peek_next_token() == CppTokenKind::LeftParen
+        && p.is_a_known_macro_name(p.current_token_text())
+}
+
+/// Read a macro invocation as a statement: `NAME ( tokens ) [ { … } ] [ ; ]`.
+///
+/// The arguments are a **balanced token group**, not an argument list of the grammar: a macro's parameters are
+/// pasted into identifiers and types alike (`TEST(Format, 1k_row)`), so nothing may be interpreted. The group is
+/// kept as an `ArgumentList` because that is what it is — the macro's arguments — and the block that may follow
+/// belongs to the same node, because it is part of what the macro's body produced.
+fn parse_macro_call(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::MacroCall);
+
+    let name = p.mark(CppSyntaxKind::NameExpr);
+    p.bump();
+    name.complete(p);
+
+    super::decls::parse_balanced_token_group(p, CppSyntaxKind::ArgumentList)?;
+
+    // What the macro's body supplies. A block is the body of a macro that expands to a statement or a whole
+    // definition (`IF_EXIST(op) if (…)`, gtest's `TEST(A, B) { … }`); a `;` is the ordinary function-like macro;
+    // and **nothing at all** is the case this rule exists for — a body that is a complete statement of its own.
+    match p.current_token() {
+        CppTokenKind::LeftBrace => {
+            if let Err(err) = parse_compound_stat(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+        }
+        CppTokenKind::Semicolon => p.bump(),
+        _ => {}
+    }
+
+    Ok(m.complete(p))
 }
 
 /// Resolve the declaration/expression ambiguity by trying the declaration reading first.
@@ -236,8 +298,24 @@ pub(super) fn parse_preprocessor_directive(p: &mut CppParser) -> ParseResult {
     // `#` alone on a line has none.
     let directive_is_include = p.current_token() == CppTokenKind::Identifier
         && matches!(p.current_token_text(), "include" | "include_next");
+    // `#define` and `#undef` name a macro, and that name is what the rest of the file needs to know: a macro is
+    // expanded before the grammar runs, so an invocation is recognisable only by name. See
+    // [`crate::parser::MacroNames`] — and note that the *name* is all that is recorded: the replacement list is
+    // read as tokens below, like the rest of the directive, and nothing tries to interpret it.
+    let defines_a_macro = p.current_token() == CppTokenKind::Identifier
+        && matches!(p.current_token_text(), "define" | "undef");
+    let undefines_a_macro = defines_a_macro && p.current_token_text() == "undef";
     if p.current_token() == CppTokenKind::Identifier {
         p.bump();
+    }
+
+    if defines_a_macro && p.current_token() == CppTokenKind::Identifier {
+        let name = p.current_token_text().to_string();
+        if undefines_a_macro {
+            p.undefine_macro_name(&name);
+        } else {
+            p.declare_macro_name(&name);
+        }
     }
 
     // Reading the rest token by token keeps the text in the tree; the preprocessor layer re-reads
