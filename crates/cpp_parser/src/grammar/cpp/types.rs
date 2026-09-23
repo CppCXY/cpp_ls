@@ -1445,6 +1445,69 @@ fn a_matching_angle_bracket_follows(p: &CppParser) -> bool {
     }
 }
 
+/// Is the cursor on a name that is **only** a template-id — `C2<T>` rather than `C2<T>::name`?
+///
+/// The distinction is what [`parse_declarator_with`] needs to refuse the first as a declarator's name. It is
+/// visible in the tokens and needs no name lookup: find the `>` that matches the `<`, and ask what follows it. A
+/// `::` means the arguments belong to a *qualifier* and the name continues; anything else means the template-id
+/// was the whole name, which no declaration can name.
+///
+/// The scan is the same shape as [`a_matching_angle_bracket_follows`] and stops at the same tokens, for the same
+/// reason: running past a `;` would find a `>` belonging to another declaration entirely.
+fn a_bare_template_id_is_here(p: &CppParser) -> bool {
+    // An **explicit instantiation** is the one declaration whose *name* is a template-id —
+    // `extern template void f<int>(int);` asks for the instantiation of `f<int>` — so the rule is suspended
+    // there and nowhere else. See [`CppParser::in_an_explicit_instantiation`].
+    if p.in_an_explicit_instantiation() {
+        return false;
+    }
+
+    if p.current_token() != CppTokenKind::Identifier || p.peek_next_token() != CppTokenKind::Less {
+        return false;
+    }
+
+    // Offsets are relative to the cursor: the `<` is at 1, which the depth above counts, so the scan starts at
+    // 2 — the first token *inside* the list — and the answer is read one past the matching `>`.
+    let mut depth = 1isize;
+
+    for (index, kind) in p.peek_token_kind_at(2..128).iter().enumerate() {
+        match kind {
+            CppTokenKind::Less => depth += 1,
+            CppTokenKind::Greater | CppTokenKind::RightShift => {
+                // `>>` closes two levels at once, so it can be the matching `>` of either the inner or the
+                // outer list; both arrive here because the amount is all that differs.
+                depth -= if *kind == CppTokenKind::RightShift {
+                    2
+                } else {
+                    1
+                };
+                if depth <= 0 {
+                    let after = index + 3;
+                    return !matches!(
+                        p.peek_token_kind_at(after..after + 1).first(),
+                        Some(&CppTokenKind::Scope)
+                    );
+                }
+            }
+            CppTokenKind::Semicolon
+            | CppTokenKind::LeftBrace
+            | CppTokenKind::RightBrace
+            | CppTokenKind::RightParen
+            | CppTokenKind::RightBracket
+            | CppTokenKind::Colon
+            | CppTokenKind::Assign
+            | CppTokenKind::Arrow
+            | CppTokenKind::Eof
+            | CppTokenKind::None
+            | CppTokenKind::LineComment
+            | CppTokenKind::BlockComment => return false,
+            _ => {}
+        }
+    }
+
+    false
+}
+
 /// Parse an operator name after the `operator` keyword.
 /// Is the `&&` at the cursor a **ref-qualifier** rather than part of a conversion operator's type?
 ///
@@ -2000,6 +2063,25 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
     }
 
     // The name, if there is one.
+    //
+    // A declarator's name can never be a **bare template-id**. `C<T> x;` declares `x` with the type `C<T>`: the
+    // arguments belong to the *type*, and the name that follows is a plain identifier. Reading them as the name
+    // is what made `C<T> && C2<T>;` — two template-ids joined by a `&&` — a declaration of an rvalue reference
+    // whose declarator was named `C2<T>`: well formed, lossless, no diagnostic, and a binding no compiler would
+    // accept. A template-id in the name position is a name only when it is *qualified*, where the arguments
+    // belong to the qualifier: `S<T>::f` names `f`.
+    //
+    // Refusing here is what turns that statement back into the expression it is: the declaration reading fails,
+    // and the caller falls back — the same bounded backtracking the declaration/expression ambiguity already
+    // relies on. See `a_bare_template_id_is_here`.
+    if a_bare_template_id_is_here(p) {
+        p.close_marks_above(base);
+        return Err(CppParseError::syntax_error_from(
+            "a declarator's name cannot have template arguments",
+            p.current_token_range(),
+        ));
+    }
+
     let named = named_inside_parentheses
         || matches!(
             p.current_token(),
@@ -2230,17 +2312,23 @@ fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
     expect_token(p, CppTokenKind::Less)?;
 
     while !p.is_eof() {
-        // A `>` closes this list exactly when it has no opener of its own: scanning forward from it,
-        // the angles balance at zero before any unmatched `<` appears.
+        // A `>` **here** closes this list, and no lookahead is needed to know it.
         //
-        // This is deliberately *not* a comparison of nesting depths. Recomputing a depth on either
-        // side of a sub-parse gives different answers for the same token, because parsing an inner
-        // list splits a `>>` into two `>`s and changes what the scan counts. Asking "does this `>`
-        // already belong to someone else?" has one answer regardless of when it is asked.
+        // "Here" is the boundary *between* arguments, and by the time the loop comes back around,
+        // every nested list inside the argument just read has already been consumed — along with its
+        // own `>`. A `>` still standing at an element boundary has no opener of its own left to
+        // belong to, so it can only be ours.
+        //
+        // This used to scan forward from the `>` and give up as soon as it saw a `<`, reading that as
+        // "an inner list still wants this `>`". The direction is the error: a `<` to the *right* says
+        // nothing about a `>` to its left. The rule rejected the first of two template-ids in one
+        // expression — `requires C<T> && C2<T>` failed at the `>` of `C<T>`, one template argument
+        // short of the end — and that shape is not rare: it is what every conjunction of two concepts
+        // is written as, and `T<A>::value < T<B>::value` is the same shape.
         //
         // `split_closing_angle` has already turned any `>>` into a lone `>` by the time we look, so
         // this is the only place the closer is consumed.
-        if p.current_token() == CppTokenKind::Greater && closer_belongs_to_this_list(p) {
+        if p.current_token() == CppTokenKind::Greater {
             p.bump();
             return Ok(m.complete(p));
         }
@@ -2313,54 +2401,6 @@ fn split_closing_angle(p: &mut CppParser) -> bool {
         }
         _ => false,
     }
-}
-
-/// Is the cursor on a `>`-family token that can close a template argument list?
-///
-/// The read-only counterpart of [`split_closing_angle`], for callers that need to ask without
-/// mutating the token stream.
-/// Is the `>` at the cursor the closer of the template argument list being parsed?
-///
-/// A `>` belongs to this list when no `<` between it and here is still waiting for it — that is, when
-/// scanning forward from the `>` the angle nesting returns to zero before going positive.
-///
-/// The alternative, comparing nesting depths computed before and after a sub-parse, is unreliable:
-/// parsing an inner argument list splits `>>` into two `>`s, which changes what the same forward scan
-/// counts and silently shifts the reference point. Looking forward from the `>` itself has one answer
-/// whenever it is asked.
-fn closer_belongs_to_this_list(p: &CppParser) -> bool {
-    let mut depth = 0isize;
-
-    for kind in p.peek_token_kind_at(1..96) {
-        match kind {
-            // An unmatched `<` after this `>` means the `>` was already claimed by it.
-            CppTokenKind::Less => return false,
-            CppTokenKind::Greater => {
-                depth -= 1;
-                if depth < 0 {
-                    return true;
-                }
-            }
-            CppTokenKind::RightShift => {
-                depth -= 2;
-                if depth < 0 {
-                    return true;
-                }
-            }
-            // A `>` never closes across one of these.
-            CppTokenKind::Semicolon
-            | CppTokenKind::LeftBrace
-            | CppTokenKind::RightBrace
-            | CppTokenKind::LeftParen
-            | CppTokenKind::Eof
-            | CppTokenKind::None => return true,
-            _ => {}
-        }
-    }
-
-    // Reached the end of the lookahead window without finding an opener: treat it as ours, so a
-    // truncated template argument list still closes rather than reporting a bogus nesting error.
-    true
 }
 
 /// Parse one template argument: a type, a template-id, or a constant expression.

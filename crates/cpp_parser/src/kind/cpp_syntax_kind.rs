@@ -104,6 +104,15 @@ pub enum CppSyntaxKind {
     /// Concept declaration (C++20)
     /// e.g.: template<typename T> concept Copyable = ...;
     ConceptDecl,
+
+    /// A **requires-clause**: `requires` followed by a constraint expression.
+    /// e.g.: the `requires C<T>` of `template <typename T> void f(T t) requires C<T>;`
+    ///
+    /// A node of its own rather than a bare `requires` token in the declaration, because the clause is what a
+    /// consumer asks a declaration for when it wants to know whether the declaration is *constrained* — and
+    /// finding it by scanning the declaration's tokens means re-implementing where a clause may appear, which is
+    /// four places.
+    RequiresClause,
     // ========== Statements ==========
     /// Compound statement - block of statements in braces
     /// e.g.: { statement1; statement2; }
@@ -261,6 +270,20 @@ pub enum CppSyntaxKind {
     /// different nodes because they are different constructs: a rethrow is only a statement, and a throw whose
     /// value is used is only an expression.
     ThrowExpr,
+
+    /// A **requires-expression** (C++20): `requires (params) { requirements }`.
+    /// e.g.: `requires(T t) { t.f(); }`, `requires { typename T::type; }`
+    ///
+    /// It is a `bool`-valued expression — the one expression whose *body* is a list of things that must be
+    /// well-formed rather than a computation.
+    RequiresExpr,
+
+    /// One requirement inside a requires-expression's body.
+    /// e.g.: `t.f()`, `typename T::type`, `{ t.f() } noexcept -> int`, `requires C<T>`
+    ///
+    /// The four kinds share a node because they share a position and a delimiter: each is one requirement up to
+    /// its `;`. What differs is inside, and a consumer that needs the difference reads the tokens it holds.
+    Requirement,
 
     /// Lambda expression (C++11)
     /// e.g.: [capture](params) -> return_type { body }

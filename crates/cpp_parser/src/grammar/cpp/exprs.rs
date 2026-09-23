@@ -166,6 +166,15 @@ fn is_fold_operator(p: &CppParser, token: CppTokenKind) -> bool {
 /// Only the assignment family is, and getting it wrong is a shape rather than an error: `a = b = c` read as
 /// left-associative produces `(a = b) = c`, which is not a thing anyone writes and is not what the source says.
 fn is_right_associative(token: CppTokenKind) -> bool {
+    is_assignment_operator(token)
+}
+
+/// Is this one of the assignment operators — `=` and the ten compound forms?
+///
+/// The list has two readers and they must agree: associativity, and the right operand's being an
+/// initializer-clause rather than an expression. An operator in one list and not the other is a shape bug in
+/// `x += {1}` that no error message would point at.
+fn is_assignment_operator(token: CppTokenKind) -> bool {
     matches!(
         token,
         CppTokenKind::Assign
@@ -202,6 +211,72 @@ pub fn parse_expr(p: &mut CppParser) -> ParseResult {
 /// the `...` for the list to trip over. That is exactly what happened when this was first written without it.
 pub fn parse_assignment_expr(p: &mut CppParser) -> ParseResult {
     parse_expr_up_to(p, Level::Assignment, true)
+}
+
+/// One argument of a call: an expression, or a **braced-init-list**.
+///
+/// `v.push_back({1, 2})` and `f({})` are ordinary C++ and were a gap of exactly the kind the assignment rule
+/// had: the grammar's argument is an *initializer-clause*, wider than an expression, and a `{` in argument
+/// position cannot begin anything else — so the token picks the reading and there is no ambiguity to resolve.
+///
+/// It is not folded into [`parse_assignment_expr`] because that reader is also the element reader for lists
+/// where a `{` means something else: `int a[] = {1, 2}` reads its elements with it, and a braced-init-list read
+/// there would nest a second `InitListExpr` inside the first. The call arm is the only list whose elements may
+/// be braces, so the choice belongs to the call arm.
+pub fn parse_argument(p: &mut CppParser) -> ParseResult {
+    if p.current_token() == CppTokenKind::LeftBrace {
+        return super::decls::parse_braced_initializer(p);
+    }
+
+    parse_assignment_expr(p)
+}
+
+/// An expression that must **not** swallow a `{` as a braced initializer, for a constraint.
+///
+/// This exists for one construct and one failure: a requires-clause sits between a declarator and the body of a
+/// definition, so the `{` after the constraint opens the *body* —
+///
+/// ```text
+/// template <typename T> void f(T t) requires C<T> { }
+///                                            ^ the constraint ends here
+/// ```
+///
+/// — while the expression grammar reads a `{` after an expression as C++11's list-initialisation of a temporary
+/// (`Vec<int>{1, 2}`). Left alone, `requires C<T> { }` came out as a constraint of `C<T>{}` with the body
+/// missing.
+///
+/// A constraint can never need a braced initializer: `requires C<T> { }` as a *definition* is the only reading
+/// that has a body, and a constraint that really wants one writes it in parentheses — `requires (C<T>{})`. So
+/// refusing the reading here takes nothing away.
+///
+/// The marker is on the parser rather than passed down, because it has to hold for the **whole** constraint: a
+/// `{` after any part of it belongs to the same body, however deeply the expression nests.
+pub fn parse_constraint_expr(p: &mut CppParser) -> ParseResult {
+    let previous = p.enter_constraint();
+    let result = parse_expr(p);
+    p.leave_constraint(previous);
+    result
+}
+
+/// The expression inside the braces of a **compound requirement**: `{ expr } noexcept -> type`.
+///
+/// It is the ordinary expression reader with the trailing-`noexcept` reading refused — see
+/// [`CppParser::is_in_a_constraint`], which the postfix rule consults for it. A `noexcept` directly after the
+/// expression belongs to the *requirement*:
+///
+/// ```text
+/// { t.f() } noexcept -> int;   the call, and then the requirement's exception specification
+/// { t.f() noexcept }           … the same tokens, and the `noexcept` is still the requirement's
+/// ```
+///
+/// Without the refusal the postfix loop takes `noexcept` as part of the expression, the requirement ends there,
+/// and the `}` that was meant to close the compound requirement has nothing left to close — which came out as
+/// `expected }` against the requirement's own closing brace.
+fn parse_requirement_expression(p: &mut CppParser) -> ParseResult {
+    let previous = p.enter_constraint();
+    let result = parse_expr(p);
+    p.leave_constraint(previous);
+    result
 }
 
 /// [`parse_expr`] without the trailing-`...` reading, for the one rule that spells the ellipsis itself.
@@ -245,6 +320,10 @@ pub fn parse_expr_without_pack_expansion(p: &mut CppParser) -> ParseResult {
 /// | `decls::finish_init_declarator` (bit-field arm) | bit-field widths |
 /// | `decls::parse_template_parameter` (default-argument arm) | template parameters |
 /// | `types::parse_template_argument` (expression fallback) | template arguments |
+///
+/// The call arm reads each element with [`parse_argument`] rather than [`parse_assignment_expr`] directly,
+/// because an argument may also be a braced-init-list — and that choice belongs to the *call* arm. See
+/// [`parse_argument`] for why the other lists must not make it.
 ///
 /// **Every entry after the first four was added because something failed**, which is the argument for writing
 /// this table before changing the reader rather than after it:
@@ -374,6 +453,18 @@ fn parse_binary_expr_with_precedence(p: &mut CppParser, min_prec: u8) -> ParseRe
         let m = left.precede(p, CppSyntaxKind::BinaryExpr);
         p.bump(); // consume operator
 
+        // The right operand of an **assignment** is an *initializer-clause*, which is a wider rule than an
+        // expression: `x = {1, 2};` assigns a braced-init-list, and a `{` cannot begin an expression at all.
+        // There is nothing to disambiguate here — only a rule that was missing.
+        //
+        // It produces the same `InitListExpr` a declaration's initializer produces; the two differ only in the
+        // grammar production that reached it, and both are a consumer's answer to "what is being assigned?".
+        if is_assignment_operator(operator) && p.current_token() == CppTokenKind::LeftBrace {
+            super::decls::parse_braced_initializer(p)?;
+            left = m.complete(p);
+            continue;
+        }
+
         // 左结合运算符用 `prec + 1`,右结合用 `prec` —— 差值就是"是否允许同级运算符继续往右吃"。
         // C++ 里只有赋值族是右结合,见 [`is_right_associative`]。
         let next_min_prec = if is_right_associative(operator) {
@@ -446,6 +537,39 @@ fn parse_unary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
             if !throw_has_no_operand(p) {
                 parse_unary_expr(p, fold_operand)?;
             }
+            Ok(m.complete(p))
+        }
+
+        // A **requires-expression** (C++20): `requires (params) { requirements }`.
+        //
+        // It is a `bool`-valued expression whose body lists things that must be *well-formed* rather than
+        // operations to perform, which is why it has a rule of its own rather than being a call or a block.
+        //
+        // This is the rule that `RequiresKeyword`'s entry in [`is_expression_keyword`] was a promise for. That
+        // list exists to keep the *name* branch from swallowing a keyword some other rule handles; `requires` was
+        // on it with no rule consuming it, so the dispatcher stepped aside for a token nothing claimed and the
+        // fallback reported `expected primary expression` against it. A place on that list is a promise — the
+        // same one `co_await` and `throw` broke before it.
+        CppTokenKind::RequiresKeyword if starts_a_requires_expression(p) => {
+            parse_requires_expression(p)
+        }
+
+        // `noexcept(expr)` — an operator only when it has its **payload**, and the payload is what tells it from
+        // the exception specification of a function: `void f() noexcept` and `void f() noexcept(true)` are the
+        // same keyword, and only the parenthesis separates them.
+        //
+        // A conditional arm rather than an unconditional one, for that reason: reading a bare `noexcept` as an
+        // expression would take the specification away from the declaration rule that owns it. With the
+        // parenthesis required, the two readings cannot collide — no expression is a bare `noexcept`, and no
+        // exception specification is `noexcept(...)` *in operand position*.
+        //
+        // `NoexceptKeyword` was already in [`is_expression_keyword`] — the list that keeps the name branch from
+        // swallowing it — with no rule consuming it, which is the same empty promise `co_await`, `throw` and
+        // `requires` each turned out to be.
+        CppTokenKind::NoexceptKeyword if p.peek_next_token() == CppTokenKind::LeftParen => {
+            let m = p.mark(CppSyntaxKind::UnaryExpr);
+            p.bump(); // `noexcept`
+            parse_unary_expr(p, fold_operand)?; // the payload, parentheses and all
             Ok(m.complete(p))
         }
 
@@ -936,11 +1060,15 @@ fn parse_postfix_suffixes(
 
                 // 解析参数列表。Each argument is read *below* the comma operator, because the commas here are
                 // the list's own — see [`parse_assignment_expr`].
+                //
+                // An argument may also be a **braced-init-list** — `v.push_back({1, 2})` — which is an
+                // initializer-clause rather than an expression, exactly as on the right of an assignment. A `{`
+                // in argument position cannot be anything else, so the reading is chosen by the token.
                 if p.current_token() != CppTokenKind::RightParen {
-                    parse_assignment_expr(p)?;
+                    parse_argument(p)?;
                     while p.current_token() == CppTokenKind::Comma {
                         p.bump(); // consume ','
-                        parse_assignment_expr(p)?;
+                        parse_argument(p)?;
                     }
                 }
 
@@ -1006,7 +1134,11 @@ fn parse_postfix_suffixes(
             // A `{` that is *not* this — the block of a lambda, a compound statement after a declaration —
             // never reaches the loop, because the lambda consumes its own body and a statement's `{` is the
             // next statement rather than a suffix of this expression.
-            CppTokenKind::LeftBrace => {
+            //
+            // **Except inside a constraint**, where the `{` belongs to the definition the constraint is written
+            // on. See [`CppParser::is_in_a_constraint`]: `requires C<T> { }` would otherwise come out as a
+            // constraint of `C<T>{}` with the body missing.
+            CppTokenKind::LeftBrace if !p.is_in_a_constraint() => {
                 let marks_before = p.open_marks();
                 let m = expr.precede(p, CppSyntaxKind::InitListExpr);
                 if let Err(err) = super::decls::parse_braced_initializer(p) {
@@ -1261,6 +1393,195 @@ fn is_expression_keyword(p: &CppParser) -> bool {
             | CppTokenKind::CoAwaitKeyword
             | CppTokenKind::RequiresKeyword
     )
+}
+
+/// Is the `requires` at the cursor the start of a **requires-expression**?
+///
+/// `requires` is a *contextual* keyword: it is also a perfectly good identifier, and the standard allows a
+/// program to use it as one. So the token alone says nothing and what follows it does — a requires-expression is
+/// always `requires` followed by a parameter list or the body:
+///
+/// ```text
+/// requires { g(); }        the body alone
+/// requires (T t) { ... }   parameters, then the body
+/// requires = 1;            a variable named `requires`
+/// requires(x);             a call to a function named `requires`
+/// ```
+///
+/// A `(` is the one needing care, because `requires(x);` is a call. The lookahead walks the parenthesised part
+/// and asks whether a `{` follows it — a body, which a call cannot have. Asking rather than assuming is what
+/// keeps the identifier reading available.
+fn starts_a_requires_expression(p: &CppParser) -> bool {
+    match p.peek_token_kind_at(1..2).first() {
+        Some(&CppTokenKind::LeftBrace) => true,
+        Some(&CppTokenKind::LeftParen) => {
+            // Walk to the matching `)` of the parameter list and ask whether a body follows it.
+            let mut depth = 0isize;
+            let mut offset = 1usize;
+            for kind in p.peek_token_kind_at(1..128) {
+                offset += 1;
+                match kind {
+                    CppTokenKind::LeftParen => depth += 1,
+                    CppTokenKind::RightParen => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return p.peek_token_kind_at(offset..offset + 1).as_slice()
+                                == [CppTokenKind::LeftBrace];
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Parse a requires-expression: `requires (params) { requirement... }`.
+fn parse_requires_expression(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::RequiresExpr);
+
+    p.bump(); // `requires`
+
+    // The parameter list, when it is written. A requires-expression's parameters are the ordinary ones —
+    // `requires(T t)`, `requires(std::vector<int> v)` — so the parameter rule is reused rather than re-spelled.
+    if p.current_token() == CppTokenKind::LeftParen
+        && let Err(err) = super::decls::parse_parameter_list(p)
+    {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    if p.current_token() != CppTokenKind::LeftBrace {
+        p.close_marks_above(base);
+        return Err(CppParseError::syntax_error_from(
+            "expected `{` after `requires`",
+            p.current_token_range(),
+        ));
+    }
+    p.bump(); // `{`
+
+    // The body: one requirement per `;`. A requirement may hold anything an expression can, so the `;` is what
+    // says where each one ends.
+    while p.current_token() != CppTokenKind::RightBrace && !p.is_eof() {
+        if let Err(err) = parse_requirement(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+        if p.current_token() == CppTokenKind::Semicolon {
+            p.bump();
+            continue;
+        }
+        break;
+    }
+
+    if p.current_token() != CppTokenKind::RightBrace {
+        p.close_marks_above(base);
+        return Err(CppParseError::syntax_error_from(
+            "expected `}`",
+            p.current_token_range(),
+        ));
+    }
+    p.bump(); // `}`
+
+    Ok(m.complete(p))
+}
+
+/// One requirement of a requires-expression's body.
+///
+/// The four kinds the standard lists, and the shape of each is what tells them apart at the cursor:
+///
+/// ```text
+/// t.f();                       simple      — an expression
+/// typename T::value_type;      type        — a `typename` name
+/// { t.f() } noexcept -> int;   compound    — a braced expression, then the exceptions and the result type
+/// requires C<T>;               nested      — a requires-clause of its own, which is why it nests
+/// ```
+///
+/// All four become one [`CppSyntaxKind::Requirement`] node: they share a position and a `;`, and what differs is
+/// inside.
+fn parse_requirement(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::Requirement);
+
+    match p.current_token() {
+        // A nested requirement: `requires C<T>;`. The clause rule is shared with the declaration side, which is
+        // the whole reason `requires` nests — the two spell the same thing.
+        CppTokenKind::RequiresKeyword => {
+            if let Err(err) = super::decls::parse_requires_clause(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+        }
+
+        // A type requirement: `typename T::value_type;`. Also the `template`-disambiguated spelling
+        // `typename T::template rebind<U>;`, which is why this goes through the type-id rule.
+        CppTokenKind::TypenameKeyword => {
+            if let Err(err) = super::types::parse_type_id(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+        }
+
+        // A compound requirement: `{ expr } noexcept -> type;`.
+        CppTokenKind::LeftBrace => {
+            p.bump(); // `{`
+            // The braced part is an expression **up to the `}`**, so the reader has to stop there — and it must
+            // also stop before a `noexcept`, because that token belongs to the *requirement* rather than to the
+            // expression: `{ t.f() noexcept }` is a call whose exceptions are specified, not a call with
+            // `noexcept` in it. `parse_requirement_expression` is the reader that stops at both.
+            if let Err(err) = parse_requirement_expression(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+            if let Err(err) = expect_token(p, CppTokenKind::RightBrace) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+
+            // The optional exception specification, which may carry a condition: `noexcept(false)`.
+            if p.current_token() == CppTokenKind::NoexceptKeyword {
+                let specification = p.mark(CppSyntaxKind::NoexceptSpec);
+                p.bump();
+                if p.current_token() == CppTokenKind::LeftParen {
+                    p.bump();
+                    if let Err(err) = parse_expr(p) {
+                        p.close_marks_above(base);
+                        return Err(err);
+                    }
+                    if let Err(err) = expect_token(p, CppTokenKind::RightParen) {
+                        p.close_marks_above(base);
+                        return Err(err);
+                    }
+                }
+                specification.complete(p);
+            }
+
+            // The optional result type: `-> int`, `-> std::same_as<T>`.
+            if p.current_token() == CppTokenKind::Arrow {
+                let trailing = p.mark(CppSyntaxKind::TrailingReturnType);
+                p.bump(); // `->`
+                if let Err(err) = super::types::parse_type_id(p) {
+                    trailing.undo(p);
+                    p.close_marks_above(base);
+                    return Err(err);
+                }
+                trailing.complete(p);
+            }
+        }
+
+        // A simple requirement: an expression that has to be well-formed.
+        _ => {
+            if let Err(err) = parse_expr(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+        }
+    }
+
+    Ok(m.complete(p))
 }
 
 /// Does the `[` at the cursor introduce a lambda rather than an index expression?

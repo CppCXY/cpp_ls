@@ -350,4 +350,81 @@ int nested = 1;
 
 namespace alias = outer::inner;
 
+// --- concepts and constraints ----------------------------------------------
+// One word, four constructs, each nested in the others: a constrained template parameter, a
+// requires-clause after the parameter list and after a declarator, a concept whose constraint is a
+// requires-expression, and a requires-expression used as an ordinary expression.
+template <typename T>
+concept Sized = requires(T t) {
+    t.size();
+    { t.empty() } noexcept -> bool;
+    typename T::value_type;
+    requires sizeof(T) > 1;
+};
+
+template <typename T>
+concept Container = Sized<T> && requires(T t) { t.begin(); };
+
+template <typename T>
+concept Addable = requires(T a, T b) { a + b; } || requires(T a) { -a; };
+
+template <Sized T>
+void takes_a_sized(T& value) { }
+
+template <Container<T> U>
+struct Wrapper { };
+
+template <typename T>
+    requires Sized<T> && Container<T>
+void constrained(T& value) { }
+
+template <typename T>
+void trailing(T& value) requires Sized<T> && Container<T>
+{
+    auto sized = requires { value.size(); };
+    if constexpr (requires { value.begin(); }) {
+        static_assert(requires(T t) { t.size(); });
+    }
+}
+
+template <typename T>
+    requires Sized<T>
+struct Constrained {
+    void member(T& value) requires Container<T> { }
+};
+
+template <typename T>
+    requires requires(T t) { t.size(); }
+void nested_clause(T& value) { }
+
+// A parenthesised constraint, which the standard *requires* for anything that is not a conjunction of primary
+// expressions: `requires N == 0` is ill-formed and `requires (N == 0)` is not.
+template <typename T>
+    requires (sizeof(T) > 1) && (sizeof(T) < 64)
+void parenthesised(T& value) { }
+
+template <int N>
+    requires (N > 0)
+struct Bounded { };
+
+// A constraint after a trailing return type — the clause follows the `-> T`, never precedes it.
+template <typename T>
+auto trailing_after_return(T& value) -> decltype(value.size()) requires Sized<T>
+{
+    return value.size();
+}
+
+// --- braced initialisers where the grammar wants an initializer-clause ------
+void braced_arguments(std::vector<int>& values) {
+    int value = 0;
+    value = {1};
+    value += {2};
+    values.push_back({1, 2});
+    values = {};
+}
+
+// --- explicit instantiations -----------------------------------------------
+extern template void forward_all<int>(int);
+extern template struct Wrapper<Constrained<int>>;
+
 }  // namespace probe

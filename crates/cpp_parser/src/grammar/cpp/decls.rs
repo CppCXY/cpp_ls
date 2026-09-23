@@ -67,19 +67,152 @@ fn parse_template_head(p: &mut CppParser) -> ParseResult {
     // A template parameter list has the same `>`-closes-the-list property an argument list has:
     // `template <int N = 3>` must not read the `>` as "greater than". Restored on every exit path.
     let previous_depth = p.enter_template_arguments();
-    let result = parse_template_head_inner(p);
+    let result = parse_template_head_inner(p, previous_depth);
     p.leave_template_arguments(previous_depth);
     result
 }
 
-fn parse_template_head_inner(p: &mut CppParser) -> ParseResult {
+fn parse_template_head_inner(p: &mut CppParser, outer_depth: usize) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::TemplateDecl);
 
     expect_token(p, CppTokenKind::TemplateKeyword)?;
 
-    // C++20 template parameter lists may end in a requires-clause; that comes after the list.
     if let Err(err) = parse_template_parameter_list(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    // The parameter list is over, so the angles are closed and a `>` from here on is the greater-than operator
+    // again. The clause below is where that shows: `template <typename T> requires (sizeof(T) > 1) void f();`
+    // read the `>` as closing a template argument list that had already ended, and reported `expected )`.
+    //
+    // Restoring the *outer* depth rather than zero, in case this head is itself written inside template
+    // arguments. The caller's own restore handles the way out.
+    p.leave_template_arguments(outer_depth);
+
+    // C++20: a template head may end in a **requires-clause**: `template <typename T> requires C<T> void f();`.
+    // It comes after the parameter list and before whatever the head introduces, which is why this is the place
+    // that can read it — the clause belongs to neither the parameters nor the declaration.
+    if p.current_token() == CppTokenKind::RequiresKeyword
+        && let Err(err) = parse_requires_clause(p)
+    {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    Ok(m.complete(p))
+}
+
+/// Parse a **concept declaration** (C++20): `concept Name = constraint;`.
+///
+/// Entered with the template head already consumed, so the cursor is on `concept`. The four parts are `concept`,
+/// a name, `=`, and a constraint — and the constraint is read as an expression, because that is what it is.
+///
+/// The name is a plain name rather than a declarator: a concept introduces a *name* for a constraint, with no
+/// type and no declarator around it, which is why this rule exists instead of the general one.
+fn parse_concept_declaration(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::ConceptDecl);
+
+    expect_token(p, CppTokenKind::ConceptKeyword)?;
+
+    // The name. Optional in the grammar's own terms only for recovery: a concept without a name is broken, and
+    // saying so once is better than consuming whatever follows as one.
+    if p.current_token() == CppTokenKind::Identifier {
+        if let Err(err) = parse_name(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+    } else {
+        p.close_marks_above(base);
+        return Err(CppParseError::syntax_error_from(
+            "expected a concept name",
+            p.current_token_range(),
+        ));
+    }
+
+    if let Err(err) = expect_token(p, CppTokenKind::Assign) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    // The constraint, and then a requires-clause of its own may follow: `concept C = true && requires { … };`
+    // is one expression, while `concept C = X requires Y;` is not valid — so there is no clause to read here.
+    // What *is* read is the expression, and a requires-expression inside it is handled by the expression rule.
+    //
+    // Read with the braced-initialiser reading refused, for the same reason a requires-clause does: the
+    // constraint ends at the `;`, and a `{` in it belongs to a requirement rather than to an initializer.
+    if let Err(err) = super::exprs::parse_constraint_expr(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    if let Err(err) = expect_semicolon(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    Ok(m.complete(p))
+}
+
+/// Is the `requires` at the cursor a **requires-clause** rather than an identifier?
+///
+/// `requires` is contextual, so the token alone decides nothing — `int requires = 1;` and `f(requires);` are both
+/// valid programs, and a clause has to be told from them. The test is the one the type grammar uses for its own
+/// ambiguities and for the same reason: **try the reading and see whether it consumes anything**.
+///
+/// ```text
+/// requires C<T>;              a clause: a constraint follows
+/// requires (C<T>);            a clause: a parenthesised constraint
+/// requires requires { … }     a clause whose constraint is a requires-expression
+/// requires = 1;               an identifier — `=` cannot begin a constraint, so nothing is consumed
+/// requires;                   … and neither can `;`
+/// requires(x);                a call — the parenthesis is consumed as a *constraint*, and what follows tells
+/// ```
+///
+/// An earlier version of this asked what the token after `requires` was, from a list of "tokens that can begin an
+/// expression". That list was wrong within minutes — it left out `&&`, so `requires C<T> && C2<T>` read the
+/// clause as ending at `C<T>` — and it would have gone on being wrong for every operator added later. Trying the
+/// parse has no such list to maintain, and it is the same bounded backtracking the declaration/expression
+/// ambiguity already relies on.
+fn starts_a_requires_clause(p: &mut CppParser) -> bool {
+    let checkpoint = p.checkpoint();
+    let started_at = p.current_token_index();
+    let parsed = parse_requires_clause(p);
+    let consumed = parsed.is_ok() && p.current_token_index() > started_at;
+    p.rollback(checkpoint);
+    consumed
+}
+
+/// Parse a **requires-clause**: `requires` followed by a constraint expression.
+///
+/// Called from the four places the standard allows one, and shared by all of them because the clause is the same
+/// construct in each — only its position differs:
+///
+/// ```text
+/// template <typename T> requires C<T> void f();          after the template parameter list
+/// template <typename T> void f(T t) requires C<T>;       after the declarator
+/// template <typename T> struct S requires C<T> { };      after a class head
+/// template <typename T> concept C = requires { f(); };   … and nested inside a requires-expression
+/// ```
+///
+/// The constraint is read as an **expression**, which is what it is: `C<T>`, `C<T> && C2<T>`, `sizeof(T) > 4`,
+/// `(C<T>)`, and a requires-expression are all expressions, and the operator rules already know how to read all
+/// of them. Nothing here needs to know which of them it got.
+///
+/// It stops where an expression stops, which is what makes the clause safe to read in a position where a
+/// declaration follows: `requires C<T> void f();` ends the constraint at `void`, because `void` cannot continue
+/// an expression.
+pub fn parse_requires_clause(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::RequiresClause);
+
+    expect_token(p, CppTokenKind::RequiresKeyword)?;
+
+    // The constraint, read with the braced-initialiser reading refused: the `{` after it opens the *body* of
+    // whatever the clause constrains. See [`super::exprs::parse_constraint_expr`].
+    if let Err(err) = super::exprs::parse_constraint_expr(p) {
         p.close_marks_above(base);
         return Err(err);
     }
@@ -261,6 +394,23 @@ fn parse_template_parameter(p: &mut CppParser) -> ParseResult {
 /// Returns `Err` without having consumed anything when the input does not look like a declaration,
 /// so the caller can fall back to parsing an expression statement.
 pub fn parse_declaration(p: &mut CppParser) -> ParseResult {
+    // A declaration is the one place a bare template-id may stand where a *name* belongs, and only when the
+    // declaration is an **explicit instantiation**: `extern template void f<int>(int);` names the instantiation
+    // it asks for, and that name is a template-id. Everywhere else `C<T> x;` gives the arguments to the type.
+    //
+    // Cleared on entry and restored on the way out, on every path including the error ones: a flag that
+    // outlived its declaration would let the *next* one read a bare template-id as a name, which is the silent
+    // wrong tree the rule exists to prevent. See [`crate::grammar::cpp::types::a_bare_template_id_is_here`].
+    let outer = p.in_an_explicit_instantiation();
+    p.set_in_an_explicit_instantiation(false);
+
+    let result = parse_declaration_here(p);
+
+    p.set_in_an_explicit_instantiation(outer);
+    result
+}
+
+fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
     let checkpoint = p.checkpoint();
 
@@ -403,6 +553,11 @@ pub fn parse_declaration(p: &mut CppParser) -> ParseResult {
     {
         p.bump(); // `extern`
         p.bump(); // `template`
+
+        // What follows names the instantiation, and for a function that name is a **template-id**:
+        // `extern template void f<int>(int);`. Recorded for the declarator rule, which otherwise refuses one —
+        // correctly, since a declarator's name may not have template arguments in any other declaration.
+        p.set_in_an_explicit_instantiation(true);
     }
 
     // The `export` of `export int helper();`, consumed *inside* the declaration node rather than at the
@@ -437,6 +592,22 @@ pub fn parse_declaration(p: &mut CppParser) -> ParseResult {
     // marker unpaired — which the translation-unit assertion reports as a rule that unwound past its owner.
     if p.current_token() == CppTokenKind::UsingKeyword {
         if let Err(err) = parse_using_declaration(p) {
+            p.rollback(checkpoint);
+            return Err(err);
+        }
+        return Ok(m.complete(p));
+    }
+
+    // A **concept declaration** (C++20): `template <typename T> concept C = constraint;`.
+    //
+    // Dispatched here, after the head, because that is the shape of the construct: a concept always has one. It
+    // is also why it is dispatched beside `using` and `typedef` rather than at the top of this function — at the
+    // top the cursor is on the `template` keyword.
+    //
+    // A concept has no return type and no declarators — it is `concept`, a name, `=`, and a constraint — so the
+    // general rule below, which begins with a specifier sequence, has nothing to start from.
+    if p.current_token() == CppTokenKind::ConceptKeyword {
+        if let Err(err) = parse_concept_declaration(p) {
             p.rollback(checkpoint);
             return Err(err);
         }
@@ -852,6 +1023,28 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
         CppTokenKind::Colon if p.last_declarator_is_function() => {
             parse_member_initializer_list(p)?;
         }
+        // A **requires-clause** after the declarator (C++20): `void f(T t) requires C<T>;`.
+        //
+        // Read here because this is where a declarator ends — and it is restricted to a **function** declarator,
+        // which is the flag the neighbouring arms already consult. The standard requires more than that
+        // ([dcl.decl.general]/5: the clause belongs to a *templated* function), but a function is the part of it
+        // that is visible in the tokens, and it is the part that matters: the clause is followed by a body or a
+        // `;`, and nothing else can follow a declarator with the token `requires`.
+        //
+        // **`struct S requires C<T> { };` is not read, and that is deliberate.** The grammar gives a class head
+        // no clause at all, and reading one used to detach the class body: the `{ }` that follows the constraint
+        // was left for the statement rule, so the tree came out as a *struct declaration* followed by a
+        // `CompoundStat` at file scope — well formed, lossless, no diagnostic, and with the class's members
+        // belonging to nothing. Reporting `expected ;` against the `requires` is both what the standard says and
+        // the only reading that keeps the body where it belongs.
+        //
+        // `requires` is contextual, so the clause is only taken when what follows can begin a constraint;
+        // `requires` used as an identifier (`int requires = 1;`) reaches here as a plain token and is left alone.
+        CppTokenKind::RequiresKeyword
+            if p.last_declarator_is_function() && starts_a_requires_clause(p) =>
+        {
+            parse_requires_clause(p)?;
+        }
         // A bit-field: `int bits : 3;`, `unsigned flags : 1, spare : 7;`.
         //
         // The same `:` in the same position as a member-initializer list, and the enclosing construct is what
@@ -973,13 +1166,21 @@ pub fn parse_function_suffix_or_initializer(
     // reading goes first and the parameter reading is what gets rewound instead. Inside a body the call is the
     // ordinary reading and the order is left alone; see [`a_declaration_is_the_better_reading`].
     //
+    // This preference is for a declaration with **no type**, which is what `Max(a, b);` is. A type keyword in
+    // front of the declarator's name settles the question the preference was guessing at, and the parameter
+    // reading is the right one — `void f(T);` is a function with one unnamed parameter, not a variable `f`
+    // initialised with the value `T`. Reading it as a variable was a *silent* wrong tree: well formed, lossless,
+    // and no diagnostic. See [`a_type_keyword_precedes_the_declarator_name`].
+    //
     // The second form is the same argument one level down: once the leading name *is* a type this file declared,
     // the parentheses follow a declarator name, and `Inner(1)` in them is a value being constructed rather than
     // a parameter. That reading is what a parameter list gets wrong — it takes `Inner` for a parameter's type
     // and then reads `(1)` as that parameter's default argument, which is a declaration of a function nobody
     // wrote.
     let declarator_is_named = p.has_declaration_type_name();
-    if (p.is_at_file_scope() && the_arguments_look_like_declarators(p, false)
+    if (p.is_at_file_scope()
+        && !a_type_keyword_precedes_the_declarator_name(p)
+        && the_arguments_look_like_declarators(p, false)
         || declarator_is_named && the_arguments_look_like_declarators(p, true))
         && let Ok(parsed) = parse_the_initializer(p)
     {
@@ -1593,11 +1794,68 @@ fn declarator_starts_with_a_type_keyword(p: &CppParser) -> bool {
     })
 }
 
-/// Does a declarator begin where the cursor stands?
+/// Is a **type keyword** written immediately before the declarator's name — the `void` in `void f(T)`?
 ///
-/// Used to refuse the empty reading of a parenthesized declarator. Only the openings that can start one are
-/// accepted: the `(` of `g()` can start neither a declarator nor a name, so the reading is refused before the
-/// parse is attempted rather than after it fails to say anything.
+/// The question the direct-initialisation heuristic has to ask at the `(` of a declarator, and one
+/// [`declarator_starts_with_a_type_keyword`] cannot answer: that one reads the *first* token of the whole
+/// declaration, which a template head pushes away — `template <typename T> void f(T)` begins with `template`.
+/// Here the walk starts at the declarator's own name, so the head is behind it and the type is in front.
+///
+/// A qualified name is stepped over as one thing: in `void A::f(T)` the name before the `(` is `A::f`, and the
+/// type is still the `void` in front of it.
+///
+/// The answer matters because a declaration that *has* a type must take the parameter reading of the
+/// parentheses, however its contents are spelled:
+///
+/// ```text
+/// void f(T);        a function with one unnamed parameter of type `T`
+/// template <typename T> void f(T) { }
+/// ```
+///
+/// Both used to be read as *variables* — `f` initialised with the value `T` — because a list of bare names is
+/// the one shape a direct-initialiser and a parameter list share, and at file scope the initialiser reading was
+/// preferred for it. That preference exists for `Max(a, b);`, a declaration with **no type at all**; a `void` in
+/// front of the name settles the question the preference was guessing at.
+fn a_type_keyword_precedes_the_declarator_name(p: &CppParser) -> bool {
+    let mut index = p.current_token_index();
+    let mut seen_an_identifier = false;
+
+    while index > 0 {
+        index -= 1;
+        let kind = p.token_kind_at(index);
+
+        if is_declaration_trivia(kind) {
+            continue;
+        }
+        if matches!(
+            kind,
+            CppTokenKind::Semicolon | CppTokenKind::LeftBrace | CppTokenKind::RightBrace
+        ) {
+            return false;
+        }
+
+        match kind {
+            CppTokenKind::Identifier => seen_an_identifier = true,
+            // A `::` in front of the name just read: this is a qualified name, so the walk continues to the
+            // segment in front of it.
+            CppTokenKind::Scope if seen_an_identifier => seen_an_identifier = false,
+            // The token in front of the name — `auto` and `decltype` are left out for the reason
+            // [`declarator_starts_with_a_type_keyword`] gives: both can begin an expression as readily.
+            _ if seen_an_identifier => {
+                return super::types::is_type_specifier_keyword(kind)
+                    && !matches!(
+                        kind,
+                        CppTokenKind::AutoKeyword | CppTokenKind::DecltypeKeyword
+                    );
+            }
+            _ => return false,
+        }
+    }
+
+    false
+}
+
+/// Does a declarator begin where the cursor stands?
 fn starts_a_declarator(p: &CppParser) -> bool {
     matches!(
         p.current_token(),

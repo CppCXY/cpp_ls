@@ -111,6 +111,32 @@ pub struct CppParser<'a> {
     /// expression grammar cannot know that, so it asks. A counter rather than a flag because the
     /// lists nest, and the innermost closer belongs to the innermost list.
     template_argument_depth: usize,
+    /// Is the cursor inside a **constraint** — a requires-clause or a concept's expression?
+    ///
+    /// One thing changes there, and it is the reason this exists: a `{` after an expression is normally C++11's
+    /// list-initialisation of a temporary (`Vec<int>{1, 2}`), but a constraint is followed by the **body** of the
+    /// definition it constrains:
+    ///
+    /// ```text
+    /// template <typename T> void f(T t) requires C<T> { }
+    ///                                            ^ the constraint ends here, and this opens the body
+    /// ```
+    ///
+    /// So inside a constraint the braced-initialiser reading is refused and the `{` is left for whoever owns it.
+    /// Nothing is taken away: a constraint that genuinely wants list-initialisation writes it in parentheses —
+    /// `requires (C<T>{})` — and a constraint can never *be* followed by a body it should swallow.
+    ///
+    /// A `usize` rather than a bool because the contexts nest: a requires-expression inside a constraint holds
+    /// requirements, each of which is an expression, and leaving the innermost one must not clear the flag for the
+    /// clause around it.
+    constraint_depth: usize,
+    /// Is the declaration being parsed an **explicit instantiation** — `extern template void f<int>(int);`?
+    ///
+    /// It is the one declaration in which a bare template-id is a valid *name*, so
+    /// [`crate::grammar::cpp::types::parse_declarator`] asks before refusing one. Set where the `extern
+    /// template` is consumed and cleared at the start of every declaration, so it cannot outlive the one it
+    /// belongs to and let a later declaration read a name it should not.
+    in_an_explicit_instantiation: bool,
     /// Did the declarator parsed most recently declare a function?
     ///
     /// Set by [`crate::grammar::cpp::types::parse_declarator`] and read by
@@ -256,6 +282,8 @@ impl<'a> CppParser<'a> {
             open_marks: Vec::new(),
             closed_marks: std::collections::HashMap::new(),
             template_argument_depth: 0,
+            constraint_depth: 0,
+            in_an_explicit_instantiation: false,
             last_declarator_is_function: false,
             type_names: TypeNames::new(),
             declaration_type_name: None,
@@ -297,6 +325,8 @@ impl<'a> CppParser<'a> {
             open_marks: Vec::new(),
             closed_marks: std::collections::HashMap::new(),
             template_argument_depth: 0,
+            constraint_depth: 0,
+            in_an_explicit_instantiation: false,
             last_declarator_is_function: false,
             type_names: TypeNames::new(),
             declaration_type_name: None,
@@ -661,6 +691,40 @@ impl<'a> CppParser<'a> {
     /// Leave a template argument list, restoring the depth `enter_template_arguments` returned.
     pub fn leave_template_arguments(&mut self, previous: usize) {
         self.template_argument_depth = previous;
+    }
+
+    /// Is the cursor inside a **constraint**, where a `{` is not a braced initialiser?
+    ///
+    /// See the field's documentation. Read by the postfix rule, which is the one that would otherwise take the
+    /// `{` after a requires-clause for list-initialisation and swallow the body of the definition.
+    pub fn is_in_a_constraint(&self) -> bool {
+        self.constraint_depth > 0
+    }
+
+    /// Enter a constraint. Returns the previous depth so the caller can restore it.
+    pub fn enter_constraint(&mut self) -> usize {
+        let previous = self.constraint_depth;
+        self.constraint_depth += 1;
+        previous
+    }
+
+    /// Leave a constraint, restoring the depth `enter_constraint` returned.
+    pub fn leave_constraint(&mut self, previous: usize) {
+        self.constraint_depth = previous;
+    }
+
+    /// Is the declaration being parsed an **explicit instantiation**? See the field's documentation.
+    ///
+    /// Read by the declarator rule, which is the one that would otherwise refuse the template-id naming the
+    /// instantiation: `extern template void f<int>(int);` names `f<int>`, and a bare template-id is not a name
+    /// anywhere else.
+    pub fn in_an_explicit_instantiation(&self) -> bool {
+        self.in_an_explicit_instantiation
+    }
+
+    /// Record whether this declaration is an explicit instantiation, handing back the previous answer.
+    pub fn set_in_an_explicit_instantiation(&mut self, value: bool) -> bool {
+        std::mem::replace(&mut self.in_an_explicit_instantiation, value)
     }
 
     /// Record whether the declarator just parsed declared a function. See the field's docs.

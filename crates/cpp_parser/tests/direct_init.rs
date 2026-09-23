@@ -438,3 +438,96 @@ fn count_of(source: &str, kind: CppSyntaxKind) -> usize {
         .filter(|node| CppSyntaxKind::from(node.kind()) == kind)
         .count()
 }
+
+/// A function whose parameter is an **unnamed** type: `void f(T);`, not `void f(T t);`.
+///
+/// The list of bare names is the one shape a direct-initialiser and a parameter list share — `Widget w(T)` and
+/// `void f(T)` are the same tokens — and at file scope the initialiser reading was preferred for it, because the
+/// shape it was written for is `Max(a, b);`: a declaration with **no type at all**, where a call statement at
+/// file scope is not a thing. The preference was guessing.
+///
+/// A type keyword in front of the declarator's name is not a guess. `void f(T);` has a type, so the parentheses
+/// are a parameter list, and reading them as a value made the declaration a **variable** — `f` initialised with
+/// the value `T`. That reading is well formed, lossless and reported nothing: an A0-class wrong tree, and the
+/// definition spelled the same way was worse still, because the body's `{` then had no declaration to belong to
+/// and the whole thing was refused.
+///
+/// The forms that must **not** change are the ones the preference exists for, and they are asserted beside it.
+#[test]
+fn an_unnamed_parameter_of_an_unknown_type_is_a_parameter() {
+    for source in [
+        "void f(T);\n",
+        "void f(T) { }\n",
+        "int f(T);\n",
+        "template <typename T> void f(T);\n",
+        "template <typename T> void f(T) { }\n",
+        "template <typename T> void g(T, T);\n",
+        "void f(std::vector<T>);\n",
+        "struct S { void f(T); };\n",
+    ] {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert_eq!(
+            tree.get_errors(),
+            [],
+            "{source:?} must parse cleanly, got {:?}",
+            tree.get_errors()
+        );
+        assert_eq!(
+            count_of(source, CppSyntaxKind::ParameterList),
+            1,
+            "{source:?}: the parentheses are a parameter list"
+        );
+        assert_eq!(
+            count_of(source, CppSyntaxKind::Initializer),
+            0,
+            "{source:?}: the declaration is not a variable initialised from a value"
+        );
+    }
+
+    // One parameter, unnamed: the count is the assertion, because a wrong reading produces zero here.
+    assert_eq!(
+        count_of("void f(T);\n", CppSyntaxKind::Parameter),
+        1,
+        "the parameter is read even though it has no name"
+    );
+
+    // And the shapes the initialiser preference exists for keep their reading — a declaration with **no type**,
+    // and a declaration whose type is a name this file knows.
+    assert_declaration("Widget w(1, 2);\n");
+    assert_declaration("Widget w(Inner(1));\n");
+    assert_declaration("std::string s(other);\n");
+    // The shape the whole preference exists for, unchanged — see
+    // `unknown_leading_names_become_declarations_at_file_scope`.
+    assert_declaration("Max(a, b);\n");
+
+    // One consequence is worth pinning: a keyword type in front of the name now buys the **same** reading at
+    // file scope that it has always had inside a body, where the parameter reading is tried first. `int a(b)`
+    // is a function declaring one unnamed parameter of type `b` in both places — which is what C++ says when
+    // `b` names a type, and the reading this file already committed to at block scope.
+    assert_eq!(
+        count_of("int a(b);\n", CppSyntaxKind::ParameterList),
+        1,
+        "at file scope"
+    );
+    assert_eq!(
+        count_of("void f() { int a(b); }\n", CppSyntaxKind::ParameterList),
+        2,
+        "the same reading inside a body — one for `f`, one for `a`"
+    );
+
+    // Still a gap, and a **loud** one, so it is registered rather than fixed here: a qualified declarator name
+    // with an unnamed parameter of a bare unknown type. The name is folded into the type by the specifier
+    // sequence (`void Widget::draw`), so the declarator has no name of its own, and the parameter reading of
+    // `(T)` fails where it succeeds for `(int)`, for `(Canvas&)` and for `(std::vector<int>)`.
+    //
+    //   void Widget::draw(T) { }        refused
+    //   void Widget::draw(int) { }      read
+    //   void Widget::draw(Canvas&) { }  read
+    let refused = "void Widget::draw(T) { }\n";
+    assert!(
+        !CppParser::parse(refused, ParserConfig::default())
+            .get_errors()
+            .is_empty(),
+        "{refused:?} is a known gap: it is reported, not silently misread"
+    );
+}

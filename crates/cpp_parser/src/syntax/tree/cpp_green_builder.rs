@@ -207,9 +207,16 @@ mod tests {
 
         // "a" must be a *sibling* of DeclStat, and "b" must be *inside* it. A flat tree here would
         // mean the builder lost the nesting, which is the bug this assertion exists to catch.
+        //
+        // The expected kind is spelled from the enum rather than pasted in as `SyntaxKind(32794)`.
+        // The literal version said nothing a reader could check, and it went stale — with a failure
+        // message about nesting — the moment an unrelated kind was added to the enum.
         assert_eq!(
             shape(&green),
-            r#""a"SyntaxKind(32794)("b")"#,
+            format!(
+                "\"a\"{:?}(\"b\")",
+                rowan::SyntaxKind::from(CppSyntaxKind::DeclStat)
+            ),
             "children were not nested under their node"
         );
         assert_eq!(green.kind(), CppSyntaxKind::TranslationUnit.into());
@@ -262,6 +269,12 @@ mod tests {
         builder.finish_node();
 
         let green = builder.finish(text);
-        assert_eq!(shape(&green), r#""a"SyntaxKind(32794)("b")"#);
+        assert_eq!(
+            shape(&green),
+            format!(
+                "\"a\"{:?}(\"b\")",
+                rowan::SyntaxKind::from(CppSyntaxKind::DeclStat)
+            )
+        );
     }
 }

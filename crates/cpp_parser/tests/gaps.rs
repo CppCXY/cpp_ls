@@ -475,6 +475,22 @@ fn constructs_the_parser_reads() {
             "try { } catch (const E& e) { }",
             "goto label; label: ;",
             "int x = {1};",
+            // A **braced-init-list** where the grammar says *initializer-clause* rather than *expression*: the
+            // right-hand side of an assignment and an argument of a call. Both were reached only after the
+            // empty-declarator defect was fixed, because `x = {1};` used to be read — silently, and wrongly — as
+            // a declaration of a variable whose declarator named nothing. See `expressions.rs`.
+            "x = {1};",
+            "x = {1, 2};",
+            "x = {};",
+            "x += {1};",
+            "v.push_back({1, 2});",
+            "f({1});",
+            "f(a, {1});",
+            // A **requires-expression**, which is one of the three places a braced-init-list is *not* read: a
+            // `{` inside a constraint opens a requirement.
+            "auto r = requires { g(); };",
+            "if constexpr (requires { g(); }) { }",
+            "static_assert(requires { g(); });",
             // A parenthesised variable is an expression, not a cast — the shape that made the cast rule
             // precise rather than eager.
             "x = (a);",
@@ -540,6 +556,38 @@ fn constructs_the_parser_reads() {
             "decltype(x) v[2];",
             "noexcept(f()) g();",
             "const decltype(x) y = 1;",
+            // **`concept` and `requires`** — the largest single block of missing grammar. Four constructs share
+            // the one word: a constrained template parameter, a requires-clause after the template parameter
+            // list, the same clause after a declarator, and a requires-expression, which is a primary expression
+            // and can therefore be nested anywhere an expression can.
+            "template <typename T> concept C = true;",
+            "template <typename T> concept C = requires(T t) { t.f(); };",
+            "template <typename T> concept C = C2<T> && C3<T>;",
+            "template <C T> void f(T t);",
+            "template <C<T> U> void f(U u);",
+            "template <typename T> requires C<T> void f(T t);",
+            "template <typename T> requires C<T> && C2<T> void f(T t);",
+            "template <typename T> requires (C<T>) void f(T t);",
+            "template <typename T> void f(T t) requires C<T>;",
+            "template <typename T> void f(T t) requires C<T> { }",
+            "template <typename T> void f(T t) requires requires(T t) { t.f(); };",
+            "void f() requires true;",
+            // The clause **after a trailing return type**, which is the only order the standard allows: the
+            // clause belongs to the init-declarator, so it follows the whole declarator, the `-> T` included.
+            "template <typename T> auto g(T t) -> int requires C<T>;",
+            // A parenthesised constraint — which the standard *requires* around anything that is not a
+            // conjunction of primary expressions: `requires (N > 0)` is valid and `requires N > 0` is not.
+            "template <typename T> requires (sizeof(T) > 1) && (sizeof(T) < 64) void h(T t);",
+            "template <int N> requires ((N >> 1) > 0) void h();",
+            "template <typename T> void f(T t) requires C<T> && C2<T> { }",
+            // A function whose parameter is **unnamed**: `void f(T)`, not `void f(T t)`. The same tokens as a
+            // direct-initialised variable, and at file scope the variable reading used to win — silently, since
+            // a variable declaration with a direct initialiser is perfectly well formed. See `direct_init.rs`.
+            "void f(T);",
+            "void f(T) { }",
+            "template <typename T> void f(T) { }",
+            "template <typename T> void f(T) requires C<T> { }",
+            "void f(std::vector<T>);",
         ],
     );
 
@@ -734,6 +782,13 @@ fn constructs_are_read_as_the_right_node() {
         shape("value = other;", Where::Body, CppSyntaxKind::ExpressionStat),
         shape("x = f();", Where::Body, CppSyntaxKind::ExpressionStat),
         shape("x = a ? b : c;", Where::Body, CppSyntaxKind::ExpressionStat),
+        shape("x = { 1 };", Where::Body, CppSyntaxKind::ExpressionStat),
+        shape("x = { 1, 2 };", Where::Body, CppSyntaxKind::ExpressionStat),
+        // Two template-ids joined by `&&`. The declaration reading is available — `C<T>` is a type and `&&` an
+        // rvalue reference — and it used to win, producing a *declaration* whose declarator was named `C2<T>`:
+        // well formed, lossless, and no diagnostic. A declarator's name cannot have template arguments, which is
+        // what settles the reading. See `expressions.rs`.
+        shape("C<T> && C2<T>;", Where::Body, CppSyntaxKind::ExpressionStat),
         shape("x = 1;", Where::File, CppSyntaxKind::ExpressionStat),
         // The other side of the same gate: a declaration *is* a declaration, and a qualified declarator keeps
         // its declaration reading even though it names nothing for the declarator rule to take — the name was
@@ -916,6 +971,59 @@ fn modern_constructs_produce_the_right_nodes() {
         ("auto y = cond ? throw 1 : 2;", CppSyntaxKind::ThrowExpr),
         // An inline namespace is a namespace, not a declaration of something called `namespace`.
         ("inline namespace v1 { }", CppSyntaxKind::NamespaceDecl),
+        // `concept` and `requires`: the declaration, the clause and the expression are three different nodes,
+        // and the *clause* is the one a wrong reading keeps well formed. `RequiresExpr` is a primary expression,
+        // so the three places it can be written are three different rules reaching the same node.
+        (
+            "template <typename T> concept C = true;",
+            CppSyntaxKind::ConceptDecl,
+        ),
+        (
+            "template <typename T> requires C<T> void f(T t);",
+            CppSyntaxKind::RequiresClause,
+        ),
+        (
+            "template <typename T> void f(T t) requires C<T> { }",
+            CppSyntaxKind::RequiresClause,
+        ),
+        // The clause after a trailing return type, and one after a template head on a class. A clause after a
+        // *class head* is deliberately not read: the grammar gives it none, and reading one used to hand the
+        // class body to the statement rule — see `concepts.rs`.
+        (
+            "template <typename T> auto g(T t) -> int requires C<T>;",
+            CppSyntaxKind::RequiresClause,
+        ),
+        (
+            "template <typename T> requires C<T> struct S { };",
+            CppSyntaxKind::RequiresClause,
+        ),
+        (
+            "template <typename T> concept C = requires(T t) { t.f(); };",
+            CppSyntaxKind::RequiresExpr,
+        ),
+        ("auto r = requires { g(); };", CppSyntaxKind::RequiresExpr),
+        (
+            "auto r = requires(T t) { t.f(); };",
+            CppSyntaxKind::Requirement,
+        ),
+        // A braced-init-list in *expression* position, which is an `InitListExpr` and not the `Initializer` a
+        // declaration produces. `x = {1};` was a silent wrong tree until the empty-declarator defect was fixed,
+        // and the two nodes are how a consumer tells "a declaration initialised with braces" from "an assignment
+        // of a braced-init-list".
+        ("x = {1};", CppSyntaxKind::InitListExpr),
+        ("v.push_back({1, 2});", CppSyntaxKind::InitListExpr),
+        ("int x = {1};", CppSyntaxKind::Initializer),
+        // An **unnamed parameter** is a parameter, and the count is the assertion: the variable reading produced
+        // zero of them and a well-formed declaration instead. See `direct_init.rs`.
+        ("void f(T);", CppSyntaxKind::Parameter),
+        (
+            "template <typename T> void f(T) { }",
+            CppSyntaxKind::ParameterList,
+        ),
+        (
+            "template <typename T> void f(T) { }",
+            CppSyntaxKind::CompoundStat,
+        ),
     ]);
 
     // Exactly one parameter: the silent version produced zero here and a phantom member beside it.
@@ -928,5 +1036,18 @@ fn modern_constructs_produce_the_right_nodes() {
             .count(),
         1,
         "an explicit object parameter is one parameter"
+    );
+
+    // And exactly one clause: a clause read as ending at its first term leaves the rest of the constraint to be
+    // read by whatever follows, which is well formed and wrong. See `concepts.rs`.
+    let source = "template <typename T> requires C<T> && C2<T> void f(T t);";
+    assert_eq!(
+        CppParser::parse(source, ParserConfig::default())
+            .get_red_root()
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::RequiresClause)
+            .count(),
+        1,
+        "a conjunction of two concepts is one clause"
     );
 }

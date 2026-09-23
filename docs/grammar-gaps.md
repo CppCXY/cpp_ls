@@ -69,6 +69,44 @@ matches!(p.current_token(), CppTokenKind::Assign)
 
 **护栏**：`gaps.rs::constructs_are_read_as_the_right_node` 钉住 18 条语句的节点类型；`direct_init.rs::an_assignment_is_not_a_declaration` 与 `a_qualified_declarator_keeps_its_reading` 钉住这条门的两侧。
 
+### A0-2. 无名参数的函数声明被读成变量 —— 已修复
+
+```cpp
+void f(T);                              // 0 报错、0 ErrorNode，读成"变量 f 用值 T 直接初始化"
+template <typename T> void f(T) { }     // 报错：类体的 `{` 没地方放
+template <typename T> void f(T) requires C<T>;   // 同上
+```
+
+**现象**：`void f(T);` 读成
+
+```
+Syntax(Declaration)
+  Syntax(DeclSpecifierSeq)   void
+  Syntax(InitDeclarator)
+    Syntax(Declarator)
+      Syntax(NameExpr)       f
+      Syntax(Initializer)
+        Syntax(ArgumentList) (T)
+```
+
+——一个**直接初始化的变量**，而不是"一个无名形参的函数"。只有 `void f(T);`（声明）是静默的；带函数体时 `{` 没有声明可归，于是响亮报错。
+
+**性质**：缺规则（判据不够细）。**成因**：`T x(...)` 的两种读法——直接初始化与形参列表——token 完全相同，只能靠判据。`parse_function_suffix_or_initializer` 里有一条**文件作用域优先读初始化器**的规则，为的是 `Max(a, b);`：那里**根本没有类型**（`Max` 是被当成类型的那个名字），而文件作用域不存在调用语句，所以优先当声明。问题在于这条规则问的是"括号里是不是一串裸名字"，`(T)` 满足，于是 `void f(T);` 也走了这条路——**尽管它的声明已经有一个明确的类型关键字 `void`**。
+
+**修复**：新增 `a_type_keyword_precedes_the_declarator_name`——从 `(` 往前，跨过声明符自己的名字（限定名 `A::f` 也整个跨过），看紧挨着的那个 token 是不是类型关键字。是，就说明这条声明**有类型**，括号只能是形参列表，初始化器优先那条规则不适用（它本来是为"没有类型的声明"写的）。
+
+**为什么不能复用旁边那个同名的判据**：`declarator_starts_with_a_type_keyword` 找的是**整条声明的第一个** token，而模板头把它推远了——`template <typename T> void f(T)` 的第一个 token 是 `template`，不是类型关键字，于是这条最该被修的写法恰好落在判据之外。新的判据从声明符自己的名字起往前看，模板头在它身后，类型在它身前。
+
+**顺带的一致性**：`int a(b);` 在**块作用域**里一直读成形参列表（`a_parameter_list_is_not_a_value_list` 早就钉住了它），而文件作用域读成变量——同一串 token 两种读法。修完之后两处一致，也与 C++ 在 `b` 是类型时给的答案一致。
+
+**仍留着的一条（响亮，已登记下条 B14）**：**限定名 + 无名裸类型形参**。
+
+**护栏**：`direct_init.rs::an_unnamed_parameter_of_an_unknown_type_is_a_parameter`（9 条必须读成形参列表的写法、4 条必须保持原读法的写法、1 条已知缺口的报错断言）；`gaps.rs` 已支持清单 5 条、形状断言 3 条（`Parameter` 的**计数**是关键——错误读法下它是 0）。
+
+### A0-3. requires-clause 写在类头上时类体被丢到文件作用域 —— 已修复（见 C1）
+
+`template <typename T> struct S requires C<T> { };` 曾经读成"结构体声明 + 文件作用域上的一个 `CompoundStat`"：类体不再属于类。它同时是**非标准写法**（标准里类头没有 requires-clause 的位置），所以修法是**拒收**而不是补规则——详见 C1 条目。
+
 ---
 
 ## A 类：静默错树
@@ -309,6 +347,48 @@ decltype(x)* p;            // 一直读得出
 
 **护栏**：`modern.rs::a_decltype_declaration_has_a_declarator` 断言**恰好一个 `InitDeclarator` 与一个 `Declarator`**——缺陷版本在这些位置是 0，而"能解析吗"这个问法看不见它。
 
+### B12. `requires` / `concept` 作标识符
+
+```cpp
+int requires = 1;            // expected a type specifier
+void f() { requires = 1; }   // 同上
+int concept = 2;             // 同上
+```
+
+**性质**：缺规则，但在**词法层**。**成因**：`cpp_lexer.rs` 把 `requires` 和 `concept` 登记成了关键字，于是它们永远到不了"这是个名字"的分支。它们其实是**上下文关键字**——`final`、`override`、`module`、`import` 都是按标识符进入 parser 再按文本判定的，只有这两个没有。
+
+**为什么不在修 C1 时顺手做**：改词法是全表改动（parser 里有 18 处按 `RequiresKeyword`/`ConceptKeyword` 判定），每一处都要改成按文本判定，而**漏掉一处的症状是"clause 不被识别"这种响亮错误，混在 C1 自己的改动里不容易与它区分**。分开做，改动面才看得清。
+
+**处置**：半天。级别 B：报错、局部、无静默风险。
+
+### B13. 不带 `extern` 的显式实例化
+
+```cpp
+template void f<int>(int);          // expected <, but get void
+template int v<int>;                // 同上
+template class C<int>;              // 同上
+```
+
+**性质**：缺规则。**成因**：`template` 后面直接跟类型说明符时，`parse_template_head` 要求 `<`，于是整个声明被回退。带 `extern` 的那半（`extern template …`）已经能读——B10 修的就是它，而两条路走的是**不同的代码**：`extern template` 在声明规则里就地消费两个关键字，裸 `template` 则先撞上模板头。
+
+**处置**：半天。级别 B。
+
+### B14. 限定名 + 无名裸类型形参
+
+```cpp
+void Widget::draw(T) { }        // expected primary expression —— 报错
+void Widget::draw(int) { }      // 读得出
+void Widget::draw(Canvas&) { }  // 读得出
+void Widget::f(T t) { }         // 读得出
+void Widget::f(T);              // 读得出
+```
+
+**性质**：缺规则（与 A0-2 同源，但这一支是响亮的）。**成因**：限定名 `Widget::draw` 被 specifier 序列整段当成类型吃掉（`a_qualified_name_is_the_type`），声明符**自己没有名字**；无名声明符 + 裸类型无名形参这一组合下，形参读法失败而初始化器读法也不成立，于是整条声明回退、语句层再失败。
+
+**为什么先不动**：这是 A0-2 那条判据够不到的角落——A0-2 修的是"有类型关键字时不许走初始化器优先"，而这里有类型但类型是**限定名**（不是关键字），另外还叠着"无名声明符"这个状态。要修得先想清楚无名声明符的形参列表该挂在哪里，属于 A0-1 那个"声明符没名字"家族的后续。
+
+**处置**：半天。级别 B（报错，无静默风险）。
+
 ---
 
 ### B6. 别名中的包展开
@@ -349,7 +429,7 @@ auto g = [](int x) { return x; };    // expected primary expression
 
 ## C 类：报错拒收，成本高
 
-### C1. concept 与 requires —— 最大的单块缺口
+### C1. concept 与 requires —— 已修复
 
 ```cpp
 template <typename T> concept C = requires(T t) { t.f(); };   // expected a type specifier @22..29
@@ -360,11 +440,64 @@ template <typename T> concept C = true; template <C T> void f(T t);  // expected
 
 **性质**：缺规则。**成因**：requires 表达式有四个子规则（simple / type / compound / nested requirement），可以任意嵌套，还需要接 requires-clause 和约束参数。
 
-**注意一张空头支票**：`RequiresKeyword` 已经在 `is_expression_keyword` 列表里（`exprs.rs`）。那个列表是一张**承诺**——"有规则会消费这个 token"。requires 没有任何规则消费它，所以它现在只会让名字分支绕开它，然后让 `_` 兜底报 `expected primary expression`。
+**一张空头支票兑现了**：`RequiresKeyword` 早已在 `is_expression_keyword` 列表里（`exprs.rs`）。那个列表是一张**承诺**——"有规则会消费这个 token"——而 requires 没有任何规则消费它，所以它只会让名字分支绕开它，然后让 `_` 兜底报 `expected primary expression`。现在 `parse_primary_expr` 有了对应的分支（见维护约定第 7 条）。
 
-**另外注意**：`template <Number T>` 这种**受约束模板参数是好的**，`template <C T>` 也是。坏的只有 `concept` 声明本身和 requires-表达式。这两件事容易混为一谈。
+**另外注意**：`template <Number T>` 这种**受约束模板参数是好的**，`template <C T>` 也是。坏的只有 `concept` 声明本身和 requires-表达式。这两件事容易混为一谈——修完之后仍然是两件事：受约束参数走的是**类型名**那条路，与 clause 无关。
 
-**处置**：1–2 周，建议单独排期。
+**修复**（一次做完整块，因为四件事共用同一个词）：
+
+| 位置 | 规则 | 节点 |
+|---|---|---|
+| `template <C T>` | 已有的类型名读法，**未改动** | `TemplateParameter` |
+| 模板头之后（`template <…> requires C<T> void f();`） | `parse_requires_clause` | `RequiresClause` |
+| 函数声明符之后（`void f() requires C<T> { }`） | 同一个 `parse_requires_clause` | `RequiresClause` |
+| 表达式位置 | `parse_requires_expression`，四个子规则在读 | `RequiresExpr`、`Requirement` |
+| `concept C = X;` | `parse_concept_declaration` | `ConceptDecl` |
+
+**子规则在语法里的位置是查过标准才写下的**（[temp.pre]、[dcl.decl.general]），两处结论与直觉不同，也因此改掉了实现里的一处**静默错树**：
+
+```text
+template-head:    template < template-parameter-list > requires-clause_opt
+init-declarator:  declarator requires-clause function-contract-specifier-seq_opt
+```
+
+1. **类头没有 requires-clause**。标准里根本没有这个位置，`struct S requires C<T> { };` 是错的。原先实现把它当第四种"标准位置"读了，而**读出来的树是错的**：
+   ```text
+   Declaration(TemplateDecl, DeclSpecifierSeq(StructDef(S)), InitDeclarator(RequiresClause))
+   CompoundStat { }        <- 类体掉到了文件作用域，成了一个"复合语句"
+   ```
+   良构、无损、零报错——A0 类。判据不是"解析了吗"而是"**类体和类还在一起吗**"——这正是第 6 条约定说的形状断言。现在 clause 只接在**函数声明符**之后（`last_declarator_is_function`，相邻分支早就在用的标志），`requires` 原样留下报 `expected ;`，类体留在类里。
+2. **clause 在尾随返回类型之后，不在之前**。`auto f(T t) -> bool requires C<T>;` 对，`auto f(T t) requires C<T> -> bool;` 错——标准在 [dcl.decl.general]/5 的例子把这条与"clause 属于 init-declarator"写在一起。实现天然就是对的（clause 分支在 `eat_function_qualifiers` 读完 `-> T` 之后），现在有测试钉住"错的那半要报错"。
+3. **比标准宽的那一份是刻意的**：`void f() requires true;` 是**非模板函数**，按 [dcl.decl.general]/5 也错，但它被读——函数声明符后面的 clause 只能跟函数体或 `;`，没有第二种读法，宽容不会产生错树。这条写成了带理由的测试，不是默认行为。
+
+**约束的语法比表达式窄，这一点也查过**：`requires-clause: requires constraint-logical-or-expression`，而 constraint-logical-or-expression 是**由 `&&`/`||` 连接的 primary-expression**，所以
+```cpp
+template <int N> requires N == sizeof new unsigned short int f();   // 标准注释：error: parentheses required
+template <int N> requires (N == 0) void f();                        // 对
+```
+标准注释把这条讲得很直白：**不是 primary expression 连 `&&`/`||` 的东西必须加括号**。parser 读的是**完整表达式**（比标准宽），因为约束后面紧跟着声明，宽容换来的是"少一个假报错"，而不是错树：`requires N == 0 void f();` 里 `void` 接不上表达式，clause 自然在那里停住。④（原子约束的括号形式）因此是**读得到的**，`ParenExpr` 保留括号。
+
+**这一条里另一个顺带发现**：模板头的 `enter_template_arguments` **一直开到了 clause 里**。参数列表结束时角括号已经闭合，但深度没有还原，于是 `template <typename T> requires (sizeof(T) > 1) void f();` 里的 `>` 被当成"闭合一个早已结束的模板实参表"，报 `expected )`。修复是在参数列表之后把深度还原成**进入本模板头之前**的值（不是 0——模板头本身可能嵌在模板实参里）。
+
+三个判断值得单独记：
+
+1. **clause 的判据是"试读一遍，看它是否消费了 token"**，不是"下一个 token 在不在某张表里"。第一版用了后者，列了一张"能开始表达式的 token"表，**几分钟内就错了**：漏了 `&&`，于是 `requires C<T> && C2<T>` 把 clause 读成到 `C<T>` 为止。试读没有这张表要维护，用的是这个 parser 早就在别处用的有界回溯。
+2. **约束里拒绝 `{` 作为花括号初始化**（`CppParser::constraint_depth`）。clause 夹在声明符和函数体之间，`requires C<T> { }` 里的 `{` 是**函数体**；而表达式语法把表达式后面的 `{` 读成 C++11 的临时量列表初始化（`Vec<int>{1,2}`）。不拒绝就会得到"C<T>{} 的约束 + 没有函数体"——良构、无损、无报错。深度而不是 bool，因为约束会嵌套（requires 表达式里的 requirement 又是表达式）。
+3. **`noexcept` 进了一元运算符，但带条件**：只有后面跟着 `(` 才算（`noexcept(g())` 是表达式），否则那是函数的异常说明。它在清单里从来没被当过运算符，所以 `requires requires(T t) { { t.f() } noexcept -> int; }` 之前停在 `noexcept` 上。
+
+**另外三件旧缺陷，被 C1 露出来并一起修掉**（都不是 C1 自己的规则；加上前面的类头 A0 与模板头角深度，这一条一共带出五件）：
+
+- **模板实参表的收尾判据方向错了**（`closer_belongs_to_this_list`）。它从 `>` 往后扫，一看到 `<` 就认为"这个 `>` 是别人要的"。方向反了：**右边的 `<` 说明不了左边的 `>`**。后果是 `C<T> && C2<T>` 在第一个 `>` 上失败——而这不是罕见形状，它是**每一条两个 concept 的合取**，`T<A>::value < T<B>::value` 是同一个形状。现在元素边界上的 `>` 直接就是本表的收尾符：能回到这个边界，说明前面那个实参里所有嵌套的表都已经收完了。
+- **声明符的名字不能是裸 template-id**（A0 级，静默错树）。`C<T> && C2<T>;` 在修好上一条之后仍然"通过"——被读成**声明**：`C<T> &&` 是右值引用类型，声明符名叫 `C2<T>`。良构、无损、无报错、无 `ErrorNode`，而这是任何编译器都不会接受的绑定。判据在 token 里就有：`C<T> x;` 的实参属于**类型**，名字是 `x`；template-id 只有当它是**限定名**时才是名字（`S<T>::f`，实参属于限定部分）。例外只有一个——**显式实例化**，那里名字真的是 template-id（`extern template void f<int>(int);`），所以标志位只在那条路上置起，且由 `parse_declaration` 在每条路径上复位。
+- **花括号初始化列表在表达式位置没有读法**：`x = {1};`、`x += {1};`、`v.push_back({1, 2})`、`f({1})`。C++ 在这里要的是 *initializer-clause*，比表达式宽——赋值右操作数和调用实参都是。`x = {1};` 曾经靠 A0-1 的错树"过"，A0-1 修好之后它变成响亮报错，缺的规则才露出来。**一个缺陷会遮住另一个缺陷**：这不是新坏的，是一直错着、只是错得安静。
+
+**护栏**：`tests/concepts.rs`（12 条：四种子规则、两个标准位置、一个宽容位置、一处**拒收**、括号形式与角括号记号、clause 范围、body 不被吞、类头拒收后类体仍在类里）、`expressions.rs` 的两条、`gaps.rs` 已支持清单里的 16 条与形状断言 4 条。
+
+**一句话结论**：C1 的代价不在"写四条规则"，而在**它把语句读成表达式之后，原先被错树遮住的规则开始被走到**。这一条里三件旧缺陷都是这么露出来的，没有一件是 C1 弄坏的。
+
+**仍不支持**（新登记，见下面 B12/B13）：`requires`/`concept` 作**标识符**（词法层把它们当关键字了）；不带 `extern` 的显式实例化 `template void f<int>(int);`。
+
+**分析层待办**（parser 之外的下一环）：`ConceptDecl` 是新节点，`scopes.rs` 的 `declaration` 走 `declaration_parts`，而后者在**没有声明符**的声明上早退（`is_unnamed_declaration`），所以 concept 的名字目前**不被绑定**——引用它解析不到符号。`BindingKind` 也没有 concept 这一种。修它需要新增一种绑定类别并想清楚 `is_type_like` 的答案（concept 不是类型，但出现在类型名的位置），所以单列，不塞进这一条。
 
 ### C2. 包展开（pack expansion）—— 已修复
 
@@ -476,12 +609,18 @@ operator bool() &&  // && 和 ( 分开     -> 这是成员函数的引用限定�
 | 10 | 替代运算符记号 + `throw` 表达式 | B8, B9 | 半天 | **完成** |
 | 11 | `extern template` + `inline namespace` | B10 | 半天 | **完成** |
 | 12 | `decltype` 作类型说明符（两个叠加缺陷） | B11 | 半天 | **完成** |
-| 13 | concept / requires | C1 | 1–2 周 | 待办 |
+| 13 | concept / requires（含三件顺带发现） | C1 | 1–2 周 | **完成** |
+| — | `requires`/`concept` 作标识符（词法层） | B12 | 半天 | 待办 |
+| — | 不带 `extern` 的显式实例化 | B13 | 半天 | 待办 |
+| — | 限定名 + 无名裸类型形参 `void Widget::draw(T) { }` | B14 | 半天 | 待办 |
 | — | `namespace` 与名字之间的属性 | B3 残留 | 半天 | 待办 |
+| — | `void()` 作表达式 | B5 | 半天 | 待办（很少见） |
 | — | `(MyType)1.5`（裸名字 cast）、`(f)(x)` 的调用读法 | T1 取舍的那半 | — | **不做** |
 | — | `asm volatile`、`__attribute__` | D | — | **不做** |
 
 第 6 项排在 C1 之前，理由和它的级别一样：它是**唯一一类连 `ErrorNode` 都不留的错树**，而 C1 虽然贵，至少是响亮的。
+
+第 13 项的实际成本远低于预估的"1–2 周"，原因值得记下来：**四件事共用一条判据**（试读一遍看是否消费 token），而不是四条各自维护一张 token 表。真正花时间的是它顺带暴露的旧事——模板实参表的收尾方向、声明符名字不能是裸 template-id、花括号初始化列表在表达式位置没有读法、类头 clause 把类体丢掉、模板头角深度漏进 clause、无名形参被读成变量——**没有一件在 C1 的计划里，也没有一件是 C1 弄坏的**。它们是 C1 把语句读成表达式之后才**露出来**的：一个缺陷会遮住另一个缺陷。
 
 第 7、8 项连着做，因为是同一件事的两面：两个运算符都是"同时也是标点的运算符"，都需要一条**不在运算表里**的判据。第 7 项的清单（`exprs.rs` 的 `Level` 文档）在第 8 项里没有用上——cast 不与任何列表争 token——但它在第 7 项自己身上抓到了两个漏掉的调用点（pack expansion 与位域宽度），值得保留成模板。
 
@@ -504,4 +643,6 @@ operator bool() &&  // && 和 ( 分开     -> 这是成员函数的引用限定�
 4. 语料探针 `crates/cpp_parser/examples/corpus/constructs.cpp` 是找缺漏的手段，不是缺漏的记录处。它必须保持 **0 error、0 ErrorNode**，所以发现缺漏时**不要**把坏构造留在里面。
 5. **改公共入口的读写规则时**（例如让某个 token 在 `parse_expr` 里多一种含义），必须同时列出所有**自己拼这串 token** 的规则并逐一验证。C2 的修复在 `cargo test` 全绿的情况下弄坏了 GNU case 区间和 lambda 捕获列表，两个都是靠语料库和抽查才发现的。
 6. **改的是"某个构造读成什么"时，同时加一条 `gaps.rs` 的形状断言**。报错、无损、良构三条判据都拦不住错树（见 A0）；只有"这个构造必须读成这种节点"能拦住。加断言的成本是几行，漏掉它的成本是 A0-1 那样——静默地错在几乎每个函数体里。
-7. **kind 表里有节点、规则里没有产出**，是一张空头支票（`ParenExpr`/`LambdaExpr` 长期如此，`RequiresKeyword` 至今如此）。要么兑现，要么别在表里留。
+7. **kind 表里有节点、规则里没有产出**，是一张空头支票（`ParenExpr`/`LambdaExpr` 长期如此，`RequiresKeyword` 直到 C1 才兑现）。要么兑现，要么别在表里留。
+8. **一个缺陷会遮住另一个缺陷**（第 13 项）：`x = {1};` 曾经靠 A0-1 的错树"通过"，A0-1 修好后它变成响亮报错，花括号初始化列表缺规则这件事才露出来。所以修好一条之后，**把它的邻居再走一遍**——新露出来的缺口往往不是新坏的，而是一直错着，只是从前错得安静。同理，改完一条规则要问的不是"测试还绿吗"，而是"**它以前替谁挡着**"。第 13 项里 A0-2 就是这么被找出来的：为了给 requires-clause 补第四个位置而逐条探针，撞上了 `template <typename T> void f(T) { }`——一句和 concept 毫无关系的写法。
+9. **"旁边有个同名判据"不等于能复用**（A0-2）：`declarator_starts_with_a_type_keyword` 与 `a_type_keyword_precedes_the_declarator_name` 问的看起来是同一件事，实际一个看**整条声明的第一个 token**、一个看**声明符名字前面的那个 token**。模板头正好卡在两者之间，于是最需要修的那条写法落在前者的判据之外。**复用判据之前先问它从哪里开始看**——起点不同，答案就不同。

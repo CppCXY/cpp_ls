@@ -215,3 +215,168 @@ fn a_lambda_body_is_a_compound_statement() {
         parses(source);
     }
 }
+
+#[test]
+fn a_braced_init_list_is_read_where_the_grammar_wants_an_initializer_clause() {
+    // C++ says the right operand of an assignment and an argument of a call are *initializer-clauses*, not
+    // expressions — so `{1, 2}` is allowed in both, and a `{` there cannot begin anything else. Neither was
+    // read, and the two are one gap: the expression grammar had no rule that accepts a `{` at all.
+    //
+    // The assignment half was hidden. `x = {1};` used to parse — as a *declaration* of a variable whose
+    // declarator named nothing, the silent wrong tree described in `an_assignment_is_not_a_declaration` below.
+    // Fixing that turned it into a loud error, which is how the missing rule came to be visible at all.
+    for source in [
+        "void f() { x = { 1 }; }\n",
+        "void f() { x = { 1, 2 }; }\n",
+        "void f() { x = {}; }\n",
+        "void f() { x += { 1 }; }\n",
+        "void f() { x = { 1 }, y = { 2 }; }\n",
+        "void f() { v.push_back({ 1, 2 }); }\n",
+        "void f() { v.push_back({}); }\n",
+        "void f() { f({ 1 }); }\n",
+        "void f() { f(a, { 1 }); }\n",
+        "void f() { f({ 1 }, { 2 }); }\n",
+        "void f() { m.insert({ key, value }); }\n",
+        // The declaration shapes keep their own reading, which is the half that must not change.
+        "void f() { int x = { 1 }; }\n",
+        "void f() { int a[] = { 1, 2 }; }\n",
+        "void f() { auto p = Pair{ 1, 2 }; }\n",
+        "void f() { std::vector<int> v{ 1, 2 }; }\n",
+    ] {
+        parses(source);
+    }
+
+    // The two positions produce the same node, because they are the same production one level apart — and it is
+    // not the `Initializer` a declaration wraps its `= ...` in, which is what keeps "an assignment of a braced
+    // list" distinguishable from "a declaration initialised with braces".
+    assert_eq!(
+        count("void f() { x = { 1, 2 }; }\n", CppSyntaxKind::InitListExpr),
+        1
+    );
+    assert_eq!(
+        count("void f() { x = { 1, 2 }; }\n", CppSyntaxKind::Initializer),
+        0,
+        "an assignment's right-hand side is not a declaration's initialiser"
+    );
+    assert_eq!(
+        count(
+            "void f() { v.push_back({ 1, 2 }); }\n",
+            CppSyntaxKind::InitListExpr
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            "void f() { int xx[] = { 1, 2 }; }\n",
+            CppSyntaxKind::InitListExpr
+        ),
+        1,
+        "a declaration's initialiser is still an InitListExpr, once"
+    );
+
+    // A braced list inside a *constraint* is a requirement and not an initialiser, so the reading is refused
+    // there. See `concepts.rs`.
+    assert_eq!(
+        count(
+            "template <typename T> void f(T t) requires C<T> { }\n",
+            CppSyntaxKind::InitListExpr
+        ),
+        0,
+        "the brace after a constraint is the body"
+    );
+}
+
+#[test]
+fn a_template_id_does_not_claim_the_next_one() {
+    // `C<T> && C2<T>` is two template-ids in one expression, and the first one failed on its own closing `>`.
+    //
+    // The rule that decides where a template argument list ends used to scan forward from the `>` and give up as
+    // soon as it saw a `<`, on the theory that an inner list still wanted the `>`. The direction is the error: a
+    // `<` to the *right* says nothing about a `>` to its left. The shape is not exotic — it is how every
+    // conjunction of two concepts is written, and `T<A>::value < T<B>::value` is the same shape with an operator
+    // between them.
+    for source in [
+        "void f() { C<T> && C2<T>; }\n",
+        "void f() { C<T> || C2<T>; }\n",
+        "void f() { C<T> && C2<T> && C3<T>; }\n",
+        "void f() { T<A>::value < T<B>::value; }\n",
+        "void f() { auto x = C<T> && C2<T>; }\n",
+        "void f() { if (C<T> && C2<T>) { } }\n",
+        "void f() { auto x = f<A>(1) < f<B>(2); }\n",
+        "void f() { std::vector<std::vector<int>> v; }\n",
+        "void f() { std::map<int, std::vector<int>> m; }\n",
+    ] {
+        parses(source);
+    }
+
+    assert_eq!(
+        count(
+            "void f() { C<T> && C2<T>; }\n",
+            CppSyntaxKind::TemplateArgumentList
+        ),
+        2,
+        "two template-ids, two argument lists"
+    );
+    assert_eq!(
+        count("void f() { C<T> && C2<T>; }\n", CppSyntaxKind::BinaryExpr),
+        1,
+        "the `&&` joins them rather than being absorbed"
+    );
+}
+
+#[test]
+fn a_declarator_name_is_never_a_bare_template_id() {
+    // The other half of the same statement. With the argument list fixed, `C<T> && C2<T>;` still parsed — as a
+    // *declaration*, of an rvalue reference whose declarator was named `C2<T>`: well formed, lossless, no
+    // diagnostic, and a binding no compiler would accept.
+    //
+    // A declarator's name cannot have template arguments. `C<T> x;` gives the arguments to the **type** and names
+    // `x`; a template-id in the name position is a name only when it is *qualified*, where the arguments belong
+    // to the qualifier (`S<T>::f` names `f`). Refusing the bare form is what lets the declaration reading fail
+    // and the statement fall back to the expression it is.
+    let source = "void f() { C<T> && C2<T>; }\n";
+    parses(source);
+    assert_eq!(
+        count(source, CppSyntaxKind::ExpressionStat),
+        1,
+        "the statement is an expression"
+    );
+    assert_eq!(
+        count(source, CppSyntaxKind::Declaration),
+        1,
+        "only the function definition is a declaration"
+    );
+    assert_eq!(
+        count(source, CppSyntaxKind::RValueReferenceType),
+        0,
+        "`&&` is the logical operator here, not a declarator's rvalue reference"
+    );
+
+    // What must keep its reading: the **explicit instantiation**, which is the one declaration whose name really
+    // is a template-id, and every shape whose template-id belongs to a type or a qualifier.
+    for source in [
+        "extern template void f<int>(int);\n",
+        "extern template class C<int>;\n",
+        "extern template struct S<int>;\n",
+        "extern template int v<int>;\n",
+        "template <typename T> struct A<T*> { };\n",
+        "template <typename T> void S<T>::f() { }\n",
+        "template <typename T> void S<T>::f() requires C<T> { }\n",
+        "A<int> x;\n",
+        "void f() { A<int> x; }\n",
+        "void f() { std::vector<int> v; }\n",
+        "void f() { T<A>::value = 1; }\n",
+    ] {
+        parses(source);
+    }
+
+    // The flag that suspends the rule belongs to one declaration only: the explicit instantiation above must not
+    // leave the *next* declaration free to read a bare template-id as a name.
+    let source = "extern template void f<int>(int);\nvoid g() { C<T> && C2<T>; }\n";
+    parses(source);
+    assert_eq!(
+        count(source, CppSyntaxKind::ExpressionStat),
+        1,
+        "the declaration after an instantiation is still read by the ordinary rules"
+    );
+}
