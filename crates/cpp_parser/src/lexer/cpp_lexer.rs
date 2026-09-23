@@ -115,8 +115,10 @@ impl<'a> CppLexer<'a> {
             "thread_local" => CppTokenKind::ThreadLocalKeyword,
 
             // C++20 keywords
-            "concept" => CppTokenKind::ConceptKeyword,
-            "requires" => CppTokenKind::RequiresKeyword,
+            // `concept` and `requires` are deliberately **not** here. Both are contextual keywords — the grammar
+            // reads them as keywords in the positions the standard gives them a meaning, and as ordinary names
+            // everywhere else — so the lexer hands them over as identifiers and the grammar decides. See
+            // [`crate::grammar::cpp::is_contextual_keyword`].
             "co_await" => CppTokenKind::CoAwaitKeyword,
             "co_return" => CppTokenKind::CoReturnKeyword,
             "co_yield" => CppTokenKind::CoYieldKeyword,

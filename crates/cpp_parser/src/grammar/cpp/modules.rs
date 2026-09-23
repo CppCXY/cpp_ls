@@ -72,8 +72,12 @@ pub fn starts_import_declaration(p: &CppParser) -> bool {
 }
 
 /// Is the cursor on a specific contextual keyword (an identifier with a given spelling)?
+///
+/// The test itself is shared — [`super::is_contextual_keyword`] — because `module` and `import` are two members
+/// of a family that also holds `final`, `override`, `requires` and `concept`, and two copies of "an identifier
+/// with this spelling" is one copy more than the family can afford.
 fn is_contextual(p: &CppParser, text: &str) -> bool {
-    p.current_token() == CppTokenKind::Identifier && p.current_token_text() == text
+    super::is_contextual_keyword(p, text)
 }
 
 /// `module` is a module declaration only when followed by a name, `:`, `;`, or `.`.

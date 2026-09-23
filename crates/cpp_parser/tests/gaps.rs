@@ -588,6 +588,14 @@ fn constructs_the_parser_reads() {
             "template <typename T> void f(T) { }",
             "template <typename T> void f(T) requires C<T> { }",
             "void f(std::vector<T>);",
+            // The same two words used as **ordinary names**, which is what says they are contextual keywords
+            // rather than keywords: the lexer hands both over as identifiers and the grammar asks for the spelling
+            // where the standard gives it a meaning. See `concepts.rs`.
+            "int requires = 1;",
+            "int concept = 2;",
+            "void requires();",
+            "void f(int requires, int concept);",
+            "struct S { int requires; int concept; };",
         ],
     );
 
@@ -1024,6 +1032,12 @@ fn modern_constructs_produce_the_right_nodes() {
             "template <typename T> void f(T) { }",
             CppSyntaxKind::CompoundStat,
         ),
+        // The two constraint words as ordinary names: a call is a call and an assignment is an expression, with no
+        // construct in either. A keyword token made all four of these unreadable. See `concepts.rs`.
+        ("void f() { requires(); }", CppSyntaxKind::CallExpr),
+        ("void f() { concept(); }", CppSyntaxKind::CallExpr),
+        ("void f() { concept = 2; }", CppSyntaxKind::ExpressionStat),
+        ("void f() { requires = 1; }", CppSyntaxKind::ExpressionStat),
     ]);
 
     // Exactly one parameter: the silent version produced zero here and a phantom member beside it.

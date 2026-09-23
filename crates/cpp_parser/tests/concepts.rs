@@ -245,24 +245,123 @@ fn a_refused_clause_leaves_the_class_body_with_the_class() {
 }
 
 #[test]
-fn a_requires_clause_is_not_confused_with_the_identifier_requires() {
-    // `requires` is contextual, so the token decides nothing on its own. The clause is told from the identifier
-    // by *trying* the reading and keeping it only if it consumed something — a peek at the next token would have
-    // to be a list of everything that can begin a constraint, and that list is wrong the moment an operator is
-    // added to it. These are the forms the reading has to refuse.
+fn the_two_words_are_ordinary_names_everywhere_else() {
+    // `requires` and `concept` are **contextual keywords**: the standard gives them a meaning in particular
+    // positions and leaves them as perfectly good identifiers everywhere else. The lexer used to hand both over as
+    // keyword tokens, which made every one of these programs unparseable — a variable named `requires` is not an
+    // exotic thing to write, and the lexer was telling the grammar something the grammar does not believe.
+    //
+    // Both now arrive as `Identifier`, and the grammar asks for the *spelling* where the standard gives the word a
+    // meaning. Every use below is an ordinary name, and none of them may produce a concept, a clause or a
+    // requires-expression.
     for source in [
+        "int requires = 1;\n",
+        "int concept = 2;\n",
         "void f() { int requires = 1; }\n",
+        "void f() { int concept = 2; }\n",
         "void f() { requires = 1; }\n",
+        "void f() { concept = 2; }\n",
+        "void f() { requires(); }\n",
+        "void f() { concept(); }\n",
+        "void f() { g(requires); }\n",
+        "void f() { g(concept); }\n",
+        "void f(int requires);\n",
+        "struct S { int requires; int concept; };\n",
+        "void f() { requires.requires = 1; }\n",
+        "void f() { auto x = requires; }\n",
+        "void f() { int concept = requires; }\n",
+        "void requires();\n",
     ] {
+        parses(source);
+
         let parsed = tree(source);
-        assert!(
-            !parsed
-                .get_red_root()
-                .descendants()
-                .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::RequiresClause),
-            "{source:?} has no clause in it"
-        );
+        for kind in [
+            CppSyntaxKind::ConceptDecl,
+            CppSyntaxKind::RequiresClause,
+            CppSyntaxKind::RequiresExpr,
+        ] {
+            assert_eq!(
+                parsed
+                    .get_red_root()
+                    .descendants()
+                    .filter(|node| CppSyntaxKind::from(node.kind()) == kind)
+                    .count(),
+                0,
+                "{source:?} has no {kind:?} in it — the word is a name there"
+            );
+        }
     }
+
+    // And the readings are the ordinary ones, which is the half an error list cannot see: a statement that
+    // mentions the name is an *expression*, and a call is a call.
+    assert_eq!(
+        count("void f() { concept = 2; }\n", CppSyntaxKind::ExpressionStat),
+        1,
+        "an assignment to a variable named `concept`"
+    );
+    assert_eq!(
+        count("void f() { concept(); }\n", CppSyntaxKind::CallExpr),
+        1,
+        "a call to a function named `concept`"
+    );
+    assert_eq!(
+        count("void f() { requires(); }\n", CppSyntaxKind::CallExpr),
+        1,
+        "a call to a function named `requires` — not a clause over a parenthesised constraint"
+    );
+    assert_eq!(
+        count("void f() { g(requires); }\n", CppSyntaxKind::IdentifierExpr),
+        2,
+        "the callee and the argument, both names"
+    );
+    assert_eq!(
+        count("int requires = 1;\n", CppSyntaxKind::Declaration),
+        1,
+        "a variable named `requires` is still a declaration"
+    );
+
+    // The other direction, in one place: the same spelling where the standard *does* give it a meaning still
+    // produces the construct. Without this the test above would pass just as well on a parser that never read a
+    // constraint at all.
+    assert_eq!(
+        count(
+            "template <typename T> concept C = true;\n",
+            CppSyntaxKind::ConceptDecl
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            "void f() { auto x = requires { g(); }; }\n",
+            CppSyntaxKind::RequiresExpr
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            "template <typename T> requires C<T> void f(T t);\n",
+            CppSyntaxKind::RequiresClause
+        ),
+        1
+    );
+    // `requires(x);` is the pair that needs both tests: the spelling is there, and what follows is an argument
+    // list rather than a body. The standard reads it as a call, and so does this.
+    assert_eq!(
+        count("void f() { requires(x); }\n", CppSyntaxKind::RequiresExpr),
+        0,
+        "a call is not a requires-expression"
+    );
+
+    // The word is a name *inside* a constraint too, where the surrounding construct is a clause either way:
+    // `requires;` is a simple requirement whose expression is a name, not a clause with no constraint.
+    let nested = "void f() { auto x = requires { requires; }; }\n";
+    parses(nested);
+    assert_eq!(
+        count(nested, CppSyntaxKind::RequiresClause),
+        0,
+        "`requires;` is a requirement, not a clause"
+    );
+    assert_eq!(count(nested, CppSyntaxKind::Requirement), 1);
 }
 
 #[test]

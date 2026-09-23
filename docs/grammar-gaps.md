@@ -347,19 +347,28 @@ decltype(x)* p;            // 一直读得出
 
 **护栏**：`modern.rs::a_decltype_declaration_has_a_declarator` 断言**恰好一个 `InitDeclarator` 与一个 `Declarator`**——缺陷版本在这些位置是 0，而"能解析吗"这个问法看不见它。
 
-### B12. `requires` / `concept` 作标识符
+### B12. `requires` / `concept` 作标识符 —— 已修复
 
 ```cpp
 int requires = 1;            // expected a type specifier
 void f() { requires = 1; }   // 同上
 int concept = 2;             // 同上
+void f() { concept(); }      // 同上
 ```
 
 **性质**：缺规则，但在**词法层**。**成因**：`cpp_lexer.rs` 把 `requires` 和 `concept` 登记成了关键字，于是它们永远到不了"这是个名字"的分支。它们其实是**上下文关键字**——`final`、`override`、`module`、`import` 都是按标识符进入 parser 再按文本判定的，只有这两个没有。
 
-**为什么不在修 C1 时顺手做**：改词法是全表改动（parser 里有 18 处按 `RequiresKeyword`/`ConceptKeyword` 判定），每一处都要改成按文本判定，而**漏掉一处的症状是"clause 不被识别"这种响亮错误，混在 C1 自己的改动里不容易与它区分**。分开做，改动面才看得清。
+**修复**：把这两个词从词法器的关键字表里删掉，并把 `CppTokenKind::RequiresKeyword` / `ConceptKeyword` 两个 token 种类**整个删除**（留着就是留一个没人该产生的值）。语法层新增 `grammar/cpp/mod.rs::is_contextual_keyword`、`at_requires`、`at_concept`、`expect_contextual_keyword`，8 处判定改成按拼写；`modules.rs` 里那份私有的 `is_contextual` 改为委托同一实现——`module`、`import`、`final`、`override`、`requires`、`concept` 是**一家人**，一个判据只能有一份。
 
-**处置**：半天。级别 B：报错、局部、无静默风险。
+**做的时候才看清的三件事**（每一件都是"词是标识符"直接推出来的）：
+
+1. **`concept` 不能当 `starts_declaration` 的锚点。** 第一版加了 `Identifier if at_concept(p) => true`，结果 `void f() { concept = 2; }` 被导去声明读法，在 `=` 上报 `expected a concept name`——锚点的意思是"这里一定是声明"，而 `concept = 2;` 恰恰是**不是**声明的那个反例。真正的判据是"**模板头 + 这个词**"：concept 定义一定有头，而头是 parser 刚刚读过的信息，不需要另查。删掉锚点、给派发加上 `seen_a_template_head &&` 之后，两种读法各归各位。
+2. **嵌套 requirement 要判一次"读得下去吗"。** `requires C<T>;` 是 clause，`requires;` 是名为 `requires` 的**简单 requirement**——同一个词，后者是名字。判据用的是 C1 里那条试读（`starts_a_requires_clause`），因此把它从模块私有提到 `pub(super)`，让表达式语法共用。这与 requires-expression 那边早已存在的 `starts_a_requires_expression`（区分 `requires { }` 与 `requires(x)` 这个调用）是同一条思路。
+3. **`is_expression_keyword` 的那一条要删，而不是留。** 那张表的语义是"有别的规则消费这个 token，名字分支请让开"。词变成标识符之后，消费它的是 `Identifier if at_requires(...)` 分支，名字分支是兜底——**这张表本来就不该收它**。空头支票（C1 里记的那张）的结局有两种：兑现，或者发现这张表从一开始就不该有它。这次是后者。
+
+**顺带的一致性收益**：`requires`/`concept` 现在与 `final`/`override`/`module`/`import` 走同一条路，于是"哪些词是上下文关键字"这件事在代码里只有一个答案——词法器只放真关键字，语法层按拼写判定。
+
+**护栏**：`concepts.rs::the_two_words_are_ordinary_names_everywhere_else`（16 条名字用法必须无错、无 concept/clause/requires-expression 节点、且读成 ExpressionStat / CallExpr / Declaration 的形状；再加反向的 3 条断言证明构造仍然读得出，以及 `requires;` 是 requirement 而非 clause）；`invariants.rs` 的 "requires and concept as ordinary names"；`gaps.rs` 已支持清单 5 条 + 形状断言 4 条；语料库新增一段名字用法。
 
 ### B13. 不带 `extern` 的显式实例化
 
@@ -495,7 +504,7 @@ template <int N> requires (N == 0) void f();                        // 对
 
 **一句话结论**：C1 的代价不在"写四条规则"，而在**它把语句读成表达式之后，原先被错树遮住的规则开始被走到**。这一条里三件旧缺陷都是这么露出来的，没有一件是 C1 弄坏的。
 
-**仍不支持**（新登记，见下面 B12/B13）：`requires`/`concept` 作**标识符**（词法层把它们当关键字了）；不带 `extern` 的显式实例化 `template void f<int>(int);`。
+**仍不支持**（新登记，见下面 B13）：不带 `extern` 的显式实例化 `template void f<int>(int);`。（B12 的 `requires`/`concept` 作标识符已经修好，见该条。）
 
 **分析层待办**（parser 之外的下一环）：`ConceptDecl` 是新节点，`scopes.rs` 的 `declaration` 走 `declaration_parts`，而后者在**没有声明符**的声明上早退（`is_unnamed_declaration`），所以 concept 的名字目前**不被绑定**——引用它解析不到符号。`BindingKind` 也没有 concept 这一种。修它需要新增一种绑定类别并想清楚 `is_type_like` 的答案（concept 不是类型，但出现在类型名的位置），所以单列，不塞进这一条。
 
@@ -610,7 +619,7 @@ operator bool() &&  // && 和 ( 分开     -> 这是成员函数的引用限定�
 | 11 | `extern template` + `inline namespace` | B10 | 半天 | **完成** |
 | 12 | `decltype` 作类型说明符（两个叠加缺陷） | B11 | 半天 | **完成** |
 | 13 | concept / requires（含三件顺带发现） | C1 | 1–2 周 | **完成** |
-| — | `requires`/`concept` 作标识符（词法层） | B12 | 半天 | 待办 |
+| 14 | `requires`/`concept` 作标识符（词法层拆关键字） | B12 | 半天 | **完成** |
 | — | 不带 `extern` 的显式实例化 | B13 | 半天 | 待办 |
 | — | 限定名 + 无名裸类型形参 `void Widget::draw(T) { }` | B14 | 半天 | 待办 |
 | — | `namespace` 与名字之间的属性 | B3 残留 | 半天 | 待办 |
@@ -646,3 +655,4 @@ operator bool() &&  // && 和 ( 分开     -> 这是成员函数的引用限定�
 7. **kind 表里有节点、规则里没有产出**，是一张空头支票（`ParenExpr`/`LambdaExpr` 长期如此，`RequiresKeyword` 直到 C1 才兑现）。要么兑现，要么别在表里留。
 8. **一个缺陷会遮住另一个缺陷**（第 13 项）：`x = {1};` 曾经靠 A0-1 的错树"通过"，A0-1 修好后它变成响亮报错，花括号初始化列表缺规则这件事才露出来。所以修好一条之后，**把它的邻居再走一遍**——新露出来的缺口往往不是新坏的，而是一直错着，只是从前错得安静。同理，改完一条规则要问的不是"测试还绿吗"，而是"**它以前替谁挡着**"。第 13 项里 A0-2 就是这么被找出来的：为了给 requires-clause 补第四个位置而逐条探针，撞上了 `template <typename T> void f(T) { }`——一句和 concept 毫无关系的写法。
 9. **"旁边有个同名判据"不等于能复用**（A0-2）：`declarator_starts_with_a_type_keyword` 与 `a_type_keyword_precedes_the_declarator_name` 问的看起来是同一件事，实际一个看**整条声明的第一个 token**、一个看**声明符名字前面的那个 token**。模板头正好卡在两者之间，于是最需要修的那条写法落在前者的判据之外。**复用判据之前先问它从哪里开始看**——起点不同，答案就不同。
+10. **一个词如果同时是名字，它就不该是 token 种类**（B12）。`requires`、`concept` 当初进了关键字表，代价是 `int requires = 1;` 这种完全合法的程序读不出来；而它们真正的判据从来不在词法层——"这里是不是 clause"要看后面跟着什么。凡是要按上下文判定的词，**词法器交给标识符、语法层按拼写判**，`module`/`import`/`final`/`override` 一直如此。反面教材还有一个细节值得记：C1 里那张"空头支票"（`RequiresKeyword` 在 `is_expression_keyword` 里却没有规则消费它）最后不是靠补规则解决的，而是发现**那张表本来就不该收它**——表里的每一条都要能回答"哪条规则消费它"。

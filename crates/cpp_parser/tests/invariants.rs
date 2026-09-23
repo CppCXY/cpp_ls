@@ -297,6 +297,23 @@ const CORPUS: &[(&str, &str)] = &[
         "module and import as ordinary names",
         "int module = 1;\nauto import = module;\n",
     ),
+    (
+        // The same for the two C++20 words whose second reading is a *constraint*: both are ordinary identifiers
+        // wherever the standard does not give them a meaning, and both used to be lexed as keywords — which made
+        // every one of these lines a syntax error. See `concepts.rs`.
+        "requires and concept as ordinary names",
+        concat!(
+            "int requires = 1;\n",
+            "int concept = 2;\n",
+            "void f() { int requires = 1; int concept = 2; }\n",
+            "void f() { requires = 1; concept = 2; }\n",
+            "void f() { requires(); concept(); }\n",
+            "void f() { g(requires, concept); }\n",
+            "void f(int requires, int concept);\n",
+            "struct S { int requires; int concept; };\n",
+            "void requires();\n",
+        ),
+    ),
     ("labels", "void f() {\nagain:\n    goto again;\n}\n"),
     (
         // Every shape a range-based `for` declares its variable with. The binding-pattern form is the one that

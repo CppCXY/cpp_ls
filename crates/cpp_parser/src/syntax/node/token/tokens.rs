@@ -193,8 +193,6 @@ pub fn is_keyword(kind: CppTokenKind) -> bool {
             | CppTokenKind::WhileKeyword
             | CppTokenKind::AlignasKeyword
             | CppTokenKind::AlignofKeyword
-            | CppTokenKind::ConceptKeyword
-            | CppTokenKind::RequiresKeyword
             | CppTokenKind::CoAwaitKeyword
             | CppTokenKind::CoReturnKeyword
             | CppTokenKind::CoYieldKeyword

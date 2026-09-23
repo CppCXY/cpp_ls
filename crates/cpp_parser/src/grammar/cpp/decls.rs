@@ -50,7 +50,7 @@ use crate::{
 };
 
 use super::{
-    expect_token,
+    at_concept, at_requires, expect_contextual_keyword, expect_token,
     exprs::parse_expr,
     stats::{parse_compound_stat, parse_stats},
     types::{
@@ -94,7 +94,12 @@ fn parse_template_head_inner(p: &mut CppParser, outer_depth: usize) -> ParseResu
     // C++20: a template head may end in a **requires-clause**: `template <typename T> requires C<T> void f();`.
     // It comes after the parameter list and before whatever the head introduces, which is why this is the place
     // that can read it — the clause belongs to neither the parameters nor the declaration.
-    if p.current_token() == CppTokenKind::RequiresKeyword
+    //
+    // `requires` is contextual, so the word alone decides nothing: `template <typename T> requires requires(T t)
+    // { }` is a clause whose constraint is an expression, and a *name* spelled `requires` would be a parameter
+    // list's worth of something else. Reading the clause is what tells them apart, which is why the clause rule
+    // is entered and its failure tolerated rather than a lookahead being asked.
+    if at_requires(p)
         && let Err(err) = parse_requires_clause(p)
     {
         p.close_marks_above(base);
@@ -115,7 +120,7 @@ fn parse_concept_declaration(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::ConceptDecl);
 
-    expect_token(p, CppTokenKind::ConceptKeyword)?;
+    expect_contextual_keyword(p, "concept")?;
 
     // The name. Optional in the grammar's own terms only for recovery: a concept without a name is broken, and
     // saying so once is better than consuming whatever follows as one.
@@ -176,7 +181,11 @@ fn parse_concept_declaration(p: &mut CppParser) -> ParseResult {
 /// clause as ending at `C<T>` — and it would have gone on being wrong for every operator added later. Trying the
 /// parse has no such list to maintain, and it is the same bounded backtracking the declaration/expression
 /// ambiguity already relies on.
-fn starts_a_requires_clause(p: &mut CppParser) -> bool {
+///
+/// Exposed to the expression grammar for the **nested requirement**: inside a requires-expression's body,
+/// `requires C<T>;` is a clause while `requires;` is a simple requirement naming a variable called `requires`.
+/// The same test separates them there, for the same reason.
+pub(super) fn starts_a_requires_clause(p: &mut CppParser) -> bool {
     let checkpoint = p.checkpoint();
     let started_at = p.current_token_index();
     let parsed = parse_requires_clause(p);
@@ -208,7 +217,7 @@ pub fn parse_requires_clause(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::RequiresClause);
 
-    expect_token(p, CppTokenKind::RequiresKeyword)?;
+    expect_contextual_keyword(p, "requires")?;
 
     // The constraint, read with the braced-initialiser reading refused: the `{` after it opens the *body* of
     // whatever the clause constrains. See [`super::exprs::parse_constraint_expr`].
@@ -606,7 +615,13 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
     //
     // A concept has no return type and no declarators — it is `concept`, a name, `=`, and a constraint — so the
     // general rule below, which begins with a specifier sequence, has nothing to start from.
-    if p.current_token() == CppTokenKind::ConceptKeyword {
+    //
+    // **The head is required, and that is what keeps the word usable as a name.** `concept` is contextual, so the
+    // spelling alone says nothing, and a bare `concept = 2;` is an assignment to a variable of that name — asking
+    // this rule to read it produced `expected a concept name` against the `=`. A concept definition always has a
+    // template head, so the head is the condition that tells the two apart, and it is one the parser already
+    // knows because it just read one.
+    if seen_a_template_head && at_concept(p) {
         if let Err(err) = parse_concept_declaration(p) {
             p.rollback(checkpoint);
             return Err(err);
@@ -1038,10 +1053,13 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
         // belonging to nothing. Reporting `expected ;` against the `requires` is both what the standard says and
         // the only reading that keeps the body where it belongs.
         //
-        // `requires` is contextual, so the clause is only taken when what follows can begin a constraint;
-        // `requires` used as an identifier (`int requires = 1;`) reaches here as a plain token and is left alone.
-        CppTokenKind::RequiresKeyword
-            if p.last_declarator_is_function() && starts_a_requires_clause(p) =>
+        // `requires` is contextual, so the arm is a *spelling* test with the shape test beside it: the clause is
+        // only taken when what follows can begin a constraint. `requires` used as an identifier (`int requires =
+        // 1;`) is a declarator **name**, and it reaches this match as the token that ends the declarator rather
+        // than beginning a clause — `starts_a_requires_clause` tries the clause and reports that it consumed
+        // nothing, which is the same test the class-head refusal above relies on.
+        CppTokenKind::Identifier
+            if at_requires(p) && p.last_declarator_is_function() && starts_a_requires_clause(p) =>
         {
             parse_requires_clause(p)?;
         }
@@ -2354,8 +2372,13 @@ pub fn starts_declaration(p: &mut CppParser) -> bool {
         | CppTokenKind::ClassKeyword
         | CppTokenKind::StructKeyword
         | CppTokenKind::UnionKeyword
-        | CppTokenKind::EnumKeyword
-        | CppTokenKind::ConceptKeyword => true,
+        | CppTokenKind::EnumKeyword => true,
+
+        // `concept` is **not** an anchor, and the omission is a decision: the word is contextual, and a statement
+        // that begins with it is an ordinary use of the name — `concept = 2;`, `concept();`. A concept definition
+        // always begins with `template`, which is already an anchor above, so nothing is lost by leaving the bare
+        // word to the expression rule. Anchoring it here is what made `void f() { concept = 2; }` demand a concept
+        // name at the `=`.
 
         // `alignas` cannot begin an expression either — its parentheses hold an alignment, not a value being
         // used — so a declaration that starts with it is a declaration and does not need the speculative pass.

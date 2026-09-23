@@ -152,10 +152,12 @@ pub enum CppTokenKind {
     ThreadLocalKeyword,
 
     // C++20 keywords
-    /// concept - concept (C++20)
-    ConceptKeyword,
-    /// requires - constraint (C++20)
-    RequiresKeyword,
+    //
+    // `concept` and `requires` are **not** here, and their absence is a decision rather than an omission: both
+    // are contextual keywords that are also ordinary identifiers (`int requires = 1;` is a valid program), so
+    // they lex as `Identifier` and the grammar reads them by spelling. See
+    // [`crate::grammar::cpp::is_contextual_keyword`]. `co_await`, `co_return` and `co_yield` have no such second
+    // reading: they are keywords outright.
     /// co_await - coroutine await (C++20)
     CoAwaitKeyword,
     /// co_return - coroutine return (C++20)
@@ -464,8 +466,6 @@ impl fmt::Display for CppTokenKind {
             Self::ConstinitKeyword => write!(f, "constinit"),
 
             // C++20关键字
-            Self::ConceptKeyword => write!(f, "concept"),
-            Self::RequiresKeyword => write!(f, "requires"),
             Self::CoAwaitKeyword => write!(f, "co_await"),
             Self::CoReturnKeyword => write!(f, "co_return"),
             Self::CoYieldKeyword => write!(f, "co_yield"),

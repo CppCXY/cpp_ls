@@ -5,7 +5,7 @@ use crate::{
     parser_error::CppParseError,
 };
 
-use super::expect_token;
+use super::{at_requires, expect_token};
 
 /// 操作符优先级定义
 /// 数值越高，优先级越高
@@ -545,12 +545,15 @@ fn parse_unary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
         // It is a `bool`-valued expression whose body lists things that must be *well-formed* rather than
         // operations to perform, which is why it has a rule of its own rather than being a call or a block.
         //
-        // This is the rule that `RequiresKeyword`'s entry in [`is_expression_keyword`] was a promise for. That
-        // list exists to keep the *name* branch from swallowing a keyword some other rule handles; `requires` was
-        // on it with no rule consuming it, so the dispatcher stepped aside for a token nothing claimed and the
-        // fallback reported `expected primary expression` against it. A place on that list is a promise — the
-        // same one `co_await` and `throw` broke before it.
-        CppTokenKind::RequiresKeyword if starts_a_requires_expression(p) => {
+        // Two tests, because `requires` is contextual and one is not enough: the **spelling** says the word is
+        // there, and `starts_a_requires_expression` says what follows is a body rather than the argument list of
+        // a call. A call to a function named `requires` — `requires(x)` — therefore keeps its reading and reaches
+        // the name branch below, which is the point of the word being an identifier at all.
+        //
+        // The arm used to be keyed on a keyword token, and the word was listed in [`is_expression_keyword`] to
+        // keep the name branch from swallowing it. That list is for keywords some *other* rule consumes; with the
+        // word lexed as an identifier the arm below is what claims it, and the entry is gone with the keyword.
+        CppTokenKind::Identifier if at_requires(p) && starts_a_requires_expression(p) => {
             parse_requires_expression(p)
         }
 
@@ -1391,7 +1394,6 @@ fn is_expression_keyword(p: &CppParser) -> bool {
             | CppTokenKind::DeleteKeyword
             | CppTokenKind::ThrowKeyword
             | CppTokenKind::CoAwaitKeyword
-            | CppTokenKind::RequiresKeyword
     )
 }
 
@@ -1509,7 +1511,11 @@ fn parse_requirement(p: &mut CppParser) -> ParseResult {
     match p.current_token() {
         // A nested requirement: `requires C<T>;`. The clause rule is shared with the declaration side, which is
         // the whole reason `requires` nests — the two spell the same thing.
-        CppTokenKind::RequiresKeyword => {
+        //
+        // The guard is what keeps the *identifier* reading available here as well: `requires;` is a simple
+        // requirement whose expression is a name, and the clause rule consumes nothing on it. `requires(x);` reads
+        // as a nested requirement, which is the standard's own reading of those tokens.
+        CppTokenKind::Identifier if at_requires(p) && super::decls::starts_a_requires_clause(p) => {
             if let Err(err) = super::decls::parse_requires_clause(p) {
                 p.close_marks_above(base);
                 return Err(err);
