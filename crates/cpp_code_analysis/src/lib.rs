@@ -38,10 +38,12 @@
 //! An [`ExpandedToken`] travels with a [`Origin`], so that "where is this?" has an answer even when the
 //! token was written in a different file: navigation reaches the macro, diagnostics reach the call site.
 
+pub mod cache;
 pub mod file;
 pub mod include;
 pub mod preprocess;
 pub mod sema;
+pub mod summary;
 
 // The four folders above are the *organisation*; the modules inside them keep their own names, and they are
 // re-exported here so that every path written before the reorganisation still resolves — `crate::directive::…`
@@ -52,10 +54,14 @@ pub mod sema;
 // * `preprocess` — directives, macros, conditions, guards, expansion (the entry point is this module itself)
 // * `include`  — include paths and compiler settings, the file provider, the resolver, the graph
 // * `sema`     — names, scopes and C++20 modules
+pub use cache::{CACHE_DIRECTORY, FORMAT_VERSION, SummaryKey, content_hash, fnv1a64};
 pub use file::token;
 pub use include::{config, graph, paths};
 pub use preprocess::{condition, directive, expand, guards, macros};
 pub use sema::{module_info, modules, parser_symbols, scopes, symbol};
+pub use summary::{
+    DeclFact, DeclKind, FactGuard, FileSummary, IncludeFact, MacroFact, SummaryGuards,
+};
 // `guard` is the exception: `preprocess::guard` and `preprocess::guards` differ by one letter, which is exactly
 // the hazard the folders are meant to remove, so the *analysis* keeps the plural name and the types are reached
 // as `preprocess::guard`.
