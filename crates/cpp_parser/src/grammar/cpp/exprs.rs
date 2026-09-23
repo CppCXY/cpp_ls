@@ -92,6 +92,13 @@ fn get_operator_precedence(p: &CppParser, token: CppTokenKind) -> Option<u8> {
         // 乘法、除法、模运算 - 最高优先级
         CppTokenKind::Star | CppTokenKind::Slash | CppTokenKind::Percent => Some(13),
 
+        // 指向成员的指针: `a.*b`、`p->*b`。标准里 pm-expression 是 multiplicative-expression 的**下一层**,
+        // 也就是比乘法结合得更紧 —— `p->*h * n` 是 `(p->*h) * n` —— 所以排在 13 之上。
+        //
+        // 两个 token 一直在词法器里(`.*` 与 `->*`),表达式层却没人接: `(this->*handle)(args)` 报
+        // `expected ), but get ->*`,而那是**成员函数指针的唯一解引用写法**。`CodeActionService.cpp` 就是它。
+        CppTokenKind::DotStar | CppTokenKind::ArrowStar => Some(14),
+
         _ => None,
     }
 }
@@ -791,7 +798,24 @@ fn is_a_type_in_parentheses(p: &CppParser) -> bool {
             // the cast branch in `parse_primary_expr`.
             p.is_a_known_type_name(p.peek_token_text_at(1))
         }
-        Some(&CppTokenKind::Scope) => true,
+        // **No arm for a leading `::`.**
+        //
+        // A global-qualified name looked like certain evidence — `::std::string` can only be a type, surely — and
+        // it is not, because the same `::` starts a global-qualified **expression**:
+        //
+        // ```text
+        // (::x)              a parenthesised expression — and it was read as a cast type instead
+        // (::abs(x) > 1)     the same, in the shape a real file writes: `SymSpell.cpp` line 155
+        // (::MyType)x        a cast, and the operand after the `)` is what says so — see the check above
+        // ```
+        //
+        // An arm here answered "cast" for the first two, and the cast reading then demanded an operand that was
+        // never written: `(::x);` reported `expected primary expression` at its own `;`, and `(::abs(x) > 1)`
+        // reported `expected ), but get >`. Every cast that is really a cast has an operand after the `)`, which
+        // the operand check above already answers for — including a cast to a qualified type the file has never
+        // heard of, `(::std::string)x`. What it deliberately leaves out is the ambiguous operator case, and that
+        // reading is the same one an unqualified name gets: `(T)*p` is a multiplication, which is the cheaper
+        // mistake (see `operators.rs` and T1 in `docs/grammar-gaps.md`).
         _ => false,
     }
 }
@@ -1389,6 +1413,39 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
                 }
             }
 
+            Ok(m.complete(p))
+        }
+
+        // A **functional-notation conversion with a keyword type**: `bool(x)`, `int(y)`, `double(n)`.
+        //
+        // The same conversion as `(bool)x`, written the other way round, and it is everywhere a value is
+        // normalised — `root.AddChild("code_style_check", bool(lint["codeStyle"]))` in a real file, which is where
+        // this was found. A type keyword is neither an identifier nor in [`is_expression_keyword`], so no arm
+        // matched it at all and the expression rule reported `expected primary expression` against the keyword
+        // itself.
+        //
+        // Only when a `(` follows. A bare `bool` is not an expression, and a keyword type followed by anything
+        // else is a *declaration* — which is the reading the declaration rule owns, and it is tried before this
+        // one: `int(x);` is a declaration of the parenthesised name `x`, and it stays one.
+        kind if super::types::is_type_specifier_keyword(kind)
+            && p.peek_next_token() == CppTokenKind::LeftParen =>
+        {
+            let m = p.mark(CppSyntaxKind::CastExpr);
+
+            // The type is the **keyword and nothing else**. Handing these tokens to `parse_type_id` looks like the
+            // obvious reuse and is wrong: a type-id continues with an *abstract declarator*, so it read `bool(x)`
+            // as the function type "bool taking x" — a perfectly good type — and then had no `(` left for the
+            // payload, reporting `expected (, but get ;` against the token after it. Functional notation takes a
+            // simple-type-specifier, which is one word; every spelling with more than one is either invalid or a
+            // declaration (`unsigned long(x)` declares a function).
+            let the_type = p.mark(CppSyntaxKind::BuiltinType);
+            p.bump();
+            the_type.complete(p);
+
+            if let Err(err) = parse_parenthesized_expression(p) {
+                m.undo(p);
+                return Err(err);
+            }
             Ok(m.complete(p))
         }
 

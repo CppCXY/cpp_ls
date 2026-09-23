@@ -38,6 +38,116 @@ fn parses(source: &str) {
 }
 
 // ============================================================================
+// Two more spellings of "the parentheses might hold a type"
+// ============================================================================
+
+/// A **global-qualified name** in parentheses is an expression, not a cast type.
+///
+/// `::name` looked like certain evidence of a type — `::std::string` surely is one — and it is the same token that
+/// begins a global-qualified *expression*. An arm of `is_a_type_in_parentheses` answered "cast" for `(::x)`, the
+/// cast reading then demanded an operand that was never written, and the shapes a real file writes failed:
+/// `(::abs(static_cast<int>(a - b)) > c)` in `SymSpell.cpp`, reported as `expected ), but get >`.
+///
+/// What settles a cast is what follows the `)` — an operand, which two operands in a row cannot be — and that
+/// check is asked before this arm ever mattered: a cast to a qualified type the file has never heard of still
+/// works, because the `x` after the `)` is what says so.
+#[test]
+fn a_global_qualified_name_in_parentheses_is_an_expression() {
+    for source in [
+        "void f() { (::x); }\n",
+        "void f() { auto y = (::x); }\n",
+        "void f() { (::x + 1); }\n",
+        "void f() { (::x()); }\n",
+        "int f(int x) { return (::abs(x) > 1); }\n",
+        "int f(int x) { return ((::abs(x)) > 1); }\n",
+    ] {
+        parses(source);
+        assert!(
+            count(source, CppSyntaxKind::ParenExpr) >= 1,
+            "{source:?} is a parenthesised expression"
+        );
+    }
+
+    // The casts that really are casts are unchanged, including one to a qualified type no header of this file
+    // declares.
+    for source in [
+        "void f(void* p) { auto x = (::MyType*)p; }\n",
+        "void f(int x) { auto y = (::MyType)x; }\n",
+        "void f(int x) { auto y = (::std::string)x; }\n",
+    ] {
+        parses(source);
+        assert!(
+            count(source, CppSyntaxKind::CastExpr) >= 1,
+            "{source:?} is a cast"
+        );
+    }
+}
+
+/// A **functional-notation conversion with a keyword type**: `bool(x)`, `int(y)`, `unsigned(z)`.
+///
+/// The other way of writing `(bool)x`, and everywhere a value is normalised. A type keyword is neither an
+/// identifier nor one of the keywords the expression dispatch lists, so no arm matched and the rule reported
+/// `expected primary expression` against the keyword itself — `bool(lint["codeStyle"])` in a real file.
+///
+/// The type is the keyword **and nothing else**: `parse_type_id` would read the parentheses as a function type's
+/// parameter list ("bool taking x") and have nothing left for the payload.
+#[test]
+fn a_functional_cast_with_a_keyword_type_is_a_cast() {
+    for source in [
+        "int f(int x) { return bool(x); }\n",
+        "void f(int x) { g(bool(x)); }\n",
+        "void f() { g(\"k\", bool(lint[\"s\"])); }\n",
+        "void f(int x) { if (bool(x)) { } }\n",
+        "void f(int x) { auto y = int(x) + double(x); }\n",
+        "void f(int x) { auto y = unsigned(x); }\n",
+    ] {
+        parses(source);
+        assert!(
+            count(source, CppSyntaxKind::CastExpr) >= 1,
+            "{source:?} is a functional-notation conversion"
+        );
+    }
+
+    // The declaration reading keeps its own spelling of the same tokens: `int(x);` declares the parenthesised
+    // name `x`, and that reading is tried first.
+    let declaration = "void f() { int(x); }\n";
+    parses(declaration);
+    assert_eq!(
+        count(declaration, CppSyntaxKind::CastExpr),
+        0,
+        "`int(x);` is a declaration, not a conversion"
+    );
+}
+
+// ============================================================================
+// Pointer-to-member operators
+// ============================================================================
+/// `.*` and `->*` are the **only** way to use a pointer to member, and both are punctuation-as-operator like the
+/// comma and the cast above. The tokens have always existed in the lexer (`DotStar`, `ArrowStar`) and the
+/// expression table simply did not list them, so `(this->*handle)(args)` — the spelling every member-pointer call
+/// is written with — failed with `expected ), but get ->*`.
+///
+/// Their precedence is the one part worth pinning: the standard puts pm-expression *below*
+/// multiplicative-expression, so `.*` and `->*` bind **tighter** than `*`. A table that gave them the same level
+/// as `*` would read `p->*h * n` as `p->*(h * n)`.
+#[test]
+fn the_pointer_to_member_operators_are_binary_operators() {
+    for source in [
+        "struct C { };\nvoid f(C* c) { (c->*h)(1); }\n",
+        "struct C { };\nvoid f(C& c) { (c.*h)(1); }\n",
+        "struct C { };\nvoid f(C* c) { auto x = c->*h; }\n",
+        "struct C { };\nvoid f(C* c) { g(c->*h); }\n",
+        "struct S { void f() { (this->*h)(1); } };\n",
+    ] {
+        parses(source);
+        assert!(
+            count(source, CppSyntaxKind::BinaryExpr) >= 1,
+            "{source:?} has a pointer-to-member expression in it"
+        );
+    }
+}
+
+// ============================================================================
 // The comma operator
 // ============================================================================
 

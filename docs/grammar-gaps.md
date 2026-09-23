@@ -574,10 +574,277 @@ char const info_version[] = {
 
 **护栏**：`expressions.rs::a_directive_inside_a_literal_run_is_read_as_a_directive`（2 条 + "一个 `LiteralExpr`" + "两个指令节点都在树里" + "别处的 `#` 仍报错"）；语料与真实文件探针。
 
-**顺带**：`CMakeCCompilerId.c` 剩下的 3 条是 **K&R 风格函数定义**（`int main(argc, argv) int argc; char *argv[];`），那是**另一个缺口**，与本条无关，见实施顺序表。
+**顺带**：`CMakeCCompilerId.c` 剩下的 3 条是 **K&R 风格函数定义**（`int main(argc, argv) int argc; char *argv[];`），那是**另一个缺口**，与本条无关——后来单独修了，见 B24。
+
+### B24. K&R 风格函数定义（形参声明写在括号外） —— 已修复
+
+```c
+int main(argc, argv)
+    int argc;
+    char *argv[];
+{ return argc; }
+```
+
+**现象**：`int main(argc, argv)` 后面跟着一个声明时报 `expected primary expression`（诊断落在那个声明上，整条定义随后级联报错）。C++ 已废除、C 已弃用，但 1989 年前的 C 全是这么写的，而**发现它的文件是 CMake 生成的 `CMakeCCompilerId.c`**——每个 CMake 构建树里都有一份，不是罕见文件。B23 修完后它是 `luajit-dll` 里唯一还有报错的文件。
+
+**成因**：缺规则，而且是"括号自己说不了"的那种缺。`(argc, argv)` 读在任何东西说明它是哪种表之前，两种读法的 token 完全一样：`argc` 是**完全合法的形参类型**，所以现代形参表把这两个名字读成两个没有名字、类型分别是 `argc` 和 `argv` 的形参。分辨两者的是**后面**——现代函数接着 `{`、`;`、`:`、`requires`……而"函数声明符后面跟一个声明"只可能是 K&R 形参表。这正是维护约定第 13 条要问的两句（读完停在哪、后面能跟什么），只是这次的答案是"能跟一个声明"。
+
+**修复**：`finish_init_declarator` 收尾的 match 加一条兜底分支（`declarator_is_function && starts_an_old_style_parameter_list(p)`），把括号后面那些声明读进新 kind `OldStyleParameterList`（紧跟 `ParameterList` 定义），其下逐条调用**普通声明规则**；判据只问"这里能不能开始一条声明"（类型关键字 / `starts_declaration` / 本文件已知的类型名）。**两种答案都留在树里**：`ParameterList` 是括号说的，`OldStyleParameterList` 是它实际的意思——消费者要形参的类型就读后者，`old_style.rs` 把这一对钉住了。
+
+**第二个缺陷（修好第一个才露出来）**：K&R 头的**最后一个形参声明已经吃掉了 `;`**，外层声明因此没有自己的 `;` 可要；只有带函数体的写法（游标正好落在 `{` 上）才碰不到这条。而 CMake 文件恰好是**没有函数体**的形状——头和体分处同一个条件的两支，体由两支共用：
+
+```c
+#if defined(__CLASSIC_C__)
+int main(argc, argv)
+int argc;
+char* argv[];
+#else
+int main(int argc, char* argv[])
+#endif
+{ … }
+```
+
+于是它报 `expected ';'`，而诊断打在 **`#else` 那一行**上：一条报错落在预处理行，整条定义连同**没写错的那一支**一起没了。判据：本声明的事件里出现过 `OldStyleParameterList` 就不再要收尾 `;`——token 已经把树定死了，后面跟着什么由各自的规则负责。这是"一个缺陷遮住另一个缺陷"的又一次：不先修好第一条，根本走不到第二条。
+
+**性质**：缺规则（C 的旧写法；本 parser 的既定目标包含读 C）。修完 `luajit-dll` 的**全部**真实文件——`main.c`、`extensions.c`、`extensions.h`、`lauxlib.h`、`lua.h`、`luaconf.h`、`lualib.h`、`CMakeCCompilerId.c`——都是 **0 报错**，这是本项目第一次做到一个真实项目的文件全绿。
+
+**护栏**：`tests/old_style.rs`（7 条：一条定义的整体形状、两种列表并存、前面有别的声明、**无函数体**的头、头体分处条件两支、现代声明符不长出这个节点、列表到非声明为止）+ `gaps.rs` 的已支持清单与形状断言 + 真实文件探针。
+
+### B25. 函数 try 块（`void f() try { } catch (...) { }`） —— 待办
+
+**现象**：`try` 出现在**声明符和函数体之间**时报 `expected primary expression`（后面级联若干条）。语句形式的 `try { } catch (const E& e) { }` 是支持的（在 `gaps.rs` 的已支持清单里）。
+
+**成因**：缺规则。声明符收尾处只认 `{`、`;`、`:`、`requires` 和 K&R 形参表，没有 `try`；而函数 try 块的 `try` 必须在那里被接住，之后是可选的构造函数初始化列表、`catch` 序列，最后才是 `{`。
+
+**性质**：缺规则，**响亮**（报错，不静默）。真实代码里罕见——构造函数在成员初始化失败时才用——成本按小算，所以登记而不是立刻修。
+
+**发现经过**：写 B24 的护栏时，为了说明"现代函数声明符后面能跟什么"随手列了一条 `void f() try { } catch (...) { }` 当反例，结果它自己读不出来。维护约定第 12 条（写反面用例也会撞出缺口）的又一次。
+
+**护栏**：`gaps.rs` 的"仍不支持"清单（`Where::Class`：`void f() try { } catch (const E& e) { }`）。
+
+## 一批：真实 C++ 项目探针暴露的 10 类（B26–B35）
+
+**共同的发现经过**：`luajit-dll` 全绿之后，登记表在 **C** 上收敛了，但 C++ 侧从来没有拿真实项目当过探针——`real_world.cpp` 只有 2.9KB 手写片段，其余全是单元测试。把 `cpp_dump` 指向 `EmmyLuaCodeStyle`（200 个 C++ 文件，真实工程）后，**66 个文件报错**，而按"每个文件的**第一条**错误"归因只有 **10 个根因**（其余全是级联，最多的一份文件报了 98 条）。十条都做了最小复现并逐条孤立确认，下面各记一条，末尾附**修完之后的复验结果**。**一次探针挖出的比前面手写清单加起来还多**——维护约定第 11 条的第三次验证。
+
+**复验（十条全部修完之后，同一个 200 文件工程、同一把 `cpp_dump`）**：
+
+| | 修前 | 修后 |
+|---|---|---|
+| 有报错的文件 | 66 / 200 | **7 / 200** |
+| 报错总数 | ~650 | **128** |
+
+剩下的 7 个文件归成 **5 个新成因**，已逐条最小复现（见本节末"下一批"）。也就是说：**这一轮把"真实文件里能看见的问题"从 10 类压到 5 类**，而那 5 类里没有一类是这一轮改出来的。
+
+### B26. 枚举量的初始化式**吃掉后面的枚举量** —— 已修复
+
+```cpp
+enum E { A = 0, B };        // 干净、无损、良构、零报错 —— 但 B 不再是枚举量
+enum E { A = 0, B, };       // 同一个成因，带尾逗号时响亮报错
+```
+
+**现象**：第一种写法树里只有**一个** `EnumeratorDecl`，`B` 变成 A 的初始化式里的 `BinaryExpr`（`0, B`）：消费者问枚举有哪些成员，从第一个带初始化式的成员之后全丢。第二种写法报 `expected primary expression`（诊断落在 `}` 上）。EmmyLuaCodeStyle 里 2 个文件就是它。
+
+**成因**：`parse_enumerator_body` 用 **`parse_expr`** 读初始化式——那是**逗号运算符**那一层，于是 `= 0` 顺手把 `, B` 也吃了。这与当初**位域宽度**的缺陷是同一个：一条**自己拼逗号**的规则（枚举体拼 `,`、位域表拼 `,`）必须退出逗号运算符。位域那处当时改成了 `parse_assignment_expr`，这里漏了——**同一个教训的第二处，隔了几轮才撞上**（第一处见维护约定第 2 条那句"一条规则自己拼逗号就要退出逗号运算符"）。
+
+**为什么既有护栏没抓到**：`gaps.rs` 与文档里的枚举例子一直是 `enum Color { Red, Green };`——**没有初始化式**。所以这类"构造在、形状对、只有一半读法"的缺陷，靠"这个构造能读吗"是问不出来的。这是 A0 类（静默错树），也是本批唯一静默的一类。
+
+**性质**：A0。
+
+**修复**：`parse_enumerator_body` 的初始化式改用 `parse_assignment_expr`（位域宽度当年就是这么修的），一行；**护栏**是"枚举成员数"的形状断言（`gaps.rs`：`enum E { A = 0, B }` 必须是 **2** 个 `EnumeratorDecl`，另加带尾逗号、`enum class : unsigned`、多个带初始化式四种），以及已支持清单里的四条枚举写法。**这一条也说明了护栏该问什么**：`enum Color { Red, Green };` 钉了十年，钉的是"能读"，而该问的是"读出了几个成员"。
+
+### B27. UTF-8 BOM 报 `unrecognized character` —— 已修复
+
+```
+EF BB BF 23 70 72 61 67 6D 61 20 6F 6E 63 65     ← BOM + `#pragma once`
+```
+
+**现象**：文件开头带 UTF-8 BOM 时，**第一个 token 就报错**：`unrecognized character \u{feff}`。EmmyLuaCodeStyle 里 **37/200 个文件**如此（Visual Studio 与一批 Windows 编辑器存盘默认加 BOM），是本批覆盖面最大的一类。诊断在偏移 0，等于"文件一开头就坏"，对编辑器是最刺眼的一种坏法。
+
+**成因**：词法器的字符分派里没有 U+FEFF，落到"未知字符"兜底分支。U+FEFF 是零宽不换行空格，C++ 标准把 BOM 当**空白**处理，本来就该进 trivia。
+
+**性质**：缺规则（词法层），成本最低、收益最大。
+
+**修复**：`lex()` 的字符分派把它并进空白分支，`lex_whitespace` 的谓词也收它（文件中间的同一个码点同样当空白）。**护栏**：`lexer.rs::a_byte_order_mark_is_whitespace`（无报错 + 是一个 `Whitespace` token 而不是被丢掉——这同时是"不丢字符"的检查 + 中段 FEFF）+ `gaps.rs` 已支持清单里的 `\u{feff}int x;`。
+
+### B28. 块作用域的直接初始化判据**只看到一层** —— 已修复
+
+```cpp
+LuaParser p(file, std::move(luaLexer.GetTokens()));   // expected `;` after expression
+Widget w(a, std::move(b));                            // 干净
+Widget w(a, f(b.c()));                                // 干净
+Widget w(a, std::move(b.c()));                        // 失败
+```
+
+**现象**：`类型 名字(实参…)` 在**函数体内**读不出来（文件作用域同理），报 `expected ; after expression`；EmmyLuaCodeStyle 里 7 个文件的第一条错误都是它（`LuaParser p(file, std::move(luaLexer.GetTokens()))`、`std::fstream fin(newPath, std::ios::in | std::ios::binary)`）。
+
+**成因**：`direct_init` 的判据问的是"**实参看起来像值吗**"，而"像值"的证据是在实参里找字面量/调用/运算符。`std::move(b)` 能看出是调用，`std::move(b.c())` 却看不出——**证据是嵌在里面的**（限定名调用里再套成员调用），扫描没往里走两层。`std::ios::in | std::ios::binary` 同理：两个限定名之间的 `|` 没被当成"只可能是值"的运算符。
+
+**性质**：缺规则（判据深度不足）。**注意它和 B21/B22 是同一族**：判据看着"够用"就收工，遇到更深一层的嵌套就退回错的读法。
+
+**修复**：`the_arguments_like_values` 里"元素由名字后面那个 token 判定"这句话，改成"由**整条限定名链**后面那个 token 判定"——`::` 只说明名字还没完，不是答案。`std::move(b)` 于是由 `move` 后面的 `(` 判成调用。
+
+**顺带记下一条容易看错的现象**：`Widget w(a, std::move(b));` 本来就"干净"，但**它是函数声明**（形参类型 `std::move`），不是直接初始化——形参表读法先试且成功，根本轮不到这条判据。所以只有"形参表读不出来"的形状（`std::move(b.c())`、`B::C(1)`、`ios::in | ios::binary`）才会暴露这个缺陷。找根因时这一点很关键：**"干净"不等于"读对了"**（第 13 条的老问题，这次出现在探针的判读上）。
+
+**护栏**：`direct_init.rs::a_qualified_name_is_judged_after_the_whole_chain`（5 条限定名调用必须读成直接初始化 + 4 条形参表读法不受影响）。
+
+### B29. 声明开头的"宏 + 类型名"两个裸名字 —— 已修复
+
+```cpp
+EMMY_API RangeFormatResult f(const char *code);   // 读不出来
+EMMY_API char *f(const char *code);               // 干净（char 是关键字）
+MY_API W *f();                                    // 也读不出来（W 已知为类型也没用）
+```
+
+**现象**：导出宏（`MY_API`/`EXPORT`/`EMMY_API`/`__declspec` 之类）写在返回类型前面时，**只要返回类型不是关键字**，整条声明读不出来（退化成表达式语句，报 `expected ; after expression`）。真实 C++ 工程里这种前缀宏遍地都是。
+
+**成因**：声明说明符序列接受"一个裸名字 + 一个关键字类型"，不接受"**两个连续的裸名字**"——`EMMY_API RangeFormatResult` 是两个名字，判据（`declarator_starts_with_a_type_keyword` 那一族锚点）不成立，于是声明读法没被尝试。**已知为类型也救不了**：那条路只在名字**后面**紧跟声明符时才用得上。
+
+**性质**：缺规则。修法要在"说明符里已经有名字了"时仍允许再吃一个名字，且不能把 `A * b;`、`g(1, 2);` 这些既有判据弄坏（维护约定第 5 条：改公共入口先列调用点）。
+
+**修复**：`name_joins_the_type` 多问一句——"这个名字后面还留着**声明符**吗？"（后面是名字 / `*` / `&` / `&&` / `::` / `<` 就是留着，是 `;` `)` `,` `=` `(` 就不是），留着就让它并入类型。两条例外都是必需的，缺一条就出事：
+
+1. **只在声明里问，不在 type-id 里问**（`allow_second_name`）。第一版漏了这条，于是 `-> int requires C<T>` 里的 `requires` 也"后面留着声明符"，整个 clause 被吃进返回类型——`gaps.rs` 的形状断言当场抓出来（`no RequiresClause in it`）。**这就是维护约定第 6 条的价值**：报错、无损、良构三样全过，只有"这个构造必须读成这种节点"能拦住。
+2. **只在已经有一个名字并入类型之后才问**（从事件流读回 `TemplateType`，不是加一个标志位——理由和 `has_type_specifier` 一样：忘了置位的分支是静默的）。
+
+**代价**：`Name Name Name`、`Name Name * Name` 在任何语法里都不是表达式，所以只有"原本没有读法"的语句改变了读法。
+
+**护栏**：`ast.rs::an_export_macro_before_the_type_leaves_the_declarator_last`（**用类型化 AST 问"这条声明叫什么名字"**——要的是 `p`/`f`/`g`/`make`，而不是"能解析"；加 4 条不受影响的对照）+ `gaps.rs` 已支持清单三条。
+
+### B30. 嵌套 `>>` 与空模板实参 `std::less<>` —— 已修复
+
+```cpp
+class S : public DBBase<K, std::shared_ptr<V>> { };              // expected `;`
+void f(const std::map<int, int, std::less<>> &m);                // 读不出来
+std::map<int, int, std::less<>> &Get();                          // 干净
+void f(std::less<> l);  void f(std::shared_ptr<A::B> p);         // 干净
+```
+
+**现象**：两处各自成立、**组合起来就坏**：基类子句里嵌套 `>>` 收尾报 `expected ;`（2 个文件），形参里"空模板实参 `<>` 套在另一个 template-id 里"（连排三个 `>`）读不出来（3 个文件，含 `std::less<>` 作返回类型时级联到下一行）。
+
+**成因**：`>` 的配对与"这个 `>` 是模板收尾还是比较"这条判据（B21）在**嵌套 + 连排**时数错了一格：`less<>` 的 `<>`、`map<...>` 的收尾 `>`，三个 `>` 挤在一起，配对方向就丢了。
+
+**性质**：缺规则（判据在连排 `>` 上的漏洞）。
+
+**修复（三处，都是同一个"一个 token 关两层"的问题）**：
+
+1. **模板实参表**：`parse_template_argument_list` 的循环只在**读完一个实参之后**才 `split_closing_angle`，而**空实参表**没有实参可读——游标一上来就是 `RightShift`，于是报 `expected a template argument`。修法是在循环顶上先拆。非空写法一直好，只是因为它的实参先被读了。
+2. **`a_body_follows_the_class_head`**（类头的 `{` 预查）：它数 `<` / `>` 时漏了 `RightShift`，于是嵌套 template-id 的基类子句里深度一直没归零，`{` 到不了、类头被当成"没有类体"，整条定义报 `expected ;`——而**单层**实参表的同一个基类子句是好的。
+3. **抽出 `angle_depth_delta`**：数角度的扫描一共有**三处**（限定名预查、`a_parenthesis_follows_the_name`、类体预查），前两处有 `RightShift`、第三处没有。这正是维护约定第 14 条说的事——**同一个判据的第二处用法就是例外被漏掉的地方**，所以这次不补第三遍，抽成一个函数。
+
+**顺带**：修 B29 时把 `<` 也算作"后面留着声明符"，当场撞坏了**显式实例化** `template MyType f<int>(int);`（`f<int>` 是声明符的名字，不是类型的一部分）——`modern.rs` 的既有测试抓住了。判据要走过**整个实参表**再看后面那个 token：`*` → 名字属于类型（`MY_API Vector<int> *make();`），`(` → 名字是被调用的那一个（`f<int>(int)`）。
+
+**护栏**：`gaps.rs` 已支持清单五条 + 形状断言（嵌套基类必须有 `BaseSpecifier`；`std::less<>` 那条必须有**两个** `TemplateArgumentList`）。
+
+### B31. 成员指针：`->*` 与 `(Class::*name)` —— 已修复
+
+```cpp
+(c->*h)(1);                                                   // expected ), but get ->*
+std::shared_ptr<ReturnType> (LSPHandle::*handle)(std::shared_ptr<ParamType>)   // 类体提前收尾
+```
+
+**现象**：`->*`（指向成员的指针解引用）没有规则，`(this->*handle)(...)` 直接报错（`CodeActionService.cpp`）；类里的**成员函数指针形参** `(LSPHandle::*handle)(...)` 更坏：它让**类体提前收尾**，其后的成员全部级联报错（`LSPHandle.h` 的 2 条报错是它，第 2 条落在类的 `};` 上）。
+
+**成因**：`->*` 已在词法器（`ArrowStar`），表达式层没有对应的读取；声明符层的 `::*`（指向成员的指针声明符）没有规则，于是 `(LSPHandle::*handle)` 这个括号读法失败，`}` 被当成类体结束。
+
+**性质**：缺规则（两处，同一个概念）。
+
+**修复（三处，其中一处是探针自己挖出来的静默错树）**：
+
+1. **表达式层**：`.*` / `->*` 加进运算符表，优先级 14（标准里 pm-expression 在 multiplicative-expression 之下，比乘法结合更紧）。
+2. **声明符层（静默那半）**：`int C::*p;` 本来"能读"，但**读错了**——`C::` 并进了类型，`*p` 成了**类型节点里面的** `InitDeclarator`：无损、良构、零报错，而消费者问类型得到 `int C::`、问声明符什么也得不到。判据：`continues_a_qualified_name` 遇到"`::` 后面紧跟 `*`"要回答**否**——那是成员指针运算符，不是限定名的延续（`int A::B *p;` 是"类型 `A::B` + 指针 `p`"，两者的区别后一个 token 说了算）。
+3. **抽象声明符**：`Class::*` 属于 ptr-operator（标准里 nested-name-specifier 在运算符**里面**），所以那个类名站在抽象声明符的起点而不是声明符名字的起点。加上这条之后 `int C::*p;` 的树才正确；再把"括号里是成员指针运算符"补进另外两条括号判据，`typedef int (C::*fp)(int);`、`void g(int (C::*h)(int));`、无名参数的 `void h(int (C::*)(int));` 一起通了。**有名字的 `(C::*h)` 与无名字的 `(C::*)` 必须分开判**——前者归 `parse_parenthesised_declarator`（它要求有名字），后者归抽象声明符；混在一起会让无名的那个参数读不出来。
+
+**护栏**：`operators.rs::the_pointer_to_member_operators_are_binary_operators`（5 条 + 必须有 `BinaryExpr`）+ `gaps.rs` 已支持清单六条 + **形状断言**（`int C::*p;` 的 `DeclSpecifierSeq` 文本必须恰好是 `"int "`——这是唯一能看见"声明符钻进类型里"的判据）。
+
+### B32. gtest 风格的"宏 + 块" —— 已修复
+
+```cpp
+TEST(FormatPerformance, 1k_row) {
+    ...
+}
+```
+
+**现象**：文件作用域上"一个调用后面直接跟块"读不出来，报 `expected ; after expression`（`{` 无处安放）。EmmyLuaCodeStyle 的 6 个 `*_unitest.cpp` 如此，其中两份报了 68 和 98 条——**全是这一条的级联**。
+
+**成因**：`TEST(A, B)` 没有声明符名字，声明读法失败；它不是函数定义，也不是变量声明——真实含义是**宏**，而"宏 + 块"这种形状（gtest/Catch2/benchmark 都这么写）没有规则。字面地看，它和"函数定义的头"只差一个名字。
+
+**性质**：缺规则。修法要克制：只在**文件/名字空间作用域**、且"调用形状 + 块"时才接，别把 `g(1,2) { }` 这类真错误也吞掉。
+
+**修复**：新增形状判据 `a_macro_definition_follows`（无声明符名字 + 头的名字不是限定名 + 不在函数体内 + 括号是**平衡**的且后面紧跟 `{`），命中就把括号当**宏的实参表**读成 `ArgumentList`（原始 token，不做任何解释），并把"这是函数声明符"的标志置上，好让 `{` 成为**函数体**。三条例外都是被既有测试逼出来的：
+
+1. **限定名头部**（`void Widget::draw(T) { }`）：它的括号**就是**形参表——第一版把它的形参表吃成了实参表，`direct_init.rs` 的两条既有测试当场报 `the parentheses are a parameter list`（0 ≠ 1）。
+2. **不在函数体内**：`g(x) { }` 在函数体里是"语句后面跟一个块"，那是真错误。
+3. **判据必须同时加进声明符后缀循环的开门条件**（`types.rs`）：循环原本只在"声明/表达式问题有答案"时打开，而这个形状**恰恰没有答案**（宏的 token 既不像值也不像声明符）——所以 `TEST(A, B) { }`（实参像声明符）能读、`TEST(A, 1) { }`（实参像值）不能读。同一个判据写两遍就是维护约定第 14 条的场景，所以抽成一个函数两处调用。
+
+**护栏**：已支持清单（**文件作用域**四条：`TEST(A, B) { }`、带 `1k_row` 的、体内有语句的、名字空间里的）+ 形状断言（块是 `Declaration` 的**子节点**、其文本是 `{ int x = 1; }`——即测试体真的被读成了体）。
+
+### B33. 用户自定义字面量作**实参** —— 已修复
+
+```cpp
+auto x = 1_km;      // 干净（B18 修的）
+g(1k_row);          // expected ), but get identifier
+```
+
+**现象**：B18 让 `UserDefinedLiteral` 能被表达式读法接住，但**实参列表**里的同一个 token 仍然失败。`Performance_unitest.cpp` 的 `TEST(FormatPerformance, 1k_row)` 里就有一个。
+
+**成因**：典型的"空头支票的镜像"（维护约定第 12 条）：上游（词法器）特意分出了 `UserDefinedLiteral`，下游**一处**接了（字面量分支），另一处（"这里能开始一个操作数吗"的判据）没接。
+
+**性质**：缺规则（判据表漏一项）。
+
+**修复**：真正的成因在**词法层**，不在判据表：后缀只有以 `_` 开头才被当成用户自定义后缀，于是 `1k_row` 被切成 `1` + `k_row` 两个 token，`g(1k_row)` 的实参读法自然失败。改成**任何标识符**都可以是后缀之后，`1k_row`、`100ms`、`"name"sv` 都是一个 `UserDefinedLiteral`，而标准后缀（`1u`、`1LL`、`1z`）、指数（`1e5`）、十六进制（`0x1f`）、浮点后缀（`1.5f`）都在到达这条规则之前就被数字扫描吃掉了、行为不变。不带 `_` 的后缀在标准里只是"保留给实现"（对**程序**的要求，不是对 token 的要求），GCC/Clang 都按一个字面量收下并给个警告。
+
+**顺带**：这条比 preprocessor 更早生效，因为 `1k_row` 在预处理阶段本来就是**一个 pp-number**——这也解释了为什么 gtest 的 `TEST(FormatPerformance, 1k_row)` 里那个"测试名"能这么写。
+
+**护栏**：`lexer.rs::a_literal_suffix_need_not_start_with_an_underscore`（8 条必须是一个 `UserDefinedLiteral` + 9 条标准后缀不得变成它 + `12abc` 是一个 token）+ 已支持清单三条。
+
+### B34. 表达式里以 `::` 开头的限定名 —— 已修复
+
+```cpp
+return (::abs(static_cast<int>(x)) > y);   // expected ), but get >
+return (std::abs(x) > y);                  // 干净
+```
+
+**现象**：`(::abs(x) > 1)` 报 `expected ), but get >`（`SymSpell.cpp`）；把 `::` 换成 `std::` 就干净。
+
+**成因**：括号读法（`ParenExpr` / cast 的两义）里，"全局限定名 `::name`"这种操作数不在"这里能开始一个操作数"的判据表里，于是 `(` 后面那一串被当成类型读法的一部分，读到 `>` 就要 `)`。
+
+**性质**：缺规则（判据表漏一项，和 B33 同族）。
+
+**修复**：问题不在"操作数从哪儿开始"的判据表，而在 **`is_a_type_in_parentheses`**——它有一条 `Some(&Scope) => true`，意思是"以 `::` 开头的一定是类型"。那正是 T1 那条教训的反例：`::name` 既是全局限定**类型**的开头，也是全局限定**表达式**的开头，而 token 上分不出来，唯一能分的是 `)` **后面跟什么**。那条判据（"`(` 后面是类型"）本来就在上面几行、且已经在用操作数证据，所以**删掉这个 arm** 就够了：`(::x)`、`(::abs(x) > 1)` 回到括号表达式，而 `(::MyType)x`、`(::std::string)x`、`(::MyType*)p` 因为有操作数/指针运算符照旧是转换。
+
+**顺带**：这也是维护约定第 14 条的反向用法——**判据的每一条例外都要能被"后面跟什么"解释**。裸名字那一条已经用类型表 + 操作数证据回答了，`::` 那一条却只凭"看起来像类型"。
+
+**护栏**：`operators.rs::a_global_qualified_name_in_parentheses_is_an_expression`（6 条必须是 `ParenExpr` + 3 条必须仍是 `CastExpr`）+ 已支持清单两条。
+
+### B35. 函数式转换 `bool(x)` —— 已修复
+
+```cpp
+root.AddChild("code_style_check", bool(lint["codeStyle"]));
+```
+
+**现象**：`bool(x)`、`int(y)` 这类**函数式转换**（用 builtin 类型名当函数调用）报 `expected primary expression`（`ClientConfig.cpp`）。
+
+**成因**：表达式里"类型名 + `(`" 只有两条路：显式类型转换 `(T)x` 和构造临时对象 `T(x)`；后者要求 `T` 是**已知类型名**，而 `bool`/`int` 是关键字，走的是另一张表，那张表没接 `(`。
+
+**性质**：缺规则（关键字类型名没接函数式转换）。
+
+**修复**：`parse_primary_expr` 加一条分支——类型关键字 + `(` → `CastExpr(BuiltinType(关键字), ParenExpr(操作数))`。**类型只吃关键字本身**：交给 `parse_type_id` 会把括号读成函数类型的形参表（"返回 bool、形参 x 的函数"），然后没有 `(` 留给载荷了（报 `expected (, but get ;`）——这是第一版的错。声明读法照旧优先：`int(x);` 是"声明了带括号的名字 `x`"，测试里钉住了这条对照。
+
+**护栏**：`operators.rs::a_functional_cast_with_a_keyword_type_is_a_cast`（6 条必须是 `CastExpr` + `int(x);` 必须不是）+ 已支持清单两条。
+
+### 下一批（B36–B40，待办）：复验后剩下的 5 个成因
+
+两条都逐条最小复现过，成因已确认，只是还没动手。按"覆盖的文件数"排序：
+
+| 编号 | 例子（最小复现） | 现象 | 归属文件 |
+|---|---|---|---|
+| **B36** | `void f() { IF_EXIST(k) { g(); } }` | 报 `expected }, but get ;`。**函数体内**的"宏 + 块"——B32 的规则**故意**不收体内（那里 `g(x) { }` 是真错误），但 `IF_EXIST(...) { ... }` 这种"条件宏 + 块"在体内到处都是 | `LuaStyle.cpp`（68 条，全是它的级联） |
+| **B37** | `static const struct { unsigned char left; } priority[] = { { 1 } };` | 报 `expected a declarator name`。**无名类类型 + 数组声明符 + 初始化式**（`static const struct { … } name[] = { … };` 是 C 的老写法） | `LuaDefine.h`（45 条） |
+| **B38** | `void f(const std::function<bool(TokenKind)> &predicated);` | 报 `expected primary expression`。**函数类型出现在形参/模板实参位置**（`bool(TokenKind)` 是类型不是调用） | `SyntaxNodeHelper.cpp/.h`、`LuaSyntaxNode.cpp`（3 个文件） |
+| **B39** | `struct S { void f() { for (auto &v: vec) { } } };` | 报 `expected ;, but get )`。类体内的函数体里，范围 `for` 的 `:` 被当成**位域宽度**读走了（`v: vec`） | `LSP.h`（5 条） |
+| **B40** | `try { g(); }` 换行 `#if !defined(_DEBUG)` 换行 `catch (const E& e) {` | 报 `expected }`。指令落在 **`}` 与 `catch` 之间**——B23 那一族（构造中间的指令）的第三种形状 | `IOSession.cpp`（5 条） |
 
 ### B19. `sizeof` 的操作数只要不是裸名字就失败 —— 已修复
-
 ```cpp
 sizeof(a[0]);        // expected ), but get [
 sizeof(a.b);         // expected ), but get .
@@ -913,7 +1180,23 @@ operator bool() &&  // && 和 ( 分开     -> 这是成员函数的引用限定�
 | 22 | 类型后的 cv 限定符（两个叠加缺陷；修完 CMake 文件 10→4 条） | **A0-4** | 半天 | **完成** |
 | 23 | 数组类型进类型读法（`sizeof(int[4])`、`Vec<int[4]>`；含 `new` 的开关与方括号配对的扫描） | B20 的另一半 | 半天 | **完成** |
 | 24 | 构造中间的预处理条件行（初始化列表元素之间 + 字符串字面量串中间） | B23 | 一天 | **完成** |
-| — | K&R 风格函数定义 `int main(argc, argv) int argc; ...` | 新缺口 | 半天 | 待办 |
+| 25 | K&R 风格函数定义（两个叠加缺陷：括号外形参表 + 那个不存在的 `;`；修完真实项目全绿） | B24 | 半天 | **完成** |
+| 26 | 枚举量的初始化式吃掉后续枚举量（**A0 静默错树**；真实 C++ 项目探针的头号发现） | **B26** | 半天 | **完成** |
+| 27 | UTF-8 BOM 当空白（37/200 个真实文件，一个字符覆盖最大面） | B27 | 一小时 | **完成** |
+| 28 | 直接初始化判据只看到一层（限定名调用里的嵌套实参） | B28 | 半天 | **完成** |
+| 29 | 声明开头的"宏 + 类型名"两个裸名字（`MY_API SomeClass *f();`；第一版误伤 requires-clause，被形状断言抓住） | B29 | 一天 | **完成** |
+| 30 | 嵌套 `>>` 与空模板实参 `std::less<>`（三处数角度的扫描，抽出 `angle_depth_delta`） | B30 | 半天 | **完成** |
+| 31 | 成员指针：`->*` 与 `(Class::*name)`（含 `int C::*p;` 的**静默**错树：声明符钻进类型节点） | B31 | 一天 | **完成** |
+| 32 | gtest 风格的"宏 + 块"（6 个测试文件，最多 98 条级联；三条例外由既有测试逼出） | B32 | 半天 | **完成** |
+| 33 | 字面量后缀不必以 `_` 开头（`1k_row`、`100ms`、`"name"sv`；真因在词法层） | B33 | 一小时 | **完成** |
+| 34 | 表达式里以 `::` 开头的限定名（删掉 `is_a_type_in_parentheses` 里那条凭"看起来像类型"的 arm） | B34 | 一小时 | **完成** |
+| 35 | 函数式转换 `bool(x)`（类型只吃关键字本身，不能交给 `parse_type_id`） | B35 | 一小时 | **完成** |
+| — | 函数体内的"宏 + 块"（`IF_EXIST(k) { … }`；B32 的规则故意不收体内） | B36 | 半天 | 待办 |
+| — | 无名类类型 + 数组声明符（`static const struct { … } name[] = { … };`） | B37 | 一天 | 待办 |
+| — | 函数类型出现在形参/模板实参位置（`std::function<bool(T)> &pred`） | B38 | 一天 | 待办 |
+| — | 类体内函数体里的范围 `for`：`:` 被当成位域宽度 | B39 | 半天 | 待办 |
+| — | 指令落在 `}` 与 `catch` 之间（B23 族的第三种形状） | B40 | 半天 | 待办 |
+| — | 函数 try 块 `void f() try { } catch (...) { }` | B25 | 半天 | 待办 |
 | — | `namespace` 与名字之间的属性 | B3 残留 | 半天 | 待办 |
 | — | `void()` 作表达式 | B5 | 半天 | 待办（很少见） |
 | — | `asm volatile`、`__attribute__` | D | — | **不做** |
@@ -959,3 +1242,4 @@ operator bool() &&  // && 和 ( 分开     -> 这是成员函数的引用限定�
     
     写新规则时先问这两句：**它应该在哪个 token 上收尾？收尾之后那个 token 允许是什么？** 只写"解析成功就接受"的规则，在这个容错 parser 里迟早会在垃圾输入上"成功"。
 14. **同一条判据的第二处用法，当场抽出来，别写第二遍**（B22）。"后面跟着操作数"这条证据先用在 cast 上（T1），后来用在 template-id 上（B21），两处都需要同一条例外（clause 内不生效）——第二次直接改的时候漏了 cast 那处，是**新写的测试用例**（`requires (C<T>) T value = T{};`）把它抓出来的。抽成 `an_operand_is_decisive` 之后，例外只有一处实现。**"这条例外要加在哪里"是比"这条例外是什么"更容易错的问题**：只要同一个判据出现两次，例外就有两处可能被漏。
+15. **嵌进去的规则会先花掉外层规则要的 token**（B24 的第二个缺陷）。K&R 形参表读的是**真正的声明**，每条自带一个 `;`，于是外层声明收尾时那个 `;` 早被吃掉了；而这只在"没有函数体"的形状上暴露——有体时游标落在 `{` 上，走的是另一条分支。所以看到"这里应该有个 `;`"时，要先问**这段 token 里有没有嵌套规则已经消费过它**。同族问题还有 `friend`：它的载荷是整条声明（`;` 在内），外层当初也又找了一遍 init-declarator，失败后回退，把后面的成员全变成了错误节点。两次的形状一样：**外层以为收尾符号还在**。

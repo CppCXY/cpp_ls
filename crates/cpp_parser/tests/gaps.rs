@@ -387,6 +387,15 @@ fn constructs_the_parser_reads() {
             "template <typename... Us> using Pack = std::tuple<int, char>;",
             // A pack expansion as a template argument, in a declaration's type rather than in an expression.
             "template <typename... Ts> using All = std::tuple<Ts...>;",
+            // A **macro invocation used where a definition goes** — how gtest, Catch2 and every benchmark library
+            // write a test. File scope (or a namespace) is what makes it that shape: inside a function body a call
+            // followed by a block is a real error, and the rule refuses it there — so this list is the only one it
+            // can be read from. The arguments are the macro's tokens, neither values nor declarators, which is why
+            // the shape is the whole of the test.
+            "TEST(A, B) { }",
+            "TEST(FormatPerformance, 1k_row) { }",
+            "TEST(A, B) { int x = 1; }",
+            "namespace n { TEST(A, B) { } }",
         ],
     );
 
@@ -698,6 +707,62 @@ fn constructs_the_parser_reads() {
             "void requires();",
             "void f(int requires, int concept);",
             "struct S { int requires; int concept; };",
+            // A **K&R (old-style) function definition**, whose parameters are declared *after* the parenthesis
+            // rather than inside it. It is C's spelling from before 1989, and the file that found it is a CMake
+            // compiler-id probe — generated into every CMake build tree, so it is not an exotic file. Both the
+            // definition and the body-less head are listed, because a conditional can put the head in one branch
+            // and the body in neither; `old_style.rs` owns the shapes, this list only says that they are read.
+            "int main(argc, argv)\nint argc;\nchar *argv[];\n{ return argc; }",
+            "int main(argc, argv)\nint argc;\nchar *argv[];",
+            "int f(a)\nint a;\nfloat b;\n{ return a; }",
+            // Enumerators **with initializers**, which is where the enumerator list is really a list: a reader
+            // that takes the comma swallows the members after the first initialised one (B26), and an enum whose
+            // members have no initializers cannot see that. `enum Color { Red, Green }` was the example for years.
+            "enum E { A = 0, B };",
+            "enum E { A = 0, B, };",
+            "enum class E : unsigned { A = 1, B = 2, C };",
+            "enum E { A = 1 << 2, B = f(1, 2), C };",
+            // A **byte-order mark**: not a construct, but the first character of a file Visual Studio saved, and
+            // it used to be the first *diagnostic* of that file too (37 of 200 files in a real project).
+            "\u{feff}int x;",
+            // An **export macro** in front of the type: two names where a declaration has its type, and the
+            // declarator is the third. `ast.rs` pins the name it comes out with; this only says it is read.
+            "MY_API Widget *p;",
+            "EMMY_API Result f(int x);",
+            "EXPORT std::string g();",
+            // Two closers in one token. The lexer glues `>>` together (`a >> b` is a shift), so a nested
+            // template-id ends with a token that closes **two** lists — and the empty argument list
+            // `std::less<>` has no argument to read before the closer arrives, which is why it failed while the
+            // non-empty spelling worked. Any scan that counts angles has to answer for `>>`; see
+            // `angle_depth_delta`.
+            "class D : public Base<K, std::shared_ptr<V>> { };",
+            "class D : public std::vector<std::pair<K, V>> { };",
+            "void f(const std::map<int, int, std::less<>> &m);",
+            "std::map<int, int, std::less<>> &Get();",
+            "void f(std::map<int, std::less<int>> m);",
+            // **Pointers to members**, in every spelling: the operator after the type (`C::*`), the parenthesised
+            // form with a name, the abstract form a parameter uses, and the expression operators. `gaps.rs` also
+            // pins the *shape* below, because the unparenthesised form used to parse with the declarator nested
+            // inside the type — lossless, well formed, no diagnostic, wrong.
+            "int C::*p;",
+            "typedef int (C::*fp)(int);",
+            "void g(int (C::*h)(int));",
+            "void h(int (C::*)(int));",
+            "struct C { };\nvoid f(C* c) { (c->*h)(1); }",
+            "struct C { };\nvoid f(C& c) { (c.*h)(1); }",
+            // The literal suffixes those arguments use — `1k_row` is one token, not a number and a name. The
+            // macro-definition shape itself is in the file-scope list above: inside a body it is a call followed
+            // by a block, which is a real error and is refused on purpose.
+            "auto x = 1k_row;",
+            // A **global-qualified name in parentheses** is an expression; the `::` used to make it a cast type.
+            "auto y = (::x);",
+            "auto y = (::abs(x) > 1);",
+            // A **functional-notation conversion with a keyword type** — `bool(x)`, the other way of writing
+            // `(bool)x`.
+            "auto y = bool(x);",
+            "g(\"key\", bool(lint[\"codeStyle\"]));",
+            "auto timeout = 100ms;",
+            "auto text = \"name\"sv;",
         ],
     );
 
@@ -866,6 +931,17 @@ fn constructs_the_parser_does_not_read_yet() {
             //
             // They are pinned as *read* in the test above instead, and this list is kept — rather than deleted —
             // so that the next gap has a place to go.
+            //
+            // The next gap: a **function-try-block**, whose `try` sits between the declarator and the body.
+            // `try { } catch (const E& e) { }` as a *statement* is read (it is in the list above); the same words
+            // in a function's own position are not, and the declarator's tail accepts `{`, `;`, `:`, `requires`
+            // and an old-style parameter list — not `try`. Found while writing `old_style.rs`, whose list of
+            // "what a modern function declarator continues with" was meant to contain no unsupported spelling.
+            // Rare outside constructors, and loud rather than silent, so it is logged rather than fixed.
+            (
+                "void f() try { } catch (const E& e) { }",
+                "the declarator's tail has no rule for `try` — see B25 in docs/grammar-gaps.md",
+            ),
         ],
     );
 }
@@ -1216,4 +1292,102 @@ fn modern_constructs_produce_the_right_nodes() {
         1,
         "a conjunction of two concepts is one clause"
     );
+
+    // A K&R definition: the second list is the assertion, because the *first* one is what the parenthesis says
+    // either way — `argc` is a good parameter type, so a modern parameter list reads the same tokens. The
+    // declarations after the parenthesis are what says they were names. See `old_style.rs` for the full shape.
+    let source = "int main(argc, argv)\nint argc;\nchar *argv[];\n{ return argc; }";
+    assert!(
+        contains(source, CppSyntaxKind::OldStyleParameterList),
+        "the parameters declared after the parenthesis get a list of their own"
+    );
+    assert!(
+        contains(source, CppSyntaxKind::CompoundStat),
+        "and the body is still the definition's"
+    );
+
+    // A base clause with a **nested template-id**: the `BaseSpecifier` is the assertion, because the failure was
+    // that the head was not recognised as one at all — the angle scan read the `>>` as a single closer's worth of
+    // depth, the `{` of the body arrived with the depth still positive, and the class definition failed against
+    // its own name. A tree without the base clause is lossless, well formed and one diagnostic away from right.
+    let source = "class D : public Base<K, std::shared_ptr<V>> { };";
+    assert!(
+        contains(source, CppSyntaxKind::BaseSpecifier),
+        "the nested base clause is read as a base clause"
+    );
+    // And both nested lists are lists: the empty `std::less<>` inside a parameter list is two argument lists, not
+    // one that swallowed the other's closer.
+    let source = "void f(const std::map<int, int, std::less<>> &m);";
+    assert_eq!(
+        CppParser::parse(source, ParserConfig::default())
+            .get_red_root()
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::TemplateArgumentList)
+            .count(),
+        2,
+        "two template argument lists, one of them empty"
+    );
+
+    // A **pointer to member**: the `C::*` is the declarator's, and the type is only `int`. Read the other way —
+    // `C::` joining the type — the tree was lossless, well formed, free of diagnostics and *wrong*: the
+    // declarator sat inside the type node, so a consumer asking the declaration for its type got `int C::` and
+    // one asking for its declarator got nothing. The text of the specifier sequence is what tells the two apart,
+    // and it is the only assertion here that sees it.
+    let source = "int C::*p;";
+    let specifiers = CppParser::parse(source, ParserConfig::default())
+        .get_red_root()
+        .descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::DeclSpecifierSeq)
+        .expect("a specifier sequence")
+        .text()
+        .to_string();
+    assert_eq!(
+        specifiers, "int ",
+        "the member-pointer operator belongs to the declarator, not to the type"
+    );
+
+    // A **macro invocation used as a definition**: the block is the declaration's *body*, not a statement that
+    // follows it, and the statement inside it is read as a statement. Both halves matter — the shape is what the
+    // reader of a test file needs (the body of a `TEST(...)` is where the code is), and the body being attached is
+    // what `TEST(A, B) { int x = 1; }` failing used to cost.
+    let source = "TEST(FormatPerformance, 1k_row) { int x = 1; }";
+    let parsed = CppParser::parse(source, ParserConfig::default());
+    let body = parsed
+        .get_red_root()
+        .descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CompoundStat)
+        .expect("the block is in the tree");
+    assert_eq!(
+        body.parent()
+            .map(|parent| CppSyntaxKind::from(parent.kind())),
+        Some(CppSyntaxKind::Declaration),
+        "the block is the definition's body, not a statement after it"
+    );
+    assert_eq!(
+        body.text().to_string(),
+        "{ int x = 1; }",
+        "and its own declarations are inside it"
+    );
+
+    // **How many enumerators an enum has.** This is the assertion the A0 defect of B26 needed and did not have:    // with the initializer read at the comma-operator level, `enum E { A = 0, B };` came out as *one*
+    // `EnumeratorDecl` whose initializer was the expression `0, B` — lossless, well formed, no diagnostic, and
+    // with `B` no longer a member of the enum. Counting members is the only question that sees it, and the census
+    // above cannot ask it ("does this construct parse?" was answered `yes` by the wrong tree all along).
+    for (source, expected) in [
+        ("enum E { A = 0, B };", 2),
+        ("enum E { A = 0, B, };", 2),
+        ("enum class E : unsigned { A = 1, B = 2, C };", 3),
+        ("enum E { A, B, C };", 3),
+        ("enum E { A = 0 };", 1),
+    ] {
+        assert_eq!(
+            CppParser::parse(source, ParserConfig::default())
+                .get_red_root()
+                .descendants()
+                .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::EnumeratorDecl)
+                .count(),
+            expected,
+            "{source:?} has {expected} enumerators"
+        );
+    }
 }

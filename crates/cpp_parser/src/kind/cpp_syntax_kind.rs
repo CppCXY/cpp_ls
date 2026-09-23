@@ -513,6 +513,23 @@ pub enum CppSyntaxKind {
     /// e.g.: (int x, double y, char* z)
     ParameterList,
 
+    /// The **old-style (K&R) parameter declarations** of a function definition.
+    ///
+    /// The parameters are declared *after* the parenthesis rather than inside it, so the identifiers in the
+    /// parenthesis are names whose types arrive later:
+    ///
+    /// ```c
+    /// int main(argc, argv)
+    ///     int argc;
+    ///     char *argv[];
+    /// { … }
+    /// ```
+    ///
+    /// Obsolete in C++ and deprecated in C, but ordinary in C from before 1989 — and this parser is asked to read
+    /// C. The declarations are ordinary `Declaration`s inside this node, so a consumer finds the parameters' types
+    /// without re-reading tokens.
+    OldStyleParameterList,
+
     /// Argument list - function call argument list
     /// e.g.: func(arg1, arg2, arg3)
     ArgumentList,

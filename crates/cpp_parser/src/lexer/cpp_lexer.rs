@@ -135,7 +135,7 @@ impl<'a> CppLexer<'a> {
         match self.reader.current_char() {
             // Whitespace
             '\n' | '\r' => self.lex_newline(),
-            ' ' | '\t' => self.lex_whitespace(),
+            ' ' | '\t' | '\u{feff}' => self.lex_whitespace(),
 
             // Single character tokens
             '(' => {
@@ -485,8 +485,17 @@ impl<'a> CppLexer<'a> {
     }
 
     /// Lex whitespace characters
+    ///
+    /// A **byte-order mark** is whitespace here. `\u{feff}` at the start of a file is the BOM that Visual Studio
+    /// and a good many Windows editors write, and the standard has the implementation drop it in translation
+    /// phase 1 — so a file saved that way is a perfectly good translation unit. Treating it as an unrecognised
+    /// character reported `unrecognized character \u{feff}` at offset 0, which is the worst place a diagnostic can
+    /// land: *every* file the editor opened with a BOM looked broken at its first byte (37 of the 200 files in the
+    /// first real C++ project put in front of this parser). It is also the zero-width no-break space, so the same
+    /// character in the middle of a file is trivia for the same reason.
     fn lex_whitespace(&mut self) -> CppTokenKind {
-        self.reader.eat_while(|ch| ch == ' ' || ch == '\t');
+        self.reader
+            .eat_while(|ch| ch == ' ' || ch == '\t' || ch == '\u{feff}');
         CppTokenKind::Whitespace
     }
 
@@ -745,12 +754,23 @@ impl<'a> CppLexer<'a> {
     ///
     /// The suffix must be part of the literal token: `"hello"_s` lexed as a string plus an
     /// identifier makes the parser see two expressions where the language has one.
+    ///
+    /// The suffix is **any identifier**, not only one that starts with `_`. Requiring the underscore split
+    /// everything else into two tokens, and the two that matter are ordinary modern C++:
+    ///
+    /// ```text
+    /// auto timeout = 100ms;    std::chrono_literals — ms, us, ns, s, min, h
+    /// auto text = "name"sv;    std::string_view_literals
+    /// ```
+    ///
+    /// A suffix that does not begin with `_` is *reserved* — a rule about programs, not about tokens, and one
+    /// GCC and Clang accept with a warning. The token is a single user-defined literal either way.
     fn finish_literal(&mut self, kind: CppTokenKind) -> CppTokenKind {
-        if self.reader.current_char() != '_' {
+        if !is_name_start_with_dollar(self.reader.current_char(), false) {
             return kind;
         }
 
-        self.reader.bump(); // `_`
+        self.reader.bump();
         self.reader
             .eat_while(|ch| is_name_continue_with_dollar(ch, false));
         CppTokenKind::UserDefinedLiteral
@@ -1017,7 +1037,12 @@ impl<'a> CppLexer<'a> {
                 .eat_while(|c| matches!(c, 'u' | 'U' | 'l' | 'L' | 'z' | 'Z'));
         }
 
-        if self.reader.current_char() == '_' {
+        // A **user-defined suffix**, which is any identifier — see [`Self::finish_literal`] for why requiring an
+        // underscore was wrong. Nothing valid is lost by reading one here: a number immediately followed by a name
+        // character is not two tokens in any reading of C++ (`12abc` is ill-formed either way), and every
+        // legitimate continuation has been consumed above — the exponent (`1e5`), the hex digits (`0x1f`) and the
+        // standard suffixes (`1u`, `1LL`, `1.5f`, `1z`).
+        if is_name_start_with_dollar(self.reader.current_char(), false) {
             self.reader.bump();
             self.reader
                 .eat_while(|c| is_name_continue_with_dollar(c, false));

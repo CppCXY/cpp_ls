@@ -358,13 +358,32 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
     // been consumed is a different question and is answered by `specifiers` — a declaration
     // beginning with `explicit` has a specifier and no name.
     p.begin_declaration_type();
+    // Where the specifier sequence begins, so the loop can read back what it has produced. See the note on
+    // `a_further_name_may_join` below.
+    let specifiers_from = p.current_event_count();
     loop {
         let specifier_seen = specifiers > 0;
+        // May a **further** name still join the type, beyond the one that is already in it?
+        //
+        // Two conditions, and both are load-bearing:
+        //
+        // * **This is a declaration, not a type-id.** `allow_second_name` is the caller's answer, and in a type-id
+        //   it is `false` because the sequence has to end at the type — there is no declarator for a second name
+        //   to make room for. Asking the question in a type-id is how a trailing return type swallowed the clause
+        //   after it: `-> int requires C<T>` came out as the type `int requires C<T>`, and the clause vanished
+        //   from a well-formed, lossless, diagnostic-free tree.
+        // * **A name has joined already.** That is the shape being read: an unexpanded macro (`MY_API`) followed by
+        //   the real type. Read back from the events the sequence produced rather than tracked as a flag, for the
+        //   same reason [`parse_one_decl_specifier`] reads `has_type_specifier` back from them — a branch that
+        //   forgot to set a flag is a silent one. A name-based type specifier is a `TemplateType`.
+        let a_further_name_may_join = allow_second_name
+            && p.events_contain_any(specifiers_from, &[CppSyntaxKind::TemplateType]);
         if let Err(err) = parse_one_decl_specifier(
             p,
             &mut has_specifier,
             &mut has_type_specifier,
             &mut name_allowed,
+            a_further_name_may_join,
             specifier_seen,
         ) {
             if specifiers == 0 {
@@ -415,11 +434,17 @@ fn parse_one_decl_specifier(
     has_specifier: &mut bool,
     has_type_specifier: &mut bool,
     name_allowed: &mut bool,
+    a_further_name_may_join: bool,
     specifier_seen: bool,
 ) -> ParseResult {
     let events_before = p.current_event_count();
-    let result =
-        parse_one_decl_specifier_inner(p, has_type_specifier, name_allowed, specifier_seen);
+    let result = parse_one_decl_specifier_inner(
+        p,
+        has_type_specifier,
+        name_allowed,
+        a_further_name_may_join,
+        specifier_seen,
+    );
 
     if result.is_ok() {
         *has_specifier = true;
@@ -498,6 +523,7 @@ fn parse_one_decl_specifier_inner(
     p: &mut CppParser,
     has_type_specifier: &mut bool,
     name_allowed: &mut bool,
+    a_further_name_may_join: bool,
     specifier_seen: bool,
 ) -> ParseResult {
     let base = p.open_marks();
@@ -786,7 +812,12 @@ fn parse_one_decl_specifier_inner(
             // while no *name* has joined it yet and the specifier before it is not already a
             // complete type; the `::` of a qualified name is walked by this loop one segment at a
             // time, so each later segment is still the same name.
-            if !name_joins_the_type(p, *has_type_specifier, *name_allowed) {
+            if !name_joins_the_type(
+                p,
+                *has_type_specifier,
+                *name_allowed,
+                a_further_name_may_join,
+            ) {
                 return Err(CppParseError::syntax_error_from(
                     "expected a declarator name",
                     p.current_token_range(),
@@ -824,20 +855,59 @@ fn parse_one_decl_specifier_inner(
 /// `std::vector<int>` reaches `parse_decl_specifier_seq` in pieces, because
 /// [`parse_name`](parse_name) stops after each segment: the specifier loop is what walks the `::`.
 /// Without this, the "two adjacent names" guard would fire in the middle of a perfectly ordinary
+/// How much does this token move the **template angle depth** a lookahead scan is keeping?
+///
+/// `<` opens one list and `>` closes one — but the lexer has already glued `>>` into a single `RightShift`
+/// token, because it cannot know which it is: in `a >> b` the token really is a shift, and in `Base<K,
+/// std::shared_ptr<V>>` it is two closers. Only the parser's context can tell them apart, so one *token* can
+/// close **two** lists and every scan that counts angles has to say so.
+///
+/// Three scans count angles and each wrote the rule out for itself; this is what happens when the copies drift.
+/// `a_body_follows_the_class_head` counted `Greater` alone, so in `class D : public Base<K, std::shared_ptr<V>> {`
+/// the depth was still one when the scanner reached the `{`, the head was read as *not* opening a body, and the
+/// class definition failed with `expected ;` against its own name — while the same base clause with a
+/// single-level argument list parsed fine. That is maintenance convention #14 in `docs/grammar-gaps.md`: the
+/// second use of a predicate is where the exception gets forgotten, so it is extracted the second time.
+fn angle_depth_delta(kind: CppTokenKind) -> isize {
+    match kind {
+        CppTokenKind::Less => 1,
+        CppTokenKind::Greater => -1,
+        // One token, two lists closed.
+        CppTokenKind::RightShift => -2,
+        _ => 0,
+    }
+}
+
 /// qualified type.
 fn continues_a_qualified_name(p: &CppParser) -> bool {
     // Scan forward over a name and its template arguments, then check for `::`.
     let mut depth = 0isize;
-    let mut result = false;
+    let mut offset = 1usize;
 
-    for kind in p.peek_token_kind_at(1..96) {
+    loop {
+        let Some(kind) = p.peek_token_kind_at(offset..offset + 1).first().copied() else {
+            return false;
+        };
+
         match kind {
-            CppTokenKind::Less => depth += 1,
-            CppTokenKind::Greater => depth -= 1,
-            CppTokenKind::RightShift => depth -= 2,
             CppTokenKind::Scope if depth <= 0 => {
-                result = true;
-                break;
+                // A `::` that a `*` follows is the **pointer-to-member operator**, not a name continuation:
+                //
+                // ```text
+                // int C::*p;        a pointer to a member of `C`, named `p`
+                // int A::B *p;      a pointer `p` to the type `A::B`
+                // ```
+                //
+                // Both start with a name, then `::`, so only what follows the `::` tells them apart — and saying
+                // "yes" to the first made `C::` part of the *type*: the specifier sequence took it, the `*p` that
+                // followed became a declarator **inside the type node**, and the declaration came out lossless,
+                // well formed, diagnostic-free and wrong. `a_pointer_to_member_operator_is_here` reads the
+                // operator itself; see [`parse_abstract_declarator`].
+                return p
+                    .peek_token_kind_at(offset + 1..offset + 2)
+                    .first()
+                    .copied()
+                    != Some(CppTokenKind::Star);
             }
             // Anything that ends a name without a following `::`.
             CppTokenKind::Comma
@@ -847,12 +917,43 @@ fn continues_a_qualified_name(p: &CppParser) -> bool {
             | CppTokenKind::LeftParen
             | CppTokenKind::Assign
             | CppTokenKind::Eof
-            | CppTokenKind::None => break,
-            _ => {}
+            | CppTokenKind::None => return false,
+            kind => depth += angle_depth_delta(kind),
+        }
+
+        offset += 1;
+    }
+}
+
+/// Does a **pointer-to-member operator** start `at` tokens past the cursor: `C::*`, or a longer nested name
+/// `A::B::*` — and how many tokens does it span?
+///
+/// The `::` of a nested-name-specifier normally continues a name — `A::B` is a type — and only a `*` right after
+/// it makes the whole thing an operator. So the test is written as the walk itself: names separated by `::`, and
+/// the last of those `::` followed by a `*`. `A::B *p` fails it at the last step (the token after the final `::`
+/// is a name, not a `*`), which is exactly the type-then-pointer spelling it has to stay.
+///
+/// The length is returned rather than a bare `true` because the callers look at what *follows* the operator:
+/// [`a_parenthesised_declarator_with_a_name_follows`] asks whether a name and a `)` close the group.
+fn pointer_to_member_operator_length(p: &CppParser, at: usize) -> Option<usize> {
+    let mut offset = at;
+    loop {
+        if p.peek_token_kind_at(offset..offset + 1).first().copied()
+            != Some(CppTokenKind::Identifier)
+        {
+            return None;
+        }
+        offset += 1;
+
+        if p.peek_token_kind_at(offset..offset + 1).first().copied() != Some(CppTokenKind::Scope) {
+            return None;
+        }
+        offset += 1;
+
+        if p.peek_token_kind_at(offset..offset + 1).first().copied() == Some(CppTokenKind::Star) {
+            return Some(offset + 1 - at);
         }
     }
-
-    result
 }
 
 /// May the name at the cursor still be part of the type being parsed, rather than the declarator?
@@ -885,7 +986,12 @@ fn continues_a_qualified_name(p: &CppParser) -> bool {
 ///   way, so it is the declarator and the parentheses are what initialises it. See
 ///   [`a_parenthesis_follows_the_name`] for the whole argument; it is what makes `Widget w(1, 2, 3);`
 ///   a declaration without asking the type table.
-fn name_joins_the_type(p: &CppParser, has_type_specifier: bool, name_allowed: bool) -> bool {
+fn name_joins_the_type(
+    p: &CppParser,
+    has_type_specifier: bool,
+    name_allowed: bool,
+    a_further_name_may_join: bool,
+) -> bool {
     // No type yet, so this name can only be the type.
     if !has_type_specifier {
         return true;
@@ -912,12 +1018,87 @@ fn name_joins_the_type(p: &CppParser, has_type_specifier: bool, name_allowed: bo
     if continues_a_qualified_name(p) {
         return true;
     }
+    // A **second name in the specifier sequence**, which is what an export or attribute macro looks like:
+    //
+    // ```text
+    // MY_API Widget *p;          a declaration of `p`
+    // EMMY_API RangeResult f();  a declaration of `f`
+    // EXPORT std::string g();    the macro, then a qualified type, then the declarator
+    // ```
+    //
+    // A macro is not expanded here, so `MY_API` is an ordinary name to this parser and the type that follows it
+    // is a *second* name in the same sequence. The allowance is spent after the first, so the second was refused
+    // and became the declarator name, and the real declarator (`p`, `f`) had nowhere to go: the declaration
+    // failed and the whole line came back as an expression statement — `expected ;` against the return type. It
+    // is how `CodeFormatCLib.cpp` fails, and there is nothing rare about the spelling: every real C++ project
+    // with a DLL/export boundary writes it.
+    //
+    // What makes the name part of the type rather than the declarator is that **the declaration has not reached a
+    // declarator yet**: after it come more names (`B C d`), a `*`, a `&`/`&&`, a `::` or a `<` — the things a
+    // declarator is written from. When what follows is `;`, `)`, `,`, `=`, `{` or `(`, the name is the
+    // declarator and the allowance still decides, exactly as before.
+    //
+    // Nothing valid is taken from the expression reading by this: `Name Name Name` and `Name Name * Name` are not
+    // expressions in any grammar, so the only statements that change are the ones that had no reading at all.
+    if a_further_name_may_join && a_declarator_still_follows_the_name(p) {
+        return true;
+    }
     let complete = type_is_already_complete(p);
     let called = a_parenthesis_follows_the_name(p);
     if complete || called {
         return false;
     }
     name_allowed
+}
+
+/// Does what follows the name at the cursor still leave room for a **declarator**?
+///
+/// The question [`name_joins_the_type`] asks about a *second* name in the specifier sequence — the one an export
+/// macro leaves behind. The name may be qualified (`EXPORT std::string g();`) or templated
+/// (`MY_API Vector<int> *make();`), so the whole name is walked first and the token after it is what answers.
+///
+/// Walking *past* a template argument list rather than stopping at its `<` is the whole subtlety, and both
+/// directions are real code:
+///
+/// ```text
+/// MY_API Vector<int> *make();     a `*` after the list needs a declarator, so `Vector<int>` is the type
+/// template MyType f<int>(int);    a `(` after the list calls the name, so `f<int>` is the *declarator's* name
+/// ```
+///
+/// Answering at the `<` reads the second line as a type `MyType f<int>` with no declarator left, and the explicit
+/// instantiation fails — which is exactly what a first version of this rule did.
+fn a_declarator_still_follows_the_name(p: &CppParser) -> bool {
+    let mut after = super::decls::next_significant_index(p, p.current_token_index());
+    while p.token_kind_at(after) == CppTokenKind::Scope {
+        let segment = super::decls::next_significant_index(p, after);
+        if p.token_kind_at(segment) != CppTokenKind::Identifier {
+            break;
+        }
+        after = super::decls::next_significant_index(p, segment);
+    }
+
+    // A template argument list is part of the name, so step over it. `angle_depth_delta` is the same rule the
+    // lookahead scans use — including the `>>` that closes two lists at once.
+    if p.token_kind_at(after) == CppTokenKind::Less {
+        let mut depth = 0isize;
+        let mut index = after;
+        while index < p.token_count() {
+            depth += angle_depth_delta(p.token_kind_at(index));
+            index += 1;
+            if depth <= 0 {
+                break;
+            }
+        }
+        after = super::decls::next_significant_index(p, index.saturating_sub(1));
+    }
+
+    matches!(
+        p.token_kind_at(after),
+        CppTokenKind::Identifier
+            | CppTokenKind::Star
+            | CppTokenKind::Ampersand
+            | CppTokenKind::LogicalAnd
+    )
 }
 
 /// Is the identifier at the cursor immediately followed by a `(`?
@@ -984,9 +1165,6 @@ fn a_parenthesis_follows_the_name(p: &CppParser) -> bool {
 
     for kind in p.peek_token_kind_at(1..64) {
         match kind {
-            CppTokenKind::Less => depth += 1,
-            CppTokenKind::Greater => depth -= 1,
-            CppTokenKind::RightShift => depth -= 2,
             CppTokenKind::LeftParen if depth <= 0 => return true,
             CppTokenKind::RightParen if depth <= 0 => return false,
             // The name ended without a `(`: an operator, a separator, an initialiser, a body, or the
@@ -1006,7 +1184,7 @@ fn a_parenthesis_follows_the_name(p: &CppParser) -> bool {
             | CppTokenKind::Ellipsis
             | CppTokenKind::Eof
             | CppTokenKind::None => return false,
-            _ => {}
+            kind => depth += angle_depth_delta(kind),
         }
     }
 
@@ -1319,11 +1497,9 @@ fn a_body_follows_the_class_head(p: &CppParser) -> bool {
     let mut depth = 0isize;
     for kind in p.peek_token_kind_at(0..64) {
         match kind {
-            CppTokenKind::Less => depth += 1,
-            CppTokenKind::Greater => depth -= 1,
             CppTokenKind::LeftBrace if depth <= 0 => return true,
             CppTokenKind::Semicolon | CppTokenKind::RightBrace | CppTokenKind::Eof => return false,
-            _ => {}
+            kind => depth += angle_depth_delta(kind),
         }
     }
     false
@@ -1395,7 +1571,17 @@ fn parse_enumerator_body(p: &mut CppParser) -> ParseResult {
 
         if p.current_token() == CppTokenKind::Assign {
             p.bump();
-            if let Err(err) = super::exprs::parse_expr(p) {
+            // Read **below the comma operator**, because the enumerator list is comma-separated:
+            // `enum E { A = 0, B };` is two enumerators, and an initializer reader that took the comma swallowed
+            // `B` whole — the tree then held one `EnumeratorDecl` whose initializer was the expression `0, B`, with
+            // every token present, no `ErrorNode` and no diagnostic. A consumer asking the enum for its members
+            // lost every one of them after the first initialised one, and nothing said so.
+            //
+            // This is the **same rule the bit-field width follows**, and for the same reason: a rule that spells a
+            // comma itself has to opt out of the operator that spells commas. That one was fixed first and this
+            // one was left behind, which is how the defect survived a green test suite — the enum examples in
+            // `gaps.rs` all happen to have no initializer.
+            if let Err(err) = super::exprs::parse_assignment_expr(p) {
                 p.close_marks_above(base);
                 return Err(err);
             }
@@ -1903,6 +2089,34 @@ pub fn parse_abstract_declarator(p: &mut CppParser, name_possible: bool) -> Pars
                 eat_cv_qualifiers(p);
                 op.complete(p);
             }
+            // **A pointer to member written after the type**: `int C::*p;`, `int (C::*h)(int);`,
+            // `void g(int (C::*)(int));`.
+            //
+            // The grammar puts the nested-name-specifier *inside* the ptr-operator (`nested-name-specifier *`),
+            // so the name that begins it stands where the abstract declarator begins — this loop — and not where
+            // the declarator's own name does. Reading it as a type instead is what the silent defect looked like:
+            // `C::` joined the specifier sequence, `*p` became a declarator **inside the type node**, and nothing
+            // anywhere said so. `continues_a_qualified_name` now refuses a `::` that a `*` follows, which is what
+            // brings the tokens here.
+            //
+            // The parenthesised spelling had one failure mode on top of that one: `int (C::*h)(int);` reaches the
+            // declarator with `C` at the cursor, this loop broke immediately on a name, and the parentheses came
+            // out empty and the declaration failed — the form an out-of-line member-pointer *typedef* is written
+            // in.
+            CppTokenKind::Identifier if pointer_to_member_operator_length(p, 0).is_some() => {
+                let _ = container!();
+                let op = p.mark(CppSyntaxKind::PointerType);
+
+                // The nested-name-specifier: `A::B::` is a name and a `::` per segment, and the `::` that ends
+                // the specifier is the one the `*` follows.
+                while p.peek_next_token() == CppTokenKind::Scope {
+                    p.bump(); // a name of the nested-name-specifier
+                    p.bump(); // its `::`
+                }
+                p.bump(); // `*`
+                eat_cv_qualifiers(p);
+                op.complete(p);
+            }
             // `Class::*` — a pointer to member.
             //
             // The node is only opened once the `*` has actually been seen: opening it up front and
@@ -2063,6 +2277,10 @@ fn a_parenthesised_abstract_declarator_follows(p: &CppParser) -> bool {
             // `(::*)` — a pointer to member, where the operator comes after the class name.
             | Some(&CppTokenKind::Scope)
     )
+    // `(C::*)` — the same operator with its class name written out, and no name after it: an *unnamed* parameter
+    // of member-pointer-to-function type, `void h(int (C::*)(int));`. The named spelling `(C::*h)` never reaches
+    // here — [`a_parenthesised_declarator_with_a_name_follows`] claims it first.
+    || pointer_to_member_operator_length(p, 1).is_some()
 }
 
 /// Does the `(` at the cursor wrap a declarator that has a **name** in it: `(*f)(int)`, `(&f)(int)`?
@@ -2090,14 +2308,35 @@ fn a_parenthesised_declarator_with_a_name_follows(p: &CppParser) -> bool {
         return false;
     }
 
-    matches!(
+    if matches!(
         p.peek_token_kind_at(1..4).as_slice(),
         [
             CppTokenKind::Star | CppTokenKind::Ampersand | CppTokenKind::LogicalAnd,
             CppTokenKind::Identifier,
             CppTokenKind::RightParen
         ]
-    )
+    ) {
+        return true;
+    }
+
+    // `(C::*h)`, `(A::B::*h)` — a **pointer to member**, whose class name stands where the operator would, and
+    // whose name stands after the `*`. The same group is also written without a name — `(C::*)`, which is the
+    // abstract spelling a type-id uses (`void g(int (C::*)(int));`) — and both are groups this rule has to claim,
+    // because the alternative reading of those tokens is a parameter list, and `C::*` is not a parameter.
+    //
+    // Leaving them out is what made the parenthesised member-pointer *typedef* — `typedef int (C::*fp)(int);` —
+    // and every parameter of a member-function-pointer type fail together: the parentheses were read as a
+    // parameter list, `C` became a parameter of an unknown type, and the declaration fell apart at its `;`.
+    let Some(length) = pointer_to_member_operator_length(p, 1) else {
+        return false;
+    };
+    let after = 1 + length;
+
+    // **With a name**, which is the group this rule owns. The nameless `(C::*)` is the abstract spelling and
+    // belongs to [`parse_abstract_declarator`] — claiming it here would take it to a rule that requires a name
+    // and fail on a parameter that is perfectly good: `void h(int (C::*)(int));`.
+    p.peek_token_kind_at(after..after + 2).as_slice()
+        == [CppTokenKind::Identifier, CppTokenKind::RightParen]
 }
 
 /// Parse the suffixes that bind to a declarator: parameter lists and array bounds, in any order.
@@ -2270,6 +2509,11 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
         || a_qualified_name_is_the_type(p)
         || super::decls::the_head_of_the_declaration_is_qualified(p)
         || super::decls::a_declaration_is_the_better_reading(p, declarator_from)
+        // …or a **macro invocation used as a definition**, which is the one shape with no answer to the
+        // declaration/expression question at all: `TEST(FormatPerformance, 1k_row) { … }`. Its arguments are the
+        // macro's tokens, so `the_arguments_look_like_declarators` says no and the loop would never open — which
+        // is exactly how `TEST(A, B) { }` came to work while `TEST(A, 1) { }` did not.
+        || super::decls::a_macro_definition_follows(p, declarator_from)
     {
         loop {
             match p.current_token() {
@@ -2465,6 +2709,18 @@ fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
     expect_token(p, CppTokenKind::Less)?;
 
     while !p.is_eof() {
+        // A **`>>` standing where an argument would begin** is two closers, and the first of them closes this
+        // list. That is the *empty* argument list: `std::less<>` inside `std::map<K, V, std::less<>>`.
+        //
+        // The split has to happen before the argument is read. Everywhere else it happens on the way *out* — the
+        // argument is read, and then `split_closing_angle` in the `match` below turns the trailing `>>` into a
+        // lone `>` — which is why the non-empty spelling `std::map<K, std::less<int>>` has always worked while
+        // the empty one reported `expected a template argument` against the `>>`: there was nothing to read
+        // first, so the loop never reached the split.
+        if p.current_token() == CppTokenKind::RightShift {
+            split_closing_angle(p);
+        }
+
         // A `>` **here** closes this list, and no lookahead is needed to know it.
         //
         // "Here" is the boundary *between* arguments, and by the time the loop comes back around,

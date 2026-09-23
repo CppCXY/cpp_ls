@@ -46,6 +46,33 @@ fn finds_top_level_declarations() {
     assert_eq!(decl_names(source), vec!["counter", "reset", "Point"]);
 }
 
+/// An **export or attribute macro** in front of the type is part of the type, and the declarator is the *third*
+/// name — not the second.
+///
+/// A macro is not expanded here, so `MY_API` is an ordinary name to this parser: `MY_API Widget *p;` puts two
+/// names where a declaration has its type. The rule that decides how many names may join the type refused the
+/// second one, made it the declarator, and left the real declarator (`p`) with nowhere to go — the declaration
+/// failed and the line came back as an expression statement, reported against the return type. Every real C++
+/// project with a DLL or export boundary writes this, and it is how `CodeFormatCLib.cpp` in the first real C++
+/// project put in front of this parser failed.
+///
+/// Asked through the typed layer on purpose: the answer that matters to a consumer is **the name of the
+/// declaration**, and "it parses" is exactly what the wrong tree also said.
+#[test]
+fn an_export_macro_before_the_type_leaves_the_declarator_last() {
+    assert_eq!(decl_names("MY_API Widget *p;\n"), vec!["p"]);
+    assert_eq!(decl_names("EMMY_API Result f(int x);\n"), vec!["f"]);
+    assert_eq!(decl_names("EXPORT std::string g();\n"), vec!["g"]);
+    assert_eq!(decl_names("MY_API Vector<int> *make();\n"), vec!["make"]);
+
+    // The shapes around it are untouched: one name is the type and the next is the declarator, and a keyword type
+    // never needed the rule at all.
+    assert_eq!(decl_names("Widget w;\n"), vec!["w"]);
+    assert_eq!(decl_names("Widget *p;\n"), vec!["p"]);
+    assert_eq!(decl_names("MY_API int f();\n"), vec!["f"]);
+    assert_eq!(decl_names("std::string name;\n"), vec!["name"]);
+}
+
 #[test]
 fn variable_declaration_exposes_type_and_initializer() {
     let (root, _) = unit("int counter = 42;\n");

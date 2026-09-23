@@ -768,6 +768,34 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
         return Ok(m.complete(p));
     }
 
+    // An **old-style (K&R) parameter list ends the declaration as well**: the `;` that closed its last parameter
+    // declaration closed *this* declaration too, so there is no second one to expect.
+    //
+    // ```c
+    // #if defined(__CLASSIC_C__)
+    // int main(argc, argv)
+    // int argc;
+    // char *argv[];
+    // #else
+    // int main(int argc, char *argv[])
+    // #endif
+    // { … }
+    // ```
+    //
+    // That is the shape the CMake compiler-id probe is written in, and it is the reason the arm above exists: the
+    // head and the body sit in *different branches* of one conditional, so the declaration that carries the
+    // old-style list has neither a body of its own nor a `;` left to give — `char *argv[];` spent it. Asking again
+    // reported `expected ';'` against the `#else`, and a single diagnostic against a *preprocessor* line took the
+    // whole definition with it.
+    //
+    // Nothing but a body can follow a function declarator, so this costs no reading: a declaration that follows is
+    // one the old-style list has already swallowed, and the tokens after the cursor belong to whichever rule owns
+    // them — a body (read above), a directive, or a statement that reports on its own terms rather than through a
+    // declaration that was never wrong.
+    if p.events_contain_any(specifiers_from, &[CppSyntaxKind::OldStyleParameterList]) {
+        return Ok(m.complete(p));
+    }
+
     if let Err(err) = expect_semicolon(p) {
         p.close_marks_above(base);
         return Err(err);
@@ -1028,6 +1056,29 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
         ));
     }
 
+    // **Directives between a function's head and its body.** A conditional head is a real spelling — the two
+    // variants of a signature, one per platform:
+    //
+    // ```c
+    // #if defined(_WIN32)
+    // void f(void)
+    // #else
+    // void f()
+    // #endif
+    // { … }
+    // ```
+    //
+    // A `#` here cannot be anything else: a declarator is followed by a body, a `;`, an initializer — or a
+    // directive. Read as the node it is, and the match below is then asked about the token that really follows.
+    // The same argument as the two places `docs/grammar-gaps.md` records for B23; a `#` anywhere else in an
+    // expression is still an error.
+    while declarator_is_function && p.current_token() == CppTokenKind::Hash {
+        if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+            m.undo(p);
+            return Err(err);
+        }
+    }
+
     match p.current_token() {
         CppTokenKind::Assign => {
             p.bump();
@@ -1130,10 +1181,85 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
             }
             width.complete(p);
         }
+        // An **old-style (K&R) parameter list**: the parameters are declared after the parenthesis rather than
+        // inside it.
+        //
+        // ```c
+        // int main(argc, argv)
+        //     int argc;
+        //     char *argv[];
+        // { … }
+        // ```
+        //
+        // The parenthesis has already been read, and read as a *parameter list* — `argc` is a perfectly good
+        // parameter type, and nothing in those tokens says it is a name instead. What identifies the old style is
+        // what follows: a declaration, where a modern function has its body or its `;`. The declarations are read
+        // by the ordinary declaration rule and kept in a list node of their own, so a consumer gets the
+        // parameters' types without re-reading tokens.
+        //
+        // Obsolete in C++ and deprecated in C, but ordinary in C from before 1989 — and this parser is asked to
+        // read C. Nothing else can follow a function declarator with a declaration, so the reading costs no
+        // modern spelling: `void f() int x;` is not a program in any language, and the tokens say what was meant.
+        _ if declarator_is_function && starts_an_old_style_parameter_list(p) => {
+            let list = p.mark(CppSyntaxKind::OldStyleParameterList);
+
+            loop {
+                let before = p.current_token_index();
+                let checkpoint = p.checkpoint();
+                match parse_declaration(p) {
+                    // A declaration that consumed nothing would spin this loop; one that failed is not an
+                    // old-style parameter declaration, which ends the list rather than the declaration.
+                    Ok(_) if p.current_token_index() > before => {}
+                    _ => {
+                        p.rollback(checkpoint);
+                        break;
+                    }
+                }
+
+                if !starts_an_old_style_parameter_list(p) {
+                    break;
+                }
+            }
+
+            list.complete(p);
+        }
         _ => {}
     }
 
     Ok(m.complete(p))
+}
+
+/// Does an old-style (K&R) parameter declaration list start at the cursor?
+///
+/// The question is "can a declaration start here?", and a declaration starts with a **type**: a type keyword
+/// (`int argc;`, `char *argv[];`), a class keyword (`struct S x;`), the other specifiers that only a declaration
+/// begins — or a **name this file knows to be a type**, because `size_t argc;` is as ordinary in old C as
+/// `int argc;` is.
+///
+/// [`starts_declaration`] is consulted for the specifiers and cannot answer on its own: it holds the anchors a
+/// *statement* needs to tell a declaration from an expression, and a plain type keyword is deliberately not one of
+/// them — `int x;` is reached by trying the declaration reading, not by an anchor. A `[` or a `*` reaching here is
+/// how the two lists differ, which is exactly what the question needs.
+///
+/// Asked before the declarations are read rather than after they fail, so that a token which cannot begin a
+/// declaration — the body's `{`, the `;` of a declaration, a `throw()` specification — is left to the arms that
+/// do own it.
+fn starts_an_old_style_parameter_list(p: &mut CppParser) -> bool {
+    if matches!(
+        p.current_token(),
+        CppTokenKind::LeftBrace
+            | CppTokenKind::Semicolon
+            | CppTokenKind::Eof
+            | CppTokenKind::None
+            | CppTokenKind::Hash
+    ) {
+        return false;
+    }
+
+    super::types::is_type_specifier_keyword(p.current_token())
+        || starts_declaration(p)
+        || (p.current_token() == CppTokenKind::Identifier
+            && p.is_a_known_type_name(p.current_token_text()))
 }
 
 /// Continue a declarator after a parenthesized name has been consumed.
@@ -1218,6 +1344,33 @@ pub fn parse_function_suffix_or_initializer(
 ) -> ParseResult {
     let checkpoint = p.checkpoint();
 
+    // A **macro invocation used where a definition goes**: `TEST(FormatPerformance, 1k_row) { … }`.
+    //
+    // This is how gtest, Catch2 and every benchmark library write a test, and the shape has no grammar behind it:
+    // a name is *called* with tokens that are neither types nor expressions (`1k_row` is a token the macro pastes
+    // into an identifier), and a block follows. The declaration reading gets as far as the group and then takes
+    // the block for a braced initializer, so the definition has no `;` to end with and the whole statement is
+    // reported as an expression — 6 of the 200 files in the first real C++ project, two of them with ~100
+    // cascading errors from this one line each.
+    //
+    // Read here, and only in the shape that has no other reading:
+    //
+    // * **no declarator name** — `void f(A, B) { }` is an ordinary definition whose declarator is named `f`, and
+    //   it never reaches this branch;
+    // * **not inside a function body** — there, `g(x) { }` is a statement followed by a block, and a real error is
+    //   the better answer;
+    // * the group is **balanced** and a `{` follows it, which is the whole test. Nothing else can stand between a
+    //   name and a block at declaration level, so the reading costs no valid program.
+    //
+    // The group is kept as an `ArgumentList` because that is what it is — a macro's arguments, not a parameter
+    // list, and not an initializer either. The flag that says "a function declarator" is set so that the block is
+    // read as the **body** by `parse_declaration` rather than as one more initializer.
+    if a_macro_definition_follows(p, declarator_from) {
+        parse_balanced_token_group(p, CppSyntaxKind::ArgumentList)?;
+        p.set_last_declarator_is_function(true);
+        return Ok(CompleteMarker::empty());
+    }
+
     // A declarator that named **nothing**, in a declaration whose head is a **qualified** name, is the head of a
     // definition — `static void Widget::draw(T)`, `void A::f<int>(int)` — so its parentheses are a parameter list
     // and nothing else.
@@ -1294,6 +1447,102 @@ pub fn parse_function_suffix_or_initializer(
     }
 
     Ok(CompleteMarker::empty())
+}
+
+/// Is the cursor on the argument list of a **macro invocation used where a definition goes**?
+///
+/// The shape is `TEST(FormatPerformance, 1k_row) { … }`, and it is the one shape in a declaration where the
+/// declaration/expression question has no answer at all: the tokens inside the parentheses are the macro's, so
+/// they are neither values nor declarators, and both readings refuse them. The test is therefore about the shape
+/// and nothing else — see [`parse_function_suffix_or_initializer`] for the reading:
+///
+/// * **no declarator name**, so `void f(A, B) { }` — an ordinary definition — never matches;
+/// * **not a qualified head**: `void Widget::draw(T) { }` has no declarator name either (the specifier sequence
+///   took the whole qualified name), and its parentheses *are* a parameter list. A `::` in the head is what
+///   tells the two apart, and the definitions of out-of-line members are far too common to lose;
+/// * **not inside a function body**, where a call followed by a block is a real error;
+/// * a **balanced** group with a `{` right after it.
+///
+/// Exposed because the declarator's suffix loop has to ask it *before* it opens at all: its other reasons to open
+/// are all answers to the declaration/expression question, and this shape has none of them — which is why
+/// `TEST(A, B) { }` (whose arguments look like declarators) worked while `TEST(A, 1) { }` (whose arguments look
+/// like values) did not.
+pub(super) fn a_macro_definition_follows(p: &CppParser, declarator_from: usize) -> bool {
+    !a_name_was_parsed(p, declarator_from)
+        && !the_head_of_the_declaration_is_qualified(p)
+        && !p.is_inside_a_body()
+        && a_block_follows_the_group(p)
+}
+
+/// Is the `(` at the cursor a **balanced** group with a `{` immediately after it?
+///
+/// The shape test for a macro invocation used as a definition — see
+/// [`parse_function_suffix_or_initializer`]. Balanced rather than "parses as something", because the tokens
+/// inside are the macro's, and they need not parse as anything at all.
+fn a_block_follows_the_group(p: &CppParser) -> bool {
+    if p.current_token() != CppTokenKind::LeftParen {
+        return false;
+    }
+
+    let mut depth = 0isize;
+    let mut offset = 0usize;
+    while let Some(kind) = p.peek_token_kind_at(offset..offset + 1).first().copied() {
+        match kind {
+            CppTokenKind::LeftParen => depth += 1,
+            CppTokenKind::RightParen => {
+                depth -= 1;
+                if depth == 0 {
+                    return p
+                        .peek_token_kind_at(offset + 1..offset + 2)
+                        .first()
+                        .copied()
+                        == Some(CppTokenKind::LeftBrace);
+                }
+            }
+            // A `;` before the group closes means this is not the shape at all: it is a declaration that ends.
+            CppTokenKind::Semicolon if depth == 0 => return false,
+            CppTokenKind::Eof | CppTokenKind::None => return false,
+            _ => {}
+        }
+        offset += 1;
+    }
+
+    false
+}
+
+/// Consume a balanced parenthesised group as **raw tokens**, under a node of `kind`.
+///
+/// For the one shape that has no grammar behind it: the arguments of a macro invocation, whose tokens are the
+/// macro's own. They are kept in the tree as they were written — lossless, and available to a consumer that wants
+/// to show them — while nothing pretends to know what they mean.
+fn parse_balanced_token_group(p: &mut CppParser, kind: CppSyntaxKind) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(kind);
+
+    let mut depth = 0isize;
+    loop {
+        match p.current_token() {
+            CppTokenKind::LeftParen => {
+                depth += 1;
+                p.bump();
+            }
+            CppTokenKind::RightParen => {
+                depth -= 1;
+                p.bump();
+                if depth == 0 {
+                    return Ok(m.complete(p));
+                }
+            }
+            CppTokenKind::Eof | CppTokenKind::None => {
+                p.close_marks_above(base);
+                return Err(CppParseError::syntax_error_from(
+                    "unterminated argument list",
+                    p.current_token_range(),
+                ));
+            }
+            _ => p.bump(),
+        }
+    }
 }
 
 /// Read the argument list at the cursor as a direct-initialiser.
@@ -1573,7 +1822,31 @@ fn the_arguments_look_like_values(p: &CppParser) -> bool {
             // multiplication and a parameter of type `B*` — stays a call, which is the cheaper mistake; see the
             // note on operators below.
             CppTokenKind::Identifier if at_element_start => {
-                let follower = p.token_kind_at(next_significant_index(p, index));
+                // The follower is read after the **whole qualified chain**, not just after its first segment:
+                // a `::` says the name continues, so it is not an answer to "what follows this name".
+                //
+                // ```text
+                // std::move(b)     a call — the `(` after `move` settles it
+                // std::move(b.c()) likewise, and it is why the chain has to be walked at all
+                // B::C             a type — the `,` or `)` after `C` settles it
+                // std::string name a type and a name — `name` settles it
+                // ```
+                //
+                // Stopping at the first `::` made a qualified *call* look like a type: the follower was `::`,
+                // which keeps the element a declaration, and the element-start marker was spent — so the call's
+                // own `(` and everything inside it went unread, and an argument like `std::move(luaLexer.
+                // GetTokens())` produced no evidence of a value at all. The declaration reading was then refused
+                // and the statement reported `expected ;` against its own `(`. Seven files of the first real C++
+                // project put in front of this parser failed on that one shape.
+                let mut after = next_significant_index(p, index);
+                while p.token_kind_at(after) == CppTokenKind::Scope {
+                    let segment = next_significant_index(p, after);
+                    if p.token_kind_at(segment) != CppTokenKind::Identifier {
+                        break;
+                    }
+                    after = next_significant_index(p, segment);
+                }
+                let follower = p.token_kind_at(after);
                 // The followers that keep this a *declaration*: another name (`B C`), a pointer or reference
                 // (`B* c`), a qualified or templated continuation (`B::C`, `B<C>`), the `,` or `)` that ends a
                 // nameless parameter (`void f(B)`), or a bracket or `=` that opens what a declarator carries.
@@ -1693,7 +1966,9 @@ fn can_begin_a_type(kind: CppTokenKind) -> bool {
 /// The token list is indexed, not peeked, in the scans above, so a question about the token *after* the one
 /// being looked at has to step over trivia by index. `peek_token_kind_at` cannot answer it: it counts
 /// significant tokens from the cursor, and the cursor is not where these scans are.
-fn next_significant_index(p: &CppParser, index: usize) -> usize {
+///
+/// Exposed to `super::types`, which asks the same question about the name a specifier sequence is looking at.
+pub(super) fn next_significant_index(p: &CppParser, index: usize) -> usize {
     let mut next = index + 1;
     while next < p.token_count() && is_declaration_trivia(p.token_kind_at(next)) {
         next += 1;

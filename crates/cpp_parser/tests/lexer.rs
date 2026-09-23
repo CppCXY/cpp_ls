@@ -455,3 +455,94 @@ fn numeric_literals_are_single_tokens() {
         );
     }
 }
+
+/// A **user-defined literal suffix is any identifier**, not only one that starts with `_`.
+///
+/// Requiring the underscore split everything else into two tokens — a number and a name — and the two families
+/// that matters for are ordinary modern C++: the `std::chrono_literals` suffixes (`100ms`, `10s`, `2h`) and the
+/// pasted-identifier arguments of a macro (`TEST(FormatPerformance, 1k_row)` in gtest, whose second argument is a
+/// test name). A suffix that does not begin with `_` is *reserved*, which is a rule about programs rather than
+/// about tokens: GCC and Clang lex one user-defined literal and warn.
+#[test]
+fn a_literal_suffix_need_not_start_with_an_underscore() {
+    for source in [
+        "100ms",
+        "10s",
+        "2h",
+        "1k_row",
+        "1_km",
+        "\"name\"sv",
+        "\"text\"_s",
+        "'x'_c",
+    ] {
+        let lexed = significant(source);
+        assert_eq!(lexed.len(), 1, "{source:?} was split into {lexed:?}");
+        assert_eq!(
+            lexed[0].0,
+            CppTokenKind::UserDefinedLiteral,
+            "{source:?} is one user-defined literal"
+        );
+        assert_eq!(lexed[0].1, source, "{source:?} is not cut short");
+    }
+
+    // What the language's own suffixes look like is unchanged, and that is the half worth pinning: an exponent, a
+    // hex value, a digit separator and the standard suffixes (`u`, `LL`, `z`, `f`) are all consumed by the number
+    // before the new rule is reached, so none of them becomes a user-defined literal.
+    for source in [
+        "1u",
+        "1LL",
+        "1z",
+        "0x1f",
+        "1e5",
+        "1.5f",
+        "1'000'000",
+        "0b1010",
+        "0x1p3",
+    ] {
+        let lexed = significant(source);
+        assert_eq!(lexed.len(), 1, "{source:?} was split into {lexed:?}");
+        assert_ne!(
+            lexed[0].0,
+            CppTokenKind::UserDefinedLiteral,
+            "{source:?} has no user-defined suffix"
+        );
+    }
+
+    // And a name that merely *follows* a number still does, because nothing separates them: `12abc` is one token
+    // in every reading of C++, and it is ill-formed either way.
+    assert_eq!(significant("12abc").len(), 1);
+}
+
+/// A **byte-order mark** is whitespace, not an unrecognised character.
+///
+/// `\u{feff}` at offset 0 is what Visual Studio writes when it saves a file as "UTF-8 with signature", and the
+/// standard drops it in translation phase 1 — so a file saved that way is a perfectly good translation unit.
+/// Reporting it as an unrecognised character put one diagnostic at **offset 0** of every such file, which is the
+/// worst place a diagnostic can land: 37 of the 200 files in the first real C++ project this parser was pointed
+/// at began that way. The same code point in the middle of a file is the zero-width no-break space, and is trivia
+/// for the same reason.
+#[test]
+fn a_byte_order_mark_is_whitespace() {
+    let source = "\u{feff}#pragma once\n";
+    let errors = errors_for(source);
+    assert!(errors.is_empty(), "a BOM is not an error: {errors:?}");
+
+    // Trivia, and **one** token of it: the mark is not a character the lexer silently dropped on the floor, which
+    // is what keeps the tree lossless.
+    let lexed = tokens(source);
+    assert_eq!(lexed[0].0, CppTokenKind::Whitespace);
+    assert_eq!(lexed[0].1, "\u{feff}");
+
+    // The token after it is the directive's `#`, and nothing was lost on the way.
+    assert_eq!(
+        significant(source),
+        vec![
+            (CppTokenKind::Hash, "#".to_string()),
+            (CppTokenKind::Identifier, "pragma".to_string()),
+            (CppTokenKind::Identifier, "once".to_string()),
+        ]
+    );
+
+    // The same code point mid-file, where it is only ever a stray mark.
+    assert!(errors_for("int x\u{feff}= 1;").is_empty());
+}

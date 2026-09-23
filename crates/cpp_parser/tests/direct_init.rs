@@ -249,6 +249,51 @@ fn an_element_is_judged_by_the_token_after_the_name() {
 }
 
 #[test]
+fn a_qualified_name_is_judged_after_the_whole_chain() {
+    // A `::` says the *name* continues; it is not an answer to "what follows this name". Reading the follower
+    // straight after the first segment made a qualified **call** look like a type — the follower was `::`, which
+    // keeps the element a declaration, and the element-start marker was spent, so the call's own `(` and
+    // everything inside it went unread. `std::move(luaLexer.GetTokens())` then produced no evidence of a value at
+    // all, the declaration reading was refused, and the statement reported `expected ;` against its own `(`.
+    //
+    // Seven files of the first real C++ project this parser was pointed at failed on that one shape, and every
+    // one of them was a local variable constructed from a call: `LuaParser p(file, std::move(luaLexer
+    // .GetTokens()));`, `std::fstream fin(newPath, std::ios::in | std::ios::binary);`.
+    // The parameter-list reading is tried **before** this heuristic and wins wherever it succeeds, so these are
+    // function declarations — `B::C` is a type and `std::move(b)` is one too, as far as the tokens go — and the
+    // question below never arises. Walking the chain did not change that, which is the point of asserting it.
+    for source in [
+        "void f() { Widget w(a, B::C); }\n",
+        "void f() { Widget w(a, B::C()); }\n",
+        "void f() { Widget w(a, std::move(b)); }\n",
+        "void f() { Widget w(std::vector<int> v); }\n",
+    ] {
+        let parsed = parse(source);
+        assert!(
+            parsed.errors.is_empty(),
+            "{source:?} should parse cleanly, got {:?}",
+            parsed.errors
+        );
+        assert_eq!(
+            parsed.initializers, 0,
+            "{source:?} is a parameter list, not a direct initialiser"
+        );
+    }
+
+    // And these are the ones a parameter list cannot hold — a literal, a nested call, an operator — so they reach
+    // the heuristic, where a qualified callee used to be read as a type.
+    for source in [
+        "void f() { Widget w(a, B::C(1)); }\n",
+        "void f() { Widget w(a, std::move(b.c())); }\n",
+        "void f() { Widget w(a, n::m(b.c())); }\n",
+        "void f() { LuaParser p(file, std::move(luaLexer.GetTokens())); }\n",
+        "void f() { std::fstream fin(newPath, std::ios::in | std::ios::binary); }\n",
+    ] {
+        assert_declaration(source);
+    }
+}
+
+#[test]
 fn an_unnamed_pointer_parameter_is_the_one_reading_left_to_the_type_table() {
     // The documented cost of this rule. `Widget w(*p)` is a dereference — `*p` has no name for the pointer to
     // decorate — but a parameter list is also a reading of those tokens, because `void f(*p)` declares an
