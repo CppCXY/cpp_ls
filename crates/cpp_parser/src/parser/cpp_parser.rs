@@ -3,6 +3,7 @@ use crate::{
     kind::{CppSyntaxKind, CppTokenKind},
     lexer::{CppLexer, CppTokenData},
     parser_error::CppParseError,
+    symbols::{MacroBody, SymbolKind},
     syntax::{CppSyntaxTree, CppTreeBuilder},
     text::SourceRange,
 };
@@ -79,6 +80,75 @@ pub struct EventStreamAudit {
 impl EventStreamAudit {
     pub fn is_balanced(&self) -> bool {
         self.final_depth == 0 && self.min_depth == 0 && self.unclosed.is_empty()
+    }
+}
+
+/// What a parse can say about a name **as a macro** — see [`CppParser::macro_evidence`], which is the only way to
+/// obtain one and which fixes the order the three sources of evidence are consulted in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MacroEvidence {
+    /// The name is `#define`d in the file being parsed. Its body is in the file but **uninterpreted**: the
+    /// directive's tokens are kept, and nothing evaluates them, so only the name is known.
+    DefinedHere,
+
+    /// The caller's table knows the name is a macro, and says what it expands to.
+    Described {
+        function_like: bool,
+        body: MacroBody,
+    },
+}
+
+impl MacroEvidence {
+    /// Is the macro invoked with arguments — `NAME(x)` — rather than used bare?
+    ///
+    /// A name defined in this file answers "yes" because nothing here reads the replacement list: an
+    /// object-like macro invoked with parentheses (`NAME(x)`) is how a macro that *does* take arguments is
+    /// written, and refusing the reading for a name nobody described would cost the common case.
+    pub fn is_function_like(self) -> bool {
+        match self {
+            MacroEvidence::DefinedHere => true,
+            MacroEvidence::Described { function_like, .. } => function_like,
+        }
+    }
+
+    /// Could an invocation of this macro stand where a **statement** goes, with no `;` of its own?
+    ///
+    /// The question behind the macro-statement rule (B41 in `docs/grammar-gaps.md`), and the one place where a
+    /// wrong "yes" costs a diagnostic: a call whose `;` is missing is exactly this shape. So the answer is "yes"
+    /// only for a body that *is* a statement, and for a name this file defines — where the replacement list is
+    /// unread and taking the reading is what the file's own `#define` licenses.
+    ///
+    /// `Expression` and `Type` bodies answer **no** on purpose: `#define MAX(a, b) ((a) > (b) ? (a) : (b))` used as
+    /// `MAX(x, y)` really is an expression statement, and a missing `;` after it is a typo worth reporting.
+    pub fn may_be_a_statement_without_a_semicolon(self) -> bool {
+        match self {
+            MacroEvidence::DefinedHere => true,
+            MacroEvidence::Described {
+                function_like,
+                body,
+            } => {
+                function_like
+                    && matches!(
+                        body,
+                        MacroBody::Statement | MacroBody::Block | MacroBody::Unknown
+                    )
+            }
+        }
+    }
+
+    /// Could this macro be the **only** thing on a class member's line — `Q_OBJECT`, `Q_PROPERTY(int x READ x)`?
+    ///
+    /// A member that is nothing but a macro invocation, with no `;`, is how an attribute-like macro is written.
+    /// What matters is that the body is *not* a specifier or a type: `#define MY_INT int` used as `MY_INT x;` is a
+    /// declaration, and the shape test beside this one is what keeps the two apart.
+    pub fn may_stand_alone_as_a_member(self) -> bool {
+        match self {
+            MacroEvidence::DefinedHere => true,
+            MacroEvidence::Described { body, .. } => matches!(
+                body,
+                MacroBody::Statement | MacroBody::Block | MacroBody::Unknown
+            ),
+        }
     }
 }
 
@@ -854,6 +924,42 @@ impl<'a> CppParser<'a> {
     /// [`crate::parser::MacroNames`].
     pub fn is_a_known_macro_name(&self, name: &str) -> bool {
         self.macro_names.is_a_macro(name)
+    }
+
+    /// What this parse can say about `name` **as a macro**, in the order the evidence is consulted.
+    ///
+    /// 1. this file's own `#define`s — the text being parsed, so the freshest thing there is;
+    /// 2. the caller's external table — everything the file cannot see;
+    /// 3. nothing, and the caller falls back to a shape preference.
+    ///
+    /// The order is the one [`crate::symbols`] documents, and the reason it is *this* way round is staleness: an
+    /// index lags the buffer, while a `#define` in the buffer is a fact about the text in front of us.
+    pub fn macro_evidence(&self, name: &str) -> Option<MacroEvidence> {
+        if self.macro_names.is_a_macro(name) {
+            // The name is `#define`d here. What its body expands to is *in* the file but uninterpreted — the
+            // directive keeps its tokens and nothing evaluates them — so only the name is known.
+            return Some(MacroEvidence::DefinedHere);
+        }
+
+        match self.parse_config.symbol_table()?.kind_of(name)? {
+            SymbolKind::Macro {
+                function_like,
+                body,
+            } => Some(MacroEvidence::Described {
+                function_like,
+                body,
+            }),
+            // Every other answer says the name is *not* a macro, which the caller reads as "no evidence": the
+            // question was about macros, and `Some(Function)` does not answer it.
+            _ => None,
+        }
+    }
+
+    /// What the caller's table says about `name`, if the caller supplied one.
+    ///
+    /// `None` is "no evidence from outside" — never "not a type". See [`crate::symbols`].
+    pub fn symbol_kind(&self, name: &str) -> Option<SymbolKind> {
+        self.parse_config.symbol_table()?.kind_of(name)
     }
 
     /// The table itself, for a consumer that wants to audit what the parse recorded.

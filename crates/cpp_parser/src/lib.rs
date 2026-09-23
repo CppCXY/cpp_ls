@@ -3,6 +3,7 @@ mod kind;
 mod lexer;
 mod parser;
 mod parser_error;
+mod symbols;
 mod syntax;
 mod text;
 
@@ -12,8 +13,9 @@ pub use lexer::{
     CppLexer, CppTokenData, DocCommentStyle, DocToken, DocTokenKind, LexerConfig, is_block_comment,
     is_doc_whitespace, is_documentation_comment, lex_comment,
 };
-pub use parser::{Checkpoint, CppParser, EventStreamAudit, MarkEvent, ParserConfig};
+pub use parser::{Checkpoint, CppParser, EventStreamAudit, MacroEvidence, MarkEvent, ParserConfig};
 pub use parser_error::{CppParseError, CppParseErrorKind};
+pub use symbols::{MacroBody, NoSymbols, SymbolKind, SymbolMap, SymbolTable};
 pub use syntax::*;
 pub use text::{LineIndex, Reader, SourceRange};
 

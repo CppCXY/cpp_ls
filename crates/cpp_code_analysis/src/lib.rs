@@ -38,23 +38,28 @@
 //! An [`ExpandedToken`] travels with a [`Origin`], so that "where is this?" has an answer even when the
 //! token was written in a different file: navigation reaches the macro, diagnostics reach the call site.
 
-pub mod condition;
-pub mod config;
-pub mod directive;
-pub mod expand;
 pub mod file;
-pub mod graph;
-pub mod guard;
-pub mod guards;
 pub mod include;
-pub mod macros;
-pub mod module_info;
-pub mod modules;
-pub mod paths;
 pub mod preprocess;
-pub mod scopes;
-pub mod symbol;
-pub mod token;
+pub mod sema;
+
+// The four folders above are the *organisation*; the modules inside them keep their own names, and they are
+// re-exported here so that every path written before the reorganisation still resolves — `crate::directive::…`
+// inside this crate, `cpp_code_analysis::directive::…` outside it. Moving a file is a change to the filesystem,
+// and this is what keeps it from being a change to the API.
+//
+// * `file`     — one file analysed, and the token of the expanded stream
+// * `preprocess` — directives, macros, conditions, guards, expansion (the entry point is this module itself)
+// * `include`  — include paths and compiler settings, the file provider, the resolver, the graph
+// * `sema`     — names, scopes and C++20 modules
+pub use file::token;
+pub use include::{config, graph, paths};
+pub use preprocess::{condition, directive, expand, guards, macros};
+pub use sema::{module_info, modules, parser_symbols, scopes, symbol};
+// `guard` is the exception: `preprocess::guard` and `preprocess::guards` differ by one letter, which is exactly
+// the hazard the folders are meant to remove, so the *analysis* keeps the plural name and the types are reached
+// as `preprocess::guard`.
+pub use preprocess::guard;
 
 pub use condition::{ConditionExpr, EvalError, MacroValues, Value, evaluate, parse_condition};
 pub use config::{
@@ -91,6 +96,6 @@ pub use preprocess::{FilePreprocessing, PositionalMacros, preprocess};
 pub use scopes::{build_scopes, declared_module_names};
 pub use symbol::{
     Binding, BindingKind, BindingOrigin, DeclName, HeaderName, Known, MaybeName, Name, NameKind,
-    QualifiedName, Scope, ScopeId, ScopeKind, SymbolTable, UnknownReason,
+    QualifiedName, Scope, ScopeId, ScopeKind, ScopeTree, UnknownReason,
 };
 pub use token::Token;

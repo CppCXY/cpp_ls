@@ -34,7 +34,7 @@ use cpp_parser::{CppAstNode, CppSyntaxKind, CppSyntaxNode, CppTokenKind};
 
 use crate::symbol::{
     Binding, BindingKind, BindingOrigin, DeclName, Name, QualifiedName, ScopeId, ScopeKind,
-    SymbolTable,
+    ScopeTree,
 };
 
 /// Should a block statement open a scope of its own?
@@ -58,9 +58,9 @@ enum Body {
 ///
 /// The root node is the translation unit, and the table it produces has that as its file scope. See the module
 /// documentation for what is and is not recorded.
-pub fn build_scopes(root: &CppSyntaxNode) -> SymbolTable {
+pub fn build_scopes(root: &CppSyntaxNode) -> ScopeTree {
     let mut walker = ScopeWalker {
-        table: SymbolTable::new(),
+        table: ScopeTree::new(),
     };
 
     let file = walker.table.create_scope(
@@ -76,7 +76,7 @@ pub fn build_scopes(root: &CppSyntaxNode) -> SymbolTable {
 
 /// Walks a tree, creating a scope per construct and a binding per declaration.
 struct ScopeWalker {
-    table: SymbolTable,
+    table: ScopeTree,
 }
 
 impl ScopeWalker {

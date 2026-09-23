@@ -181,3 +181,7 @@ impl FileAnalysis {
         SourceRange::new(start, end - start)
     }
 }
+
+// The parts of this layer: the analysis itself lives in this module, and `token` is the token of the *expanded*
+// stream — the one that knows which macro produced it.
+pub mod token;

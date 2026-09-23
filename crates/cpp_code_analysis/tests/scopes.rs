@@ -7,11 +7,11 @@
 //!
 //! Scope is what these tests are about, so the renderings show scopes and the names in them, and nothing else.
 
-use cpp_code_analysis::{BindingKind, ScopeKind, SymbolTable, build_scopes};
+use cpp_code_analysis::{BindingKind, ScopeKind, ScopeTree, build_scopes};
 use cpp_parser::{CppParser, CppSyntaxKind, ParserConfig};
 
 /// Parse, check the parse is sound, and build the scopes.
-fn scopes(source: &str) -> SymbolTable {
+fn scopes(source: &str) -> ScopeTree {
     let tree = CppParser::parse(source, ParserConfig::default());
 
     assert_eq!(
@@ -33,8 +33,8 @@ fn scopes(source: &str) -> SymbolTable {
 ///
 /// A scope with no bindings prints as `KIND` rather than `KIND{}`, so a rendering that lost its bindings is
 /// distinguishable from one that never had any.
-fn shape(table: &SymbolTable) -> String {
-    fn render(table: &SymbolTable, id: cpp_code_analysis::ScopeId, out: &mut String) {
+fn shape(table: &ScopeTree) -> String {
+    fn render(table: &ScopeTree, id: cpp_code_analysis::ScopeId, out: &mut String) {
         let scope = table.scope(id).expect("a scope that exists");
 
         let kind = match scope.kind {
@@ -82,7 +82,7 @@ fn shape(table: &SymbolTable) -> String {
 
 /// The kind of the binding a scope holds for `name`, or `None`.
 fn kind_of(
-    table: &SymbolTable,
+    table: &ScopeTree,
     scope: cpp_code_analysis::ScopeId,
     name: &str,
 ) -> Option<BindingKind> {
@@ -96,7 +96,7 @@ fn kind_of(
 
 /// All bindings of a name in a scope, as `(kind, name_range)` pairs.
 fn bindings_of(
-    table: &SymbolTable,
+    table: &ScopeTree,
     scope: cpp_code_analysis::ScopeId,
     name: &str,
 ) -> Vec<(BindingKind, cpp_parser::SourceRange)> {

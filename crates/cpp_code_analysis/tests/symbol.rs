@@ -11,7 +11,7 @@
 
 use cpp_code_analysis::{
     Binding, BindingKind, BindingOrigin, DeclName, FileId, HeaderName, Known, Name, NameKind,
-    PathInterner, QualifiedName, ScopeId, ScopeKind, SymbolTable, UnknownReason,
+    PathInterner, QualifiedName, ScopeId, ScopeKind, ScopeTree, UnknownReason,
 };
 use cpp_parser::{CppParser, ParserConfig, source_range};
 use std::path::Path;
@@ -473,7 +473,7 @@ fn an_operator_declaration_has_no_ordinary_name() {
 /// being well defined.
 #[test]
 fn only_one_scope_is_the_file_scope() {
-    let mut table = SymbolTable::new();
+    let mut table = ScopeTree::new();
     assert!(table.root().is_none(), "an empty table has no root");
 
     let file = table.create_scope(ScopeKind::TranslationUnit, None, Some(range(0, 100)));
@@ -493,7 +493,7 @@ fn only_one_scope_is_the_file_scope() {
 /// A parent link alone would make "what is declared inside this namespace" a full scan of the table.
 #[test]
 fn child_scopes_are_linked_both_ways() {
-    let mut table = SymbolTable::new();
+    let mut table = ScopeTree::new();
     let file = table.create_scope(ScopeKind::TranslationUnit, None, Some(range(0, 200)));
     let ns = table.create_scope(ScopeKind::Namespace, Some(file), Some(range(10, 100)));
     let class = table.create_scope(ScopeKind::Class, Some(ns), Some(range(20, 50)));
@@ -513,7 +513,7 @@ fn child_scopes_are_linked_both_ways() {
 /// scope, and a consumer that got the namespace instead would offer the wrong completions everywhere.
 #[test]
 fn the_scope_at_an_offset_is_the_innermost() {
-    let mut table = SymbolTable::new();
+    let mut table = ScopeTree::new();
     let file = table.create_scope(ScopeKind::TranslationUnit, None, Some(range(0, 200)));
     let ns = table.create_scope(ScopeKind::Namespace, Some(file), Some(range(10, 100)));
     let class = table.create_scope(ScopeKind::Class, Some(ns), Some(range(20, 50)));
@@ -536,14 +536,14 @@ fn the_scope_at_an_offset_is_the_innermost() {
 /// file scope and a consumer would confidently complete names that are not in scope at all.
 #[test]
 fn an_uncovered_offset_has_no_scope() {
-    let mut table = SymbolTable::new();
+    let mut table = ScopeTree::new();
     table.create_scope(ScopeKind::TranslationUnit, None, Some(range(0, 10)));
 
     assert_eq!(table.scope_at(11), None);
     assert_eq!(table.scope_at(usize::MAX), None, "and does not overflow");
 
     // A synthesised scope with no range is never "at" an offset.
-    let mut ranged = SymbolTable::new();
+    let mut ranged = ScopeTree::new();
     ranged.create_scope(ScopeKind::TranslationUnit, None, None);
     assert_eq!(ranged.scope_at(0), None);
 }
@@ -554,7 +554,7 @@ fn an_uncovered_offset_has_no_scope() {
 /// walks in the order the language does.
 #[test]
 fn the_scope_chain_runs_outward() {
-    let mut table = SymbolTable::new();
+    let mut table = ScopeTree::new();
     let file = table.create_scope(ScopeKind::TranslationUnit, None, Some(range(0, 200)));
     let ns = table.create_scope(ScopeKind::Namespace, Some(file), Some(range(10, 100)));
     let function = table.create_scope(ScopeKind::Function, Some(ns), Some(range(20, 80)));
@@ -570,7 +570,7 @@ fn the_scope_chain_runs_outward() {
 /// hang an editor. Cheap to guarantee, expensive to debug otherwise.
 #[test]
 fn a_cyclic_scope_chain_terminates() {
-    let mut table = SymbolTable::new();
+    let mut table = ScopeTree::new();
     let a = table.create_scope(ScopeKind::Block, None, Some(range(0, 10)));
     let b = table.create_scope(ScopeKind::Block, Some(a), Some(range(0, 5)));
 
@@ -591,7 +591,7 @@ fn a_cyclic_scope_chain_terminates() {
 /// only one binding per name would be making a resolution decision this layer is not entitled to make.
 #[test]
 fn one_name_can_have_several_bindings() {
-    let mut table = SymbolTable::new();
+    let mut table = ScopeTree::new();
     let file = table.create_scope(ScopeKind::TranslationUnit, None, Some(range(0, 100)));
 
     assert!(table.add_binding(
@@ -628,7 +628,7 @@ fn one_name_can_have_several_bindings() {
 /// than a push. Asserted by inserting out of order and reading back.
 #[test]
 fn bindings_are_kept_sorted_by_name() {
-    let mut table = SymbolTable::new();
+    let mut table = ScopeTree::new();
     let file = table.create_scope(ScopeKind::TranslationUnit, None, Some(range(0, 100)));
 
     for name in ["zebra", "apple", "mango", "banana"] {
@@ -655,7 +655,7 @@ fn bindings_are_kept_sorted_by_name() {
 /// a gap a consumer can see, where a panic stops the editor.
 #[test]
 fn a_binding_for_a_missing_scope_is_rejected() {
-    let mut table = SymbolTable::new();
+    let mut table = ScopeTree::new();
     let absent = ScopeId(99);
 
     let added = table.add_binding(
@@ -674,7 +674,7 @@ fn a_binding_for_a_missing_scope_is_rejected() {
 /// look like it declared something at file scope.
 #[test]
 fn a_scope_rejects_bindings_it_cannot_hold() {
-    let mut table = SymbolTable::new();
+    let mut table = ScopeTree::new();
     let file = table.create_scope(ScopeKind::TranslationUnit, None, Some(range(0, 200)));
     let ns = table.create_scope(ScopeKind::Namespace, Some(file), Some(range(10, 100)));
     let function = table.create_scope(ScopeKind::Function, Some(ns), Some(range(20, 80)));
@@ -758,7 +758,7 @@ fn a_scope_rejects_bindings_it_cannot_hold() {
 /// declaration, so the two are asserted to be different and to be the ranges that were asked for.
 #[test]
 fn a_binding_keeps_the_declaration_and_the_name_apart() {
-    let mut table = SymbolTable::new();
+    let mut table = ScopeTree::new();
     let file = table.create_scope(ScopeKind::TranslationUnit, None, Some(range(0, 100)));
 
     let mut binding = binding(Name::identifier("count"), BindingKind::Variable, file, 10);
@@ -783,7 +783,7 @@ fn a_binding_records_its_origin() {
     let (interner, files) = file_ids(4);
     assert_eq!(files.len(), 4, "the interner is what mints ids");
 
-    let mut table = SymbolTable::new();
+    let mut table = ScopeTree::new();
     let file = table.create_scope(ScopeKind::TranslationUnit, None, Some(range(0, 100)));
 
     let mut from_macro = binding(

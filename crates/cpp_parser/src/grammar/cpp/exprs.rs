@@ -3,6 +3,7 @@ use crate::{
     kind::{CppSyntaxKind, CppTokenKind},
     parser::{CppParser, MarkerEventContainer},
     parser_error::CppParseError,
+    symbols::SymbolKind,
 };
 
 use super::{at_requires, expect_token};
@@ -796,7 +797,14 @@ fn is_a_type_in_parentheses(p: &CppParser) -> bool {
             // a name in front of something a *cast* carries and an expression does not — and the *parse* settles
             // the rest: a cast whose operand fails to parse is rewound and read as a parenthesised expression. See
             // the cast branch in `parse_primary_expr`.
-            p.is_a_known_type_name(p.peek_token_text_at(1))
+            //
+            // The **caller's table** is consulted last, and it is what makes `(Widget)x` a cast for a `Widget` from
+            // a header — the case the file-local table cannot answer. A `Function` or `Variable` answer refuses the
+            // cast, which is the direction the local table cannot express at all.
+            let name = p.peek_token_text_at(1);
+            p.is_a_known_type_name(name)
+                || p.symbol_kind(name)
+                    .is_some_and(|kind| matches!(kind, SymbolKind::Type | SymbolKind::Template))
         }
         // **No arm for a leading `::`.**
         //

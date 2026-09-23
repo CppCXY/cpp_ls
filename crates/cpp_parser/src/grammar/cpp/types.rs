@@ -17,6 +17,7 @@ use crate::{
     kind::{CppSyntaxKind, CppTokenKind},
     parser::{CompleteMarker, CppParser, Marker, MarkerEventContainer},
     parser_error::CppParseError,
+    symbols::SymbolKind,
 };
 
 use super::expect_token;
@@ -1081,6 +1082,23 @@ fn name_joins_the_type(
     if a_class_definition_was_written {
         return false;
     }
+    // A name the **caller's table** says is a type, joining a sequence that has already taken a name: that is the
+    // shape a modifier macro leaves behind —
+    //
+    // ```text
+    // MY_API Widget *p;         the ordinary spelling, which the shape rule above already reads
+    // MY_API Widget const w;    …and the one it cannot: `const` is not a declarator, so the follower rule says
+    //                           "no declarator follows" and the type would end at `const`
+    // ```
+    //
+    // The first name is what makes this safe to ask: before a name has joined, a type name is what the *sequence*
+    // is for, and `name_allowed` already decides it.
+    if a_further_name_may_join
+        && p.symbol_kind(p.current_token_text())
+            .is_some_and(|kind| matches!(kind, SymbolKind::Type | SymbolKind::Template))
+    {
+        return true;
+    }
     let complete = type_is_already_complete(p);
     let called = a_parenthesis_follows_the_name(p);
     if complete || called {
@@ -1105,7 +1123,7 @@ fn name_joins_the_type(
 ///
 /// Answering at the `<` reads the second line as a type `MyType f<int>` with no declarator left, and the explicit
 /// instantiation fails — which is exactly what a first version of this rule did.
-fn a_declarator_still_follows_the_name(p: &CppParser) -> bool {
+pub(super) fn a_declarator_still_follows_the_name(p: &CppParser) -> bool {
     let mut after = super::decls::next_significant_index(p, p.current_token_index());
     while p.token_kind_at(after) == CppTokenKind::Scope {
         let segment = super::decls::next_significant_index(p, after);

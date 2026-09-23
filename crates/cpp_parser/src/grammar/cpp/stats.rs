@@ -7,7 +7,7 @@
 use crate::{
     grammar::ParseResult,
     kind::{CppSyntaxKind, CppTokenKind},
-    parser::{CppParser, MarkerEventContainer},
+    parser::{CppParser, MacroEvidence, MarkerEventContainer},
     parser_error::CppParseError,
 };
 
@@ -194,7 +194,8 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
 fn at_a_macro_call_statement(p: &CppParser) -> bool {
     p.current_token() == CppTokenKind::Identifier
         && p.peek_next_token() == CppTokenKind::LeftParen
-        && p.is_a_known_macro_name(p.current_token_text())
+        && p.macro_evidence(p.current_token_text())
+            .is_some_and(MacroEvidence::may_be_a_statement_without_a_semicolon)
 }
 
 /// Read a macro invocation as a statement: `NAME ( tokens ) [ { … } ] [ ; ]`.

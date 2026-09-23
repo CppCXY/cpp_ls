@@ -177,3 +177,20 @@ pub fn opens_unclosed_region(directive: &Directive) -> bool {
         DirectiveKind::If | DirectiveKind::Ifdef | DirectiveKind::Ifndef
     )
 }
+
+// The pieces this entry point is built from:
+//
+//   PreprocessorDirective nodes -> typed Directive values       (directive)
+//   #define                     -> MacroDef, token sequence      (macros)
+//   #if / #elif                 -> Guard conditions over macros  (condition, guard, guards)
+//   a macro call                -> a shadow token stream, every
+//                                  token carrying its origin      (expand)
+//
+// Nothing here is re-lexed from the source: `directive` walks the parser's `PreprocessorDirective` nodes, which is
+// what keeps the two layers from drifting apart.
+pub mod condition;
+pub mod directive;
+pub mod expand;
+pub mod guard;
+pub mod guards;
+pub mod macros;

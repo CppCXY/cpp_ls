@@ -584,3 +584,10 @@ mod tests {
         assert!(resolution.is_resolved(), "{resolution:?}");
     }
 }
+
+// Where files come from, and who includes whom: compiler settings (`config`), the provider that reads files
+// (`paths`), the resolver (this module), and the graph those resolutions form (`graph`). This is the half of the
+// preprocessor a parser cannot have, and the reason the layer above the tree is its own crate.
+pub mod config;
+pub mod graph;
+pub mod paths;

@@ -4,7 +4,7 @@ mod marker;
 mod parser_config;
 mod type_names;
 
-pub use cpp_parser::{Checkpoint, CppParser, EventStreamAudit, ParseAnchor};
+pub use cpp_parser::{Checkpoint, CppParser, EventStreamAudit, MacroEvidence, ParseAnchor};
 #[allow(unused)]
 pub use macro_names::MacroNames;
 #[allow(unused)]

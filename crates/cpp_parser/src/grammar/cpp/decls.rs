@@ -45,8 +45,9 @@
 use crate::{
     grammar::ParseResult,
     kind::{CppSyntaxKind, CppTokenKind},
-    parser::{CompleteMarker, CppParser, Marker, MarkerEventContainer, ParseAnchor},
+    parser::{CompleteMarker, CppParser, MacroEvidence, Marker, MarkerEventContainer, ParseAnchor},
     parser_error::CppParseError,
+    symbols::SymbolKind,
 };
 
 use super::{
@@ -1473,10 +1474,19 @@ pub(super) fn a_macro_definition_follows(p: &CppParser, declarator_from: usize) 
         && !the_head_of_the_declaration_is_qualified(p)
         && a_block_follows_the_group(p)
         // At *declaration* level the shape has no other reading at all, so any name will do. Inside a **body**
-        // it competes with a real mistake — a call whose `;` is missing, followed by a block — so only a name
-        // spelled like a macro is taken, which is what `IF_EXIST(indent_style) { … }` is.
+        // it competes with a real mistake — a call whose `;` is missing, followed by a block — so the name has to
+        // be evidence: a macro this file `#define`d, or one the caller's table describes, and only then the
+        // spelling convention as the last resort (a macro from a header nobody indexed).
+        //
+        // The statement rule claims most of these shapes before this one is reached, so this consult is normally
+        // redundant — and it is here anyway, because a rule that *depends* on another rule running first is a rule
+        // whose behaviour changes when the order changes. Evidence first, convention second, in both rules.
         && (!p.is_inside_a_body()
-            || p.declaration_type_name().is_some_and(looks_like_a_macro_name))
+            || p.declaration_type_name().is_some_and(|name| {
+                p.macro_evidence(name)
+                    .is_some_and(MacroEvidence::may_be_a_statement_without_a_semicolon)
+                    || looks_like_a_macro_name(name)
+            }))
 }
 
 /// Is this name written the way a **macro** is written: `TEST`, `IF_EXIST`, `CHECK_EQ`?
@@ -1624,6 +1634,34 @@ pub fn a_declaration_is_the_better_reading(p: &CppParser, declarator_from: usize
     // common case — `Widget w(1, 2);` — and it is also what makes `Widget make();` a declaration at file scope.
     if declarator_starts_with_a_known_type_name(p) {
         return p.is_inside_a_body() || p.is_at_file_scope();
+    }
+
+    // What the **caller's table** says about the leading name, when the caller supplied one.
+    //
+    // This is the consumer the external-table design exists for. `Widget w(1, 2);` and `g(1, 2);` are the same
+    // tokens, and the file's own table answers only for names *this* file declares — a class from a header, a
+    // helper defined in another translation unit, are exactly the names that made `Widget w(1, 2)` a guess. The
+    // index behind this table knows them.
+    //
+    // A `Function` or `Variable` answer is the part the local table can *never* express: "this name is not a
+    // type". That is a reading being refused rather than one being chosen, and it is why the trait answers in
+    // kinds rather than in a `bool` — see `crate::symbols`.
+    //
+    // A `None` — the ordinary case — falls through to the shape preferences below, which is what keeps this a
+    // preference and not a dependency.
+    if let Some(name) = p.declaration_type_name()
+        && let Some(kind) = p.symbol_kind(name)
+    {
+        return match kind {
+            SymbolKind::Type | SymbolKind::Template => true,
+            // Not a type, so not a declaration's type: the reading is refused and the expression statement —
+            // the call — is what the tokens really are.
+            SymbolKind::Function | SymbolKind::Variable | SymbolKind::Namespace => false,
+            // A macro in type position is not itself a type — what stands there is what its body produced. A table
+            // that knows the body says `MacroBody::Type` for a type macro, and the shape rules handle the rest;
+            // answering "not a type" here keeps a macro name from being taken for one.
+            SymbolKind::Macro { .. } => false,
+        };
     }
 
     // Nothing in the file says the leading name is a type — it was declared in a header, or below the point
@@ -2704,7 +2742,101 @@ pub fn parse_class_body(p: &mut CppParser) -> ParseResult {
     Ok(m.complete(p))
 }
 
-/// The members of a class body, up to its closing brace.
+/// Does a **member that is only a macro invocation** start here — `Q_OBJECT`, `Q_PROPERTY(int x READ x)`?
+///
+/// Three conditions, and each is evidence or shape rather than a guess:
+///
+/// * the name is a macro — this file's own `#define`, or the caller's table (see `CppParser::macro_evidence`);
+/// * the body, when the table describes one, is **not** a specifier or a type: `#define MY_INT int` used as
+///   `MY_INT x;` is a declaration, and a table that says `Specifier` settles that on its own;
+/// * a **`(`** invocation must not be followed by a `;`, or it is a plain call statement, which the statement rule
+///   owns rather than the member loop.
+///
+/// The bare spelling is where the two sources of evidence part company, and the distinction is worth recording: a
+/// *described* body that is a statement cannot be part of a declaration's specifiers, so the name is a macro
+/// whatever follows it — which is the only way `Q_OBJECT` can be told from the next member, since that member
+/// begins with a name and so looks exactly like a declarator. A name this file merely `#define`d has **no body to
+/// consult** — the replacement list is not interpreted — so there the shape has to answer, and it answers
+/// conservatively: no declarator may follow.
+fn at_a_macro_member(p: &CppParser) -> bool {
+    if p.current_token() != CppTokenKind::Identifier {
+        return false;
+    }
+
+    let Some(evidence) = p.macro_evidence(p.current_token_text()) else {
+        return false;
+    };
+    if !evidence.may_stand_alone_as_a_member() {
+        return false;
+    }
+
+    if p.peek_next_token() == CppTokenKind::LeftParen {
+        // `Q_PROPERTY(…)`: the group is the macro's, and a `;` after it would make this an ordinary call
+        // statement — which the statement rule owns, not the member loop.
+        return !a_semicolon_follows_the_group(p);
+    }
+
+    match evidence {
+        // A described body that is a statement settles it: a statement cannot be a declaration's specifiers, so
+        // the name is a macro whatever follows — which is the only way `Q_OBJECT` can be told from the member
+        // written after it, that member beginning with a name and so looking exactly like a declarator.
+        MacroEvidence::Described { .. } => true,
+        // A name this file `#define`d has no body to consult, so the shape answers, and it answers
+        // conservatively: `#define MY_INT int` used as `MY_INT x;` is a declaration and must stay one.
+        MacroEvidence::DefinedHere => !super::types::a_declarator_still_follows_the_name(p),
+    }
+}
+
+/// Is the balanced group at the cursor followed by something other than a `;`?
+fn a_semicolon_follows_the_group(p: &CppParser) -> bool {
+    let mut depth = 0isize;
+    let mut offset = 0usize;
+    while let Some(kind) = p.peek_token_kind_at(offset..offset + 1).first().copied() {
+        match kind {
+            CppTokenKind::LeftParen => depth += 1,
+            CppTokenKind::RightParen => {
+                depth -= 1;
+                if depth == 0 {
+                    return p
+                        .peek_token_kind_at(offset + 1..offset + 2)
+                        .first()
+                        .copied()
+                        == Some(CppTokenKind::Semicolon);
+                }
+            }
+            CppTokenKind::Eof | CppTokenKind::None => return false,
+            _ => {}
+        }
+        offset += 1;
+    }
+
+    false
+}
+
+/// Read a macro invocation that stands where a class member goes, into a `MacroCall`.
+///
+/// The same node the statement rule produces, for the same reason: a macro's meaning is not knowable here, and
+/// dressing it up as a declaration would hide that.
+fn parse_macro_member(p: &mut CppParser) -> ParseResult {
+    let m = p.mark(CppSyntaxKind::MacroCall);
+
+    let name = p.mark(CppSyntaxKind::NameExpr);
+    p.bump();
+    name.complete(p);
+
+    if p.current_token() == CppTokenKind::LeftParen {
+        parse_balanced_token_group(p, CppSyntaxKind::ArgumentList)?;
+    }
+
+    // A `;` is not part of the shape this rule is for (that shape is a plain call statement), but a file may
+    // write one, and swallowing it keeps the loop from reporting it as a stray member.
+    if p.current_token() == CppTokenKind::Semicolon {
+        p.bump();
+    }
+
+    Ok(m.complete(p))
+}
+
 fn parse_class_body_members(p: &mut CppParser) -> ParseResult {
     while p.current_token() != CppTokenKind::RightBrace && !p.is_eof() {
         let member_base = p.open_marks();
@@ -2719,9 +2851,22 @@ fn parse_class_body_members(p: &mut CppParser) -> ParseResult {
             continue;
         }
 
+        // A **member that is nothing but a macro invocation**: `Q_OBJECT`, `Q_PROPERTY(int x READ x)`,
+        // `Q_ENUM(E)`. An attribute-like macro is written where a member goes and carries no `;` — its expansion
+        // supplies whatever declarations it wants — so the member loop has to recognise it before the declaration
+        // rule takes the name for a type and then fails at the next member.
+        //
+        // The evidence is the table's, or this file's own `#define` (see `CppParser::macro_evidence`), and the
+        // shape test is what keeps a *declaration* out of it: `#define MY_INT int` used as `MY_INT x;` has a
+        // declarator after the name, so it is a declaration and never reaches this rule.
+        let before = p.current_token_index();
+        if at_a_macro_member(p) {
+            parse_macro_member(p)?;
+            continue;
+        }
+
         // A member is a declaration; anything that is not gets wrapped in an error node so the
         // loop always advances.
-        let before = p.current_token_index();
         if parse_member(p).is_err() {
             p.close_marks_above(member_base);
             if p.current_token_index() == before {

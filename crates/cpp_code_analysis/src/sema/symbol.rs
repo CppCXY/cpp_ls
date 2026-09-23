@@ -671,7 +671,7 @@ impl Scope {
 
 /// A scope's identity.
 ///
-/// Indices into a [`SymbolTable`] rather than pointers, for the same reason [`FileId`] is an index: the table
+/// Indices into a [`ScopeTree`] rather than pointers, for the same reason [`FileId`] is an index: the table
 /// owns the scopes, so a `ScopeId` that outlives one table cannot be silently valid in another. A pointer
 /// would make that mistake possible and a reference would make the table unbuildable while it is being
 /// filled.
@@ -691,15 +691,15 @@ impl ScopeId {
 /// state, and nothing more. A table that required the project to be walked first would make every keystroke
 /// cost the whole project.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SymbolTable {
+pub struct ScopeTree {
     scopes: Vec<Scope>,
     /// The file scope, when one was created. Every non-empty file has exactly one.
     root: Option<ScopeId>,
 }
 
-impl SymbolTable {
+impl ScopeTree {
     pub fn new() -> Self {
-        SymbolTable::default()
+        ScopeTree::default()
     }
 
     /// The file scope, if the table has one.

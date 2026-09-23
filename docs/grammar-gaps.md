@@ -1178,9 +1178,31 @@ operator bool() &&  // && 和 ( 分开     -> 这是成员函数的引用限定�
 
 判据是**源码相邻性**（`peek_token_range_at`），和 `<=>` / `<` 那类问题用的是同一类证据。失败模式：有人把 `operator bool()&&` 写成没有空格，名字会多读一个 token、声明报缺 `;`——响亮、局部、改一个空格就好。
 
-### T4. 跨编译单元的类型信息
+### T4. 跨编译单元的类型信息 —— 已给出设计：不在 parser 里补，而是开一个接口
 
 `TypeNames` 表是**文件局部**的。头文件里的类型、模板参数、没见过的 builtin，它一概不知道。这不是 bug，是"不等符号表"的直接推论。表的定位见 `crates/cpp_parser/src/parser/type_names.rs` 的模块文档，用法见 `cpp_parser/src/grammar/cpp/types.rs` 的模块文档（"Everything in this module is *syntactic*. Name lookup is deliberately absent"）。
+
+**现在有了正式答案：外部符号表**（`crates/cpp_parser/src/symbols.rs`；接口定义在 parser 侧，实现由 `cpp_code_analysis` 提供）。要点：
+
+1. **两层**：有表就用表（它知道头文件与别的翻译单元），没有表、或者表也不知道，就回落到既有的形状偏好——**表是偏好，不是依赖**：`ParserConfig::default()` 的现有调用一行不改，行为与今天逐字节相同（`tests/symbols.rs::an_empty_table_parses_exactly_like_no_table` 用真实语料 `real_world.cpp` 把这条钉住了）。
+2. **三值，不是布尔**：`kind_of(name) -> Option<SymbolKind>`，`None` 是"**这张表不知道**"，绝不是"不是类型"。"否"只能由 `Some(其它种类)` 表达——比如 `Function` 用来**否决**声明读法。把两者合成 `bool`，会让一个过期的索引悄悄改变合法代码的读法，那正是 A0 类的问题。
+3. **优先级**：本文件（`TypeNames`/`MacroNames`——就是正在解析的文本，永远最新）→ 外部表 → 形状偏好。索引是**滞后**的，所以排在"文件自己说的话"之后：刚改名的符号由第 1 条或"不知道"回答，永远不会被过期的第 2 条抢先。
+4. **词汇表是"判据驱动"的**：`Type` / `Template` / `Macro { function_like, body }` / `Function` / `Variable` / `Namespace`。其中最值钱的是 `MacroBody`（`Specifier` / `Statement` / `Block` / `Expression` / `Type` / `Unknown`）——它正好对上这几轮所有宏形状（`MY_API` 是 Specifier、`NUMBER_OPTION` 是 Statement、`IF_EXIST` 是 Statement + 块、gtest 的 `TEST` 是 Block），于是"按形状猜"可以变成"查表"。`Unknown` 必须存在：索引常常知道"这是宏"却不知道宏体。
+5. **契约**：表只决定**读法**、不决定**结构**——喂一张胡说八道的表（"一切都是宏"、"一切都是类型"）树仍然无损、良构、不 panic，`tests/symbols.rs::a_hostile_table_cannot_break_the_tree` 就是这么测的；表是只读纯函数（`&self`、`Send + Sync`、无内部可变状态），所以**不进 `Checkpoint`**，回滚不需要恢复它；一次 parse 的结果是 `(文本, 表)` 的函数，索引更新后重新解析即可。
+
+**接入点与进度**（都是这几轮收敛出来的具名判据，不需要新层）：
+
+| 判据 | 表能给的证据 | 状态 |
+|---|---|---|
+| `at_a_macro_call_statement`（B41） | `Macro{body:Statement/Block/Unknown}` | **已接**：`may_be_a_statement_without_a_semicolon`——`Expression`/`Type` 体**故意答否**（`MAX(x,y)` 漏分号仍要报） |
+| 类体成员位置的裸宏（`Q_OBJECT`、`Q_PROPERTY(...)`） | `Macro{body:Statement/Block/Unknown}` | **已接**：新增 `at_a_macro_member`/`parse_macro_member`，产出同一个 `MacroCall`；带 `(` 的形状要求组后没有 `;`，裸写法的判断用的是**表描述的宏体**（本地 `#define` 没有宏体可查，才退回形状保守判断） |
+| `a_declaration_is_the_better_reading`（`Widget w(1,2)` vs `g(1,2)`） | `Type`/`Template` ⇒ 声明；`Function`/`Variable`/`Namespace` ⇒ 不是 | **已接**：这是这张表最主要的存在理由，也是本地表永远给不出的那个"否" |
+| `is_a_type_in_parentheses`（T1 的 cast 判据） | `Type`/`Template` | **已接**：`(Widget)x` 对头文件里的 `Widget` 也能读成 cast |
+| `a_macro_definition_follows`（B32/B36） | `Macro{body:Statement/Block/Unknown}` | **已接**：体内那个形状通常由**语句规则**先一步接走（`MacroCall` + 块），所以这次咨询多数时候是冗余的——接的理由是**一条规则不该依赖另一条规则的执行顺序**；拼写约定退成最后兜底（头文件宏、没人索引过的那种） |
+| `name_joins_the_type`（`MY_API Widget *p;`） | `Type`/`Template`（在已经并进一个名字之后） | **已接**：常见写法（`MY_API Widget *p;`）本来就由 B29 覆盖，表补的是形状判据看不见的那半——`MY_API Widget const w;`：`const` 不是声明符能延续的东西，没有表时类型会停在 `const` 前面 |
+| `a_bare_template_id_is_here` | `Template` | **判断为不需要**：它问的是"裸 template-id 不能当声明符名字"，是对**token 形状**的判断，与"这个名字是不是模板"不是同一个问题；硬接进去只会把两件事混在一起 |
+
+落地顺序：**接口（已完成）** → **宏优先（已完成）** → **类型优先（已完成，除下面那条判断为不需要的）** → `cpp_code_analysis` 实现 trait（未开始）。每一步的证据都在 `tests/symbols.rs`（8 条）：表命中、表未知、**表喂错**（`Expression` 体、"表说是宏但名字不像宏"、`Specifier` 体在体内）三种情形各有用例，另有"空表 ≡ 无表"的逐节点等价断言。
 
 ---
 
@@ -1277,5 +1299,6 @@ operator bool() &&  // && 和 ( 分开     -> 这是成员函数的引用限定�
     
     写新规则时先问这两句：**它应该在哪个 token 上收尾？收尾之后那个 token 允许是什么？** 只写"解析成功就接受"的规则，在这个容错 parser 里迟早会在垃圾输入上"成功"。
 14. **同一条判据的第二处用法，当场抽出来，别写第二遍**（B22）。"后面跟着操作数"这条证据先用在 cast 上（T1），后来用在 template-id 上（B21），两处都需要同一条例外（clause 内不生效）——第二次直接改的时候漏了 cast 那处，是**新写的测试用例**（`requires (C<T>) T value = T{};`）把它抓出来的。抽成 `an_operand_is_decisive` 之后，例外只有一处实现。**"这条例外要加在哪里"是比"这条例外是什么"更容易错的问题**：只要同一个判据出现两次，例外就有两处可能被漏。
+17. **符号查询是三值的，而且本文件优先**（外部符号表）。kind_of(name) -> Option<SymbolKind> 里的 None 是"**这张表不知道**"，绝不是"不是类型"；"否"必须由 Some(其它种类) 表达（Function 用来否决声明读法）。判据的顺序固定为**本文件（TypeNames/MacroNames）→ 外部表 → 形状偏好**，因为索引是滞后的、而"文件自己说的话"就是正在解析的文本。另一条同样重要的：**表只决定读法、不决定结构**——任何表（包括胡说八道的）都必须产出无损、良构的树，	ests/symbols.rs 用一张"一切都是宏"的表把这条钉住了。接口定义在 crates/cpp_parser/src/symbols.rs。
 16. **把"约定"换成"证据"，只在能拿出证据的地方放宽**（B41）。宏的判据一开始是**拼写约定**（全大写下划线就算宏）——它能用，但它是个猜测：CHECK(x) 漏写分号也会被当成宏吞掉。改法是**建表**：#define 过什么名字是文件里写着的事实，parser::MacroNames 把它记下来（和 TypeNames 同形、同一边界），于是"宏调用省略分号"这条本该吞手误的规则变成了**只对本文件定义过的宏生效**，g(x) 漏分号照旧报错。分工要记清楚：**需要证据的地方用表（放宽的代价是诊断），兜底的地方用约定（反正两种读法都是错，挑损失小的那个）**——所以"宏 + 块"那两处（B32/B36）保留拼写兜底，头文件里来的 TEST 依然读得出来。判据一旦放宽，**反向钉住**必须同时加上：gaps.rs 的"仍不支持"清单里钉着反例，放宽就会立刻失败。
 15. **嵌进去的规则会先花掉外层规则要的 token**（B24 的第二个缺陷）。K&R 形参表读的是**真正的声明**，每条自带一个 `;`，于是外层声明收尾时那个 `;` 早被吃掉了；而这只在"没有函数体"的形状上暴露——有体时游标落在 `{` 上，走的是另一条分支。所以看到"这里应该有个 `;`"时，要先问**这段 token 里有没有嵌套规则已经消费过它**。同族问题还有 `friend`：它的载荷是整条声明（`;` 在内），外层当初也又找了一遍 init-declarator，失败后回退，把后面的成员全变成了错误节点。两次的形状一样：**外层以为收尾符号还在**。
