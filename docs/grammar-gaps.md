@@ -1320,3 +1320,33 @@ operator bool() &&  // && 和 ( 分开     -> 这是成员函数的引用限定�
     * **下游症状二（未修，已知缺口）**：`CppDeclaration::get_name()` 走的是 `init-declarator`，上表前两种形状都没有它，于是 `is_unnamed_declaration` 判定"这条声明没有名字"并丢掉整条声明——**构造函数、没有 `virtual` 的析构函数、`= delete`/`= default` 的特殊成员都不是绑定**。修它要的是一条"裸 declarator 也算声明了名字"的规则，而这条规则必须同时不接受 `is_unnamed_declaration` 存在要拒绝的形状（`tests/scopes.rs` 的 `a_call_statement_declares_nothing` 与 `a_real_declaration_is_still_declared` 是这条规则两侧的钉子）。边界现在由 `a_destructor_without_a_specifier_declares_nothing_yet` 钉住：**能力落地那天它会失败，改它就是有意为之**。
 
     这一条与第 18 条同族，但更贵：第 18 条只是"读错了运算符"，这一条是**把一个声明读成了另一个实体**，而且顺带吞掉了它后面的成员。
+
+20. **成员访问运算符后面什么都没有时，恢复吃掉了块的 `}`**（未修，已知缺漏）。做补全入口时探到的：`w.` 是补全**唯一真正被问到的状态**（运算符打完、名字还没写），parser 目前的读法是
+
+    ```text
+    w.          IndexExpr[IdentifierExpr(w) Dot]   + push 前的 Err
+    w.si        IndexExpr[IdentifierExpr(w) Dot Identifier(si)]   + 只报 "expected `;` after expression"
+    ```
+
+    形状本身**够用**——对象和运算符都在 `IndexExpr` 里，所以成员列表 / 补全在**那个游标处**照常工作（这正是第 19 条里"形状能用就先别动 parser"的同一判断）。问题在**恢复的半径**，实测（`void f() {\n  Widget w;\n  w.\n}\nint after;\nvoid g() { }\n`）：
+
+    ```text
+    Errors: ["expected identifier after member access operator"]
+    Declaration@0..54
+      CompoundStat@9..54          <- 本该在 29 结束
+        Declaration@13..25        <- Widget w;
+        ExpressionStat@25..30     <- w.\n}\n   ：IndexExpr 把块自己的 `}`(28..29) 吃了
+        Declaration@30..41        <- int after;     ** 于是它变成了 f() 的局部 **
+        Declaration@41..54        <- void g() { }
+    ```
+
+    对照 `w.si`（同一个位置、同样报错）时结构是**完好**的：`CompoundStat@9..32`，`int after;` 仍是文件作用域。也就是说差别只来自"`parse_expr` 用 `Err` 返回"这条路径，而 `parse_compound_stat` 里对"缺 `}`"已经有现成的处理范式（`emit_missing_node()` + `push_error`，注释写着"编辑时最常见的错误，保住块、别把文件其余部分吞进错误节点，但问题仍然要报"）。**修法应当在同一范式里**：成员名缺失时补一个零宽节点、`push_error`、`complete` 之后 `break` 出后缀循环，不要让 `Err` 穿过语句层。
+
+    之所以现在不修：这属于 parser 的恢复策略，要带自己的 `gaps.rs` 形状断言（"`w.` 之后 `int after;` 仍是文件作用域"）和严重度归类；而**它现在没有挡住任何查询**。补全查询的宽容放在形状读取器里（见 `docs/index-design.md`），定义查询对空成员显式返回 `UnparsableName`。
+
+21. **标准库闭包是最有说服力的探针语料，用它的"第一个错"当队列**（`docs/std-library.md`）。第 11 条说"真实文件覆盖实际存在的构造"，标准库是这种语料能拿到的最好的样本：本机闭包 185 个文件 / 111k 行，**只有 26% 干净解析**，而修它要按 **include 图的拓扑序**（叶子在前）——因为上层需要读的宏与声明来自下层。用它的时候有两条判据必须守住：
+
+    * **按文件数报进度，不按报错条数。** 标准头级联得厉害：`bits/stl_algobase.h` 一个构造没读出来，后面挂 190 条错。所以"2067 条 unexpected token"不是 2067 个缺陷，甚至不是 2067 个现象。
+    * **看每个文件的第一个错**，那是唯一没有东西能解释它的一条。`cargo run --release -p cpp_code_analysis --example std_probe -- files.txt` 打的就是这个视图，附带"这个错所在行有没有闭包定义的宏"的占比——**这个占比是判断"该建表还是该修语法"的依据**，本机是 58% 对 4%（只有 4% 是本文件自己 `#define` 的），于是结论很硬：文件自己的 `MacroNames` 对标准库几乎没用，起作用的是外部符号表（第 17 条那条线）。
+
+    还有一条**不要踩的坑**：标准库的宏在 `#if` 两个分支里可以展开成完全不同的东西（`_GLIBCXX_BEGIN_NAMESPACE_CONTAINER` 在一个分支里开出 `namespace`、在另一个里什么都没有），所以"知道它是宏"并不总能换来"跳过它就行"——开出作用域的那种只能**展开**。这是第 15 条（嵌套规则花掉外层的 token）的同族：**跳过与展开的差别，在"宏里有括号"时就是错树与对树的差别。**

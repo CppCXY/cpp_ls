@@ -58,7 +58,7 @@ pub mod summary_codec;
 // * `sema`     — names, scopes, the index's declaration facts, and C++20 modules
 pub use cache::{CACHE_DIRECTORY, FORMAT_VERSION, SummaryKey, content_hash, fnv1a64};
 pub use file::token;
-pub use include::{config, graph, paths};
+pub use include::{config, graph, paths, toolchain};
 pub use preprocess::{condition, directive, expand, guards, macros};
 pub use sema::declarations::{build_facts, by_name, declared_type_of, scope_of};
 pub use sema::{module_info, modules, parser_symbols, scopes, symbol};
@@ -91,16 +91,20 @@ pub use graph::{
 pub use guard::{Branch, Guard, GuardStack, Region, Visibility};
 pub use guards::{FileGuard, GuardAnalysis, analyse_guards, detect_guard};
 pub use include::{FoundIn, IncludeResolver, Resolution, Resolved, Unresolved};
+pub use toolchain::{
+    CommandRunner, DiskCommands, Environment, Output, Toolchain, discover, find_compiler,
+    parse_search_list, parse_version, search_paths,
+};
 // The index layer is flattened like the rest, even though it is the newest: a consumer that wants navigation
 // needs `SummaryStore` and `definition_across_files`, and reaching them through two module hops says nothing a
 // reader benefits from. `index::summary` is not here — the *shape* of a summary is `summary`, and one type with
 // two paths is worse than a longer import.
 pub use index::{
-    ChangeBatch, EventKind, FileEvent, FileIndexer, IncludeVisibility, MemberList, Priority,
-    ProjectDefinition, ProjectIndex, ProjectMacro, ProjectMember, Response, Step, StepOutcome,
-    StoreStats, SummaryReadError, SummaryStore, UnlistedBase, VisibleDeclaration, WatchFilter,
-    Worklist, definition_across_files, macro_across_files, member_across_files, members_of,
-    read_summary, summarize, write_summary,
+    ChangeBatch, EventKind, FileEvent, FileIndexer, IncludeVisibility, MemberCompletions, MemberList,
+    Priority, ProjectDefinition, ProjectIndex, ProjectMacro, ProjectMember, Response, Step,
+    StepOutcome, StoreStats, SummaryReadError, SummaryStore, UnlistedBase, VisibleDeclaration,
+    WatchFilter, Worklist, definition_across_files, macro_across_files, member_across_files,
+    member_completions_at, members_of, read_summary, summarize, write_summary,
 };
 pub use macros::{MacroBody, MacroDef, MacroTable, Parameter, ParameterKind};
 pub use module_info::{ImportDeclaration, ImportTarget, ModuleInfo, ModuleUnit};

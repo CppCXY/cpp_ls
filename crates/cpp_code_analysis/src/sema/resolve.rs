@@ -203,13 +203,22 @@ fn spell(global: bool, written: &str) -> String {
 /// The first query in this crate that has to ask about a **type** rather than a name. `size` is not looked up
 /// anywhere: it is looked up *in the type of `widget`*, so the answer needs the object, its type, and the member
 /// — and this is the half that reads the shape off the syntax.
+///
+/// # The member may not be written yet
+///
+/// `w.` is how a member access is asked about most often — the keystroke that *is* the question — and the parser
+/// reads it as an access with nothing after the operator rather than as a different construct. So
+/// [`MemberAccess::member`] is empty in that state and [`MemberAccess::member_range`] is an empty range just past
+/// the operator, which is where a client inserts the chosen name. A caller with nothing to do about a nameless
+/// access has to say so itself: [`crate::index::project::member_across_files`] does, because there is no member to
+/// jump to, while the completion query is asking exactly for this state.
 #[derive(Debug, Clone)]
 pub struct MemberAccess {
     /// The expression left of the `.` or `->`: the thing whose type decides what the member is.
     pub object: CppSyntaxNode,
-    /// The member's spelling, as written.
+    /// The member's spelling, as written — **empty** when only the operator has been typed.
     pub member: String,
-    /// The member's range, for a selection or a rename.
+    /// The member's range, for a selection or a rename. Empty and past the operator when nothing is written.
     pub member_range: SourceRange,
 }
 
@@ -219,13 +228,16 @@ pub struct MemberAccess {
 /// the last name is asking about the member of the member.
 ///
 /// `None` for every other position — a plain name, an operator, a declaration — which is the ordinary answer for
-/// most cursor positions.
+/// most cursor positions. A cursor immediately after a `.` or `->` **is** in a member access — see
+/// [`MemberAccess`] — with an empty member.
 pub fn member_access_at(root: &CppSyntaxNode, offset: usize) -> Option<MemberAccess> {
     let node = member_node_at(root, offset)?;
     let access = member_access_of(&node)?;
 
     // A cursor on the *object* of `a.b` is asking about `a`, which is the name query's question rather than this
     // one's — so the offset decides whether this is an answer at all, and the node only decides what the shape is.
+    // For a nameless access the range is empty and sits just past the operator, so this accepts exactly the one
+    // offset that means "here is where the member goes" and not the whole line it is on.
     contains_range(access.member_range, SourceRange::new(offset, 0)).then_some(access)
 }
 
@@ -236,6 +248,7 @@ pub fn member_access_at(root: &CppSyntaxNode, offset: usize) -> Option<MemberAcc
 /// is what makes inference recursive — `a.b.size` needs the shape of `a.b` with nobody's cursor on it.
 ///
 /// `None` for a node that is not a member access: `arr[0]` is the same node kind with brackets instead of a dot.
+/// An access whose member is not written yet is **not** `None` — see [`MemberAccess`].
 pub fn member_access_of(node: &CppSyntaxNode) -> Option<MemberAccess> {
     let elements: Vec<cpp_parser::CppSyntaxElement> = node.children_with_tokens().collect();
 
@@ -265,7 +278,17 @@ pub fn member_access_of(node: &CppSyntaxNode) -> Option<MemberAccess> {
                 && token.text_range().start() >= operator_range.end()
         })
         .collect();
-    let member_token = after_operator.into_iter().next_back()?;
+
+    // Nothing after the operator is a real state and not a failure: `w.` is a member access with the member still
+    // to be written. The empty range sits at the operator's end, which is exactly where the name goes — so a
+    // caller that inserts, replaces or drops text has one range to work with in both states.
+    let Some(member_token) = after_operator.into_iter().next_back() else {
+        return Some(MemberAccess {
+            object,
+            member: String::new(),
+            member_range: SourceRange::new(usize::from(operator_range.end()), 0),
+        });
+    };
 
     Some(MemberAccess {
         object,

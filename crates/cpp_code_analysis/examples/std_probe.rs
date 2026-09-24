@@ -1,0 +1,161 @@
+//! What a standard-library closure looks like to this parser: cost, cleanliness, and where it breaks.
+//!
+//! ```text
+//! g++ -M -std=c++20 t.cpp | tr '\\' '/' | tr ' ' '\n' | sort -u > files.txt
+//! cargo run --release -p cpp_code_analysis --example std_probe -- files.txt
+//! ```
+//!
+//! `docs/std-library.md` records the numbers this prints and what they decide. It exists so that the numbers can
+//! be reproduced after a fix rather than remembered: the point of the standard-library work is to move "failing
+//! files" towards zero, and a claim about progress that cannot be re-measured is not a claim.
+//!
+//! Three things are printed, in increasing order of how much they decide:
+//!
+//! 1. **the cost** — files, lines, bytes, and how long the parse takes;
+//! 2. **the census** — how many files parse cleanly, and which messages account for the rest, most common first.
+//!    A message count is *not* a defect count: the standard headers cascade, so one unread construct costs a
+//!    hundred errors;
+//! 3. **the first error of every failing file**, with its source line — which is the only view that shows the
+//!    *cause*, because the first error is the one nothing above it explains. Plus the share of those lines that
+//!    mention a macro the closure defines, which is what says whether the dominant family is "a macro the parser
+//!    does not know" or something else.
+
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+
+fn main() {
+    let list = std::env::args().nth(1).expect("a file list");
+    let paths: Vec<PathBuf> = std::fs::read_to_string(&list)
+        .expect("the list reads")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .collect();
+
+    let key = cpp_code_analysis::SummaryKey::new(0, 0);
+
+    // Every macro name the closure defines, which is the upper bound on what a table could know, and each
+    // file's own — the difference between the two is the whole question of whether the file-local table is
+    // enough.
+    let mut closure_macros: HashSet<String> = HashSet::new();
+    let mut own_macros: HashMap<PathBuf, HashSet<String>> = HashMap::new();
+
+    let started = std::time::Instant::now();
+    for path in &paths {
+        let Ok(source) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let summary = cpp_code_analysis::summarize(path, &source, key);
+        let names: HashSet<String> = summary
+            .macros
+            .iter()
+            .filter(|fact| fact.kind.is_definition())
+            .map(|fact| fact.name.clone())
+            .collect();
+        closure_macros.extend(names.iter().cloned());
+        own_macros.insert(path.clone(), names);
+    }
+    let indexed = started.elapsed();
+
+    let mut clean = 0usize;
+    let mut failing = 0usize;
+    let mut by_message: HashMap<String, usize> = HashMap::new();
+    let mut explained_by_own = 0usize;
+    let mut explained_by_closure = 0usize;
+    let mut details: Vec<String> = Vec::new();
+    let mut total_bytes = 0usize;
+    let mut total_lines = 0usize;
+
+    let started = std::time::Instant::now();
+    for path in &paths {
+        let Ok(source) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        total_bytes += source.len();
+        total_lines += source.lines().count();
+
+        let tree = cpp_parser::CppParser::parse(&source, cpp_parser::ParserConfig::default());
+        let errors = tree.get_errors();
+
+        if errors.is_empty() {
+            clean += 1;
+            // The invariants hold on this corpus too, and are checked rather than assumed: a header is not a
+            // gentler input than a test fixture.
+            assert_eq!(
+                tree.to_source_text(),
+                source,
+                "losslessness broke on {}",
+                path.display()
+            );
+            continue;
+        }
+
+        failing += 1;
+        for error in errors {
+            *by_message.entry(error.message.clone()).or_default() += 1;
+        }
+
+        let index = cpp_parser::LineIndex::parse(&source);
+        let Some((line, column)) = index.get_line_col(errors[0].range.start(), &source) else {
+            continue;
+        };
+
+        // The offending line and the two before it: a macro that breaks a declaration is usually written on the
+        // line itself or the one above, and a diagnostic often lands a line late.
+        let window: Vec<&str> = source
+            .lines()
+            .skip(line.saturating_sub(2))
+            .take(3)
+            .collect();
+        let mentions = |names: &HashSet<String>| {
+            window.join(" ").split(|c: char| !(c.is_alphanumeric() || c == '_')).any(
+                |word| word.len() > 2 && names.contains(word),
+            )
+        };
+
+        if own_macros.get(path).is_some_and(&mentions) {
+            explained_by_own += 1;
+        }
+        if mentions(&closure_macros) {
+            explained_by_closure += 1;
+        }
+
+        details.push(format!(
+            "{:>4}:{:<3} {:<44} | {}",
+            line + 1,
+            column,
+            errors[0].message,
+            window.last().unwrap_or(&"").trim().chars().take(84).collect::<String>()
+        ));
+    }
+    let parsed = started.elapsed();
+
+    println!(
+        "files {} | clean {} | failing {} | {} KB | {} lines\n\
+         index (parse + scopes + facts) {:?} | parse alone {:?}\n\
+         {failing} failures: first error on a line mentioning a macro this file defines {explained_by_own} \
+         ({:.0}%), any macro the closure defines {explained_by_closure} ({:.0}%)",
+        paths.len(),
+        clean,
+        failing,
+        total_bytes / 1024,
+        total_lines,
+        indexed,
+        parsed,
+        explained_by_own as f64 * 100.0 / failing.max(1) as f64,
+        explained_by_closure as f64 * 100.0 / failing.max(1) as f64,
+    );
+
+    let mut ranked: Vec<(&String, &usize)> = by_message.iter().collect();
+    ranked.sort_by(|one, other| other.1.cmp(one.1));
+    println!("\n--- messages, most common first (a count is not a defect count: these cascade) ---");
+    for (message, count) in ranked.iter().take(15) {
+        println!("{count:6}  {message}");
+    }
+
+    println!("\n--- the first error of every failing file, which is the one nothing above explains ---");
+    for detail in &details {
+        println!("{detail}");
+    }
+}

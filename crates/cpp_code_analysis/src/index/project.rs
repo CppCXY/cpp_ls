@@ -189,6 +189,14 @@ pub fn member_across_files(
         return Known::Unknown(UnknownReason::UnparsableName);
     };
 
+    // `w.` with nothing after the operator is a member access with no member, and a *jump* needs something to jump
+    // to. The question this answers is which declaration the written name refers to, and there is no written name —
+    // so this is the same "nothing to look up" as a cursor on punctuation. That the shape is readable at all is
+    // what the completion query needs, and it is why the tolerance lives in the shape reader rather than here.
+    if access.member.is_empty() {
+        return Known::Unknown(UnknownReason::UnparsableName);
+    }
+
     // The type of the object, which is what decides which class the member is looked for in.
     let Known::Yes((written, _)) = type_of_expression(index, scopes, root, path, &access.object)
     else {
@@ -470,6 +478,128 @@ fn mark_ambiguity(members: &mut [ProjectMember]) {
                 .get(&member.fact.name)
                 .is_some_and(|classes| classes.len() > 1);
     }
+}
+
+/// What a completion at a member access should offer: the type, its members, and where to put the chosen one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberCompletions {
+    /// The type of the object, as the **lookup key** the members were found under — `Widget`, `ns::Widget`,
+    /// `Base` for `Base<int>`.
+    ///
+    /// The key rather than the spelling the file wrote, because a consumer showing "members of `…`" has to name
+    /// something the user can find, and `Base<int>` is a type no member is declared in. It is also the fastest
+    /// thing to look at when the list is wrong.
+    pub class: String,
+    pub members: MemberList,
+    /// The range the member's name occupies, which is what a client **replaces** with the chosen one.
+    ///
+    /// Empty and just past the operator for `w.`, which is the state this query exists for. One field for both
+    /// states on purpose: an insert-at-a-point and a replace-a-prefix are the same edit, and a consumer that had
+    /// to branch on which one it is would get it wrong exactly once — on the keystroke right after the dot.
+    pub member_range: cpp_parser::SourceRange,
+    /// What of the name is already written **before the cursor**: `si` for `w.si|`, and empty for `w.|`.
+    ///
+    /// Not the whole written member, which is why it is computed here rather than taken from the shape: a cursor
+    /// in the *middle* of a name — `w.si|ze` — filters by `si` while [`MemberCompletions::member_range`] covers
+    /// all of `size`, because the range is what gets replaced and the prefix is what gets matched. A consumer that
+    /// used the whole spelling for both would offer nothing while the user is plainly typing.
+    pub prefix: String,
+}
+
+/// The members a completion at `offset` should offer: `w.` and `w.si`, answered with `Widget`'s members.
+///
+/// The third query that needs a **type**, and the one the other two were building towards: [`members_of`] answers
+/// "what does this type have" given a type, and this answers "what should be offered here" given a cursor. The
+/// steps are all ones that already existed, which is the whole reason it is short:
+///
+/// ```text
+/// 1. read the shape   — the object expression and what of the member is written (sema::resolve::member_access_at)
+/// 2. infer the type   — type_of_expression, the recursive inference the member *lookup* already uses
+/// 3. list the members — members_of, including the ones the bases declare
+/// ```
+///
+/// # The state it exists for
+///
+/// `w.` — the operator typed and nothing after it. That is the keystroke that *asks* the question, and the parser
+/// reads it as a member access with an empty member rather than as some other construct, so nothing here needs a
+/// second shape reader or a re-parse of the line. The same answer covers `w.si`, where the work is only that
+/// [`MemberCompletions::member_range`] is the written prefix instead of a point.
+///
+/// # The answers, and the one that matters most
+///
+/// * `Yes(completions)` — the members of the object's type.
+/// * `Unknown(UnknownType)` — the object's type could not be worked out. **The common case in real code**, and
+///   the honest one: `f().size` needs a return type computed, `(*p).size` needs a dereference followed, and
+///   `arr[i].size` needs a subscript — see [`members_of`]'s note and `docs/index-design.md`. A consumer shows
+///   nothing rather than offering the members of some other type.
+/// * `Unknown(NotDeclaredHere)` — the object's type is a class nothing visible declares.
+/// * `Unknown(ConditionalCompilation)` — that class is only reachable through a guarded `#include`.
+/// * `Unknown(UnparsableName)` — the cursor is not on a member access at all.
+pub fn member_completions_at(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    offset: usize,
+) -> Known<MemberCompletions> {
+    let Some(access) = crate::sema::resolve::member_access_at(root, offset) else {
+        return Known::Unknown(UnknownReason::UnparsableName);
+    };
+
+    let written = match type_of_expression(index, scopes, root, path, &access.object) {
+        Known::Yes((written, _)) => written,
+        Known::Unknown(reason) => return Known::Unknown(reason),
+        // The only `No` the type layer produces is "nothing says what this is", which is the same answer as an
+        // expression it cannot type: there is nothing to list members of.
+        Known::No => {
+            return Known::Unknown(UnknownReason::UnknownType(Box::from(
+                access.object.text().to_string().trim(),
+            )));
+        }
+    };
+
+    let class = base_type_name(&written);
+    if class.is_empty() {
+        return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
+    }
+
+    match members_of(index, scopes, root, path, class) {
+        Known::Yes(members) => Known::Yes(MemberCompletions {
+            class: class.to_string(),
+            members,
+            member_range: access.member_range,
+            prefix: written_before_the_cursor(&access, offset),
+        }),
+        Known::Unknown(reason) => Known::Unknown(reason),
+        // `members_of` reports a name nothing declares as `Unknown(NotDeclaredHere)` rather than `No`, so this arm
+        // is for totality and says the same thing it would.
+        Known::No => Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(class))),
+    }
+}
+
+/// The part of the member's spelling that lies **before** the cursor.
+///
+/// Separate from the range because the two answer different halves of the same edit: the range is what the client
+/// **replaces** with the chosen name — all of `size`, so nothing of the old spelling is left behind — while this
+/// is what a server **matches** against the candidates, and a cursor inside a name has only typed the part before
+/// it. Taking the whole spelling for both is what makes `w.si|ze` offer nothing.
+///
+/// The slice is by byte offset into the member's own text, so it is exactly the written prefix; a cursor that is
+/// not on a character boundary (possible in an identifier with non-ASCII letters) falls back to the whole
+/// spelling, which is the safe direction — a filter that matches too much still shows something.
+fn written_before_the_cursor(access: &crate::sema::resolve::MemberAccess, offset: usize) -> String {
+    let start = access.member_range.start_offset;
+    let end = access.member_range.end_offset().min(offset);
+
+    if end <= start {
+        return String::new();
+    }
+
+    access
+        .member
+        .get(..end - start)
+        .unwrap_or(&access.member)
+        .to_string()
 }
 
 /// The type of an expression, as far as this layer can tell, and the file that declared it.
@@ -1716,16 +1846,32 @@ mod tests {
         from: &str,
         source: &str,
     ) -> (ProjectIndex, cpp_parser::CppSyntaxTree) {
-        let mut index = index(files);
+        let (index, tree) = analysed_while_typing(files, from, source);
 
-        let tree = cpp_parser::CppParser::parse(source, cpp_parser::ParserConfig::default());
         assert!(
             tree.get_errors().is_empty(),
             "the fixture must parse cleanly: {source:?}"
         );
 
-        // The file being queried is indexed too, and its summary must describe the same text whose tree is used
-        // below — otherwise the two would disagree about offsets, and the tests would pass for the wrong reason.
+        (index, tree)
+    }
+
+    /// The same, for a file that is **being typed** and therefore need not parse cleanly.
+    ///
+    /// Separate from [`analysed`] rather than a flag on it, because the two assertions mean different things: a
+    /// shape assertion is worthless if the tree it reads came from a file with errors, while an incomplete file is
+    /// the *state the completion query exists for* — `w.` is not a program, it is a question. What is deliberately
+    /// **not** relaxed is that the querying file is indexed: the index and the tree have to describe the same text
+    /// or the offsets in the answer mean something else.
+    fn analysed_while_typing(
+        files: &[(&str, &str)],
+        from: &str,
+        source: &str,
+    ) -> (ProjectIndex, cpp_parser::CppSyntaxTree) {
+        let mut index = index(files);
+
+        let tree = cpp_parser::CppParser::parse(source, cpp_parser::ParserConfig::default());
+
         let mut summary = summarize(Path::new(from), source, SummaryKey::new(0, 0));
         for include in &mut summary.includes {
             include.resolved = Some(std::path::PathBuf::from(format!("/p/{}", include.spelling)));
@@ -2739,6 +2885,316 @@ mod tests {
             a_members,
             ["a_member"],
             "a fact stores the spelling `B`, never the members `B` happens to have"
+        );
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // Completion: the cursor-to-members query
+    //
+    // Every fixture here is an **incomplete program**, which is the only honest way to test this: `w.` does not
+    // parse, and a test that made it parse would be testing a question nobody asks. The helper below therefore
+    // does not assert a clean parse — see `analysed_while_typing`.
+    // -------------------------------------------------------------------------------------------
+
+    /// The offset just **past** the last `needle`, which is where the cursor is after that much has been typed.
+    fn after(source: &str, needle: &str) -> usize {
+        source
+            .rfind(needle)
+            .unwrap_or_else(|| panic!("{needle:?} is not in {source:?}"))
+            + needle.len()
+    }
+
+    /// The members offered at the cursor just past `needle`.
+    fn completions_at(
+        files: &[(&str, &str)],
+        from: &str,
+        source: &str,
+        needle: &str,
+    ) -> Known<super::MemberCompletions> {
+        let (index, tree) = analysed_while_typing(files, from, source);
+        let root = tree.get_red_root();
+        let scopes = crate::build_scopes(&root);
+
+        super::member_completions_at(
+            &index,
+            &scopes,
+            &root,
+            Path::new(from),
+            after(source, needle),
+        )
+    }
+
+    #[test]
+    fn a_member_access_with_nothing_typed_offers_the_types_members() {
+        // The keystroke that asks the question. `w.` is not a program and does not parse, which is exactly why
+        // this is a query over a damaged tree rather than over a compiled one.
+        let source = "struct Widget {\n  int size;\n  void grow();\n};\n\
+                      void f() {\n  Widget w;\n  w.\n}\n";
+        let found = completions_at(&[], "/p/a.cpp", source, "w.");
+
+        let Known::Yes(completions) = found else {
+            panic!("`w` is a `Widget` declared two lines up: {found:?}");
+        };
+
+        assert_eq!(completions.class, "Widget");
+        assert_eq!(
+            completions
+                .members
+                .members
+                .iter()
+                .map(|member| member.fact.name.as_str())
+                .collect::<Vec<_>>(),
+            ["grow", "size"]
+        );
+        assert_eq!(completions.prefix, "", "nothing of the name is written yet");
+        assert_eq!(
+            completions.member_range.start_offset,
+            after(source, "w."),
+            "the empty range sits just past the operator, which is where the name goes"
+        );
+        assert_eq!(completions.member_range.length, 0);
+    }
+
+    #[test]
+    fn a_half_typed_member_offers_the_same_members_and_names_the_prefix() {
+        // The other half of the same question: the list is the *whole* list — filtering is the client's job and
+        // it has the document — while the range is what the client replaces with the chosen member.
+        let source = "struct Widget {\n  int size;\n  void grow();\n};\n\
+                      void f() {\n  Widget w;\n  w.si\n}\n";
+        let found = completions_at(&[], "/p/a.cpp", source, "w.si");
+
+        let Known::Yes(completions) = found else {
+            panic!("the cursor is on the member being typed: {found:?}");
+        };
+
+        assert_eq!(completions.class, "Widget");
+        assert_eq!(completions.prefix, "si");
+        assert_eq!(
+            &source[completions.member_range.start_offset..completions.member_range.end_offset()],
+            "si",
+            "the range covers what is written, so replacing it does not leave a doubled name"
+        );
+    }
+
+    #[test]
+    fn a_pointer_member_access_offers_the_pointees_members() {
+        let source = "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget* p;\n  p->\n}\n";
+        let found = completions_at(&[], "/p/a.cpp", source, "p->");
+
+        let Known::Yes(completions) = found else {
+            panic!("`Widget* p` is a pointer to a `Widget`: {found:?}");
+        };
+        assert_eq!(completions.class, "Widget");
+        assert_eq!(completions.members.members.len(), 1);
+    }
+
+    #[test]
+    fn a_completion_on_this_offers_the_enclosing_classs_members() {
+        // `this` needs no inference — the scope chain already knows which class it is — which makes it the one
+        // completion inside a class body that works before the object has a name.
+        let source = "struct Widget {\n  int size;\n  void grow() {\n    this->\n  }\n};\n";
+        let found = completions_at(&[], "/p/a.cpp", source, "this->");
+
+        let Known::Yes(completions) = found else {
+            panic!("`this` is the enclosing `Widget`: {found:?}");
+        };
+        assert_eq!(completions.class, "Widget");
+        assert_eq!(
+            completions
+                .members
+                .members
+                .iter()
+                .map(|member| member.fact.name.as_str())
+                .collect::<Vec<_>>(),
+            ["grow", "size"]
+        );
+    }
+
+    #[test]
+    fn the_members_offered_include_the_ones_the_bases_declare() {
+        // Completion is where the query-time base walk pays off: the whole inherited list is there, each entry
+        // tagged with the class that declares it, without anything having been stored on `Derived`.
+        let source = "struct Base {\n  int inherited_size;\n};\n\
+                      struct Derived : public Base {\n  int own_size;\n};\n\
+                      void f() {\n  Derived d;\n  d.\n}\n";
+        let found = completions_at(&[], "/p/a.cpp", source, "d.");
+
+        let Known::Yes(completions) = found else {
+            panic!("`d` is a `Derived`: {found:?}");
+        };
+
+        let listed: Vec<(&str, &str)> = completions
+            .members
+            .members
+            .iter()
+            .map(|member| (member.fact.name.as_str(), member.declared_in.as_str()))
+            .collect();
+        assert_eq!(
+            listed,
+            [("own_size", "Derived"), ("inherited_size", "Base")],
+            "the class's own member first, then the inherited one, tagged with where it is declared"
+        );
+    }
+
+    #[test]
+    fn the_members_offered_cross_a_header() {
+        let source = "#include \"widget.h\"\nvoid f() {\n  Widget w;\n  w.\n}\n";
+        let (index, tree) = analysed_while_typing(
+            &[("/p/widget.h", "struct Widget {\n  int size;\n};\n")],
+            "/p/main.cpp",
+            source,
+        );
+        let root = tree.get_red_root();
+        let scopes = crate::build_scopes(&root);
+
+        let found = super::member_completions_at(
+            &index,
+            &scopes,
+            &root,
+            Path::new("/p/main.cpp"),
+            after(source, "w."),
+        );
+
+        let Known::Yes(completions) = found else {
+            panic!("the class is in the included header: {found:?}");
+        };
+        assert_eq!(completions.class, "Widget");
+        assert_eq!(completions.members.members[0].file, Path::new("/p/widget.h"));
+    }
+
+    #[test]
+    fn a_completion_on_an_expression_with_no_type_offers_nothing_and_says_why() {
+        // `make().` is the boundary of the type layer, and this is where a user meets it. Offering the members of
+        // some other class would be worse than offering none: the list looks like an answer.
+        let source = "struct Widget {\n  int size;\n};\nWidget make();\n\
+                      void f() {\n  make().\n}\n";
+        let found = completions_at(&[], "/p/a.cpp", source, "make().");
+
+        assert!(
+            matches!(found, Known::Unknown(UnknownReason::UnknownType(_))),
+            "a call's return type is not computed yet: {found:?}"
+        );
+    }
+
+    #[test]
+    fn a_completion_on_an_object_of_an_unknown_type_offers_nothing() {
+        // The object resolves fine — `w`'s declaration *says* its type is `Nowhere` — and what fails is the type:
+        // nothing here declares it. So the reason names the type rather than the object, which is what tells a
+        // consumer whether to go looking for a missing declaration of `w` or of `Nowhere`.
+        let source = "void f() {\n  Nowhere w;\n  w.\n}\n";
+        let found = completions_at(&[], "/p/a.cpp", source, "w.");
+
+        assert!(
+            matches!(found, Known::Unknown(UnknownReason::NotDeclaredHere(_))),
+            "`Nowhere` is a type nothing here declares: {found:?}"
+        );
+        let Known::Unknown(UnknownReason::NotDeclaredHere(name)) = found else {
+            unreachable!("just checked")
+        };
+        assert_eq!(&*name, "Nowhere", "and the reason names the type, not the object");
+    }
+
+    #[test]
+    fn a_cursor_that_is_not_on_a_member_access_offers_nothing() {
+        let source = "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget w;\n}\n";
+        let found = completions_at(&[], "/p/a.cpp", source, "Widget w;");
+
+        assert!(
+            matches!(found, Known::Unknown(UnknownReason::UnparsableName)),
+            "a declaration is not a member access: {found:?}"
+        );
+    }
+
+    #[test]
+    fn a_cursor_on_the_object_asks_about_the_object() {
+        // The offset decides, not the node: `w.size` with the cursor *on* `w` is a question about `w`, and
+        // answering it with `Widget`'s members would insert a member name in the middle of the object's.
+        let source = "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget w;\n  w.size;\n}\n";
+        let (index, tree) = analysed_while_typing(&[], "/p/a.cpp", source);
+        let root = tree.get_red_root();
+        let scopes = crate::build_scopes(&root);
+
+        let found = super::member_completions_at(
+            &index,
+            &scopes,
+            &root,
+            Path::new("/p/a.cpp"),
+            at(source, "w.size"),
+        );
+
+        assert!(
+            matches!(found, Known::Unknown(UnknownReason::UnparsableName)),
+            "the cursor is on the object, before the operator: {found:?}"
+        );
+    }
+
+    #[test]
+    fn a_cursor_inside_a_name_filters_by_the_part_before_it() {
+        // The range and the prefix answer two halves of one edit, and this is where they differ: the client
+        // replaces all of `size`, while the filter matches `si` — the part the user has actually typed. Using the
+        // whole spelling for both is what makes completion offer nothing in the middle of a word.
+        let source = "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget w;\n  w.size;\n}\n";
+        let (index, tree) = analysed_while_typing(&[], "/p/a.cpp", source);
+        let root = tree.get_red_root();
+        let scopes = crate::build_scopes(&root);
+
+        // Two characters into `size`.
+        let cursor = at(source, "w.size") + 2 + 2;
+
+        let found =
+            super::member_completions_at(&index, &scopes, &root, Path::new("/p/a.cpp"), cursor);
+        let Known::Yes(completions) = found else {
+            panic!("the cursor is inside the member's name: {found:?}");
+        };
+
+        assert_eq!(completions.prefix, "si", "what has been typed so far");
+        assert_eq!(
+            &source[completions.member_range.start_offset..completions.member_range.end_offset()],
+            "size",
+            "and the whole name is what gets replaced"
+        );
+    }
+
+    #[test]
+    fn a_completed_member_access_still_answers_with_its_own_prefix() {
+        // The state between two keystrokes: `w.size` is a finished expression, and a cursor at its end is still
+        // asking for the members — with `size` as the prefix to replace. Nothing about the completion path is
+        // special to the half-typed case.
+        let source = "struct Widget {\n  int size;\n  void grow();\n};\n\
+                      void f() {\n  Widget w;\n  w.size\n}\n";
+        let found = completions_at(&[], "/p/a.cpp", source, "w.size");
+
+        let Known::Yes(completions) = found else {
+            panic!("the cursor is at the end of `size`: {found:?}");
+        };
+        assert_eq!(completions.prefix, "size");
+        assert_eq!(
+            &source[completions.member_range.start_offset..completions.member_range.end_offset()],
+            "size"
+        );
+    }
+
+    #[test]
+    fn a_jump_on_a_member_that_is_not_written_yet_has_nothing_to_jump_to() {
+        // The completion query tolerates a nameless access; the *definition* query must not, and the difference is
+        // the question rather than the shape. Reading `w.` as "the member named nothing" would answer
+        // `NotDeclaredHere("Widget::")`, which says the class is missing a member that has not been typed.
+        let source = "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget w;\n  w.\n}\n";
+        let (index, tree) = analysed_while_typing(&[], "/p/a.cpp", source);
+        let root = tree.get_red_root();
+        let scopes = crate::build_scopes(&root);
+
+        let found = super::member_across_files(
+            &index,
+            &scopes,
+            &root,
+            Path::new("/p/a.cpp"),
+            after(source, "w."),
+        );
+
+        assert!(
+            matches!(found, Known::Unknown(UnknownReason::UnparsableName)),
+            "there is no written name to resolve: {found:?}"
         );
     }
 
