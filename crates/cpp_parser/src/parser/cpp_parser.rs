@@ -40,6 +40,13 @@ pub struct Checkpoint {
     /// Parser state like the two above, and restored for the same reason: a speculative region parses its own
     /// declaration, and whether *that* one's type was qualified must not leak back into the enclosing one.
     declaration_type_is_qualified: bool,
+    /// How many diagnostics had been reported when the checkpoint was taken.
+    ///
+    /// The fourth piece of state that is not in the event stream, and the one that is easiest to miss because it
+    /// is not *parse* state at all: a reading that is tried and rewound reported its problems on the way, and a
+    /// problem with a reading nobody kept is a problem the file does not have. [`CppParser::rollback`] truncates
+    /// the list back to this, so a speculative attempt leaves the tree **and** the diagnostics as it found them.
+    errors_len: usize,
 }
 
 /// A position in the parse, for a question asked later about the tokens around it.
@@ -385,23 +392,24 @@ impl<'a> CppParser<'a> {
         Self::parse_inner(text, config)
     }
 
-    /// Like [`CppParser::parse`], but also returns the raw event stream.
+    /// A parser over `text`, reporting problems into `errors`.
     ///
-    /// The event stream is the parser's real output and the tree is a fold of it, so when a tree is
-    /// wrongly nested the stream is where the cause is visible. Kept public because diagnosing a
-    /// shape bug otherwise means adding a temporary `println!` inside the parser.
-    pub fn parse_with_events(
+    /// **The one place the struct is built.** Both entry points below used to spell the twenty fields out, which
+    /// is twenty chances for the two to drift — and a field that one of them forgot would be a parser that behaves
+    /// differently depending on which door it was entered through. It is also what makes the rollback contract
+    /// testable from inside the crate: a test can hold both halves, which the borrow checker forbids to a caller
+    /// who only has [`CppParser::parse`].
+    fn with_text(
         text: &'a str,
         config: ParserConfig<'a>,
-    ) -> (CppSyntaxTree, Vec<MarkEvent>) {
-        let mut errors: Vec<CppParseError> = Vec::new();
-
+        errors: &'a mut Vec<CppParseError>,
+    ) -> CppParser<'a> {
         let tokens = {
-            let mut lexer = CppLexer::new(text, config.lexer_config(), &mut errors);
+            let mut lexer = CppLexer::new(text, config.lexer_config(), errors);
             lexer.tokenize()
         };
 
-        let mut parser = CppParser {
+        CppParser {
             text,
             events: Vec::new(),
             tokens,
@@ -422,8 +430,21 @@ impl<'a> CppParser<'a> {
             open_bodies: Vec::new(),
             declaration_ended_inside_specifiers: false,
             parse_config: config,
-            errors: &mut errors,
-        };
+            errors,
+        }
+    }
+
+    /// Like [`CppParser::parse`], but also returns the raw event stream.
+    ///
+    /// The event stream is the parser's real output and the tree is a fold of it, so when a tree is
+    /// wrongly nested the stream is where the cause is visible. Kept public because diagnosing a
+    /// shape bug otherwise means adding a temporary `println!` inside the parser.
+    pub fn parse_with_events(
+        text: &'a str,
+        config: ParserConfig<'a>,
+    ) -> (CppSyntaxTree, Vec<MarkEvent>) {
+        let mut errors: Vec<CppParseError> = Vec::new();
+        let mut parser = CppParser::with_text(text, config, &mut errors);
 
         parse_cpp_unit(&mut parser);
 
@@ -440,35 +461,7 @@ impl<'a> CppParser<'a> {
 
     fn parse_inner(text: &'a str, config: ParserConfig<'a>) -> (CppSyntaxTree, EventStreamAudit) {
         let mut errors: Vec<CppParseError> = Vec::new();
-
-        let tokens = {
-            let mut lexer = CppLexer::new(text, config.lexer_config(), &mut errors);
-            lexer.tokenize()
-        };
-
-        let mut parser = CppParser {
-            text,
-            events: Vec::new(),
-            tokens,
-            token_index: 0,
-            current_token: CppTokenKind::None,
-            open_marks: Vec::new(),
-            closed_marks: std::collections::HashMap::new(),
-            template_argument_depth: 0,
-            constraint_depth: 0,
-            a_template_id_may_be_the_name: false,
-            last_declarator_is_function: false,
-            type_names: TypeNames::new(),
-            template_parameters: Vec::new(),
-            macro_names: crate::parser::MacroNames::new(),
-            declaration_type_name: None,
-            previous_declaration_type_name: None,
-            declaration_type_is_qualified: false,
-            open_bodies: Vec::new(),
-            declaration_ended_inside_specifiers: false,
-            parse_config: config,
-            errors: &mut errors,
-        };
+        let mut parser = CppParser::with_text(text, config, &mut errors);
 
         parse_cpp_unit(&mut parser);
 
@@ -582,13 +575,22 @@ impl<'a> CppParser<'a> {
             declaration_type_name: self.declaration_type_name.clone(),
             previous_declaration_type_name: self.previous_declaration_type_name.clone(),
             declaration_type_is_qualified: self.declaration_type_is_qualified,
+            errors_len: self.errors.len(),
         }
     }
 
-    /// Rewind to `checkpoint`, discarding every event and token consumed since.
+    /// Rewind to `checkpoint`, discarding every event, token **and diagnostic** produced since.
     ///
     /// Any markers opened after the checkpoint are dropped along with their events, so callers
     /// must not hold on to a `Marker` created inside a speculative region.
+    ///
+    /// # Why the diagnostics go too
+    ///
+    /// A rollback is always "that reading did not fit, try another" — `a.b < c > d` against `a.b<c> d`, a cast
+    /// against a parenthesised expression, an init-declarator against an expression statement. Whatever the
+    /// discarded reading complained about is not a fact about the file: it is a fact about a guess. Keeping it
+    /// reports code the user did not write, which is worse than saying nothing — the file that comes out is valid
+    /// C++ and the editor would underline it. The reading that *is* kept reports its own problems normally.
     pub fn rollback(&mut self, checkpoint: Checkpoint) {
         self.events.truncate(checkpoint.events_len);
         self.open_marks.truncate(checkpoint.open_marks);
@@ -599,7 +601,7 @@ impl<'a> CppParser<'a> {
         self.declaration_type_name = checkpoint.declaration_type_name;
         self.previous_declaration_type_name = checkpoint.previous_declaration_type_name;
         self.declaration_type_is_qualified = checkpoint.declaration_type_is_qualified;
-        self.token_index = checkpoint.token_index;
+        self.errors.truncate(checkpoint.errors_len);        self.token_index = checkpoint.token_index;
         self.current_token = self
             .tokens
             .get(self.token_index)
@@ -1684,4 +1686,104 @@ fn is_line_layout_kind(kind: CppTokenKind) -> bool {
         kind,
         CppTokenKind::Whitespace | CppTokenKind::Newline | CppTokenKind::LineContinuation
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A parser over `text`, with the diagnostics it reports, for the tests below that need to watch a rollback.
+    ///
+    /// Both halves are held here because the borrow checker is what makes them impossible to hold from outside:
+    /// `errors` is borrowed by the parser for as long as it lives.
+    fn parser_and_errors<'a>(
+        text: &'a str,
+        errors: &'a mut Vec<CppParseError>,
+    ) -> CppParser<'a> {
+        CppParser::with_text(text, ParserConfig::default(), errors)
+    }
+
+    #[test]
+    fn a_rolled_back_region_takes_its_diagnostics_with_it() {
+        // The contract at the centre of every C++ ambiguity this parser resolves by trying: a reading that is
+        // thrown away must leave **nothing** behind, and "nothing" includes the problems it reported on the way.
+        // A diagnostic about a guess that lost is not a fact about the file — it is a complaint about code the
+        // user did not write, and an editor would underline it.
+        //
+        // Tested by driving the parser rather than by finding a file that triggers it, and that is a measured
+        // choice: instrumented over the 583 files of both corpora plus 53 valid snippets, **no input reaches this
+        // path at all** (0 rollbacks that had diagnostics to drop). So there is no file-shaped test to write —
+        // what can be pinned is the rule, and the rule is what a future speculative rule will lean on.
+        let mut errors = Vec::new();
+        let mut parser = parser_and_errors("int x;", &mut errors);
+
+        let lost: Option<()> = parser.try_parse(|p| {
+            p.push_error(CppParseError::syntax_error_from(
+                "a reading that did not fit",
+                p.current_token_range(),
+            ));
+            None
+        });
+
+        assert!(lost.is_none(), "the closure returned `None`");
+        assert!(
+            parser.errors.is_empty(),
+            "the discarded reading's diagnostic is still there: {:?}",
+            parser.errors
+        );
+    }
+
+    #[test]
+    fn a_reading_that_is_kept_keeps_its_diagnostics() {
+        // The other half, and the reason the rule above is about *rolling back* rather than about reporting: the
+        // reading that survives reports its problems normally.
+        let mut errors = Vec::new();
+        let mut parser = parser_and_errors("int x;", &mut errors);
+
+        let kept: Option<()> = parser.try_parse(|p| {
+            p.push_error(CppParseError::syntax_error_from(
+                "a reading that fit, with a problem in it",
+                p.current_token_range(),
+            ));
+            Some(())
+        });
+
+        assert!(kept.is_some(), "the closure returned `Some`");
+        assert_eq!(
+            parser.errors.len(),
+            1,
+            "a kept reading's diagnostic must survive: {:?}",
+            parser.errors
+        );
+    }
+
+    #[test]
+    fn a_rollback_restores_every_piece_of_state_that_is_not_in_the_event_stream() {
+        // `Checkpoint` exists because four things the parser carries are invisible to `events.truncate`: the
+        // declaration's type name and whether it was qualified (both parked by a nested speculative declaration),
+        // and now the diagnostics. Each one was found the same way — by a reading that came out wrong in a way no
+        // tree shape explained.
+        let mut errors = Vec::new();
+        let mut parser = parser_and_errors("Widget x;", &mut errors);
+
+        let checkpoint = parser.checkpoint();
+        parser.begin_declaration_type();
+        parser.note_declaration_type_name("Widget".to_string());
+        parser.note_qualified_declaration_type();
+        parser.push_error(CppParseError::syntax_error_from(
+            "reported inside the region",
+            parser.current_token_range(),
+        ));
+        parser.bump();
+
+        parser.rollback(checkpoint);
+
+        assert!(parser.declaration_type_name().is_none(), "the type name came back");
+        assert!(
+            !parser.has_qualified_declaration_type_name(),
+            "and so did the qualified flag"
+        );
+        assert!(parser.errors.is_empty(), "the diagnostic came back");
+        assert_eq!(parser.current_token_index(), 0, "and so did the cursor");
+    }
 }

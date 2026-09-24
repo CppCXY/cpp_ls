@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use crate::preprocess::directive::{Directive, DirectiveKind, SpannedDirective};
 use crate::preprocess::FilePreprocessing;
 use crate::sema::symbol::{Binding, BindingKind, ScopeId, ScopeTree};
-use crate::summary::{DeclFact, DeclKind, FactGuard, SummaryGuards};
+use crate::summary::{DeclFact, DeclKind, FactGuard, MacroFact, MacroKind, SummaryGuards};
 use cpp_parser::CppSyntaxKind;
 
 use cpp_parser::{CppSyntaxNode, SourceRange};
@@ -815,12 +815,13 @@ pub fn assign_guards(
     preprocessing: &FilePreprocessing,
     guards: &mut SummaryGuards,
 ) {
-    // Built into a local list rather than written straight into `guards`, and the reason is the read below: the
-    // walk has to ask where each open region *starts*, which is a shared borrow of `guards` while a region is
-    // still being appended. The list is small — one entry per conditional directive — so the extra allocation is
-    // nothing next to having two mutable borrows of the same field.
-    let mut regions: Vec<SourceRange> = Vec::new();
-    let conditionals = conditional_regions(preprocessing, &mut regions);
+    // Built locally rather than written straight into `guards`, and the reason is the read below: the walk has to
+    // ask where each open region *starts*, which is a shared borrow while a region is still being handed out. The
+    // list is small — one entry per conditional directive — so the extra allocation is nothing next to having two
+    // mutable borrows of the same field.
+    let mut conditionals = conditionals(preprocessing);
+    let regions = std::mem::take(&mut conditionals.regions);
+    let conditionals = conditionals.directives;
 
     let mut open: Vec<usize> = Vec::new();
     let mut cursor = 0usize;
@@ -861,17 +862,107 @@ pub fn assign_guards(
     guards.regions = regions;
 }
 
-/// Every directive that opens or closes a conditional, paired with the region it affects.
+/// Everything one walk over a file's conditionals knows: the regions, their shapes, and the sweep's directives.
+struct Conditionals {
+    /// The directives the guard sweep needs, in source order.
+    directives: Vec<ConditionalDirective>,
+    /// One entry per region: the span of its conditions, which is its identity in [`SummaryGuards`].
+    regions: Vec<SourceRange>,
+    /// One entry per region: what its branches are, and where it sits in the nesting.
+    shapes: Vec<RegionShape>,
+    /// `#endif`s that closed nothing, and regions still open at the end of the file.
+    ///
+    /// Both are how a file whose directives do not balance is noticed — see [`mark_settling_macro_facts`], which
+    /// refuses to apply its rule when either is non-zero.
+    stray_closers: usize,
+    unclosed: usize,
+}
+
+/// One conditional directive of the sweep, paired with the region it affects.
 ///
-/// `observed_by` is the directive's **end**: a condition is not in force on the line it is written on, so
-/// `#if A` must not be treated as open for a fact that starts before the directive finishes. That is the same
-/// rule [`FilePreprocessing::guard_at`] applies, and it is the one that keeps a declaration on the `#if` line
-/// itself outside the region it opens.
-fn conditional_regions(
-    preprocessing: &FilePreprocessing,
-    regions_out: &mut Vec<SourceRange>,
-) -> Vec<ConditionalDirective> {
-    let mut regions: Vec<ConditionalDirective> = Vec::new();
+/// `observed_by` is the directive's **end**: a condition is not in force on the line it is written on, so `#if A`
+/// must not be treated as open for a fact that starts before the directive finishes. That is the same rule
+/// [`FilePreprocessing::guard_at`] applies, and it is the one that keeps a declaration on the `#if` line itself
+/// outside the region it opens.
+///
+/// See [`conditionals`], which produces these alongside the region shapes both consumers need.
+#[derive(Debug, Clone, Copy)]
+struct ConditionalDirective {
+    /// Which entry of `SummaryGuards::regions` this directive opens or closes.
+    index: usize,
+    /// Is this the `#endif` that ends the region, as opposed to the `#if` that began it?
+    close: bool,
+    /// The offset at which the directive is over, and therefore at which it takes effect.
+    observed_by: usize,
+}
+
+/// The branches of one conditional, and where the conditional itself sits.
+///
+/// Built for one purpose — the rule in [`mark_settling_macro_facts`], which needs to know what *each* branch does
+/// to a name — and it is the reason a region's span is not enough: the span is the identity, the branches are the
+/// meaning.
+struct RegionShape {
+    branches: Vec<Branch>,
+    /// Is there an `#else`? Without one, "no branch was taken" is a real possibility and the region settles
+    /// nothing however much its branches agree.
+    exhaustive: bool,
+    /// The conditional this one is written inside, by region index. Regions are numbered in opening order, so a
+    /// parent always has a smaller index than its children — which is what lets the rule below be computed
+    /// outermost-first in one pass.
+    parent: Option<usize>,
+}
+
+/// One `#if` / `#elif` / `#else` of a region, with the body it guards.
+struct Branch {
+    condition: BranchCondition,
+    /// The body: from after the condition to the next branch's directive, or to the `#endif`.
+    body: SourceRange,
+}
+
+/// One branch's last word on a name: which fact it is, and which way it settled the name.
+///
+/// A named pair rather than the tuple inline, because the two `usize`s and a kind in a nested map is a type a
+/// reader has to decode every time they meet it.
+type BranchFact = (usize, MacroKind);
+
+/// What a branch's condition says about **one name**, when it says anything about a name at all.
+///
+/// The rule this exists for is about `#ifndef NAME / #define NAME`, so the only conditions that matter are the two
+/// that name a macro's presence. Everything else is [`BranchCondition::Other`] and the rule makes no claim about
+/// it — which is what keeps the rule from needing the condition evaluator, a macro environment, or a guess.
+enum BranchCondition {
+    /// `#ifndef NAME`, or `#if !defined(NAME)`.
+    NotDefined(Box<str>),
+    /// `#ifdef NAME`, or `#if defined(NAME)`.
+    Defined(Box<str>),
+    /// `#else`.
+    Otherwise,
+    /// Anything else — including a condition that did not read.
+    Other,
+}
+
+impl RegionShape {
+    /// Which branch's body holds `offset`, if any.
+    fn branch_at(&self, offset: usize) -> Option<usize> {
+        self.branches.iter().position(|branch| {
+            branch.body.start_offset <= offset && offset < branch.body.end_offset()
+        })
+    }
+}
+
+/// Walk a file's conditionals once, producing the regions, their shapes and the sweep's directives.
+///
+/// One walk for both consumers — [`assign_guards`], which hands the regions out as fact guards, and
+/// [`mark_settling_macro_facts`], which reads the shapes — because the two agree only if they read the same
+/// structure, and two walks would be two chances to disagree about where a region ends.
+fn conditionals(preprocessing: &FilePreprocessing) -> Conditionals {
+    let mut found = Conditionals {
+        directives: Vec::new(),
+        regions: Vec::new(),
+        shapes: Vec::new(),
+        stray_closers: 0,
+        unclosed: 0,
+    };
     // Where each currently-open region's index is, so an `#else` or `#endif` can find the region it continues or
     // closes without re-walking the directive list.
     let mut open: Vec<usize> = Vec::new();
@@ -880,14 +971,22 @@ fn conditional_regions(
         let kind = spanned.directive.kind();
 
         if kind.opens_a_condition() {
-            let index = regions_out.len();
+            let index = found.regions.len();
             // The region's range is the condition itself, completed when the matching `#endif` is reached — see
             // `extend_region_to`. A consumer asking "was this compiled" re-reads this span, which is why the span
             // has to be the condition and not the whole region: the body can be megabytes and the question is
             // about the condition.
-            regions_out.push(condition_span(spanned));
+            found.regions.push(condition_span(spanned));
+            found.shapes.push(RegionShape {
+                parent: open.last().copied(),
+                branches: vec![Branch {
+                    condition: branch_condition(&spanned.directive),
+                    body: SourceRange::new(spanned.range.end_offset(), 0),
+                }],
+                exhaustive: false,
+            });
             open.push(index);
-            regions.push(ConditionalDirective {
+            found.directives.push(ConditionalDirective {
                 index,
                 close: false,
                 observed_by: spanned.range.end_offset(),
@@ -895,31 +994,313 @@ fn conditional_regions(
         } else if kind.closes_a_condition() {
             let Some(index) = open.last().copied() else {
                 // An `#endif` with no `#if`: malformed, and the recovery is to record nothing rather than to
-                // attribute the rest of the file to a region that does not exist.
+                // attribute the rest of the file to a region that does not exist. Counted, because it is also the
+                // sign that the directive list is missing an opener.
+                found.stray_closers += 1;
                 continue;
             };
+
+            // The directive ends the branch that was open: its body stops where this line begins. An `#else` or
+            // `#elif` is followed by the next branch's body, an `#endif` is not.
+            close_branch(&mut found.shapes, index, spanned.range.start_offset);
 
             // `#else` and `#elif` end the region they were in and start another with the same identity: the
             // region *is* the conditional, and a fact on either branch is in the same `#if`. So the region's span
             // is extended and the region stays open.
             let closes = kind == DirectiveKind::Endif;
+            extend_region_to(&mut found.regions, index, spanned.range.end_offset());
+
             if closes {
                 open.pop();
-                extend_region_to(regions_out, index, spanned.range.end_offset());
+                found.directives.push(ConditionalDirective {
+                    index,
+                    close: true,
+                    observed_by: spanned.range.end_offset(),
+                });
             } else {
-                extend_region_to(regions_out, index, spanned.range.end_offset());
-                continue;
+                open_branch(&mut found.shapes, index, &spanned.directive, &spanned.range);
             }
-
-            regions.push(ConditionalDirective {
-                index,
-                close: true,
-                observed_by: spanned.range.end_offset(),
-            });
         }
     }
 
-    regions
+    found.unclosed = open.len();
+    found
+}
+
+/// Stop the open branch of `region` at `end`.
+fn close_branch(shapes: &mut [RegionShape], region: usize, end: usize) {
+    let Some(branch) = shapes
+        .get_mut(region)
+        .and_then(|shape| shape.branches.last_mut())
+    else {
+        return;
+    };
+
+    branch.body = SourceRange::new(
+        branch.body.start_offset,
+        end.saturating_sub(branch.body.start_offset),
+    );
+}
+
+/// Start the next branch of `region`.
+fn open_branch(
+    shapes: &mut [RegionShape],
+    region: usize,
+    directive: &Directive,
+    range: &SourceRange,
+) {
+    let Some(shape) = shapes.get_mut(region) else {
+        return;
+    };
+
+    if directive.kind() == DirectiveKind::Else {
+        shape.exhaustive = true;
+    }
+
+    shape.branches.push(Branch {
+        condition: branch_condition(directive),
+        body: SourceRange::new(range.end_offset(), 0),
+    });
+}
+
+/// What this directive's condition says about a name, when it says anything.
+fn branch_condition(directive: &Directive) -> BranchCondition {
+    match directive {
+        Directive::Ifdef { kind, name } => match kind {
+            DirectiveKind::Ifndef => BranchCondition::NotDefined(name.clone()),
+            DirectiveKind::Ifdef => BranchCondition::Defined(name.clone()),
+            _ => BranchCondition::Other,
+        },
+        Directive::Conditional { condition, .. } => named_condition(condition),
+        Directive::Marker { kind } if *kind == DirectiveKind::Else => BranchCondition::Otherwise,
+        _ => BranchCondition::Other,
+    }
+}
+
+/// `defined(NAME)`, `defined NAME`, `!defined(NAME)`, `!defined NAME` — and nothing else.
+///
+/// A **token pattern** rather than a parsed condition, on purpose: these four spellings are the whole of what the
+/// rule needs, and running the condition parser over every `#if` in every file to look for them would be work no
+/// answer uses. A condition that is anything else is `Other`, which is the answer that makes no claim.
+fn named_condition(tokens: &[crate::token::Token]) -> BranchCondition {
+    let significant: Vec<&crate::token::Token> = tokens
+        .iter()
+        .filter(|token| !crate::token::is_trivia(token.kind))
+        .collect();
+    let rest = without_outer_parentheses(&significant);
+
+    let (negated, rest) = match rest.split_first() {
+        Some((first, rest)) if first.kind == cpp_parser::CppTokenKind::LogicalNot => (true, rest),
+        _ => (false, rest),
+    };
+
+    // `defined` is an ordinary identifier in the token stream — the lexer has no reason to know it.
+    let Some((defined, rest)) = rest.split_first().filter(|(token, _)| token.text() == "defined") else {
+        return BranchCondition::Other;
+    };
+    let _ = defined;
+
+    let parenthesised = rest
+        .first()
+        .is_some_and(|token| token.kind == cpp_parser::CppTokenKind::LeftParen);
+    let rest = if parenthesised { &rest[1..] } else { rest };
+
+    let Some((name, rest)) = rest.split_first().filter(|(token, _)| token.is_identifier()) else {
+        return BranchCondition::Other;
+    };
+
+    let rest = if parenthesised {
+        match rest.split_first() {
+            Some((close, rest)) if close.kind == cpp_parser::CppTokenKind::RightParen => rest,
+            _ => return BranchCondition::Other,
+        }
+    } else {
+        rest
+    };
+
+    if !rest.is_empty() {
+        return BranchCondition::Other;
+    }
+
+    if negated {
+        BranchCondition::NotDefined(name.text.clone())
+    } else {
+        BranchCondition::Defined(name.text.clone())
+    }
+}
+
+/// Strip parentheses that wrap the whole condition, so that `#if (!defined(N))` reads like `#if !defined(N)`.
+fn without_outer_parentheses<'a>(
+    tokens: &'a [&'a crate::token::Token],
+) -> &'a [&'a crate::token::Token] {
+    let mut rest = tokens;
+
+    while rest.len() >= 2
+        && rest[0].kind == cpp_parser::CppTokenKind::LeftParen
+        && rest[rest.len() - 1].kind == cpp_parser::CppTokenKind::RightParen
+    {
+        // The first `(` has to match the last `)` — `(a) && (b)` also starts and ends with one, and it is not one
+        // group.
+        let mut depth = 0isize;
+        let closes_at_the_end = rest.iter().enumerate().all(|(index, token)| {
+            match token.kind {
+                cpp_parser::CppTokenKind::LeftParen => depth += 1,
+                cpp_parser::CppTokenKind::RightParen => depth -= 1,
+                _ => {}
+            }
+            depth > 0 || index == rest.len() - 1
+        });
+
+        if !closes_at_the_end {
+            break;
+        }
+
+        rest = &rest[1..rest.len() - 1];
+    }
+
+    rest
+}
+
+/// Mark the macro facts whose conditional **settles the name**, whatever branch is taken.
+///
+/// See [`crate::MacroFact::settles_the_name`] for what the flag claims and why the claim is sound. This is the
+/// only place that can compute it: it needs the directives (for the branches), the regions (for the guards, which
+/// `assign_guards` has already given each fact) and the facts themselves.
+///
+/// # The rule
+///
+/// A region settles a name when
+///
+/// ```text
+/// every branch of it ends in a fact about that name, and all of them are the same kind, and
+///   either it has an `#else` — one of its branches ran, and whichever it was, it acted on the name
+///   or it is a single `#ifndef NAME` whose branch defines NAME — the condition is about the very name it writes
+///   or it is a single `#ifdef NAME` whose branch undefines NAME — the mirror of the above
+/// ```
+///
+/// **and every region it is nested inside settles the name too** — where a region that is the file's **own
+/// include guard** counts as settling everything, for the reason [`crate::index`] gives when it de-guards those
+/// facts: reaching the file's contents at all is what the guard means, so it is not a condition on anything. That
+/// is what makes the rule reach a `#ifndef NAME` written inside a guarded header, which is where the shape
+/// actually lives.
+///
+/// What a branch does to a name is decided by the **last** fact about it in that branch, so `#define N` followed
+/// by `#undef N` settles "not a macro" — and a branch with no fact about the name at all settles nothing.
+pub fn mark_settling_macro_facts(
+    preprocessing: &FilePreprocessing,
+    own_guard: Option<usize>,
+    macros: &mut [MacroFact],
+) {
+    if macros.is_empty() {
+        return;
+    }
+
+    let conditionals = conditionals(preprocessing);
+
+    if conditionals.shapes.is_empty() {
+        return;
+    }
+
+    // **The nesting has to be the file's nesting.** A directive the parser did not produce — which a file with
+    // syntax errors can lose — shifts the depth of every directive after it, and a parent chain that is wrong in
+    // the *shorter* direction would let this rule claim a name is settled when an enclosing `#if` says otherwise.
+    // An over-claim here is a wrong answer of the kind that gets a rename applied to code it should not touch, so
+    // an unbalanced file gets no claims at all. Measured: `winnt.h` has 417 parse errors, they cost it eight
+    // `#endif`s, and this is what notices.
+    if conditionals.stray_closers > 0 || conditionals.unclosed > 0 {
+        return;
+    }
+
+    // The last fact about each name directly inside each branch. "Directly" is the guard: a fact in a *nested*
+    // region has that region's index, so it is not counted here — which is right, because whether it is reached is
+    // the nested region's question.
+    let mut last: HashMap<(usize, usize, &str), (MacroKind, usize)> = HashMap::new();
+
+    for (index, fact) in macros.iter().enumerate() {
+        let FactGuard::Region(region) = fact.guard else {
+            continue;
+        };
+
+        let Some(shape) = conditionals.shapes.get(region as usize) else {
+            continue;
+        };
+        let Some(branch) = shape.branch_at(fact.range.start_offset) else {
+            continue;
+        };
+
+        last.insert(
+            (region as usize, branch, fact.name.as_str()),
+            (fact.kind, index),
+        );
+    }
+
+    // Grouped by region and name, so the rule below costs one pass over the facts rather than one per region.
+    let mut mentioned: HashMap<usize, HashMap<&str, Vec<BranchFact>>> = HashMap::new();
+    for (&(region, _, name), &(kind, index)) in &last {
+        mentioned
+            .entry(region)
+            .or_default()
+            .entry(name)
+            .or_default()
+            .push((index, kind));
+    }
+
+    // Outermost first, because a region's answer is its own rule **and** its parent's. Regions are numbered in
+    // opening order, so a parent is always seen before its children.
+    let mut settles: HashMap<(usize, &str), bool> = HashMap::new();
+    let mut settling: Vec<usize> = Vec::new();
+
+    for (region, shape) in conditionals.shapes.iter().enumerate() {
+        let Some(by_name) = mentioned.get(&region) else {
+            continue;
+        };
+
+        for (name, in_branches) in by_name {
+            if in_branches.len() != shape.branches.len() {
+                continue;
+            }
+
+            let kind = in_branches[0].1;
+            if in_branches.iter().any(|(_, held)| *held != kind) {
+                continue;
+            }
+
+            let guaranteed = match (shape.branches.as_slice(), shape.exhaustive) {
+                (_, true) => true,
+                ([one], false) => match &one.condition {
+                    BranchCondition::NotDefined(condition) => {
+                        condition.as_ref() == *name && kind.is_definition()
+                    }
+                    BranchCondition::Defined(condition) => {
+                        condition.as_ref() == *name && !kind.is_definition()
+                    }
+                    BranchCondition::Otherwise | BranchCondition::Other => false,
+                },
+                _ => false,
+            };
+
+            if !guaranteed {
+                continue;
+            }
+
+            let inherited = shape
+                .parent
+                .is_none_or(|parent| {
+                    Some(parent) == own_guard
+                        || settles.get(&(parent, name)).copied().unwrap_or(false)
+                });
+
+            settles.insert((region, name), inherited);
+
+            if inherited {
+                settling.extend(in_branches.iter().map(|(index, _)| *index));
+            }
+        }
+    }
+
+    for index in settling {
+        macros[index].settles_the_name = true;
+    }
 }
 
 /// Stretch a region's span to cover a directive that belongs to it.
@@ -933,17 +1314,6 @@ fn extend_region_to(regions: &mut [SourceRange], index: usize, end: usize) {
         let length = end.saturating_sub(start);
         *region = SourceRange::new(start, length);
     }
-}
-
-/// A conditional directive, as the sweep needs it.
-#[derive(Debug, Clone, Copy)]
-struct ConditionalDirective {
-    /// Which entry of [`SummaryGuards::regions`] this directive opens or closes.
-    index: usize,
-    /// Is this the `#endif` that ends the region, as opposed to the `#if` that began it?
-    close: bool,
-    /// The offset at which the directive is over, and therefore at which it takes effect.
-    observed_by: usize,
 }
 
 /// The span of a conditional directive's condition, which is the region's identity.

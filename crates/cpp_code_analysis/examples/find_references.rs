@@ -196,7 +196,56 @@ fn main() {
         );
     }
 
-    // --- the cursor path, which is what an editor uses ---------------------------------------------
+    // --- what the branch rule buys ----------------------------------------------------------------
+    //
+    // `MacroFact::settles_the_name` is true for a `#define` inside a conditional that cannot change whether the
+    // name is a macro — the `#ifndef NAME / #define NAME` idiom, and a region whose every branch agrees. This is
+    // what it is worth: on this closure those are the macros whose references come back as **uses** instead of
+    // "maybe", which is the difference between a rename a user can trust and one they cannot.
+    let settling = settling_names(&session);
+    println!(
+        "\n{} macro names in this closure have a definition whose conditional settles the name:",
+        settling.len()
+    );
+
+    let mut ranked: Vec<(String, usize, usize)> = Vec::new();
+
+    for name in &settling {
+        let Known::Yes(found) =
+            macro_references(session.index(), &files, name, ReferenceBudget::default())
+        else {
+            continue;
+        };
+
+        let uses = found
+            .files
+            .iter()
+            .flat_map(|file| &file.references)
+            .filter(|reference| matches!(reference.kind, ReferenceKind::Use { .. }))
+            .count();
+
+        if uses > 0 {
+            ranked.push((name.clone(), uses, found.uncertain()));
+        }
+    }
+
+    ranked.sort_by(|one, other| other.1.cmp(&one.1).then(one.0.cmp(&other.0)));
+
+    for (name, uses, uncertain) in ranked.iter().take(6) {
+        println!("  {name:<36} {uses:>6} uses, {uncertain:>4} still uncertain");
+    }
+
+    let rescued: usize = ranked.iter().map(|(_, uses, _)| *uses).sum();
+    let left: usize = ranked.iter().map(|(_, _, uncertain)| *uncertain).sum();
+    println!(
+        "  … {} names in all, {rescued} references that are uses — against {left} that a condition still covers",
+        ranked.len()
+    );
+    println!(
+        "  the four macros above are *not* among them: their defining files have syntax errors (winnt.h: 417), \
+         which costs the directive list eight `#endif`s — and a nesting that does not balance is one this rule \
+         refuses to read, because an over-claim is a wrong answer. That is a parser item, not a rule item."
+    );
     //
     // Two positions, both of which a user reaches by right-clicking a name: a use in a buffer, and the `#define`
     // itself. The second one is why `name_at_including_directives` exists — a directive's name is tokens in a
@@ -392,6 +441,21 @@ fn tokens_named(texts: &[&str], name: &str) -> usize {
                 .count()
         })
         .sum()
+}
+
+/// The names with a definition whose conditional settles the name, sorted.
+fn settling_names(session: &Session<'_, DiskFiles>) -> Vec<String> {
+    let mut names: Vec<String> = session
+        .index()
+        .summaries()
+        .flat_map(|summary| summary.macros.iter())
+        .filter(|fact| fact.settles_the_name && fact.kind.is_definition())
+        .map(|fact| fact.name.clone())
+        .collect();
+
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// The references as `file:kind` pairs, for a one-line answer a human can check.

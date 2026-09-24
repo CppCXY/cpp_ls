@@ -96,7 +96,14 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// *call* has where the function's own name has no type at all. A trailing return type is why it is a field of its
 /// own rather than a reading of `type_of`: `auto make() -> Widget` spells the type after the parameter list.
 /// (The headings name the version a change came *from*; the number below is the one the bytes carry.)
-pub const CODEC_VERSION: u32 = 9;
+///
+/// # Version 9
+///
+/// A macro fact gained `settles_the_name` — the bump to version 10: whether the conditional the fact is written in
+/// cannot change **whether the name is a macro** afterwards (the `#ifndef NAME / #define NAME` idiom and a region
+/// whose every branch agrees). A byte per macro fact, and the field is a conclusion drawn from this file's own
+/// directives, so no other file's text can change it.
+pub const CODEC_VERSION: u32 = 10;
 
 /// Write a summary as bytes.
 ///
@@ -140,6 +147,7 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
         put_u8(&mut out, macro_body_code(fact.body));
         put_range(&mut out, fact.range);
         put_u32(&mut out, guard_code(fact.guard));
+        put_u8(&mut out, u8::from(fact.settles_the_name));
     }
 
     put_u32(&mut out, summary.includes.len() as u32);
@@ -225,6 +233,7 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
             body: macro_body_from(reader.u8()?)?,
             range: reader.range()?,
             guard: guard_from(reader.u32()?)?,
+            settles_the_name: reader.u8()? != 0,
         });
     }
 
@@ -665,6 +674,9 @@ mod tests {
                 body: MacroBody::Specifier,
                 range: range(80, 30),
                 guard: FactGuard::Region(0),
+                // `true` rather than the common `false`, and on purpose: a round trip that only ever carries the
+                // default value would pass with the field dropped from the encoding entirely.
+                settles_the_name: true,
             }],
             includes: vec![
                 IncludeFact {

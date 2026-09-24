@@ -2272,7 +2272,6 @@ impl ProjectIndex {
             candidates,
         }
     }
-
     /// Every fact about `name` in this file and everything it includes, with where each one sits.
     ///
     /// A file is expanded once per query. That is enough for the answer — the facts are the same however many
@@ -2289,7 +2288,7 @@ impl ProjectIndex {
         &self,
         path: &Path,
         chain: &mut Vec<usize>,
-        conditional: bool,
+        path_conditional: bool,
         visited: &mut HashSet<String>,
         name: &str,
         out: &mut Vec<MacroCandidate>,
@@ -2310,7 +2309,7 @@ impl ProjectIndex {
                 position,
                 file: summary.path.clone(),
                 fact: fact.clone(),
-                conditional: conditional || fact.guard != FactGuard::Unconditional,
+                path_conditional,
             });
         }
 
@@ -2323,7 +2322,7 @@ impl ProjectIndex {
             self.macro_candidates(
                 target,
                 chain,
-                conditional || include.guard != FactGuard::Unconditional,
+                path_conditional || include.guard != FactGuard::Unconditional,
                 visited,
                 name,
                 out,
@@ -2347,9 +2346,10 @@ pub struct MacroEnvironment {
 }
 
 impl MacroEnvironment {
-    /// What the name is at `offset`, or why that cannot be said.
+    /// **Which `#define` is in force** at `offset`, or why that cannot be said.
     ///
-    /// The rules are [`ProjectIndex::macro_definition`]'s, and they are the preprocessor's:
+    /// This is the question "go to macro definition" asks, and it is the strict one. The rules are the
+    /// preprocessor's:
     ///
     /// * **only facts pasted in at or before the cursor count.** The first element of a candidate's chain is where
     ///   it enters the file the cursor is in — the fact's own offset, or the `#include` that pulled its file in —
@@ -2360,46 +2360,100 @@ impl MacroEnvironment {
     /// * **an unconditional fact beats a conditional one** even when the conditional one is later: a fact behind an
     ///   `#if` may not be there at all, so one that is certainly there settles the name — and only when nothing
     ///   certain exists does the conditional one make the answer `Unknown(ConditionalCompilation)`.
+    ///
+    /// [`MacroFact::settles_the_name`] is deliberately **not** consulted here: it says the name is a macro either
+    /// way, not *which* `#define` did it, and in the `#ifndef NAME` shape the definition may have come from an
+    /// earlier header this file cannot see. [`MacroEnvironment::is_a_macro_at`] is the question it answers.
     pub fn at(&self, offset: usize) -> Known<&MacroCandidate> {
-        let in_force = self
-            .candidates
-            .iter()
-            .filter(|candidate| candidate.position[0] <= offset);
+        let in_force: Vec<&MacroCandidate> = self.in_force(offset).collect();
 
-        let certain = in_force
-            .clone()
-            .filter(|candidate| !candidate.conditional)
-            .max_by(|one, other| one.position.cmp(&other.position));
+        let best = last(in_force.iter().copied().filter(|candidate| !candidate.is_conditional()))
+            .or_else(|| last(in_force.iter().copied()));
 
-        let best = match certain {
-            Some(found) => found,
-            None => match in_force.max_by(|one, other| one.position.cmp(&other.position)) {
-                Some(found) => found,
-                None => {
-                    return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(
-                        self.name.as_str(),
-                    )));
-                }
-            },
+        let Some(best) = best else {
+            return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(self.name.as_str())));
         };
 
-        if best.conditional {
+        if best.is_conditional() {
             return Known::Unknown(UnknownReason::ConditionalCompilation);
         }
 
-        if !best.fact.kind.is_definition() {
-            return Known::Unknown(UnknownReason::UndefinedHere(Box::from(
-                self.name.as_str(),
-            )));
+        self.as_answer(best)
+    }
+
+    /// **Is this name a macro** at `offset` — the weaker question a find-references asks.
+    ///
+    /// The difference from [`MacroEnvironment::at`] is one word: a fact inside an `#if` counts here when the
+    /// conditional *cannot change whether the name is a macro* afterwards, which is what
+    /// [`MacroFact::settles_the_name`] records (the `#ifndef NAME / #define NAME` idiom and a region whose every
+    /// branch agrees). That is the whole reason this is a second method rather than a flag on the first: a use is a
+    /// use even when which `#define` is in force depends on a macro nobody has.
+    ///
+    /// The `#undef` case is where the two genuinely part company, so it gets its own rule: a certain `#undef` says
+    /// the name is not a macro here — **unless** something that might be in force *after* it is a definition.
+    pub fn is_a_macro_at(&self, offset: usize) -> Known<&MacroCandidate> {
+        let in_force: Vec<&MacroCandidate> = self.in_force(offset).collect();
+
+        let Some(best) = last(
+            in_force
+                .iter()
+                .copied()
+                .filter(|candidate| candidate.is_certain_about_the_name()),
+        ) else {
+            // Nothing that reaches this offset settles it. Either there is nothing at all — the name is not a
+            // macro here — or everything there is depends on a condition.
+            return if in_force.is_empty() {
+                Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(self.name.as_str())))
+            } else {
+                Known::Unknown(UnknownReason::ConditionalCompilation)
+            };
+        };
+
+        if best.is_definition() {
+            return Known::Yes(best);
         }
 
-        Known::Yes(best)
+        // The name is certainly *not* a macro here — a `#define` re-asserted inside a conditional is not a second
+        // definition, and this fact already answered the question. But a `#undef` can be overturned by a
+        // conditional definition that comes later in the stream, and then the honest answer is "maybe".
+        let overturned = in_force
+            .iter()
+            .any(|candidate| candidate.position > best.position && candidate.is_definition());
+
+        if overturned {
+            return Known::Unknown(UnknownReason::ConditionalCompilation);
+        }
+
+        Known::Unknown(UnknownReason::UndefinedHere(Box::from(self.name.as_str())))
+    }
+
+    /// The in-force candidates, in no particular order: everything pasted in at or before `offset`.
+    fn in_force(&self, offset: usize) -> impl Iterator<Item = &MacroCandidate> {
+        self.candidates
+            .iter()
+            .filter(move |candidate| candidate.position[0] <= offset)
+    }
+
+    /// The answer a settled candidate gives, whether or not its region was settled by the flag.
+    fn as_answer<'a>(&self, best: &'a MacroCandidate) -> Known<&'a MacroCandidate> {
+        if best.is_definition() {
+            return Known::Yes(best);
+        }
+
+        Known::Unknown(UnknownReason::UndefinedHere(Box::from(self.name.as_str())))
     }
 
     /// Is there anything at all to say about the name in this file?
     pub fn is_empty(&self) -> bool {
         self.candidates.is_empty()
     }
+}
+
+/// The last of a run of candidates in translation order.
+fn last<'a>(
+    candidates: impl Iterator<Item = &'a MacroCandidate>,
+) -> Option<&'a MacroCandidate> {
+    candidates.max_by(|one, other| one.position.cmp(&other.position))
 }
 
 /// One fact about a macro name, and where it sits in the translation unit's stream.
@@ -2410,8 +2464,12 @@ pub struct MacroCandidate {
     position: Vec<usize>,
     file: PathBuf,
     fact: MacroFact,
-    /// Is it inside an `#if` on the way in, or inside one itself?
-    conditional: bool,
+    /// Is one of the `#include`s that pull this fact's file in written inside a conditional?
+    ///
+    /// Kept apart from the fact's own [`MacroFact::guard`] because the two are answered by different things: a
+    /// path through a conditional `#include` means the fact's *file* may not be part of the translation unit at
+    /// all, which nothing about the fact's own text can repair.
+    path_conditional: bool,
 }
 
 impl MacroCandidate {
@@ -2429,9 +2487,23 @@ impl MacroCandidate {
         self.fact.kind.is_definition()
     }
 
-    /// Is it reached through an `#if`, or written inside one?
+    /// Is **which `#define` is in force** conditional — the question [`MacroEnvironment::at`] answers?
+    ///
+    /// Yes when the path in is conditional, or when the fact is written inside an `#if` — including the
+    /// `#ifndef NAME` whose body defines the name, where the name is certainly a macro but the *definition* it has
+    /// may be somebody else's.
     pub fn is_conditional(&self) -> bool {
-        self.conditional
+        self.path_conditional || self.fact.guard != FactGuard::Unconditional
+    }
+
+    /// Is **whether the name is a macro here** settled — the question [`MacroEnvironment::is_a_macro_at`] answers?
+    ///
+    /// The path in still has to be unconditional: a fact in a header that may not have been included at all says
+    /// nothing. The fact's own region, on the other hand, is settled by
+    /// [`MacroFact::settles_the_name`] — which is exactly the case the two questions differ in.
+    pub fn is_certain_about_the_name(&self) -> bool {
+        !self.path_conditional
+            && (self.fact.guard == FactGuard::Unconditional || self.fact.settles_the_name)
     }
 }
 

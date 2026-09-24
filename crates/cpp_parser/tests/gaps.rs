@@ -817,6 +817,177 @@ fn a_statement_the_parser_gives_up_on_keeps_the_block_after_it() {
     }
 }
 
+/// A **member access whose name is not written yet** — `w.` — is the state a completion is asked in, and it must
+/// not cost the block its `}`.
+///
+/// The shape of `w.` is fine and has been since the completion entry point was built: it reads as
+/// `IndexExpr[IdentifierExpr(w) Dot]`, so the object and the operator are there for a cursor to be resolved
+/// against. What was wrong was the **radius of the recovery**: the member name is mandatory in the suffix loop, so
+/// the only way out was an `Err`, and an `Err` out of `parse_expr` reaches the statement layer as a failed
+/// statement.
+///
+/// ```text
+/// void f() { Widget w; w.  }        an `Err` here                       a `MissingNode` here
+///   CompoundStat@9..54   ← closes at 54, not 29                          CompoundStat@9..29
+///     ExpressionStat@25..30  ← the IndexExpr ate the `}`                   ExpressionStat@25..28
+///     Declaration@30..41     ← `int after;` became a LOCAL of f()          Declaration@30..41  ← file scope
+/// ```
+///
+/// The second shape is what `parse_compound_stat` already does for a missing `}` — `emit_missing_node` plus a
+/// reported error, so completion has a node to live in and the user is still told — and the fix is to do the same
+/// thing in the suffix loop rather than let `Err` cross the statement boundary. See maintenance convention 20.
+#[test]
+fn a_member_access_without_a_name_keeps_the_block_after_it() {
+    let source = "void f() {\n  Widget w;\n  w.\n}\nint after;\nvoid g() { }\n";
+    let tree = CppParser::parse(source, ParserConfig::default());
+
+    // The error is still reported: the absence is a fact about the text, and an editor has to be able to say so.
+    assert!(
+        tree.get_errors()
+            .iter()
+            .any(|error| error.message.contains("member access")),
+        "the missing member name is still reported: {:?}",
+        tree.get_errors()
+    );
+
+    // …and the block ends where its `}` is, so `int after;` is at file scope rather than inside `f`.
+    assert!(
+        tree.get_red_root()
+            .descendants()
+            .any(|node| {
+                CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration
+                    && node.text().to_string().starts_with("int after;")
+            }),
+        "`int after;` is still a declaration: {}",
+        tree.to_source_text()
+    );
+
+    let local = tree
+        .get_red_root()
+        .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CompoundStat)
+        .any(|block| block.text().to_string().contains("int after;"));
+
+    assert!(
+        !local,
+        "and it is not inside the function body — the block kept its own `}}`: {}",
+        tree.to_source_text()
+    );
+}
+
+/// A **speculative read that is rolled back must take its diagnostics with it**.
+///
+/// C++'s declaration/expression ambiguity is resolved by reading one way, and rewinding if it does not fit — the
+/// template-argument case is the common one: `a.b < c > d` is a comparison, `a.b<c> d` is a declaration, and the
+/// only way to know is to try. A failed attempt is not a fact about the file, so an error it reported belongs to a
+/// reading nobody kept: leaving it behind reports a problem that the accepted reading does not have.
+///
+/// The file below is valid C++ and reads cleanly; before the fix it carried the diagnostics of the attempt that
+/// lost. That is worse than a missing diagnostic, because it tells the user about code that is not there.
+#[test]
+fn a_rolled_back_reading_takes_its_diagnostics_with_it() {
+    let valid = [
+        // A comparison written after a member access: the template-argument reading is tried and rewound.
+        "void f() { a.b < c > d; }\n",
+        // The same with a template member and real arguments, where the reading *is* kept.
+        "void f() { a.template b<int>(1); }\n",
+        // A pointer-to-member and a cast, whose readings are tried in order.
+        "void f() { (Widget*)p; }\n",
+        "struct S { int m; };\nvoid f() { int S::*p = &S::m; }\n",
+    ];
+
+    for source in valid {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert!(
+            tree.get_errors().is_empty(),
+            "{source:?} is valid and must read without diagnostics, got {:?}",
+            tree.get_errors()
+                .iter()
+                .map(|error| error.message.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+/// **Valid C++ written in the shapes a recovery eats.** Every entry here is a construct the parser already read
+/// before this round; none of them is new grammar. What they have in common is that each one goes through a
+/// ``try one reading, rewind, try another`` decision — a cast against a parenthesised expression, a template
+/// argument list against a comparison, a declaration against a statement — and that is where recovery does its
+/// damage when it is wrong.
+///
+/// The list exists because the census cannot see this class of bug. Every construct here is *valid*, so a
+/// regression shows up as a diagnostic on code that is not wrong: the file count of the corpus would not move, and
+/// an editor would underline a line the user typed correctly. It is the second number of maintenance convention
+/// 29, and the three shapes that were tried and rewound on the way are listed with what they must keep.
+#[test]
+fn valid_cpp_in_the_shapes_recovery_eats() {
+    assert_reads(
+        Where::Body,
+        &[
+            // Casts and parenthesised expressions: the same prefix, two readings.
+            "(Widget*)p;",
+            "(void)p;",
+            "int x = (int)y;",
+            "g((int)x);",
+            "(a)(b)(c);",
+            "p = (T*)q;",
+            // A template-id against a comparison — the ambiguity the parser exists to solve by trying.
+            "A<B> c;",
+            "a < b > c;",
+            "a.b < c > d;",
+            "x = y < z > w;",
+            "g<int, double>(x);",
+            "T::template f<int>();",
+            "typename T::type y;",
+            // Initialisation: braces, parens and the two together.
+            "X x = {1, 2};",
+            "int a[] = {1, 2};",
+            "T t{};",
+            "A a = A();",
+            "new (p) T(1);",
+            "decltype(x) y;",
+            "sizeof(T);",
+            "alignas(16) int x;",
+            "static_assert(sizeof(T) > 0);",
+            // Bodies inside speculative regions: a lambda is parsed while the enclosing construct is still a guess.
+            "auto l = [](int a) { return a; };",
+            "g([](){ });",
+            // Statements whose head is a declaration.
+            "for (auto& x : v) { }",
+            "while (a) { }",
+            "do { } while (a);",
+            "switch (a) { case 1: break; }",
+            "goto end; end: ;",
+            "if (a) { }",
+            "throw X();",
+            // Declarations inside a body, including the ones with several declarators and initialisers.
+            "int x = 1; int y = 2;",
+            "struct S { int x; } s;",
+            "enum E { A };",
+            // Pointers to members, which the expression grammar reads with the same suffix loop as `.*`.
+            "a->*b;",
+            "a.*b;",
+            "int (S::*p) = &S::m;",
+        ],
+    );
+
+    assert_reads(
+        Where::File,
+        &[
+            "using T = int;",
+            "template<class T> void f(T t) { g<T>(t); }",
+            "auto f() -> int { return 0; }",
+            "void f(int a, int b) { }",
+            "void g() { h(); } void f() { g(); }",
+            "void f() { (Widget*)p; }",
+            "struct S { S() : m(1) { } int m; };",
+            "class C { public: C() = default; ~C(); };",
+            "struct S { int x : 3; };",
+            "template<class T> concept C = requires (T t) { t.f(); };",
+        ],
+    );
+}
+
 /// An **operator name** is a name in an expression too, in all three positions it can be written.
 /// `operator<=>(a, b)` is a call to the operator function, and the standard library asks exactly that question
 /// when it wants to know whether a type has a comparison: `{ operator<=>(x, y); }` inside a requires-expression
@@ -1676,7 +1847,26 @@ fn constructs_the_parser_does_not_read_yet() {
                 "a call with its `;` missing and **no `#define` in the file**: the macro reading needs that \
                  evidence, and a spelling convention is not enough for it; see B41 and `macros.rs`",
             ),
+            (
+                "if (int x = g()) { }",
+                "a **condition with an initialiser** — a declaration inside an `if`/`while`/`switch` head. Valid \
+                 C++ (checked with g++ 15), and the file found it while looking for recovery damage rather than \
+                 for grammar: `int` in condition position comes out as `expected primary expression` and the \
+                 block's braces are then read as rubble. Recorded here so the next round has the shape and the \
+                 reproduction",
+            ),
         ],
+    );
+
+    assert_does_not_read_yet(
+        Where::File,
+        &[(
+            "void f() try { } catch (...) { }",
+            "a **function-try-block**: `try` written between the declarator and its body. Valid C++ (checked \
+             with g++ 15), read today as four errors starting at `void`. The `try` was given a rule as a \
+             *statement* (that is why the same tokens are fine inside a body) and not as a part of a function \
+             definition",
+        )],
     );
 
     // `decltype` in **type position** used to be here, and the record of what it looked like is worth keeping

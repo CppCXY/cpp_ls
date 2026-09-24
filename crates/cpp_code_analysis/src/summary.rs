@@ -239,6 +239,43 @@ pub struct MacroFact {
     /// Where the fact is, for "go to macro definition".
     pub range: cpp_parser::SourceRange,
     pub guard: FactGuard,
+    /// Does this fact settle the name's macro state **whatever branch of its `#if` is taken**?
+    ///
+    /// False for a fact outside every conditional (there is nothing to settle), and false for the ordinary
+    /// conditional fact, whose existence depends on a macro nobody has. True for the two shapes where the
+    /// conditional *cannot* change the answer:
+    ///
+    /// ```text
+    /// #ifndef NAME            the condition IS "NAME is not defined yet", and the body defines it:
+    /// #define NAME 1          taken → defined here; not taken → it was already defined. Either way: a macro.
+    /// #endif
+    ///
+    /// #if A                   every branch ends in the same kind of fact about the same name, and there
+    /// #define NAME 1          is an `#else` — so one of them ran, and whichever it was, the name is a macro.
+    /// #else
+    /// #define NAME 2
+    /// #endif
+    /// ```
+    ///
+    /// `#ifdef NAME` whose body ends in `#undef NAME` is the mirror, and says the name is **not** a macro after
+    /// the block. A single-branch `#if A` never settles anything, because the branch may not be taken at all — and
+    /// a region nested inside an unsettled one settles nothing either, which is why this is computed for the whole
+    /// chain of enclosing conditionals rather than for the innermost alone.
+    ///
+    /// # What it does *not* say
+    ///
+    /// **Not which `#define` is in force.** In the second shape the branches differ in what they define the name
+    /// *as*, and in the first the name may have been defined by an earlier header that this file cannot see. So
+    /// `macro_definition` — the question "where is this macro defined" — ignores this field, and the reference
+    /// query, which asks the weaker "is this name a macro *here*", is what reads it. Two questions, two answers.
+    ///
+    /// # Why this is a fact and not a conclusion
+    ///
+    /// The invariant every field here is judged by is "would a change to another file make it stale?" — a resolved
+    /// type would, a `FileId` would, an instantiation would. This one cannot: it is computed from **this file's own
+    /// directives**, and no header can change how a file writes its `#if`s. That is also why it is stored rather
+    /// than recomputed per query: the answer needs the branch structure, and a summary keeps only the regions.
+    pub settles_the_name: bool,
 }
 
 /// Which of the two things a macro name's history is made of.

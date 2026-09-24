@@ -15,7 +15,7 @@
 //! 1. 候选集    只有能看见某个定义的文件才可能是用户：定义所在文件 + 它们的传递反向 include 闭包
 //! 2. 文本预筛  名字不是这个文件正文的子串，就一个标识符也不可能叫这个名字 → 连词法都不用做
 //! 3. 词法      CppLexer 一遍：注释和字符串是**一个 token**，所以它们里的名字根本不会出现成 Identifier
-//! 4. 精确判定  每个命中都问一次 macro_definition(名字, 文件, 偏移)：它是不是宏、是哪一条 #define
+//! 4. 精确判定  每个命中问一次**宏环境**（每个文件算一次）：它是不是宏、是哪一条 #define
 //! ```
 //!
 //! 第 3 级是这一层能成立的关键：**注释与字符串不需要解析就能排除**，而"用文本子串找引用"最大的假阳性
@@ -309,7 +309,7 @@ pub fn macro_references<F: FileProvider>(
                     continue;
                 }
 
-                match environment.at(range.start_offset) {
+                match environment.is_a_macro_at(range.start_offset) {
                     // It is a macro here, and it is a *definition* that settles it: this is a use.
                     Known::Yes(found) => references.push(Reference {
                         range,

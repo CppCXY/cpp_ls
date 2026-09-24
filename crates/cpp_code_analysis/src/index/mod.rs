@@ -62,7 +62,7 @@ use crate::include::paths::{FileProvider, PathInterner};
 use crate::include::IncludeResolver;
 use crate::preprocess::directive::{Directive, SpannedDirective};
 use crate::preprocess::preprocess;
-use crate::sema::declarations::{assign_guards, build_facts};
+use crate::sema::declarations::{assign_guards, build_facts, mark_settling_macro_facts};
 use crate::sema::scopes::build_scopes;
 use crate::summary::{FactGuard, FileSummary, IncludeFact, MacroFact};
 use crate::summary_codec::DecodeError;
@@ -183,7 +183,9 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // rule every `#include` written inside a header is "conditional" and every declaration reached through one
         // is `ConditionalCompilation` — measured on the closure of `<string>`, that is *every* cross-file answer
         // there is. See `deguard_the_files_own_guard` for why calling it unconditional is the honest reading.
-        if let Some(region) = own_guard_region(&preprocessing, &root) {
+        let own_guard = own_guard_region(&preprocessing, &root);
+
+        if let Some(region) = own_guard {
             let mut all: Vec<&mut FactGuard> = declarations
                 .iter_mut()
                 .map(|fact| &mut fact.guard)
@@ -192,6 +194,13 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
                 .collect();
             deguard_the_files_own_guard(&mut all, region);
         }
+
+        // What the guards above cannot say on their own: whether a `#define` inside an `#if` still *settles* the
+        // name whichever branch is taken — the `#ifndef NAME / #define NAME` idiom, which is how the system headers
+        // define most of the macros a project uses. It runs after the de-guard step because a fact already
+        // `Unconditional` has nothing to settle, and it is told which region the own guard is because the rule it
+        // applies nests inside conditionals and must agree with that step about what a file guard means.
+        mark_settling_macro_facts(&preprocessing, own_guard, &mut macros);
 
         FileSummary {
             path: path.to_path_buf(),
@@ -251,6 +260,9 @@ fn macro_fact(spanned: &SpannedDirective) -> Option<MacroFact> {
                 // `#endif`.
                 range: definition.name_range,
                 guard: crate::summary::FactGuard::Unconditional,
+                // Filled in by `mark_settling_macro_facts`, which is the only place that knows where the
+                // conditionals are; see `MacroFact::settles_the_name`.
+                settles_the_name: false,
             })
         }
         Directive::Undef { name: Some(name) } => Some(MacroFact {
@@ -261,6 +273,7 @@ fn macro_fact(spanned: &SpannedDirective) -> Option<MacroFact> {
             body: cpp_parser::MacroBody::Unknown,
             range: spanned.range,
             guard: crate::summary::FactGuard::Unconditional,
+            settles_the_name: false,
         }),
         _ => None,
     }
@@ -596,7 +609,7 @@ mod tests {
     use crate::preprocess::directive::{Directive, IncludeForm};
     use crate::preprocess::macros::MacroTable;
     use crate::preprocess::preprocess;
-    use crate::summary::{DeclKind, FactGuard};
+    use crate::summary::{DeclKind, FactGuard, MacroKind};
     use cpp_parser::{CppParser, MacroBody, ParserConfig};
     use std::path::{Path, PathBuf};
 
@@ -608,9 +621,147 @@ mod tests {
         summarize(Path::new("/p/widget.cpp"), source, key())
     }
 
+    /// The facts about `name`, with their guards and the settling flag, for a short assertion.
+    fn macro_facts(source: &str, name: &str) -> Vec<(crate::summary::MacroKind, FactGuard, bool)> {
+        summary(source)
+            .macros
+            .iter()
+            .filter(|fact| fact.name == name)
+            .map(|fact| (fact.kind, fact.guard, fact.settles_the_name))
+            .collect()
+    }
+
     #[test]
-    fn a_file_with_declarations_and_macros_summarizes_both() {
-        let summary = summary(
+    fn a_define_inside_ifndef_settles_the_name_whatever_the_branch() {
+        // The idiom the whole flag exists for, and the shape the system headers define most macros in:
+        // `#ifndef NAME / #define NAME`. Taken → defined here; not taken → it was defined already. Either way the
+        // name is a macro, so a *use* after this block is a use and not a "maybe".
+        //
+        // A declaration before the conditional is what keeps it from being the **file's own guard** — which is a
+        // separate rule that would make the fact `Unconditional` instead (see the test after this one).
+        assert_eq!(
+            macro_facts("int early;\n#ifndef NAME\n#define NAME 1\n#endif\n", "NAME"),
+            [(MacroKind::Definition, FactGuard::Region(0), true)]
+        );
+    }
+
+    #[test]
+    fn the_files_own_guard_is_not_a_condition_and_neither_is_a_define_inside_it() {
+        // `#ifndef WIDGET_H / #define WIDGET_H` wrapping the file is a guard, so its facts are unconditional
+        // already — and a `#ifndef NAME` nested inside one inherits that: reaching the file at all is what the
+        // guard means, which is the same rule the de-guard step applies to declarations and includes.
+        assert_eq!(
+            macro_facts(
+                "#ifndef WIDGET_H\n#define WIDGET_H\n#ifndef NAME\n#define NAME 1\n#endif\n#endif\n",
+                "NAME"
+            ),
+            [(MacroKind::Definition, FactGuard::Region(1), true)]
+        );
+        assert_eq!(
+            macro_facts("#ifndef WIDGET_H\n#define WIDGET_H\n#endif\n", "WIDGET_H"),
+            [(MacroKind::Definition, FactGuard::Unconditional, false)]
+        );
+    }
+
+    #[test]
+    fn a_region_whose_every_branch_agrees_settles_the_name() {
+        // The general case behind the idiom: whichever branch ran, it did the same thing to the name. The two
+        // definitions may differ in what they define it *as* — that is the question the flag deliberately does not
+        // answer, and `macro_definition` therefore still ignores it.
+        assert_eq!(
+            macro_facts(
+                "int early;\n#if defined(A)\n#define NAME 1\n#else\n#define NAME 2\n#endif\n",
+                "NAME"
+            ),
+            [
+                (MacroKind::Definition, FactGuard::Region(0), true),
+                (MacroKind::Definition, FactGuard::Region(0), true)
+            ]
+        );
+
+        // `#ifdef NAME / #undef NAME` is the mirror: after it the name is certainly not a macro.
+        assert_eq!(
+            macro_facts("int early;\n#ifdef NAME\n#undef NAME\n#endif\n", "NAME"),
+            [(MacroKind::Undefinition, FactGuard::Region(0), true)]
+        );
+    }
+
+    #[test]
+    fn a_region_that_does_not_settle_the_name_marks_nothing() {
+        // The four shapes that must stay false, because a rule that over-claims is worse than no rule at all: a
+        // single branch that may not be taken; branches that disagree; a branch whose last word on the name is the
+        // opposite of what it started with; and a `#define` in a branch that the condition does not name.
+        for source in [
+            // No `#else`: "nothing ran" is a possibility, and then the name may not be a macro.
+            "int early;\n#if defined(A)\n#define NAME 1\n#endif\n",
+            // Branches that disagree about the name.
+            "int early;\n#if defined(A)\n#define NAME 1\n#else\n#undef NAME\n#endif\n",
+            // The branch's *last* word is `#undef`, so the branch leaves the name undefined.
+            "int early;\n#ifndef NAME\n#define NAME 1\n#undef NAME\n#endif\n",
+            // The condition is not about this name, so nothing about it is settled.
+            "int early;\n#ifndef OTHER\n#define NAME 1\n#endif\n",
+            // A name defined in only one of two exhaustive branches: the other one leaves it as it found it.
+            "int early;\n#if defined(A)\n#define NAME 1\n#else\n#define OTHER 2\n#endif\n",
+        ] {
+            let facts = macro_facts(source, "NAME");
+            assert!(
+                facts.iter().all(|(_, _, settles)| !settles),
+                "{source:?} must settle nothing, got {facts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_settling_region_inside_a_plain_conditional_settles_nothing() {
+        // The chain rule, and the case it exists for: if `A` is false the inner `#ifndef NAME` never runs, so
+        // nothing about the name is certain — the outer region does not settle it either.
+        assert_eq!(
+            macro_facts(
+                "int early;\n#if defined(A)\n#ifndef NAME\n#define NAME 1\n#endif\n#endif\n",
+                "NAME"
+            ),
+            [(MacroKind::Definition, FactGuard::Region(1), false)]
+        );
+    }
+
+    #[test]
+    fn a_settling_region_reached_through_an_if_defined_settles_the_name() {
+        // The shape the system headers actually use: `#if !defined(NAME)` written out instead of `#ifndef NAME`,
+        // and wrapped in parentheses for good measure. Recognised as the same claim, because it *is* the same
+        // claim — the condition is about the very name the body writes.
+        for condition in ["!defined(NAME)", "!defined NAME", "(!defined(NAME))"] {
+            let source = format!("int early;\n#if {condition}\n#define NAME 1\n#endif\n");
+            assert_eq!(
+                macro_facts(&source, "NAME"),
+                [(MacroKind::Definition, FactGuard::Region(0), true)],
+                "{condition} should settle the name"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_whose_conditionals_do_not_balance_settles_nothing() {
+        // The safety net, and the reason it exists: the rule reads a *nesting*, and the nesting comes from the
+        // directives the parser found. A file with syntax errors can lose one — measured, `winnt.h` loses eight
+        // `#endif`s and 417 errors is what it costs — and a parent chain that is wrong in the shorter direction
+        // would claim a name is settled when an enclosing `#if` says it may not be. So an unbalanced file gets no
+        // claims at all, in either direction.
+        for source in [
+            // A region never closed: the `#ifndef NAME` may be inside something that is not taken.
+            "int early;\n#if defined(A)\n#ifndef NAME\n#define NAME 1\n#endif\n",
+            // An `#endif` that closes nothing: an opener is missing, and the depth after it is wrong.
+            "int early;\n#endif\n#ifndef NAME\n#define NAME 1\n#endif\n",
+        ] {
+            let facts = macro_facts(source, "NAME");
+            assert!(
+                facts.iter().all(|(_, _, settles)| !settles),
+                "{source:?} must settle nothing, got {facts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_with_declarations_and_macros_summarizes_both() {        let summary = summary(
             "#define MY_API\n#define MAX(a, b) ((a) > (b) ? (a) : (b))\nstruct Widget { int size; };\n",
         );
 

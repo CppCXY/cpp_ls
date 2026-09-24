@@ -1345,10 +1345,27 @@ fn parse_postfix_suffixes(
                         name.complete(p);
                     }
                 } else {
-                    return Err(CppParseError::syntax_error_from(
+                    // **Nothing is written after the operator**, which is the state a completion is asked in and
+                    // the commonest thing a user's cursor is found in the middle of. The member name is mandatory
+                    // here, but returning `Err` is the wrong way to say so: an `Err` out of `parse_expr` reaches
+                    // the statement layer as a failed statement, and the recovery that follows consumes the `}`
+                    // that closes the block — so `w.` at the end of a body pushed every declaration written after
+                    // the body *into* the body.
+                    //
+                    // A zero-width `MissingNode` says the same thing without giving up the expression: the member
+                    // access is complete, its object and operator are in the tree for a cursor to be resolved
+                    // against, and the user is told what is missing. It is the pattern `parse_compound_stat` uses
+                    // for a missing `}`, for the same reason — a position being edited is not a failed construct.
+                    // See maintenance convention 20.
+                    p.emit_missing_node();
+                    p.push_error(CppParseError::syntax_error_from(
                         &t!("expected identifier after member access operator"),
                         p.current_token_range(),
                     ));
+                    expr = m.complete(p);
+                    // Nothing else can follow that is a suffix of *this* expression: the next token is whatever
+                    // ended the statement. Leaving the loop here is what keeps the error local.
+                    break;
                 }
 
                 expr = m.complete(p);
