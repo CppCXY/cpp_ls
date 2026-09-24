@@ -89,7 +89,14 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// function body, a block or a lambda, so that a name lookup across files can leave it out instead of offering a
 /// name the reader cannot see. (The headings name the version a change came *from*; the number below is the one
 /// the bytes carry.)
-pub const CODEC_VERSION: u32 = 8;
+///
+/// # Version 8
+///
+/// A declaration fact gained `returns` — the bump to version 9: the type a **function** returns, which is what a
+/// *call* has where the function's own name has no type at all. A trailing return type is why it is a field of its
+/// own rather than a reading of `type_of`: `auto make() -> Widget` spells the type after the parameter list.
+/// (The headings name the version a change came *from*; the number below is the one the bytes carry.)
+pub const CODEC_VERSION: u32 = 9;
 
 /// Write a summary as bytes.
 ///
@@ -113,6 +120,7 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
         put_opt_str(&mut out, fact.scope.as_deref());
         put_u8(&mut out, decl_kind_code(fact.kind));
         put_opt_str(&mut out, fact.type_of.as_deref());
+        put_opt_str(&mut out, fact.returns.as_deref());
         put_u32(&mut out, fact.bases.len() as u32);
         for base in &fact.bases {
             put_str(&mut out, base);
@@ -192,6 +200,7 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
             scope: reader.optional_string()?,
             kind: decl_kind_from(reader.u8()?)?,
             type_of: reader.optional_string()?,
+            returns: reader.optional_string()?,
             bases: {
                 let mut bases = Vec::new();
                 for _ in 0..reader.count()? {
@@ -608,6 +617,8 @@ mod tests {
                     kind: DeclKind::Type,
                     // A class declares no type in `type_of`'s sense, so the `None` branch is covered here.
                     type_of: None,
+                    // A class returns nothing either, so `None` — and the second fact below covers the other value.
+                    returns: None,
                     // A base list, so that branch of the format is covered too: two bases, one of them qualified.
                     bases: vec!["Base".to_string(), "ns::Other".to_string()],
                     range: range(10, 20),
@@ -619,12 +630,13 @@ mod tests {
                     guard: FactGuard::Unconditional,
                 },
                 DeclFact {
-                    name: "member".to_string(),
+                    name: "make".to_string(),
                     scope: Some("ns::Widget".to_string()),
-                    kind: DeclKind::Variable,
-                    // A qualified spelling with a template argument list, because the field is stored as text and
-                    // a decoder that mangled one would only be caught by a value like this.
-                    type_of: Some("ns::Container<int>".to_string()),
+                    kind: DeclKind::Function,
+                    // A function declares no `type_of` — the name has no type — and its `returns` is what a *call*
+                    // has. Both halves of that distinction are in this fixture on purpose.
+                    type_of: None,
+                    returns: Some("ns::Container<int>".to_string()),
                     bases: Vec::new(),
                     range: range(40, 15),
                     name_range: range(48, 6),
@@ -637,6 +649,7 @@ mod tests {
                     scope: None,
                     kind: DeclKind::Other,
                     type_of: None,
+                    returns: None,
                     bases: Vec::new(),
                     range: range(60, 8),
                     name_range: range(60, 0),

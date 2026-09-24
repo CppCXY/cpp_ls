@@ -4,6 +4,8 @@
 [`index-design.md`](index-design.md)，parser 的读法与缺漏仍在 [`grammar-gaps.md`](grammar-gaps.md)——
 这份是那条工作线的施工图，以及它撞上的几条旧决定。
 
+**当前的待办队列在 [`next-steps.md`](next-steps.md)**（含 parser 侧的第一条错清单与最小复现）；这份文档保留"为什么这么做"与每次普查的数字。
+
 ## 目标，与明确不做的事
 
 ```text

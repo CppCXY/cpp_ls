@@ -148,6 +148,81 @@ fn holds(node: &CppSyntaxNode, offset: usize) -> bool {
     offset >= usize::from(range.start()) && offset < usize::from(range.end())
 }
 
+/// The type a **function** declaration returns, as the file spells it.
+///
+/// The sibling of [`declared_type_of`], with the same walk down to the declaration and the same two answers — a
+/// spelling, or `None` — and two differences that are the whole of it:
+///
+/// * only a **function** has one: `int x;` returns nothing, and `struct S { };` *is* a type rather than returning
+///   one;
+/// * a **trailing return type wins**: `auto make() -> Widget` spells the type *after* the parameter list, so the
+///   specifier sequence says `auto` and the answer is in a `TrailingReturnType` the walk passes on the way down.
+///   That node exists so a consumer does not have to strip the `->` itself, which is why this reads it rather
+///   than the text.
+///
+/// `None` for a return type the file does not *state*: a deduced `auto` is not a class to look a member up in, and
+/// recording it as one would answer `make().size` with "the type `auto` has no members" — a wrong answer where
+/// "nothing is known" is the true one. See [`DeclFact::returns`].
+pub fn declared_returns_of(root: &CppSyntaxNode, binding: &Binding) -> Option<String> {
+    if binding.kind != BindingKind::Function {
+        return None;
+    }
+
+    // The walk `declared_type_of` makes, and for the same reason: a binding's range is the *declarator*, so the
+    // tree is asked where the declaration is rather than the geometry of a range. Two things are collected on the
+    // way: the last specifier sequence passed, and the last trailing return type.
+    let mut node = root.clone();
+    let mut specifiers = None;
+    let mut trailing = None;
+
+    loop {
+        if let Some(found) = node
+            .children()
+            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq)
+        {
+            specifiers = Some(found.text().to_string());
+        }
+        if let Some(found) = node
+            .children()
+            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TrailingReturnType)
+            && let Some(type_id) = found
+                .children()
+                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TypeId)
+        {
+            trailing = Some(type_id.text().to_string());
+        }
+
+        match node
+            .children_with_tokens()
+            .find(|element| {
+                element
+                    .as_node()
+                    .is_some_and(|child| holds(child, binding.range.start_offset))
+            })
+            .and_then(|element| element.into_node())
+        {
+            Some(child) => node = child,
+            None => break,
+        }
+    }
+
+    if let Some(trailing) = trailing {
+        let spelling = trailing.trim().to_string();
+        return (!spelling.is_empty()).then_some(spelling);
+    }
+
+    let spelling = strip_declaration_specifiers(&specifiers?);
+
+    // A **deduced** return type is not a type this layer can name. `auto` and `decltype(auto)` are the two
+    // spellings, and both would otherwise be looked up as class names — answering "no member `size` in `auto`"
+    // where the honest answer is that the file never said.
+    if spelling == "auto" || spelling == "decltype(auto)" {
+        return None;
+    }
+
+    (!spelling.is_empty()).then_some(spelling)
+}
+
 /// The base classes a class-like declaration was written with, in declaration order.
 ///
 /// Public for the same reason [`declared_type_of`] is: the query layer needs it for a class in the file being
@@ -278,6 +353,7 @@ fn fact_for(
         // that is not in a scope at all. See [`ScopeTree::declares_a_local`].
         local,
         type_of: declared_type_of(root, binding),
+        returns: declared_returns_of(root, binding),
         bases: declared_bases_of(root, binding),
         range: binding.range,
         name_range: binding.name_range,
@@ -961,8 +1037,7 @@ mod tests {
     }
 
     #[test]
-    fn a_declaration_inside_a_function_body_is_local() {
-        // The field `scope` cannot carry: `None` is both "at file scope", which every including file can name, and
+    fn a_declaration_inside_a_function_body_is_local() {        // The field `scope` cannot carry: `None` is both "at file scope", which every including file can name, and
         // "inside a function body", which nothing outside it can. Every kind of place a declaration can be written
         // is here, because the answer comes from the *scope chain* rather than from the declaration's shape.
         let (facts, _) = facts(
@@ -1001,5 +1076,52 @@ mod tests {
             local_of("inner"),
             "and a class declared in there declares locals too"
         );
+    }
+
+    #[test]
+    fn a_function_records_what_it_returns_and_nothing_else_does() {
+        // The other half of `type_of`, and the two are deliberately exclusive: `make` is not a `Widget` — a member
+        // access on the *name* has nothing to look in — while a call of it has one.
+        let (facts, _) = facts(
+            "Widget make();\n\
+             Widget w;\n\
+             struct C { Widget member(); };\n\
+             static inline Widget decorated();\n\
+             auto trailing() -> Widget;\n\
+             auto deduced() { return Widget{}; }\n\
+             void plain();\n",
+        );
+
+        let of = |name: &str| {
+            facts
+                .iter()
+                .find(|fact| fact.name == name)
+                .unwrap_or_else(|| panic!("`{name}` is declared in the fixture"))
+        };
+
+        assert_eq!(of("make").returns.as_deref(), Some("Widget"));
+        assert_eq!(of("make").type_of, None, "a function has no type of its own");
+        assert_eq!(
+            of("w").type_of.as_deref(),
+            Some("Widget"),
+            "…and a variable returns nothing"
+        );
+        assert_eq!(of("w").returns, None);
+        assert_eq!(
+            of("decorated").returns.as_deref(),
+            Some("Widget"),
+            "declaration specifiers are stripped, as they are from `type_of`"
+        );
+        assert_eq!(
+            of("trailing").returns.as_deref(),
+            Some("Widget"),
+            "a trailing return type wins — it is the one the file stated, and the specifiers say `auto`"
+        );
+        assert_eq!(
+            of("deduced").returns,
+            None,
+            "a deduced `auto` is not a class anything can be looked up in"
+        );
+        assert_eq!(of("plain").returns.as_deref(), Some("void"));
     }
 }

@@ -91,6 +91,25 @@ pub struct DeclFact {
     ///   not part of the type's name and a lookup by name is what this is for. `unsigned long` survives, because
     ///   there the words *are* the type.
     pub type_of: Option<String>,
+    /// The type a **function** returns, as the file spells it.
+    ///
+    /// The other half of [`DeclFact::type_of`], and separate from it for the reason that field's documentation
+    /// gives: a class *is* a type and a function *returns* one, so `Widget make();` has no `type_of` — `make` is
+    /// not a `Widget` and has no members — while its `returns` is what the *call* `make()` has. Collapsing the two
+    /// would make `make.size` resolve as if the function were the object.
+    ///
+    /// It exists for one query: `make().size` is answered by finding what `make` returns and then `size` inside
+    /// that, and nothing else in a fact says how to get from a call to a type.
+    ///
+    /// Same limits as `type_of`: **as written**, so a consumer resolves it with the qualified-name machinery and
+    /// gets `Unknown` where that cannot go; declaration specifiers stripped (`static inline Widget make()` records
+    /// `Widget`); `None` for everything that is not a function.
+    ///
+    /// A **trailing return type wins**, and it is the reason this cannot be read out of the specifier sequence
+    /// alone: `auto make() -> Widget` spells the type after the parameter list, so the specifiers say `auto`.
+    /// `None` for a return type the file does not state — `auto make() { … }` is deduced, and `auto` is not a
+    /// class anything can be looked up in.
+    pub returns: Option<String>,
     /// For a class-like declaration, the base classes it was written with, in declaration order.
     ///
     /// Spelled as written — `B`, `ns::C`, `Base<int>` — for the same reason [`DeclFact::type_of`] is: a consumer

@@ -1048,34 +1048,21 @@ fn type_of_expression(
     // A name: its declaration says what type it has. The file being edited is asked first, because a buffer that
     // has never been saved has no summary — the two-layer split the name query uses, for the same reason.
     if !written.is_empty() && written.chars().all(|c| c.is_alphanumeric() || c == '_') {
-        let offset = usize::from(expression.text_range().start());
-
-        let declared_type = match crate::sema::resolve::definition_at(scopes, root, offset) {
-            Known::Yes(binding) => crate::sema::declarations::declared_type_of(root, &binding)
-                .map(|type_of| (type_of, path.to_path_buf())),
-            Known::Unknown(UnknownReason::NotDeclaredHere(name)) => {
-                match index.definition(&name, path) {
-                    Known::Yes(found) => found
-                        .fact
-                        .type_of
-                        .clone()
-                        .map(|type_of| (type_of, found.file)),
-                    // The object is nowhere this analysis can see, so there is no type to read. Reporting the
-                    // *name* reason would say "the owner is missing" where what is missing is the type of an
-                    // expression — a different answer for a consumer deciding what to tell the user.
-                    Known::Unknown(_) | Known::No => None,
-                }
-            }
-            // A name this layer cannot place at all is not a type it can read. `No` means the offset is not on a
-            // name; any other `Unknown` is already the most specific answer available and is passed through.
-            Known::Unknown(reason) => return Known::Unknown(reason),
-            Known::No => None,
+        return match declaration_of_expression(index, scopes, root, path, expression) {
+            Known::Yes(named) => match named.type_of(root) {
+                Some(type_of) => Known::Yes((type_of, named.file(path))),
+                // The declaration is a function, a class or an alias: none of them has a type *as a name*, which
+                // is the distinction `DeclFact::returns` exists for.
+                None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+            },
+            Known::Unknown(reason) => Known::Unknown(reason),
+            Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
         };
+    }
 
-        return match declared_type {
-            Some(found) => Known::Yes(found),
-            None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
-        };
+    // A **call**: what the callee returns, or a temporary of the class it names.
+    if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::CallExpr {
+        return type_of_a_call(index, scopes, root, path, expression);
     }
 
     // A member access: the type of the member, which is a fact on its declaration.
@@ -1111,6 +1098,180 @@ fn type_of_expression(
     }
 
     Known::Unknown(UnknownReason::UnknownType(Box::from(written)))
+}
+
+/// The declaration an expression **names**, from the file being edited or from the index.
+///
+/// The reconciliation the two-layer split needs, in one place: the buffer answers with a [`crate::Binding`] whose
+/// spellings are read out of the tree, while an indexed file answers with a [`DeclFact`] that carries them as
+/// fields. Both are needed for the same two questions — what type does this name have, what does a call of it
+/// give — and a second reconciliation would be a second rule book for the same question.
+///
+/// The answers are the ones the name query gives, and for the same reason: a name this file cannot place is asked
+/// of the index, and a name *nothing* declares is [`UnknownType`] carrying the spelling rather than
+/// [`UnknownReason::NotDeclaredHere`] — what is missing here is the type of an expression, which is a different
+/// thing for a consumer to be told.
+///
+/// [`UnknownType`]: UnknownReason::UnknownType
+enum NamedDeclaration {
+    /// A binding of the file being edited. Its spellings come from the tree the caller has.
+    Here(crate::Binding),
+    /// A declaration in an indexed file, with the file it is in.
+    Indexed(DeclFact, PathBuf),
+}
+
+impl NamedDeclaration {
+    /// Where the declaration is — the answer's own file, for a consumer that has to jump or to look further.
+    fn file(&self, here: &Path) -> PathBuf {
+        match self {
+            NamedDeclaration::Here(_) => here.to_path_buf(),
+            NamedDeclaration::Indexed(_, file) => file.clone(),
+        }
+    }
+
+    /// The type this declaration was written with.
+    ///
+    /// `None` for a function — `make` is not a `Widget` and has no members — which is the distinction
+    /// [`DeclFact::type_of`] documents.
+    fn type_of(&self, root: &cpp_parser::CppSyntaxNode) -> Option<String> {
+        match self {
+            NamedDeclaration::Here(binding) => {
+                crate::sema::declarations::declared_type_of(root, binding)
+            }
+            NamedDeclaration::Indexed(fact, _) => fact.type_of.clone(),
+        }
+    }
+
+    /// What a **call** of this declaration has: the type it returns, or the class it declares.
+    ///
+    /// Two answers because C++ has two, and the tokens do not separate them: `make()` is a call of a function and
+    /// has what it returns, while `Widget()` — the same shape — is a *temporary* of the class. Only the
+    /// declaration says which, which is why this is asked here rather than of the shape.
+    fn what_a_call_has(&self, root: &cpp_parser::CppSyntaxNode) -> Option<String> {
+        match self {
+            NamedDeclaration::Here(binding) => {
+                if binding.kind == crate::BindingKind::Class {
+                    return binding
+                        .name
+                        .identifier_text()
+                        .map(|name| name.to_string());
+                }
+                crate::sema::declarations::declared_returns_of(root, binding)
+            }
+            NamedDeclaration::Indexed(fact, _) => what_a_call_has_in(fact),
+        }
+    }
+}
+
+/// [`NamedDeclaration::what_a_call_has`] for a declaration the index (or a member lookup) produced.
+fn what_a_call_has_in(fact: &DeclFact) -> Option<String> {
+    match fact.kind {
+        // `Widget()` is a temporary of `Widget`, so a call of a class has the class. `DeclKind::Type` is exactly
+        // "this declaration declares a class-like type", which is the case a call whose callee is a *type* lands in.
+        crate::DeclKind::Type => Some(fact.qualified_name()),
+        _ => fact.returns.clone(),
+    }
+}
+
+/// The declaration an expression names, or why it names none. See [`NamedDeclaration`].
+fn declaration_of_expression(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    expression: &cpp_parser::CppSyntaxNode,
+) -> Known<NamedDeclaration> {
+    let offset = usize::from(expression.text_range().start());
+    let written = expression.text().to_string();
+    let written = written.trim();
+
+    match crate::sema::resolve::definition_at(scopes, root, offset) {
+        Known::Yes(binding) => Known::Yes(NamedDeclaration::Here(binding)),
+        Known::Unknown(UnknownReason::NotDeclaredHere(name)) => match index.definition(&name, path) {
+            Known::Yes(found) => Known::Yes(NamedDeclaration::Indexed(found.fact, found.file)),
+            // The declaration is nowhere this analysis can see, so there is no type to read. Reporting the *name*
+            // reason would say "the owner is missing" where what is missing is the type of an expression — a
+            // different answer for a consumer deciding what to tell the user.
+            Known::Unknown(_) | Known::No => {
+                Known::Unknown(UnknownReason::UnknownType(Box::from(written)))
+            }
+        },
+        // A name this layer cannot place at all is not a type it can read. `No` means the offset is not on a name;
+        // any other `Unknown` is already the most specific answer available and is passed through.
+        Known::Unknown(reason) => Known::Unknown(reason),
+        Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+    }
+}
+
+/// The type of a **call**: `make().size` needs this, and so does `fac.build().size`.
+///
+/// # The two callees, and the one lookup behind them
+///
+/// ```text
+/// make()          a name: what it returns
+/// Widget()        a name, and the same tokens — a temporary of the class it names
+/// fac.build()     a member access: what the member returns
+/// ns::make()      a qualified name: what it returns
+/// ```
+///
+/// The first two are one case because only the *declaration* separates them, and the last two go through the
+/// lookups that already exist — the member lookup for a member call, the name lookup for everything else. What
+/// this adds is the last step: the callee's declaration says what a call of it has ([`what_a_call_has_in`]).
+///
+/// Everything else stays [`UnknownReason::UnknownType`]: a call of a function pointer, of a lambda, of a template
+/// parameter whose type is not known here. Each of those needs a type *computed* rather than read off a
+/// declaration, which is the same boundary the rest of this function has.
+fn type_of_a_call(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    call: &cpp_parser::CppSyntaxNode,
+) -> Known<(String, PathBuf)> {
+    let written = call.text().to_string();
+    let written = written.trim();
+
+    let Some(callee) = call.children().next() else {
+        return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
+    };
+
+    // A member call: the object's type, then the member's declaration, then what a call of it has.
+    if let Some(access) = crate::sema::resolve::member_access_of(&callee) {
+        let object = match type_of_expression(index, scopes, root, path, &access.object) {
+            Known::Yes((type_of, _)) => type_of,
+            Known::Unknown(reason) => return Known::Unknown(reason),
+            Known::No => return Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+        };
+
+        let class = base_type_name(&object);
+        if class.is_empty() {
+            return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
+        }
+
+        let found = member_fact(index, scopes, root, path, class, &access.member);
+        let Known::Yes((fact, file)) = found else {
+            let Known::Unknown(reason) = found else {
+                unreachable!("the first match established that this is an `Unknown`")
+            };
+            return Known::Unknown(reason);
+        };
+
+        return match what_a_call_has_in(&fact) {
+            Some(type_of) => Known::Yes((type_of, file)),
+            None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+        };
+    }
+
+    // Everything else is a name — `make()`, `Widget()`, `ns::make()` — and the name lookup is the one every other
+    // question about a name goes through.
+    match declaration_of_expression(index, scopes, root, path, &callee) {
+        Known::Yes(named) => match named.what_a_call_has(root) {
+            Some(type_of) => Known::Yes((type_of, named.file(path))),
+            None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+        },
+        Known::Unknown(reason) => Known::Unknown(reason),
+        Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+    }
 }
 
 /// The declaration of `member` in the class `class` names, and the file it is in.
@@ -1245,6 +1406,9 @@ fn fact_from_binding(root: &cpp_parser::CppSyntaxNode, class: &str, binding: &cr
         local: false,
         kind: crate::DeclKind::from_binding_kind(binding.kind),
         type_of: crate::sema::declarations::declared_type_of(root, binding),
+        // Answered here as well, because **members** are exactly where a call happens: `fac.build().size` needs the
+        // return type of a member function that the file being edited declares. See [`DeclFact::returns`].
+        returns: crate::sema::declarations::declared_returns_of(root, binding),
         bases: crate::sema::declarations::declared_bases_of(root, binding),
         range: binding.range,
         name_range: binding.name_range,
@@ -1960,10 +2124,12 @@ impl ProjectDefinition {
                 scope,
                 local,
                 kind: crate::DeclKind::from_binding_kind(binding.kind),
-                // No type and no bases, because this answer is a *place to jump to* and the binding it comes from
-                // carries neither: they are facts about the file's text, and the file they belong to has the
-                // summary that holds them. A consumer asking what a name *is* asks the index, not this answer.
+                // No type, no return type and no bases, because this answer is a *place to jump to* and the binding
+                // it comes from carries none of them: they are facts about the file's text, and the file they
+                // belong to has the summary that holds them. A consumer asking what a name *is* asks the index,
+                // not this answer.
                 type_of: None,
+                returns: None,
                 bases: Vec::new(),
                 range: binding.range,
                 name_range: binding.name_range,
@@ -2447,6 +2613,42 @@ mod tests {
     }
 
     #[test]
+    fn a_call_resolves_through_the_return_type_of_a_header() {
+        // The whole chain, and three of its links are in the header rather than in the buffer: the class, the
+        // member function, and the class its return type names. This is what `DeclFact::returns` was added for,
+        // and it is also the path a cached summary goes through — the field is written and read by the codec.
+        let source = "#include \"widget.h\"\nvoid f() {\n  Widget w;\n  w.inner().size = 1;\n}\n";
+        let (index, tree) = analysed(
+            &[(
+                "/p/widget.h",
+                "struct Inner {\n  int size;\n};\nstruct Widget {\n  Inner inner();\n};\n",
+            )],
+            "/p/main.cpp",
+            source,
+        );
+
+        let root = tree.get_red_root();
+        let scopes = crate::build_scopes(&root);
+        let found = super::member_across_files(
+            &index,
+            &scopes,
+            &root,
+            Path::new("/p/main.cpp"),
+            at(source, "size = 1;"),
+        );
+
+        let Known::Yes(definition) = found else {
+            panic!("`w.inner()` returns an `Inner`, which declares `size`: {found:?}");
+        };
+        assert_eq!(definition.fact.name, "size");
+        assert_eq!(
+            definition.file,
+            Path::new("/p/widget.h"),
+            "the member is in the header, like everything else on this chain"
+        );
+    }
+
+    #[test]
     fn a_name_only_a_header_declares_is_found_through_the_index() {        let source = "#include \"widget.h\"\nvoid f() {\n  Widget w;\n}\n";
         let (index, tree) = analysed(
             &[("/p/widget.h", "struct Widget { int size; };\n")],
@@ -2683,16 +2885,62 @@ mod tests {
     }
 
     #[test]
-    fn a_member_access_on_an_expression_is_an_unknown_type() {
-        // The boundary of this layer, stated as an answer rather than as a wrong guess: `f().size` has a type,
-        // and working it out is the larger problem the type layer will have to take on.
+    fn a_member_access_on_a_call_is_the_callees_return_type() {
+        // `make().size` — the construct `DeclFact::returns` exists for.
+        //
+        // This test used to assert the *opposite*, and its comment said so: "the boundary of this layer, stated as
+        // an answer rather than as a wrong guess: `f().size` has a type, and working it out is the larger problem
+        // the type layer will have to take on". That problem is now solved for a call whose callee is a
+        // declaration this analysis can find, so the boundary moved — the failure of this test is what said so.
         let source = "struct Widget {\n  int size;\n};\nWidget make();\n\
+                      void f() {\n  make().size = 1;\n}\n";
+        let found = member_of(&[], "/p/a.cpp", source, "size = 1;");
+
+        let Known::Yes(definition) = found else {
+            panic!("`make()` returns a `Widget`, so `size` is its member: {found:?}");
+        };
+        assert_eq!(definition.fact.name, "size");
+        assert_eq!(definition.fact.type_of.as_deref(), Some("int"));
+
+        // The other reading of the same tokens: `Widget()` is a **temporary** of the class rather than a call of
+        // anything, and the declaration is what says which one this is.
+        let constructed = member_of(
+            &[],
+            "/p/a.cpp",
+            "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget().size = 1;\n}\n",
+            "size = 1;",
+        );
+        assert!(
+            matches!(constructed, Known::Yes(_)),
+            "a temporary of a known class has the class's members: {constructed:?}"
+        );
+    }
+
+    #[test]
+    fn a_member_access_on_an_expression_that_is_not_a_call_is_an_unknown_type() {
+        // What is left of the old boundary, and the reason it is still a boundary: a dereference, a subscript and
+        // an arithmetic expression each need a type *computed* rather than read off a declaration.
+        let source = "struct Widget {\n  int size;\n};\nWidget* make();\n\
+                      void f() {\n  (*make()).size = 1;\n}\n";
+        let found = member_of(&[], "/p/a.cpp", source, "size = 1;");
+
+        assert!(
+            matches!(found, Known::Unknown(UnknownReason::UnknownType(_))),
+            "the object is a dereference, not a call: {found:?}"
+        );
+    }
+
+    #[test]
+    fn a_call_of_something_with_no_return_type_is_an_unknown_type() {
+        // The boundary inside the new capability, and it is the *honest* answer rather than a wrong guess: a
+        // deduced `auto` is not a class anything can be looked up in, so the file never says what this call has.
+        let source = "struct Widget {\n  int size;\n};\nauto make() { return Widget{}; }\n\
                       void f() {\n  make().size = 1;\n}\n";
         let found = member_of(&[], "/p/a.cpp", source, "size = 1;");
 
         assert!(
             matches!(found, Known::Unknown(UnknownReason::UnknownType(_))),
-            "the object is not a name, so its type is not known: {found:?}"
+            "the return type is deduced, so the file does not state it: {found:?}"
         );
     }
 
@@ -3599,12 +3847,35 @@ mod tests {
     }
 
     #[test]
-    fn a_completion_on_an_expression_with_no_type_offers_nothing_and_says_why() {
-        // `make().` is the boundary of the type layer, and this is where a user meets it. Offering the members of
-        // some other class would be worse than offering none: the list looks like an answer.
-        let source = "struct Widget {\n  int size;\n};\nWidget make();\n\
+    fn a_completion_after_a_call_offers_what_the_call_returns() {
+        // `make().` — the keystroke this capability exists for, and the one the test below is the boundary of.
+        // Before `returns` existed this answered `UnknownType`; now it is the same answer as `w.` for a `w` of the
+        // same type, which is the whole point of recording a return type at all.
+        let source = "struct Widget {\n  int size;\n  void grow();\n};\nWidget make();\n\
                       void f() {\n  make().\n}\n";
-        let found = completions_at(&[], "/p/a.cpp", source, "make().");
+        let Known::Yes(completions) = completions_at(&[], "/p/a.cpp", source, "make().") else {
+            panic!("`make()` returns a `Widget`");
+        };
+
+        assert_eq!(completions.class, "Widget");
+        assert_eq!(
+            completions
+                .members
+                .members
+                .iter()
+                .map(|member| member.fact.name.as_str())
+                .collect::<Vec<_>>(),
+            ["grow", "size"]
+        );
+    }
+
+    #[test]
+    fn a_completion_on_an_expression_with_no_type_offers_nothing_and_says_why() {
+        // What is left of the boundary, and this is where a user meets it. Offering the members of some other
+        // class would be worse than offering none: the list looks like an answer.
+        let source = "struct Widget {\n  int size;\n};\nWidget* make();\n\
+                      void f() {\n  (*make()).\n}\n";
+        let found = completions_at(&[], "/p/a.cpp", source, "(*make()).");
 
         assert!(
             matches!(found, Known::Unknown(UnknownReason::UnknownType(_))),
