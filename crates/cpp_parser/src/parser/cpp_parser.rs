@@ -214,13 +214,21 @@ pub struct CppParser<'a> {
     /// requirements, each of which is an expression, and leaving the innermost one must not clear the flag for the
     /// clause around it.
     constraint_depth: usize,
-    /// Is the declaration being parsed an **explicit instantiation** — `extern template void f<int>(int);`?
+    /// May the declaration being parsed be **named by a bare template-id**?
     ///
-    /// It is the one declaration in which a bare template-id is a valid *name*, so
-    /// [`crate::grammar::cpp::types::parse_declarator`] asks before refusing one. Set where the `extern
-    /// template` is consumed and cleared at the start of every declaration, so it cannot outlive the one it
+    /// Usually not: `C<T> x;` gives the arguments to the *type*, and a declarator whose name was `C<T>` is the
+    /// silent wrong tree [`crate::grammar::cpp::types::a_bare_template_id_is_here`] refuses. Three declarations
+    /// are the exception, and all three are declarations that must say *which* template they are about:
+    ///
+    /// ```text
+    /// extern template void f<int>(int);        an explicit instantiation
+    /// template <> void f<int>(int);            an explicit specialization — the head is empty
+    /// template <class T> bool v<T*> = true;    a partial specialization — the head is not empty
+    /// ```
+    ///
+    /// Set by each of those three, and cleared at the start of every declaration, so it cannot outlive the one it
     /// belongs to and let a later declaration read a name it should not.
-    in_an_explicit_instantiation: bool,
+    a_template_id_may_be_the_name: bool,
     /// Did the declarator parsed most recently declare a function?
     ///
     /// Set by [`crate::grammar::cpp::types::parse_declarator`] and read by
@@ -245,6 +253,27 @@ pub struct CppParser<'a> {
     /// knowing it is the difference between reading `BOOL_OPTION(x)` (a macro whose body supplies the `;`) and
     /// reading `g(x)` with its `;` missing (a typo). See [`crate::parser::MacroNames`].
     macro_names: crate::parser::MacroNames,
+    /// The names the **open template heads** declared as parameters that are types.
+    ///
+    /// The second half of [`CppParser::is_a_known_type_name`], and the construct that made it necessary:
+    ///
+    /// ```text
+    /// template <typename _Tp, size_t _Nm>
+    ///   constexpr bool __destructible<_Tp[_Nm]> = true;      <_Tp[_Nm]> is an **array type**
+    /// ```
+    ///
+    /// `_Tp[_Nm]` is a type argument only if `_Tp` is a type, and the tokens cannot say: `S<a[0]>` — a non-type
+    /// argument that is a subscript — has exactly the same shape. The file's own table answers such questions,
+    /// but a template parameter is *scoped* to the declaration its head introduces, and that table's depth counts
+    /// braced bodies rather than template declarations — so recording one there would make the name a type for
+    /// the rest of the file, which is the one failure direction `TypeNames` refuses. Hence a list of its own,
+    /// appended by each head and cut back when the declaration that owns it ends: see
+    /// [`CppParser::truncate_template_parameters`], which `parse_declaration` calls for exactly that reason.
+    ///
+    /// Measured over the closure of six standard headers: **51** template arguments of the `_Tp[_Size]` / `_Tp[]`
+    /// shape, every one of them a type argument, and not one instance of the subscript reading that makes the
+    /// question ambiguous.
+    template_parameters: Vec<Box<str>>,
     /// The first name written in type position by the declaration being parsed.
     ///
     /// `Widget` for `Widget w(1, 2);`, `None` for `int a(1);` — the keyword is not a name. Recorded while the
@@ -382,9 +411,10 @@ impl<'a> CppParser<'a> {
             closed_marks: std::collections::HashMap::new(),
             template_argument_depth: 0,
             constraint_depth: 0,
-            in_an_explicit_instantiation: false,
+            a_template_id_may_be_the_name: false,
             last_declarator_is_function: false,
             type_names: TypeNames::new(),
+            template_parameters: Vec::new(),
             macro_names: crate::parser::MacroNames::new(),
             declaration_type_name: None,
             previous_declaration_type_name: None,
@@ -426,9 +456,10 @@ impl<'a> CppParser<'a> {
             closed_marks: std::collections::HashMap::new(),
             template_argument_depth: 0,
             constraint_depth: 0,
-            in_an_explicit_instantiation: false,
+            a_template_id_may_be_the_name: false,
             last_declarator_is_function: false,
             type_names: TypeNames::new(),
+            template_parameters: Vec::new(),
             macro_names: crate::parser::MacroNames::new(),
             declaration_type_name: None,
             previous_declaration_type_name: None,
@@ -817,18 +848,17 @@ impl<'a> CppParser<'a> {
         self.constraint_depth = previous;
     }
 
-    /// Is the declaration being parsed an **explicit instantiation**? See the field's documentation.
+    /// May the declaration being parsed be named by a bare template-id? See the field's documentation.
     ///
-    /// Read by the declarator rule, which is the one that would otherwise refuse the template-id naming the
-    /// instantiation: `extern template void f<int>(int);` names `f<int>`, and a bare template-id is not a name
-    /// anywhere else.
-    pub fn in_an_explicit_instantiation(&self) -> bool {
-        self.in_an_explicit_instantiation
+    /// Read by the declarator rule, which is the one that would otherwise refuse the template-id that names an
+    /// instantiation or a specialization.
+    pub fn a_template_id_may_be_the_name(&self) -> bool {
+        self.a_template_id_may_be_the_name
     }
 
-    /// Record whether this declaration is an explicit instantiation, handing back the previous answer.
-    pub fn set_in_an_explicit_instantiation(&mut self, value: bool) -> bool {
-        std::mem::replace(&mut self.in_an_explicit_instantiation, value)
+    /// Record whether this declaration may be named by a bare template-id, handing back the previous answer.
+    pub fn set_a_template_id_may_be_the_name(&mut self, value: bool) -> bool {
+        std::mem::replace(&mut self.a_template_id_may_be_the_name, value)
     }
 
     /// Record whether the declarator just parsed declared a function. See the field's docs.
@@ -854,8 +884,39 @@ impl<'a> CppParser<'a> {
     /// The question that separates `Widget w(1, 2);` from `g(1, 2);`. A `false` is not "not a type" but "this
     /// file does not say it is one" — a type from an included header, a template parameter, or a builtin this
     /// table never saw. Callers must therefore treat it as one signal among several rather than as the answer.
+    ///
+    /// A **template parameter** counts, and the two sources are kept apart because they are scoped differently:
+    /// see [`CppParser::template_parameters`].
     pub fn is_a_known_type_name(&self, name: &str) -> bool {
         self.type_names.is_a_type(name)
+            || self
+                .template_parameters
+                .iter()
+                .any(|parameter| &**parameter == name)
+    }
+
+    /// Record a template parameter that declares a **type** — `typename T`, `class C`.
+    ///
+    /// Called by the template parameter rule, which is the only place that knows which spelling of a parameter
+    /// this is: `int N` and `auto N` declare *values*, and `N[4]` is not an array of anything.
+    pub fn declare_template_parameter(&mut self, name: &str) {
+        self.template_parameters.push(Box::from(name));
+    }
+
+    /// How many template parameters are in scope, so that [`CppParser::truncate_template_parameters`] can cut
+    /// the list back to a caller's own state.
+    pub fn template_parameter_count(&self) -> usize {
+        self.template_parameters.len()
+    }
+
+    /// Forget every template parameter recorded since `count` names were in scope.
+    ///
+    /// The list is appended as heads are read and cut back by the **declaration** that owns them, which is what
+    /// keeps a parameter from being a type name for the rest of the file. Nested declarations save and restore
+    /// around themselves, so a class template's members still see the class's parameters: the length the member's
+    /// own `parse_declaration` saved already includes them.
+    pub fn truncate_template_parameters(&mut self, count: usize) {
+        self.template_parameters.truncate(count);
     }
 
     /// Enter a braced body, for the table's scope approximation.
@@ -1088,6 +1149,17 @@ impl<'a> CppParser<'a> {
     /// A *parser* depth rather than a C++ scope — a class body counts the same as a function body. That is the
     /// approximation `TypeNames` documents, and it is on the safe side here: what the answer licenses is the
     /// declaration reading, which is the cheaper of the two mistakes.
+    ///
+    /// What it must **not** count is a brace that is not a body: a **linkage specification's** block
+    /// (`extern "C++" { … }`) introduces no scope for names at all — see [`parse_linkage_block`] — so the depth
+    /// does not move inside one, and the rules that ask "am I inside a body" (the macro-from-a-header rules of
+    /// `stats.rs` and `decls.rs`) keep answering no there. Counting it was a bug with wide reach: most of
+    /// libstdc++ is written inside `extern "C++" { namespace std { … } }`, so `_GLIBCXX_BEGIN_NAMESPACE_VERSION`
+    /// was read as a name instead of as the macro it is, and the declaration behind it came out as an expression
+    /// (`expected `;` after expression` at `using ::wint_t;` — the first error of `cwchar`, `cstdlib` and every
+    /// other header with that shape).
+    ///
+    /// [`parse_linkage_block`]: crate::grammar::cpp::decls::parse_linkage_block
     pub fn is_inside_a_body(&self) -> bool {
         self.type_names.depth() > 0
     }

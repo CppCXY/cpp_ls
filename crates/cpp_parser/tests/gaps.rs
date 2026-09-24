@@ -269,6 +269,23 @@ fn a_macro_from_a_header_can_stand_where_a_declaration_goes() {
         CppSyntaxKind::MacroCall
     ));
 
+    // …and the wrapper most of libstdc++ is actually written in: a **linkage specification's block**, which is a
+    // scope for names but *not* a body. Reading it as a body is what made every macro in there fail, and the
+    // symptom was nowhere near the cause — `using ::wint_t;` reported `expected ; after expression`, because the
+    // macro above it had been read as a name and the declaration behind it as an expression.
+    let in_a_linkage_block = "extern \"C++\"\n{\nnamespace std\n{\n_GLIBCXX_BEGIN_NAMESPACE_VERSION\n\
+                              struct Widget { int size; };\n}\n}\n";
+    assert!(
+        contains(in_a_linkage_block, CppSyntaxKind::MacroCall),
+        "the macro is still a macro inside a linkage block"
+    );
+    assert!(
+        CppParser::parse(in_a_linkage_block, ParserConfig::default())
+            .get_errors()
+            .is_empty(),
+        "and the declaration behind it is read as one"
+    );
+
     // The shapes that must keep their reading.
     assert!(
         !contains("x = 1;\n", CppSyntaxKind::MacroCall),
@@ -791,7 +808,34 @@ fn constructs_the_parser_reads() {
             // `[[likely]]` on the substatement, which is where C++20 puts it.
             "if (x) [[likely]] { }",
             "if (x) [[unlikely]] y();",
-            "if (x) [[likely]] { } else [[likely]] { }",            "delete[] p;",
+            "if (x) [[likely]] { } else [[likely]] { }",
+            // A template head *wraps* the declaration it introduces, and three things follow from that being read
+            // as a head rather than as tokens in front of one. Each was a separate defect, and the census of the
+            // standard library found all three:
+            //
+            // * a **partial specialization** names its template with a template-id in the *name* position —
+            //   `v<T*>` — which is what the rule refusing a bare template-id there used to refuse;
+            // * an **unnamed parameter whose type is an array** — `f(T[4])`, whose `[4]` is a declarator suffix
+            //   that opens only when "does this declaration lead with a type keyword" answers yes — and that
+            //   question was answered by walking back past the head, where the first token is `template`;
+            // * an **array type as a template argument** — `S<T[N]>`, which is a type only if `T` is one, and `T`
+            //   is a template parameter: a name the file declares in type position, scoped to its declaration.
+            "template <typename T> constexpr bool v = false;",
+            "template <typename T> constexpr bool v<T*> = true;",
+            "template <> constexpr bool v<int> = true;",
+            "template <typename T, int N> struct S<T[N]> { };",
+            "template <typename T> struct S<T[]> { };",
+            "template <typename T, int N> constexpr bool d<T[N]> = true;",
+            "template <typename T> void f(T[4]);",
+            "template <typename T> void f(T[]);",
+            "template <template <class> class C, class T> struct S<C<T>> { };",
+            "template <class T> struct Outer { template <class U> void f(T t, U u[4]); };",
+            // A **linkage specification's block is not a body**: the declarations inside are at file scope, so the
+            // macro-from-a-header rules keep working in there. Most of libstdc++ is written inside
+            // `extern "C++" { namespace std { … } }`, and counting that block as a body is what made
+            // `_GLIBCXX_BEGIN_NAMESPACE_VERSION` read as an ordinary name.
+            "extern \"C++\"\n{\nnamespace std\n{\n_GLIBCXX_BEGIN_NAMESPACE_VERSION\n  int helper();\n}\n}",
+            "delete[] p;",
             "int n = sizeof(void(int));",
             "auto x = a ? b : c;",
             // The C++17 initializer in a condition: a declaration, a `;`, and the condition itself.
@@ -1518,6 +1562,17 @@ fn constructs_are_read_as_the_right_node() {
         ),
     ]);
 
+    // The other half of the array assertion above, and the half that keeps it from being a licence: a name that
+    // is *not* a template parameter keeps its subscript. `a[I]` is an expression, and an `ArrayType` here would be
+    // a type the file never wrote.
+    assert!(
+        !contains(
+            "template <int I> struct S<a[I]> { };",
+            CppSyntaxKind::ArrayType
+        ),
+        "`a` is not a template parameter, so `a[I]` is a subscript"
+    );
+
     // The `::` of a `::new` belongs to the **allocation**, not to whatever encloses it: the two spellings mean
     // different functions when the type has its own `operator new`, so a tree that dropped the qualification
     // would be lossless, well formed, diagnostic-free and wrong.
@@ -1766,6 +1821,18 @@ fn modern_constructs_produce_the_right_nodes() {
         (
             "__forceinline int f(void) { return 0; }",
             CppSyntaxKind::InlineSpec,
+        ),
+        // The **array** is the assertion, twice over. In the first it is a *type argument* — `_Tp[_Nm]` is the
+        // idiomatic array specialization, and reading it as a subscript would give the argument no type at all.
+        // What tells the two apart is that `_Tp` is a **template parameter**, which is why the second is here:
+        // `a` is not one, so `a[I]` stays an expression and no `ArrayType` may appear.
+        (
+            "template <typename _Tp, int _Nm> constexpr bool d<_Tp[_Nm]> = true;",
+            CppSyntaxKind::ArrayType,
+        ),
+        (
+            "template <typename T> void f(T[4]);",
+            CppSyntaxKind::ArrayType,
         ),
     ]);
 

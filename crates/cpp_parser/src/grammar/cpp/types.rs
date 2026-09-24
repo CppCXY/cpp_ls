@@ -1892,8 +1892,8 @@ fn a_matching_angle_bracket_follows(p: &CppParser) -> bool {
 fn a_bare_template_id_is_here(p: &CppParser) -> bool {
     // An **explicit instantiation** is the one declaration whose *name* is a template-id —
     // `extern template void f<int>(int);` asks for the instantiation of `f<int>` — so the rule is suspended
-    // there and nowhere else. See [`CppParser::in_an_explicit_instantiation`].
-    if p.in_an_explicit_instantiation() {
+    // there and nowhere else. See [`CppParser::a_template_id_may_be_the_name`].
+    if p.a_template_id_may_be_the_name() {
         return false;
     }
 

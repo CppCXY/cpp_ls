@@ -293,11 +293,54 @@ fn ends_a_template_parameter_head(kind: CppTokenKind) -> bool {
     definitely_ends_a_type(kind) || matches!(kind, CppTokenKind::Ellipsis | CppTokenKind::Greater)
 }
 
+/// The name this template parameter declares as a **type**, when it declares one.
+///
+/// Three spellings introduce a type parameter, and all three are asked of the **tokens in front** of the
+/// parameter rather than of anything the parse produced:
+///
+/// ```text
+/// typename T        class T        typename… Ts / class… Ts
+/// ```
+///
+/// `template <…> class C` is a fourth, and it is asked after the inner head has been read — the name comes
+/// *after* the head, which is the only reason this is called twice in [`parse_template_parameter`].
+///
+/// Everything else declares a **value** — `int N`, `auto N`, `size_t N` — and is deliberately not a type name:
+/// `N[4]` is a subscript of an array, not an array of `N`.
+fn a_type_parameter_name(p: &CppParser) -> Option<String> {
+    if !matches!(
+        p.current_token(),
+        CppTokenKind::TypenameKeyword | CppTokenKind::ClassKeyword
+    ) {
+        return None;
+    }
+
+    // `typename… Ts` / `class… Ts`: the name follows the pack marker, which follows the keyword.
+    if p.peek_next_token() == CppTokenKind::Ellipsis {
+        let name = p.peek_token_text_at(2);
+        return (!name.is_empty()).then(|| name.to_string());
+    }
+
+    if p.peek_next_token() != CppTokenKind::Identifier {
+        return None;
+    }
+
+    Some(p.peek_token_text_at(1).to_string())
+}
+
 /// Parse one template parameter: `typename T`, `class C`, `int N`, `template <...> class T`,
 /// `T...`, or a constrained parameter `C T`.
 fn parse_template_parameter(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::TemplateParameter);
+
+    // Which parameters declare a **type**, recorded before anything consumes them: the specifier sequence reads
+    // `typename T` as one specifier, so by the time it returns the name is behind the cursor and the spelling
+    // that said "this is a type" is the only thing that could have told us. `int N` and `auto N` declare values
+    // and are deliberately not recorded — `N[4]` is not an array of anything.
+    if let Some(name) = a_type_parameter_name(p) {
+        p.declare_template_parameter(&name);
+    }
 
     // A template template parameter: `template <typename> class C`.
     if p.current_token() == CppTokenKind::TemplateKeyword
@@ -305,6 +348,13 @@ fn parse_template_parameter(p: &mut CppParser) -> ParseResult {
     {
         p.close_marks_above(base);
         return Err(err);
+    }
+
+    // The name of a **template template** parameter comes after its head: `template <…> class C`. The head has
+    // just been read, so this is the first moment the `class C` half can be seen, and the spelling is the same
+    // one the check above looks for.
+    if let Some(name) = a_type_parameter_name(p) {
+        p.declare_template_parameter(&name);
     }
 
     // `typename... Rest` — the one spelling that cannot go through the declaration machinery below, and the
@@ -411,12 +461,19 @@ pub fn parse_declaration(p: &mut CppParser) -> ParseResult {
     // Cleared on entry and restored on the way out, on every path including the error ones: a flag that
     // outlived its declaration would let the *next* one read a bare template-id as a name, which is the silent
     // wrong tree the rule exists to prevent. See [`crate::grammar::cpp::types::a_bare_template_id_is_here`].
-    let outer = p.in_an_explicit_instantiation();
-    p.set_in_an_explicit_instantiation(false);
+    let outer = p.a_template_id_may_be_the_name();
+    p.set_a_template_id_may_be_the_name(false);
+
+    // A **template parameter** is a name declared as a type, and it is scoped to the declaration its head
+    // introduces — so this is where that scope ends. The count is saved rather than the list, and cut back
+    // rather than cleared, so a nested declaration (a member of a class template) keeps the parameters of the
+    // head around it: what *it* saved already includes them.
+    let parameters_before = p.template_parameter_count();
 
     let result = parse_declaration_here(p);
 
-    p.set_in_an_explicit_instantiation(outer);
+    p.truncate_template_parameters(parameters_before);
+    p.set_a_template_id_may_be_the_name(outer);
     result
 }
 
@@ -572,7 +629,7 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
         // What follows names the instantiation, and for a function that name is a **template-id**:
         // `extern template void f<int>(int);`. Recorded for the declarator rule, which otherwise refuses one —
         // correctly, since a declarator's name may not have template arguments in any other declaration.
-        p.set_in_an_explicit_instantiation(true);
+        p.set_a_template_id_may_be_the_name(true);
     }
 
     // The same construct **without** `extern`: `template void f<int>(int);`, `template class C<int>;`,
@@ -590,7 +647,7 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
         && p.peek_next_token() != CppTokenKind::Less
     {
         p.bump(); // `template`
-        p.set_in_an_explicit_instantiation(true);
+        p.set_a_template_id_may_be_the_name(true);
     }
 
     // The `export` of `export int helper();`, consumed *inside* the declaration node rather than at the
@@ -607,23 +664,25 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
     // concepts without five copies of the same parser.
     let mut seen_a_template_head = false;
     if p.current_token() == CppTokenKind::TemplateKeyword {
-        // An **empty** head — `template <>` — introduces an explicit *specialization* rather than a template, and
-        // the declaration it introduces is named by a template-id in exactly the way an explicit instantiation is:
+        // Whatever head it is — empty or not — the declaration it introduces is one of the three that may be
+        // **named by a template-id**, because each of them has to say *which* template it is about:
         //
         // ```text
-        // template <> void f<int>(int);      a function specialization
-        // template <> int v<int>;            a variable specialization
+        // template <> void f<int>(int);              an explicit specialization: the head is empty
+        // template <class T> bool v<T*> = true;      a partial specialization: it is not
         // ```
         //
-        // The flag that permits such a name therefore covers this spelling too. Without it the declaration was
-        // refused by the rule that stops a *bare* template-id from being a declarator's name — a rule written for
-        // the ambiguity between a name and a type, which has no ambiguity to resolve here: a specialization must
-        // say which specialization it is.
-        if p.peek_next_token() == CppTokenKind::Less
-            && p.peek_token_kind_at(2..3).as_slice() == [CppTokenKind::Greater]
-        {
-            p.set_in_an_explicit_instantiation(true);
-        }
+        // The empty spelling used to be the only one that set this, and the non-empty one was left to the rule
+        // that refuses a bare template-id in a declarator's name — a rule written for the *type/name* ambiguity
+        // (`C<T> x;` gives the arguments to the type), which has nothing to resolve here: a variable template's
+        // partial specialization writes its arguments in the name position and has nowhere else to put them. It
+        // cost `bits/stl_pair.h` (`__is_tuple_v<tuple<_Ts...>>`), `concepts` (`__destructible_impl<_Tp>`) and
+        // `bits/functional_hash.h` their first error each.
+        //
+        // Setting it for *every* templated declaration costs nothing: the flag is only consulted at a declarator's
+        // name, and no other declaration a head can introduce writes a template-id there — `template <class T>
+        // C<T> x;` gives the arguments to the type, which the specifier sequence has already taken.
+        p.set_a_template_id_may_be_the_name(true);
 
         if let Err(err) = parse_template_head(p) {
             p.rollback(checkpoint);
@@ -2269,12 +2328,30 @@ pub fn the_head_of_the_declaration_is_qualified(p: &CppParser) -> bool {
 /// is what keeps it inside this statement: without that, `void f() { g(1); }` would find the `void` of the
 /// enclosing function and call the call a declaration.
 ///
+/// It also steps over **angle lists**, and stops at a template head's `template`. Both were bugs rather than
+/// refinements, and they were the same bug: the walk collected the token that followed the earliest boundary,
+/// so for a declaration under a head it collected the `<` of `template <…>` and answered "not a type keyword"
+/// for every one of them.
+///
+/// The symptom was narrow enough to hide and wide enough to matter: the suffix loop of an **unnamed** declarator
+/// opens only when this answers yes (a named one opens on its own name), so
+/// `template <class T> void f(int[4]);` failed with ``expected a parameter list or an initializer`` — the
+/// parameter's `[4]` had nothing to attach to — while `void f(int[4]);` was read, and while the same parameter
+/// *with* a name was read too. Measured: `bits/stl_pair.h`, `concepts` and `bits/functional_hash.h` each stopped
+/// at a line of this shape.
+///
+/// The angle stepping is the other half and is what makes the stop at `template` mean anything: a list's own
+/// tokens are not the declaration's beginning — `std::vector<int> x` begins at `std::vector` — so both halves of
+/// an angle list are stepped over rather than assigned.
+///
 /// Not asked of the event stream, which was the first attempt and does not work: the events reach back to the
 /// beginning of the file, so the `BuiltinType` of an enclosing declaration is indistinguishable from this
 /// one's by node kind alone.
 fn declarator_starts_with_a_type_keyword(p: &CppParser) -> bool {
     let mut index = p.current_token_index();
     let mut first = None;
+    // How many angle lists the walk is inside, counted **backwards**: a `>` opens one, its `<` closes it.
+    let mut angles = 0usize;
 
     while index > 0 {
         index -= 1;
@@ -2282,11 +2359,28 @@ fn declarator_starts_with_a_type_keyword(p: &CppParser) -> bool {
 
         if matches!(
             kind,
-            CppTokenKind::Semicolon | CppTokenKind::LeftBrace | CppTokenKind::RightBrace
+            CppTokenKind::Semicolon
+                | CppTokenKind::LeftBrace
+                | CppTokenKind::RightBrace
+                | CppTokenKind::TemplateKeyword
         ) {
             break;
         }
         if is_declaration_trivia(kind) {
+            continue;
+        }
+
+        match kind {
+            CppTokenKind::Greater => angles += 1,
+            CppTokenKind::RightShift => angles += 2,
+            // The `<` that closes the list being walked through is stepped over like the tokens inside it.
+            CppTokenKind::Less if angles > 0 => {
+                angles -= 1;
+                continue;
+            }
+            _ => {}
+        }
+        if angles > 0 {
             continue;
         }
 
@@ -3616,16 +3710,29 @@ fn parse_stats_block(p: &mut CppParser) -> ParseResult {
 /// construct rather than a statement block: everything inside is a declaration, and the names it introduces
 /// are visible afterwards, which is why it is parsed by the declaration rule rather than
 /// [`parse_stats_block`].
+///
+/// # Why it does not enter a scope, although every other brace does
+///
+/// A linkage specification is **not** a scope for names — C++ says the declarations inside it are visible
+/// outside exactly as if the block were not there, and only their *language linkage* is affected. So the two
+/// things every other braced construct does here are wrong for it, and it does neither:
+///
+/// * no name scope, so a type declared inside is a type name afterwards (what the standard says);
+/// * no *body*, which is what `is_inside_a_body` reports — and this one had teeth. Entering a scope made the
+///   parser believe it was inside a body, and the macro-from-a-header rules (`at_a_macro_that_stands_for_a_
+///   declaration`, `a_macro_definition_follows`) refuse inside a body by design. Most of libstdc++ is written
+///   inside `extern "C++" { namespace std { … } }`, so `_GLIBCXX_BEGIN_NAMESPACE_VERSION` was read as an ordinary
+///   name and the declaration after it as an expression: the first error of `cwchar` was
+///   ``expected `;` after expression`` at `using ::wint_t;`, and `cstdlib` failed the same way at `using ::div_t;`.
 pub fn parse_linkage_block(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::CompoundStat);
 
     expect_token(p, CppTokenKind::LeftBrace)?;
 
-    // A linkage block is a scope, like a namespace body, so a type declared inside it is not a type outside.
-    p.enter_type_name_scope();
     // A *block* rather than a class body: `extern "C" { int bits : 3; }` is not a member declaration, and the
-    // innermost brace is what the bit-field rule asks about.
+    // innermost brace is what the bit-field rule asks about. That question is about the brace, not about scopes,
+    // which is why this one stays.
     p.enter_block_body();
 
     while p.current_token() != CppTokenKind::RightBrace && !p.is_eof() {
@@ -3643,7 +3750,6 @@ pub fn parse_linkage_block(p: &mut CppParser) -> ParseResult {
     }
 
     p.leave_block_body();
-    p.leave_type_name_scope();
 
     if p.current_token() == CppTokenKind::RightBrace {
         p.bump();

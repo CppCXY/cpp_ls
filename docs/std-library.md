@@ -185,11 +185,11 @@ let config = toolchain.map_or_else(CompilerConfig::new, |toolchain| toolchain.co
 在那之前，P0 的收益（"真实项目的文件终于能被缓存"）**只是可兑现的，不是已兑现的**——这一条写在
 `index-design.md` 的"现在答不了什么"表里。
 
-### P1 让闭包干净解析（**进行中**：48 → 97 个文件干净）
+### P1 让闭包干净解析（**进行中**：48 → 101 个文件干净）
 
 **按形状放宽，而不是接表**——这是这一轮最重要的一条计划修正，理由见下。
 
-十条规则都落在 parser 里，都**不依赖任何宏表**，因为标准库的宏名字定义在 `c++config.h`（一个**被包含**的文件）里，本文件的 `MacroNames` 没见过它，而外部表（`symbols.rs`）也没接到 includes 上。能知道的只有形状，而形状在这些地方是决定性的：
+十几条规则都落在 parser 里，都**不依赖任何宏表**，因为标准库的宏名字定义在 `c++config.h`（一个**被包含**的文件）里，本文件的 `MacroNames` 没见过它，而外部表（`symbols.rs`）也没接到 includes 上。能知道的只有形状，而形状在这些地方是决定性的：
 
 | 形状 | 规则 | 代价 |
 |---|---|---|
@@ -203,6 +203,8 @@ let config = toolchain.map_or_else(CompilerConfig::new, |toolchain| toolchain.co
 | `int f() throw(int)`（63 处 / 14 个文件） | 声明符**后缀**位置上的 `throw(…)`，载荷按**类型表**读（`TypeId` + 逗号） | C++17 删掉了这个规格，但标准库还写着；这个位置不可能有 throw **表达式**（形参表已经结束），所以读法唯一。变量声明没有 `throw(…)`，于是它还能给"两条读法都成功"的 `T x(y)` 断案 |
 | `if _GLIBCXX17_CONSTEXPR (cond)`、`if (cond) [[likely]]`（12 + 7 个文件） | `if` 与条件之间允许一个标识符（后随 `(`）；子语句上的属性在 `parse_statement_body` 里读，于是 then/else/每个循环体一次覆盖 | `if` 后面必然是 `(`，所以一个标识符**不花任何合法程序**；属性的位置在 C++20 里就是子语句 |
 | `__cdecl` / `__restrict` / `__extension__` / `__forceinline`（1464 / 365 / 61 / 3 处） | 编译器自己的关键字，在说明符序列和声明符的限定符位置都接受；`__restrict` → `RestrictQual`，`__forceinline` → `InlineSpec`，叫用约定留作裸 token | 同样的两个条件（保留给实现、来自编译器），而这一条修的是**静默错树**：`int __cdecl g(void);` 原本读成"名字叫 `__cdecl`、后缀是宏 `g(void)`"，零诊断 |
+| `extern "C++" { namespace std { … } }`（**每个** libstdc++ 头的骨架） | 链接块**不进**名字作用域，于是也不被当成 body；里面的宏规则照常生效 | 标准说链接块只影响 language linkage、不引入名字作用域，所以这一条本来就该如此（详见 `grammar-gaps.md` 第九轮第一条） |
+| `template <class T> bool v<T*> = true;`（变量的偏特化） / `S<T[N]>`（数组做实参） / `void f(T[4]);`（无名数组形参） | 模板头被当**包着声明的东西**读：偏特化可以有一个 template-id 名字；数组类型实参靠"`T` 是模板参数"认出来（模板参数是文件在类型位置声明的名字，作用域是它那条声明）；回走的判据跨过尖括号表并在 `template` 处停 | 三条都是"判据的边界不在它以为的地方"，症状一律出现在**别的行**上（`expected a parameter list or an initializer` 指向一个形参、`expected a template argument` 指向 `_Tp[_Nm]`），所以三条都由同一个探针（闭包普查 + 首错定位）找出来 |
 
 **实测**（`examples/std_probe.rs`，同一份 185 个文件的闭包）：
 
@@ -214,9 +216,10 @@ let config = toolchain.map_or_else(CompilerConfig::new, |toolchain| toolchain.co
 后缀位置的宏之后：干净 87 / 报错 95     （"行内有闭包宏"降到 44%）
 运算符名之后：干净 88 / 报错 94
 第八轮（::new / __try / throw() / if 宏 / [[likely]] / 编译器关键字）之后：干净 97 / 报错 85
+第九轮（链接块不是 body / 变量偏特化 / 无名数组形参 / 数组类型做实参）之后：干净 101 / 报错 81，消息总数 ≈2423 → ≈2252
 ```
 
-**第八轮的六个构造一起算只多了 9 个干净文件，但其中一条改掉的是 1464 处静默错树**（`__cdecl`，见 [`grammar-gaps.md`](grammar-gaps.md) 的第八轮那一节和维护约定第 29 条）：那些文件本来就"解析成功"，普查数不出来。所以两个数字要一起看——`clean` 数报错，`gaps.rs` 的形状断言数错树。
+**第八轮的六个构造一起算只多了 9 个干净文件，但其中一条改掉的是 1464 处静默错树**（`__cdecl`，见 [`grammar-gaps.md`](grammar-gaps.md) 的第八轮那一节和维护约定第 29 条）：那些文件本来就"解析成功"，普查数不出来。所以两个数字要一起看——`clean` 数报错，`gaps.rs` 的形状断言数错树。第九轮同理：四条里只有一条（链接块）直接把 4 个文件推到干净，另外三条把 `stl_pair.h`（72→60 条错）、`concepts`、`type_traits` 这些文件的首错往后推了一大截。
 
 `bits/stl_algobase.h` 一个文件从 190 条错降到零头——那 190 条全部来自第 83 行的命名空间头。后缀那一条一次拿下 17 个报错文件里的 5 个，包括 `c++config.h`、`move.h`、`new_allocator.h`、`typeinfo` 这些每个文件都要用的头。
 
@@ -241,7 +244,7 @@ let config = toolchain.map_or_else(CompilerConfig::new, |toolchain| toolchain.co
 
 **这一轮选了 3**：语义那一轮做完了不变量 3 的粒度（`DeclFact::clean`，**见下面那一节——顺带更正了第 2 条里"这才是真正挡着语义查询的那道门"这个判断：实测证明门是解析缺口，不是可信度**）；随后的一轮回到 P1，把队列前六项做完（`::new`、`__try`/`__catch`、`throw()`、`if` 与条件之间的宏、子语句上的 `[[likely]]`、编译器自己的关键字），闭包 88 → **97** 个文件干净，形状断言同时钉住了一条 1464 处的静默错树。
 
-**下一步的队列**（`std_probe` 随时重排，且会打印文件名）：`#if` 落在 `if` 与它的 `else` 之间（`bits/stl_construct.h` 的 214 行，本轮新露出来的）、模板参数表里的宏（`typename... _ArgTypes _GLIBCXX_NOEXCEPT_PARM`，`refwrap.h`）、变量模板的偏特化（`concepts`、`functional_hash.h`、`bits/stl_pair.h`）、`typedef __typeof__(…)` 与 `__int128`（`bits/stl_uninitialized.h`、`ranges_base.h`、`stddef.h`、`_mingw.h`）、小写函数式宏独占一行（`__glibcxx_function_requires(…)`，形状规则要求"后面能开始一个声明"，而它后面跟着的是另一个语句）、`subrange_kind::sized ? … : …` 当模板实参（`bits/ranges_util.h`）。
+**下一步的队列**（`std_probe` 随时重排，且会打印文件名）：`#if` 落在 `if` 与它的 `else` 之间（`bits/stl_construct.h` 的 214 行）、模板参数表里的宏（`typename... _ArgTypes _GLIBCXX_NOEXCEPT_PARM`，`refwrap.h`）、`typedef __typeof__(…)` 与 `__int128`（`bits/stl_uninitialized.h`、`ranges_base.h`、`stddef.h`、`_mingw.h`）、小写函数式宏独占一行（`__glibcxx_function_requires(…)`）、`if constexpr (requires { … })`（`basic_string.h`）、类模板成员函数定义里的 `{ return 0; }`（`functional_hash.h`，第九轮新露出来的）、推导指引里的 `basic_string_view(_It, _End) -> …`（`string_view`）、`subrange_kind::sized ? … : …` 当模板实参（`bits/ranges_util.h`）。
 
 **这一轮的规则被抓出来三次，每次都是"看起来对、其实把另一种读法吃了"**，三次都钉在 `gaps.rs` / `tests/symbols.rs` 里：
 
