@@ -1417,3 +1417,39 @@ operator bool() &&  // && 和 ( 分开     -> 这是成员函数的引用限定�
     **这里按拼写匹配是有依据的，和第 16 条批评的"拼写约定"不是一回事**：这两个名字由标准保留给实现，任何 `#define __attribute__` 的程序都不在需要读的范围里；而且它是**编译器**的扩展，不是文件的——没有任何头文件里的 `#define` 能把它变成别的东西。判据要同时满足这两条才算数，`MY_API` 两条都不满足（所以它继续走"表 → 兜底约定"那条路）。
 
     属性内部的括号是**平衡 token 组**，不是语法：`__attribute__ ((__mode__ (TI)))`、`__attribute__ ((__format__ (gnu_printf, 1, 2)))` 的内容是编译器的事，这里一个字都不解释。GNU 拼写的双括号不需要特例——平衡计数把它们当普通嵌套，外层那对才是属性的界。
+
+25. **declarator 的**后缀**位置上，标识符只有两种读法**（已修，一次拿下 17 个报错文件里的 5 个）。libstdc++ 在几乎每条声明后面都放一个宏：
+
+    ```text
+    inline void __terminate() _GLIBCXX_USE_NOEXCEPT
+    T* addressof(T& r) _GLIBCXX_NOEXCEPT { … }
+    bool before(const type_info&) const _GLIBCXX_NOEXCEPT;      cv 限定符之后
+    void f() _GLIBCXX_NOEXCEPT_IF(noexcept(g()));                带参数的
+    extern "C" void abort(void) _GLIBCXX_NOTHROW _GLIBCXX_NORETURN;   连着两个
+    int x MY_DECL_SUFFIX;                                        变量名之后
+    ```
+
+    在这两个位置（函数 declarator 的后缀、变量 declarator 的名字之后），一个标识符**只有两种读法**：上下文关键字，或者宏。其余合法的东西全是关键字或标点——`{`、`;`、`=`、`,`、`:`、`[[`、`->`、`noexcept`、`const`。所以接受一个名字不花任何合法程序，而另一种读法是报错；这是第 16 条那个"兜底"侧，和 `eat_namespace_head_macros` 同一立场。
+
+    **三个名字必须被显式拒绝**，而且各有各的理由：`override` 与 `final` 是**合法的**上下文关键字（同一个循环里本来就在处理它们），`requires` 开启一个**子句**——那条子句由 declarator 自己的循环读（`decls.rs` 的 `at_requires` + `starts_a_requires_clause`），在这里当成宏会把约束吞掉、把它的 token 留到下一条声明上。`gaps.rs` 的 `a_macro_can_stand_among_a_declarators_suffixes` 把这三条拒绝和六个正例钉在一起。
+
+    一处助手、两个调用点（`eat_function_qualifiers` 与 `finish_init_declarator`），因为这是同一个位置的两个实例：一个在参数的 `)` 之后，一个在名字之后。**写第二遍才是错的**（第 14 条）——两处的判据完全相同。
+
+    顺带记一个**没有**被这条规则救回来的形状：`__atomic_flag_data_type _M_i _GLIBCXX20_INIT({});` 仍然报错，但它**不是**这条规则没生效——是更早的一步（"这是声明还是表达式"）因为 `({})` 这个括号组选了表达式读法。队列要按**第一个错**排而不是按"哪条规则没生效"排，否则会去修一条根本没走到的规则。
+
+26. **运算符名在表达式里也是一个名字**（已修）。C++ 允许把一个运算符函数**按名字调用**，标准库用它问"这个类型能不能比"：
+
+    ```text
+    { operator<=>(static_cast<_Tp&&>(__t), static_cast<_Up&&>(__u)); }     compare：requires 表达式里的光杆调用
+    { operator<(std::forward<_Tp>(__t), std::forward<_Up>(__u)); }         bits/ranges_cmp.h，同上
+    { return operator~() + 1; }                                            bits/max_size_type.h：无参调用再参与运算
+    { t.operator<(u); }   p->~T()   s.~basic_string()                      点号/箭头之后的运算符名与析构名
+    ```
+
+    三个位置各是一个分支，所以一个能跑不代表另外两个能跑：
+
+    * **光杆的**：`parse_primary_expr` 的名字分支列了 `Identifier | Scope` 却**没列 `OperatorKeyword`**——于是 `operator<` 只在 `::` 之后被当成名字（`Foo::operator+()` 一直是通的），在表达式开头不是。它一直没被发现，是因为**函数体里那个形状由声明规则读掉**：`operator<(a, b);` 被读成一条转换运算符声明，无损、无错、形状不同——所以这个洞只在 requires 表达式里露出来（那里只有表达式读法）。**这是第 18 条那类"跨层形状耦合"的又一个变体：一个分支在另一个分支的影子里，测试只覆盖了影子里的那个。**
+    * **点号之后的运算符名**：成员访问的读取只收 `Identifier`，遇到 `operator` 直接报"expected identifier after member access operator"。修法是调用**声明侧那同一个** `parse_operator_name_here`（它的文档早就写着"暴露出来是因为表达式的 callee 与声明的名字是同一个问题"）——一处实现，两个位置。
+    * **点号之后的 `~`**：伪析构调用 `p->~T()`。`~Name` 在表达式里也是名字的一种拼法，而且后面还可能带限定名或模板实参（`x.~A<T>()`），所以读取用的是表达式自己的名字读取器。
+
+    `gaps.rs` 的 `an_operator_name_is_a_name_in_an_expression_too` 把三个位置和四种拼法钉在一起。

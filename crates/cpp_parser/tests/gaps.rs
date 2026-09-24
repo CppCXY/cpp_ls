@@ -352,6 +352,128 @@ fn the_compilers_attribute_spellings_are_attributes() {
     );
 }
 
+/// A macro standing among a declarator's **suffixes** is a macro, and the three names that are not stay as they are.
+///
+/// After a declarator an identifier has exactly two readings in C++ — a contextual keyword or a macro — and
+/// everything else that may legally stand there is a keyword or punctuation. So the shape costs no valid program
+/// and the alternative is an error; libstdc++ puts one of these after nearly every declaration it writes:
+///
+/// ```text
+/// inline void __terminate() _GLIBCXX_USE_NOEXCEPT
+/// T* addressof(T& r) _GLIBCXX_NOEXCEPT { … }
+/// bool before(const type_info&) const _GLIBCXX_NOEXCEPT;
+/// void f() _GLIBCXX_NOEXCEPT_IF(noexcept(g()));
+/// extern "C" void abort(void) _GLIBCXX_NOTHROW _GLIBCXX_NORETURN;      two in a row
+/// int x MY_DECL_SUFFIX;                                             after a *variable*'s name
+/// ```
+///
+/// The three refusals are the point of the negative half. `override` and `final` are the contextual keywords that
+/// legitimately stand here, and `requires` begins a **clause** the declarator loop reads for itself — taking it
+/// for a macro would swallow the constraint and leave its tokens on the declaration that follows, which is what
+/// the last assertion checks.
+#[test]
+fn a_macro_can_stand_among_a_declarators_suffixes() {
+    let parses = |source: &str| {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert_eq!(tree.get_errors(), [], "this must parse cleanly: {source:?}");
+        tree
+    };
+
+    let suffixes = parses(
+        "inline void __terminate() _GLIBCXX_USE_NOEXCEPT { }\n\
+         T* addressof(T& r) _GLIBCXX_NOEXCEPT { return nullptr; }\n\
+         bool before(const type_info& a) const _GLIBCXX_NOEXCEPT;\n\
+         void f() _GLIBCXX_NOEXCEPT_IF(noexcept(g()));\n\
+         extern \"C\" void abort(void) _GLIBCXX_NOTHROW _GLIBCXX_NORETURN;\n",
+    );
+    assert_eq!(
+        suffixes
+            .get_red_root()
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::MacroCall)
+            .count(),
+        6,
+        "each one is a macro invocation, including the two in a row"
+    );
+
+    // After a **variable**'s name, which is the same position one level down.
+    let variable = parses("int x MY_DECL_SUFFIX;\n");
+    assert!(
+        variable
+            .get_red_root()
+            .descendants()
+            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::MacroCall),
+        "and it is a macro there too"
+    );
+
+    // The refusals.
+    let keywords = parses("struct S {\n  void f() override;\n  void g() final;\n};\n");
+    assert!(
+        !keywords
+            .get_red_root()
+            .descendants()
+            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::MacroCall),
+        "`override` and `final` are contextual keywords, not macros"
+    );
+
+    let clause = parses("template <typename T>\nvoid f(T) requires C<T>;\n");
+    assert!(
+        clause
+            .get_red_root()
+            .descendants()
+            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::RequiresClause),
+        "and `requires` still begins a clause: the constraint is read, not swallowed as a macro"
+    );
+}
+
+/// An **operator name** is a name in an expression too, in all three positions it can be written.
+///
+/// `operator<=>(a, b)` is a call to the operator function, and the standard library asks exactly that question
+/// when it wants to know whether a type has a comparison: `{ operator<=>(x, y); }` inside a requires-expression
+/// is how `std::three_way_comparable` is written. The three positions are separate arms of the expression
+/// grammar, so one working says nothing about the others:
+///
+/// ```text
+/// operator<(a, b)              a bare operator name as the callee       bits/ranges_cmp.h
+/// x.operator<(y)               an explicit member operator call          the same file, one line down
+/// p->~T()   x.~basic_string()  a pseudo-destructor call                  concepts, bits/stl_construct.h
+/// ```
+///
+/// The bare form was the one missing: the name arm of the primary rule listed `Identifier` and `Scope` but not
+/// `OperatorKeyword`, so `operator<` was a name *after* a `::` and never one at the start. In a function body it
+/// happened to work, because there the **declaration** rule reads `operator<(a, b);` as a conversion-operator
+/// declaration — which is why the missing arm went unnoticed: the shape is only reachable as an expression
+/// inside a requirement.
+#[test]
+fn an_operator_name_is_a_name_in_an_expression_too() {
+    let parses = |source: &str| {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert_eq!(tree.get_errors(), [], "this must parse cleanly: {source:?}");
+        tree
+    };
+
+    // The bare callee, in the position that has no declaration reading: a requirement's braced expression.
+    parses("template <typename T>\nconcept C = requires(T a) { operator<(a, a); };\n");
+    parses("template <typename T, typename U>\nconcept D = requires(T t, U u) { operator<=>(t, u); };\n");
+
+    // The member call and the pseudo-destructor, which are the same question one level down.
+    parses("template <typename T, typename U>\nconcept E = requires(T t, U u) { t.operator<(u); };\n");
+    parses("template <typename T>\nvoid f(T* p) { p->~T(); }\n");
+    parses("struct S { ~S(); };\nvoid g(S s) { s.~S(); }\n");
+    parses("void h() { operator~(); operator new(1); }\n");
+
+    // And the call reads the operator **as an operator**: `a.operator<(b)` is not a member called `operator`.
+    let member = parses("void f(A a, B b) { a.operator<(b); }\n");
+    assert!(
+        member
+            .get_red_root()
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .any(|token| CppTokenKind::from(token.kind()) == CppTokenKind::OperatorKeyword),
+        "the operator name is in the tree, read by the same rule a declaration's operator name goes through"
+    );
+}
+
 /// A construct whose statement kind is all that is asserted.
 fn shape(construct: &'static str, place: Where, kind: CppSyntaxKind) -> Shape {
     Shape {
@@ -548,6 +670,20 @@ fn constructs_the_parser_reads() {
             "extern \"C++\" __attribute__ ((__noreturn__, __always_inline__))\ninline void f() noexcept { }\n",
             "void f() __attribute__ ((__noreturn__));\n",
             "__declspec(dllexport) void g();\n",
+            // A **macro among a declarator's suffixes**, which is where libstdc++ puts one — after the parameter
+            // list, after a `const`, twice in a row, and after a variable's name. See
+            // `a_macro_can_stand_among_a_declarators_suffixes` for the three names that must stay keywords.
+            "inline void f() _GLIBCXX_USE_NOEXCEPT { }\n",
+            "T* addressof(T& r) _GLIBCXX_NOEXCEPT { return nullptr; }\n",
+            "bool before(const type_info& a) const _GLIBCXX_NOEXCEPT;\n",
+            "void f() _GLIBCXX_NOEXCEPT_IF(noexcept(g()));\n",
+            "extern \"C\" void abort(void) _GLIBCXX_NOTHROW _GLIBCXX_NORETURN;\n",
+            "int x MY_DECL_SUFFIX;\n",
+            // An **operator name** used as an expression — the question a requires-expression asks about a type.
+            // See `an_operator_name_is_a_name_in_an_expression_too`.
+            "template <typename T>\nconcept C = requires(T a) { operator<(a, a); };\n",
+            "template <typename T, typename U>\nconcept D = requires(T t, U u) { t.operator<(u); };\n",
+            "template <typename T>\nvoid f(T* p) { p->~T(); }\n",
             // A **conditional handler**: a directive can land at either joint of a `try`, and the first one is the
             // one that used to break the statement — with `try` separated from its block, the block was not the
             // try's block at all, and the `catch` became a statement with no statement before it.

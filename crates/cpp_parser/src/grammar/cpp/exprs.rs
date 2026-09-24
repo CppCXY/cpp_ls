@@ -1295,6 +1295,36 @@ fn parse_postfix_suffixes(
                             p.rollback(before_the_arguments);
                         }
                     }
+                } else if p.current_token() == CppTokenKind::OperatorKeyword {
+                    // An **explicit call to a member operator**: `x.operator<(...)`, `x.operator->()`,
+                    // `x.operator std::string_view()`. The name after a `.` is an operator name as much as a
+                    // member name is, and the same reader a declaration's operator name goes through is what
+                    // reads it — see [`super::types::parse_operator_name_here`], which is exposed for exactly
+                    // this: one answer to "what is an operator name" rather than two.
+                    super::types::parse_operator_name_here(p)?;
+                } else if p.current_token() == CppTokenKind::Tilde {
+                    // A **pseudo-destructor call**: `p->~T()`, `x.~basic_string()`. `~name` is how a destructor is
+                    // spelled, in an expression as much as in a declaration, and what follows the name may be
+                    // qualified or a template-id (`x.~A<T>()`) — so the name is read by the expression's own name
+                    // reader, which already knows all three spellings.
+                    p.bump(); // `~`
+                    if p.current_token() == CppTokenKind::Identifier
+                        || p.current_token() == CppTokenKind::Scope
+                    {
+                        let name = p.mark(CppSyntaxKind::NameExpr);
+                        if p.current_token() == CppTokenKind::Scope {
+                            p.bump();
+                        }
+                        while p.current_token() == CppTokenKind::Identifier {
+                            p.bump();
+                            if p.current_token() == CppTokenKind::Scope {
+                                p.bump();
+                                continue;
+                            }
+                            break;
+                        }
+                        name.complete(p);
+                    }
                 } else {
                     return Err(CppParseError::syntax_error_from(
                         &t!("expected identifier after member access operator"),
@@ -1461,7 +1491,15 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
         // (`std::vector<int>`). Both forms appear as expressions — `std::move(x)`,
         // `std::vector<int>::size_type` — so the expression grammar has to accept them, not just the
         // type grammar.
-        CppTokenKind::Identifier | CppTokenKind::Scope if !is_expression_keyword(p) => {
+        //
+        // `operator` begins one too, and it is the *first* token of the name rather than a segment after a `::`:
+        // `operator<=>(a, b)` in a requires-expression body is a call to the operator function, and the standard
+        // library asks exactly that question (`compare`, `bits/ranges_cmp.h`). The segment loop below already read
+        // an operator name in every position *except* this one — it is reached for `Foo::operator+()` but not for
+        // a bare `operator+()`, because the arm's pattern did not include the keyword.
+        CppTokenKind::Identifier | CppTokenKind::Scope | CppTokenKind::OperatorKeyword
+            if !is_expression_keyword(p) =>
+        {
             let base = p.open_marks();
             let m = p.mark(CppSyntaxKind::IdentifierExpr);
 

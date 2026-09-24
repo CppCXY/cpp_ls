@@ -64,6 +64,8 @@ fn main() {
     let mut explained_by_own = 0usize;
     let mut explained_by_closure = 0usize;
     let mut details: Vec<String> = Vec::new();
+    // How many errors each file has, so the histogram below can say how much of the tail is one construct away.
+    let mut counts: Vec<usize> = Vec::new();
     let mut total_bytes = 0usize;
     let mut total_lines = 0usize;
 
@@ -80,6 +82,7 @@ fn main() {
 
         if errors.is_empty() {
             clean += 1;
+            counts.push(0);
             // The invariants hold on this corpus too, and are checked rather than assumed: a header is not a
             // gentler input than a test fixture.
             assert_eq!(
@@ -92,6 +95,7 @@ fn main() {
         }
 
         failing += 1;
+        counts.push(errors.len());
         for error in errors {
             *by_message.entry(error.message.clone()).or_default() += 1;
         }
@@ -154,6 +158,24 @@ fn main() {
     for (message, count) in ranked.iter().take(15) {
         println!("{count:6}  {message}");
     }
+
+    // How much of the tail is "one construct away"? A file with a single error is a file one rule from clean,
+    // while a file with fifty is a file whose first error hid everything after it — and the two want different
+    // work, which a list of first errors cannot say.
+    let mut histogram = [0usize; 4];
+    for count in counts.iter() {
+        histogram[match count {
+            0 => 0,
+            1 => 1,
+            2..=5 => 2,
+            _ => 3,
+        }] += 1;
+    }
+    println!(
+        "\n--- how many errors each file has ---\n\
+         clean {} | exactly one {} | two to five {} | more {}",
+        histogram[0], histogram[1], histogram[2], histogram[3]
+    );
 
     println!("\n--- the first error of every failing file, which is the one nothing above explains ---");
     for detail in &details {

@@ -2993,6 +2993,11 @@ pub fn eat_function_qualifiers(p: &mut CppParser) {
             CppTokenKind::Identifier if matches!(p.current_token_text(), "override" | "final") => {
                 p.bump()
             }
+            // A **macro** among the suffixes, which is where libstdc++ puts one: `void f() _GLIBCXX_NOEXCEPT`,
+            // `T* addressof(T&) _GLIBCXX_NOEXCEPT`, `… const _GLIBCXX_NOEXCEPT`. A name here has no other
+            // reading — the two contextual keywords are the arm above, and `requires` is refused inside — so the
+            // shape is decisive: see [`super::decls::eat_a_macro_suffix`].
+            CppTokenKind::Identifier if super::decls::eat_a_macro_suffix(p) => {}
             CppTokenKind::Arrow => {
                 // The `->` goes in a `TrailingReturnType` wrapper rather than inside the `TypeId`,
                 // so the type node's text is the type the user wrote (`int*`) and not the arrow that

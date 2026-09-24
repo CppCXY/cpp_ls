@@ -1036,6 +1036,12 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
         return Err(err);
     }
 
+    // A **macro** in the same position: `__atomic_flag_data_type _M_i _GLIBCXX20_INIT({});`. Read after the
+    // attributes and before the initializer question below, because the token *after* it is what decides whether
+    // there is an initializer at all — `int x MACRO = 1;` has one and `int x MACRO;` does not. See
+    // [`eat_a_macro_suffix`] for why a name here costs nothing.
+    while eat_a_macro_suffix(p) {}
+
     // **An initializer needs something to initialise.** Without this the declaration reading accepts a
     // declarator that named nothing and is followed by `=`, and what comes out is a *silent wrong tree*: `x = 1;`
     // became `Declaration(DeclSpecifierSeq(x), InitDeclarator(=, Initializer(1)))` — no error, no `ErrorNode`,
@@ -2800,6 +2806,61 @@ fn at_a_macro_member(p: &CppParser) -> bool {
 
 /// The kind of the first token **after** the balanced group at the cursor.
 ///
+/// Read a **macro standing among a declarator's suffixes**, and say whether there was one.
+///
+/// `_GLIBCXX_NOEXCEPT`, `_GLIBCXX_NOTHROW`, `_GLIBCXX_USE_NOEXCEPT`, `_GLIBCXX20_DEPRECATED_SUGGEST("…")`,
+/// `_GLIBCXX20_INIT({})` — one of these stands after nearly every declaration libstdc++ writes, and the whole
+/// declaration was lost without it: `inline void __terminate() _GLIBCXX_USE_NOEXCEPT` reported `expected ';'`
+/// against the macro, and then recovered by eating the body.
+///
+/// # Why the shape is decisive here
+///
+/// After a declarator, an identifier has exactly **two** readings in C++, and both are known: a contextual
+/// keyword, or a macro. Everything else that may legally stand in this position is a keyword or punctuation —
+/// `{`, `;`, `=`, `,`, `:`, `[[`, `->`, `noexcept`, `const`. So a name here costs no valid program, and the
+/// alternative is an error; that is maintenance convention 16's fallback side of the rule, the same footing as
+/// `eat_namespace_head_macros`.
+///
+/// The three names that would be a *better* reading as something else are refused by spelling, which is the same
+/// test the function-suffix loop already makes for `override` and `final`: `override` and `final` are read by
+/// that loop, and `requires` begins a clause the declarator loop reads for itself — taking it here would swallow
+/// the constraint and leave the clause's tokens on the declaration that follows.
+///
+/// # Why the group is optional
+///
+/// Both spellings occur and they mean different things to the macro, not to this: `_GLIBCXX_NOEXCEPT` is a bare
+/// name, `_GLIBCXX_NOEXCEPT_IF(noexcept(…))` is an invocation. The group is read as raw tokens by
+/// [`parse_balanced_token_group`] — the macro's arguments, nothing interpreted — and the whole thing becomes one
+/// `MacroCall`, the same node every other macro reading produces.
+pub(super) fn eat_a_macro_suffix(p: &mut CppParser) -> bool {
+    if p.current_token() != CppTokenKind::Identifier {
+        return false;
+    }
+
+    if matches!(p.current_token_text(), "override" | "final" | "requires") {
+        return false;
+    }
+
+    let checkpoint = p.checkpoint();
+    let m = p.mark(CppSyntaxKind::MacroCall);
+
+    let name = p.mark(CppSyntaxKind::NameExpr);
+    p.bump();
+    name.complete(p);
+
+    if p.current_token() == CppTokenKind::LeftParen
+        && parse_balanced_token_group(p, CppSyntaxKind::ArgumentList).is_err()
+    {
+        // An unterminated group is not this shape at all: give the name back and let the caller report whatever
+        // it reported before.
+        p.rollback(checkpoint);
+        return false;
+    }
+
+    m.complete(p);
+    true
+}
+
 /// Read a macro invocation that stands where a class member goes, into a `MacroCall`.
 ///
 /// The same node the statement rule produces, for the same reason: a macro's meaning is not knowable here, and
