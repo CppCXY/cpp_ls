@@ -94,6 +94,44 @@ pub struct DeclFact {
     /// Just the name, which is what a reference search matches. Separate from `range` for the reason
     /// [`crate::Binding`] documents: collapsing them renames whole declarations.
     pub name_range: cpp_parser::SourceRange,
+    /// Was this declaration read **without a diagnostic touching it**?
+    ///
+    /// `false` when a parse error fell inside the declaration this fact was written in. The tokens are all there
+    /// and the node is well formed — the parser is total — but the reading around it was *recovered from*, so
+    /// what this declaration says is not to be trusted. This is the record `docs/index-design.md`'s third
+    /// invariant asks for: the parser is tolerant, so the layers above have to be able to see how much was
+    /// recovered.
+    ///
+    /// # Why per fact, and not per file
+    ///
+    /// Measured on the closure of `<vector>` (279 files from one compiler): **5388 of 8499** declarations come
+    /// from files that do not parse cleanly, and a per-file rule would throw all of them away — including the 157
+    /// `std::` types that are indexed correctly today (`std::allocator`, `std::pair`, `std::tuple`). Of those
+    /// 5388, only **214 — 4% —** are marked unclean here, and the 3111 declarations of the clean files are all
+    /// clean: **8285 of 8499** declarations survive the question. The question is therefore about a declaration
+    /// rather than about a file, and by a factor of twenty-five.
+    ///
+    /// # The range the question is asked about
+    ///
+    /// Not the fact's own range, which is the declarator: a diagnostic in the **type** is outside the declarator
+    /// and inside the declaration, and the type is what a consumer reads off `type_of`. What is asked about is
+    /// the innermost declaration node containing this fact's name. Measured, that costs 108 declarations over the
+    /// declarator rule (106 against 214, both against 5388 for the file), and the 108 are exactly the ones worth
+    /// having: by node kind, 89 are `Declaration` and 19 are `TemplateDecl` — the type part and the template
+    /// header. The looser rule, "any declaration whose range contains the name", marks **2907** — one error in a
+    /// class body would condemn every member of it — which is why the innermost one is the rule.
+    ///
+    /// # What it does not mean
+    ///
+    /// `true` is **not** a promise that the declaration is right. A recovery can land badly *before* a
+    /// declaration and change where it belongs: the closing `}` of a block eaten by an error turns everything
+    /// after it into locals, and those declarations' own tokens are untouched, so they are clean while their
+    /// *scope* is wrong. A diagnostic that falls inside no declaration at all — an unexpected token at file
+    /// scope, between two declarations — marks neither of them, and neither does one that lands in a declaration
+    /// the walk produced no fact for, which is what a failed declarator usually does: the fact is then missing
+    /// rather than unclean. The field claims exactly one thing, and it is the one thing the parser can answer:
+    /// whether a diagnostic fell inside the declaration this fact was written in.
+    pub clean: bool,
     pub guard: FactGuard,
 }
 

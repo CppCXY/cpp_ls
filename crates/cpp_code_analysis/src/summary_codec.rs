@@ -75,7 +75,15 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 ///
 /// A declaration fact gained `type_of`: the type a variable was written with, which is what a member access has
 /// to know to get from `widget` to `Widget`.
-pub const CODEC_VERSION: u32 = 6;
+///
+/// # Version 6
+///
+/// A declaration fact gained `clean` — this is the bump to version 7: whether a diagnostic fell inside the
+/// declaration the fact was written in. It is a fact about the *file's text* rather than about the language, which
+/// is why it belongs here and not in a query — and it is stored rather than recomputed because a consumer of a
+/// summary no longer has the tree the errors came from. (The headings above name the version a change came
+/// *from*; the number below is the one the bytes carry.)
+pub const CODEC_VERSION: u32 = 7;
 
 /// Write a summary as bytes.
 ///
@@ -104,6 +112,7 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
         }
         put_range(&mut out, fact.range);
         put_range(&mut out, fact.name_range);
+        put_u8(&mut out, u8::from(fact.clean));
         put_u32(&mut out, guard_code(fact.guard));
     }
 
@@ -179,6 +188,7 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
             },
             range: reader.range()?,
             name_range: reader.range()?,
+            clean: reader.u8()? != 0,
             guard: guard_from(reader.u32()?)?,
         });
     }
@@ -588,6 +598,8 @@ mod tests {
                     bases: vec!["Base".to_string(), "ns::Other".to_string()],
                     range: range(10, 20),
                     name_range: range(17, 6),
+                    // The `false` branch of the field, so a round trip covers both values of it.
+                    clean: false,
                     guard: FactGuard::Unconditional,
                 },
                 DeclFact {
@@ -600,6 +612,7 @@ mod tests {
                     bases: Vec::new(),
                     range: range(40, 15),
                     name_range: range(48, 6),
+                    clean: true,
                     guard: FactGuard::Region(3),
                 },
                 DeclFact {
@@ -610,6 +623,7 @@ mod tests {
                     bases: Vec::new(),
                     range: range(60, 8),
                     name_range: range(60, 0),
+                    clean: true,
                     guard: FactGuard::Unconditional,
                 },
             ],

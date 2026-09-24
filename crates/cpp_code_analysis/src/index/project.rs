@@ -812,13 +812,16 @@ fn direct_member(
 /// a fact about the text, and the layer that sweeps the directives fills it in when the summary is built — see
 /// [`build_facts`](crate::sema::declarations::build_facts).
 ///
-/// # The one field that is not answered on this path
+/// # The two fields that are not answered on this path
 ///
-/// A fact built from the **buffer's** scope tree has had no such sweep, so its `guard` says `Unconditional` even
-/// for a member written inside an `#if`. That is a gap rather than a decision, and it is stated here rather than
-/// left to be discovered: a consumer that needs the region has to ask the summary — which does have it — and a
-/// consumer that is showing a member list has nothing to gain from it, which is why this was not worth a third
-/// `FactGuard` variant for. The same applies to the facts [`member_across_files`] returns from this path.
+/// A fact built from the **buffer's** scope tree has had no directive sweep and has no diagnostic list, so two of
+/// its fields are defaults rather than answers: `guard` says `Unconditional` even for a member written inside an
+/// `#if`, and `clean` says `true` even in a buffer that does not parse. Both are gaps rather than decisions, and
+/// they are stated here rather than left to be discovered: this path is handed a **node** and the tree's
+/// diagnostics are not on it, so a caller that needs either field has to ask the summary — which does have them —
+/// and a consumer showing a member list has nothing to gain from either, which is why neither was worth
+/// threading the tree through every query for. The same applies to the facts [`member_across_files`] returns
+/// from this path.
 fn fact_from_binding(root: &cpp_parser::CppSyntaxNode, class: &str, binding: &crate::Binding) -> DeclFact {
     DeclFact {
         name: binding
@@ -832,6 +835,7 @@ fn fact_from_binding(root: &cpp_parser::CppSyntaxNode, class: &str, binding: &cr
         bases: crate::sema::declarations::declared_bases_of(root, binding),
         range: binding.range,
         name_range: binding.name_range,
+        clean: true,
         guard: FactGuard::Unconditional,
     }
 }
@@ -1521,6 +1525,10 @@ impl ProjectDefinition {
                 bases: Vec::new(),
                 range: binding.range,
                 name_range: binding.name_range,
+                // And no answer about diagnostics either, for the same reason `guard` has none: the binding came
+                // from the buffer's own scopes, which are built from a node rather than from a tree with a
+                // diagnostic list. See [`fact_from_binding`].
+                clean: true,
                 guard: FactGuard::Unconditional,
             },
         }

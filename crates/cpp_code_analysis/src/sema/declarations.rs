@@ -54,12 +54,21 @@ use cpp_parser::{CppSyntaxNode, SourceRange};
 /// and not about the scope tree. Taking it from the root's text rather than from a node keeps the walker out of
 /// this module's business — the binding already says where the declaration and its name are, and what lies
 /// between them is the type as the file spells it.
+///
+/// `errors` is the parser's diagnostic list, and it answers one field: whether the declaration a fact was written
+/// in is one of them. It is **passed in** rather than looked up because the diagnostics live on the tree and this
+/// module is handed a node — and because a caller that forgot to pass them would otherwise get a summary whose
+/// every declaration claims to be clean, which is exactly the kind of silent default
+/// [`crate::DeclFact::clean`]'s documentation warns about. An empty slice means "this file has no diagnostics",
+/// which is the truth for a file that parses cleanly and is what the tests that do not care about the field
+/// pass.
 pub fn build_facts(
     scopes: &ScopeTree,
     preprocessing: &FilePreprocessing,
     root: &CppSyntaxNode,
+    errors: &[SourceRange],
 ) -> (Vec<DeclFact>, SummaryGuards) {
-    let file = DeclarationFacts::new(scopes, preprocessing, root);
+    let file = DeclarationFacts::new(scopes, preprocessing, root, errors);
     file.build()
 }
 
@@ -243,7 +252,12 @@ fn strip_declaration_specifiers(spelling: &str) -> String {
 ///
 /// A free function rather than a method so that the borrow of the fact list and the borrow of the scope tree
 /// cannot be confused for each other while the walk is filling one from the other.
-fn fact_for(root: &CppSyntaxNode, binding: &Binding, scope: Option<String>) -> Option<DeclFact> {
+fn fact_for(
+    root: &CppSyntaxNode,
+    binding: &Binding,
+    scope: Option<String>,
+    declarations: &Declarations<'_>,
+) -> Option<DeclFact> {
     // A binding with no identifier is a destructor, an operator, or a conversion function: real declarations,
     // but ones whose *name* is not a name a lookup can be keyed on. They are stored with an empty name and the
     // kind `Other` rather than dropped, because "there is a declaration here" is still the answer a
@@ -262,9 +276,115 @@ fn fact_for(root: &CppSyntaxNode, binding: &Binding, scope: Option<String>) -> O
         bases: declared_bases_of(root, binding),
         range: binding.range,
         name_range: binding.name_range,
+        // The one field that comes from the diagnostics rather than from the tree — see [`DeclFact::clean`] for
+        // what the answer does and does not claim.
+        clean: declarations.is_clean(binding.name_range, binding.range),
         // Filled in by `assign_guards`, which is the only place that knows where the directives are.
         guard: FactGuard::Unconditional,
     })
+}
+
+/// One declaration node of the file, and whether a diagnostic fell inside it.
+struct Declared {
+    range: cpp_parser::SourceRange,
+    touched: bool,
+}
+
+/// The declaration nodes of one file, in the form [`DeclFact::clean`]'s question needs them.
+///
+/// # The three rules that were measured
+///
+/// Over the closure of `<vector>` (279 files, 8499 declarations, 5388 of them in files that do not parse
+/// cleanly), asked of every declaration in a file with diagnostics:
+///
+/// | what is asked about | marked unclean |
+/// |---|---|
+/// | the fact's own range, which is the declarator | 106 |
+/// | the innermost declaration node containing the name | 214 |
+/// | **any** declaration node containing the name | 2907 |
+/// | the file | 5388 |
+///
+/// The third row is the one that looks simplest and is not affordable: a class or namespace body with one error
+/// in it condemns every member, which is more than half of the standard library's declarations. The second row is
+/// 108 more than the first, and those 108 are the point of the exercise — measured by kind, 89 are `Declaration`
+/// nodes and 19 are `TemplateDecl` nodes, which is exactly the **type part** and the **template header**: text
+/// outside the declarator and inside the declaration, and the text a fact's `type_of` is read from.
+///
+/// # Why the node set is the walker's own
+///
+/// The kinds are [`crate::scopes::declaring_kinds`], the set this layer already reads declarations out of, so
+/// "was the declaration recovered from" cannot drift from "what counts as a declaration". That coupling is a
+/// shape coupling between the symbol layer and this one and is deliberate; a construct added to the grammar and
+/// to that list is a declaration here too, and one added to neither is invisible to both.
+struct Declarations<'a> {
+    /// Shortest first, which is what makes the scan below find the **innermost** declaration: the nodes are
+    /// nested, so the shortest one containing a name is the one that name was written in.
+    nodes: Vec<Declared>,
+    /// The diagnostics, for the one case the nodes cannot answer.
+    errors: &'a [SourceRange],
+}
+
+impl<'a> Declarations<'a> {
+    /// Read every declaration node of the file, and mark the ones a diagnostic falls inside.
+    fn of(root: &CppSyntaxNode, errors: &'a [SourceRange]) -> Self {
+        let mut nodes = Vec::new();
+
+        if !errors.is_empty() {
+            for node in root.descendants() {
+                let kind = CppSyntaxKind::from(node.kind());
+                if !crate::scopes::declaring_kinds().contains(&kind) {
+                    continue;
+                }
+
+                let range = cpp_parser::source_range(node.text_range());
+                nodes.push(Declared {
+                    range,
+                    touched: errors.iter().any(|error| {
+                        error.start_offset < range.end_offset()
+                            && range.start_offset < error.end_offset()
+                    }),
+                });
+            }
+
+            nodes.sort_by_key(|declared| declared.range.length);
+        }
+
+        Declarations { nodes, errors }
+    }
+
+    /// Was the declaration this fact was written in free of diagnostics?
+    ///
+    /// The innermost declaration node containing the **name** is what is asked about, rather than the fact's own
+    /// range: the fact's range is the declarator, and a diagnostic in the type of what it declares is outside it
+    /// and inside the declaration — the measurement above counts 108 of those.
+    ///
+    /// The fallback is for a fact whose name no declaration node contains, which is a binding the walk found
+    /// outside the constructs it reads declarations from: there the fact's own range is all there is to ask
+    /// about. A file with no diagnostics has an empty node list and answers `true` for every fact, which is the
+    /// truth and is what the tests that do not care about this field rely on.
+    fn is_clean(&self, name_range: SourceRange, own_range: SourceRange) -> bool {
+        match self
+            .nodes
+            .iter()
+            .find(|declared| contains(declared.range, name_range))
+        {
+            Some(declared) => !declared.touched,
+            None => !self
+                .errors
+                .iter()
+                .any(|error| overlaps(*error, own_range)),
+        }
+    }
+}
+
+/// Is `inner` inside `outer`?
+fn contains(outer: SourceRange, inner: SourceRange) -> bool {
+    outer.start_offset <= inner.start_offset && inner.end_offset() <= outer.end_offset()
+}
+
+/// Do the two ranges share a token position?
+fn overlaps(one: SourceRange, other: SourceRange) -> bool {
+    one.start_offset < other.end_offset() && other.start_offset < one.end_offset()
 }
 
 /// The walk's state: the regions opened so far, and the facts collected.
@@ -273,6 +393,8 @@ struct DeclarationFacts<'a> {
     preprocessing: &'a FilePreprocessing,
     /// The tree, which is where a declared type's spelling comes from.
     root: &'a CppSyntaxNode,
+    /// The declarations the diagnostics fall inside, computed once — see [`Declarations`].
+    declarations: Declarations<'a>,
     guards: SummaryGuards,
     /// Every fact, in the order the scopes hold them — sorted by offset once, before the guard sweep.
     facts: Vec<DeclFact>,
@@ -283,22 +405,29 @@ impl<'a> DeclarationFacts<'a> {
         scopes: &'a ScopeTree,
         preprocessing: &'a FilePreprocessing,
         root: &'a CppSyntaxNode,
+        errors: &'a [SourceRange],
     ) -> Self {
         DeclarationFacts {
             scopes,
             preprocessing,
             root,
+            declarations: Declarations::of(root, errors),
             guards: SummaryGuards::default(),
             facts: Vec::new(),
         }
     }
 
-    fn build(mut self) -> (Vec<DeclFact>, SummaryGuards) {
-        // Moved out up front so that the walk below borrows three fields of `self` separately rather than all of
-        // it — the loop pushes into `self.facts` while reading the other two.
-        let preprocessing = self.preprocessing;
-        let scopes = self.scopes;
-        let root = self.root;
+    fn build(self) -> (Vec<DeclFact>, SummaryGuards) {
+        // Destructured so that the walk below holds the three inputs and the two outputs as separate bindings:
+        // the loop pushes into `facts` while reading `declarations`, which a `&mut self` method could not do.
+        let DeclarationFacts {
+            scopes,
+            preprocessing,
+            root,
+            declarations,
+            mut guards,
+            mut facts,
+        } = self;
 
         for (index, scope) in scopes.scopes().iter().enumerate() {
             // The prefix is what a declaration written *here* is qualified by, which is the scope's own name
@@ -307,8 +436,8 @@ impl<'a> DeclarationFacts<'a> {
             let prefix = scopes.qualification_prefix_of(ScopeId(index));
 
             for binding in &scope.bindings {
-                if let Some(fact) = fact_for(root, binding, prefix.clone()) {
-                    self.facts.push(fact);
+                if let Some(fact) = fact_for(root, binding, prefix.clone(), &declarations) {
+                    facts.push(fact);
                 }
             }
         }
@@ -316,18 +445,15 @@ impl<'a> DeclarationFacts<'a> {
         // The sweep below needs both lists in offset order. Facts are sorted rather than built in order
         // because the scope tree's order is depth-first, which is not offset order — a nested class's members
         // are walked before the next top-level declaration.
-        self.facts.sort_by_key(|fact| fact.range.start_offset);
+        facts.sort_by_key(|fact| fact.range.start_offset);
 
-        let mut guards = std::mem::take(&mut self.guards);
-        let targets: Vec<(&mut FactGuard, usize)> = self
-            .facts
+        let mut targets: Vec<(&mut FactGuard, usize)> = facts
             .iter_mut()
             .map(|fact| (&mut fact.guard, fact.range.start_offset))
             .collect();
-        let mut targets = targets;
         assign_guards(&mut targets, preprocessing, &mut guards);
 
-        (self.facts, guards)
+        (facts, guards)
     }
 }
 
@@ -545,7 +671,31 @@ mod tests {
         assert_eq!(tree.get_errors(), [], "the input must parse cleanly");
 
         let root = tree.get_red_root();
-        build_facts(&build_scopes(&root), &preprocess(&root), &root)
+        build_facts(&build_scopes(&root), &preprocess(&root), &root, &[])
+    }
+
+    /// The facts of a file that **does not** parse cleanly, with the diagnostics that say so.
+    fn facts_of_a_broken_file(
+        source: &str,
+    ) -> (Vec<crate::summary::DeclFact>, Vec<cpp_parser::SourceRange>) {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert_ne!(
+            tree.get_errors(),
+            [],
+            "this fixture is meant to have errors: {source:?}"
+        );
+
+        let root = tree.get_red_root();
+        let errors: Vec<cpp_parser::SourceRange> = tree
+            .get_errors()
+            .iter()
+            .map(|error| cpp_parser::source_range(error.range))
+            .collect();
+
+        (
+            build_facts(&build_scopes(&root), &preprocess(&root), &root, &errors).0,
+            errors,
+        )
     }
 
     fn qualified(source: &str) -> Vec<String> {
@@ -733,5 +883,74 @@ mod tests {
         assert_eq!(kind_of("member"), Some(DeclKind::Variable));
         assert_eq!(kind_of("method"), Some(DeclKind::Function));
         assert_eq!(kind_of("ns"), Some(DeclKind::Namespace));
+    }
+
+    /// The names of the facts of a file that does not parse cleanly whose declaration was touched.
+    fn unclean(source: &str) -> Vec<String> {
+        let (facts, errors) = facts_of_a_broken_file(source);
+        assert!(!errors.is_empty(), "the fixture must have diagnostics");
+
+        facts
+            .iter()
+            .filter(|fact| !fact.clean)
+            .map(|fact| fact.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_file_that_parses_cleanly_is_clean() {
+        let (facts, _) = facts("struct S { int a; };\nint count;\nvoid f() { int local; }\n");
+
+        assert!(!facts.is_empty(), "the fixture declares something");
+        assert!(
+            facts.iter().all(|fact| fact.clean),
+            "with no diagnostics there is nothing to be unclean about: {:?}",
+            facts
+                .iter()
+                .filter(|fact| !fact.clean)
+                .map(|fact| fact.name.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_broken_declaration_leaves_the_rest_of_its_file_alone() {
+        // The declaration that failed contributes **no fact at all** — which is what every fixture tried while
+        // choosing this rule did, and worth pinning: a reading that goes wrong usually removes the fact rather
+        // than producing a wrong one. What the field is for is the facts around it, and they stay clean.
+        let (facts, errors) = facts_of_a_broken_file("struct S { int a; };\nint b = ;\n");
+
+        assert_eq!(errors.len(), 1, "one error, in the second declaration");
+        assert_eq!(
+            facts.iter().map(|fact| fact.name.as_str()).collect::<Vec<_>>(),
+            ["S", "a"],
+            "no fact for the declaration that failed"
+        );
+        assert!(
+            facts.iter().all(|fact| fact.clean),
+            "and the two that were read are untouched by the recovery"
+        );
+    }
+
+    #[test]
+    fn an_error_inside_a_declaration_is_reported_on_it() {
+        // Both fixtures keep a fact for the declaration the error landed in — a namespace and a function — and
+        // in both the error is inside the *body*, which is the case a rule based on the declarator alone would
+        // have called clean.
+        assert_eq!(unclean("namespace n { int bad = ; }\nint ok;\n"), ["n"]);
+        assert_eq!(unclean("void f() { int a = ; }\nint ok;\n"), ["f"]);
+    }
+
+    #[test]
+    fn only_the_innermost_declaration_is_touched() {
+        // The error is inside `m`'s body: `m` is touched, and so is the class that contains it — but `a`, a
+        // sibling member whose own declaration is untouched, is not. The wider rule, "any declaration whose range
+        // contains the name", would mark `a` too; measured over the standard library's closure that rule marks
+        // **2907** of 5388 declarations against **214** for this one, because a single error in a class body
+        // condemns every member of it.
+        assert_eq!(
+            unclean("struct S { int a; void m() { int x = ; } };\nint ok;\n"),
+            ["S", "m"]
+        );
     }
 }

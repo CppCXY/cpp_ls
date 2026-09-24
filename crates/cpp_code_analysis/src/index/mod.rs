@@ -111,7 +111,18 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         let root = tree.get_red_root();
         let preprocessing = preprocess(&root);
         let scopes = build_scopes(&root);
-        let (declarations, mut guards) = build_facts(&scopes, &preprocessing, &root);
+
+        // The diagnostics, as ranges, for the one field a fact takes from them rather than from the tree — see
+        // [`DeclFact::clean`]. Collected once for the whole file: the parser reports a handful per file, and
+        // asking per declaration would be a scan of the list per fact.
+        let errors: Vec<cpp_parser::SourceRange> = tree
+            .get_errors()
+            .iter()
+            .map(|error| cpp_parser::source_range(error.range))
+            .collect();
+
+        let (declarations, mut guards) =
+            build_facts(&scopes, &preprocessing, &root, &errors);
 
         let mut macros: Vec<MacroFact> = preprocessing
             .directives
