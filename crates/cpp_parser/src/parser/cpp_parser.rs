@@ -674,8 +674,7 @@ impl<'a> CppParser<'a> {
             return false;
         }
 
-        // Angle form: scan forward for the closing `>` at the same "line", refusing if anything
-        // shows up that cannot be inside a header name.
+        // Angle form: scan forward for the closing `>` at the same "line".
         let mut end_index = self.token_index + 1;
         let mut consumed = 0usize;
         loop {
@@ -685,15 +684,19 @@ impl<'a> CppParser<'a> {
 
             match token.kind {
                 CppTokenKind::Greater => break,
-                CppTokenKind::Whitespace => {}
-                // Anything else invalidates the guess and the caller lexes normally.
-                CppTokenKind::Identifier
-                | CppTokenKind::Dot
-                | CppTokenKind::Slash
-                | CppTokenKind::Minus
-                | CppTokenKind::Plus
-                | CppTokenKind::IntegerLiteral => {}
-                _ => return false,
+                // What ends the scan is only what ends the **line**. A header name runs to the closing `>` and
+                // may contain anything else — the standard makes an h-char any character except newline and
+                // `>` — so this is a list of what *cannot* be inside one rather than of what can.
+                //
+                // It was a whitelist, and the whitelist was missing `++`: `#include <bits/c++config.h>` did not
+                // fold, which is the most common include in libstdc++ and therefore in every standard header
+                // there is. The cost was not a worse tree but a *wrong target*: the analysis layer's fallback for
+                // an unfolded angle include reconstructed the name from these tokens, and every file that
+                // included one then resolved its includes to nothing and was never cached. See
+                // `docs/grammar-gaps.md` — a whitelist here is a rule about the lexer's token kinds pretending to
+                // be a rule about header names.
+                CppTokenKind::Newline | CppTokenKind::LineContinuation | CppTokenKind::Eof => return false,
+                _ => {}
             }
 
             consumed += 1;

@@ -144,9 +144,19 @@ cpp_code_analysis
 - 批量变更（切分支/merge/格式化）：两段式——**打开的文件 → 它的 include 闭包 → 其余**，由 `index::worklist` 实现（一步一个文件，调用方决定节奏）；UI 不阻塞，未索引的文件查询返回 Unknown 而不是等。
 - 监听：**不接 OS 监听器**。语言服务器由**客户端**通知（LSP 的 `didOpen`/`didChange`/`didSave`/`didClose`/`workspace/didRenameFiles` 本身就是事件源），所以不需要 `notify`、不需要去抖时钟、不需要文件系统轮询。客户端来一批事件就构造一个 `ChangeBatch`、调一次 `respond`，然后按返回的路径跑 `Worklist`——这就是服务器的接入点。过滤与合并规则（`.git/`、缓存目录、构建目录、`compile_commands.json`、`删+建` 的合并）仍然有用，因为客户端也可能报出无关路径。重命名按内容哈希复用（同目录同文字 ⇒ 同键，一次解析都不用重来），但**监听层不负责把新路径加进索引**——那是文件清单和 include 图的活。
 
-### 驱动层：`SummaryStore` 的三条规则
+### 驱动层：`SummaryStore` 的四条规则
 
-`index::store` 只做三件事：`get(path)`（现在是文件**当前**该有的摘要）、`invalidate(path)`（改了以后的工作集）、`stats()`（命中率）。它不监听文件系统、不排调度、不碰线程——和 `FileIndexer` 对解析的态度一样。
+`index::store` 做四件事：`get(path)`（现在是文件**当前**该有的摘要）、`index_includes_from(entry, budget)`
+（**一个文件及其闭包**——顺着摘要里的 `resolved` 边走边问缓存，返回 `IncludeIndex`）、`invalidate(path)`
+（改了以后的工作集）、`stats()`（命中率）。它不监听文件系统、不排调度、不碰线程——和 `FileIndexer` 对解析
+的态度一样。
+
+**闭包那一条是"打开一个项目"的入口**，也是 P0 的搜索路径发现第一次真正兑现的地方：`#include <vector>`
+解析得出来之后，这一个调用就会把 185 个标准头索引进缓存。实测本机一个含 `<vector>`/`<string>` 的
+`main.cpp`：冷 309 个文件 3.6 s，热 307 个命中 262 ms、盘上 1.5 MB。它**不是一个新层**：闭包的结构不需要
+重新解析，因为摘要里已经记着每条 include 解析到了哪个路径，所以循环就是"问 store 要一个文件 → 从答案里
+读它包含谁 → 再来"。预算（文件数 + 深度）两条，且**截断要报告**（`not_indexed` 带原因），因为"没有更多了"
+和"可能还有"是两句话。
 
 **规则一：先查盘，后建。** 顺序是：读文字 → 算键（哈希 + 语境，两者都不需要解析）→ 盘上有就直接用 → 没有才建、落盘。命中时**连 include 都不去找**（有测试用 provider 的探测量钉住这一点）。这条规则是宏环境离开键之后才成立的，见上；它也是"缓存到底省了什么"的答案：省的是解析，不只是写。
 
@@ -359,7 +369,7 @@ a.cpp:  #define MAX 1         位置 [0]
 
 ## 下一步：宏、标准库、语义索引与语义查询
 
-索引与驱动层的骨架已经能跑（事实层 + 缓存 + 顺序 + 事件响应，886 个测试）。**从这一轮起重心转向语义**：不再在文件系统/进程/监听这些事情上消耗，因为语言服务器由客户端通知，那些事情没有真正的消费者。已经拿下的语义查询：名字（含限定名）、宏（位置化）、成员访问（第一个需要类型的查询）、成员列表、补全（游标 → 类型 → 列表）；环境发现这一层落了工具链搜索路径（[`std-library.md`](std-library.md) 的 P0）。
+索引与驱动层的骨架已经能跑（事实层 + 缓存 + 顺序 + 事件响应，902 个测试）。**从这一轮起重心转向语义**：不再在文件系统/进程/监听这些事情上消耗，因为语言服务器由客户端通知，那些事情没有真正的消费者。已经拿下的语义查询：名字（含限定名）、宏（位置化）、成员访问（第一个需要类型的查询）、成员列表、补全（游标 → 类型 → 列表）；环境发现这一层落了工具链搜索路径（[`std-library.md`](std-library.md) 的 P0）。
 
 按依赖排，接下来要做的：
 
@@ -386,7 +396,7 @@ a.cpp:  #define MAX 1         位置 [0]
 ### 门禁：三件事必须全绿
 
 ```bash
-cargo test --workspace                              # 886 个测试，34 个套件
+cargo test --workspace                              # 902 个测试，34 个套件
 cargo clippy --workspace --all-targets              # 零警告
 cargo doc --no-deps -p cpp_code_analysis            # 零警告（cpp_parser 还有 32 条历史链接问题，不管）
 ```
@@ -417,12 +427,12 @@ cargo doc --no-deps -p cpp_code_analysis            # 零警告（cpp_parser 还
 | `f().size`、`(*p).size`、`arr[i].size` | `Unknown(UnknownType)` | 表达式类型推断；第一步是给函数记返回类型 |
 | 模板实参的成员 `v.begin()` | `Unknown(NotDeclaredHere)` | 实例化 |
 | 宏的"找引用/重命名" | 没这个查询 | 标识符位置表（摘要里没有） |
-| `#include <vector>` | **能解析了**（`toolchain::discover` + `Toolchain::config`）；但**没有 driver 调它**，所以文件仍然不会因此被缓存 | 把 `SummaryStore`/`FileIndexer`/`Worklist` 串起来、打开项目时做一次发现的入口 |
+| `#include <vector>` | **已兑现**：`toolchain::discover` 发现搜索路径，`SummaryStore::index_includes_from` 顺着 include 图把闭包索引进缓存（冷 309 文件 3.6 s、热 262 ms、盘上 1.5 MB） | 还没有"打开项目"的入口去调它们（以及一个真正的语言服务器二进制） |
 | 成员访问之外的位置（裸名字、`::` 后面） | `Unknown(UnparsableName)` | 作用域名补全：一次作用域内查找，不是成员列表 |
 | 构造函数、无 `virtual` 的析构函数、`= delete` 的特殊成员 | 不在成员列表里（作用域层根本没绑定） | 一条"裸 declarator 也算声明了名字"的规则；见 `grammar-gaps.md` 第 19 条，边界由 `a_destructor_without_a_specifier_declares_nothing_yet` 钉住 |
 | `using Base::f;` 带进来的成员、虚函数覆盖 | 不在列表里 | 需要 `using` 声明与覆盖的模型 |
 | `w.` 之后文件其余部分的作用域 | 错的（恢复吃掉了块的 `}`） | parser 的恢复策略；见 `grammar-gaps.md` 第 20 条 |
-| 标准库闭包（185 个文件里 134 个报错） | 读不干净 → 不变量 3 让它的声明不可信 | 见 [`std-library.md`](std-library.md) 的 P1 |
+| 标准库闭包（185 个文件里 104 个报错，两条形状规则之前是 134） | 读不干净 → 不变量 3 让它的声明不可信 | 见 [`std-library.md`](std-library.md) 的 P1 |
 
 ### 两条曾经踩过的坑（读代码时会看到痕迹）
 

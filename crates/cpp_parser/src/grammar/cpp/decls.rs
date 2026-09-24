@@ -2787,8 +2787,16 @@ fn at_a_macro_member(p: &CppParser) -> bool {
     }
 }
 
-/// Is the balanced group at the cursor followed by something other than a `;`?
-fn a_semicolon_follows_the_group(p: &CppParser) -> bool {
+/// The kind of the first token **after** the balanced group at the cursor.
+///
+/// The question every rule asks that has a macro invocation in front of it: what the group is followed by is what
+/// says which reading this is — `;` a call, `{` a definition whose body is the block, a declaration keyword a
+/// macro standing for a declaration. Written once, because counting parentheses is the part that is easy to get
+/// subtly wrong, and four callers should not each count for themselves.
+///
+/// [`CppTokenKind::None`] when the group never closes: an unbalanced `(` has no "after", and a caller that read
+/// one would be answering about the wrong token.
+pub(super) fn kind_after_the_group(p: &CppParser) -> CppTokenKind {
     let mut depth = 0isize;
     let mut offset = 0usize;
     while let Some(kind) = p.peek_token_kind_at(offset..offset + 1).first().copied() {
@@ -2801,16 +2809,21 @@ fn a_semicolon_follows_the_group(p: &CppParser) -> bool {
                         .peek_token_kind_at(offset + 1..offset + 2)
                         .first()
                         .copied()
-                        == Some(CppTokenKind::Semicolon);
+                        .unwrap_or(CppTokenKind::None);
                 }
             }
-            CppTokenKind::Eof | CppTokenKind::None => return false,
+            CppTokenKind::Eof | CppTokenKind::None => return CppTokenKind::None,
             _ => {}
         }
         offset += 1;
     }
 
-    false
+    CppTokenKind::None
+}
+
+/// Is the balanced group at the cursor followed by a `;`?
+pub(super) fn a_semicolon_follows_the_group(p: &CppParser) -> bool {
+    kind_after_the_group(p) == CppTokenKind::Semicolon
 }
 
 /// Read a macro invocation that stands where a class member goes, into a `MacroCall`.
@@ -2971,58 +2984,78 @@ fn a_decltype_here_is_a_type(p: &mut CppParser) -> bool {
     followed_by_a_declarator
 }
 
+/// The kind of the first significant token **after** the one at the cursor.
+///
+/// The question a rule asks when the token at the cursor is a name and what decides the reading is what follows:
+/// [`super::stats::at_a_macro_that_stands_for_a_declaration`] wants to know whether a declaration can begin
+/// there. Written once, because the walk past trivia is the part that is easy to get subtly wrong — a rule that
+/// looked at the *next raw token* would see a newline and answer about that.
+pub(super) fn kind_after_the_name(p: &CppParser) -> CppTokenKind {
+    p.token_kind_at(next_significant_index(p, p.current_token_index()))
+}
+
+/// Can a declaration begin with this token kind?///
+/// Factored out of [`starts_declaration`] because there are two starting points and one question:
+/// `starts_declaration` asks it at the **cursor**, where a statement could also begin, and
+/// [`super::stats::at_a_macro_that_stands_for_a_declaration`] asks it at the token **after a name**, where the
+/// other reading is an expression that continues. Two copies of this list would be free to disagree about what
+/// begins a declaration, and the list is a closed grammatical set — every entry says "a declaration may start
+/// with this", which is a different kind of claim from the "which token kinds may be inside a header name" list
+/// whose cost `docs/grammar-gaps.md` entry 22 records.
+///
+/// The kinds whose answer needs the tokens *after* them (`decltype`, and `concept`, which is contextual) are not
+/// here: they stay in [`starts_declaration`], where that lookahead is available.
+pub(super) fn can_begin_a_declaration(kind: CppTokenKind) -> bool {
+    matches!(
+        kind,
+        CppTokenKind::TypedefKeyword
+            | CppTokenKind::UsingKeyword
+            | CppTokenKind::NamespaceKeyword
+            | CppTokenKind::TemplateKeyword
+            | CppTokenKind::ExternKeyword
+            | CppTokenKind::StaticAssertKeyword
+            | CppTokenKind::ClassKeyword
+            | CppTokenKind::StructKeyword
+            | CppTokenKind::UnionKeyword
+            | CppTokenKind::EnumKeyword
+            | CppTokenKind::AlignasKeyword
+            // Specifiers. Several of these also begin expressions — `const` cannot, `static` cannot, `auto`
+            // cannot — which is what the caller's lookahead is for.
+            | CppTokenKind::ConstKeyword
+            | CppTokenKind::VolatileKeyword
+            | CppTokenKind::ConstexprKeyword
+            | CppTokenKind::StaticKeyword
+            | CppTokenKind::InlineKeyword
+            | CppTokenKind::VirtualKeyword
+            | CppTokenKind::ExplicitKeyword
+            | CppTokenKind::FriendKeyword
+            | CppTokenKind::MutableKeyword
+            | CppTokenKind::ThreadLocalKeyword
+    )
+}
+
 pub fn starts_declaration(p: &mut CppParser) -> bool {
     match p.current_token() {
-        CppTokenKind::TypedefKeyword
-        | CppTokenKind::UsingKeyword
-        | CppTokenKind::NamespaceKeyword
-        | CppTokenKind::TemplateKeyword
-        | CppTokenKind::ExternKeyword
-        | CppTokenKind::StaticAssertKeyword
-        | CppTokenKind::ClassKeyword
-        | CppTokenKind::StructKeyword
-        | CppTokenKind::UnionKeyword
-        | CppTokenKind::EnumKeyword => true,
-
         // `concept` is **not** an anchor, and the omission is a decision: the word is contextual, and a statement
         // that begins with it is an ordinary use of the name — `concept = 2;`, `concept();`. A concept definition
-        // always begins with `template`, which is already an anchor above, so nothing is lost by leaving the bare
-        // word to the expression rule. Anchoring it here is what made `void f() { concept = 2; }` demand a concept
-        // name at the `=`.
-
-        // `alignas` cannot begin an expression either — its parentheses hold an alignment, not a value being
-        // used — so a declaration that starts with it is a declaration and does not need the speculative pass.
+        // always begins with `template`, which is already an anchor, so nothing is lost by leaving the bare word
+        // to the expression rule. Anchoring it here is what made `void f() { concept = 2; }` demand a concept name
+        // at the `=`.
         //
-        // The anchor is not an optimisation here. Without it the declaration reading is *tried and abandoned*:
-        // `alignas(16) E e;` with an unqualified name for the type reaches the expression rule, fails at
-        // `alignas`, and reports `expected primary expression` against a token the specifier loop had just
-        // learned to read.
-        CppTokenKind::AlignasKeyword => true,
-
-        // `decltype(x) y = 1;`, `decltype(auto) x = f();` — and only those. A `decltype` **can** begin an
-        // expression (`decltype(x) + 1;`), so it is not an anchor on its own; [`a_decltype_here_is_a_type`]
-        // asks whether what follows the type-id is a declarator, which is the same question the two readings
-        // differ on.
+        // `alignas` is an anchor and is not an optimisation: without it `alignas(16) E e;` with an unqualified
+        // name for the type reaches the expression rule, fails at `alignas`, and reports `expected primary
+        // expression` against a token the specifier loop had just learned to read.
+        //
+        // `decltype(x) y = 1;` and `decltype(auto) x = f();` — and only those. A `decltype` **can** begin an
+        // expression (`decltype(x) + 1;`), so it is not an anchor on its own; [`a_decltype_here_is_a_type`] asks
+        // whether what follows the type-id is a declarator, which is the same question the two readings differ on.
         //
         // Without the anchor the declaration reading is never taken at all, because `decltype` is in
         // `is_expression_keyword` and no expression rule consumes it — so the statement rule read it as a name,
         // found `y` next, and reported `expected primary expression` against the `decltype` itself.
         CppTokenKind::DecltypeKeyword if a_decltype_here_is_a_type(p) => true,
 
-        // These are specifiers, but several of them also begin expressions: `const` cannot,
-        // `static` cannot, `auto` cannot — while `decltype(x)` and `noexcept(...)` can.
-        CppTokenKind::ConstKeyword
-        | CppTokenKind::VolatileKeyword
-        | CppTokenKind::ConstexprKeyword
-        | CppTokenKind::StaticKeyword
-        | CppTokenKind::InlineKeyword
-        | CppTokenKind::VirtualKeyword
-        | CppTokenKind::ExplicitKeyword
-        | CppTokenKind::FriendKeyword
-        | CppTokenKind::MutableKeyword
-        | CppTokenKind::ThreadLocalKeyword => true,
-
-        _ => false,
+        kind => can_begin_a_declaration(kind),
     }
 }
 
@@ -3347,6 +3380,11 @@ pub fn parse_namespace_declaration(p: &mut CppParser) -> ParseResult {
         }
     }
 
+    // A macro invocation between the name and the `{`. See the rule for why this is read by shape.
+    if p.current_token() != CppTokenKind::LeftBrace {
+        eat_namespace_head_macros(p);
+    }
+
     if p.current_token() == CppTokenKind::LeftBrace {
         if let Err(err) = parse_stats_block(p) {
             p.close_marks_above(base);
@@ -3357,6 +3395,58 @@ pub fn parse_namespace_declaration(p: &mut CppParser) -> ParseResult {
 
     let _ = expect_semicolon(p);
     Ok(m.complete(p))
+}
+
+/// Read the macro-shaped tokens that may sit between a namespace's name and its `{`.
+///
+/// `namespace std _GLIBCXX_VISIBILITY(default) {` is how **every** libstdc++ header opens — the measured closure
+/// has it in one header after another, and it is the first thing in the file — and `_GLIBCXX_VISIBILITY(V)`
+/// expands to *nothing at all* on the toolchain this was measured on (`bits/c++config.h` defines
+/// `_GLIBCXX_PSEUDO_VISIBILITY(V)` empty there; it is `__attribute__((__visibility__("default")))` only where the
+/// toolchain has visibility attributes). So the head the compiler sees is `namespace std {`, and what stands
+/// between the name and the brace is a macro invocation. Not reading it cost *the whole file*: the head failed,
+/// and every declaration after it came out as an error node — 190 diagnostics in `bits/stl_algobase.h` alone.
+///
+/// # Why by shape, and not by a table
+///
+/// The name is `#define`d in `c++config.h`, an **included** header, so nothing the parser can be handed knows it:
+/// this file's own `MacroNames` never saw the definition, and the external hook (`symbols.rs`) is not wired to a
+/// file's includes — see `docs/std-library.md`, where that connection is called out as the expensive layer it is.
+/// What *is* knowable here is the shape, and the shape settles it: **no valid C++ has anything between a
+/// namespace's name and its `{`** — the two readings are `namespace std {` and an error — so accepting a macro
+/// costs nothing, which is maintenance convention 16's fallback side of the rule ("both readings are wrong, pick
+/// the cheaper one").
+///
+/// # What it does not accept
+///
+/// A name, or a name and one balanced group, and nothing else. And the scan is **abandoned unless it ends on
+/// `{`**: a head that does not close where this expects gives every token back, and the declaration rule then
+/// reports exactly what it reported before. That is what keeps a typo — `namespace std ;` — from being read as a
+/// namespace with a macro in it.
+fn eat_namespace_head_macros(p: &mut CppParser) -> bool {
+    let checkpoint = p.checkpoint();
+    let mut ate_anything = false;
+
+    while p.current_token() == CppTokenKind::Identifier {
+        p.bump();
+        ate_anything = true;
+
+        if p.current_token() == CppTokenKind::LeftParen {
+            // The group is the invocation's argument list. The same reader a class-member macro call uses, so the
+            // two cannot come to disagree about where an invocation ends.
+            if parse_balanced_token_group(p, CppSyntaxKind::ArgumentList).is_err() {
+                p.rollback(checkpoint);
+                return false;
+            }
+        }
+    }
+
+    if !ate_anything || p.current_token() != CppTokenKind::LeftBrace {
+        p.rollback(checkpoint);
+        return false;
+    }
+
+    true
 }
 
 /// Parse a `{ ... }` block whose contents are declarations, reusing the statement machinery.

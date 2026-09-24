@@ -438,9 +438,20 @@ fn parse_include(tokens: &[Token], kind: DirectiveKind) -> Directive {
         // `#include <a/b.h>` that the lexer did not fold — the tokens are still there, and the text
         // between them is the name. Reconstructing it from tokens rather than from a range keeps this
         // working for a header name that was never folded.
+        //
+        // **After** the `<`, not from it: `tokens` begins with the delimiter, and appending from there
+        // produced `<bits/c++config.h` as the target — which resolves to nothing, so every file that
+        // included one was built, found an unresolved include, and was deliberately not cached (see
+        // `index::store`). The trivia between the delimiters is kept, because the text between them *is*
+        // the name: a space is a character a header name may contain, and dropping it would make this
+        // disagree with the compiler about which file was meant.
         CppTokenKind::Less => {
             let mut text = String::new();
-            for token in tokens {
+            for token in tokens
+                .iter()
+                .skip_while(|token| token.kind != CppTokenKind::Less)
+                .skip(1)
+            {
                 if token.kind == CppTokenKind::Greater {
                     return Directive::Include(Include {
                         form: IncludeForm::Angle,

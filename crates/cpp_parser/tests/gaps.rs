@@ -20,7 +20,7 @@
 //! When one of these starts working, the test that pins it fails, and the fix is to move the line from the
 //! second list to the first. That is the whole mechanism, and it is deliberately the cheapest one available.
 
-use cpp_parser::{CppParser, CppSyntaxKind, CppSyntaxTree, ParserConfig};
+use cpp_parser::{CppParser, CppSyntaxKind, CppSyntaxTree, CppTokenKind, ParserConfig};
 
 /// The three places a construct can be written, because the same tokens are read differently in each.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -216,6 +216,82 @@ fn contains(source: &str, kind: CppSyntaxKind) -> bool {
         .any(|node| CppSyntaxKind::from(node.kind()) == kind)
 }
 
+/// A macro **from a header** can stand where a declaration goes, and only where nothing else can.
+///
+/// The shape that made this necessary is `namespace std _GLIBCXX_VISIBILITY(default) {`, which opens **every**
+/// libstdc++ header, and `_GLIBCXX_BEGIN_NAMESPACE_VERSION` on a line of its own inside the body. Neither name is
+/// in any table the parser can be handed — the `#define`s are in `bits/c++config.h`, an *included* file — so the
+/// shape is what decides, and it decides only where it has no competitor. Measured on the closure of six standard
+/// headers: 48 of 185 files read cleanly before these two rules, 78 after (`docs/std-library.md`).
+///
+/// The negative assertions are the point of the test. Each is a shape that looks similar and must keep the
+/// reading it already had:
+///
+/// ```text
+/// x = 1;                the `=` continues an expression — the first version of the rule read this as a macro
+/// FOO(x);               the most vexing parse: a declaration, and the `;` is what says so
+/// TEST(A, B) { … }      a definition whose body is the block
+/// COUNT (in a body)     a missing `;`, which must stay an error
+/// ```
+///
+/// The first and the fourth are the two mistakes the rule was rewritten to avoid, so they are pinned here rather
+/// than left to the rules that own them: widening this one again is exactly what would break them.
+#[test]
+fn a_macro_from_a_header_can_stand_where_a_declaration_goes() {
+    // The namespace head, which is the shape in every standard header.
+    let header = "namespace std _GLIBCXX_VISIBILITY(default)\n{\n  struct Widget { int size; };\n}\n";
+    assert!(
+        contains(header, CppSyntaxKind::NamespaceDecl),
+        "the namespace is still a namespace"
+    );
+    assert!(
+        contains(header, CppSyntaxKind::CompoundStat),
+        "and it still opens a body — the macro is between the name and the brace, not instead of either"
+    );
+    assert!(
+        CppParser::parse(header, ParserConfig::default())
+            .get_errors()
+            .is_empty(),
+        "and the head no longer costs the whole file"
+    );
+
+    // A bare invocation standing for a declaration, with and without arguments.
+    let bare = "_GLIBCXX_BEGIN_NAMESPACE_VERSION\ntemplate <typename T> struct S { T x; };\n";
+    assert!(contains(bare, CppSyntaxKind::MacroCall));
+    assert!(
+        CppParser::parse(bare, ParserConfig::default())
+            .get_errors()
+            .is_empty(),
+        "and what follows it is read as the declaration it is"
+    );
+    assert!(contains(
+        "_GLIBCXX_BEGIN_INLINE_ABI_NAMESPACE(__cxx11)\nint x;\n",
+        CppSyntaxKind::MacroCall
+    ));
+
+    // The shapes that must keep their reading.
+    assert!(
+        !contains("x = 1;\n", CppSyntaxKind::MacroCall),
+        "an assignment: no declarator follows an `=`, and asking about declarators is what read this as a macro"
+    );
+    assert!(
+        contains("FOO(x);\n", CppSyntaxKind::Declaration),
+        "the most vexing parse is a declaration, and the `;` is what says so"
+    );
+    assert!(
+        contains("TEST(A, B) { int x = 1; }\n", CppSyntaxKind::Declaration),
+        "a macro used as a definition: the block is the declaration's body"
+    );
+    assert!(
+        !contains("void f() { COUNT\n  return; }\n", CppSyntaxKind::MacroCall),
+        "inside a body a missing `;` is the likelier story, and an error is the honest answer"
+    );
+    assert!(
+        !contains("void f() { FOO(x) }\n", CppSyntaxKind::MacroCall),
+        "and a call inside a body is a call, however it is spelled"
+    );
+}
+
 /// A construct whose statement kind is all that is asserted.
 fn shape(construct: &'static str, place: Where, kind: CppSyntaxKind) -> Shape {
     Shape {
@@ -396,6 +472,14 @@ fn constructs_the_parser_reads() {
             "TEST(FormatPerformance, 1k_row) { }",
             "TEST(A, B) { int x = 1; }",
             "namespace n { TEST(A, B) { } }",
+            // A **macro from a header** in declaration position, which is the shape every libstdc++ header opens
+            // with: the name is `#define`d in an *included* file, so no table the parser can be handed knows it and
+            // the shape is what decides. File scope is where that works — see
+            // `a_macro_from_a_header_can_stand_where_a_declaration_goes` for the shapes that must *not* be read
+            // this way, and `docs/grammar-gaps.md` entry 23.
+            "namespace std _GLIBCXX_VISIBILITY(default) { int x; }",
+            "_GLIBCXX_BEGIN_NAMESPACE_VERSION\nint x;\n",
+            "_GLIBCXX_BEGIN_INLINE_ABI_NAMESPACE(__cxx11)\nint x;\n",
             // A **conditional handler**: a directive can land at either joint of a `try`, and the first one is the
             // one that used to break the statement — with `try` separated from its block, the block was not the
             // try's block at all, and the `catch` became a statement with no statement before it.
@@ -1198,8 +1282,7 @@ fn constructs_are_read_as_the_right_node() {
 
 /// A construct that must contain a node of `kind`, with the statement kind it must have.
 #[track_caller]
-fn assert_fragment_contains(fragments: &[(&str, CppSyntaxKind)]) {
-    let missing: Vec<String> = fragments
+fn assert_fragment_contains(fragments: &[(&str, CppSyntaxKind)]) {    let missing: Vec<String> = fragments
         .iter()
         .filter(|(fragment, kind)| !contains(&format!("void probe() {{ {fragment} }}"), *kind))
         .map(|(fragment, kind)| format!("  {fragment}\n      no {kind:?} in it"))
@@ -1214,6 +1297,52 @@ fn assert_fragment_contains(fragments: &[(&str, CppSyntaxKind)]) {
             .iter()
             .map(|failure| format!("\n{failure}"))
             .collect::<String>()
+    );
+}
+
+/// A header name is **one token**, whatever the name is made of.
+///
+/// The bug this pins: the fold accepted `Identifier | Dot | Slash | Minus | Plus | IntegerLiteral` between the
+/// delimiters, and `c++config` lexes as `c`, `++`, `config` — so `#include <bits/c++config.h>` did not fold, and
+/// that is the most common include in libstdc++: every standard header writes it.
+///
+/// What it cost was not a worse tree but a **wrong target**. The analysis layer reconstructs the name from the
+/// tokens when the fold declines, and its reconstruction started at the `<`, so the target came out
+/// `<bits/c++config.h` and resolved to nothing. A file with an unresolved include is deliberately never cached
+/// (`index::store`), so every one of those headers was re-parsed on every session and every declaration in it
+/// was invisible — 54 of the 169 files in a measured `<vector>` closure. Both halves are pinned:
+/// `cpp_code_analysis/tests/preprocess.rs` has the reconstruction, and this has the fold.
+///
+/// A whitelist here is a rule about the *lexer's token kinds* pretending to be a rule about header names, which
+/// is why the fix is a list of what cannot appear rather than of what can. See `docs/grammar-gaps.md` entry 22.
+#[test]
+fn a_header_name_is_one_token_whatever_is_in_it() {
+    let folds = |source: &str| {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        tree.get_red_root()
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .any(|token| CppTokenKind::from(token.kind()) == CppTokenKind::HeaderName)
+    };
+
+    assert!(folds("#include <vector>\n"), "the ordinary case");
+    assert!(folds("#include \"local.h\"\n"), "and the quoted one");
+    assert!(
+        folds("#include <bits/c++config.h>\n"),
+        "`++` splits the name into three tokens, and a header name is not limited to the tokens a whitelist \
+         happened to list"
+    );
+    assert!(folds("#include <sys/a-b.h>\n"), "`-` is a token of its own too");
+    assert!(folds("#include <a/b/c.hpp>\n"));
+
+    // What really ends a header name — and the assertion that the widening did not swallow the line.
+    assert!(
+        !folds("#include <unterminated\nint x;\n"),
+        "a newline ends the directive, so there is no header name to fold"
+    );
+    assert!(
+        !folds("a < b;\n"),
+        "and outside a directive `<` is still less-than, which is why this is a parser rule and not a lexer one"
     );
 }
 

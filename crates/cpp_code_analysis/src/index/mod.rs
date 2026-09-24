@@ -43,7 +43,10 @@ pub use project::{
     ProjectMember, UnlistedBase, VisibleDeclaration, definition_across_files, macro_across_files,
     member_across_files, member_completions_at, members_of,
 };
-pub use store::{StoreStats, SummaryStore};
+pub use store::{
+    IncludeBudget, IncludeIndex, NotIndexed, NotIndexedReason, StoreStats, SummaryStore,
+    UnresolvedEdge,
+};
 pub use watch::{ChangeBatch, EventKind, FileEvent, Response, WatchFilter};
 pub use worklist::{Priority, Step, StepOutcome, Worklist};
 

@@ -163,6 +163,12 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
             Ok(m.complete(p))
         }
 
+        // A macro from a header standing where a declaration goes, which is how every libstdc++ header opens a
+        // namespace version: `_GLIBCXX_BEGIN_NAMESPACE_VERSION` on a line of its own. See the rule.
+        CppTokenKind::Identifier if at_a_macro_that_stands_for_a_declaration(p) => {
+            parse_a_macro_that_stands_for_a_declaration(p)
+        }
+
         // Everything else is a declaration or an expression statement.
         _ => parse_declaration_or_expression_statement(p),
     };
@@ -196,6 +202,110 @@ fn at_a_macro_call_statement(p: &CppParser) -> bool {
         && p.peek_next_token() == CppTokenKind::LeftParen
         && p.macro_evidence(p.current_token_text())
             .is_some_and(MacroEvidence::may_be_a_statement_without_a_semicolon)
+}
+
+/// Does a **macro invocation that stands for a declaration** start at the cursor?
+///
+/// `_GLIBCXX_BEGIN_NAMESPACE_VERSION` alone on a line inside a namespace body, or
+/// `_GLIBCXX_BEGIN_INLINE_ABI_NAMESPACE(__cxx11)`, is a macro from a header: `bits/c++config.h` expands the first
+/// to `namespace __8 {` in one branch and to **nothing at all** in the other. No table the parser can be handed
+/// knows the name — the `#define` is in an *included* file, and the external hook is not wired to a file's
+/// includes (see `eat_namespace_head_macros`, and `docs/std-library.md` for why that connection is a design round
+/// of its own). So the shape decides, and it decides only where it has no competitor:
+///
+/// ```text
+/// _GLIBCXX_BEGIN_NAMESPACE_VERSION   then `template`, `class`, `typedef`, `}`   -> a macro
+/// _GLIBCXX_BEGIN_INLINE_ABI_NAMESPACE(__cxx11)   then a declaration          -> a macro
+/// x = 1;                             the `=` continues an expression        -> an assignment, unchanged
+/// Widget w;                          a declarator follows                   -> a declaration, unchanged
+/// FOO(x);                            the group ends at a `;`                -> the most vexing parse, unchanged
+/// COUNT                              inside a body, where a missing `;` is the competing reading
+/// ```
+///
+/// # The question is "what may follow", and it is asked of the token after the invocation
+///
+/// A lone name at file or namespace scope has two readings, and what tells them apart is the token after the
+/// invocation — after the **group** when there is one, since the group is the macro's:
+///
+/// ```text
+/// MACRO template<…>        a declaration can begin there   -> a macro
+/// MACRO}                   the scope ends there            -> a macro
+/// MACRO(A, B) int x;       a declaration can begin there   -> a macro
+/// Widget w;                an identifier is not a type     -> a declaration, unchanged
+/// x = 1;                   `=` continues the name          -> an assignment, unchanged
+/// FOO(x);                  a `;` follows the group         -> the most vexing parse, unchanged
+/// TEST(A, B) { … }         a `{` follows the group         -> a definition, unchanged
+/// COUNT                    inside a body, where a missing `;` is the competing reading
+/// ```
+///
+/// The first version of this rule asked "does a *declarator* follow the name" instead, and `x = 1;` is what that
+/// cost: no declarator follows an `=`, so an assignment was read as a macro and the `=` then had no left-hand
+/// side. `Widget w;` is why the answer cannot simply be "an identifier follows": that is a declaration, and it is
+/// the `;`, the `{` and the identifier that say so.
+///
+/// # What it costs
+///
+/// A file that writes a macro-shaped name followed by a declaration and means something else gets a `MacroCall`
+/// where a reader might have wanted an error. Nothing is invented about it, every token is still in the tree, and
+/// the declarations after it are read normally — which is the whole point: not reading it cost every declaration
+/// in the file (190 diagnostics in `bits/stl_algobase.h` alone).
+fn at_a_macro_that_stands_for_a_declaration(p: &CppParser) -> bool {
+    if p.current_token() != CppTokenKind::Identifier || p.is_inside_a_body() {
+        return false;
+    }
+
+    let after = if p.peek_next_token() == CppTokenKind::LeftParen {
+        super::decls::kind_after_the_group(p)
+    } else {
+        super::decls::kind_after_the_name(p)
+    };
+
+    starts_a_new_declaration(after) || ends_the_scope(after)
+}
+
+/// Can a declaration begin with this token kind — by an **anchor**, or by a **type**?
+///
+/// The union of two lists the grammar already keeps apart: [`can_begin_a_declaration`] (the keywords that can only
+/// start a declaration, plus the specifiers) and the type keywords (`int`, `void`, `auto`, …, and the elaborated
+/// `class`/`struct`/`union`/`enum`). A declaration begins with one or the other, and a caller asking "may a
+/// declaration begin here" needs both — which is why this is a name rather than a longer list at the call site.
+///
+/// What is deliberately **not** here is an ordinary identifier: `Widget w;` is a declaration in which an
+/// identifier follows a name, and a rule that accepted one would read `Widget` as a macro.
+fn starts_a_new_declaration(kind: CppTokenKind) -> bool {
+    super::decls::can_begin_a_declaration(kind) || super::types::is_type_specifier_keyword(kind)
+}
+
+/// Does this token end the scope the cursor is in, or start a directive — so that nothing continues it?
+///
+/// The other half of "what may follow", beside [`starts_a_new_declaration`]: a macro standing for a declaration is
+/// the last thing on its line, so `}` and a following directive are both ordinary things to find after it. `#` is
+/// here rather than in the declaration list because a directive does not begin a declaration — it begins a
+/// *directive*, and the declaration it is about to write is the next thing on the next line.
+fn ends_the_scope(kind: CppTokenKind) -> bool {
+    matches!(
+        kind,
+        CppTokenKind::RightBrace | CppTokenKind::Hash | CppTokenKind::Eof | CppTokenKind::None
+    )
+}
+
+/// Read a macro invocation that stands for a declaration: `NAME` or `NAME ( tokens )`.
+///
+/// The same node the statement form produces, for the same reason — a macro's meaning is not knowable here, and
+/// dressing it up as a declaration would hide that. No `;` is consumed: a macro standing for a declaration does
+/// not write one, and a `;` that is there belongs to the empty statement rule.
+fn parse_a_macro_that_stands_for_a_declaration(p: &mut CppParser) -> ParseResult {
+    let m = p.mark(CppSyntaxKind::MacroCall);
+
+    let name = p.mark(CppSyntaxKind::NameExpr);
+    p.bump();
+    name.complete(p);
+
+    if p.current_token() == CppTokenKind::LeftParen {
+        super::decls::parse_balanced_token_group(p, CppSyntaxKind::ArgumentList)?;
+    }
+
+    Ok(m.complete(p))
 }
 
 /// Read a macro invocation as a statement: `NAME ( tokens ) [ { … } ] [ ; ]`.

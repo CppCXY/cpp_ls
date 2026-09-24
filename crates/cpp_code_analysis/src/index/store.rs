@@ -63,7 +63,7 @@ use crate::include::config::CompilerConfig;
 use crate::include::paths::{DiskFiles, FileProvider, normalize_path};
 use crate::index::project::ProjectIndex;
 use crate::index::{FileIndexer, read_summary, write_summary};
-use crate::summary::FileSummary;
+use crate::summary::{FileSummary, IncludeFact};
 
 /// A project's summaries on disk and in memory, and the rule for when each is rebuilt.
 pub struct SummaryStore<'a, F: FileProvider = DiskFiles> {
@@ -106,6 +106,101 @@ impl StoreStats {
         let total = self.reused + self.rebuilt;
         (total > 0).then(|| self.reused as f64 / total as f64)
     }
+
+    /// What happened between two readings — the cost of one call rather than of the session.
+    ///
+    /// A caller that wants to report "this call parsed 12 files and reused 173" has to subtract, and subtracting
+    /// in every caller is how one of them ends up reporting the session's numbers as the call's. Saturating
+    /// because the counters only grow: a `since` given a later reading is a caller's mistake, and answering `0`
+    /// is a better failure than a panic in an editor.
+    pub fn since(self, earlier: StoreStats) -> StoreStats {
+        StoreStats {
+            reused: self.reused.saturating_sub(earlier.reused),
+            rebuilt: self.rebuilt.saturating_sub(earlier.rebuilt),
+            unstored: self.unstored.saturating_sub(earlier.unstored),
+        }
+    }
+}
+
+/// How much of a project one walk may index.
+///
+/// Two limits rather than one, because they bound different failures: a **file count** bounds the total work, and
+/// a **depth** bounds the recursion along a chain that is long but narrow (a generated include ladder, a cycle
+/// that only its guards break). Neither is a policy about what is worth analysing — that is the caller's — they are
+/// what keeps a pathological project from making one call take the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IncludeBudget {
+    /// How many files one call may open, the entry included.
+    pub max_files: usize,
+    /// How far the include chain is followed from the entry, which is at depth `0`.
+    pub max_depth: usize,
+}
+
+impl Default for IncludeBudget {
+    /// Roomy enough that a real closure is never truncated, bounded enough to be a limit.
+    ///
+    /// The measured worst case is `<bits/stdc++.h>` at 359 files and a normal translation unit's closure at 185
+    /// (`docs/std-library.md`), so 4096 is more than ten times the largest case anyone has measured — while a
+    /// project whose include graph is that large is one a caller wants to hear about anyway, which is what
+    /// [`IncludeIndex::not_indexed`] is for.
+    fn default() -> Self {
+        IncludeBudget {
+            max_files: 4096,
+            max_depth: crate::MAX_INCLUDE_DEPTH,
+        }
+    }
+}
+
+/// What indexing one file's includes did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IncludeIndex {
+    /// Every file whose summary is now in the index, in the order the walk reached them.
+    ///
+    /// The entry is first, and a file appears once however many includes name it.
+    pub indexed: Vec<PathBuf>,
+    /// The `#include`s that resolved to nothing, so a caller can say *which* header is missing rather than that
+    /// something is.
+    pub unresolved: Vec<UnresolvedEdge>,
+    /// Files the walk reached and did not open, with why.
+    ///
+    /// The field that keeps a truncated index from reading as a complete one: `indexed` says what the analysis
+    /// has, and this says where it stopped. Both are needed — "there is nothing more" and "there may be more" are
+    /// the two answers a consumer has to be able to tell apart.
+    pub not_indexed: Vec<NotIndexed>,
+    /// What this call cost: parses the disk saved, parses that were spent, summaries deliberately not written.
+    pub stats: StoreStats,
+}
+
+/// An `#include` that resolved to nothing, and where it was written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedEdge {
+    /// The file that writes the directive.
+    pub from: PathBuf,
+    /// The name between the delimiters, as written.
+    pub spelling: String,
+    /// The directive's span, so a caller can point at the line.
+    pub range: cpp_parser::SourceRange,
+}
+
+/// A file the walk reached but did not index, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotIndexed {
+    pub path: PathBuf,
+    pub reason: NotIndexedReason,
+}
+
+/// Why a reached file was not opened.
+///
+/// Three reasons because they have three different fixes: a budget is raised, a depth limit says the include
+/// chain is longer than the walk follows, and unreadable says the filesystem changed under the walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotIndexedReason {
+    /// [`IncludeBudget::max_files`] ran out.
+    Budget,
+    /// The chain is deeper than [`IncludeBudget::max_depth`].
+    Depth,
+    /// The file could not be read: it resolved a moment ago, and it is not there now.
+    Unreadable,
 }
 
 impl<'a> SummaryStore<'a, DiskFiles> {
@@ -203,8 +298,104 @@ impl<'a, F: FileProvider> SummaryStore<'a, F> {
         self.index.summary(path)
     }
 
-    /// Forget everything the store holds about `path`, because the file is gone.
+    /// Index `entry` **and everything it includes**, so that the declarations the file can see are in the index.
     ///
+    /// The one call that makes the store's cache worth having on a real project. [`SummaryStore::get`] answers for
+    /// one file and records where that file's `#include`s resolved; this follows those edges until it runs out of
+    /// them, asking the cache at every step. That is what turns `#include <vector>` from a line the analysis
+    /// cannot follow into 185 summarised files that the next session reads in milliseconds.
+    ///
+    /// # It follows the *summaries*, not the syntax
+    ///
+    /// The traversal needs no second parse and no separate graph walk, because a summary already records the path
+    /// each of its includes resolved to — see [`IncludeFact::resolved`]. So the loop is: ask the store for a file,
+    /// read the resolved targets out of the answer, repeat. Every level is a cache lookup, which is also why this
+    /// is cheap on the second call: the files come back from disk and no parse happens at all.
+    ///
+    /// The alternative — parse the translation unit twice, once to build a graph and once to index — would pay the
+    /// most expensive step in the crate twice for information the first pass already had.
+    ///
+    /// # What it does not do
+    ///
+    /// * **No macro environment.** Each file is indexed on its own, so a header's conditions are decided without
+    ///   the `-D`s of the translation unit that includes it. `docs/std-library.md` calls that the expensive layer
+    ///   (P3) and keeps it separate on purpose: feeding the macro environment in means the key must name it, which
+    ///   invalidates every stored summary in every project.
+    /// * **No scheduling and no watching.** The caller says when. A file that changes afterwards is
+    ///   [`SummaryStore::invalidate`]'s question, not this one's.
+    /// * **No completeness claim.** [`IncludeIndex::not_indexed`] names every file the walk reached and did not
+    ///   open, with why — a budget that truncated silently would make a partial index look like a whole one, which
+    ///   is the failure `Known` exists to prevent one layer up.
+    ///
+    /// # The budget
+    ///
+    /// A file count, a depth, and both are reported rather than enforced quietly. The measured worst case is
+    /// `<bits/stdc++.h>` at 359 files, so the default leaves room for a project far larger than that while still
+    /// bounding what one call can cost; see [`IncludeBudget::default`].
+    pub fn index_includes_from(&mut self, entry: &Path, budget: IncludeBudget) -> IncludeIndex {
+        let before = self.stats;
+        let mut outcome = IncludeIndex::default();
+
+        // A file reached twice is one file: `#include <vector>` written in twenty headers is twenty edges and one
+        // node, and the second visit would either re-ask the cache or re-parse. The root is also the only seed.
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut pending: Vec<(PathBuf, usize)> = vec![(entry.to_path_buf(), 0)];
+
+        while let Some((path, depth)) = pending.pop() {
+            if !seen.insert(normalize_path(&path, cfg!(windows))) {
+                continue;
+            }
+
+            if outcome.indexed.len() >= budget.max_files {
+                outcome.not_indexed.push(NotIndexed {
+                    path,
+                    reason: NotIndexedReason::Budget,
+                });
+                continue;
+            }
+
+            if depth > budget.max_depth {
+                outcome.not_indexed.push(NotIndexed {
+                    path,
+                    reason: NotIndexedReason::Depth,
+                });
+                continue;
+            }
+
+            // Unreadable is a real case and not an error: the target resolved a moment ago, and the walk is not
+            // the thing that gets to complain about the file having moved since.
+            let Some(summary) = self.get(&path) else {
+                outcome.not_indexed.push(NotIndexed {
+                    path,
+                    reason: NotIndexedReason::Unreadable,
+                });
+                continue;
+            };
+
+            let includes: Vec<IncludeFact> = summary.includes.clone();
+            outcome.indexed.push(path.clone());
+
+            // Reversed onto the stack so that they come off it in the order the file writes them. A stack is the
+            // whole reason this walk needs no recursion, but it turns "the includes, in order" into "the includes,
+            // backwards" unless the push is reversed — and the order is worth keeping: it is the order a compiler
+            // reads them in, and the order a caller showing what was indexed expects to see.
+            for include in includes.into_iter().rev() {
+                match include.resolved {
+                    Some(target) => pending.push((target, depth + 1)),
+                    None => outcome.unresolved.push(UnresolvedEdge {
+                        from: path.clone(),
+                        spelling: include.spelling,
+                        range: include.range,
+                    }),
+                }
+            }
+        }
+
+        outcome.stats = self.stats.since(before);
+        outcome
+    }
+
+    /// Forget everything the store holds about `path`, because the file is gone.    ///
     /// The disk entry is **not** removed: it is keyed by the text, so if the file comes back with the text it had,
     /// the entry is exactly the summary it needs, and deleting it would throw away a hit for no reason. What this
     /// drops is the in-memory summary, so that a query stops finding declarations in a file that no longer exists.
@@ -1041,5 +1232,344 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // Indexing a file's includes
+    //
+    // The fixtures are shaped like a real project: a `.cpp` that includes a header, which includes another, with
+    // a standard-library-shaped target that resolves into a search path. What each test is about is what the walk
+    // *reached* and what it said about where it stopped.
+    // -------------------------------------------------------------------------------------------
+
+    use super::{
+        IncludeBudget, NotIndexedReason, StoreStats,
+    };
+
+    /// A translation unit with a two-level include chain, and nothing missing.
+    fn chain() -> MemoryFiles {
+        MemoryFiles::new()
+            .with_case_insensitive(false)
+            .with_file("/p/main.cpp", "#include \"middle.h\"\nint main() { return 0; }\n")
+            .with_file("/p/middle.h", "#include \"deep.h\"\nstruct Middle { Deep d; };\n")
+            .with_file("/p/deep.h", "struct Deep { int x; };\n")
+    }
+
+    /// The paths a walk indexed, as strings, so an assertion can read as the shape of the graph.
+    fn indexed(index: &super::IncludeIndex) -> Vec<String> {
+        index
+            .indexed
+            .iter()
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .collect()
+    }
+
+    #[test]
+    fn indexing_a_file_indexes_everything_it_includes() {
+        // What the call is for: after it, the declarations the file can *see* are in the index, which is the
+        // difference between answering about `Deep` and reporting it as not declared here.
+        let files = chain();
+        let (mut store, root) = store("closure", &files);
+
+        let index = store.index_includes_from(Path::new("/p/main.cpp"), IncludeBudget::default());
+
+        assert_eq!(
+            indexed(&index),
+            ["/p/main.cpp", "/p/middle.h", "/p/deep.h"],
+            "the entry first, then outwards"
+        );
+        assert!(index.not_indexed.is_empty(), "{:?}", index.not_indexed);
+        assert!(index.unresolved.is_empty());
+        assert_eq!(index.stats.rebuilt, 3, "three files, three parses");
+        assert_eq!(index.stats.reused, 0);
+
+        let found = store.index().definition("Deep", Path::new("/p/main.cpp"));
+        assert!(
+            matches!(found, crate::Known::Yes(_)),
+            "and a name two headers down is now visible from the file that includes them: {found:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_header_reached_twice_is_indexed_once() {
+        // `#include <vector>` written in twenty headers is twenty edges and one node. Without the visited set the
+        // second visit would re-ask the cache — cheap, but it would also put the file in `indexed` twice, and a
+        // caller counting files would report a project larger than it is.
+        let files = MemoryFiles::new()
+            .with_case_insensitive(false)
+            .with_file("/p/main.cpp", "#include \"a.h\"\n#include \"b.h\"\n")
+            .with_file("/p/a.h", "#include \"shared.h\"\nstruct A { int x; };\n")
+            .with_file("/p/b.h", "#include \"shared.h\"\nstruct B { int y; };\n")
+            .with_file("/p/shared.h", "struct Shared { int x; };\n");
+        let (mut store, root) = store("diamond", &files);
+
+        let index = store.index_includes_from(Path::new("/p/main.cpp"), IncludeBudget::default());
+
+        assert_eq!(indexed(&index).len(), 4, "{:?}", indexed(&index));
+        assert_eq!(
+            indexed(&index).iter().filter(|path| *path == "/p/shared.h").count(),
+            1
+        );
+        assert_eq!(
+            index.stats.rebuilt, 4,
+            "four files, four parses — the fifth visit is the one the visited set stopped, and it is why this \
+             number is not five"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn two_files_with_the_same_text_side_by_side_share_one_parse() {
+        // The content-key property turning up inside a closure walk, and it is worth a test precisely because it
+        // is surprising: the key names a file's **text and directory**, not its path, so two headers that happen
+        // to be identical share an entry. Both are still in `indexed` — they are two files — while only one of
+        // them was parsed.
+        let files = MemoryFiles::new()
+            .with_case_insensitive(false)
+            .with_file("/p/main.cpp", "#include \"one.h\"\n#include \"two.h\"\n")
+            .with_file("/p/one.h", "struct Same { int x; };\n")
+            .with_file("/p/two.h", "struct Same { int x; };\n");
+        let (mut store, root) = store("twin-headers", &files);
+
+        let index = store.index_includes_from(Path::new("/p/main.cpp"), IncludeBudget::default());
+
+        assert_eq!(indexed(&index).len(), 3, "three files");
+        assert_eq!(index.stats.rebuilt, 2, "and two parses, because two of them are the same text");
+        assert_eq!(index.stats.reused, 1, "the twin was answered by the entry the first one wrote");
+
+        // And the one entry is filed under **each** path that asked for it — see `ProjectIndex::insert_at` — so a
+        // query about either header finds what it declares. Asked as a list rather than as a definition because
+        // this fixture declares `Same` twice: two headers defining one class is an ODR violation, and the honest
+        // answer to "which one" is that nothing chooses.
+        let declared_in: Vec<String> = store
+            .index()
+            .files_declaring("Same", Path::new("/p/main.cpp"))
+            .iter()
+            .map(|found| found.file.to_string_lossy().replace('\\', "/"))
+            .collect();
+        assert_eq!(declared_in, ["/p/one.h", "/p/two.h"]);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_cycle_of_includes_terminates() {
+        // Two headers that include each other with no guards, which is a mistake a compiler would report and an
+        // editor still has to survive. The visited set is what ends this; without it the walk does not fail, it
+        // does not return.
+        let files = MemoryFiles::new()
+            .with_case_insensitive(false)
+            .with_file("/p/main.cpp", "#include \"a.h\"\n")
+            .with_file("/p/a.h", "#include \"b.h\"\nstruct A { int x; };\n")
+            .with_file("/p/b.h", "#include \"a.h\"\nstruct B { int y; };\n");
+        let (mut store, root) = store("cycle", &files);
+
+        let index = store.index_includes_from(Path::new("/p/main.cpp"), IncludeBudget::default());
+
+        assert_eq!(indexed(&index).len(), 3, "{:?}", indexed(&index));
+        assert!(index.not_indexed.is_empty());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_include_that_resolved_to_nothing_is_reported_rather_than_dropped() {
+        // The walk continues past it — a missing header is one file's problem, not the walk's — and says which
+        // directive it was, because "something is missing" is not actionable and "`missing.h` in `middle.h`, line
+        // 2" is.
+        let files = MemoryFiles::new()
+            .with_case_insensitive(false)
+            .with_file(
+                "/p/main.cpp",
+                "#include \"middle.h\"\n#include \"gone.h\"\nint main() { return 0; }\n",
+            )
+            .with_file("/p/middle.h", "#include \"deep.h\"\n")
+            .with_file("/p/deep.h", "struct Deep { int x; };\n");
+        let (mut store, root) = store("missing", &files);
+
+        let index = store.index_includes_from(Path::new("/p/main.cpp"), IncludeBudget::default());
+
+        assert_eq!(indexed(&index).len(), 3, "the rest of the closure was still indexed");
+        assert_eq!(index.unresolved.len(), 1, "{:?}", index.unresolved);
+        assert_eq!(index.unresolved[0].from, Path::new("/p/main.cpp"));
+        assert_eq!(index.unresolved[0].spelling, "gone.h");
+        assert!(
+            index.unresolved[0].range.start_offset > 0,
+            "and the range points at the directive rather than at the file"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_file_budget_stops_the_walk_and_says_so() {
+        // A budget that truncated silently would make a partial index look like a whole one — the same failure
+        // `Known` exists to prevent one layer up, one layer down.
+        let files = chain();
+        let (mut store, root) = store("budget", &files);
+
+        let index = store.index_includes_from(
+            Path::new("/p/main.cpp"),
+            IncludeBudget {
+                max_files: 2,
+                ..IncludeBudget::default()
+            },
+        );
+
+        assert_eq!(indexed(&index).len(), 2);
+        assert_eq!(index.not_indexed.len(), 1, "{:?}", index.not_indexed);
+        assert_eq!(
+            index.not_indexed[0].reason,
+            NotIndexedReason::Budget,
+            "and the reason names the budget rather than the filesystem"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_depth_limit_stops_a_long_chain_and_says_so() {
+        // The other limit, and the other failure: a chain that is long rather than wide.
+        let files = MemoryFiles::new()
+            .with_case_insensitive(false)
+            .with_file("/p/l0.h", "#include \"l1.h\"\n")
+            .with_file("/p/l1.h", "#include \"l2.h\"\n")
+            .with_file("/p/l2.h", "struct Deep { int x; };\n");
+        let (mut store, root) = store("depth", &files);
+
+        let index = store.index_includes_from(
+            Path::new("/p/l0.h"),
+            IncludeBudget {
+                max_depth: 1,
+                ..IncludeBudget::default()
+            },
+        );
+
+        assert_eq!(indexed(&index), ["/p/l0.h", "/p/l1.h"]);
+        assert_eq!(
+            index
+                .not_indexed
+                .iter()
+                .map(|stopped| (stopped.reason, stopped.path.to_string_lossy().to_string()))
+                .collect::<Vec<_>>(),
+            [(NotIndexedReason::Depth, "/p/l2.h".to_string())]
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_reported_rather_than_being_an_error() {
+        // The entry itself is missing. A caller asking about a file that is not there is an ordinary thing to do
+        // — an editor restoring a session, a watcher reporting a deletion — and the answer is that the index has
+        // nothing to say, not a panic.
+        let files = chain();
+        let (mut store, root) = store("missing-entry", &files);
+
+        let index = store.index_includes_from(Path::new("/p/nope.cpp"), IncludeBudget::default());
+
+        assert!(index.indexed.is_empty());
+        assert_eq!(
+            index.not_indexed,
+            [super::NotIndexed {
+                path: Path::new("/p/nope.cpp").to_path_buf(),
+                reason: NotIndexedReason::Unreadable,
+            }]
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_second_call_reads_the_whole_closure_from_disk() {
+        // The point of the whole exercise. A second session — a new store, nothing in memory, only what the first
+        // one wrote — must reach the same index without parsing anything: that is what makes opening a real
+        // project cheap the second time, and it is the number `docs/std-library.md` measures at 11 ms for 185
+        // files against a second and a half of parsing.
+        let files = chain();
+        let root = std::env::temp_dir().join("cppls-store-tests").join("closure-warm");
+        let _ = std::fs::remove_dir_all(&root);
+
+        let cold = {
+            let mut store = SummaryStore::with_provider(&root, CompilerConfig::default(), &files);
+            store.index_includes_from(Path::new("/p/main.cpp"), IncludeBudget::default())
+        };
+        assert_eq!(cold.stats.rebuilt, 3);
+
+        let mut reopened = SummaryStore::with_provider(&root, CompilerConfig::default(), &files);
+        let warm = reopened.index_includes_from(Path::new("/p/main.cpp"), IncludeBudget::default());
+
+        assert_eq!(indexed(&warm), indexed(&cold), "the same files, in the same order");
+        assert_eq!(warm.stats.rebuilt, 0, "the parser was not asked");
+        assert_eq!(warm.stats.reused, 3);
+        assert_eq!(warm.stats.hit_rate(), Some(1.0));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_stats_of_one_call_are_a_delta_and_not_the_session() {
+        // A caller reporting "this call parsed 3 files" must not report the session's numbers, and the way that
+        // goes wrong is every caller subtracting for itself until one of them forgets.
+        let files = chain();
+        let (mut store, root) = store("stats-delta", &files);
+
+        let first = store.index_includes_from(Path::new("/p/main.cpp"), IncludeBudget::default());
+        let second = store.index_includes_from(Path::new("/p/main.cpp"), IncludeBudget::default());
+
+        assert_eq!(first.stats.rebuilt, 3);
+        assert_eq!(
+            second.stats.rebuilt, 0,
+            "the second call found its own work on disk"
+        );
+        assert_eq!(second.stats.reused, 3);
+        assert_eq!(
+            store.stats().rebuilt,
+            3,
+            "while the session's total is still the whole story"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_default_budget_does_not_truncate_a_measured_real_closure() {
+        // The default is a limit, and a limit that cuts into something real is a bug rather than a policy. The
+        // worst case measured on a real toolchain is `<bits/stdc++.h>` at 359 files, so the default has to clear
+        // that with room — see `docs/std-library.md`.
+        let budget = IncludeBudget::default();
+
+        assert!(
+            budget.max_files > 359,
+            "the default must not truncate the largest real closure anyone has measured: {budget:?}"
+        );
+        assert_eq!(budget.max_depth, crate::MAX_INCLUDE_DEPTH);
+    }
+
+    #[test]
+    fn a_delta_of_stats_saturates_rather_than_panicking() {
+        let later = StoreStats {
+            reused: 1,
+            rebuilt: 0,
+            unstored: 0,
+        };
+        let earlier = StoreStats {
+            reused: 0,
+            rebuilt: 5,
+            unstored: 2,
+        };
+
+        assert_eq!(
+            later.since(earlier),
+            StoreStats {
+                reused: 1,
+                rebuilt: 0,
+                unstored: 0,
+            },
+            "a reading given out of order is a caller's mistake, and zero is a better failure than a panic"
+        );
     }
 }

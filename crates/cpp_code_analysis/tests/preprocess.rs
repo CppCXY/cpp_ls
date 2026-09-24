@@ -208,6 +208,45 @@ fn include_next_is_distinguished_from_include() {
     assert!(directive.as_include().expect("an include").is_next);
 }
 
+/// An angle include the parser did **not** fold into one token still names the right file.
+///
+/// The fallback reconstructs the target from the tokens between the delimiters, and it used to start at the
+/// `<` itself — so the target came out `<bits/c++config.h`, which resolves to nothing, which means the file
+/// containing it is never cached (`index::store` refuses to store a summary with an unresolved include) and
+/// every declaration in it is invisible.
+///
+/// The fixture is spelled with a space between the `#` and the directive name, which is legal and which is what
+/// keeps this path reachable: the fold is attempted only when the token right after the `#` is the directive
+/// name, so `#  include <…>` always comes through here.
+#[test]
+fn an_unfolded_angle_include_names_the_file_between_its_delimiters() {
+    // `c++config` is why the fold is worth a fallback at all: `++` splits the name into several tokens, and the
+    // fold's rule for which tokens may appear inside one is a list of what cannot rather than of what can.
+    match first("#  include <bits/c++config.h>\n", DirectiveKind::Include) {
+        Directive::Include(Include {
+            form,
+            target,
+            is_next,
+            ..
+        }) => {
+            assert_eq!(form, IncludeForm::Angle);
+            assert_eq!(&*target, "bits/c++config.h", "the delimiters are not part of the name");
+            assert!(!is_next);
+        }
+        other => panic!("expected an include, got {other:?}"),
+    }
+}
+
+/// The same, for a name made of tokens nothing folds: the reconstruction is the **text** between the
+/// delimiters, and a space is a character a header name may contain.
+#[test]
+fn an_unfolded_angle_include_keeps_the_text_verbatim() {
+    match first("#  include <sys/a-b.h>\n", DirectiveKind::Include) {
+        Directive::Include(Include { target, .. }) => assert_eq!(&*target, "sys/a-b.h"),
+        other => panic!("expected an include, got {other:?}"),
+    }
+}
+
 // ============================================================================
 // #define
 // ============================================================================
