@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 use cpp_parser::{CppParser, CppSyntaxTree, ParserConfig};
 
 pub mod project;
+pub mod references;
 pub mod store;
 pub mod watch;
 pub mod worklist;
@@ -43,6 +44,10 @@ pub use project::{
     ProjectIndex, ProjectMacro, ProjectMember, UnlistedBase, VisibleDeclaration,
     definition_across_files, macro_across_files, member_across_files, member_completions_at, members_of,
     name_completions_at,
+};
+pub use references::{
+    FileReferences, MacroReferences, Reference, ReferenceBudget, ReferenceKind, Rename,
+    macro_references,
 };
 pub use store::{
     IncludeBudget, IncludeIndex, NotIndexed, NotIndexedReason, StoreStats, SummaryStore,

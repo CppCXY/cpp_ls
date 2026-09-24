@@ -2234,66 +2234,61 @@ impl ProjectIndex {
     /// become `Unknown` — and the residual uncertainty is stated rather than hidden: a guarded `#undef` *after* an
     /// unconditional `#define` is treated as not having happened.
     pub fn macro_definition(&self, name: &str, visible_from: &Path, offset: usize) -> Known<ProjectMacro> {
+        match self.macro_environment(name, visible_from).at(offset) {
+            Known::Yes(found) => Known::Yes(ProjectMacro {
+                file: found.file.clone(),
+                fact: found.fact.clone(),
+            }),
+            Known::Unknown(reason) => Known::Unknown(reason),
+            Known::No => Known::No,
+        }
+    }
+
+    /// Everything this file can know about one macro name, **computed once** and then asked about any offset.
+    ///
+    /// [`ProjectIndex::macro_definition`] is one walk of the include graph per call, which is the right shape for a
+    /// query about one cursor. It is the wrong shape for a query about **thousands** of positions in the same file,
+    /// and that is not a hypothetical: `macro_references` asked it once per hit and took **3.8 s** on
+    /// `STDMETHODCALLTYPE` in the standard-library closure — 4 079 hits, each walking the same graph, to produce an
+    /// answer whose every input was identical. This is that walk, done once per file, with the offset applied to the
+    /// result instead of to the search.
+    ///
+    /// The cost is one traversal of the reachable files per caller, so a caller that asks about one position should
+    /// use [`ProjectIndex::macro_definition`] and one that asks about many should hold this.
+    pub fn macro_environment(&self, name: &str, visible_from: &Path) -> MacroEnvironment {
         let mut candidates = Vec::new();
-        let mut visited = HashSet::new();
 
         self.macro_candidates(
             visible_from,
             &mut Vec::new(),
-            Some(offset),
             false,
-            &mut visited,
+            &mut HashSet::new(),
             name,
             &mut candidates,
         );
 
-        // Translation order, and `Vec`'s order is the lexicographic one the chains are meant to be compared by.
-        // The unconditional ones are what settles it; see above.
-        let certain = candidates
-            .iter()
-            .filter(|candidate| !candidate.conditional)
-            .max_by(|one, other| one.position.cmp(&other.position));
-        let best = certain.or_else(|| {
-            candidates
-                .iter()
-                .max_by(|one, other| one.position.cmp(&other.position))
-        });
-
-        let Some(best) = best else {
-            return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(name)));
-        };
-
-        if best.conditional {
-            return Known::Unknown(UnknownReason::ConditionalCompilation);
+        MacroEnvironment {
+            name: name.to_string(),
+            candidates,
         }
-
-        if best.fact.kind.is_definition() {
-            return Known::Yes(ProjectMacro {
-                file: best.file.clone(),
-                fact: best.fact.clone(),
-            });
-        }
-
-        Known::Unknown(UnknownReason::UndefinedHere(Box::from(name)))
     }
 
     /// Every fact about `name` in this file and everything it includes, with where each one sits.
-    ///
-    /// `limit` is the offset the query is asked at, and applies **only to the file the query started from**: a
-    /// line after the cursor cannot be in force yet, while everything in an included file is pasted at the
-    /// `#include` and therefore all of it counts.
     ///
     /// A file is expanded once per query. That is enough for the answer — the facts are the same however many
     /// paths reach them — and it is what makes a cycle of includes terminate. What it costs is the ordering *among
     /// facts reached through the same top-level include*, which is the one case where a header reached twice by
     /// different routes could be placed at the earlier of its two positions rather than the later; the fact it
     /// reports is the same either way.
+    ///
+    /// No offset is applied here: where a fact *is* in the stream is the fact, and which of them is in force at a
+    /// particular cursor is [`MacroEnvironment::at`]'s question. That split is what lets one walk answer thousands
+    /// of positions.
     #[allow(clippy::too_many_arguments)]
     fn macro_candidates(
         &self,
         path: &Path,
         chain: &mut Vec<usize>,
-        limit: Option<usize>,
         conditional: bool,
         visited: &mut HashSet<String>,
         name: &str,
@@ -2309,10 +2304,6 @@ impl ProjectIndex {
         };
 
         for fact in summary.macros.iter().filter(|fact| fact.name == name) {
-            if limit.is_some_and(|limit| fact.range.start_offset > limit) {
-                continue;
-            }
-
             let mut position = chain.clone();
             position.push(fact.range.start_offset);
             out.push(MacroCandidate {
@@ -2324,9 +2315,6 @@ impl ProjectIndex {
         }
 
         for include in &summary.includes {
-            if limit.is_some_and(|limit| include.range.start_offset > limit) {
-                continue;
-            }
             let Some(target) = &include.resolved else {
                 continue;
             };
@@ -2335,7 +2323,6 @@ impl ProjectIndex {
             self.macro_candidates(
                 target,
                 chain,
-                None,
                 conditional || include.guard != FactGuard::Unconditional,
                 visited,
                 name,
@@ -2346,8 +2333,78 @@ impl ProjectIndex {
     }
 }
 
+/// Every fact about one macro name that a file can reach — the answer to "what is this name here", before the
+/// question of *where* is asked.
+///
+/// Built by [`ProjectIndex::macro_environment`]. The point of holding it is that the expensive half — walking the
+/// include graph for the facts — does not depend on the offset, while the cheap half does.
+#[derive(Debug, Clone, Default)]
+pub struct MacroEnvironment {
+    /// The name asked about, kept so that a reason can say *which* name could not be resolved — the walk is over
+    /// one name and a caller reading the answer should not have to remember it.
+    name: String,
+    candidates: Vec<MacroCandidate>,
+}
+
+impl MacroEnvironment {
+    /// What the name is at `offset`, or why that cannot be said.
+    ///
+    /// The rules are [`ProjectIndex::macro_definition`]'s, and they are the preprocessor's:
+    ///
+    /// * **only facts pasted in at or before the cursor count.** The first element of a candidate's chain is where
+    ///   it enters the file the cursor is in — the fact's own offset, or the `#include` that pulled its file in —
+    ///   so one comparison covers both cases: a `#define` written below the use is not in force yet, and neither is
+    ///   anything from an `#include` written below it. Everything *inside* an included file counts, because the
+    ///   preprocessor pastes all of it at the `#include`.
+    /// * **the last one wins**, by lexicographic comparison of those chains.
+    /// * **an unconditional fact beats a conditional one** even when the conditional one is later: a fact behind an
+    ///   `#if` may not be there at all, so one that is certainly there settles the name — and only when nothing
+    ///   certain exists does the conditional one make the answer `Unknown(ConditionalCompilation)`.
+    pub fn at(&self, offset: usize) -> Known<&MacroCandidate> {
+        let in_force = self
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.position[0] <= offset);
+
+        let certain = in_force
+            .clone()
+            .filter(|candidate| !candidate.conditional)
+            .max_by(|one, other| one.position.cmp(&other.position));
+
+        let best = match certain {
+            Some(found) => found,
+            None => match in_force.max_by(|one, other| one.position.cmp(&other.position)) {
+                Some(found) => found,
+                None => {
+                    return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(
+                        self.name.as_str(),
+                    )));
+                }
+            },
+        };
+
+        if best.conditional {
+            return Known::Unknown(UnknownReason::ConditionalCompilation);
+        }
+
+        if !best.fact.kind.is_definition() {
+            return Known::Unknown(UnknownReason::UndefinedHere(Box::from(
+                self.name.as_str(),
+            )));
+        }
+
+        Known::Yes(best)
+    }
+
+    /// Is there anything at all to say about the name in this file?
+    pub fn is_empty(&self) -> bool {
+        self.candidates.is_empty()
+    }
+}
+
 /// One fact about a macro name, and where it sits in the translation unit's stream.
-struct MacroCandidate {
+#[derive(Debug, Clone)]
+pub struct MacroCandidate {
     /// The chain of offsets that pastes this fact in: the top-level `#include`, each nested one, and the fact's
     /// own offset. Compared lexicographically, which is what makes it a position.
     position: Vec<usize>,
@@ -2355,6 +2412,27 @@ struct MacroCandidate {
     fact: MacroFact,
     /// Is it inside an `#if` on the way in, or inside one itself?
     conditional: bool,
+}
+
+impl MacroCandidate {
+    /// The file the fact is written in.
+    pub fn file(&self) -> &Path {
+        &self.file
+    }
+
+    pub fn fact(&self) -> &MacroFact {
+        &self.fact
+    }
+
+    /// Is the fact a `#define` (as opposed to an `#undef`)?
+    pub fn is_definition(&self) -> bool {
+        self.fact.kind.is_definition()
+    }
+
+    /// Is it reached through an `#if`, or written inside one?
+    pub fn is_conditional(&self) -> bool {
+        self.conditional
+    }
 }
 
 /// A declaration found in another file, with how the file that asked reaches it.#[derive(Debug, Clone, PartialEq, Eq)]

@@ -33,6 +33,7 @@ cpp_code_analysis
 | `index::project` | **跨文件查询**：`ProjectIndex` 装摘要 + 派生反向边 + 可见性走查；入口是 `definition_across_files`（名字，含限定名）、`macro_across_files`（宏，位置化）、`member_across_files`（成员，含类型推断）、`member_completions_at` / `name_completions_at`（补全，两个位置） |
 | `index::store` | **驱动**：`SummaryStore` 决定"什么时候建、什么时候复用、变了以后哪些要重建"——唯一碰文件系统的索引层 |
 | `index::worklist` | **顺序**：`Worklist` 决定"先索引哪个文件"——打开的文件 → 它的 include 闭包 → 其余；一步一个文件，调用方决定节奏 |
+| `index::references` | **找引用**：`macro_references` 回答"这个名字在项目里出现在哪些位置"——唯一需要**读文件正文**的查询（摘要里没有标识符位置）；四级阶梯：候选集 → 文本预筛 → 词法 → 精确判定，外加 `rename()` 给出的编辑表 |
 | `index::watch` | **监听**：`ChangeBatch` + `WatchFilter` 把文件系统事件归约成"忘掉谁、重读谁、还是全量重来"；不含 OS 绑定、线程、时钟 |
 | `session` | **驱动**：`Session` 把上面几层串成一个开着的项目——开项目（发现工具链 + 编译数据库 + 扫描）、`did_open`/`did_change`/`did_close`/`changed(事件)`、`advance(n)` 惰性索引、`view(路径)` + 五个查询。它**不碰协议**（位置是字节 offset），也**不含线程与时钟**（客户端就是事件源） |
 | `cache` | 键与路径 |
@@ -269,6 +270,29 @@ a.cpp:  #define MAX 1         位置 [0]
 
 **没有 `Ambiguous`**：两条不同的链不可能相等，所以"同一个名字有多个定义"这件事在这里不是歧义而是有确定答案的——这正是宏查询比名字查询简单的地方。
 
+### 找引用：四级阶梯，以及"位置表为什么没做"
+
+`macro_references(index, files, name, budget)` 回答反过来的问题——**这个名字在项目里出现在哪些位置**——而它是**唯一需要读文件正文**的查询：摘要里存的是声明与指令，没有标识符位置。重命名要的就是这个列表。
+
+**设计问题因此变成"一个项目里找一次引用要读多少东西"，答案是一段四级阶梯，每一级都比上一级便宜，而且每一级都是可靠的（不是启发式）**：
+
+```text
+1. 候选集    只有能看见某个定义的文件才可能是用户：定义所在文件 + 它们的传递反向 include 闭包
+2. 文本预筛  text.contains(名字) —— 精确：标识符的文本一定是正文的子串，所以没有这个名字的文件一个标识符都不可能有
+3. 词法      CppLexer 一遍：注释是一个 token、字符串是一个 token，两类最大的假阳性根本进不了标识符过滤
+4. 精确判定  每个命中问"这个名字在这里是不是宏、是哪条 #define"（macro_environment，见下）
+```
+
+**第 3 级是这一层能成立的关键**，也是"要不要在摘要里存一张标识符位置表"这个问题的答案。实测（`examples/find_references.rs`，标准库闭包 454 文件，问用得最多的四个宏）：词法要 **14–27 ms**，同样这些文件**解析**要 **448–932 ms**（**17–56 倍**），而整条查询 **25–40 ms**；整个闭包有 **630 278 个标识符**，一张"名字 → 位置"的表约 **4.9 MB**，现有摘要一共 5.4 MB。**要存的位置比要存的事实还多，而查询并不慢**——所以位置表不做，这条结论是量出来的，不是偏好。
+
+**写这份查询时先写错了一次，量出来才发现，这条要记住**：第一版每个命中单独调一次 `macro_definition`，于是每个命中都走一遍同一张 include 图。`STDMETHODCALLTYPE` 的 4 079 个命中 = **3.77 s**。改成"每个文件算一次**宏环境**（`ProjectIndex::macro_environment`），再按偏移问它（`MacroEnvironment::at`）"之后是 **35 ms**，**106 倍**，而两次答案逐条相同。这个拆分之所以可能，是因为"走到哪些事实"与偏移无关，而"哪条事实在生效"只与偏移有关：链在构建时算一次，偏移只用来过滤和比较。
+
+**答案的形状**：每条命中只有三种归宿——确定是它（`Definition` / `Undefinition` / `Use { resolved_to }`）、确定不是（计数进 `rejected`：同名变量、`#undef` 之后的普通标识符）、可能但说不准（`Uncertain(ConditionalCompilation)`）。`rename()` **只改确定的那两种**：不确定的位置可能是别的实体，改它是改用户没让它改的代码；要显示它们由调用方决定。计数器是阶梯本身（`candidates()` / `looked_at` / `without_the_name` / `lexed()` / `not_looked_at` / `unreadable`），全部有 accessor——第一版探针自己算错过一次（把跳过的文件加进了读过的），有测试钉住它们相加等于阶梯。
+
+**两处顺带修掉的"读错了一半"**，都是旧字段不够用而不是新功能：`#undef` 的事实带的是**整条指令**的范围（指令读取器不记名字在哪），于是重命名会把 `#undef API` 整行换掉——现在用词法给出的名字范围补上；`name_at` 在**指令里**答 `None`（`#define FOO` 是 token，不是名字节点），于是"在 `#define` 上右键找引用"这条路本来是断的（新增 `name_at_including_directives`）。
+
+**边界：标准库上几乎每条命中都是"可能"，而原因量清楚了。** MinGW 的 `winnt.h:450` 把 `STDMETHODCALLTYPE` 定义在 `#ifndef STDMETHODCALLTYPE` 里（"define-once"惯例，不是文件守卫），所以"这个名字在这里是不是宏"取决于分析没有的宏环境。但这里有一条**可靠的定理**可用：*`#if` 的每个分支都写了同一个名字、同一种 kind ⇒ 这个条件块之后这个名字的宏状态与分支无关*（`#ifndef NAME / #define NAME / #endif` 是它的特例：条件成立则这里定义，不成立则它已经被定义过）。正确的做法是在**事实层记下这个结论**（`MacroFact` 的一个布尔字段，抬 `CODEC_VERSION`），由**引用查询**使用它——定义查询仍然要答"哪条 `#define` 在生效"，那依然是有条件的。这条在 `roadmap.md` §3.5 末尾，是下一步。
+
 ### 成员访问：第一个需要**类型**的查询
 
 `index::project::member_across_files` 回答 `widget.size` 里的 `size` 指向哪条声明。它不是"在作用域里找 `size`"——是**在 `widget` 的类型里找 `size`**。三步，每一步都已经存在：
@@ -449,7 +473,7 @@ loc          没有限定符：从游标所在的作用域往外，每一层能�
 
 ## 下一步：宏、标准库、语义索引与语义查询
 
-索引与驱动层的骨架已经能跑（事实层 + 缓存 + 顺序 + 事件响应 + **会话**，967 个测试）。**从这一轮起重心转向语义**：不再在文件系统/进程/监听这些事情上消耗，因为语言服务器由客户端通知，那些事情没有真正的消费者。已经拿下的语义查询：名字（含限定名）、宏（位置化）、成员访问（第一个需要类型的查询，而"类型"现在包括**调用**：`f().size` 靠 `DeclFact.returns`、**解引用与下标**：`(*p).size`/`arr[0].empty` 靠 `type_of_expression` 的两格）、成员列表、**成员补全与名字补全**（游标 → 类型/作用域 → 列表）；环境发现这一层落了工具链搜索路径（[`std-library.md`](std-library.md) 的 P0），可信度这一层落了 `DeclFact::clean`（每条声明回答"这条读得干不干净"，见上面的不变量 3），跨文件可见性把"每个文件一次图搜索"改成了"一次查询一遍图"（573 ms → 3.2 ms，见上面那一节），而**驱动层**（`session::Session`）把它们串成了"一个开着的项目"——开项目、收通知、惰性索引、按光标回答，见上面"会话层"那一节。
+索引与驱动层的骨架已经能跑（事实层 + 缓存 + 顺序 + 事件响应 + **会话** + **找引用**，979 个测试）。**从这一轮起重心转向语义**：不再在文件系统/进程/监听这些事情上消耗，因为语言服务器由客户端通知，那些事情没有真正的消费者。已经拿下的语义查询：名字（含限定名）、宏（位置化与**找引用/重命名**）、成员访问（第一个需要类型的查询，而"类型"现在包括**调用**：`f().size` 靠 `DeclFact.returns`、**解引用与下标**：`(*p).size`/`arr[0].empty` 靠 `type_of_expression` 的两格）、成员列表、**成员补全与名字补全**（游标 → 类型/作用域 → 列表）；环境发现这一层落了工具链搜索路径（[`std-library.md`](std-library.md) 的 P0），可信度这一层落了 `DeclFact::clean`（每条声明回答"这条读得干不干净"，见上面的不变量 3），跨文件可见性把"每个文件一次图搜索"改成了"一次查询一遍图"（573 ms → 3.2 ms，见上面那一节），而**驱动层**（`session::Session`）把它们串成了"一个开着的项目"——开项目、收通知、惰性索引、按光标回答，见上面"会话层"那一节。
 
 按依赖排，接下来要做的：
 
@@ -480,7 +504,7 @@ loc          没有限定符：从游标所在的作用域往外，每一层能�
 ### 门禁：三件事必须全绿
 
 ```bash
-cargo test --workspace                              # 967 个测试，34 个套件
+cargo test --workspace                              # 979 个测试，34 个套件
 cargo clippy --workspace --all-targets              # 零警告
 cargo doc --no-deps -p cpp_code_analysis            # 零警告（cpp_parser 还有 32 条历史链接问题，不管）
 ```
@@ -511,8 +535,8 @@ cargo doc --no-deps -p cpp_code_analysis            # 零警告（cpp_parser 还
 | `f().size`、`obj.f().size` | **已兑现**（`DeclFact.returns`）：被调用者的声明说它返回什么，`w.inner().size` 连"类在头文件、成员函数在头文件、返回类型也在头文件"这条链都能走通 | 剩下的同类形状：**类类型**的下标（`v[0]` 要实例化模板）、算术表达式的类型——见下面"成员访问"一节 |
 | `(*p).size`、`arr[i].size` | **已兑现**（`type_of_expression` 的第五、六格）：指针/引用的 `*` 与数组的下标都是**对拼写做算术**，`&x` 也在同一格；`examples/std_query.rs` 上各有实测（`(*p).size` 与 `arr[0].empty`，对象是 `std::string*` / `std::string[4]` 形参，各要跨别名、类型算术、跨文件查找三步） | 拼写里**没有**指针运算符时仍然 `Unknown`（那是类型错，不该猜）；两个字段因此各补了一半：`returns` 接上声明符里名字之前的运算符，`type_of` 接上除名字与初始化式之外的声明符 |
 | 模板实参的成员 `v.begin()` | `Unknown(NotDeclaredHere)` | 实例化 |
-| 宏的"找引用/重命名" | 没这个查询 | 标识符位置表（摘要里没有） |
-| `#include <vector>` | **已兑现**：`toolchain::discover` 发现搜索路径，`Session::open` 把工具链 + 编译数据库 + 文件清单合起来当成一个项目打开，`advance(n)` 顺着 include 图按需把闭包索引进缓存（`examples/open_project.rs`：冷启动 454 个文件 9.4 s，热启动 99% 命中、整个闭包 0.3 s 级） | **语言服务器二进制**：JSON-RPC 帧与 `textDocument/*` 到 `Session` 的映射（位置换算用 `cpp_parser::LineIndex`，注意 LSP 的列是 UTF-16 码元、这里是字符） |
+| 宏的"找引用/重命名" | **已兑现**：`macro_references` + `rename()`，四级阶梯（候选集 → 文本 → 词法 → 精确判定）。实测标准库闭包：整条查询 **25–40 ms**（454 文件里词法 14–27 ms，同样文件解析要 448–932 ms）；项目自己的宏给出"1 定义 + 2 使用 + 0 可能" | **条件块的分支结论**（`#ifndef NAME / #define NAME` 之后这个名字是不是宏与分支无关）：标准库上四个最常用的宏，引用**全部**落在 `Uncertain(ConditionalCompilation)`，成因是定义在 `#ifndef` 里而不是 bug——修法是往 `MacroFact` 加一个布尔字段（抬 `CODEC_VERSION`），见上面"找引用"那一节 |
+| `#include <vector>` | **已兑现**：`toolchain::discover` 发现搜索路径，`Session::open` 把工具链 + 编译数据库 + 文件清单合起来当成一个项目打开，`advance(n)` 顺着 include 图按需把闭包索引进缓存（`examples/open_project.rs`：冷启动 454 个文件 9.4 s，热启动 99% 命中、整个闭包 0.3 s 级） | 差**语言服务器二进制**（JSON-RPC 帧与 `textDocument/*` 到 `Session` 的映射、位置换算用 `cpp_parser::LineIndex`，注意 LSP 的列是 UTF-16 码元、这里是字符）。**它是协议活不是语义活，不挡任何语义工作，所以暂缓**，见 [`roadmap.md`](roadmap.md) §3.6 |
 | 成员访问之外的位置（裸名字、`::` 后面） | **已兑现**：`name_completions_at` 回答四种位置（`ns::`、`Widget::` 含基类、`::`、裸名字），实测 `std::vec` 488 个名字 3.3 ms / 裸名字 1218 个 5.1 ms | 还没有"作用域里有什么"的倒排表：现在仍要遍历所有摘要（见上面那一节，一万文件时才是瓶颈） |
 | 构造函数、无 `virtual` 的析构函数、`= delete` 的特殊成员 | 不在成员列表里（作用域层根本没绑定） | 一条"裸 declarator 也算声明了名字"的规则；见 `grammar-gaps.md` 第 19 条，边界由 `a_destructor_without_a_specifier_declares_nothing_yet` 钉住 |
 | `using Base::f;` 带进来的成员、虚函数覆盖 | 不在列表里 | 需要 `using` 声明与覆盖的模型 |

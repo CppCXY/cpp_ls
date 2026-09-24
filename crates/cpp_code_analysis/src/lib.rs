@@ -103,13 +103,14 @@ pub use toolchain::{
 // reader benefits from. `index::summary` is not here — the *shape* of a summary is `summary`, and one type with
 // two paths is worse than a longer import.
 pub use index::{
-    ChangeBatch, EventKind, FileEvent, FileIndexer, IncludeBudget, IncludeIndex, IncludeVisibility,
-    MemberCompletions, MemberList, NameCompletions, NotIndexed, NotIndexedReason, OfferedName, Priority,
-    ProjectDefinition, ProjectIndex, ProjectMacro, ProjectMember, Response, Step, StepOutcome,
+    ChangeBatch, EventKind, FileEvent, FileIndexer, FileReferences, IncludeBudget, IncludeIndex,
+    IncludeVisibility, MacroReferences, MemberCompletions, MemberList, NameCompletions, NotIndexed,
+    NotIndexedReason, OfferedName, Priority, ProjectDefinition, ProjectIndex, ProjectMacro,
+    ProjectMember, Reference, ReferenceBudget, ReferenceKind, Rename, Response, Step, StepOutcome,
     StoreStats, SummaryReadError, SummaryStore, UnlistedBase, UnresolvedEdge, VisibleDeclaration,
-    WatchFilter, Worklist, definition_across_files, macro_across_files, member_across_files,
-    member_completions_at, members_of, name_completions_at, outcome_of, read_summary, summarize,
-    write_summary,
+    WatchFilter, Worklist, definition_across_files, macro_across_files, macro_references,
+    member_across_files, member_completions_at, members_of, name_completions_at, outcome_of,
+    read_summary, summarize, write_summary,
 };
 pub use macros::{MacroBody, MacroDef, MacroTable, Parameter, ParameterKind};
 pub use module_info::{ImportDeclaration, ImportTarget, ModuleInfo, ModuleUnit};

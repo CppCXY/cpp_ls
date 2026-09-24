@@ -130,6 +130,42 @@ pub fn name_at(root: &CppSyntaxNode, offset: usize) -> Option<(String, SourceRan
     ))
 }
 
+/// The name the cursor is on, including when the cursor is inside a **preprocessor directive**.
+///
+/// [`name_at`] answers for the syntax the grammar builds name nodes for, and a directive is not part of it:
+/// `#define FOO(x) …` is a run of tokens inside a `PreprocessorDirective`, so a cursor on `FOO` finds no name node
+/// and [`name_at`] answers `None`. That is the wrong answer for the question a user asks by pointing at a macro's
+/// name — "where is this used", "rename this" and "go to its definition" all start from the `#define`.
+///
+/// The fallback is the token under the cursor: if it is an `Identifier`, its spelling **is** the name. Nothing is
+/// inferred from it, which is what keeps this honest: a `#define`'s name and a use of it are the same spelling by
+/// construction, and a spelling nothing defines is rejected by whichever query reads it (there is no definition to
+/// find, and no references to list).
+///
+/// The token search is a walk of the tree at the offset, not a scan of the file: this runs on every request that
+/// has a cursor.
+pub fn name_at_including_directives(
+    root: &CppSyntaxNode,
+    offset: usize,
+) -> Option<(String, SourceRange)> {
+    if let Some(found) = name_at(root, offset) {
+        return Some(found);
+    }
+
+    let token = root
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .find(|token| contains_token(token, offset))?;
+
+    (cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::Identifier)
+        .then(|| {
+            (
+                token.text().to_string(),
+                cpp_parser::source_range(token.text_range()),
+            )
+        })
+}
+
 /// The name the cursor is on as the file **writes** it, which is what a lookup has to be given: `ns::Widget` for
 /// an offset on `Widget` in `ns::Widget w;`, and `Widget` for one on a bare name.
 ///

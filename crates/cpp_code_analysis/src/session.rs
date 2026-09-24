@@ -46,7 +46,7 @@
 //! # Lazy indexing makes "not here" mean two things, and this is where that is handled
 //!
 //! A query about a name that nothing has indexed answers
-//! [`UnknownReason::NotDeclaredHere`](crate::UnknownReason::NotDeclaredHere) — the same answer a
+//! [`UnknownReason::NotDeclaredHere`](crate::UnknownReason) — the same answer a
 //! fully indexed project gives for a name that genuinely is not there. That is deliberate and it is the honest
 //! answer ([`ProjectIndex::definition`] explains why the index never claims "nowhere"), and it is *different* from
 //! what a user needs: a consumer that reports absence must not report it while the file's includes are still being
@@ -77,6 +77,7 @@ use crate::include::toolchain::{self, DiskCommands, Environment, Toolchain};
 use crate::index::project::{
     MemberCompletions, MemberList, NameCompletions, ProjectDefinition, ProjectIndex, ProjectMacro,
 };
+use crate::index::references::{MacroReferences, ReferenceBudget, macro_references};
 use crate::index::store::{StoreStats, SummaryStore};
 use crate::index::watch::{ChangeBatch, FileEvent, Response, WatchFilter};
 use crate::index::worklist::{Priority, Step, outcome_of};
@@ -84,7 +85,7 @@ use crate::index::{
     definition_across_files, macro_across_files, member_completions_at, members_of, name_completions_at,
 };
 use crate::sema::scopes::build_scopes;
-use crate::symbol::{Known, ScopeTree};
+use crate::symbol::{Known, ScopeTree, UnknownReason};
 
 /// The name a compile database is conventionally found under, relative to the project root.
 const COMPILE_DATABASE: &str = "compile_commands.json";
@@ -702,6 +703,38 @@ impl<'a, F: FileProvider> Session<'a, F> {
     /// Which `#define` or `#undef` settles the macro name at `offset`.
     pub fn macro_definition(&self, view: &FileView, offset: usize) -> Known<ProjectMacro> {
         macro_across_files(self.store.index(), &view.root, &view.path, offset)
+    }
+
+    /// Everywhere the macro name written at `offset` is used, across the project — the query a rename starts from.
+    ///
+    /// The name comes from the cursor rather than from the caller, because that is what a client has: a position,
+    /// not a spelling. Everything after that is [`macro_references`], which reads file **text** — through this
+    /// session's overlay, so an unsaved buffer is searched as the user typed it rather than as it is on disk.
+    ///
+    /// # What the answer depends on, in a session
+    ///
+    /// The candidates are the files the index holds. A file whose summary was dropped by an edit and has not been
+    /// read again is not one of them, so its own uses are missing from the answer until [`Session::advance`] gets
+    /// to it — which is the same lazy-indexing boundary every query here has, and the same rule applies: **do not
+    /// show "no references" while [`Session::pending`] is non-zero.**
+    ///
+    /// A cursor on an ordinary identifier — a variable, a function — answers `Unknown(NotDeclaredHere)`, which says
+    /// exactly what is true: nothing defines that name as a macro. This query is about macros, and references of a
+    /// *name* need the scope of every candidate file, which is a parse per candidate rather than a lex.
+    pub fn macro_references(&self, view: &FileView, offset: usize) -> Known<MacroReferences> {
+        // `name_at_including_directives` rather than `name_at`: the place a user asks this question is the name
+        // itself, and half the time that name is written in a `#define` — which is tokens in a directive, not a
+        // name node the scope walker sees.
+        let Some((name, _)) = crate::sema::resolve::name_at_including_directives(&view.root, offset) else {
+            return Known::Unknown(UnknownReason::UnparsableName);
+        };
+
+        macro_references(
+            self.store.index(),
+            self.files,
+            &name,
+            ReferenceBudget::default(),
+        )
     }
 
     /// What to offer after a member access at `offset`: the object's type, its members, and the edit.
