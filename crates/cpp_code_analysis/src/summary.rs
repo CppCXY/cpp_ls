@@ -80,6 +80,14 @@ pub struct DeclFact {
     /// Access and `virtual` are not recorded. They decide whether a member is *reachable* and how the class is
     /// laid out, and this is a fact about the text rather than a semantic property — a lookup that used them would
     /// be the first thing here to need real semantics, and it would need the whole of them.
+    ///
+    /// # What is *not* in a derived class's fact, and why
+    ///
+    /// The members `B` happens to have are **not** copied onto `D`. The list is walked at query time
+    /// (`index::project::members_of`), and the reason is the one thing a per-file key cannot catch: whether an
+    /// added member of `B` reaches `D` depends on `D`'s base list, and *which* `B` the spelling refers to depends
+    /// on macros and includes `D` never mentions. A stored copy would therefore go stale while `D`'s own text and
+    /// key stayed identical, so nothing would invalidate it. `bases` is a spelling; the chain is a query.
     pub bases: Vec<String>,
     /// The whole declaration, for a "go to definition" highlight.
     pub range: cpp_parser::SourceRange,

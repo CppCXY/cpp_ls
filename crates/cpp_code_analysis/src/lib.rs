@@ -96,10 +96,11 @@ pub use include::{FoundIn, IncludeResolver, Resolution, Resolved, Unresolved};
 // reader benefits from. `index::summary` is not here — the *shape* of a summary is `summary`, and one type with
 // two paths is worse than a longer import.
 pub use index::{
-    ChangeBatch, EventKind, FileEvent, FileIndexer, IncludeVisibility, Priority,
-    ProjectDefinition, ProjectIndex, ProjectMacro, Response, Step, StepOutcome, StoreStats,
-    SummaryReadError, SummaryStore, VisibleDeclaration, WatchFilter, Worklist,
-    definition_across_files, macro_across_files, read_summary, summarize, write_summary,
+    ChangeBatch, EventKind, FileEvent, FileIndexer, IncludeVisibility, MemberList, Priority,
+    ProjectDefinition, ProjectIndex, ProjectMacro, ProjectMember, Response, Step, StepOutcome,
+    StoreStats, SummaryReadError, SummaryStore, UnlistedBase, VisibleDeclaration, WatchFilter,
+    Worklist, definition_across_files, macro_across_files, member_across_files, members_of,
+    read_summary, summarize, write_summary,
 };
 pub use macros::{MacroBody, MacroDef, MacroTable, Parameter, ParameterKind};
 pub use module_info::{ImportDeclaration, ImportTarget, ModuleInfo, ModuleUnit};

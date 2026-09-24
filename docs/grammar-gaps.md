@@ -1304,3 +1304,19 @@ operator bool() &&  // && 和 ( 分开     -> 这是成员函数的引用限定�
 15. **嵌进去的规则会先花掉外层规则要的 token**（B24 的第二个缺陷）。K&R 形参表读的是**真正的声明**，每条自带一个 `;`，于是外层声明收尾时那个 `;` 早被吃掉了；而这只在"没有函数体"的形状上暴露——有体时游标落在 `{` 上，走的是另一条分支。所以看到"这里应该有个 `;`"时，要先问**这段 token 里有没有嵌套规则已经消费过它**。同族问题还有 `friend`：它的载荷是整条声明（`;` 在内），外层当初也又找了一遍 init-declarator，失败后回退，把后面的成员全变成了错误节点。两次的形状一样：**外层以为收尾符号还在**。
 
 18. **跨层按形状写的判据，要在本文档留痕**（成员访问读成 `IndexExpr`）。`w.size` 与 `arr[0]` 产出的是**同一种节点**（`IndexExpr`），区别只在运算符 token 是 `.` 还是 `[`——`MemberExpr`/`ArrowExpr` 这两个种类存在，但 `w.size` 不走它们。索引层的成员访问查询因此按**运算符文本**判断，而不是节点种类：`crates/cpp_code_analysis/src/sema/resolve.rs` 的 `member_access_of`。谁要是把 `w.size` 改成产出 `MemberExpr`，必须同时改那里，否则**成员访问会静默地全部失效**（不是报错，是每个 `obj.member` 都变成"游标不在成员访问上"）。这类"下游读上游形状"的耦合要在这里记一笔，因为它的失败模式是静默的，而本文档是读法唯一的登记处。
+
+19. **类体里的特殊成员函数有两种形状，都不走 `init-declarator`**（`~Widget();` 与 `S();`）。由成员列表那一轮查出来，两个症状都静默：
+
+    ```text
+    ~Widget();            Declaration[Declarator[NameExpr(~ Widget), ParameterList]]       没有 DeclSpecifierSeq，
+                                                                                          也没有 InitDeclarator
+    Widget();             Declaration[DeclSpecifierSeq[TemplateType[NameExpr(Widget)]],   名字被读成了**类型**，
+                          InitDeclarator[Declarator[ParameterList]]]                      声明符里只剩 ()
+    virtual ~Widget();    Declaration[DeclSpecifierSeq[VirtualSpec],                      形状正常 —— 唯一
+                          InitDeclarator[Declarator[NameExpr(~ Widget), ParameterList]]]   走得通的一条
+    ```
+
+    * **下游症状一（已修）**：`name_from_text` 用 `descendants_with_tokens` 找 `~` 与 `operator` 关键字，而它被传的是**整条声明**。于是 `struct Widget { ~Widget(); };` 的声明（那个 `StructDef`）里也有一个 `~`，**类自己**被读成了析构函数 `~Widget`：类的绑定没了、作用域被命名成 `~Widget`、析构函数之后写的每个成员都落进那个作用域。真实 C++ 里几乎每个类都有析构函数，所以这不是边角。修法是把这两个 token 的查找范围收到**名字节点**上（`declared_name` 传 `&name_node`），回退路径才继续传声明节点。`tests/scopes.rs` 的 `a_class_with_a_destructor_in_its_body_keeps_its_own_name` 与 `a_class_with_an_operator_in_its_body_keeps_its_own_name` 各钉一条，`index::project` 的 `a_destructor_without_a_specifier_is_not_a_member_yet` 钉住下游那一半。
+    * **下游症状二（未修，已知缺口）**：`CppDeclaration::get_name()` 走的是 `init-declarator`，上表前两种形状都没有它，于是 `is_unnamed_declaration` 判定"这条声明没有名字"并丢掉整条声明——**构造函数、没有 `virtual` 的析构函数、`= delete`/`= default` 的特殊成员都不是绑定**。修它要的是一条"裸 declarator 也算声明了名字"的规则，而这条规则必须同时不接受 `is_unnamed_declaration` 存在要拒绝的形状（`tests/scopes.rs` 的 `a_call_statement_declares_nothing` 与 `a_real_declaration_is_still_declared` 是这条规则两侧的钉子）。边界现在由 `a_destructor_without_a_specifier_declares_nothing_yet` 钉住：**能力落地那天它会失败，改它就是有意为之**。
+
+    这一条与第 18 条同族，但更贵：第 18 条只是"读错了运算符"，这一条是**把一个声明读成了另一个实体**，而且顺带吞掉了它后面的成员。

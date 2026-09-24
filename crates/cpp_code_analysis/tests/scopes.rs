@@ -215,6 +215,104 @@ fn a_nested_class_nests() {
     assert_eq!(shape(&table), "File{Outer}(Class{Inner}(Class{x}))");
 }
 
+/// A class whose body contains a destructor is still named by its own name.
+///
+/// The bug this pins: `~Widget` is spelled with a `~` token, and whether a name is a destructor was decided by
+/// looking for that token with `descendants_with_tokens` over the whole **declaration**. For `struct Widget { ~Widget(); };`
+/// the declaration is the `StructDef`, whose descendants include the destructor inside the body — so the *class*
+/// became `~Widget`. The class's scope was named `~Widget`, every member written after the destructor landed in
+/// it, and `Widget` itself was never bound at all.
+///
+/// Every class in real C++ has a destructor, so this was not an edge case: it silently renamed the class and
+/// moved its members.
+#[test]
+fn a_class_with_a_destructor_in_its_body_keeps_its_own_name() {
+    let table = scopes("struct Widget {\n  ~Widget();\n  int size;\n};\n");
+    let file = table.root().unwrap();
+
+    assert_eq!(
+        shape(&table),
+        "File{Widget}(Class{size})",
+        "the class is `Widget` and `size` is its member"
+    );
+    assert_eq!(kind_of(&table, file, "Widget"), Some(BindingKind::Class));
+    assert_eq!(
+        qualified_of(&table, ScopeKind::Class, Some("Widget")).as_deref(),
+        Some("Widget"),
+        "and the scope it opens is named after it, not after the destructor"
+    );
+}
+
+/// An `operator` declaration in a class body does not make the class an operator either.
+///
+/// The same shape of bug as the destructor above, one token over: the search for the `operator` keyword has to
+/// look in the **name node**, and a class body holding `operator+` put that keyword in the declaration's
+/// descendants. Pinned separately because the two searches are separate calls and fixing one does not fix the
+/// other.
+#[test]
+fn a_class_with_an_operator_in_its_body_keeps_its_own_name() {
+    let table = scopes("struct Widget {\n  Widget& operator+(const Widget&);\n  int size;\n};\n");
+
+    assert_eq!(
+        shape(&table),
+        "File{Widget}(Class{size})",
+        "the class is `Widget`; the class body does not make it an operator"
+    );
+}
+
+/// A declaration whose declarator is **not** wrapped in an `InitDeclarator` declares nothing here yet.
+///
+/// The boundary, written down rather than left to be discovered — see "现在答不了什么" in
+/// `docs/index-design.md`. It is a gap in this walker, not a decision: `~Widget();` is
+/// `Declaration[Declarator[NameExpr(~ Widget), ParameterList]]`, with no `DeclSpecifierSeq` and no
+/// `InitDeclarator`, and [`is_unnamed_declaration`] asks `CppDeclaration::get_name_text` — which reads the first
+/// `init-declarator` — so the declaration looks unnamed and is dropped.
+///
+/// What it costs today: a destructor or a `= delete`d special member is not a binding, so it is missing from a
+/// member list and a jump to it from a call site cannot land. What landing it needs: a rule for "a bare
+/// declarator names the entity" that does **not** also accept the shapes `is_unnamed_declaration` exists to
+/// reject — see `a_call_statement_declares_nothing` and `a_real_declaration_is_still_declared` just above, which
+/// are the two sides that rule has to keep apart.
+///
+/// The test is written to fail the day it lands, on purpose: the fix is then a deliberate edit here.
+#[test]
+fn a_destructor_without_a_specifier_declares_nothing_yet() {
+    let table = scopes("struct Widget {\n  ~Widget();\n  int size;\n};\n");
+
+    assert_eq!(
+        shape(&table),
+        "File{Widget}(Class{size})",
+        "`~Widget` is not bound; when it is, this becomes `Class{{size,~Widget}}` and the test has to be updated"
+    );
+}
+
+/// A `virtual` destructor **is** bound, and its name is not an identifier.
+///
+/// The other side of the boundary above, and the case that keeps the empty-name handling in the member-list
+/// query from being dead code: the specifier sequence is what lets this declaration through the unnamed test, and
+/// the name it binds is `~Widget` — a [`NameKind::Destructor`], whose `identifier_text()` is `None`. So a fact
+/// built from it stores an empty name, and any rule that compared member names would compare two empty strings.
+///
+/// [`NameKind::Destructor`]: cpp_code_analysis::NameKind::Destructor
+#[test]
+fn a_virtual_destructor_is_bound_under_its_tilde_name() {
+    let table = scopes("struct Widget {\n  virtual ~Widget();\n  int size;\n};\n");
+
+    assert_eq!(shape(&table), "File{Widget}(Class{size,~Widget})");
+
+    let class = table.scope(table.root().unwrap()).unwrap().children[0];
+    let bound = table
+        .scope(class)
+        .unwrap()
+        .bindings
+        .iter()
+        .find(|binding| binding.name.identifier_text().is_none())
+        .expect("the destructor is bound");
+
+    assert_eq!(bound.name.text(), "~Widget");
+    assert_eq!(bound.kind, BindingKind::Destructor);
+}
+
 /// `class Widget;` declares the name even though no body follows.
 ///
 /// A forward declaration makes `Widget` known as a class, so a table that only read definitions would leave

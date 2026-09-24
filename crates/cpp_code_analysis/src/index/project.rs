@@ -216,6 +216,262 @@ pub fn member_across_files(
     Known::Yes(ProjectDefinition { file, fact })
 }
 
+/// Every member a type has: its own, and the ones it inherits.
+///
+/// The query a completion after `.` or `->` is built on, and the second one in this module that needs a **type**.
+/// It is the *list* form of [`member_across_files`]: that one is given a member's name and answers where it is
+/// declared, this one is given nothing but the type and answers what there is to name at all.
+///
+/// # The base chain is walked here, and never stored
+///
+/// The one design decision this query makes, and the reason it is a query rather than a field.
+///
+/// A summary keeps what each file **says**: `struct D : public B` is stored as the spelling `B`, and `D`'s
+/// summary says nothing about `B`'s members. The alternative — resolving the bases when the summary is built and
+/// writing `D`'s inherited members onto `D` — is what an index-shaped instinct reaches for, and it is wrong for
+/// three reasons that all end in a stale answer with nothing on disk to contradict it:
+///
+/// ```text
+/// 1. B gains and loses members          -> D's text and D's key are unchanged, and D's stored list is now wrong
+/// 2. D's base list changes              -> caught, because D's text changed
+/// 3. *which* B the name `B` means       -> unchanged in D's text, changed by a macro, an include or an
+///                                          `#undef`, so D's stored list is wrong with nothing to catch it
+/// ```
+///
+/// The third is the one that settles it: it leaves `D`'s text identical, so no per-file invalidation can see it.
+/// Walking the chain at query time costs one lookup per base per query and cannot go stale, because nothing is
+/// kept. `a_member_added_to_a_base_appears_without_reindexing_the_derived_class` is that argument as a test.
+///
+/// # The three things a list can be, and none of them is "these are all the members"
+///
+/// * `Yes(list)` — the members this analysis can see. `list.unlisted` names the bases that could not be listed
+///   at all, so a consumer can tell a complete answer from a truncated one instead of guessing.
+/// * `Unknown(NotDeclaredHere)` — nothing visible declares the type. Not `No`: the index holds a subset of the
+///   translation unit, so a type from a header nobody indexed looks exactly like a type that does not exist.
+/// * `Unknown(ConditionalCompilation)` — the type is only reachable through a guarded `#include`, so whether it
+///   is here at all is not known.
+///
+/// # What it does with a name two bases declare
+///
+/// Both entries are listed and both are marked [`ProjectMember::ambiguous`]. Dropping one would be choosing, and
+/// choosing is the answer the language refuses to give — the same fact [`member_across_files`] states as
+/// `Unknown(Ambiguous)` for a single name, stated here as a property of a listed member, because a list with a
+/// hole in it would be a worse answer than a list that says which entries are contested.
+///
+/// # What it deliberately does not do
+///
+/// * No `using` declarations and no virtual/override resolution. A `using Base::f;` in a derived class brings a
+///   name in without declaring a member of its own, and nothing here models that yet.
+/// * No access check. A `private` base's members are listed, because access is not in the facts — see
+///   [`DeclFact::bases`] — and filtering on a guess would hide members a consumer can legitimately see.
+/// * No instantiation. A template class lists the members it was written with; a base written `Base<int>` is
+///   looked up as the class `Base`.
+/// * No conditional region. A member of a class in the buffer comes back with [`FactGuard::Unconditional`]
+///   whatever `#if` it is really in — see `fact_from_binding`. A class from the index does carry its regions.
+pub fn members_of(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+) -> Known<MemberList> {
+    // The spelling is normalized once, at the entry, for the same reason a base's is: a consumer feeding this from
+    // `DeclFact.type_of` hands over what the file wrote — `const Widget&`, `::Widget`, `Base<int>` — and every one
+    // of those parts is about the type's shape rather than about which class declares the members. Normalizing
+    // here also means `declared_in` is a qualified spelling from the first level on, and levels cannot disagree.
+    let class = base_type_name(class);
+
+    let own = match direct_members(index, scopes, root, path, class) {
+        Known::Yes(members) => members,
+        Known::Unknown(reason) => return Known::Unknown(reason),
+        // `direct_members` reports a name nothing declares as `Unknown(NotDeclaredHere)` rather than as `No` —
+        // the index is a subset of the translation unit — so this arm exists for totality, not for a case.
+        Known::No => return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(class))),
+    };
+
+    let mut list = MemberList::default();
+    let mut hidden: HashSet<String> = HashSet::new();
+    let mut visited: HashSet<String> = HashSet::from([class.to_string()]);
+
+    // Level 0 is the type's own body. It is not part of the walk below because its members are the ones that
+    // *hide*, and a base is only reached after them.
+    let mut own: Vec<ProjectMember> = own
+        .into_iter()
+        .map(|(file, fact)| ProjectMember {
+            file,
+            fact,
+            declared_in: class.to_string(),
+            depth: 0,
+            ambiguous: false,
+        })
+        .collect();
+    own.sort_by(|one, other| one.fact.name.cmp(&other.fact.name));
+    mark_ambiguity(&mut own);
+    hidden.extend(recorded_names(&own));
+    list.members.extend(own);
+
+    // Then outward, one level of bases at a time — which is the order C++ hides in: a base's member is hidden by
+    // a same-named member of anything nearer, so a level that has already contributed a name removes it from
+    // every level below.
+    let mut level = bases_of(index, scopes, root, path, class)
+        .value()
+        .unwrap_or_default();
+    let mut depth = 1;
+
+    while !level.is_empty() {
+        let mut found: Vec<ProjectMember> = Vec::new();
+        let mut next: Vec<String> = Vec::new();
+
+        for base in level {
+            if !visited.insert(base.clone()) {
+                continue;
+            }
+
+            let members = match direct_members(index, scopes, root, path, &base) {
+                Known::Yes(members) => members,
+                // A base nothing here can resolve. Its members are **missing from the list** rather than absent
+                // from the type, and naming the base is what makes the gap actionable — the fix is an include
+                // path or a file that was never indexed, not a different query.
+                Known::Unknown(reason) => {
+                    list.unlisted.push(UnlistedBase {
+                        spelling: base,
+                        reason,
+                    });
+                    continue;
+                }
+                Known::No => continue,
+            };
+
+            found.extend(members.into_iter().map(|(file, fact)| ProjectMember {
+                file,
+                fact,
+                declared_in: base.clone(),
+                depth,
+                ambiguous: false,
+            }));
+
+            match bases_of(index, scopes, root, path, &base) {
+                Known::Yes(further) => next.extend(further),
+                Known::Unknown(reason) => list.unlisted.push(UnlistedBase {
+                    spelling: base,
+                    reason,
+                }),
+                Known::No => {}
+            }
+        }
+
+        found.retain(|member| !hidden.contains(&member.fact.name));
+        found.sort_by(|one, other| one.fact.name.cmp(&other.fact.name));
+        mark_ambiguity(&mut found);
+        hidden.extend(recorded_names(&found));
+        list.members.extend(found);
+
+        level = next;
+        depth += 1;
+    }
+
+    Known::Yes(list)
+}
+
+/// Every declaration written **directly in** the class or namespace `class` names.
+///
+/// The class's own body first, from the file being edited, and then the index — the same two-layer split
+/// [`direct_member`] makes, and for the same reason: a buffer that has never been saved has no summary, and a
+/// class the buffer does not mention is only in the index.
+///
+/// [`Known::Yes`] with an empty list is a real answer — a class with nothing in it — and is deliberately not the
+/// same as [`Known::Unknown`], which is what a name nothing declares produces. The two are told apart by asking
+/// whether the *name* is declared, which is the one question that distinguishes "nothing written in it" from
+/// "nothing here knows what it is".
+///
+/// A name that is not an identifier — a destructor, an operator, a conversion function — comes back with an empty
+/// [`DeclFact::name`], exactly as the index stores it. It is a declaration that exists, so it is not dropped here;
+/// a consumer that shows a list filters on the name it can print and reads the spelling from the source, which is
+/// where it lives.
+fn direct_members(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+) -> Known<Vec<(PathBuf, DeclFact)>> {
+    if let Some(scope) = scopes.scope_with_qualified_name(class)
+        && let Some(data) = scopes.scope(scope)
+    {
+        return Known::Yes(
+            data.bindings
+                .iter()
+                .map(|binding| (path.to_path_buf(), fact_from_binding(root, class, binding)))
+                .collect(),
+        );
+    }
+
+    let found = index.declarations_in(class, path);
+    if !found.is_empty() {
+        return Known::Yes(
+            found
+                .into_iter()
+                .map(|declaration| (declaration.file.clone(), declaration.fact.clone()))
+                .collect(),
+        );
+    }
+
+    // Nothing is written *in* it, so the name is either an empty class or no class at all. Which one is decided by
+    // the declaration itself rather than by the absence of members: a fact whose own qualified name is the
+    // spelling asked about is the class, and everything else that matched did so on its bare name.
+    match index.definition(class, path) {
+        Known::Yes(found) if found.fact.qualified_name() == class => Known::Yes(Vec::new()),
+        Known::Unknown(reason) => Known::Unknown(reason),
+        Known::Yes(_) | Known::No => Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(class))),
+    }
+}
+
+/// The names in a level that take part in **hiding**: every member except the ones whose name is not recorded.
+///
+/// A destructor, an operator and a conversion function come back with an empty [`DeclFact::name`], because a fact
+/// stores a lookup key rather than a spelling — the spelling lives in the source, and `~D` has no identifier in it.
+/// There is therefore nothing to compare them by, and two of them are *not* one name: `~D` and `~B` differ by the
+/// class they name. Leaving them out of the hiding rule is what keeps `~D` from hiding `~B` — a wrong answer
+/// arrived at by treating a missing spelling as if it were a spelling. They are still **listed**, because they are
+/// declarations that exist; see [`direct_members`].
+fn recorded_names(members: &[ProjectMember]) -> impl Iterator<Item = String> + '_ {
+    members
+        .iter()
+        .map(|member| member.fact.name.clone())
+        .filter(|name| !name.is_empty())
+}
+
+/// Flag the members whose name another class at the same level also declares.
+///
+/// Level-scoped rather than list-scoped, and the difference is the language's: a base's member that a *derived*
+/// class redeclares is hidden, so it never reaches this function, while two bases at the same level genuinely
+/// leave the name unresolved — the same finding [`member_across_files`] reports as `Unknown(Ambiguous)`.
+///
+/// **Overloads are not ambiguity.** `void f(); void f(int);` declares one name once, in one class, and a consumer
+/// that flagged it would refuse to complete a name the language resolves perfectly well. So what is counted is
+/// the number of distinct declaring classes, not the number of declarations.
+///
+/// A member with no recorded name is skipped for the same reason it takes no part in hiding — see
+/// [`recorded_names`] — and skipping it is the conservative direction: claiming two declarations are one contested
+/// name would be a definite statement about a name this layer cannot read.
+fn mark_ambiguity(members: &mut [ProjectMember]) {
+    let mut declaring: HashMap<String, HashSet<String>> = HashMap::new();
+
+    for member in members.iter().filter(|member| !member.fact.name.is_empty()) {
+        declaring
+            .entry(member.fact.name.clone())
+            .or_default()
+            .insert(member.declared_in.clone());
+    }
+
+    for member in members.iter_mut() {
+        member.ambiguous = !member.fact.name.is_empty()
+            && declaring
+                .get(&member.fact.name)
+                .is_some_and(|classes| classes.len() > 1);
+    }
+}
+
 /// The type of an expression, as far as this layer can tell, and the file that declared it.
 ///
 /// The core of the `infer` layer, and it is **recursive** because that is what an expression is: `a.b.size` is a
@@ -343,7 +599,9 @@ fn member_fact(
     // which is what C++ does, so the search stops at the first level that has any answer. Two answers at the same
     // level are ambiguous — a diamond where both sides declare the name — and reporting that is the honest
     // outcome: picking one would be a jump to an entity the language says is not uniquely named.
-    let mut level = bases_of(index, scopes, root, path, class);
+    let mut level = bases_of(index, scopes, root, path, class)
+        .value()
+        .unwrap_or_default();
     let mut visited: Vec<String> = vec![class.to_string()];
 
     while !level.is_empty() {
@@ -361,7 +619,11 @@ fn member_fact(
             if let Some(member_found) = direct_member(index, scopes, root, path, &base, member) {
                 found.push(member_found);
             }
-            next.extend(bases_of(index, scopes, root, path, &base));
+            next.extend(
+                bases_of(index, scopes, root, path, &base)
+                    .value()
+                    .unwrap_or_default(),
+            );
         }
 
         match found.len() {
@@ -399,19 +661,7 @@ fn direct_member(
             .iter()
             .find(|binding| binding.name.identifier_text() == Some(member))
     {
-        return Some((
-            DeclFact {
-                name: member.to_string(),
-                scope: Some(class.to_string()),
-                kind: crate::DeclKind::from_binding_kind(binding.kind),
-                type_of: crate::sema::declarations::declared_type_of(root, binding),
-                bases: crate::sema::declarations::declared_bases_of(root, binding),
-                range: binding.range,
-                name_range: binding.name_range,
-                guard: FactGuard::Unconditional,
-            },
-            path.to_path_buf(),
-        ));
+        return Some((fact_from_binding(root, class, binding), path.to_path_buf()));
     }
 
     match index.definition(&format!("{class}::{member}"), path) {
@@ -420,14 +670,65 @@ fn direct_member(
     }
 }
 
+/// One binding as a [`DeclFact`], under the qualified name of the scope it was written in.
+///
+/// The single reader of a binding's fact-shaped fields, shared by the single-member query and the member-list
+/// query so that `Widget::size`'s type and `Widget`'s member `size` cannot come out differently: both are read
+/// out of the tree through [`declared_type_of`](crate::sema::declarations::declared_type_of) and
+/// [`declared_bases_of`](crate::sema::declarations::declared_bases_of), and a second call site would be a second
+/// answer to "what does this declaration say".
+///
+/// The guard is [`FactGuard::Unconditional`] because a binding carries none: the region a declaration sits in is
+/// a fact about the text, and the layer that sweeps the directives fills it in when the summary is built — see
+/// [`build_facts`](crate::sema::declarations::build_facts).
+///
+/// # The one field that is not answered on this path
+///
+/// A fact built from the **buffer's** scope tree has had no such sweep, so its `guard` says `Unconditional` even
+/// for a member written inside an `#if`. That is a gap rather than a decision, and it is stated here rather than
+/// left to be discovered: a consumer that needs the region has to ask the summary — which does have it — and a
+/// consumer that is showing a member list has nothing to gain from it, which is why this was not worth a third
+/// `FactGuard` variant for. The same applies to the facts [`member_across_files`] returns from this path.
+fn fact_from_binding(root: &cpp_parser::CppSyntaxNode, class: &str, binding: &crate::Binding) -> DeclFact {
+    DeclFact {
+        name: binding
+            .name
+            .identifier_text()
+            .unwrap_or_default()
+            .to_string(),
+        scope: Some(class.to_string()),
+        kind: crate::DeclKind::from_binding_kind(binding.kind),
+        type_of: crate::sema::declarations::declared_type_of(root, binding),
+        bases: crate::sema::declarations::declared_bases_of(root, binding),
+        range: binding.range,
+        name_range: binding.name_range,
+        guard: FactGuard::Unconditional,
+    }
+}
+
 /// The base classes `class` was written with, from this file or from the index.
+///
+/// # Names, not spellings
+///
+/// What comes back is normalized for **lookup**: `public Base<int>` is the class `Base`. The spelling the file
+/// wrote stays in [`DeclFact::bases`], which is a fact about the text; a base here is a name to find a class by,
+/// and the template arguments say which *type* is inherited rather than which class declares the members. The
+/// members of `Base<int>` are the members of `Base`'s primary template, which is the most useful answer available
+/// without instantiating anything — and the same rule [`base_type_name`] applies to a declared type.
+///
+/// # Why this is `Known` and not a list
+///
+/// "This class has no bases" and "nothing here says what this class inherits from" are different statements, and
+/// an empty `Vec` would merge them. The member **lookup** treats them alike — a base it cannot reach contributes
+/// no members either way, so it walks on — while the member **list** reports the gap, because a list is a claim
+/// about what a type has.
 fn bases_of(
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
-) -> Vec<String> {
+) -> Known<Vec<String>> {
     // In this file: the class scope's parent holds the binding of the class's *name*, which is the declaration the
     // bases were written on. Asking the tree through that binding is the same walk the fact builder makes, so the
     // two cannot disagree about what a class inherits from.
@@ -444,13 +745,25 @@ fn bases_of(
                     .find(|binding| binding.name.identifier_text() == Some(name))
             })
     {
-        return crate::sema::declarations::declared_bases_of(root, binding);
+        return Known::Yes(lookup_names(&crate::sema::declarations::declared_bases_of(
+            root, binding,
+        )));
     }
 
     match index.definition(class, path) {
-        Known::Yes(found) => found.fact.bases,
-        Known::Unknown(_) | Known::No => Vec::new(),
+        Known::Yes(found) => Known::Yes(lookup_names(&found.fact.bases)),
+        Known::Unknown(reason) => Known::Unknown(reason),
+        Known::No => Known::No,
     }
+}
+
+/// Base spellings as names a class can be looked up by, in the order they were written.
+fn lookup_names(bases: &[String]) -> Vec<String> {
+    bases
+        .iter()
+        .map(|base| base_type_name(base).to_string())
+        .filter(|base| !base.is_empty())
+        .collect()
 }
 
 /// The class whose scope encloses `offset`, for `this`.
@@ -475,10 +788,18 @@ fn enclosing_class(scopes: &crate::ScopeTree, offset: usize) -> Option<String> {
 
 /// The name of the class a written type names, with the parts that do not affect *which* class it is removed.
 ///
-/// `const Widget&` → `Widget`, `std::vector<int>` → `std::vector`, `struct Widget` → `Widget`. The goal is a
-/// spelling that can be looked up as a qualified name, and every one of those parts is about the type's shape
-/// rather than its name. `unsigned long` is left alone: there the words *are* the type, and it names no class
-/// anyway.
+/// `const Widget&` → `Widget`, `std::vector<int>` → `std::vector`, `struct Widget` → `Widget`, `::Widget` →
+/// `Widget`. The goal is a spelling that can be looked up as a qualified name, and every one of those parts is
+/// about the type's shape or about which name space it is in rather than about its name. `unsigned long` is left
+/// alone: there the words *are* the type, and it names no class anyway.
+///
+/// # Why the leading `::` comes off
+///
+/// A leading `::` asks about the **global** name space — a real distinction for a *name* lookup, where dropping it
+/// would also match `ns::Widget`, and [`matches`] honours it for exactly that reason. It is not a distinction for
+/// this walk, because the walk does not ask "which name space"; it asks for the qualified spelling the index keys
+/// on, and a global declaration's spelling is its bare name. Keeping the prefix made `::Widget w;` — the type
+/// spelling a consumer hands over verbatim from `DeclFact.type_of` — fail to find a class sitting in the buffer.
 fn base_type_name(written: &str) -> &str {
     let mut name = written.trim();
 
@@ -490,6 +811,9 @@ fn base_type_name(written: &str) -> &str {
 
     // Declarators written after the type: `Widget*`, `Widget&`, `Widget&&`.
     name = name.trim_end_matches(['*', '&']).trim();
+
+    // The global name space, which for a qualified spelling is no prefix at all.
+    name = name.strip_prefix("::").unwrap_or(name).trim();
 
     // An elaborated specifier: `struct Widget` and `Widget` name one class, and only the second is a spelling the
     // index matches.
@@ -617,6 +941,33 @@ impl ProjectIndex {
     /// appear in some scope. A caller that gets one answer from the qualified match should prefer it to any
     /// number from the bare one.
     pub fn files_declaring(&self, name: &str, visible_from: &Path) -> Vec<VisibleDeclaration<'_>> {
+        self.visible_declarations(visible_from, |fact| matches(fact, name))
+    }
+
+    /// Every declaration written **directly in** the scope `scope`, visible from `visible_from`.
+    ///
+    /// The whole-scope counterpart of [`ProjectIndex::definition`]: that asks about one name, this asks about
+    /// every name one scope holds, which is what a member list is made of. `scope` is a **qualified** spelling —
+    /// `Widget`, `ns::Widget` — because that is what a [`DeclFact`] records; see [`DeclFact::scope`].
+    ///
+    /// Note what "directly in" excludes, because it is the whole reason this is not a name search: a local
+    /// variable inside a member function is a fact whose scope is `None` — a function body contributes no segment
+    /// to a qualified name — so `C`'s members are `C`'s bindings and not everything written between its braces.
+    pub fn declarations_in(&self, scope: &str, visible_from: &Path) -> Vec<VisibleDeclaration<'_>> {
+        self.visible_declarations(visible_from, |fact| fact.scope.as_deref() == Some(scope))
+    }
+
+    /// The declarations some predicate accepts, in the files `visible_from` can see.
+    ///
+    /// The one place the visibility walk is applied to the declaration list, so that a new query over facts
+    /// cannot forget it and quietly answer with a declaration in a file the querying file does not include —
+    /// which is a jump to something it cannot compile against. `includers_of` and `visibility_of` are the graph;
+    /// this is the graph applied to a question.
+    fn visible_declarations<'a>(
+        &'a self,
+        visible_from: &Path,
+        accepts: impl Fn(&DeclFact) -> bool,
+    ) -> Vec<VisibleDeclaration<'a>> {
         let mut found = Vec::new();
 
         for summary in self.summaries() {
@@ -624,7 +975,7 @@ impl ProjectIndex {
                 continue;
             };
 
-            for fact in summary.declarations.iter().filter(|fact| matches(fact, name)) {
+            for fact in summary.declarations.iter().filter(|fact| accepts(fact)) {
                 found.push(VisibleDeclaration {
                     file: summary.path.clone(),
                     fact,
@@ -929,6 +1280,84 @@ pub struct ProjectDefinition {
     /// The declaration, cloned out of the index so that an answer does not borrow the project for as long as a
     /// consumer wants to hold it — a language server hands the location to a client and moves on.
     pub fact: DeclFact,
+}
+
+/// A type's members, as [`members_of`] lists them.
+///
+/// # The order is part of the answer
+///
+/// Members come **nearest class first**: the type's own, then its direct bases', then theirs, level by level.
+/// That is the order C++ hides in, so a consumer that shows the list in this order shows the members in
+/// precedence order — and a member that a nearer level also declares is not in the list at all, because the
+/// language does not find it by that name.
+///
+/// Within a level the order is by **name**, and it has to be imposed rather than inherited: the file's own scope
+/// tree keeps its bindings name-sorted — see [`ScopeTree::add_binding`](crate::ScopeTree::add_binding) — while
+/// the index keeps facts in offset order, so leaving each side as it came would make a list depend on whether the
+/// class happened to be in the buffer or in a header. Sorting by name is the one rule both sides can obey, and it
+/// is stable, so two declarations of one name keep the order they were written in.
+///
+/// # It is never a claim of completeness
+///
+/// [`MemberList::unlisted`] names the bases this walk could not open. An empty `unlisted` means "no base this walk
+/// reached was left unread" — not "this is everything the compiler would see". The index holds a subset of the
+/// translation unit, and the standard library is not in it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemberList {
+    pub members: Vec<ProjectMember>,
+    /// The bases whose own members are **not** in this list, with why.
+    ///
+    /// Separate from `members` rather than folded into it, because the two say different things: `members` is
+    /// what the type has, and this is where the answer stops. A consumer that shows a truncated list without
+    /// saying so is the failure this field exists to prevent.
+    pub unlisted: Vec<UnlistedBase>,
+}
+
+impl MemberList {
+    /// The members declared by the type itself, as opposed to the ones it inherits.
+    pub fn own(&self) -> impl Iterator<Item = &ProjectMember> {
+        self.members.iter().filter(|member| member.depth == 0)
+    }
+
+    /// The members reached `depth` base steps away: `0` for the type's own, `1` for a direct base's.
+    pub fn at_depth(&self, depth: usize) -> impl Iterator<Item = &ProjectMember> {
+        self.members.iter().filter(move |member| member.depth == depth)
+    }
+}
+
+/// One member of a type: where it is declared, and which class in the chain declares it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectMember {
+    pub file: PathBuf,
+    pub fact: DeclFact,
+    /// The **resolved** qualified name of the class that declares it — the type asked about, or one of its bases.
+    ///
+    /// The qualified name rather than the spelling the derived class wrote, because that is what makes the member
+    /// a thing a second query can be asked about: `Base` in `struct D : public Base` is a spelling, and
+    /// `ns::Base` is the class. The spelling is in [`DeclFact::bases`] on the derived class's own fact.
+    pub declared_in: String,
+    /// How many base steps away it is: `0` for the type's own members, `1` for a direct base's, and so on.
+    ///
+    /// Recorded rather than left to be recomputed from `members`, because a consumer grouping by it — an outline,
+    /// a completion that shows inherited members separately — would otherwise have to reconstruct the walk it was
+    /// just handed the result of.
+    pub depth: usize,
+    /// Another class **at the same level** also declares this name, so the name is not uniquely resolved here.
+    ///
+    /// The list keeps both declarations, because dropping either would be choosing. See [`members_of`].
+    pub ambiguous: bool,
+}
+
+/// A base whose members are not in the list, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnlistedBase {
+    /// The base as a **name to look up**, not as the file spelled it: `Base` for `public Base<int>` — a base is
+    /// found by name, and the template arguments say which type is inherited rather than which class declares the
+    /// members.
+    pub spelling: String,
+    /// [`UnknownReason::NotDeclaredHere`] for a base nothing visible declares, and
+    /// [`UnknownReason::ConditionalCompilation`] for one reachable only through a guarded `#include`.
+    pub reason: UnknownReason,
 }
 
 impl ProjectDefinition {
@@ -1843,6 +2272,477 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------------------------
+    // Member lists
+    //
+    // The *list* form of the member query, and the fixtures are written to make the one decision it makes
+    // visible: which class declares each member, and whether that is the type asked about or a base. The
+    // staleness test at the end is the reason none of it is stored.
+    // -------------------------------------------------------------------------------------------
+
+    /// The members of `class`, with the file analysed and indexed the way a real query has them.
+    fn members_of_class(
+        files: &[(&str, &str)],
+        from: &str,
+        source: &str,
+        class: &str,
+    ) -> Known<super::MemberList> {
+        let (index, tree) = analysed(files, from, source);
+        let root = tree.get_red_root();
+        let scopes = crate::build_scopes(&root);
+
+        super::members_of(&index, &scopes, &root, Path::new(from), class)
+    }
+
+    /// The member names, in the order the query produced them.
+    fn names(list: &super::MemberList) -> Vec<&str> {
+        list.members
+            .iter()
+            .map(|member| member.fact.name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_class_lists_the_members_written_in_it() {
+        // Written out of alphabetical order on purpose: a member list is ordered by name rather than by the text,
+        // because the file's scope tree keeps its bindings name-sorted while the index keeps facts in offset
+        // order, and the two have to agree for a class to list the same way wherever it is declared.
+        let source = "struct Widget {\n  void grow();\n  int size;\n};\n";
+        let found = members_of_class(&[], "/p/a.cpp", source, "Widget");
+
+        let Known::Yes(list) = found else {
+            panic!("`Widget` is declared in this file: {found:?}");
+        };
+
+        assert_eq!(names(&list), ["grow", "size"]);
+        assert!(
+            list.unlisted.is_empty(),
+            "a class with no bases has nothing left unread: {:?}",
+            list.unlisted
+        );
+
+        let size = &list.members[1];
+        assert_eq!(size.declared_in, "Widget");
+        assert_eq!(size.depth, 0, "its own member, not an inherited one");
+        assert!(!size.ambiguous);
+        assert_eq!(size.file, Path::new("/p/a.cpp"));
+        assert_eq!(
+            size.fact.type_of.as_deref(),
+            Some("int"),
+            "the type a completion shows beside the name"
+        );
+        assert_eq!(list.own().count(), 2, "every member here is the class's own");
+    }
+
+    #[test]
+    fn a_derived_class_lists_its_own_members_before_the_ones_it_inherits() {
+        // Nearest first, which is the order C++ hides in — and the base is tagged rather than flattened into the
+        // derived class, so a consumer can show an inherited member as inherited and can jump to `Base::count`
+        // rather than to a copy of it.
+        let source = "struct Base {\n  int inherited_count;\n};\n\
+                      struct Derived : public Base {\n  int own_count;\n};\n";
+        let found = members_of_class(&[], "/p/a.cpp", source, "Derived");
+
+        let Known::Yes(list) = found else {
+            panic!("`Derived` is declared in this file: {found:?}");
+        };
+
+        assert_eq!(
+            names(&list),
+            ["own_count", "inherited_count"],
+            "the class's own members come first, and the inherited one is last"
+        );
+        assert_eq!(list.members[0].declared_in, "Derived");
+        assert_eq!(list.members[0].depth, 0);
+        assert_eq!(
+            list.members[1].declared_in, "Base",
+            "the member is the base's, not the derived class's"
+        );
+        assert_eq!(list.members[1].depth, 1);
+        assert_eq!(
+            list.members[1].fact.type_of.as_deref(),
+            Some("int"),
+            "and it carries its own declaration's type"
+        );
+        assert_eq!(list.at_depth(1).count(), 1);
+    }
+
+    #[test]
+    fn a_member_the_class_redeclares_hides_the_one_in_its_base() {
+        // Hiding is by name, not by signature: `Derived::size` hides `Base::size` whatever the parameters are,
+        // so the base's is not in the list. A list that kept both would offer a name the language does not find.
+        let source = "struct Base {\n  int size;\n};\n\
+                      struct Derived : public Base {\n  double size;\n};\n";
+        let found = members_of_class(&[], "/p/a.cpp", source, "Derived");
+
+        let Known::Yes(list) = found else {
+            panic!("`Derived` is declared in this file: {found:?}");
+        };
+
+        assert_eq!(names(&list), ["size"], "one `size`, and it is the derived class's");
+        assert_eq!(list.members[0].declared_in, "Derived");
+        assert_eq!(list.members[0].fact.type_of.as_deref(), Some("double"));
+    }
+
+    #[test]
+    fn a_name_two_bases_declare_is_listed_twice_and_marked_ambiguous() {
+        // The list form of the ambiguity the single-member query reports: both declarations are kept, because
+        // dropping either would be choosing one for the user, and both are flagged, because a consumer offering
+        // the name has to be able to say that the language does not resolve it here.
+        let source = "struct Left {\n  int value;\n};\nstruct Right {\n  int value;\n};\n\
+                      struct Both : public Left, public Right {\n  int own;\n};\n";
+        let found = members_of_class(&[], "/p/a.cpp", source, "Both");
+
+        let Known::Yes(list) = found else {
+            panic!("`Both` is declared in this file: {found:?}");
+        };
+
+        assert_eq!(names(&list), ["own", "value", "value"]);
+
+        let values: Vec<&super::ProjectMember> = list
+            .members
+            .iter()
+            .filter(|member| member.fact.name == "value")
+            .collect();
+        assert_eq!(values.len(), 2, "both declarations survive into the list");
+        assert!(
+            values.iter().all(|member| member.ambiguous),
+            "both are contested: {values:?}"
+        );
+
+        let mut declaring: Vec<&str> = values
+            .iter()
+            .map(|member| member.declared_in.as_str())
+            .collect();
+        declaring.sort_unstable();
+        assert_eq!(declaring, ["Left", "Right"]);
+
+        assert!(
+            !list.members[0].ambiguous,
+            "`own` is declared once, in one class"
+        );
+    }
+
+    #[test]
+    fn a_member_whose_name_is_not_recorded_does_not_hide_one_in_a_base() {
+        // `virtual ~Base();` is what makes this real rather than hypothetical: the specifier sequence is what lets
+        // the declaration through the scope walker, and the name it binds is `~Base` — a destructor, whose
+        // `identifier_text()` is `None`, so the fact stores an **empty** name. Comparing two empty names made
+        // `~Derived` hide `~Base`, which is a wrong answer arrived at by treating a missing spelling as if it were
+        // a spelling: the two differ by the class they name, and neither one's spelling is in the fact.
+        let source = "struct Base {\n  virtual ~Base();\n  int size;\n};\n\
+                      struct Derived : public Base {\n  virtual ~Derived();\n  int d;\n};\n";
+        let found = members_of_class(&[], "/p/a.cpp", source, "Derived");
+
+        let Known::Yes(list) = found else {
+            panic!("`Derived` is declared in this file: {found:?}");
+        };
+
+        let unnamed: Vec<&super::ProjectMember> = list
+            .members
+            .iter()
+            .filter(|member| member.fact.name.is_empty())
+            .collect();
+        assert_eq!(
+            unnamed.len(),
+            2,
+            "both destructors are declarations that exist, and dropping one would be a silent omission: {:?}",
+            names(&list)
+        );
+
+        let mut classes: Vec<&str> = unnamed
+            .iter()
+            .map(|member| member.declared_in.as_str())
+            .collect();
+        classes.sort_unstable();
+        assert_eq!(classes, ["Base", "Derived"]);
+
+        assert!(
+            unnamed.iter().all(|member| !member.ambiguous),
+            "an empty name is not one name two classes contest: {unnamed:?}"
+        );
+        assert!(
+            list.members
+                .iter()
+                .any(|member| member.fact.name == "size" && member.declared_in == "Base"),
+            "and the named members still cross the inheritance boundary: {:?}",
+            names(&list)
+        );
+    }
+
+    #[test]
+    fn a_destructor_without_a_specifier_is_not_a_member_yet() {
+        // The boundary, asserted rather than left to be discovered — see "现在答不了什么" in
+        // `docs/index-design.md`, and `a_destructor_without_a_specifier_declares_nothing_yet` in
+        // `tests/scopes.rs` for the rule and for what landing it needs.
+        //
+        // What this test is really pinning is the *other* half: the class is found by its own name. Before the fix
+        // in `name_from_text`, a class whose body held a destructor was itself named `~Derived` — its scope was
+        // `~Derived`, `d` was filed under that, and `Derived` was never bound. So this fixture used to answer
+        // `Unknown(NotDeclaredHere("Derived"))`, which is why it is here as well as in `tests/scopes.rs`.
+        let source = "struct Derived {\n  ~Derived();\n  int d;\n};\n";
+        let found = members_of_class(&[], "/p/a.cpp", source, "Derived");
+
+        let Known::Yes(list) = found else {
+            panic!("the class must be found by its own name: {found:?}");
+        };
+        assert_eq!(
+            names(&list),
+            ["d"],
+            "`~Derived` is not listed yet: the walker binds no declarator that is not an `InitDeclarator`, so the \
+             destructor is not a fact for this query to list"
+        );
+    }
+
+    #[test]
+    fn overloads_in_one_class_are_not_ambiguous() {
+        // The other half of the rule above, and the case a count-of-declarations implementation gets wrong:
+        // `f` is declared twice and is one name in one class, so nothing about it is contested.
+        let source = "struct Widget {\n  void f();\n  void f(int);\n};\n";
+        let found = members_of_class(&[], "/p/a.cpp", source, "Widget");
+
+        let Known::Yes(list) = found else {
+            panic!("`Widget` is declared in this file: {found:?}");
+        };
+
+        assert_eq!(names(&list), ["f", "f"], "both overloads are listed");
+        assert!(
+            list.members.iter().all(|member| !member.ambiguous),
+            "one class declaring a name twice is an overload set, not an ambiguity: {:?}",
+            list.members
+        );
+    }
+
+    #[test]
+    fn a_cycle_of_bases_terminates_and_each_class_contributes_once() {
+        // A base list that cannot be written in valid C++ and can be produced by a malformed file. The visited set
+        // is what keeps the walk finite; without it this test does not fail, it does not return.
+        let source = "struct A : public B {\n  int a_member;\n};\nstruct B : public A {\n  int b_member;\n};\n";
+        let found = members_of_class(&[], "/p/a.cpp", source, "A");
+
+        let Known::Yes(list) = found else {
+            panic!("`A` is declared in this file: {found:?}");
+        };
+
+        assert_eq!(names(&list), ["a_member", "b_member"]);
+        assert_eq!(list.members[0].depth, 0);
+        assert_eq!(
+            list.members[1].depth, 1,
+            "`A` is reached again as `B`'s base and is not listed a second time"
+        );
+    }
+
+    #[test]
+    fn a_template_class_lists_the_members_it_was_written_with() {
+        // No instantiation, and the answer says so by what it contains: `value` has the type `T`, which is what
+        // the class wrote. Instantiating would mean picking an argument, and a member list for `Holder<int>` and
+        // `Holder<std::string>` would then be two different lists — which is a `sema` question, not this one.
+        let source = "template <typename T>\nstruct Holder {\n  T value;\n  int count;\n};\n";
+        let found = members_of_class(&[], "/p/a.cpp", source, "Holder");
+
+        let Known::Yes(list) = found else {
+            panic!("`Holder` is declared in this file: {found:?}");
+        };
+
+        assert_eq!(names(&list), ["count", "value"]);
+        assert_eq!(
+            list.members[1].fact.type_of.as_deref(),
+            Some("T"),
+            "the parameter as written, not an instantiated type"
+        );
+        assert!(
+            !list.members.iter().any(|member| member.fact.name == "T"),
+            "the template parameter is declared in the parameter list, not in the class: {:?}",
+            names(&list)
+        );
+    }
+
+    #[test]
+    fn a_type_nothing_declares_has_no_member_list_rather_than_an_empty_one() {
+        // The distinction the whole crate is built around, asked of a list: an empty list is a claim that the type
+        // has no members, and this analysis cannot make it about a type it has never seen.
+        let source = "void f() { }\n";
+        let found = members_of_class(&[], "/p/a.cpp", source, "Nowhere");
+
+        assert!(
+            matches!(found, Known::Unknown(UnknownReason::NotDeclaredHere(_))),
+            "`Nowhere` is not a type this analysis has seen: {found:?}"
+        );
+    }
+
+    #[test]
+    fn a_class_that_is_empty_has_an_empty_member_list() {
+        // The other side of the test above, and the one that needs the *name* to be asked about rather than the
+        // members: `struct Empty { };` writes no member and no scope either — see `scopes::class_like` — so a
+        // query that read "no members found" as "no class found" would report an empty class as a missing one.
+        let source = "struct Empty { };\n";
+        let found = members_of_class(&[], "/p/a.cpp", source, "Empty");
+
+        let Known::Yes(list) = found else {
+            panic!("`Empty` is declared in this file and has no members: {found:?}");
+        };
+        assert!(list.members.is_empty());
+    }
+
+    #[test]
+    fn a_member_declared_in_a_nested_class_is_not_a_member_of_the_outer_one() {
+        // The scope a fact records is the scope it was written in, so `Inner::x` is a member of `Inner` and the
+        // member of `Outer` is the class `Inner`. A list built by name rather than by scope would put `x` in both.
+        let source = "struct Outer {\n  struct Inner {\n    int x;\n  };\n  int y;\n};\n";
+        let found = members_of_class(&[], "/p/a.cpp", source, "Outer");
+
+        let Known::Yes(list) = found else {
+            panic!("`Outer` is declared in this file: {found:?}");
+        };
+
+        assert_eq!(names(&list), ["Inner", "y"]);
+        assert_eq!(list.members[0].fact.qualified_name(), "Outer::Inner");
+    }
+
+    #[test]
+    fn a_member_list_crosses_a_header_and_keeps_the_base_tagged() {
+        // The everyday layout: the base is in a header, the derived class is in the file being edited. The base
+        // list comes from the buffer's tree and the base's members from the index, and the answer has to name the
+        // header as the place to jump to rather than the buffer.
+        let source = "#include \"base.h\"\nstruct Derived : public Base {\n  int d;\n};\n";
+        let (index, tree) = analysed(
+            &[("/p/base.h", "struct Base {\n  int size;\n};\n")],
+            "/p/main.cpp",
+            source,
+        );
+        let root = tree.get_red_root();
+        let scopes = crate::build_scopes(&root);
+
+        let found = super::members_of(&index, &scopes, &root, Path::new("/p/main.cpp"), "Derived");
+        let Known::Yes(list) = found else {
+            panic!("`Derived` is declared in the buffer: {found:?}");
+        };
+
+        assert_eq!(names(&list), ["d", "size"]);
+        assert_eq!(list.members[1].file, Path::new("/p/base.h"));
+        assert_eq!(list.members[1].declared_in, "Base");
+    }
+
+    #[test]
+    fn a_base_that_resolves_to_a_template_is_listed_without_instantiating_it() {
+        // `public Base<int>` is the class `Base` for the purpose of finding members: the arguments say which type
+        // is inherited, not which class declares what. Reading the spelling literally would look for a class named
+        // `Base<int>`, which is a name no declaration has.
+        let source = "template <typename T>\nstruct Base {\n  int size;\n};\n\
+                      struct Derived : public Base<int> {\n  int d;\n};\n";
+        let found = members_of_class(&[], "/p/a.cpp", source, "Derived");
+
+        let Known::Yes(list) = found else {
+            panic!("`Derived` is declared in this file: {found:?}");
+        };
+
+        assert_eq!(names(&list), ["d", "size"]);
+        assert_eq!(list.members[1].declared_in, "Base");
+    }
+
+    #[test]
+    fn a_base_nothing_declares_is_reported_as_a_gap_rather_than_dropped() {
+        // The list is incomplete and says so. Answering with just `d` would be a claim that `Derived` has one
+        // member, which is exactly what this analysis cannot know: `Base` is behind an include nobody indexed.
+        let source = "#include \"missing.h\"\nstruct Derived : public Base {\n  int d;\n};\n";
+        let found = members_of_class(&[], "/p/a.cpp", source, "Derived");
+
+        let Known::Yes(list) = found else {
+            panic!("`Derived` itself is in the buffer: {found:?}");
+        };
+
+        assert_eq!(names(&list), ["d"], "what could be listed is listed");
+        assert_eq!(list.unlisted.len(), 1, "and what could not is named");
+        assert_eq!(list.unlisted[0].spelling, "Base");
+        assert!(matches!(list.unlisted[0].reason, UnknownReason::NotDeclaredHere(_)),
+            "the reason has to say that the base is not here, not that the list ended: {:?}",
+            list.unlisted[0].reason
+        );
+    }
+
+    #[test]
+    fn a_type_spelled_from_the_global_name_space_lists_the_same_members() {
+        // `::Widget w;` is a declaration whose type spelling carries the leading `::`, and a consumer feeding this
+        // query from `DeclFact.type_of` therefore hands it `::Widget`. The index keys a global declaration under
+        // its bare name — a file-scope declaration has no scope prefix — so the prefix has to come off before the
+        // walk, or a class that is plainly in the buffer answers `Unknown(NotDeclaredHere("::Widget"))`.
+        let source = "struct Widget {\n  int size;\n};\nvoid f() {\n  ::Widget w;\n}\n";
+        let found = members_of_class(&[], "/p/a.cpp", source, "::Widget");
+
+        let Known::Yes(list) = found else {
+            panic!("`::Widget` is the file-scope `Widget`: {found:?}");
+        };
+        assert_eq!(names(&list), ["size"]);
+        assert_eq!(list.members[0].declared_in, "Widget");
+    }
+
+    #[test]
+    fn a_member_added_to_a_base_appears_without_reindexing_the_derived_class() {
+        // The test that decides whether inherited members are *materialized*, and the reason they are not.
+        //
+        // Only `b.h` is rebuilt below. Nothing about `A`'s text or its key changes, so a summary that stored the
+        // members `A` inherits would go on answering with `old_member` for ever — and no invalidation rule could
+        // catch it, because there is nothing to invalidate: the edit is in a file `A` never mentions by name.
+        // Walking the chain at query time is what makes the second assertion true.
+        let a_header = "#include \"b.h\"\nstruct A : public B {\n  int a_member;\n};\n";
+        let before = "struct B {\n  int old_member;\n};\n";
+        let after = "struct B {\n  int new_member;\n};\n";
+        let main = "#include \"a.h\"\n";
+
+        let mut index = index(&[
+            ("/p/main.cpp", main),
+            ("/p/a.h", a_header),
+            ("/p/b.h", before),
+        ]);
+
+        let tree = cpp_parser::CppParser::parse(main, cpp_parser::ParserConfig::default());
+        let root = tree.get_red_root();
+        let scopes = crate::build_scopes(&root);
+
+        let listed = |index: &ProjectIndex| {
+            match super::members_of(index, &scopes, &root, Path::new("/p/main.cpp"), "A") {
+                Known::Yes(list) => list
+                    .members
+                    .iter()
+                    .map(|member| member.fact.name.clone())
+                    .collect::<Vec<_>>(),
+                other => panic!("`A` is declared in an included header: {other:?}"),
+            }
+        };
+
+        assert_eq!(listed(&index), ["a_member", "old_member"]);
+
+        // `b.h` and nothing else. `a.h` keeps the summary it was built with, which is the whole point.
+        let mut rebuilt = summarize(Path::new("/p/b.h"), after, SummaryKey::new(1, 0));
+        for include in &mut rebuilt.includes {
+            include.resolved = Some(std::path::PathBuf::from(format!("/p/{}", include.spelling)));
+        }
+        index.insert(rebuilt);
+
+        assert_eq!(
+            listed(&index),
+            ["a_member", "new_member"],
+            "the derived class's members are read from its bases at query time, so the edit is seen without \
+             anything of `A`'s being rebuilt"
+        );
+
+        // And why that worked, asserted rather than implied: `A`'s own summary holds its own member and nothing it
+        // inherits. The day something starts writing inherited members into a derived class's summary, this is
+        // where it shows up — before the stale answers do.
+        let a = index.summary(Path::new("/p/a.h")).expect("`a.h` is indexed");
+        let a_members: Vec<&str> = a
+            .declarations
+            .iter()
+            .filter(|fact| fact.scope.as_deref() == Some("A"))
+            .map(|fact| fact.name.as_str())
+            .collect();
+        assert_eq!(
+            a_members,
+            ["a_member"],
+            "a fact stores the spelling `B`, never the members `B` happens to have"
+        );
+    }
+
+    // -------------------------------------------------------------------------------------------
     // Macros
     //
     // Every test here is about **translation order**: which of the `#define`s and `#undef`s the
@@ -2176,3 +3076,4 @@ mod tests {
         );
     }
 }
+

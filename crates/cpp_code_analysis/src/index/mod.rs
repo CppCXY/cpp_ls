@@ -39,8 +39,9 @@ pub mod watch;
 pub mod worklist;
 
 pub use project::{
-    IncludeVisibility, ProjectDefinition, ProjectIndex, ProjectMacro, VisibleDeclaration,
-    definition_across_files, macro_across_files,
+    IncludeVisibility, MemberList, ProjectDefinition, ProjectIndex, ProjectMacro, ProjectMember,
+    UnlistedBase, VisibleDeclaration, definition_across_files, macro_across_files,
+    member_across_files, members_of,
 };
 pub use store::{StoreStats, SummaryStore};
 pub use watch::{ChangeBatch, EventKind, FileEvent, Response, WatchFilter};

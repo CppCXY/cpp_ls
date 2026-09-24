@@ -1153,7 +1153,9 @@ fn declared_name(node: &CppSyntaxNode) -> Option<(Name, cpp_parser::SourceRange)
         let token = first_identifier_in_name(&name_node)?;
         let text = token.text();
 
-        if let Some(name) = name_from_text(text, node) {
+        // The **name node** decides what the name is, not the declaration around it. See
+        // [`name_from_text`] — the difference is a class whose body contains a destructor.
+        if let Some(name) = name_from_text(text, &name_node) {
             return Some((name, cpp_parser::source_range(token.text_range())));
         }
     }
@@ -1431,6 +1433,19 @@ fn last_identifier(node: &CppSyntaxNode) -> Option<cpp_parser::CppSyntaxToken> {
 /// The text is the *last* identifier of the declarator, so the operator keyword is gone by the time this is
 /// called — which is why the node is consulted as well: whether `+` spells an operator depends on whether
 /// `operator` was written, and that token is in the node rather than in the name.
+///
+/// # `node` must be the **name**, not the declaration around it
+///
+/// Decided by a bug this cost. Both markers are looked for with `descendants_with_tokens`, so passing a
+/// declaration that *contains* the name means looking for them in everything the declaration encloses — and
+/// `struct Base { ~Base(); };` then has a `~` in it, which made the **class** `Base` a destructor called `~Base`.
+/// The class's own scope was named `~Base` and every member after the destructor landed in it, so the class was
+/// never bound at all. A class body containing an `operator` declaration did the same thing with the operator
+/// keyword.
+///
+/// [`declared_name`] therefore passes the node the identifier was found **in** — the declarator's
+/// [`NameExpr`](CppSyntaxKind::NameExpr) — and keeps the declaration only for the fallback path, where there is no
+/// name node and the token came from the declaration itself.
 fn name_from_text(text: &str, node: &CppSyntaxNode) -> Option<Name> {
     let has_operator_keyword = node
         .descendants_with_tokens()
