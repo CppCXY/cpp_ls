@@ -15,6 +15,7 @@
 //! content_hash     what the file says          — a change here changes the summary
 //! context_hash     compiler settings and the file's own directory; see below
 //! format_version   the producer               — a parser or schema change makes every summary wrong
+//! reading_fingerprint  the readers themselves — measured, not remembered; see [`READING_FINGERPRINT`]
 //! ```
 //!
 //! `context_hash` is the configuration **and the directory the file sits in**, which are one question rather than
@@ -29,6 +30,10 @@
 //! `format_version` is deliberately the blunt instrument: the grammar is still moving, and a summary written by a
 //! different parser is not "probably still fine", it is a **silent** wrong answer. Bumping the number is the one
 //! invalidation that must never be forgotten, so it lives in the key rather than in a migration step.
+//!
+//! It was forgotten, for many rounds — which is why the key also carries a **measurement** of the readers
+//! ([`READING_FINGERPRINT`], computed by `build.rs`): a rule that depends on remembering is a rule that gets
+//! missed, and this one is cheap to compute and impossible to miss.
 //!
 //! # Why the macro environment is *not* in the key
 //!
@@ -68,7 +73,66 @@ use std::path::{Path, PathBuf};
 ///
 /// **Bump on any change that could make an old summary wrong.** See the module documentation for why this is part
 /// of the key rather than handled by a migration.
+///
+/// A source change is caught automatically by [`READING_FINGERPRINT`], so this is for the changes that leave no
+/// trace in the sources this workspace owns: a dependency bump that changes a reading, or a build whose inputs
+/// differ some other way. The number is still the blunt instrument — every entry becomes unreachable.
 pub const FORMAT_VERSION: u32 = 1;
+
+/// The fingerprint of the code that **reads** a file into a summary, computed by `build.rs` from the text of the
+/// grammar and of this crate's semantic layer.
+///
+/// # Why this is not [`FORMAT_VERSION`]
+///
+/// The two answer different questions. `FORMAT_VERSION` is a **decision** — "I changed something, throw the store
+/// away" — and it is only as good as the memory of whoever changed it. This is a **measurement** of the readers
+/// themselves, so it cannot be forgotten, and it is what the module documentation means by "a summary written by a
+/// different parser is a silent wrong answer": the parser moved for many rounds while `FORMAT_VERSION` stayed at 1,
+/// and every entry on disk was quietly describing an older reader.
+///
+/// # It is still computable before the file is parsed
+///
+/// A constant of the binary, so a lookup can happen before the parse — which is the property the key must keep,
+/// and the reason the macro environment could not stay in it. Nothing here reads a source file at run time: the
+/// hash is computed while *building* (see `build.rs`), and a change to any of those sources changes the constant,
+/// so the whole store becomes unreachable and the next query re-indexes.
+///
+/// # What it does not cover
+///
+/// Anything outside the hashed directories — a workspace dependency's source, a compiler flag. Those remain
+/// `FORMAT_VERSION`'s job.
+pub const READING_FINGERPRINT: u64 = parse_fingerprint(env!("CPP_READING_FINGERPRINT"));
+
+/// The hexadecimal fingerprint `build.rs` emitted, as a number.
+///
+/// A `const fn` rather than `u64::from_str_radix` because the value has to be a constant: it is written into the
+/// key of every cache file name, and a runtime parse would be a runtime error in a code path that has no way to
+/// report one.
+const fn parse_fingerprint(text: &str) -> u64 {
+    let bytes = text.as_bytes();
+    let mut value = 0u64;
+    let mut index = 0;
+
+    while index < bytes.len() {
+        let digit = match bytes[index] {
+            b'0'..=b'9' => bytes[index] - b'0',
+            b'a'..=b'f' => bytes[index] - b'a' + 10,
+            b'A'..=b'F' => bytes[index] - b'A' + 10,
+            // `_` separators are allowed so the constant can be regrouped by hand; anything else is a build script
+            // that emitted something other than a number.
+            b'_' => {
+                index += 1;
+                continue;
+            }
+            _ => panic!("CPP_READING_FINGERPRINT is not hexadecimal"),
+        };
+
+        value = value * 16 + digit as u64;
+        index += 1;
+    }
+
+    value
+}
 
 /// The directory name this crate keeps its cache in, under the project root.
 ///
@@ -90,6 +154,9 @@ pub struct SummaryKey {
     pub content_hash: u64,
     pub context_hash: u64,
     pub format_version: u32,
+    /// The readers themselves — see [`READING_FINGERPRINT`]. Not a parameter of [`SummaryKey::new`], because no
+    /// caller has an opinion about it: it is a property of the binary doing the asking.
+    pub reading_fingerprint: u64,
 }
 
 impl SummaryKey {
@@ -99,6 +166,7 @@ impl SummaryKey {
             content_hash,
             context_hash,
             format_version: FORMAT_VERSION,
+            reading_fingerprint: READING_FINGERPRINT,
         }
     }
 
@@ -107,10 +175,11 @@ impl SummaryKey {
     /// The parts are hashed **together** rather than concatenated as text: the file name stays one fixed width, so
     /// a directory holds a predictable number of entries and nothing has to be parsed back out.
     pub fn file_stem(self) -> String {
-        let mut bytes = Vec::with_capacity(24);
+        let mut bytes = Vec::with_capacity(32);
         bytes.extend_from_slice(&self.content_hash.to_le_bytes());
         bytes.extend_from_slice(&self.context_hash.to_le_bytes());
         bytes.extend_from_slice(&self.format_version.to_le_bytes());
+        bytes.extend_from_slice(&self.reading_fingerprint.to_le_bytes());
         format!("{:016x}", fnv1a64(&bytes))
     }
 
@@ -183,6 +252,10 @@ mod tests {
                 format_version: FORMAT_VERSION + 1,
                 ..base
             },
+            SummaryKey {
+                reading_fingerprint: base.reading_fingerprint ^ 1,
+                ..base
+            },
         ];
         for variant in variants {
             assert_ne!(
@@ -191,6 +264,23 @@ mod tests {
                 "a different key must name a different file"
             );
         }
+    }
+
+    #[test]
+    fn the_key_carries_a_measurement_of_the_readers() {
+        // The component that makes "the parser moved, so the store is void" impossible to forget: it is not a
+        // decision someone has to remember to make, it is a number computed from the sources that decide what a
+        // summary contains (`build.rs`). A zero here would mean the build script found nothing to hash — which is
+        // the one way this could silently stop working, since a constant component invalidates nothing.
+        assert_ne!(
+            super::READING_FINGERPRINT, 0,
+            "the fingerprint is the hash of the grammar and of this crate's semantic layer"
+        );
+        assert_eq!(
+            SummaryKey::new(0, 0).reading_fingerprint,
+            super::READING_FINGERPRINT,
+            "every key this binary builds carries it, and no caller has an opinion about it"
+        );
     }
 
     #[test]

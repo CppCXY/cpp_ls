@@ -185,11 +185,11 @@ let config = toolchain.map_or_else(CompilerConfig::new, |toolchain| toolchain.co
 在那之前，P0 的收益（"真实项目的文件终于能被缓存"）**只是可兑现的，不是已兑现的**——这一条写在
 `index-design.md` 的"现在答不了什么"表里。
 
-### P1 让闭包干净解析（**进行中**：48 → 88 个文件干净）
+### P1 让闭包干净解析（**进行中**：48 → 97 个文件干净）
 
 **按形状放宽，而不是接表**——这是这一轮最重要的一条计划修正，理由见下。
 
-五条规则都落在 parser 里，都**不依赖任何宏表**，因为标准库的宏名字定义在 `c++config.h`（一个**被包含**的文件）里，本文件的 `MacroNames` 没见过它，而外部表（`symbols.rs`）也没接到 includes 上。能知道的只有形状，而形状在这五处是决定性的：
+十条规则都落在 parser 里，都**不依赖任何宏表**，因为标准库的宏名字定义在 `c++config.h`（一个**被包含**的文件）里，本文件的 `MacroNames` 没见过它，而外部表（`symbols.rs`）也没接到 includes 上。能知道的只有形状，而形状在这些地方是决定性的：
 
 | 形状 | 规则 | 代价 |
 |---|---|---|
@@ -198,6 +198,11 @@ let config = toolchain.map_or_else(CompilerConfig::new, |toolchain| toolchain.co
 | `__attribute__ ((…))` / `__declspec(…)` | 与 `[[…]]` 同一种东西，同一个 `AttributeList` 节点，在模板头之后、说明符序列里、参数表之后都能读 | 名字由标准保留给实现，所以按拼写匹配**有依据**：没有任何 `#define` 能把它变成别的（这与 `MY_API` 那种拼写约定是两回事，见 `grammar-gaps.md` 第 24 条） |
 | `void f() _GLIBCXX_NOEXCEPT`（以及 `… ) const _GLIBCXX_NOEXCEPT`、`_GLIBCXX_NOEXCEPT_IF(noexcept(…))`、`_GLIBCXX_NOTHROW _GLIBCXX_NORETURN`、变量名之后的 `_GLIBCXX20_INIT(…)`） | declarator 的**后缀位置**上一个名字（可选带一个括号组）读成 `MacroCall`，函数和变量两个位置共用同一个助手 | 在这个位置上标识符**只有两种读法**：上下文关键字（`override`/`final`/`requires`，三者都在规则里被显式拒绝）或宏；其余合法的东西全是关键字或标点。所以一个名字不花任何合法程序 |
 | `operator<(a, b)`、`x.operator<(y)`、`p->~T()` | 运算符名在**表达式**里也是一个名字：光杆的作 callee（primary 规则的名字分支少收了 `OperatorKeyword`），点号之后接运算符名或析构名 | 在表达式的位置上 `operator` / `.operator` / `.~` 没有别的读法（函数体里那个形状之所以一直"能跑"，是因为**声明**规则把它读成了转换运算符声明，所以这个洞只在 requires 表达式里露出来） |
+| `::new (p) T(args)`（41 处 / 13 个文件） | 一元表达式分派里加一条"`::` 后面是 `new`"，`::` 归 `NewExpr` 所有，其余交给已有的 `new` 规则 | `::` 本来是限定名的开头，所以这条 arm 必须**在名字分支之前**问；`::` 是"要全局的 `operator new`"的意思，丢掉它两个拼写就是同一个函数了 |
+| `__try { … } __catch (…) { … }`（18 个文件） | 按拼写读成 `TryStat`/`CatchStat`，与 `try`/`catch` 共用同一条规则 | 名字由标准保留给实现，且含义来自**实现自己的头文件**（`bits/exception_defines.h`：`#define __try try`）——与第 24 条同一条依据，不是约定。要求 `__try` 后面是 `{`（MSVC 的 SEH 用的是同一个拼写、另一种形状） |
+| `int f() throw(int)`（63 处 / 14 个文件） | 声明符**后缀**位置上的 `throw(…)`，载荷按**类型表**读（`TypeId` + 逗号） | C++17 删掉了这个规格，但标准库还写着；这个位置不可能有 throw **表达式**（形参表已经结束），所以读法唯一。变量声明没有 `throw(…)`，于是它还能给"两条读法都成功"的 `T x(y)` 断案 |
+| `if _GLIBCXX17_CONSTEXPR (cond)`、`if (cond) [[likely]]`（12 + 7 个文件） | `if` 与条件之间允许一个标识符（后随 `(`）；子语句上的属性在 `parse_statement_body` 里读，于是 then/else/每个循环体一次覆盖 | `if` 后面必然是 `(`，所以一个标识符**不花任何合法程序**；属性的位置在 C++20 里就是子语句 |
+| `__cdecl` / `__restrict` / `__extension__` / `__forceinline`（1464 / 365 / 61 / 3 处） | 编译器自己的关键字，在说明符序列和声明符的限定符位置都接受；`__restrict` → `RestrictQual`，`__forceinline` → `InlineSpec`，叫用约定留作裸 token | 同样的两个条件（保留给实现、来自编译器），而这一条修的是**静默错树**：`int __cdecl g(void);` 原本读成"名字叫 `__cdecl`、后缀是宏 `g(void)`"，零诊断 |
 
 **实测**（`examples/std_probe.rs`，同一份 185 个文件的闭包）：
 
@@ -208,7 +213,10 @@ let config = toolchain.map_or_else(CompilerConfig::new, |toolchain| toolchain.co
 名字串（run）之后：干净 82 / 报错 100
 后缀位置的宏之后：干净 87 / 报错 95     （"行内有闭包宏"降到 44%）
 运算符名之后：干净 88 / 报错 94
+第八轮（::new / __try / throw() / if 宏 / [[likely]] / 编译器关键字）之后：干净 97 / 报错 85
 ```
+
+**第八轮的六个构造一起算只多了 9 个干净文件，但其中一条改掉的是 1464 处静默错树**（`__cdecl`，见 [`grammar-gaps.md`](grammar-gaps.md) 的第八轮那一节和维护约定第 29 条）：那些文件本来就"解析成功"，普查数不出来。所以两个数字要一起看——`clean` 数报错，`gaps.rs` 的形状断言数错树。
 
 `bits/stl_algobase.h` 一个文件从 190 条错降到零头——那 190 条全部来自第 83 行的命名空间头。后缀那一条一次拿下 17 个报错文件里的 5 个，包括 `c++config.h`、`move.h`、`new_allocator.h`、`typeinfo` 这些每个文件都要用的头。
 
@@ -219,10 +227,11 @@ let config = toolchain.map_or_else(CompilerConfig::new, |toolchain| toolchain.co
 同一个工具现在多打一段**每文件错误数直方图**，因为第一处错误看不出"还差多远"：
 
 ```text
-干净 88 | 只有一个错 3 | 两到五个错 22 | 超过五个错 69
+第八轮之前：干净 88 | 只有一个错 3 | 两到五个错 22 | 超过五个错 69
+第八轮之后：干净 97 | 85 个文件仍报错
 ```
 
-**只有 3 个文件是"修一个构造就干净"**，而 69 个文件有 5 个以上的错——那些是级联，第一个错背后还压着好几个不同的构造。这和前几轮完全不同：命名空间头一条规则拿下 30 个文件，后缀宏一条拿下 5 个，而现在的每一项只值 1–3 个文件、彼此毫无关系（变量模板偏特化、`::new`、`if (…) [[likely]]`、宏站在关键字位置、`__typeof__`/`__int128` 这类 GNU 扩展、小写函数式宏独占一行）。
+**只有 3 个文件是"修一个构造就干净"**，而 69 个文件有 5 个以上的错——那些是级联，第一个错背后还压着好几个不同的构造。这和前几轮完全不同：命名空间头一条规则拿下 30 个文件，后缀宏一条拿下 5 个，而现在的每一项只值 1–3 个文件、彼此毫无关系（变量模板偏特化、`if (…) [[likely]]`、宏站在关键字位置、`__typeof__`/`__int128` 这类 GNU 扩展、小写函数式宏独占一行）。
 
 所以这里要**显式做一个选择**，而不是默认继续磨：
 
@@ -230,9 +239,9 @@ let config = toolchain.map_or_else(CompilerConfig::new, |toolchain| toolchain.co
 2. **停下来，去处理"不变量 3 的粒度"**：88/185 已经过半。既然闭包短时间内到不了 0，那"只相信干净解析的文件"这条不变量对标准库就仍然不成立。处理它（比如给事实记一个解析干净度、由查询层降权）比再修十个构造更早解锁能力；
 3. **两件事交替做**：一轮 parser、一轮语义，避免长时间只在一条线上。
 
-**这一轮选了 3**：语义这一轮做完了不变量 3 的粒度（`DeclFact::clean`，**见下面那一节——顺带更正了第 2 条里"这才是真正挡着语义查询的那道门"这个判断：实测证明门是解析缺口，不是可信度**）。下一轮回到 P1，按下面队列往下做，然后语义再一轮。
+**这一轮选了 3**：语义那一轮做完了不变量 3 的粒度（`DeclFact::clean`，**见下面那一节——顺带更正了第 2 条里"这才是真正挡着语义查询的那道门"这个判断：实测证明门是解析缺口，不是可信度**）；随后的一轮回到 P1，把队列前六项做完（`::new`、`__try`/`__catch`、`throw()`、`if` 与条件之间的宏、子语句上的 `[[likely]]`、编译器自己的关键字），闭包 88 → **97** 个文件干净，形状断言同时钉住了一条 1464 处的静默错树。
 
-**下一步的具体队列**（`std_probe` 随时重排，且会打印文件名）：`::new (p) T(args)` 的全局限定（`bits/stl_construct.h`、`new_allocator.h`）、`if (cond) [[likely]]` 之类的语句位置属性（`bits/max_size_type.h`）、变量模板的偏特化（`concepts`、`functional_hash.h`、`bits/stl_pair.h`）、宏站在关键字位置（`if _GLIBCXX17_CONSTEXPR`、模板参数表里的 `_GLIBCXX_NOEXCEPT_PARM`）、`typedef __typeof__(…)` 与 `__int128`、小写函数式宏独占一行（`__glibcxx_function_requires(…)`，形状规则要求"后面能开始一个声明"，而它后面跟着的是另一个语句）。
+**下一步的队列**（`std_probe` 随时重排，且会打印文件名）：`#if` 落在 `if` 与它的 `else` 之间（`bits/stl_construct.h` 的 214 行，本轮新露出来的）、模板参数表里的宏（`typename... _ArgTypes _GLIBCXX_NOEXCEPT_PARM`，`refwrap.h`）、变量模板的偏特化（`concepts`、`functional_hash.h`、`bits/stl_pair.h`）、`typedef __typeof__(…)` 与 `__int128`（`bits/stl_uninitialized.h`、`ranges_base.h`、`stddef.h`、`_mingw.h`）、小写函数式宏独占一行（`__glibcxx_function_requires(…)`，形状规则要求"后面能开始一个声明"，而它后面跟着的是另一个语句）、`subrange_kind::sized ? … : …` 当模板实参（`bits/ranges_util.h`）。
 
 **这一轮的规则被抓出来三次，每次都是"看起来对、其实把另一种读法吃了"**，三次都钉在 `gaps.rs` / `tests/symbols.rs` 里：
 

@@ -256,6 +256,7 @@ fn fact_for(
     root: &CppSyntaxNode,
     binding: &Binding,
     scope: Option<String>,
+    local: bool,
     declarations: &Declarations<'_>,
 ) -> Option<DeclFact> {
     // A binding with no identifier is a destructor, an operator, or a conversion function: real declarations,
@@ -272,6 +273,10 @@ fn fact_for(
         kind: DeclKind::from_binding_kind(binding.kind),
         name,
         scope,
+        // Asked of the scope the binding was made in rather than of the declaration's shape: `bool` is the one
+        // answer a *shape* cannot give, because `void f() { int x; }` and `void f() { }` differ by a declaration
+        // that is not in a scope at all. See [`ScopeTree::declares_a_local`].
+        local,
         type_of: declared_type_of(root, binding),
         bases: declared_bases_of(root, binding),
         range: binding.range,
@@ -434,9 +439,12 @@ impl<'a> DeclarationFacts<'a> {
             // for a namespace or a class and nothing at all for a function body or a block — see
             // [`ScopeTree::qualification_prefix_of`] for why the two questions have to be asked separately.
             let prefix = scopes.qualification_prefix_of(ScopeId(index));
+            // …and the second thing the *scope* knows rather than the declaration: whether a name bound here can
+            // be reached from outside the body it sits in. See [`DeclFact::local`].
+            let local = scopes.declares_a_local(ScopeId(index));
 
             for binding in &scope.bindings {
-                if let Some(fact) = fact_for(root, binding, prefix.clone(), &declarations) {
+                if let Some(fact) = fact_for(root, binding, prefix.clone(), local, &declarations) {
                     facts.push(fact);
                 }
             }
@@ -886,8 +894,7 @@ mod tests {
     }
 
     /// The names of the facts of a file that does not parse cleanly whose declaration was touched.
-    fn unclean(source: &str) -> Vec<String> {
-        let (facts, errors) = facts_of_a_broken_file(source);
+    fn unclean(source: &str) -> Vec<String> {        let (facts, errors) = facts_of_a_broken_file(source);
         assert!(!errors.is_empty(), "the fixture must have diagnostics");
 
         facts
@@ -898,8 +905,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_that_parses_cleanly_is_clean() {
-        let (facts, _) = facts("struct S { int a; };\nint count;\nvoid f() { int local; }\n");
+    fn a_file_that_parses_cleanly_is_clean() {        let (facts, _) = facts("struct S { int a; };\nint count;\nvoid f() { int local; }\n");
 
         assert!(!facts.is_empty(), "the fixture declares something");
         assert!(
@@ -951,6 +957,49 @@ mod tests {
         assert_eq!(
             unclean("struct S { int a; void m() { int x = ; } };\nint ok;\n"),
             ["S", "m"]
+        );
+    }
+
+    #[test]
+    fn a_declaration_inside_a_function_body_is_local() {
+        // The field `scope` cannot carry: `None` is both "at file scope", which every including file can name, and
+        // "inside a function body", which nothing outside it can. Every kind of place a declaration can be written
+        // is here, because the answer comes from the *scope chain* rather than from the declaration's shape.
+        let (facts, _) = facts(
+            "int global;\n\
+             namespace ns { int in_a_namespace; }\n\
+             struct C { int member; void method(); };\n\
+             void f(int parameter) {\n\
+               int local;\n\
+               { int in_a_block; }\n\
+               struct Local { int inner; };\n\
+             }\n",
+        );
+
+        let local_of = |name: &str| {
+            facts
+                .iter()
+                .find(|fact| fact.name == name)
+                .unwrap_or_else(|| panic!("`{name}` is declared in the fixture"))
+                .local
+        };
+
+        assert!(!local_of("global"), "file scope is reachable from outside");
+        assert!(!local_of("in_a_namespace"), "a namespace member too");
+        assert!(
+            !local_of("member"),
+            "a class body is not a function body, wherever the class is"
+        );
+        assert!(
+            !local_of("method"),
+            "and a member function's *declaration* is not its body"
+        );
+        assert!(local_of("parameter"), "a parameter is local to the function");
+        assert!(local_of("local"), "the case the field exists for");
+        assert!(local_of("in_a_block"), "a nested block is still inside it");
+        assert!(
+            local_of("inner"),
+            "and a class declared in there declares locals too"
         );
     }
 }

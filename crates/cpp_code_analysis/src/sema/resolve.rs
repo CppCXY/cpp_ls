@@ -198,6 +198,154 @@ fn spell(global: bool, written: &str) -> String {
     }
 }
 
+/// A name **being written** at a cursor, split into the scope to list and what is already typed.
+///
+/// The state a completion asks from, and the reason it is not [`qualified_name_at`]: that function answers "which
+/// name does this cursor point at", which requires a name to be *there*. Here the interesting states are the ones
+/// with no name at all:
+///
+/// ```text
+/// ns::            the scope is `ns`, and nothing of the next name is typed
+/// ns::Wid         the scope is `ns`, and `Wid` is typed
+/// ::Widget        the scope is the **global** name space, spelled `::`
+/// loc             no scope at all: the names visible where the cursor is
+/// ```
+///
+/// # The three fields, and why the range is one of them
+///
+/// `scope` is a **lookup key** rather than a spelling to display: the qualified name a scope is found by, with the
+/// leading `::` of a global name kept because it means "the global name space" rather than "no qualifier" — the
+/// same convention [`qualified_name_at`] and `decls::matches` use. Empty means what it says: no qualifier was
+/// written, so the answer is every name visible from the cursor.
+///
+/// `written` is what of the *next* segment is already typed (`Wid` for `ns::Wid`), which a consumer filters by and
+/// [`NamePosition::range`] is what it **replaces**. The two are separate for the reason `MemberCompletions`
+/// documents: a cursor in the middle of a name — `ns::Wi|d` — filters by `Wi` while the replacement covers all of
+/// `Wid`, and a consumer that used one for the other would offer nothing while the user is plainly typing.
+///
+/// The range is **empty at the cursor** when the segment has only just started (`ns::`), which is the state the
+/// whole reader exists for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamePosition {
+    /// The scope to list names from: `ns`, `ns::Widget`, `::` for the global name space, or empty for "wherever
+    /// the cursor is".
+    pub scope: String,
+    /// What of the name is written **before the cursor**.
+    pub written: String,
+    /// The range a consumer replaces with the chosen name.
+    pub range: SourceRange,
+}
+
+/// Is the cursor at or inside the names being written at `offset`?
+pub fn name_position_at(root: &CppSyntaxNode, offset: usize) -> Option<NamePosition> {
+    let node = name_node_around(root, offset)?;
+
+    let mut segments: Vec<String> = Vec::new();
+    let mut written = String::new();
+    let mut global = false;
+    let mut range = None;
+
+    // The chain is written as flat tokens of one node — see [`identifier_written_at`] — so this walks them in
+    // order and stops at the cursor. Trivia is stepped over rather than treated as an end: `ns :: Wid` is the same
+    // name as `ns::Wid`, and the grammar is what said so when it built one node out of them.
+    for token in node.children_with_tokens().filter_map(|child| child.into_token()) {
+        let token_range = cpp_parser::source_range(token.text_range());
+
+        if cpp_parser::is_trivia(cpp_parser::CppTokenKind::from(token.kind())) {
+            continue;
+        }
+        // Everything from here on is **after** the cursor, so it is not part of what is being written — and it is
+        // not part of the scope either. This is what keeps a recovery from answering: `ns::` at the end of a body
+        // has the closing `}` inside the same node, and a reader that walked past it would report a name that is
+        // not there.
+        if token_range.start_offset >= offset {
+            break;
+        }
+
+        match cpp_parser::CppTokenKind::from(token.kind()) {
+            cpp_parser::CppTokenKind::Identifier => {
+                if token_range.end_offset() <= offset {
+                    written.push_str(token.text());
+                    range = Some(token_range);
+                    continue;
+                }
+
+                // The cursor is inside this identifier: the part before it is what is typed.
+                written.push_str(&token.text()[..offset - token_range.start_offset]);
+                range = Some(token_range);
+                break;
+            }
+            cpp_parser::CppTokenKind::Scope => {
+                if written.is_empty() && segments.is_empty() {
+                    // A leading `::` — the global name space, which is a scope and not an empty qualifier.
+                    global = true;
+                } else {
+                    segments.push(std::mem::take(&mut written));
+                }
+                // A fresh segment: the chosen name goes where the `::` ends, at the cursor.
+                range = None;
+            }
+            // Anything else — a `(`, an operator, a token a recovery put here — ends the name.
+            _ => break,
+        }
+    }
+
+    Some(NamePosition {
+        scope: spell(global, &segments.join("::")),
+        written,
+        range: range.unwrap_or(SourceRange {
+            start_offset: offset,
+            length: 0,
+        }),
+    })
+}
+
+/// The name node a cursor is **in or at the end of**, innermost first.
+///
+/// [`name_node_at`] asks this question of a cursor that is *on* a name and answers with the name node it lands in.
+/// Completion asks it one keystroke earlier, when the cursor is at the end of what has been typed — `loc|` — or
+/// past a `::` with nothing after it, so an offset exactly at the end of a node has to count as being on it. The
+/// containment test is therefore inclusive at both ends, which is the same one [`crate::ScopeTree::scope_at`] uses
+/// and for the same reason.
+///
+/// `IndexExpr` is deliberately **not** a name node here, even though [`is_a_name_node`] counts it: `w.size` is a
+/// member access, and the query for that shape is [`member_access_at`]. What this reads is the other position — a
+/// name, or a qualifier ending in `::` — and a reader that claimed both would answer a member completion with the
+/// names in scope.
+fn name_node_around(root: &CppSyntaxNode, offset: usize) -> Option<CppSyntaxNode> {
+    let mut found = None;
+    let mut node = root.clone();
+
+    loop {
+        let range = node.text_range();
+        if !(usize::from(range.start()) <= offset && offset <= usize::from(range.end())) {
+            return found;
+        }
+
+        if matches!(
+            CppSyntaxKind::from(node.kind()),
+            CppSyntaxKind::NameExpr | CppSyntaxKind::IdentifierExpr
+        ) {
+            found = Some(node.clone());
+        }
+
+        let next = node
+            .children_with_tokens()
+            .find(|element| contains_element(element, offset) || ends_at(element, offset));
+
+        match next.and_then(|element| element.into_node()) {
+            Some(child) => node = child,
+            None => return found,
+        }
+    }
+}
+
+/// Does this element end exactly at `offset`, one past its last token?
+fn ends_at(element: &cpp_parser::CppSyntaxElement, offset: usize) -> bool {
+    let range = element.text_range();
+    usize::from(range.end()) == offset && usize::from(range.start()) < offset
+}
+
 /// A member access the cursor is in: `widget` and `size` of `widget.size`.
 ///
 /// The first query in this crate that has to ask about a **type** rather than a name. `size` is not looked up

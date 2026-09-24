@@ -91,7 +91,13 @@ pub fn definition_across_files(
                     .filter(|scope| !scope.is_empty())
             });
 
-            return Known::Yes(ProjectDefinition::from_binding(path, binding, scope));
+            // A definition answer can be a *local*: the cursor is inside the same body the name was declared in,
+            // which is exactly when `definition_at` resolves it here rather than sending it to the index. Saying
+            // so matters because the caller may hand this answer on to a consumer asking whether the name is
+            // reachable elsewhere. Asked before the binding is moved, and from the tree that can answer it.
+            let local = scopes.declares_a_local(binding.scope);
+
+            return Known::Yes(ProjectDefinition::from_binding(path, binding, scope, local));
         }
         Known::Unknown(UnknownReason::NotDeclaredHere(name)) => {
             // The single-file layer has already established the spelling, so the project layer is asked about
@@ -602,6 +608,405 @@ fn written_before_the_cursor(access: &crate::sema::resolve::MemberAccess, offset
         .to_string()
 }
 
+/// One name a completion can offer: where it is declared, and how far out it was found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfferedName {
+    pub file: PathBuf,
+    pub fact: DeclFact,
+    /// How many scopes out from the cursor the declaration was found: `0` is a name declared in the scope the
+    /// cursor is in — a local, or the scope the `::` named — and larger numbers are enclosing scopes, which C++
+    /// only considers once the inner ones have been searched. The order of [`NameCompletions::names`].
+    ///
+    /// Recorded rather than left to be recomputed, for the reason [`ProjectMember::depth`] is: a consumer showing
+    /// locals above globals, or grouping by where a name came from, would otherwise have to reconstruct the walk it
+    /// was just handed the result of.
+    pub depth: usize,
+}
+
+/// What a completion **in a name** should offer: the scope that was listed, and its names.
+///
+/// The sibling of [`MemberCompletions`], and the other half of "what can be typed here": that one answers after a
+/// `.` or `->`, where the answer is a type's members; this one answers in a name position, where the answer is
+/// what is visible — after a `::` (one scope), or with no qualifier at all (the scopes the cursor is inside, from
+/// the innermost outward).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameCompletions {
+    /// The scope the names were listed from, as the **lookup key** rather than as the file spelled it: `ns`,
+    /// `ns::Widget`, `::` for the global name space, or empty when the cursor wrote no qualifier — there the names
+    /// come from the scopes the cursor is inside rather than from one scope.
+    pub scope: String,
+    /// The names, innermost first and **deduplicated by name**: a declaration in an inner scope hides the same
+    /// name in an outer one, which is what C++ does and what keeps a local `count` from being offered beside the
+    /// header's. Two declarations of one name in the *same* scope are both kept — that is an overload, not a
+    /// choice.
+    pub names: Vec<OfferedName>,
+    /// What of the name is already written **before the cursor**: `Wid` for `ns::Wid|`, empty for `ns::|`.
+    ///
+    /// The counterpart of [`MemberCompletions::prefix`], and separate from the range for the same reason.
+    pub prefix: String,
+    /// The range a client **replaces** with the chosen name: the written segment, or an empty range at the cursor
+    /// when the segment has only just begun.
+    pub name_range: cpp_parser::SourceRange,
+}
+
+/// The names a completion at `offset` should offer: `ns::`, `Widget::`, `::`, and a bare name.
+///
+/// # The four positions, and one query for all of them
+///
+/// ```text
+/// ns::            one scope: the names written directly in `ns`
+/// Widget::        one scope, and its **bases** — a typedef a base declares is nameable through the derived class
+/// ::Widget        the global name space only, which is what the leading `::` asks for
+/// loc             no qualifier: every name visible from the cursor, innermost scope first
+/// ```
+///
+/// The first three are one question — list the declarations written in a scope — and the fourth is the same
+/// question asked of a *chain* of scopes. What differs is only where the scopes come from, which is why this is one
+/// query rather than four.
+///
+/// # The two layers, and when they are merged rather than chosen between
+///
+/// The file's own scope tree is asked first, because a buffer that has never been saved has no summary — the split
+/// every cross-file query in this crate makes. What happens next depends on what the scope *is*, and the difference
+/// is the language's:
+///
+/// * a **class** is defined once, so its members come from one place: the buffer's scope if it has one, the index
+///   otherwise. Merging would list the same member twice;
+/// * a **namespace** can be reopened, and a file that writes `namespace ns { … }` and includes a header that does
+///   the same has both sets of names. So those are merged, the buffer winning a name they both declare;
+/// * the **global name space** is a namespace, and is the namespace every included header writes into — the same
+///   merge, with the file scope of the buffer as the first contributor.
+///
+/// # What it will not offer
+///
+/// A **local** declaration of another file is never in the list. The index cannot place a local in the function it
+/// belongs to, so a name lookup there could only guess — and the guess would be wrong in the common case rather
+/// than the rare one: the standard library's headers alone declare thousands of locals called `__first` and `n`.
+/// See [`DeclFact::local`]. Locals of the file being edited *are* offered, from its own scope tree, which is the
+/// only thing that knows which body they are in.
+///
+/// # The answers
+///
+/// * `Yes(completions)` — the names, which may be an empty list for a scope that is declared and empty.
+/// * `Unknown(UnparsableName)` — the cursor is not in a name or a qualifier: on punctuation, on a keyword, or past
+///   the end of what could be one.
+/// * `Unknown(NotDeclaredHere)` — the `::` named a scope nothing here declares, so there is nothing to list and no
+///   way to say it is empty.
+/// * `Unknown(ConditionalCompilation)` — the scope is declared, but only in a file reached through a guarded
+///   `#include`, so whether these names are visible depends on macros this layer does not have.
+pub fn name_completions_at(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    offset: usize,
+) -> Known<NameCompletions> {
+    let Some(position) = crate::sema::resolve::name_position_at(root, offset) else {
+        return Known::Unknown(UnknownReason::UnparsableName);
+    };
+
+    let names = if position.scope.is_empty() {
+        match visible_names(index, scopes, root, path, offset) {
+            Known::Yes(names) => names,
+            Known::Unknown(reason) => return Known::Unknown(reason),
+            Known::No => return Known::Unknown(UnknownReason::UnparsableName),
+        }
+    } else {
+        match names_in_a_scope(index, scopes, root, path, &position.scope) {
+            Known::Yes(names) => names,
+            Known::Unknown(reason) => return Known::Unknown(reason),
+            Known::No => return Known::Unknown(UnknownReason::UnparsableName),
+        }
+    };
+
+    Known::Yes(NameCompletions {
+        scope: position.scope,
+        names,
+        prefix: position.written,
+        name_range: position.range,
+    })
+}
+
+/// Every name visible from a cursor with no qualifier written: the scope chain, then the index.
+///
+/// The order is C++'s: the scope the cursor is in, then each enclosing scope outward, and only then the names other
+/// files contribute. Each step's own answer is already a list — the tree's bindings, a class's members including
+/// its bases, a namespace's declarations across the project — so this walks the chain and hands each depth to the
+/// function that knows how to list it.
+fn visible_names(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    offset: usize,
+) -> Known<Vec<OfferedName>> {
+    let Some(innermost) = scopes.scope_at(offset) else {
+        return Known::Unknown(UnknownReason::UnparsableName);
+    };
+
+    let chain = scopes.scope_chain(innermost);
+    let mut names: Vec<OfferedName> = Vec::new();
+
+    for (depth, scope) in chain.iter().copied().enumerate() {
+        let Some(data) = scopes.scope(scope) else {
+            continue;
+        };
+
+        // The file scope is the global name space, and it is the one scope whose names other files contribute to
+        // as well — every included header is written there. It is listed below, once, rather than here.
+        if data.kind == crate::ScopeKind::TranslationUnit {
+            continue;
+        }
+
+        // A **class** in the chain — the cursor is inside a member function of it — brings its members, bases
+        // included: `size` is nameable inside `Widget::g` without a qualifier, and so is anything a base declares.
+        if matches!(data.kind, crate::ScopeKind::Class | crate::ScopeKind::Enum)
+            && let Some(class) = scopes.qualification_prefix_of(scope)
+        {
+            let members = match names_of_a_class(index, scopes, root, path, &class) {
+                Known::Yes(members) => members,
+                Known::Unknown(reason) => return Known::Unknown(reason),
+                Known::No => Vec::new(),
+            };
+            names.extend(offered(members, depth));
+            continue;
+        }
+
+        // Anything else in the chain is a body, a block or a lambda: its own bindings, which the tree has.
+        names.extend(offered(
+            bindings_of(root, path, &data.bindings, None),
+            depth,
+        ));
+
+        // …and for a **namespace**, the names other files write into it. A namespace is reopened by every file
+        // that mentions it, so the buffer's list is never the whole answer.
+        if let Some(prefix) = scopes.qualification_prefix_of(scope) {
+            names.extend(offered(declarations_in(&prefix, index, path), depth));
+        }
+    }
+
+    // The global name space: the buffer's own file scope, and every file it includes. One step past the chain, so
+    // that the depth stays an ordinary count of how far the lookup walked — the file scope is a scope like any
+    // other, it is just not one the chain walked through.
+    names.extend(global_offers(index, scopes, root, path, chain.len()));
+
+    sort_and_hide(&mut names);
+    Known::Yes(names)
+}
+
+/// The names at **file scope**, ready to offer: the buffer's own and every included file's, deduplicated.
+///
+/// A helper rather than two lines at each call site because the deduplication is the part that is easy to forget
+/// and impossible to notice: the buffer's file-scope names and the index's are the *same* declarations whenever
+/// the file being edited has been saved, so a list that skipped this step offers every global name twice.
+fn global_offers(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    depth: usize,
+) -> Vec<OfferedName> {
+    let mut names = offered(global_names(index, scopes, root, path), depth);
+    sort_and_hide(&mut names);
+    names
+}
+
+/// The names written directly in one `::`-qualified scope.
+fn names_in_a_scope(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    scope: &str,
+) -> Known<Vec<OfferedName>> {
+    // The global name space has no spelling of its own: `::` is what the file writes, and `None` is what a
+    // declaration at file scope records.
+    if scope == "::" {
+        return Known::Yes(global_offers(index, scopes, root, path, 0));
+    }
+
+    // A leading `::` on a longer path — `::ns::Widget` — asks for the *global* one, and the spelling to look up is
+    // the rest: a fact records `ns::Widget` and never `::ns::Widget`, for the same reason.
+    let spelling = scope.trim_start_matches("::");
+
+    let in_the_tree = scopes.scope_with_qualified_name(spelling);
+    let kind = in_the_tree.and_then(|id| scopes.scope(id)).map(|scope| scope.kind);
+
+    let mut names: Vec<OfferedName> = Vec::new();
+
+    match kind {
+        // A class is defined once, so its members come from one place — and the walk over its bases is
+        // `members_of`'s job rather than this query's.
+        Some(crate::ScopeKind::Class | crate::ScopeKind::Enum) => {
+            let members = match names_of_a_class(index, scopes, root, path, spelling) {
+                Known::Yes(members) => members,
+                Known::Unknown(reason) => return Known::Unknown(reason),
+                Known::No => Vec::new(),
+            };
+            names.extend(offered(members, 0));
+        }
+        // A namespace can be reopened, so the buffer's names and the project's are both part of the answer.
+        Some(_) => {
+            if let Some(data) = in_the_tree.and_then(|id| scopes.scope(id)) {
+                names.extend(offered(
+                    bindings_of(root, path, &data.bindings, Some(spelling)),
+                    0,
+                ));
+            }
+            names.extend(offered(declarations_in(spelling, index, path), 0));
+        }
+        // Not in the buffer at all: the project's answer, or nothing.
+        None => {
+            let found = declarations_in(spelling, index, path);
+            if found.is_empty() {
+                // Empty is either "declared and empty" or "no such scope", and the difference is the *name* — the
+                // same distinction `direct_members` makes, for the same reason.
+                return match index.definition(spelling, path) {
+                    Known::Yes(found) if found.fact.qualified_name() == spelling => Known::Yes(Vec::new()),
+                    Known::Unknown(reason) => Known::Unknown(reason),
+                    _ => Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(spelling))),
+                };
+            }
+            names.extend(offered(found, 0));
+        }
+    }
+
+    sort_and_hide(&mut names);
+    Known::Yes(names)
+}
+
+/// The bindings one of the file's own scopes holds, as names to offer.
+///
+/// `scope` is the qualified spelling the binding was written in — `ns` for `namespace ns { … }`, a class's name for
+/// its body — and `None` for a scope that has none: a function body, a block, a lambda. The distinction is the one
+/// [`DeclFact::scope`] documents, and it is passed rather than derived because the caller is the one that knows
+/// *why* it is listing these bindings.
+fn bindings_of(
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    bindings: &[crate::Binding],
+    scope: Option<&str>,
+) -> Vec<(PathBuf, DeclFact, usize)> {
+    let spelling = scope.unwrap_or_default();
+
+    bindings
+        .iter()
+        .map(|binding| {
+            (
+                path.to_path_buf(),
+                fact_from_binding(root, spelling, binding),
+                0,
+            )
+        })
+        .collect()
+}
+
+/// The names written at **file scope**: this buffer's, and every included file's.
+fn global_names(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+) -> Vec<(PathBuf, DeclFact, usize)> {
+    let mut names: Vec<(PathBuf, DeclFact, usize)> = scopes
+        .root()
+        .and_then(|root_scope| scopes.scope(root_scope))
+        .map(|data| bindings_of(root, path, &data.bindings, None))
+        .unwrap_or_default();
+
+    names.extend(declarations_in_scope(index, path, None));
+    names
+}
+
+/// The facts the index holds for a scope spelling, or for the global name space when it is `None`.
+///
+/// The global case is the *absence* of a spelling rather than an empty one, which is why it cannot go through
+/// [`ProjectIndex::declarations_in`]: that one compares a spelling, and a declaration at file scope records
+/// `None`. It is the same distinction `matches` makes for a leading `::`. A **local** is left out here for the
+/// reason [`DeclFact::local`] gives — a local also records `None`, and offering another file's would be the wrong
+/// answer rather than a missing one.
+fn declarations_in_scope(
+    index: &ProjectIndex,
+    visible_from: &Path,
+    scope: Option<&str>,
+) -> Vec<(PathBuf, DeclFact, usize)> {
+    let found = match scope {
+        Some(spelling) => index.declarations_in(spelling, visible_from),
+        None => index.visible_declarations(visible_from, |fact| fact.scope.is_none() && !fact.local),
+    };
+
+    found
+        .into_iter()
+        .map(|declaration| (declaration.file.clone(), declaration.fact.clone(), 0))
+        .collect()
+}
+
+/// [`declarations_in_scope`] for a named scope, spelled the way this module spells lookups.
+fn declarations_in(
+    spelling: &str,
+    index: &ProjectIndex,
+    visible_from: &Path,
+) -> Vec<(PathBuf, DeclFact, usize)> {
+    declarations_in_scope(index, visible_from, Some(spelling))
+}
+
+/// The members of a class, bases included, as names to offer.
+fn names_of_a_class(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+) -> Known<Vec<(PathBuf, DeclFact, usize)>> {
+    match members_of(index, scopes, root, path, class) {
+        Known::Yes(members) => Known::Yes(
+            members
+                .members
+                .into_iter()
+                .map(|member| (member.file, member.fact, member.depth))
+                .collect(),
+        ),
+        Known::Unknown(reason) => Known::Unknown(reason),
+        Known::No => Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(class))),
+    }
+}
+/// Wrap `(file, fact, steps)` as offers, adding the depth of the scope they were found in and dropping the
+/// declarations that have no name to type.
+///
+/// `steps` is how far *inside* one answer the name was — a base class's members are one step further than the
+/// class's own — and the two are added because they mean the same thing to a consumer: how far the lookup had to
+/// walk before it found this name, which is the order C++ walks in too.
+fn offered(found: Vec<(PathBuf, DeclFact, usize)>, depth: usize) -> Vec<OfferedName> {
+    found
+        .into_iter()
+        .filter(|(_, fact, _)| !fact.name.is_empty())
+        .map(|(file, fact, steps)| OfferedName {
+            file,
+            fact,
+            depth: depth.saturating_add(steps),
+        })
+        .collect()
+}
+
+/// Put the offers in the order a completion shows them: nearest scope first, then by name; and drop every name an
+/// inner scope has already offered.
+///
+/// The hiding is what makes a *list* an answer rather than a pile: a local `count` and a header's `count` are two
+/// declarations of one name, and C++ reaches only the first. Both would be wrong to show — one of them is not what
+/// the user gets if they pick it — and the inner one is the one they get.
+fn sort_and_hide(names: &mut Vec<OfferedName>) {
+    // Stable, so that two declarations of one name at one depth keep the order they were found in: that is an
+    // overload, and reordering it would be inventing a preference.
+    names.sort_by(|one, other| {
+        one.depth
+            .cmp(&other.depth)
+            .then_with(|| one.fact.name.cmp(&other.fact.name))
+    });
+
+    let mut seen: HashSet<String> = HashSet::new();
+    names.retain(|name| seen.insert(name.fact.name.clone()));
+}
+
 /// The type of an expression, as far as this layer can tell, and the file that declared it.
 ///
 /// The core of the `infer` layer, and it is **recursive** because that is what an expression is: `a.b.size` is a
@@ -829,7 +1234,15 @@ fn fact_from_binding(root: &cpp_parser::CppSyntaxNode, class: &str, binding: &cr
             .identifier_text()
             .unwrap_or_default()
             .to_string(),
-        scope: Some(class.to_string()),
+        // `None` for an empty spelling, which is what a caller listing the names of a **body** passes: a local has
+        // no qualified scope at all, and `Some("")` would be a scope that matches nothing while looking like one.
+        // Every other caller passes the class or namespace the binding is in.
+        scope: (!class.is_empty()).then(|| class.to_string()),
+        // Answered rather than defaulted, and the answer is always `false`: this path exists for **members**, and a
+        // member is declared in a class body by construction — the `class` spelling it is keyed by has no meaning
+        // inside a function. A local class's members are members of that class, and the caller that asked for them
+        // asked by name. See [`DeclFact::local`].
+        local: false,
         kind: crate::DeclKind::from_binding_kind(binding.kind),
         type_of: crate::sema::declarations::declared_type_of(root, binding),
         bases: crate::sema::declarations::declared_bases_of(root, binding),
@@ -1095,17 +1508,29 @@ impl ProjectIndex {
     ///
     /// The one place the visibility walk is applied to the declaration list, so that a new query over facts
     /// cannot forget it and quietly answer with a declaration in a file the querying file does not include —
-    /// which is a jump to something it cannot compile against. `includers_of` and `visibility_of` are the graph;
-    /// this is the graph applied to a question.
+    /// which is a jump to something it cannot compile against. `includers_of` and [`ProjectIndex::visible_files`]
+    /// are the graph; this is the graph applied to a question.
+    ///
+    /// # Why the graph is walked once, and not once per file
+    ///
+    /// This used to ask `visibility_of` for **each summary** in the index, and each of those answers walked the
+    /// include graph from scratch: a query over a standard-library closure therefore did three hundred
+    /// breadth-first searches to answer one question. Measured, on a closure of 308 files: **573 ms** for a
+    /// completion at `std::`, which is a query a client asks on every keystroke. One walk and a map lookup is the
+    /// same answer in under a millisecond.
     fn visible_declarations<'a>(
         &'a self,
         visible_from: &Path,
         accepts: impl Fn(&DeclFact) -> bool,
     ) -> Vec<VisibleDeclaration<'a>> {
+        // Keyed by the **normalized** path, which is what the summary map is keyed by too: the walk produces
+        // normalized spellings, and normalizing three hundred paths again per query is work with no answer in it.
+        let visible: HashMap<String, IncludeVisibility> = self.visible_files(visible_from).into_iter().collect();
+
         let mut found = Vec::new();
 
         for summary in self.summaries() {
-            let Some(visibility) = self.visibility_of(&summary.path, visible_from) else {
+            let Some(visibility) = visible.get(&normalize(&summary.path)) else {
                 continue;
             };
 
@@ -1113,12 +1538,72 @@ impl ProjectIndex {
                 found.push(VisibleDeclaration {
                     file: summary.path.clone(),
                     fact,
-                    visibility,
+                    visibility: *visibility,
                 });
             }
         }
 
         found
+    }
+
+    /// Every file `from` can see, and how — one walk of the include graph.
+    ///
+    /// The whole-graph answer to what used to be a per-file question: "can this file see that one" was asked once
+    /// per summary, and each answer walked the include graph. This returns the answer for every file at once, so
+    /// one walk serves a whole query — measured on a closure of 308 files, that turned a 573 ms completion into a
+    /// 3 ms one, and every cross-file query over declarations goes through it.
+    ///
+    /// The visibility recorded is the **best** one found: a file reached both unconditionally and through a
+    /// guarded `#include` is unconditional, because the unconditional path is the one that is always there. That
+    /// is why a file may be relaxed rather than only visited — the first path found is not necessarily the best,
+    /// and a graph with a diamond in it (which every header guard produces) has exactly that shape.
+    pub fn visible_files(&self, from: &Path) -> Vec<(String, IncludeVisibility)> {
+        let from = normalize(from);
+
+        // The file itself is visible to itself, and unconditionally: a question asked in a file is about what
+        // that file says before anything it includes.
+        let mut best: HashMap<String, IncludeVisibility> =
+            HashMap::from([(from.clone(), IncludeVisibility::Unconditional)]);
+        let mut order: Vec<String> = vec![from.clone()];
+        let mut pending: Vec<(String, IncludeVisibility, usize)> =
+            vec![(from, IncludeVisibility::Unconditional, 0)];
+
+        while let Some((current, so_far, depth)) = pending.pop() {
+            if depth > MAX_VISIBILITY_DEPTH {
+                continue;
+            }
+
+            let Some(summary) = self.summaries.get(&current) else {
+                continue;
+            };
+
+            for include in &summary.includes {
+                let Some(resolved) = &include.resolved else {
+                    continue;
+                };
+                let next = normalize(resolved);
+
+                let step = match include.guard {
+                    FactGuard::Unconditional => so_far,
+                    FactGuard::Region(_) => IncludeVisibility::Conditional,
+                };
+
+                match best.get(&next) {
+                    // Already known, and no worse: nothing new to explore through it.
+                    Some(known) if *known <= step => continue,
+                    Some(_) => {}
+                    None => order.push(next.clone()),
+                }
+
+                best.insert(next.clone(), step);
+                pending.push((next, step, depth + 1));
+            }
+        }
+
+        order
+            .into_iter()
+            .filter_map(|path| best.get(&path).map(|visibility| (path.clone(), *visibility)))
+            .collect()
     }
 
     /// Which declaration a name written in `visible_from` refers to, across the project.
@@ -1333,60 +1818,6 @@ impl ProjectIndex {
             chain.pop();
         }
     }
-
-/// How `from` reaches `target`, or `None` when it does not.
-    fn visibility_of(&self, target: &Path, from: &Path) -> Option<IncludeVisibility> {
-        let from = normalize(from);
-        let target = normalize(target);
-
-        if from == target {
-            return Some(IncludeVisibility::Unconditional);
-        }
-
-        // Breadth-first from the querying file, carrying whether any step so far was conditional. A path that
-        // exists in two forms — one conditional, one not — is reported as unconditional, because the
-        // unconditional one is the one that is always there.
-        let mut visited: HashSet<String> = HashSet::new();
-        let mut pending: Vec<(String, IncludeVisibility, usize)> =
-            vec![(from, IncludeVisibility::Unconditional, 0)];
-        let mut best: Option<IncludeVisibility> = None;
-
-        while let Some((current, so_far, depth)) = pending.pop() {
-            if depth > MAX_VISIBILITY_DEPTH {
-                continue;
-            }
-
-            let Some(summary) = self.summaries.get(&current) else {
-                continue;
-            };
-
-            for include in &summary.includes {
-                let Some(resolved) = &include.resolved else {
-                    continue;
-                };
-                let next = normalize(resolved);
-
-                let step = match include.guard {
-                    FactGuard::Unconditional => so_far,
-                    FactGuard::Region(_) => IncludeVisibility::Conditional,
-                };
-
-                if next == target {
-                    match step {
-                        IncludeVisibility::Unconditional => return Some(step),
-                        IncludeVisibility::Conditional => best = Some(step),
-                    }
-                    continue;
-                }
-
-                if visited.insert(next.clone()) {
-                    pending.push((next, step, depth + 1));
-                }
-            }
-        }
-
-        best
-    }
 }
 
 /// One fact about a macro name, and where it sits in the translation unit's stream.
@@ -1506,8 +1937,18 @@ impl ProjectDefinition {
     /// passed rather than derived because deriving it here would mean re-reading the cursor, and left empty it
     /// would make `widget.size` and a free `size` indistinguishable to a consumer showing the answer.
     ///
+    /// `local` is passed for the same reason, one step further out: whether the name can be reached from another
+    /// file is a fact about the **scope chain** the binding was made in, and a `Binding` carries a [`crate::ScopeId`]
+    /// rather than the tree that id belongs to. The caller has the tree; see [`ScopeTree::declares_a_local`].
+    ///
     /// [`Binding`]: crate::Binding
-    pub fn from_binding(path: &Path, binding: crate::Binding, scope: Option<String>) -> Self {
+    /// [`ScopeTree::declares_a_local`]: crate::ScopeTree::declares_a_local
+    pub fn from_binding(
+        path: &Path,
+        binding: crate::Binding,
+        scope: Option<String>,
+        local: bool,
+    ) -> Self {
         ProjectDefinition {
             file: path.to_path_buf(),
             fact: DeclFact {
@@ -1517,6 +1958,7 @@ impl ProjectDefinition {
                     .unwrap_or_default()
                     .to_string(),
                 scope,
+                local,
                 kind: crate::DeclKind::from_binding_kind(binding.kind),
                 // No type and no bases, because this answer is a *place to jump to* and the binding it comes from
                 // carries neither: they are facts about the file's text, and the file they belong to has the
@@ -1536,7 +1978,11 @@ impl ProjectDefinition {
 }
 
 /// Is the path to a declaration always taken, or only under conditions the index cannot evaluate?
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Ordered by **how good the answer is**, which is what lets [`ProjectIndex::visible_files`] keep the best path to
+/// a file rather than the first one it happens to find: `Unconditional < Conditional`, so "is the known answer no
+/// worse than this one" is a comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum IncludeVisibility {
     /// Every `#include` on the path is outside any `#if`, so the declaration is in scope whatever the macros are.
     Unconditional,
@@ -1554,7 +2000,18 @@ pub enum IncludeVisibility {
 /// only a declaration written at file scope answers it. Matching it by dropping the `::` would find `ns::Widget`
 /// as well — the exact wrong answer the spelling exists to avoid — so the prefix is honoured rather than
 /// stripped.
+///
+/// A **local** never answers, whatever it is called. See [`DeclFact::local`]: the index is a per-file list and
+/// cannot say which function a local belongs to, so a name lookup here has no way to know whether the reader is
+/// inside that function — and the answer it would give instead is a *wrong* one, not a missing one, because
+/// thousands of locals in the standard library's headers are called `__first` and `n`. Resolving one is the
+/// scope tree's job, and it is done there: [`crate::sema::resolve::definition_at`] walks the scopes of the file
+/// being edited, which is the only place a local can be placed.
 fn matches(fact: &DeclFact, name: &str) -> bool {
+    if fact.local {
+        return false;
+    }
+
     if let Some(global) = name.strip_prefix("::") {
         return fact.scope.is_none() && fact.name == global;
     }
@@ -1917,8 +2374,80 @@ mod tests {
     }
 
     #[test]
-    fn a_name_only_a_header_declares_is_found_through_the_index() {
+    fn another_files_local_is_never_the_answer() {
+        // The wrong answer this exists to prevent, and it is the *common* one rather than a corner: a header's
+        // function bodies declare thousands of names (`__first`, `__n`, `_Tp`), and every one of them is a
+        // declaration in the index with no scope to place it in. A lookup that matched one would answer with a
+        // name the reader cannot see — and, worse, a name that is not the entity the cursor is asking about.
+        let source = "#include \"widget.h\"\nvoid f() {\n  helper();\n}\n";
+        let (index, tree) = analysed(
+            &[(
+                "/p/widget.h",
+                "void g() {\n  int helper = 0;\n}\nstruct Widget { int size; };\n",
+            )],
+            "/p/main.cpp",
+            source,
+        );
+
+        // The fact itself, so that a failure says which half broke: the header's declaration is marked local.
+        let header = index.summary(Path::new("/p/widget.h")).expect("indexed");
+        let helper = header
+            .declarations
+            .iter()
+            .find(|fact| fact.name == "helper")
+            .expect("the header declares `helper`");
+        assert!(helper.local, "declared inside `g`'s body");
+        assert_eq!(helper.scope, None, "…which is why the scope cannot say so");
+
+        let root = tree.get_red_root();
+        let scopes = crate::build_scopes(&root);
+        let found = super::definition_across_files(
+            &index,
+            &scopes,
+            &root,
+            Path::new("/p/main.cpp"),
+            at(source, "helper();"),
+        );
+
+        assert!(
+            matches!(
+                found,
+                Known::Unknown(UnknownReason::NotDeclaredHere(_)) | Known::No
+            ),
+            "the header's local is not a declaration of the name this file writes: {found:?}"
+        );
+
+        // And the other half, so that the skip is a filter rather than a hole: a *file-scope* declaration in the
+        // same header is still found through the index.
         let source = "#include \"widget.h\"\nvoid f() {\n  Widget w;\n}\n";
+        let (index, tree) = analysed(
+            &[(
+                "/p/widget.h",
+                "void g() {\n  int helper = 0;\n}\nstruct Widget { int size; };\n",
+            )],
+            "/p/main.cpp",
+            source,
+        );
+
+        let root = tree.get_red_root();
+        let scopes = crate::build_scopes(&root);
+        let found = super::definition_across_files(
+            &index,
+            &scopes,
+            &root,
+            Path::new("/p/main.cpp"),
+            at(source, "Widget w;"),
+        );
+
+        let Known::Yes(definition) = found else {
+            panic!("`Widget` is at file scope in the header: {found:?}");
+        };
+        assert_eq!(definition.file, Path::new("/p/widget.h"));
+        assert!(!definition.fact.local);
+    }
+
+    #[test]
+    fn a_name_only_a_header_declares_is_found_through_the_index() {        let source = "#include \"widget.h\"\nvoid f() {\n  Widget w;\n}\n";
         let (index, tree) = analysed(
             &[("/p/widget.h", "struct Widget { int size; };\n")],
             "/p/main.cpp",
@@ -2903,7 +3432,6 @@ mod tests {
     // parse, and a test that made it parse would be testing a question nobody asks. The helper below therefore
     // does not assert a clean parse — see `analysed_while_typing`.
     // -------------------------------------------------------------------------------------------
-
     /// The offset just **past** the last `needle`, which is where the cursor is after that much has been typed.
     fn after(source: &str, needle: &str) -> usize {
         source
@@ -3203,6 +3731,247 @@ mod tests {
         assert!(
             matches!(found, Known::Unknown(UnknownReason::UnparsableName)),
             "there is no written name to resolve: {found:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // Completion: the cursor-to-names query
+    //
+    // The sibling of the member query above, and the same kind of fixture: a *name being written* is not a
+    // program, so these files do not parse and are not meant to. What each test asserts is one of the four
+    // positions — after a `::`, after a class's `::`, after a global `::`, and with no qualifier at all — because
+    // they reach the same query through different scopes.
+    // -------------------------------------------------------------------------------------------
+
+    /// The names offered at the cursor just past `needle`.
+    fn names_at(
+        files: &[(&str, &str)],
+        from: &str,
+        source: &str,
+        needle: &str,
+    ) -> Known<super::NameCompletions> {
+        let (index, tree) = analysed_while_typing(files, from, source);
+        let root = tree.get_red_root();
+        let scopes = crate::build_scopes(&root);
+
+        super::name_completions_at(
+            &index,
+            &scopes,
+            &root,
+            Path::new(from),
+            after(source, needle),
+        )
+    }
+
+    /// The names in an answer, in the order the query put them.
+    #[track_caller]
+    fn offered(found: &Known<super::NameCompletions>) -> Vec<String> {
+        match found {
+            Known::Yes(completions) => completions
+                .names
+                .iter()
+                .map(|name| name.fact.name.clone())
+                .collect(),
+            other => panic!("expected names: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_qualified_scope_offers_the_names_written_in_it() {
+        let source = "namespace ns {\n  struct Widget { };\n  int helper();\n}\nvoid f() {\n  ns::\n}\n";
+        let found = names_at(&[], "/p/a.cpp", source, "ns::");
+
+        assert_eq!(offered(&found), ["Widget", "helper"], "sorted within the scope");
+        let Known::Yes(completions) = found else {
+            unreachable!("asserted above")
+        };
+        assert_eq!(completions.scope, "ns", "the scope as a lookup key");
+        assert_eq!(completions.prefix, "", "nothing of the name is typed yet");
+        assert_eq!(
+            completions.name_range.start_offset,
+            after(source, "ns::"),
+            "the empty range sits just past the `::`, where the name goes"
+        );
+        assert_eq!(completions.name_range.length, 0);
+    }
+
+    #[test]
+    fn a_half_typed_name_keeps_the_prefix_and_replaces_the_whole_segment() {
+        // The two halves of one edit, as in the member query: the range covers what the client replaces (`Wid`),
+        // and the prefix is what it filters by — the part before the cursor.
+        let source = "namespace ns {\n  struct Widget { };\n}\nvoid f() {\n  ns::Wid\n}\n";
+        let Known::Yes(completions) = names_at(&[], "/p/a.cpp", source, "ns::Wid") else {
+            panic!("the cursor is on the name being typed");
+        };
+
+        assert_eq!(completions.scope, "ns");
+        assert_eq!(completions.prefix, "Wid");
+        assert_eq!(
+            completions.name_range.start_offset,
+            at(source, "Wid"),
+            "the range is the written segment, not the point"
+        );
+        assert_eq!(completions.name_range.length, 3);
+    }
+
+    #[test]
+    fn a_class_scope_offers_its_members_and_the_ones_its_bases_declare() {
+        // `Derived::` is a scope like `ns::`, and the difference between them is the language's: a class is
+        // defined once, and the names it has include the ones it inherits.
+        let source = "struct Base {\n  typedef int size_type;\n};\n\
+                      struct Derived : Base {\n  typedef int value_type;\n};\n\
+                      void f() {\n  Derived::\n}\n";
+        let found = names_at(&[], "/p/a.cpp", source, "Derived::");
+
+        assert_eq!(
+            offered(&found),
+            ["value_type", "size_type"],
+            "the class's own names first, then the ones a base declares"
+        );
+        let Known::Yes(completions) = found else {
+            unreachable!("asserted above")
+        };
+        assert_eq!(completions.scope, "Derived");
+        assert_eq!(
+            completions
+                .names
+                .iter()
+                .map(|name| name.depth)
+                .collect::<Vec<_>>(),
+            [0, 1],
+            "the base's name is one step further out, which is the order lookup walks in"
+        );
+    }
+
+    #[test]
+    fn a_global_scope_offers_only_what_is_declared_at_file_scope() {
+        // `::` is a scope and not an empty qualifier: it asks about the global name space, so a namespace member
+        // and a local are both *not* in the answer, while the file-scope declarations are — the enclosing function
+        // and namespace included, because those are written there.
+        let source = "int global;\nnamespace ns {\n  int inner;\n}\nvoid f() {\n  int local;\n  ::\n}\n";
+        let found = names_at(&[], "/p/a.cpp", source, "::");
+
+        assert_eq!(offered(&found), ["f", "global", "ns"]);
+        let Known::Yes(completions) = found else {
+            unreachable!("asserted above")
+        };
+        assert_eq!(completions.scope, "::", "the global name space, as spelled");
+
+        let names = offered(&Known::Yes(completions.clone()));
+        assert!(
+            !names.contains(&"inner".to_string()) && !names.contains(&"local".to_string()),
+            "a namespace member and a local are not in the global name space: {names:?}"
+        );
+    }
+
+    #[test]
+    fn a_bare_name_offers_the_scopes_the_cursor_is_inside_innermost_first() {
+        // No qualifier: every name visible from here, and the order is C++'s — the body's own, then the class's,
+        // then the namespace's, then the file's.
+        let source = "int at_file_scope;\nnamespace ns {\n  int in_a_namespace;\n  struct C {\n    int member;\n    \
+                      void g() {\n      int local;\n      loc\n    }\n  };\n}\n";
+        let found = names_at(&[], "/p/a.cpp", source, "loc");
+
+        assert_eq!(
+            offered(&found),
+            [
+                // depth 0: the body the cursor is in
+                "local",
+                // depth 1: the class — its members, `g` among them
+                "g",
+                "member",
+                // depth 2: the namespace
+                "C",
+                "in_a_namespace",
+                // depth 3: file scope, which is also where every included file writes
+                "at_file_scope",
+                "ns"
+            ]
+        );
+
+        let Known::Yes(completions) = found else {
+            unreachable!("asserted above")
+        };
+        assert_eq!(completions.scope, "", "no qualifier was written");
+        assert_eq!(completions.prefix, "loc");
+
+        // The order is not alphabetical and is not meant to be: it is the order C++ searches in, so a consumer
+        // that shows the list in this order shows the name the user would get first.
+        let depths: Vec<usize> = completions.names.iter().map(|name| name.depth).collect();
+        let mut sorted = depths.clone();
+        sorted.sort_unstable();
+        assert_eq!(depths, sorted, "nearer scopes come first");
+        assert_eq!(depths[0], 0, "the local is in the scope the cursor is in");
+    }
+
+    #[test]
+    fn another_files_local_is_not_offered_by_a_bare_name() {
+        // The reason `local` is a field at all. The header's `__first` is a declaration in the index with no scope
+        // to place it in, and the standard library's headers declare thousands of names like it — offering one
+        // would fill the list with names the user cannot see, and the *right* answer for this cursor is the local
+        // that really is here.
+        let source = "#include \"widget.h\"\nvoid f() {\n  int mine;\n  min\n}\n";
+        let found = names_at(
+            &[(
+                "/p/widget.h",
+                "void g() {\n  int __first = 0;\n  int helper;\n}\nint global_name;\n",
+            )],
+            "/p/main.cpp",
+            source,
+            "min",
+        );
+
+        let names = offered(&found);
+        assert!(
+            names.contains(&"mine".to_string()),
+            "the local of *this* file is offered, from its own scopes: {names:?}"
+        );
+        assert!(
+            !names.contains(&"__first".to_string()) && !names.contains(&"helper".to_string()),
+            "another file's locals are not names this file can write: {names:?}"
+        );
+        assert!(
+            names.contains(&"global_name".to_string()),
+            "…while a file-scope name in the same header is: {names:?}"
+        );
+    }
+
+    #[test]
+    fn a_namespace_is_merged_across_the_buffer_and_the_header() {
+        // A namespace can be reopened by every file that mentions it, so the buffer's names are never the whole
+        // answer — the difference from a class, which is defined once and listed from one place.
+        let source = "#include \"ns.h\"\nnamespace ns {\n  int in_the_buffer;\n}\nvoid f() {\n  ns::\n}\n";
+        let found = names_at(
+            &[("/p/ns.h", "namespace ns {\n  int in_the_header;\n}\n")],
+            "/p/main.cpp",
+            source,
+            "ns::",
+        );
+
+        assert_eq!(offered(&found), ["in_the_buffer", "in_the_header"]);
+    }
+
+    #[test]
+    fn a_scope_nothing_declares_is_not_an_empty_list() {
+        // "Declared and empty" and "no such scope" are different answers, and the second one is what stops a
+        // consumer from reporting that the user is looking at a namespace with nothing in it.
+        let source = "void f() {\n  nowhere::\n}\n";
+        let found = names_at(&[], "/p/a.cpp", source, "nowhere::");
+
+        assert!(
+            matches!(found, Known::Unknown(UnknownReason::NotDeclaredHere(_))),
+            "nothing declares `nowhere`: {found:?}"
+        );
+    }
+
+    #[test]
+    fn a_cursor_that_is_not_in_a_name_offers_nothing() {
+        let source = "struct Widget { int size; };\nvoid f() {\n  Widget w;\n}\n";
+        let found = names_at(&[], "/p/a.cpp", source, "Widget w;");
+
+        assert!(
+            matches!(found, Known::Unknown(UnknownReason::UnparsableName)),
+            "the cursor is on a declaration's name, which is not a name being written: {found:?}"
         );
     }
 

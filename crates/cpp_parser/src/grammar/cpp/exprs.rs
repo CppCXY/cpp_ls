@@ -652,6 +652,17 @@ fn parse_unary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
         // read `Widget(1, 2)` as a call, which is a different construct with the same tokens. Nothing in the
         // grammar can read a type except the type rules, so this is where they have to be called.
         CppTokenKind::NewKeyword => parse_new_expr(p),
+        // `::new` — the **global** allocation function, spelled with a leading `::`. The qualification is not
+        // decoration: an unqualified `new` inside a class finds that class's `operator new`, and `::new` is how a
+        // program says "the global one", so the `::` is kept inside the `NewExpr` rather than dropped.
+        //
+        // It needs an arm because `::` is otherwise the start of a *qualified name*: the name branch claimed it
+        // and reported ``expected a name after `::` `` at the `new`, after which the recovery swallowed the whole
+        // allocation as one flat name node — not merely the wrong node, but no structure at all. Measured on the
+        // closure of six standard headers: 41 occurrences in 13 files, all of them this shape (`std::construct_at`
+        // in `bits/stl_construct.h`, the allocators, `std::exception_ptr`, `std::pmr`), and it is the first error
+        // of several of those files.
+        CppTokenKind::Scope if p.peek_next_token() == CppTokenKind::NewKeyword => parse_new_expr(p),
         CppTokenKind::DeleteKeyword => {
             let m = p.mark(CppSyntaxKind::UnaryExpr);
             p.bump(); // consume 'delete'
@@ -976,15 +987,23 @@ fn closes_with_a_pointer_operator(p: &CppParser) -> bool {
         )
 }
 
-/// Parse a `new` expression: `new T`, `new T[4]`, `new T(1, 2)`, `new T{1}`, `new (buf) T()`.
+/// Parse a `new` expression: `new T`, `new T[4]`, `new T(1, 2)`, `new T{1}`, `new (buf) T()`, `::new (buf) T()`.
 ///
 /// The node is a [`CppSyntaxKind::NewExpr`] rather than the `UnaryExpr` this used to produce, because `new`
 /// is not an operator applied to an operand: its operand is a *type*, and the parentheses that follow it are a
 /// constructor call rather than a grouping. `UnaryExpr(NewKeyword, CallExpr(Widget, 1, 2))` — which is what the
 /// old rule built for `new Widget(1, 2)` — says the operand is a call, which is a different construct.
+///
+/// The leading `::` is optional and is read here rather than in the caller's arm, so that the qualification is
+/// part of the allocation node it qualifies instead of a sibling of it. The caller decides *whether* this rule
+/// gets the expression — see [`parse_unary_expr`], which is the only place that can see the two tokens together.
 fn parse_new_expr(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::NewExpr);
+
+    if p.current_token() == CppTokenKind::Scope {
+        p.bump(); // `::`
+    }
     p.bump(); // `new`
 
     if let Err(err) = parse_new_type_and_initializer(p) {

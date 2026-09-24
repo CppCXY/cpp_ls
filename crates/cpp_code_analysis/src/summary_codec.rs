@@ -78,12 +78,18 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 ///
 /// # Version 6
 ///
-/// A declaration fact gained `clean` — this is the bump to version 7: whether a diagnostic fell inside the
+/// A declaration fact gained `clean` — that is the bump to version 7: whether a diagnostic fell inside the
 /// declaration the fact was written in. It is a fact about the *file's text* rather than about the language, which
 /// is why it belongs here and not in a query — and it is stored rather than recomputed because a consumer of a
-/// summary no longer has the tree the errors came from. (The headings above name the version a change came
-/// *from*; the number below is the one the bytes carry.)
-pub const CODEC_VERSION: u32 = 7;
+/// summary no longer has the tree the errors came from.
+///
+/// # Version 7
+///
+/// A declaration fact gained `local` — the bump to version 8: whether the declaration was written inside a
+/// function body, a block or a lambda, so that a name lookup across files can leave it out instead of offering a
+/// name the reader cannot see. (The headings name the version a change came *from*; the number below is the one
+/// the bytes carry.)
+pub const CODEC_VERSION: u32 = 8;
 
 /// Write a summary as bytes.
 ///
@@ -97,6 +103,7 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
     put_u32(&mut out, summary.key.format_version);
     put_u64(&mut out, summary.key.content_hash);
     put_u64(&mut out, summary.key.context_hash);
+    put_u64(&mut out, summary.key.reading_fingerprint);
 
     put_path(&mut out, &summary.path);
 
@@ -112,6 +119,7 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
         }
         put_range(&mut out, fact.range);
         put_range(&mut out, fact.name_range);
+        put_u8(&mut out, u8::from(fact.local));
         put_u8(&mut out, u8::from(fact.clean));
         put_u32(&mut out, guard_code(fact.guard));
     }
@@ -169,6 +177,11 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
         format_version: reader.u32()?,
         content_hash: reader.u64()?,
         context_hash: reader.u64()?,
+        // Written and read back like the rest of the key, because a decoder can be handed a file it did not choose
+        // — see `CODEC_VERSION`'s note on the header. The number itself is a property of the *binary*, so a
+        // mismatch is a failed read rather than a value to keep: a summary produced by a different reader must not
+        // be served, and the key comparison in `store` is what rejects it.
+        reading_fingerprint: reader.u64()?,
     };
     let path = reader.path()?;
 
@@ -188,6 +201,7 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
             },
             range: reader.range()?,
             name_range: reader.range()?,
+            local: reader.u8()? != 0,
             clean: reader.u8()? != 0,
             guard: guard_from(reader.u32()?)?,
         });
@@ -598,7 +612,9 @@ mod tests {
                     bases: vec!["Base".to_string(), "ns::Other".to_string()],
                     range: range(10, 20),
                     name_range: range(17, 6),
-                    // The `false` branch of the field, so a round trip covers both values of it.
+                    // Both flags' `true` branch here, and the other facts below cover `false` — a round trip that
+                    // only ever wrote one value of a `u8` flag would not notice a decoder that dropped it.
+                    local: true,
                     clean: false,
                     guard: FactGuard::Unconditional,
                 },
@@ -612,6 +628,7 @@ mod tests {
                     bases: Vec::new(),
                     range: range(40, 15),
                     name_range: range(48, 6),
+                    local: false,
                     clean: true,
                     guard: FactGuard::Region(3),
                 },
@@ -623,6 +640,7 @@ mod tests {
                     bases: Vec::new(),
                     range: range(60, 8),
                     name_range: range(60, 0),
+                    local: false,
                     clean: true,
                     guard: FactGuard::Unconditional,
                 },
@@ -759,11 +777,12 @@ mod tests {
 
     /// The offset of the declaration count in an encoded summary.
     ///
-    /// Spelled out from the layout `encode` writes: the magic and version, the key, the path, then the count.
-    /// It assumes the fixture's path is ASCII, which is what makes the path's byte length its `char` count. Keep
-    /// it in step with `encode` — a test that computes an offset has to be told when the layout moves.
+    /// Spelled out from the layout `encode` writes: the magic and version, the key — which is a `u32` and three
+    /// `u64`s, the reading fingerprint included — the path, then the count. It assumes the fixture's path is ASCII,
+    /// which is what makes the path's byte length its `char` count. Keep it in step with `encode` — a test that
+    /// computes an offset has to be told when the layout moves.
     fn declaration_count_at(summary: &FileSummary) -> usize {
-        const HEADER: usize = MAGIC.len() + 4 + 4 + 8 + 8;
+        const HEADER: usize = MAGIC.len() + 4 + 4 + 8 + 8 + 8;
 
         HEADER + 4 + summary.path.to_string_lossy().len()
     }

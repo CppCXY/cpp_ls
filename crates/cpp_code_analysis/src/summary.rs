@@ -49,6 +49,29 @@ pub struct DeclFact {
     ///
     /// [`ScopeId`]: crate::ScopeId
     pub scope: Option<String>,
+    /// Was this declaration written inside a **function body, a block or a lambda**?
+    ///
+    /// The other half of [`DeclFact::scope`], and the reason it is a field rather than something a consumer can
+    /// work out: a fact whose scope is `None` is either a declaration at *file* scope — `void helper();`,
+    /// `extern int errno;`, which every file that includes this one can name — or a **local**, which nothing
+    /// outside its own body can name at all. The two are indistinguishable from the rest of the fact, and the
+    /// difference decides answers: a name lookup that answered with another file's local would be offering a name
+    /// the user cannot see, and `std::vector`'s headers alone declare thousands of them (`__first`, `__n`, `_Tp`),
+    /// so the wrong answer is not a corner case — it is most of what a completion would show.
+    ///
+    /// `true` for a declaration whose scope chain reaches a function body, a block or a lambda, however deeply it
+    /// is nested in there — a local class, a local `typedef`, a variable inside a loop inside a member function.
+    /// `false` at file scope, in a namespace, and in a class body, including a member function's *declaration* —
+    /// the body is what makes a declaration local, not the entity it belongs to.
+    ///
+    /// # What a consumer is expected to do with it
+    ///
+    /// The index is a per-file list of declarations, so it cannot place a local in the function it belongs to;
+    /// [`crate::ProjectIndex::definition`] therefore **skips** these facts when it looks a name up across files,
+    /// because the scope tree of the file being edited is the only thing that can resolve one. A consumer with the
+    /// file's own scopes in hand (a completion in the open buffer) lists locals from there and never needs this
+    /// field; a consumer listing *another* file's declarations uses it to leave them out.
+    pub local: bool,
     pub kind: DeclKind,
     /// The type a variable-like declaration was written with, as the file spells it.
     ///

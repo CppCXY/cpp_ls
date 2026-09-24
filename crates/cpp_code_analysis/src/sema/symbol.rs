@@ -1017,6 +1017,28 @@ impl ScopeTree {
             .map(ScopeId)
             .find(|id| self.qualified_name_of(*id).as_deref() == Some(name))
     }
+
+    /// Is a declaration written in this scope **local** — nameable only from inside the body it sits in?
+    ///
+    /// True when the chain outward reaches a function body, a block or a lambda, however far in it is: a local
+    /// class, a `typedef` in a loop, a variable in a member function. False at file scope, in a namespace, and in a
+    /// class body — a *member* function's declaration is not local, only its body is.
+    ///
+    /// The three kinds are the ones whose name reaches no qualified name ([`ScopeTree::qualification_prefix_of`]
+    /// lists the same set from the other side): a function, a block and a lambda each introduce no segment, so a
+    /// declaration inside one has a bare name and no scope to be found in. What this adds is the thing a consumer
+    /// needs and a qualified name cannot say: *which* of the two `None`-scoped cases a declaration is.
+    ///
+    /// The file scope is deliberately not "local": a declaration written directly at file scope is visible to every
+    /// file that includes this one, which is the whole distinction.
+    pub fn declares_a_local(&self, scope: ScopeId) -> bool {
+        self.scope_chain(scope).iter().any(|id| {
+            matches!(
+                self.scopes.get(id.index()).map(|scope| scope.kind),
+                Some(ScopeKind::Function | ScopeKind::Block | ScopeKind::Lambda)
+            )
+        })
+    }
 }
 
 /// Can a scope of this kind hold a binding of that kind?

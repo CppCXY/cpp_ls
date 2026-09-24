@@ -39,9 +39,10 @@ pub mod watch;
 pub mod worklist;
 
 pub use project::{
-    IncludeVisibility, MemberCompletions, MemberList, ProjectDefinition, ProjectIndex, ProjectMacro,
-    ProjectMember, UnlistedBase, VisibleDeclaration, definition_across_files, macro_across_files,
-    member_across_files, member_completions_at, members_of,
+    IncludeVisibility, MemberCompletions, MemberList, NameCompletions, OfferedName, ProjectDefinition,
+    ProjectIndex, ProjectMacro, ProjectMember, UnlistedBase, VisibleDeclaration,
+    definition_across_files, macro_across_files, member_across_files, member_completions_at, members_of,
+    name_completions_at,
 };
 pub use store::{
     IncludeBudget, IncludeIndex, NotIndexed, NotIndexedReason, StoreStats, SummaryStore,

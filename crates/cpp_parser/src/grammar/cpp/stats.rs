@@ -119,6 +119,11 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
         CppTokenKind::ForKeyword => parse_for_statement(p),
         CppTokenKind::SwitchKeyword => parse_switch_statement(p),
         CppTokenKind::TryKeyword => parse_try_statement(p),
+
+        // `__try` / `__catch(…)` — the implementation's spellings of the same statement. See
+        // [`at_the_implementations_try`] for why the spelling is the right thing to match on here rather than a
+        // table lookup, and for the measurements behind it.
+        CppTokenKind::Identifier if at_the_implementations_try(p) => parse_try_statement(p),
         CppTokenKind::ReturnKeyword => parse_return_statement(p),
         // Coroutine statements. `co_return` is `return` under another name — the same operand, the same optional
         // value, the same `;` — so it is the same rule through a different keyword rather than a copy of it.
@@ -554,6 +559,22 @@ fn parse_if_statement(p: &mut CppParser) -> ParseResult {
         false
     };
 
+    // A **macro standing between `if` and its condition**: `if _GLIBCXX17_CONSTEXPR (std::is_same_v<…>)`, which is
+    // how the standard library writes `if constexpr` in a header that must also compile as C++14 — there the macro
+    // expands to **nothing at all**, and in C++17 to `constexpr`.
+    //
+    // Accepted by shape rather than by table, and the shape is decisive: `if` is followed by a `(` in every
+    // program C++ accepts, so an identifier in between takes no valid program away. That is the fallback side of
+    // maintenance convention 16 in `docs/grammar-gaps.md` — where a table cannot answer because the `#define` is
+    // in an *included* header (`bits/c++config.h`), and where both readings of the tokens are wrong if the macro
+    // is not one. It is *not* evidence-free in the way `MY_API` was: nothing legal is being re-read.
+    //
+    // The `(` is required, which is what keeps this away from `if consteval` — that word also arrives as an
+    // identifier, and it is followed by a `{`, not by a condition.
+    if p.current_token() == CppTokenKind::Identifier && p.peek_next_token() == CppTokenKind::LeftParen {
+        p.bump(); // the macro that stands for `constexpr`, or for nothing
+    }
+
     // `if consteval` has no condition to parse. Asking for one would report `expected (` against the
     // `{` that is really the body, which is worse than useless: it accuses correct code.
     if !consteval_form && let Err(err) = parse_condition(p) {
@@ -707,7 +728,22 @@ fn parse_initializer_part(p: &mut CppParser) -> ParseResult {
 }
 
 /// Parse the body of a control-flow statement: a block, or one statement.
+///
+/// # Attributes come first
+///
+/// `if (__n > 1) [[likely]]`, `else [[unlikely]]`, `while (x) [[likely]]` — C++20 lets an attribute stand on the
+/// *substatement*, which is a position where nothing else may go, and the standard library's own headers use it
+/// (16 occurrences in 7 files of the measured closure, every one of them after an `if` condition). Reading them
+/// here rather than in each of the five statements that own a substatement is what makes one rule cover the lot:
+/// the then-branch, the else-branch and every loop body reach their statement through this function, and none of
+/// them can be reached any other way.
+///
+/// The node is a sibling of the body inside the statement, because that is what it is: an attribute *on* the
+/// statement, not part of it. The reader is the same one `[[nodiscard]]` goes through — see
+/// [`super::types::parse_attribute_specifiers`] — so nothing here is specific to `likely`.
 fn parse_statement_body(p: &mut CppParser) -> ParseResult {
+    super::types::parse_attribute_specifiers(p)?;
+
     if p.current_token() == CppTokenKind::LeftBrace {
         return parse_compound_stat(p);
     }
@@ -909,11 +945,75 @@ fn parse_switch_statement(p: &mut CppParser) -> ParseResult {
     Ok(m.complete(p))
 }
 
+/// The name the standard library's own header gives to `try`, and to `catch`.
+///
+/// `bits/exception_defines.h` defines both, and its definition is the evidence for reading them as the keywords
+/// they stand for:
+///
+/// ```text
+/// #ifdef __EXCEPTIONS                     #else
+/// # define __try      try                  # define __try      if (true)
+/// # define __catch(X) catch(X)            # define __catch(X) if (false)
+/// #endif
+/// ```
+///
+/// # Why the spelling, and not a table
+///
+/// The same reasoning as the compiler's attribute spellings (`__attribute__`, `__declspec` — see
+/// `docs/grammar-gaps.md`, maintenance convention 24), with the same two conditions satisfied: the names are
+/// **reserved to the implementation** (a double underscore, so no conforming program may define them), and the
+/// `#define` that gives them meaning is the *implementation's*, not the file's — no header a project writes can
+/// turn `__try` into something else. Both matter: the rule that reads a macro from a header
+/// ([`at_a_macro_that_stands_for_a_declaration`]) deliberately refuses inside a body and requires the table,
+/// which is why these two spellings were not read at all.
+///
+/// # What the wrong reading cost, measured
+///
+/// `__try { g(); }` used to be an **expression**, not a statement: a name followed by `{` is list-initialisation
+/// of a temporary (`Vec<int>{1, 2}`), so the block was read as an `InitListExpr` holding a statement —
+/// `expected }, but get ;` against the `;` of the first statement inside it, and then the brace matching of the
+/// whole function was off by one, which is what the `expected }` and the stray `ErrorNode` after it were. Of the
+/// 185 files in the closure of six standard headers, **18 contain `__try`** and 17 of them fail.
+///
+/// The reading is a `TryStat` with `CatchStat` handlers rather than a `MacroCall`: the construct *is* the
+/// statement under the branch that has exceptions on, and reading it as a macro would lose the pairing between
+/// the body and its handlers — the one thing a consumer of a `try` is looking for. The `if (true)`/`if (false)`
+/// branch would be a different statement, and it is the branch a reader cannot see without evaluating
+/// `__EXCEPTIONS`; `docs/index-design.md` records that both branches of a conditional are read as text, and this
+/// takes the reading that keeps the structure.
+const THE_KEYWORD_TRY_IS_SPELLED: &str = "__try";
+
+/// The same, for `catch` — see [`THE_KEYWORD_TRY_IS_SPELLED`].
+const THE_KEYWORD_CATCH_IS_SPELLED: &str = "__catch";
+
+/// Is the cursor on `__try`, with a block to follow?
+///
+/// The block is required because `__try` is *also* an MSVC keyword for structured exception handling
+/// (`__try`/`__except`/`__finally`), which is a different construct with a different shape. Neither spelling
+/// appears in the measured closure, so nothing is claimed about it here; requiring the `{` is what keeps a SEH
+/// `__try` from being read as a `try` statement whose block happens to be there.
+fn at_the_implementations_try(p: &CppParser) -> bool {
+    p.current_token() == CppTokenKind::Identifier
+        && p.current_token_text() == THE_KEYWORD_TRY_IS_SPELLED
+        && p.peek_next_token() == CppTokenKind::LeftBrace
+}
+
+/// Is the cursor on `__catch` **with its argument list**?
+///
+/// `__catch` is function-like by definition — its `#define` has a parameter — so the parenthesis is part of the
+/// spelling, and requiring it is what tells the macro from a name that merely starts the same way. Its argument
+/// list is the handler's parameter list, which is why the reading calls the same rule `catch (…)` does.
+fn at_the_implementations_catch(p: &CppParser) -> bool {
+    p.current_token() == CppTokenKind::Identifier
+        && p.current_token_text() == THE_KEYWORD_CATCH_IS_SPELLED
+        && p.peek_next_token() == CppTokenKind::LeftParen
+}
+
 fn parse_try_statement(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::TryStat);
 
-    p.bump(); // Consume 'try'
+    p.bump(); // Consume 'try' — or the implementation's spelling of it, which is the same one token
 
     // **Directives at every joint of a `try`.** A handler that exists in a debug build and not in a release one
     // is a real spelling, and the directive that decides it can land between any two tokens of the statement —
@@ -953,7 +1053,7 @@ fn parse_try_statement(p: &mut CppParser) -> ParseResult {
         return Err(err);
     }
 
-    while p.current_token() == CppTokenKind::CatchKeyword {
+    while p.current_token() == CppTokenKind::CatchKeyword || at_the_implementations_catch(p) {
         let handler = p.mark(CppSyntaxKind::CatchStat);
         p.bump();
 

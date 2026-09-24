@@ -765,7 +765,33 @@ fn constructs_the_parser_reads() {
             "auto p = new (buf, size) Widget();",
             "auto p = new (1) Widget();",
             "auto q = new Widget(1)->run();",
-            "delete[] p;",
+            // The same allocations with the **global** qualification. `::new` is how a program asks for the global
+            // `operator new` rather than a class's, so the tokens are not decorative — and the `::` used to send
+            // the whole expression to the name branch, which reported a missing name and flattened it. See
+            // `gaps::constructs_are_read_as_the_right_node` for the node that pins the reading.
+            "auto p = ::new Widget(1, 2);",
+            "auto p = ::new (buf) Widget();",
+            "(void) ::new T;",
+            "::new (__loc) _Tp[1]();",
+            // The implementation's own spelling of `try`/`catch`, which libstdc++ writes in 18 of the closure's
+            // files: `bits/exception_defines.h` defines `__try` as `try` and `__catch(X)` as `catch(X)`.
+            "__try { g(); } __catch (...) { h(); }",
+            "__try { g(); } __catch (const E& e) { h(e); }",
+            // `throw(…)` after a parameter list — the C++98 dynamic exception specification, which C++17 removed
+            // and the standard library's headers still write 63 times.
+            "void f() throw();",
+            "void g() throw(int);",
+            "void h() const throw(std::exception&, int);",
+            "int __cdecl f(void) throw();",
+            // A **macro between `if` and its condition**, which is how `if constexpr` is written in a header that
+            // must also compile as C++14: `_GLIBCXX17_CONSTEXPR` is `constexpr` or nothing at all.
+            "if _GLIBCXX17_CONSTEXPR (x) { }",
+            "if (_GLIBCXX17_CONSTEXPR (x)) { }",
+            "if (x) { } else if _GLIBCXX17_CONSTEXPR (y) { }",
+            // `[[likely]]` on the substatement, which is where C++20 puts it.
+            "if (x) [[likely]] { }",
+            "if (x) [[unlikely]] y();",
+            "if (x) [[likely]] { } else [[likely]] { }",            "delete[] p;",
             "int n = sizeof(void(int));",
             "auto x = a ? b : c;",
             // The C++17 initializer in a condition: a declaration, a `;`, and the condition itself.
@@ -1448,6 +1474,15 @@ fn constructs_are_read_as_the_right_node() {
             shape("x = throw 1;", Where::Body, CppSyntaxKind::ExpressionStat),
             CppSyntaxKind::ThrowStat,
         ),
+        // **`::new`**, the global allocation. The statement kind alone would not tell it from the unqualified
+        // form — both are an `ExpressionStat` holding a `NewExpr` — so the assertion is the `NewExpr`, and the
+        // qualification is checked separately below. What the wrong reading produced was not a different node but
+        // *no* node: `::` sent the tokens to the name branch, which reported a missing name at `new` and left the
+        // whole allocation as one flat `IdentifierExpr`.
+        requiring(
+            shape("::new (buf) Widget();", Where::Body, CppSyntaxKind::ExpressionStat),
+            CppSyntaxKind::NewExpr,
+        ),
         // An **alternative spelling** is the operator, so the node is the one the punctuation would produce.
         requiring(
             shape("auto x = a and b;", Where::Body, CppSyntaxKind::Declaration),
@@ -1482,6 +1517,23 @@ fn constructs_are_read_as_the_right_node() {
             CppSyntaxKind::DeclSpecifierSeq,
         ),
     ]);
+
+    // The `::` of a `::new` belongs to the **allocation**, not to whatever encloses it: the two spellings mean
+    // different functions when the type has its own `operator new`, so a tree that dropped the qualification
+    // would be lossless, well formed, diagnostic-free and wrong.
+    let source = "void probe() { ::new (buf) Widget(); }";
+    let allocation = CppParser::parse(source, ParserConfig::default())
+        .get_red_root()
+        .descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NewExpr)
+        .expect("the allocation is a NewExpr");
+    assert!(
+        allocation
+            .children_with_tokens()
+            .filter_map(|child| child.into_token())
+            .any(|token| CppTokenKind::from(token.kind()) == CppTokenKind::Scope),
+        "the `::` is the NewExpr's own token"
+    );
 }
 
 /// A construct that must contain a node of `kind`, with the statement kind it must have.
@@ -1683,6 +1735,38 @@ fn modern_constructs_produce_the_right_nodes() {
         // A `new` reads its own bounds: the `ArrayType` is the new-declarator's, so the `TypeId` is bare.
         ("auto p = new int[4];", CppSyntaxKind::TypeId),
         ("auto p = new int[4];", CppSyntaxKind::ArrayType),
+        // The implementation's spelling of `try`/`catch`. The `CatchStat` is the assertion rather than the
+        // `TryStat`, because that is the pairing the wrong reading loses: as an `InitListExpr` of an expression
+        // statement there was no handler at all, and the brace matching of the whole function was off by one.
+        (
+            "void f() { __try { g(); } __catch (...) { h(); } }",
+            CppSyntaxKind::CatchStat,
+        ),
+        // `throw(…)` is a **suffix of the declarator**, so the payload is a type — and reading it as a
+        // throw-expression is the reading the tokens allow, which is why the `TypeId` is what is asserted.
+        ("void f() throw(std::exception&);", CppSyntaxKind::TypeId),
+        // A macro between `if` and its condition: the condition keeps its parentheses, so there is a `ParenExpr`.
+        // The wrong reading takes the macro for a call and leaves an `ArgumentList` in its place — the two are
+        // well formed either way, and only the node says which happened.
+        ("void f() { if _GLIBCXX17_CONSTEXPR (x) { } }", CppSyntaxKind::ParenExpr),
+        ("void f() { if (x) [[likely]] { } }", CppSyntaxKind::AttributeList),
+        // The compiler's own keywords, and the assertion is the **parameter list**: the wrong reading made
+        // `__cdecl` the declarator's name and `g(void)` a macro suffix, so there was no parameter list anywhere —
+        // well formed, lossless, no diagnostic, and every name in it wrong.
+        ("int __cdecl g(void);", CppSyntaxKind::ParameterList),
+        ("int *__cdecl _errno(void);", CppSyntaxKind::ParameterList),
+        (
+            "__forceinline size_t f(const char * _src) { return 0; }",
+            CppSyntaxKind::ParameterList,
+        ),
+        // `__restrict` is the qualifier the kind table names and nothing produced.
+        ("int f(const char * __restrict__ _Src);", CppSyntaxKind::RestrictQual),
+        // …and a keyword that *means* a standard specifier produces that specifier's node, so a consumer does not
+        // have to know which compiler's spelling the file used.
+        (
+            "__forceinline int f(void) { return 0; }",
+            CppSyntaxKind::InlineSpec,
+        ),
     ]);
 
     // Exactly one parameter: the silent version produced zero here and a phantom member beside it.

@@ -363,6 +363,20 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
     // `a_further_name_may_join` below.
     let specifiers_from = p.current_event_count();
     loop {
+        // A **compiler keyword** is stepped over *here*, outside [`parse_one_decl_specifier`], and the reason is
+        // one the two functions have to agree about: that function decides "did this specifier name a type?" by
+        // looking at the last token the specifier consumed, and one of these keywords is an *identifier* —
+        // `__cdecl`, `__extension__` — which that test reads as a type name. `__forceinline size_t f() { }` was
+        // the symptom: the flag said a type had been named, so `size_t` looked like the declarator's name, the
+        // `f()` after it like a macro suffix, and the body had no declaration to belong to.
+        //
+        // Stepping over them out here cannot lose anything, because they are not specifiers *of the type*: the
+        // node each one produces (a `RestrictQual`, an `InlineSpec`, or a bare token) is still written inside the
+        // `DeclSpecifierSeq` this loop has open.
+        while an_implementation_keyword(p).is_some() {
+            parse_an_implementation_keyword(p);
+        }
+
         let specifier_seen = specifiers > 0;
         // May a **further** name still join the type, beyond the one that is already in it?
         //
@@ -557,6 +571,14 @@ fn parse_one_decl_specifier_inner(
             return parse_attribute_specifier(p);
         }
 
+        // One of the **compiler's own keywords** where a specifier goes: `__extension__ inline int f();`,
+        // `int __cdecl g(void);`, `__forceinline size_t h();`. They are consumed by the loop in
+        // [`parse_decl_specifier_seq_with`] rather than here — see the note there for why the specifier reader
+        // must not be the one to see them — so reaching this point with one at the cursor means the caller is a
+        // context that does not go through that loop, and the keyword is read here.
+        _ if an_implementation_keyword(p).is_some() => {
+            return Ok(parse_an_implementation_keyword(p));
+        }
         // `enum class E`, `enum struct E` — the scoped-enum form. Checked before the general
         // class-like case because the second keyword is part of *this* specifier, not a new one.
         CppTokenKind::EnumKeyword if is_enum_class_head(p) => {
@@ -2324,13 +2346,29 @@ fn a_parameter_list_is_the_type(p: &CppParser) -> bool {
     )
 }
 
-/// Consume any `const` / `volatile` immediately following a pointer or reference operator.
+/// Consume any `const` / `volatile` — or an implementation qualifier — immediately following a pointer,
+/// reference or pointer-to-member operator.
+///
+/// The second half is the same rule as the specifier position, one token later: `int *__cdecl _errno(void);` and
+/// `const char * __restrict__ _Src` both write the keyword *after* the `*`, because the `*` belongs to the
+/// return or element type. `__cdecl` there is a calling convention rather than a qualifier, and it is accepted
+/// here for the same reason: nothing else can stand in this position, and refusing it loses the declaration.
 fn eat_cv_qualifiers(p: &mut CppParser) {
-    while matches!(
-        p.current_token(),
-        CppTokenKind::ConstKeyword | CppTokenKind::VolatileKeyword
-    ) {
-        p.bump();
+    loop {
+        if matches!(
+            p.current_token(),
+            CppTokenKind::ConstKeyword | CppTokenKind::VolatileKeyword
+        ) {
+            p.bump();
+            continue;
+        }
+
+        if an_implementation_keyword(p).is_some() {
+            parse_an_implementation_keyword(p);
+            continue;
+        }
+
+        return;
     }
 }
 
@@ -2976,6 +3014,37 @@ pub fn eat_function_qualifiers(p: &mut CppParser) {
             | CppTokenKind::ConstevalKeyword
             | CppTokenKind::Ampersand
             | CppTokenKind::LogicalAnd => p.bump(),
+            // A **dynamic exception specification** — `throw()`, `throw(int)`, `throw(T, U&)` — which sits exactly
+            // where `noexcept` sits and is the C++98 spelling of the same idea for the empty form. Removed in
+            // C++17, and still written in the standard library's own headers: 63 occurrences in 14 files of the
+            // measured closure (`has_facet(const locale&) throw();`, `void f() throw(int);`, `~A() throw();`).
+            //
+            // It is a *suffix*, not a throw-expression, and the position is what says so: the parameter list has
+            // already ended, so there is no statement for a throw to be part of, and no declaration continues with
+            // the keyword. `throw` as an *expression* is the same token one grammar layer down, which is why this
+            // arm has to be here rather than in the expression rules.
+            //
+            // The payload is a list of **types** — that is the whole difference from `noexcept(expr)` above it —
+            // so it is read with the type-id rule, one `TypeId` node per type, exactly as a template argument list
+            // reads the same tokens.
+            CppTokenKind::ThrowKeyword if p.peek_next_token() == CppTokenKind::LeftParen => {
+                p.bump(); // `throw`
+                p.bump(); // `(`
+
+                while p.current_token() != CppTokenKind::RightParen && !p.is_eof() {
+                    if parse_type_id(p).is_err() {
+                        break;
+                    }
+                    if p.current_token() != CppTokenKind::Comma {
+                        break;
+                    }
+                    p.bump(); // `,`
+                }
+
+                if expect_token(p, CppTokenKind::RightParen).is_err() {
+                    return;
+                }
+            }
             CppTokenKind::NoexceptKeyword => {
                 p.bump();
                 if p.current_token() == CppTokenKind::LeftParen {
@@ -3016,6 +3085,67 @@ pub fn eat_function_qualifiers(p: &mut CppParser) {
             _ => return,
         }
     }
+}
+
+/// What an implementation keyword is, once it is read.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ImplementationKeyword {
+    /// A **qualifier**: `__restrict` / `__restrict__`, which is C's `restrict` spelled the way GCC and MSVC
+    /// spell it. The kind table already has a node for it — [`CppSyntaxKind::RestrictQual`] — and nothing was
+    /// producing one.
+    Qualifier,
+    /// A specifier that **means another specifier**: `__forceinline` is `inline` and nothing else (the closure's
+    /// own `_mingw.h` defines it as `inline __attribute__((__always_inline__))`), so it is read as the node the
+    /// standard spelling produces rather than as something new.
+    Means(CppSyntaxKind),
+    /// Neither: a **calling convention** (`__cdecl`, `__stdcall`, …) or a marker that suppresses a warning
+    /// (`__extension__`, `__unaligned`). These say nothing about the type or the name, so they stay bare tokens
+    /// where they were written — dressing them up as a specifier node would claim a meaning this layer does not
+    /// read.
+    Bare,
+}
+
+/// Which of the compiler's own keywords is at the cursor, if any?
+///
+/// # Why a spelling test is the right one here
+///
+/// The same two conditions as the attribute spellings ([`at_an_attribute`]) and the standard library's own
+/// `__try`/`__catch`: the names are **reserved to the implementation** — a double underscore, so no conforming
+/// program may define them — and they belong to the *compiler*, so no `#define` in any header a project writes
+/// can turn `__cdecl` into something else. `__extension__` is GCC's, `__cdecl` and `__unaligned` are MSVC's,
+/// and MinGW's headers are written with all of them at once.
+///
+/// # What the wrong reading cost, and it was not a diagnostic
+///
+/// `int __cdecl g(void);` parsed *successfully* as a declaration whose declarator was named `__cdecl` and whose
+/// suffix was a macro call `g(void)` — the sequence type, name, macro-suffix, which is a shape this grammar
+/// reads on purpose (see [`super::decls::eat_a_macro_suffix`]). Well formed, lossless, no diagnostic, and every
+/// name in it wrong. That is the class of defect `docs/grammar-gaps.md` opens with, and the reason the second
+/// position below matters as much as the first: `int *__cdecl _errno(void);` writes the keyword after the `*`.
+///
+/// # Measured, on the closure of six standard headers
+///
+/// `__cdecl` **1464 occurrences in 19 files**, `__restrict` 365 in 8, `__extension__` 61 in 12, `__int64` 81 in
+/// 14, `__forceinline` 3 in 2, and `__thiscall`, `__w64`, `__unaligned`, `__ptr64` once or twice each. Three of
+/// those files (`stdio.h`, `wchar.h`, `stdlib.h`) report the keyword's line as their **first** error, and every
+/// file that merely *parses* today is one of the silent wrong trees above.
+///
+/// The whole calling-convention family is listed, not only the one with hits, because they are one concept and
+/// one closed set of reserved names: adding `__stdcall` when a file needs it would be the same rule again. What
+/// is deliberately **not** here is `__int64`: the closure's own `_mingw.h` `#define`s it to `long long`, so it is
+/// a macro, and the reading it already has (a name in type position) coincides with what it means.
+fn an_implementation_keyword(p: &CppParser) -> Option<ImplementationKeyword> {
+    if p.current_token() != CppTokenKind::Identifier {
+        return None;
+    }
+
+    Some(match p.current_token_text() {
+        "__restrict" | "__restrict__" => ImplementationKeyword::Qualifier,
+        "__forceinline" => ImplementationKeyword::Means(CppSyntaxKind::InlineSpec),
+        "__cdecl" | "__stdcall" | "__fastcall" | "__thiscall" | "__vectorcall" | "__extension__"
+        | "__unaligned" | "__ptr64" | "__ptr32" | "__w64" => ImplementationKeyword::Bare,
+        _ => return None,
+    })
 }
 
 /// Is an attribute written at the cursor — in any of the three spellings?
@@ -3133,4 +3263,34 @@ fn parse_word_attribute(p: &mut CppParser) -> ParseResult {
     }
 
     Ok(m.complete(p))
+}
+
+/// Read the implementation keyword at the cursor, as the node [`an_implementation_keyword`] says it is.
+///
+/// Three outcomes and each is a decision rather than a branch:
+///
+/// * a **qualifier** gets [`CppSyntaxKind::RestrictQual`], the node the kind table already names for it and
+///   which nothing produced until now;
+/// * a keyword that **means a specifier** gets that specifier's node, so `__forceinline` is an `InlineSpec` and
+///   a consumer asking "is this function inline" does not have to know which compiler's spelling was used;
+/// * a **calling convention** stays a bare token in the sequence it was written in. It is not nothing — it is in
+///   the tree, and a consumer can see and print it — but this layer reads no meaning out of it, and inventing a
+///   node for a meaning nobody reads is how a tree ends up claiming more than it knows.
+fn parse_an_implementation_keyword(p: &mut CppParser) -> CompleteMarker {
+    match an_implementation_keyword(p) {
+        Some(ImplementationKeyword::Qualifier) => {
+            let m = p.mark(CppSyntaxKind::RestrictQual);
+            p.bump();
+            m.complete(p)
+        }
+        Some(ImplementationKeyword::Means(kind)) => {
+            let m = p.mark(kind);
+            p.bump();
+            m.complete(p)
+        }
+        _ => {
+            p.bump();
+            CompleteMarker::empty()
+        }
+    }
 }

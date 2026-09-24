@@ -1419,10 +1419,11 @@ pub fn parse_function_suffix_or_initializer(
     // and then reads `(1)` as that parameter's default argument, which is a declaration of a function nobody
     // wrote.
     let declarator_is_named = p.has_declaration_type_name();
-    if (p.is_at_file_scope()
-        && !a_type_keyword_precedes_the_declarator_name(p)
-        && the_arguments_look_like_declarators(p, false)
-        || declarator_is_named && the_arguments_look_like_declarators(p, true))
+    if !a_dynamic_exception_specification_follows(p)
+        && (p.is_at_file_scope()
+            && !a_type_keyword_precedes_the_declarator_name(p)
+            && the_arguments_look_like_declarators(p, false)
+            || declarator_is_named && the_arguments_look_like_declarators(p, true))
         && let Ok(parsed) = parse_the_initializer(p)
     {
         return Ok(parsed);
@@ -1449,11 +1450,40 @@ pub fn parse_function_suffix_or_initializer(
     //
     // The question is settled by asking what the tokens cannot answer — whether the type name is one — using the
     // file's own declarations, plus the scope the statement sits in. See [`a_declaration_is_the_better_reading`].
-    if a_declaration_is_the_better_reading(p, declarator_from) && an_argument_list_follows(p) {
+    if !a_dynamic_exception_specification_follows(p)
+        && a_declaration_is_the_better_reading(p, declarator_from)
+        && an_argument_list_follows(p)
+    {
         return parse_the_initializer(p);
     }
 
     Ok(CompleteMarker::empty())
+}
+
+/// Is the balanced group at the cursor followed by a **dynamic exception specification** — `throw (`?
+///
+/// The one suffix that does not merely continue a reading but *settles* it: a variable declaration has no
+/// `throw(…)`, so when the group at the cursor is followed by one, the group is a **parameter list** and the
+/// direct-initialiser reading of the same tokens — the other reading of `T x(y)` — is not available.
+///
+/// Found because the two preferences below took the initialiser reading first and left the suffix with nothing to
+/// belong to: `new_handler set_new_handler(new_handler) throw();` in `<new>` came out as an *expression statement*
+/// of flat tokens with `expected `;` after expression`, and the whole declaration was lost. The group
+/// `(new_handler)` is a bare name, which is a perfectly good one-parameter list *and* a perfectly good
+/// parenthesised value, and the first of the two preferences is written for exactly that shape — so the
+/// disagreement was between two readings that both succeed, and the suffix is what breaks the tie.
+///
+/// The suffix is not read here and nothing is consumed: the caller only asks whether the initialiser reading is
+/// still the one to take, and the parameter reading that wins instead consumes `throw(…)` through
+/// [`super::types::eat_function_qualifiers`].
+fn a_dynamic_exception_specification_follows(p: &CppParser) -> bool {
+    let Some(after) = index_after_the_group(p, p.current_token_index()) else {
+        return false;
+    };
+
+    let throw_at = significant_index_at(p, after);
+    p.token_kind_at(throw_at) == CppTokenKind::ThrowKeyword
+        && p.token_kind_at(significant_index_at(p, throw_at + 1)) == CppTokenKind::LeftParen
 }
 
 /// Is the cursor on the argument list of a **macro invocation used where a definition goes**?
