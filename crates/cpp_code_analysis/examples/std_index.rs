@@ -31,6 +31,27 @@ fn main() {
     let declared: usize = summaries.iter().map(|s| s.declarations.len()).sum();
     let macros: usize = summaries.iter().map(|s| s.macros.len()).sum();
 
+    // The aliases, counted the way the query layer recognises them: a **type** fact with a `type_of` is a
+    // `typedef`/`using` and the field is what it points at; a class is a type fact without one. Printed because
+    // `docs/roadmap.md` §3.1 asks for the number — following an alias one step is what makes the standard
+    // library's names (`std::string`, `std::vector`, every `*_type`) reachable at all, so how many there are is
+    // how much of the surface that step is holding up.
+    let aliases: usize = summaries
+        .iter()
+        .flat_map(|summary| &summary.declarations)
+        .filter(|fact| fact.kind == cpp_code_analysis::DeclKind::Type && fact.type_of.is_some())
+        .count();
+    let types: usize = summaries
+        .iter()
+        .flat_map(|summary| &summary.declarations)
+        .filter(|fact| fact.kind == cpp_code_analysis::DeclKind::Type)
+        .count();
+    let inherited: usize = summaries
+        .iter()
+        .flat_map(|summary| &summary.declarations)
+        .filter(|fact| !fact.bases.is_empty())
+        .count();
+
     let started = std::time::Instant::now();
     let mut bytes = 0usize;
     let mut encoded = Vec::new();
@@ -55,11 +76,14 @@ fn main() {
 
     println!(
         "files {} | declarations {declared} | macros {macros}\n\
+         types {types} ({aliases} aliases, {} classes) | classes with bases {inherited}\n\
          build {:?} | encode+write {:?} | read+decode {:?} | on disk {} KB ({read_back} read back)",
         summaries.len(),
+        types - aliases,
         built,
         written,
         read,
         bytes / 1024,
     );
 }
+

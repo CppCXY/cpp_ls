@@ -79,6 +79,41 @@ pub(crate) trait MarkerEventContainer {
         }
     }
 
+    /// Close every node opened after `target` **and emit each one's `NodeEnd`**.
+    ///
+    /// The counterpart of [`MarkerEventContainer::finish_marks_to`] for the one caller that is *not*
+    /// abandoning the tokens: a class body whose member declaration failed **after** consuming them.
+    /// Detaching is wrong there, and the cost is not local. An unpaired `NodeStart` is balanced by the tree
+    /// builder at the **end of the stream**, so the abandoned declaration swallows every token written after
+    /// it — the members below it stop being members, and nothing reports anything:
+    ///
+    /// ```cpp
+    /// struct Base {
+    ///   _GLIBCXX20_CONSTEXPR void f(size_type) { }   // a declaration the general rule cannot finish
+    ///   int after;                                    // …and this became a *child* of it
+    /// };
+    /// ```
+    ///
+    /// That is `bits/stl_vector.h`'s `_Vector_impl` and, through it, all of `std::vector`: one declaration
+    /// the parser gave up on took the rest of the class with it, silently (`docs/grammar-gaps.md`, tenth
+    /// round). Emitting the ends keeps what was read — the declaration node is there, with its specifiers and
+    /// its declarator — and lets the recovery carry on beside it rather than inside it.
+    ///
+    /// Innermost first, which is the order a tree builder pairs them in; the `NodeStart`s are opened
+    /// outermost first, so the stack is walked backwards. Closing a mark that already has its end event is a
+    /// no-op, so a node whose owner did reach its own `complete()` is not closed twice.
+    fn end_marks_to(&mut self, target: usize) {
+        if self.get_mark_level() <= target {
+            return;
+        }
+
+        let mut positions = self.drain_marks(target);
+        positions.reverse();
+        for position in positions {
+            self.close_mark(position, true);
+        }
+    }
+
     /// Remove and return the open-node positions above `target`.
     fn drain_marks(&mut self, target: usize) -> Vec<usize>;
 

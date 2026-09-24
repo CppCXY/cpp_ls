@@ -409,6 +409,11 @@ fn direct_members(
     path: &Path,
     class: &str,
 ) -> Known<Vec<(PathBuf, DeclFact)>> {
+    // Followed here as well as in `direct_member`, for the same reason it is there: the members of `std::string`
+    // are the members of `std::basic_string`, and the member-list query and the single-member query must not
+    // disagree about which class a spelling names.
+    let class = &resolve_aliases(index, scopes, root, path, class);
+
     if let Some(scope) = scopes.scope_with_qualified_name(class)
         && let Some(data) = scopes.scope(scope)
     {
@@ -434,9 +439,11 @@ fn direct_members(
     // the declaration itself rather than by the absence of members: a fact whose own qualified name is the
     // spelling asked about is the class, and everything else that matched did so on its bare name.
     match index.definition(class, path) {
-        Known::Yes(found) if found.fact.qualified_name() == class => Known::Yes(Vec::new()),
+        Known::Yes(found) if found.fact.qualified_name() == *class => Known::Yes(Vec::new()),
         Known::Unknown(reason) => Known::Unknown(reason),
-        Known::Yes(_) | Known::No => Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(class))),
+        Known::Yes(_) | Known::No => {
+            Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(class.as_str())))
+        }
     }
 }
 
@@ -1287,6 +1294,12 @@ fn member_fact(
     class: &str,
     member: &str,
 ) -> Known<(DeclFact, PathBuf)> {
+    // Followed **before** anything else, so that both the lookup and the spelling this answer reports when it
+    // fails name the class rather than the alias: `Widget::size` is the question that could not be answered, and
+    // `Alias::size` would be a question nobody asked. `direct_member` follows it again for the bases it is handed,
+    // where the step is idempotent — a class resolves to itself.
+    let class = &resolve_aliases(index, scopes, root, path, class);
+
     if let Some(found) = direct_member(index, scopes, root, path, class, member) {
         return Known::Yes(found);
     }
@@ -1334,6 +1347,150 @@ fn member_fact(
     ))))
 }
 
+/// How many aliases deep a type spelling is followed before the walk gives up.
+///
+/// `using A = A;` and `using A = B; using B = A;` are both writable, and a walk that trusted the spelling would
+/// follow them for ever. Eight is far past any real chain of aliases — the standard library's deepest are two or
+/// three (`string` → `basic_string`, `size_type` → `size_t` → …) — and the answer when it is reached is the
+/// spelling that was last resolved, which the caller then reports as not declared rather than as a wrong class.
+const MAX_ALIAS_DEPTH: usize = 8;
+
+/// The class a type spelling names, following `typedef`/`using` **aliases**.
+///
+/// `std::string` is `basic_string<char>`; nobody declares `substr` *in* `string`, because an alias has no members
+/// of its own. So a spelling that resolves to an alias is replaced by the type the alias points at, and the
+/// lookup carries on with that — which is one step, not a type system: no instantiation, no substitution, no
+/// inference of what the target's template arguments mean.
+///
+/// # The target is resolved in the alias's own scope
+///
+/// ```cpp
+/// namespace std { typedef basic_string<char> string; }   // the target is written *relative to* `std`
+/// ```
+///
+/// Following it as a bare `basic_string` would look in the wrong place. The candidates are therefore
+/// `<the alias's scope>::<target>` first and the bare target second — which is C++'s own enclosing-scope lookup,
+/// done one step of it: the standard library's aliases are nearly all spelled this way, so the first candidate is
+/// the one that answers, and a target that names something global still resolves through the second.
+///
+/// # Bounded, and honest when it stops
+///
+/// A spelling that cannot be resolved to a class comes back **unchanged**, so the caller reports
+/// `NotDeclaredHere(<what the file wrote>)` rather than a name nobody wrote. See [`MAX_ALIAS_DEPTH`] for the bound
+/// and why a bound is needed at all.
+fn resolve_aliases(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+) -> String {
+    let mut current = class.to_string();
+    let mut seen: Vec<String> = Vec::new();
+
+    for _ in 0..MAX_ALIAS_DEPTH {
+        if seen.contains(&current) {
+            break;
+        }
+        seen.push(current.clone());
+
+        let Some((target, scope)) = alias_target_of(index, scopes, root, path, &current) else {
+            break;
+        };
+
+        let target = base_type_name(&target).to_string();
+        if target.is_empty() {
+            break;
+        }
+
+        // An unqualified target is written relative to the scope the alias was declared in, so that spelling is
+        // tried first — and the bare one is kept for a target that names a global. A qualified target is already a
+        // complete spelling and is taken as it stands.
+        let candidates: Vec<String> = match &scope {
+            Some(prefix) if !target.contains("::") => {
+                vec![format!("{prefix}::{target}"), target.clone()]
+            }
+            _ => vec![target.clone()],
+        };
+
+        let next = candidates
+            .iter()
+            .find(|candidate| is_declared(index, scopes, path, candidate))
+            .unwrap_or(&candidates[0])
+            .clone();
+
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+
+    current
+}
+
+/// What an alias points at, and the scope it was declared in, or `None` when the spelling is not an alias.
+///
+/// # How an alias is recognised
+///
+/// In the buffer, by the binding's kind, which is exact. Through the index, by the rule [`DeclFact::type_of`]
+/// documents: a **type** fact with a `type_of` is an alias, and a class is a type fact without one. That is the
+/// whole of the test, and it is one test rather than a new field on purpose — the field was already there for
+/// variables, and what an alias *has* is a type in the same sense: the one it points at.
+fn alias_target_of(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+) -> Option<(String, Option<String>)> {
+    // The buffer first: the alias may be in a file that has never been written to disk.
+    let (scope_name, short) = match class.rsplit_once("::") {
+        Some((prefix, short)) => (prefix.to_string(), short.to_string()),
+        None => (String::new(), class.to_string()),
+    };
+
+    if let Some(scope) = scopes.scope_with_qualified_name(&scope_name)
+        && let Some(data) = scopes.scope(scope)
+        && let Some(binding) = data
+            .bindings
+            .iter()
+            .find(|binding| binding.name.identifier_text() == Some(short.as_str()))
+        && let Some(target) = crate::sema::declarations::declared_alias_target(root, binding)
+    {
+        return Some((
+            target,
+            (!scope_name.is_empty()).then_some(scope_name.clone()),
+        ));
+    }
+
+    match index.definition(class, path) {
+        Known::Yes(found) if found.fact.kind == crate::DeclKind::Type => found
+            .fact
+            .type_of
+            .clone()
+            .map(|target| (target, found.fact.scope.clone())),
+        Known::Yes(_) | Known::Unknown(_) | Known::No => None,
+    }
+}
+
+/// Is this spelling a declaration this analysis can see?
+///
+/// Used to choose between the two ways of reading an alias's target — relative to the alias's scope, or as a
+/// spelling in its own right — and deliberately a *cheap* question: a scope in the buffer or one fact in the
+/// index is answered without walking anything.
+fn is_declared(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    path: &Path,
+    spelling: &str,
+) -> bool {
+    if scopes.scope_with_qualified_name(spelling).is_some() {
+        return true;
+    }
+
+    matches!(index.definition(spelling, path), Known::Yes(_))
+}
+
 /// The declaration of `member` written **directly** in `class`, or `None`.
 ///
 /// The qualified name `<class>::<member>`, which is why nothing here needs to know what a class *is*: the file
@@ -1347,6 +1504,11 @@ fn direct_member(
     class: &str,
     member: &str,
 ) -> Option<(DeclFact, PathBuf)> {
+    // An alias has no members of its own, so the spelling is followed to the class it names before anything is
+    // looked up: `std::string`'s members are `std::basic_string`'s. This is the one place a spelling becomes a
+    // class for a **single** member, which is why the step lives here rather than at every caller.
+    let class = &resolve_aliases(index, scopes, root, path, class);
+
     // A class declared in this file is looked up here first, which is what makes the whole query work on a buffer
     // that has never been written to disk. The declared type is filled in from the tree, because a member of a
     // member is exactly what a nested access asks for next.
@@ -1360,6 +1522,28 @@ fn direct_member(
         return Some((fact_from_binding(root, class, binding), path.to_path_buf()));
     }
 
+    // Several declarations of one name **in one class** are overloads, not an ambiguity. The language keeps them in
+    // a single overload set and picks by argument types, which this layer does not have — and a cursor still needs
+    // one answer, so the first in declaration order is it. That is the rule `definition_at` already uses within a
+    // scope, and it is why [`ProjectIndex::declarations_in`] is asked here rather than
+    // [`ProjectIndex::definition`], whose "several visible declarations" answer is right for a *name* and wrong
+    // for a member: measured on the closure of `<string>`, every real member (`size`, `find`, `substr`) has
+    // several declarations, so a member lookup that called that ambiguous reported `NotDeclaredHere` for the whole
+    // standard library.
+    //
+    // A consumer that wants all of them asks [`members_of`], which is the query that exists for it — the split is
+    // "a jump takes the first, a list takes them all".
+    if let Some(found) = index
+        .declarations_in(class, path)
+        .into_iter()
+        .find(|declaration| declaration.fact.name == member)
+    {
+        return Some((found.fact.clone(), found.file.clone()));
+    }
+
+    // Nothing is scoped to that class, so the last thing to try is the qualified spelling itself: a member defined
+    // out of line can have been filed under a spelling the class's own scope is not (`C::f` for a definition
+    // written outside `C`), and that is exactly what this lookup is for.
     match index.definition(&format!("{class}::{member}"), path) {
         Known::Yes(found) => Some((found.fact, found.file)),
         Known::Unknown(_) | Known::No => None,
@@ -2784,9 +2968,189 @@ mod tests {
         super::member_across_files(&index, &scopes, &root, Path::new(from), at(source, needle))
     }
 
+    // -------------------------------------------------------------------------------------------
+    // typedef / using aliases
+    //
+    // The shape the standard library is written in: `std::string` **is** `std::basic_string<char>` and has no
+    // members of its own, so a lookup that stops at the spelling finds nothing at all. The motivating case is in
+    // these tests in its real form — a `typedef` inside a namespace, with the target written relative to it.
+    // -------------------------------------------------------------------------------------------
+
     #[test]
-    fn a_member_access_resolves_through_the_objects_type() {
-        let source = "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget w;\n  w.size = 1;\n}\n";
+    fn a_member_of_an_alias_resolves_through_it() {
+        let source = "struct Widget {\n  int size;\n};\nusing Alias = Widget;\n\
+                      void f() {\n  Alias w;\n  w.size = 1;\n}\n";
+        let found = member_of(&[], "/p/a.cpp", source, "size = 1;");
+
+        let Known::Yes(member) = found else {
+            panic!("`Alias` names `Widget`, so `size` is `Widget::size`: {found:?}");
+        };
+        assert_eq!(member.fact.name, "size");
+        assert_eq!(member.fact.scope.as_deref(), Some("Widget"));
+    }
+
+    #[test]
+    fn a_member_of_the_standard_librarys_string_resolves_into_basic_string() {
+        // The case `docs/roadmap.md` §3.1 names: `basic_string` is where every member is declared, and the
+        // alias's target is written **unqualified** inside `namespace std`, so following it needs the alias's own
+        // scope. Getting that wrong looks up a global `basic_string` and finds nothing.
+        let source = "namespace std {\n  template<typename T> struct basic_string {\n    int size;\n    \
+                      int find(int);\n  };\n  typedef basic_string<char> string;\n}\n\
+                      void f() {\n  std::string s;\n  s.size = 1;\n}\n";
+        let found = member_of(&[], "/p/a.cpp", source, "size = 1;");
+
+        let Known::Yes(member) = found else {
+            panic!("`std::string::size` is `std::basic_string::size`: {found:?}");
+        };
+        assert_eq!(member.fact.name, "size");
+        assert_eq!(
+            member.fact.scope.as_deref(),
+            Some("std::basic_string"),
+            "the member is declared in the class the alias points at, and its scope says so"
+        );
+    }
+
+    #[test]
+    fn an_alias_written_with_using_resolves_the_same_way() {
+        let source = "namespace std {\n  template<typename T> struct basic_string {\n    int size;\n  };\n  \
+                      using string = basic_string<char>;\n}\n\
+                      void f() {\n  std::string s;\n  s.size = 1;\n}\n";
+        let found = member_of(&[], "/p/a.cpp", source, "size = 1;");
+
+        let Known::Yes(member) = found else {
+            panic!("the `using` form is the same declaration shape: {found:?}");
+        };
+        assert_eq!(member.fact.scope.as_deref(), Some("std::basic_string"));
+    }
+
+    #[test]
+    fn an_alias_target_written_with_a_qualifier_is_taken_as_it_stands() {
+        // A qualified target is already a complete spelling, so the alias's scope is not prepended: doing it would
+        // ask for `ns::other::Thing`, which nothing declares.
+        let source = "namespace other {\n  struct Thing {\n    int size;\n  };\n}\n\
+                      namespace ns {\n  using Alias = other::Thing;\n}\n\
+                      void f() {\n  ns::Alias t;\n  t.size = 1;\n}\n";
+        let found = member_of(&[], "/p/a.cpp", source, "size = 1;");
+
+        let Known::Yes(member) = found else {
+            panic!("the qualified target is the class: {found:?}");
+        };
+        assert_eq!(member.fact.scope.as_deref(), Some("other::Thing"));
+    }
+
+    #[test]
+    fn an_alias_to_an_alias_is_followed_to_the_class() {
+        // Two steps, which is what the bound exists for: `A` → `B` → the class.
+        let source = "struct Widget {\n  int size;\n};\nusing B = Widget;\nusing A = B;\n\
+                      void f() {\n  A w;\n  w.size = 1;\n}\n";
+        let found = member_of(&[], "/p/a.cpp", source, "size = 1;");
+
+        let Known::Yes(member) = found else {
+            panic!("two aliases deep is still a class at the end: {found:?}");
+        };
+        assert_eq!(member.fact.scope.as_deref(), Some("Widget"));
+    }
+
+    #[test]
+    fn a_cycle_of_aliases_terminates_and_says_nothing_was_declared() {
+        // `using A = B; using B = A;` is writable, so the walk has to stop on its own rather than follow the pair
+        // for ever. The answer is the honest one: nothing in the chain names a class.
+        let source = "using A = B;\nusing B = A;\nvoid f() {\n  A w;\n  w.size = 1;\n}\n";
+        let found = member_of(&[], "/p/a.cpp", source, "size = 1;");
+
+        assert!(
+            matches!(found, Known::Unknown(_)),
+            "a cycle of aliases names no class: {found:?}"
+        );
+    }
+
+    #[test]
+    fn an_alias_to_itself_terminates() {
+        let source = "using A = A;\nvoid f() {\n  A w;\n  w.size = 1;\n}\n";
+        let found = member_of(&[], "/p/a.cpp", source, "size = 1;");
+
+        assert!(
+            matches!(found, Known::Unknown(_)),
+            "`using A = A;` names no class: {found:?}"
+        );
+    }
+
+    #[test]
+    fn an_alias_whose_target_is_not_indexed_reports_the_target() {
+        // The target is a real spelling even when nobody indexed it, and the answer says so rather than reporting
+        // the alias: `Widget::size` is the question that could not be answered, not `Alias::size`.
+        let source = "using Alias = Widget;\nvoid f() {\n  Alias w;\n  w.size = 1;\n}\n";
+        let found = member_of(&[], "/p/a.cpp", source, "size = 1;");
+
+        let Known::Unknown(UnknownReason::NotDeclaredHere(written)) = found else {
+            panic!("the target is what was looked for: {found:?}");
+        };
+        assert_eq!(&*written, "Widget::size");
+    }
+
+    #[test]
+    fn an_alias_to_a_non_class_is_not_a_member_lookup() {
+        // `typedef int MyInt;` — following it lands on `int`, which names no class, so the answer is "not
+        // declared" rather than a jump into whatever `int` might be mistaken for.
+        let source = "typedef int MyInt;\nvoid f() {\n  MyInt x;\n  x.size = 1;\n}\n";
+        let found = member_of(&[], "/p/a.cpp", source, "size = 1;");
+
+        assert!(
+            matches!(found, Known::Unknown(UnknownReason::NotDeclaredHere(_))),
+            "`int` declares no members: {found:?}"
+        );
+    }
+
+    #[test]
+    fn a_function_pointer_typedef_records_the_whole_type() {
+        // `typedef void (*F)(int);` — the type is the specifiers *and* the declarator with the alias's own name
+        // cut out, which is `void (*)(int)`. Reading only the specifiers would give `void`, and reading the
+        // declarator without cutting would give a type whose *name* is `F`.
+        let source = "typedef void (*F)(int);\nvoid f() {\n  F callback;\n  callback();\n}\n";
+        let (index, tree) = analysed(&[], "/p/a.cpp", source);
+        let root = tree.get_red_root();
+
+        let Known::Yes(fact) = index.definition("F", Path::new("/p/a.cpp")) else {
+            panic!("the alias is a fact")
+        };
+        assert_eq!(
+            fact.fact.type_of.as_deref(),
+            Some("void (*)(int)"),
+            "specifiers plus declarator minus the name"
+        );
+
+        // And a `typedef` of a plain type needs no such surgery.
+        let plain = "typedef basic_string<char> String;\n";
+        let (index, tree) = analysed(&[], "/p/b.cpp", plain);
+        let Known::Yes(fact) = index.definition("String", Path::new("/p/b.cpp")) else {
+            panic!("the alias is a fact")
+        };
+        assert_eq!(fact.fact.type_of.as_deref(), Some("basic_string<char>"));
+
+        let _ = (root, tree);
+    }
+
+    #[test]
+    fn a_member_list_of_an_alias_is_the_member_list_of_its_target() {
+        // The other query that turns a spelling into a class, and it has to agree with the single-member one:
+        // completion for `std::string` that listed nothing would be a member list of the alias rather than of the
+        // class, and an alias has no members.
+        let source = "namespace std {\n  template<typename T> struct basic_string {\n    int size;\n    \
+                      int find(int);\n  };\n  typedef basic_string<char> string;\n}\n";
+        let list = members_of_class(&[], "/p/a.cpp", source, "std::string");
+
+        let Known::Yes(list) = list else {
+            panic!("the alias's target is a class with members: {list:?}");
+        };
+        assert!(
+            names(&list).contains(&"size") && names(&list).contains(&"find"),
+            "the members are `basic_string`'s: {:?}",
+            names(&list)
+        );
+    }
+
+    #[test]
+    fn a_member_access_resolves_through_the_objects_type() {        let source = "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget w;\n  w.size = 1;\n}\n";
         let found = member_of(&[], "/p/a.cpp", source, "size = 1;");
 
         let Known::Yes(member) = found else {
@@ -4580,4 +4944,5 @@ mod tests {
         );
     }
 }
+
 

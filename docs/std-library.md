@@ -4,7 +4,7 @@
 [`index-design.md`](index-design.md)，parser 的读法与缺漏仍在 [`grammar-gaps.md`](grammar-gaps.md)——
 这份是那条工作线的施工图，以及它撞上的几条旧决定。
 
-**当前的待办队列在 [`next-steps.md`](next-steps.md)**（含 parser 侧的第一条错清单与最小复现）；这份文档保留"为什么这么做"与每次普查的数字。
+**当前的待办队列在 [`roadmap.md`](roadmap.md)**（含 parser 侧的第一条错清单与最小复现）；这份文档保留"为什么这么做"与每次普查的数字。
 
 ## 目标，与明确不做的事
 
@@ -227,6 +227,146 @@ let config = toolchain.map_or_else(CompilerConfig::new, |toolchain| toolchain.co
 
 **运算符那一条只"修完"了 1 个文件（`bits/ranges_cmp.h`），但把另外 4 个推后了一整段**：`compare` 55→49 条错、`bits/max_size_type.h` 58→57、`bits/stl_construct.h` 20→16、`bits/iterator_concepts.h` 从 474 行推到 616 行。它们各自的**下一个**拦路虎都不同——这正是下面那个判断点要说的事。
 
+## 语义侧的第一批数字（P0 之后能问什么）
+
+P0 让 `#include <string>` **解析**了，但"解析"不等于"能问"。这一轮补上别名（`roadmap.md` §3.1）
+与"文件自身守卫不算条件"之后，才第一次有跨文件答案。探针是 **`examples/std_query.rs`**：
+它写一个成员访问的小文件、发现工具链、索引闭包，然后按游标问每一个访问。
+
+本机（`<vector>/<string>/<map>/<algorithm>` 的闭包，318 个文件，g++ 15.1.0）：
+
+```text
+索引：318 个文件 3.0 s（318 解析、0 命中、2 不落盘、3 个解析不到的 include）
+别名事实：4821 条声明里 305 条别名（2770 条类型事实的 11%）        examples/std_index.rs
+
+std::string          -> 找到：stringfwd.h，kind Type，type_of Some("basic_string<char>")，scope Some("std")
+std::basic_string    -> Ambiguous（前向声明 + 定义都在可见范围里）
+std::vector          -> NotDeclaredHere（声明还在 _GLIBCXX_DEBUG 那一类条件里）
+s.size / s.substr / v.push_back …  -> 全部失败，0/7
+   但报错里的名字已经是 `std::basic_string::size`（不是 `std::string::size`）
+```
+
+**最后那一行是这一轮的证据**：失败的*拼写*已经是别名跟过去之后的类，说明"跟着 typedef 走一步"在真实闭包上生效了；
+挡住答案的是**重载**——一个真实类的成员几乎总是三条五条同名声明，而现在的查找规则把"多条可见"直接判成
+`Ambiguous`。那条规则在普通名字查询里是对的（`a::Widget` 与 `b::Widget` 必须分得开），在**成员**查询里是错的。
+
+**这一轮真正买到的是中间那两行**：`std::string` 从"`ConditionalCompilation`（等于什么都不知道）"
+变成"一条带目标拼写的别名事实"。挡住它的不是别名，是**头文件自己的 include guard**——每个头文件把身体包在
+`#ifndef _GLIBCXX_STRING` 里，于是每个 `#include` 都"落在 `#if` 里"，可见性走查把每一步都记成有条件。
+`index::deguard_the_files_own_guard` 修的就是这条（理由见 `index-design.md` 三道判据第 3 条）。
+
+剩下两格写在 `roadmap.md` §3.1 末尾，**它们是下一步真正的活**：真实类的成员几乎总是重载
+（`basic_string::size` 有三条），而现在的查找规则把"多条"直接判成 `Ambiguous`；这在普通名字查询里是对的，
+在**成员**查询里是错的。
+
+### 重载那一格修了，于是链条断在 **parser** 上（这一轮最重要的一条）
+
+成员查找不再走 `definition()`（它的"多条可见即歧义"对*名字*是对的），改问 `declarations_in(class)`
+并按声明顺序取第一条：**跳转取第一条、列表取全部**（`members_of` 就是取全部的那个查询）。
+理由与测量写在 `direct_member` 的注释里。修完之后 `std_query` 依然是 0/7，但诊断输出把链条指清楚了：
+
+```text
+std::basic_string 的成员 -> 7 条，全是 typedef（value_type / allocator_type / size_type …）
+其中名叫 `size` 的        -> 0 条
+```
+
+**成员函数一条都没有被索引**，因为 `bits/basic_string.h` 读不干净——而它的**第一条错**正是 `roadmap.md`
+队列里的 **2.1 与 2.6**。这一条**已经修了**（见下面"修完之后"），那时写下的判断是：
+
+```cpp
+485: #if __cplusplus >= 201103L
+486:   using _IterBase = decltype(std::__niter_base(__k1));
+487:   if constexpr (__or_<...>::value)
+489:     _S_copy(...);
+490: #if __cpp_lib_concepts           // ← 第一条错：指令落在 if/else 的接缝上（队列 2.1）
+491:   else if constexpr (requires {  // ← 以及 if constexpr 里的 requires 表达式（队列 2.6）
+```
+
+### 修完之后：`basic_string` 的成员从 7 条变成 117 条
+
+**第一处**（`if`/`else` 之间的指令，`parse_if_statement`）：`basic_string.h` 的第一处错
+**490 行 → 3838 行**——整个类体现在读通了；普查 **干净 74 → 76**。
+
+**第二处**（类体里两个成员之间的指令，`parse_class_body_members`）：改前 `#if` 那一行被读成一条**成员声明**
+（名字是条件里的第一个标识符），后面的成员全成了它的子孙——**无损、零诊断、形状错**。
+改后 `declarations_in("std::basic_string")`：**7 → 117 条**。
+
+**第三处已经定位到行**（`basic_string.h` 1161–1163）：两个宏站在类型前面
+（`_GLIBCXX_NODISCARD _GLIBCXX20_CONSTEXPR` / `size_type` / `size() const`），于是 walker 把第一个宏当成
+**类型**、把 `size_type` 当成**名字**，`size` 从来没有被绑定——这就是 `std_query` 依然 0/7 的原因，
+也是 `roadmap.md` §2.3 那一族（"宏在声明的最前面"）。修它的判据要在"文件自己的 `#define` 表"与
+"下划线大写的实现保留名"之间选，选后者时按维护约定第 16 条写清为什么。
+
+
+所以**语义线的下一块不在语义这边**：`basic_string` 是标准库里最常用的类，它的成员函数读不出来，
+上面那些别名、守卫、重载的修复都没有东西可查。先做 parser 的 2.1（四个接缝是一个模式）与 2.6，
+再用同一个探针量一次——`std_query` 的分母是 7，现在的 0/7 是一个**可以对比的基线**。
+
+
+### 第十轮 + 第十一轮：`basic_string` 的公开接口全部读到，`std_query` **0/7 → 7/7**
+
+第九轮结束时 `declarations_in("std::basic_string")` 有 **117 条**成员——typedef 与私有辅助函数（`_M_*`、`_S_*`）
+都在，**公开接口一条都没有**。第十轮做的是 §2.1 那条接缝在 `bits/basic_string.h` 里的**九处**，以及"读坏了之后
+怎么办"三条；第十一轮做的是"一个构造写在两个分支里"与"一个 token 定读法"六条，外加**同一条恢复判据在语句层
+的第二次**（最后那一条把 `std::map` 的成员表救回来）。形状与读法见 [`grammar-gaps.md`](grammar-gaps.md)
+的"第十轮""第十一轮"两节。
+
+```text
+declarations_in("std::basic_string")   117 → 442 条
+  其中函数                              103 → 391
+  成员里有                             size / length / max_size / resize / capacity / reserve / clear / empty /
+                                       at / front / back / append / push_back / assign / insert / erase / pop_back /
+                                       replace / copy / swap / c_str / data / get_allocator / find / rfind /
+                                       find_first_of / find_last_of / find_first_not_of / find_last_not_of /
+                                       substr / compare / starts_with / ends_with / contains / begin / end /
+                                       rbegin / rend / cbegin / cend / crbegin / crend
+basic_string.h 里该作用域的事实覆盖到        3759 行（类体是 93–3764，即整个类）
+examples/std_query.rs                 0/7 → 7/7（七条查询全部答出来，而且都答在标准库自己的头文件上：
+                                       s.size / s.substr / s.empty → bits/basic_string.h；
+                                       v.push_back / v.size → bits/stl_vector.h；
+                                       m.find / m.begin → bits/stl_map.h）
+bits/stl_vector.h 的事实行数           37 → 469（`std::vector` 自己 0 → 113 条）
+普查（128 个文件的闭包）               干净 76 → 80 / 报错 52 → 48；消息总数 1435 → 932
+                                      每文件错误数：干净 80 | 只有一个 6 | 两到五个 13 | 超过五个 29
+std_index                             声明 4821 → 12550；类型 2770 → 6223（别名 305 → 744）；带基类的类 54 → 155
+```
+
+**探针的设计在这一轮兑现了两次**：`s.empty` 一度答在 `cow_string.h`（那是老 ABI 的那份类），而 `m.find`
+一度答"未声明"——一个 resolved 计数会把前者算成通过、把后者算成失败，只有"答在哪个文件、哪个作用域"能说出
+这两件事各自是什么。
+
+**同一轮里，"文件的首错"在三个文件上都往后走了，而干净文件数只 +3**——因为这一族修的是**静默错树**
+（成员挂错了父亲，树无损、良构、多数时候零诊断）。判断这类收益只能靠 `gaps.rs` 的形状断言 + 成员数，
+普查只看得见报错：第 29 条约定又一次被验证。
+
+**同一轮里还有一条被量下来的否定结论**（假设写对了、也修好了，仍然要撤）：`bits/stl_vector.h:464` 的
+`__glibcxx_class_requires(…)`（宏定义在**被包含的** `c++config.h` 里，所以宏表拿不到它）看起来只能用**形状**读，
+而"名字 + 括号组 + 没有 `;`"这条形状规则在隔离里完全正确、失败后回滚的写法也对（维护约定第 32 条），
+量下来却是 **398 → 287 条成员、`stl_vector.h` 的首错一行没动**。原因在 `ErrorNode` 恢复：它只前进一个 token，
+所以读不下来的声明只赔上自己，后面的成员还是成员；一条宏读法会把名字和括号组一起吃掉。
+**数字先于直觉**——这条规则要是"看起来对"就留下，闭包里就少了 111 个成员，而且没有任何一个数字会说出来。
+
+**后半段（同一轮）：接缝修好只有 3/7，剩下的三个成因都在"读坏了之后怎么办"**——
+
+* **失败的声明必须带上 `NodeEnd` 关掉**：`close_marks_above` 是"摘掉而不发结束事件"，而没配对的 `NodeStart`
+  会被建树器在末尾补上，于是那条放弃掉的声明**吞掉写在它后面的一切**。`bits/stl_vector.h:192` 的一条成员
+  就让 `std::vector` 一个成员都没有（`v.size`/`v.push_back` 都答"未声明"）。改成 `end_marks_to` 之后，
+  `stl_vector.h` 的事实 **37 → 469**、`std::vector` 自己 **0 → 113 条**，`v.push_back` 答得出来。
+* **一个声明符只有一个初始化式**：同一条成员读成"变量 `_M_grew` 被初始化两次"，第二个 `{ }` 让它没有 `;` 可收尾。
+* **一个声明符可以有两个初始化列表**（一个分支一个）+ **指令与宏后缀交替**：`bits/cow_string.h:515` 的
+  copy-on-write 构造函数，恢复把它的 `{ }` 当成类的收尾大括号，`class basic_string` 提前 3400 行结束
+  （该作用域 159 → 48 → 修好后 **203** 条事实）。
+
+三条合起来把 `std_query` 从 3/7 推到 **5/7**，而**普查的干净文件数一个没动**（还是 79）——
+又是第 29 条：这一族修的从来不是报错，是"成员还算不算成员"。
+
+**那剩下 2 条查询（`v.size`、`m.find`）在第十一轮的最后一步也通了**，成因不在"类读不出来"（两个类的成员早就在
+索引里），而在**函数体**：`bits/stl_map.h:527` 的 `operator[]` 里有一个没有 `;` 的宏，失败的表达式语句把
+`ExpressionStat` **摘掉而不发结束事件**，那个没配对的 `NodeStart` 吞掉了函数体剩下的部分与整个类体剩下的部分
+（维护约定第 34 条在语句层的第二次收费）。`std-library.md` 里"`std::vector` 的声明落在条件编译里"那条判断
+是错的，第十轮推翻了它（`roadmap.md` §3.1 已改）。
+
+
 ### 判断点：队列已经从"一族"变成"长尾"
 
 同一个工具现在多打一段**每文件错误数直方图**，因为第一处错误看不出"还差多远"：
@@ -234,6 +374,7 @@ let config = toolchain.map_or_else(CompilerConfig::new, |toolchain| toolchain.co
 ```text
 第八轮之前：干净 88 | 只有一个错 3 | 两到五个错 22 | 超过五个错 69
 第八轮之后：干净 97 | 85 个文件仍报错
+第十轮之后：干净 79 | 只有一个 1 | 两到五个 13 | 超过五个 35     （128 个文件的闭包）
 ```
 
 **只有 3 个文件是"修一个构造就干净"**，而 69 个文件有 5 个以上的错——那些是级联，第一个错背后还压着好几个不同的构造。这和前几轮完全不同：命名空间头一条规则拿下 30 个文件，后缀宏一条拿下 5 个，而现在的每一项只值 1–3 个文件、彼此毫无关系（变量模板偏特化、`if (…) [[likely]]`、宏站在关键字位置、`__typeof__`/`__int128` 这类 GNU 扩展、小写函数式宏独占一行）。
@@ -373,3 +514,8 @@ not_indexed, stats }`。
 | 3 干净解析才可信 | **这一轮的核心张力**，见上一节；标准库把这个粒度问题摆到台面上 |
 | 4 改 schema 抬版本 | P3（宏环境进键）和可能的"干净度字段"都要抬；前者还要抬 `FORMAT_VERSION` |
 | 5 文档是规范 | 闭包的错误普查是**队列**，写进 `grammar-gaps.md`；修一条钉一条 |
+
+
+
+
+

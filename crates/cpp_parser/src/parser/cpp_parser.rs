@@ -1551,10 +1551,18 @@ impl<'a> CppParser<'a> {
     /// Unlike [`CppParser::rollback`], which erases events, this keeps the text and only
     /// re-balances the node stack. Used by statement-level recovery when the tokens are known to
     /// belong to the current block but the statement parser gave up part way through.
+    ///
+    /// The nodes are closed **with their end events** ([`MarkerEventContainer::end_marks_to`]), which is the
+    /// whole difference between a local error and a lost block: a node detached without one is balanced by the
+    /// tree builder at the **end of the stream**, so the statement that failed swallows everything written after
+    /// it — including the `}` that closes its own block. That is what `bits/stl_map.h` pays for:
+    /// `__glibcxx_function_requires(…)` is a macro written without its `;`, the expression statement failed, and
+    /// the `ExpressionStat` left behind then took the rest of `operator[]`'s body *and* the rest of `class map`
+    /// with it (`std::map` had no `find`). See maintenance convention 34.
     pub fn recover_to_level(&mut self, base: usize) {
         if self.open_marks.len() > base {
             self.emit_missing_node();
-            self.close_marks_above(base);
+            self.end_marks_to(base);
         }
     }
 

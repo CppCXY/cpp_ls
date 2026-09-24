@@ -1506,6 +1506,70 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
             Ok(m.complete(p))
         }
 
+        // A **`typename`-qualified type used as a functional conversion**: `typename T::type{}`,
+        // `typename T::type(x)`.
+        //
+        // A dependent name needs the keyword before it can be read as a type at all, and the standard allows a
+        // typename-specifier wherever a simple-type-specifier may stand — the functional-notation conversion is one
+        // of those places. libstdc++ writes it inside a condition, which is where it matters most
+        // (`bits/basic_string.h:3944`):
+        //
+        // ```cpp
+        // if _GLIBCXX17_CONSTEXPR (typename _Alloc_traits::is_always_equal{})
+        // ```
+        //
+        // Without this arm `typename` reached the expression rule and nothing claimed it: `expected primary
+        // expression` against the keyword, and the `if` — with everything after it — went with it.
+        //
+        // The type is read as a **name**, not as a type-id, and that is deliberate: a type-id continues with an
+        // abstract declarator, so it would swallow the very parentheses this expression is made of —
+        // `typename T::f(int)` would come out as one function *type* with no payload left. A functional conversion
+        // takes a simple-type-specifier, which is a name.
+        CppTokenKind::TypenameKeyword
+            if matches!(
+                p.peek_token_kind_at(1..2).first(),
+                Some(&CppTokenKind::Identifier)
+            ) =>
+        {
+            let m = p.mark(CppSyntaxKind::CastExpr);
+            p.bump(); // `typename`
+
+            let the_type = p.mark(CppSyntaxKind::TypenameType);
+            if let Err(err) = super::types::parse_name(p) {
+                the_type.undo(p);
+                m.undo(p);
+                return Err(err);
+            }
+            the_type.complete(p);
+
+            // The payload: exactly one of the two functional spellings, and neither is optional — without one
+            // these tokens are not an expression at all, so the arm fails and the caller's other readings get
+            // their turn.
+            match p.current_token() {
+                CppTokenKind::LeftBrace => {
+                    if let Err(err) = super::decls::parse_braced_initializer(p) {
+                        m.undo(p);
+                        return Err(err);
+                    }
+                }
+                CppTokenKind::LeftParen => {
+                    if let Err(err) = parse_parenthesized_expression(p) {
+                        m.undo(p);
+                        return Err(err);
+                    }
+                }
+                _ => {
+                    m.undo(p);
+                    return Err(CppParseError::syntax_error_from(
+                        "expected `{` or `(` after a `typename` type",
+                        p.current_token_range(),
+                    ));
+                }
+            }
+
+            Ok(m.complete(p))
+        }
+
         // A name, possibly qualified (`std::vector`), and possibly a template-id
         // (`std::vector<int>`). Both forms appear as expressions — `std::move(x)`,
         // `std::vector<int>::size_type` — so the expression grammar has to accept them, not just the

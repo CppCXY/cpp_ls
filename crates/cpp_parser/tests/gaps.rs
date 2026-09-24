@@ -443,8 +443,381 @@ fn a_macro_can_stand_among_a_declarators_suffixes() {
     );
 }
 
-/// An **operator name** is a name in an expression too, in all three positions it can be written.
+/// A **directive inside a declaration** is read where the declaration continues — and the members written after
+/// it stay members.
 ///
+/// Seven constructs, six of them from `bits/basic_string.h`, all of them the same seam: a rule is waiting for one
+/// particular token and the file writes something else there — a `#` directive, or (the last one) a second
+/// specifier name where a declarator was expected. The reading is documented where it happens; what this test
+/// pins is that the **declaration around the seam survives it**.
+///
+/// # Why the count, and not just "it parses"
+///
+/// [`assert_reads`] cannot see the defect these were. A class member read wrongly does not have to produce an
+/// error, an `ErrorNode` or a missing node: what it does is nest every member written after it *inside* the bogus
+/// declaration — lossless, well formed, silent, and with all of those members no longer members of the class.
+/// That is exactly what `bits/basic_string.h` did: measured before these seven, `std::basic_string` had **117**
+/// indexed members and none of the public interface; after them it has **326**, and `examples/std_query.rs` went
+/// from 0/7 to 2/7 (`docs/roadmap.md` §2.1). So each entry says how many members the class has, and the
+/// assertion is that the number did not change.
+#[test]
+fn a_directive_inside_a_declaration_keeps_the_members_after_it_members() {
+    let shapes: &[(&str, usize)] = &[
+        // A constrained constructor whose clause is followed by a directive and then its initializer list
+        // (`bits/basic_string.h:585`). The `:` used to be nobody's token, and `_M_dataplus(_M_local_data())` a
+        // declaration of its own.
+        (
+            "S()\n_GLIBCXX_NOEXCEPT_IF(is_nothrow_default_constructible<_Alloc>::value)\n\
+             #if __cpp_concepts\nrequires is_default_constructible_v<_Alloc>\n#endif\n\
+             : _M_dataplus(_M_local_data())\n{ }\nint after;",
+            2,
+        ),
+        // A member whose **head is conditional** (`bits/basic_string.h:700`): the `#if` half is read where a
+        // member goes, and the `#endif` arrives after the head.
+        (
+            "int a;\n#if __cpp_deduction_guides\ntemplate<typename = _RequireAllocator<_Alloc>>\n#endif\n\
+             S(const _CharT* __s);\nint after;",
+            3,
+        ),
+        // …and the same member with a **head per branch** (`bits/basic_string.h:845`): two heads for one
+        // declaration, one of them after the `#else`.
+        (
+            "int a;\n#if __cplusplus >= 201103L\ntemplate<typename _InputIterator,\n\
+             typename = std::_RequireInputIter<_InputIterator>>\n#else\ntemplate<typename _InputIterator>\n\
+             #endif\nS(const _InputIterator& __beg)\n{ }\nint after;",
+            3,
+        ),
+        // …and with a **specifier between the two heads** (`bits/basic_string.h:1673`), which is the one the
+        // specifier sequence has to read for itself.
+        (
+            "int a;\n#if __cplusplus >= 201103L\ntemplate<class _InputIterator,\n\
+             typename = std::_RequireInputIter<_InputIterator>>\n_GLIBCXX20_CONSTEXPR\n\
+             #else\ntemplate<class _InputIterator>\n#endif\nS&\nappend(_InputIterator __first)\n\
+             { return *this; }\nint after;",
+            3,
+        ),
+        // An attribute followed by the directive that closes its conditional (`bits/basic_string.h:1310`): the
+        // attribute is a specifier, so the directive arrives *inside* the sequence.
+        (
+            "int a;\n#if __cplusplus > 201703L\n[[deprecated(\"use shrink_to_fit() instead\")]]\n#endif\n\
+             void reserve();\nint after;",
+            3,
+        ),
+        // Two unexpanded macros and then a keyword type (`bits/basic_string.h:1329`): the second name has to join
+        // the type, or `_GLIBCXX20_CONSTEXPR` becomes the declarator and `empty` stops being a member.
+        (
+            "int a;\n_GLIBCXX_NODISCARD _GLIBCXX20_CONSTEXPR\nbool\nempty() const\n{ return true; }\nint after;",
+            3,
+        ),
+        // An operator-function-name after a type (`bits/basic_string.h:1025`) — the declarator that does not begin
+        // with an identifier. Read wrongly, the member was a *variable* called `_If_sv`.
+        (
+            "int a;\ntemplate<typename _Tp>\n_GLIBCXX20_CONSTEXPR\n_If_sv<_Tp, S&>\n\
+             operator=(const _Tp& __svt)\n{ return *this; }\nint after;",
+            3,
+        ),
+        // **A macro suffix after a directive, and one initializer list per branch** — the copy-on-write
+        // constructor (`bits/cow_string.h:515`), which is the shape that took 3400 lines of that header with it:
+        // the member after it was read at file scope, because the failed constructor's `{ }` was taken for the
+        // class's closing brace.
+        (
+            "S()\n#if _GLIBCXX_FULLY_DYNAMIC_STRING == 0\n_GLIBCXX_NOEXCEPT\n#endif\n\
+             #if __cpp_concepts\nrequires is_default_constructible_v<_Alloc>\n#endif\n\
+             #if _GLIBCXX_FULLY_DYNAMIC_STRING == 0\n: _M_dataplus(_S_construct(_Alloc()))\n#else\n\
+             : _M_dataplus(_S_construct(_Alloc()))\n#endif\n{ }\nint after;",
+            2,
+        ),
+    ];
+
+    for (fragment, members) in shapes {
+        let source = format!("struct S {{\n{fragment}\n}};\n");
+        assert_eq!(
+            reads(&source, Where::File),
+            Ok(()),
+            "this must parse cleanly: {fragment:?}"
+        );
+        assert_eq!(
+            direct_members(&source),
+            *members,
+            "every member written after the seam must still be a member: {fragment:?}"
+        );
+    }
+}
+
+/// **A member the parser gives up on does not take the class with it.**
+///
+/// The recovery's side of the contract above, and the reason the seams are worth anything at all: a declaration
+/// that fails **after** consuming tokens leaves the nodes it opened behind, and how they are closed decides whether
+/// the rest of the class survives. Closed without their end events — which is what `close_marks_above` does — they
+/// are balanced by the tree builder at the **end of the stream**, so the abandoned declaration swallows every
+/// member written after it:
+///
+/// ```cpp
+/// struct Base {
+///   int x = 1        // no `;` — the declaration gives up *after* reading this much
+///   int after;       // …and this became a child of it: still in the tree, no longer a member
+/// };
+/// ```
+///
+/// Measured on `bits/stl_vector.h`, one such member (`_GLIBCXX20_CONSTEXPR void f(size_type) { }`) left
+/// `std::vector` with **no members at all** — `v.size` and `v.push_back` were both "not declared here", and the
+/// class body ran to the end of the file. `parse_declaration` therefore closes them **with** their end events
+/// (`MarkerEventContainer::end_marks_to`).
+///
+/// The assertion asks the question the defect is about — *is the member still a member* — rather than counting
+/// nodes, because how many error nodes a given piece of rubble leaves is not a promise worth making.
+#[test]
+fn a_member_the_parser_gives_up_on_keeps_the_members_after_it_members() {
+    let rubble = [
+        // The one that cost `std::vector` everything: read as a variable initialised twice, with no `;` to end on.
+        "  _GLIBCXX20_CONSTEXPR void f(size_type) { }\n",
+        // A plain missing semicolon.
+        "  int x = 1\n",
+        // A function declarator whose `;` is missing.
+        "  void g(int)\n",
+        // A macro member nothing can read: `bits/stl_vector.h:464`, the macro defined in an included file.
+        "  __glibcxx_class_requires(_Tp, _SGIAssignableConcept)\n",
+    ];
+
+    for text in rubble {
+        let source = format!("struct Base {{\n{text}  int after;\n}};\n");
+        assert!(
+            has_a_member_containing(&source, "int after;"),
+            "the member after the rubble must still be a member of the class: {text:?}"
+        );
+    }
+}
+
+/// The number of **direct** members a class body holds: its own `Declaration` children, not the declarations
+/// nested inside them — which is the whole difference the two tests below are about.
+fn direct_members(source: &str) -> usize {
+    let Some(body) = class_body(source) else {
+        return 0;
+    };
+
+    body.children()
+        .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declaration)
+        .count()
+}
+
+/// Is there a **direct member** of the class body whose text contains `needle`?
+///
+/// The assertion for the recovery: the member written after a broken one must still be a member, and how many
+/// error nodes the broken one left behind is not a question worth pinning.
+fn has_a_member_containing(source: &str, needle: &str) -> bool {
+    let Some(body) = class_body(source) else {
+        return false;
+    };
+
+    body.children()
+        .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declaration)
+        .any(|child| child.text().to_string().contains(needle))
+}
+
+/// The first `ClassBody` of a parsed fragment, if it has one.
+fn class_body(source: &str) -> Option<cpp_parser::CppSyntaxNode> {
+    CppParser::parse(source, ParserConfig::default())
+        .get_red_root()
+        .descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ClassBody)
+}
+
+/// **A declarator takes one initializer** — and the member is still read as what it is.
+///
+/// The shape is `bits/stl_vector.h:192`, and the reading that made it famous is worth stating precisely, because
+/// neither token is unusual on its own:
+///
+/// ```cpp
+/// struct _Grow {
+///   _GLIBCXX20_CONSTEXPR void _M_grew(size_type) { }
+/// };
+/// ```
+///
+/// A macro this file does not define stands where a return type goes. The suffix reader then decides what
+/// `(size_type)` is — a parameter list, or a direct-initialisation of a variable named `_M_grew` — and with a
+/// *name* recorded in type position it chose the initializer. `void` is a keyword type in front of that name, which
+/// is the one piece of evidence the choice ignored, so the member came out as a variable of type
+/// `_GLIBCXX20_CONSTEXPR void` initialised with `size_type` — and then the body's `{ }` became a **second**
+/// initializer, which no declaration has. With no `;` to end on, the declaration swallowed the rest of the class:
+/// `std::vector` was left with **not one member**.
+///
+/// Refusing the second initializer is what turns that into an ordinary failure, and the recovery then reads the
+/// member correctly with the macro out of the way: one error node for `_GLIBCXX20_CONSTEXPR`, and
+/// `void f(size_type) { }` as the function it is. Both halves are asserted — the failure alone would be worthless
+/// if the members after it were lost, which is what the test below is for.
+#[test]
+fn a_declarator_takes_only_one_initializer() {
+    let source = "struct S {\n  int a;\n  _GLIBCXX20_CONSTEXPR void f(size_type) { }\n  int after;\n};\n";
+
+    assert_eq!(
+        direct_members(source),
+        3,
+        "the macro becomes an error node, and the two real members are still members"
+    );
+    assert!(
+        has_a_member_containing(source, "void f(size_type) { }"),
+        "and the member the macro stood in front of is read as the function it is"
+    );
+    assert!(
+        has_a_member_containing(source, "int after;"),
+        "with the member written after it untouched"
+    );
+}
+
+/// **One construct per branch**: a declaration whose own parts are written twice, once on each side of a
+/// conditional.
+///
+/// Not a seam at one joint but a shape that repeats — and the reason a rule that reads "the token after the `=`"
+/// is not enough on its own. Three real ones, each from a different header:
+///
+/// ```cpp
+/// template<typename _Tp, _Tp _Num> using make_integer_sequence   // bits/utility.h:174
+/// #if __has_builtin(__make_integer_seq)
+///       = __make_integer_seq<integer_sequence, _Tp, _Num>;       // a definition per branch
+/// #else
+///       = integer_sequence<_Tp, __integer_pack(_Num)...>;
+/// #endif
+///
+/// template<typename _Tp> concept __is_signed_int128              // bits/iterator_concepts.h:615
+/// #if __SIZEOF_INT128__
+///       = same_as<_Tp, __int128>;
+/// #else
+///       = false;
+/// #endif
+///
+/// template<typename _Tp, typename _Up>                           // bits/alloc_traits.h:72
+/// #if __cpp_concepts
+///   requires requires { typename _Tp::template rebind<_Up>::other; }  // a clause the directive pushed away
+///   struct __rebind<_Tp, _Up>                                         // …and a head per branch,
+/// #else
+///   struct __rebind<_Tp, _Up, __void_t<typename _Tp::template rebind<_Up>::other>>
+/// #endif
+///   { using type = typename _Tp::template rebind<_Up>::other; };      // …with one body shared by both
+/// ```
+///
+/// The third is the one whose failure was loudest: the first head saw the other branch's `{`, took it for its own
+/// body, and the declaration came apart — `bits/alloc_traits.h` lost `__allocator_traits_base` and every
+/// declaration after it. So each case asserts both that the file parses **and** that the construct's own node is
+/// there, which is what "one declaration" means here.
+#[test]
+fn a_declaration_written_once_per_branch_is_read_as_one_declaration() {
+    let shapes: &[(&str, CppSyntaxKind)] = &[
+        (
+            "template<typename _Tp, _Tp _Num>\n  using make_integer_sequence\n#if B\n    \
+             = __make_integer_seq<integer_sequence, _Tp, _Num>;\n#else\n    \
+             = integer_sequence<_Tp, __integer_pack(_Num)...>;\n#endif\n",
+            CppSyntaxKind::UsingDecl,
+        ),
+        (
+            "template<typename _Tp>\n  concept __is_signed_int128\n#if B\n\t= same_as<_Tp, __int128>;\n#else\n\t\
+             = false;\n#endif\n",
+            CppSyntaxKind::ConceptDecl,
+        ),
+        (
+            "template<typename _Tp, typename _Up>\n#if C\n  \
+             requires requires { typename _Tp::template rebind<_Up>::other; }\n  \
+             struct __rebind<_Tp, _Up>\n#else\n  \
+             struct __rebind<_Tp, _Up, __void_t<typename _Tp::template rebind<_Up>::other>>\n#endif\n  \
+             { using type = typename _Tp::template rebind<_Up>::other; };\n",
+            CppSyntaxKind::ClassBody,
+        ),
+    ];
+
+    for (source, kind) in shapes {
+        assert_eq!(
+            reads(source, Where::File),
+            Ok(()),
+            "must parse cleanly: {source:?}"
+        );
+        assert!(
+            contains(source, *kind),
+            "and the construct is one node, not rubble: {source:?}"
+        );
+    }
+}
+
+/// **A value where a type could stand**: the template-argument and cast spellings that one token decides.
+///
+/// A template argument is read as a type if it can be, and as an expression otherwise — and the two readings share
+/// their tokens far more often than the rule suggests:
+///
+/// ```text
+/// std::function<void()>            a function type with no parameters: the `(` follows `void`
+/// BoolConstant<_S_use_relocate()>  a call: the same `(` follows a *name*
+/// iter_value_t<_Tp>(iter_move(x))  a call whose payload is a call
+/// typename Alloc::is_always_equal{}   a conversion whose type needs the keyword
+/// ```
+///
+/// The first two are the same four tokens with one word changed, so what tells them apart is the word:
+/// [`a_parameter_list_is_the_type`] admits an empty group only after a keyword type, and the argument reader falls
+/// back to the expression when the type reading stops at a group that cannot be a parameter list. The measured
+/// cases are `bits/stl_vector.h` (`__bool_constant<_S_use_relocate()>` — with the type reading winning, the whole
+/// `_S_use_relocate` overload set was rubble) and `std::function<void()>`, which had been unreadable everywhere.
+#[test]
+fn a_template_argument_may_be_a_call_or_a_function_type() {
+    assert_reads(
+        Where::File,
+        &[
+            "using F = std::function<void()>;",
+            "using G = std::vector<std::function<void()>>;",
+            "using H = Fn<void(), int>;",
+            "using C = BoolConstant<_S_use_relocate()>;",
+            "using D = Other<iter_value_t<_Tp>(iter_move(x)), sizeof(int)>;",
+            "using E = T<f()>;",
+            "using I = T<f(1, 2), g(x)>;",
+            "using J = T<void(int)>;",
+            // A functional conversion whose *type* is written with `typename`, which is how a dependent type is
+            // named in an expression — `bits/basic_string.h:3944` writes one inside a condition.
+            "void f() { if (typename Alloc::is_always_equal{}) g(); }",
+            "void f() { x = typename A::x{}; }",
+        ],
+    );
+}
+
+/// **A statement the parser gives up on does not take its block with it** — the recovery contract, at the
+/// statement level.
+///
+/// The same defect as [`a_member_the_parser_gives_up_on_keeps_the_members_after_it_members`] one level down, and
+/// the one that cost `std::map` its `find`:
+///
+/// ```cpp
+/// mapped_type& operator[](const key_type& __k) {          // bits/stl_map.h:527
+///   __glibcxx_function_requires(_DefaultConstructibleConcept<mapped_type>)   // a macro with no `;`
+///
+///   iterator __i = lower_bound(__k);
+///   …
+/// }
+/// mapped_type& at(const key_type& __k) { … }              // ← this stopped being a member
+/// ```
+///
+/// The expression statement failed on the missing `;` and **detached** the node it had opened instead of closing
+/// it, so the leftover `NodeStart` swallowed the rest of the body — the `}` that ends it included — and then the
+/// rest of the class (`std::map`'s member list stopped at the next declaration and `m.find` answered "not
+/// declared in this file"). `parse_expression_statement` and `CppParser::recover_to_level` close their nodes
+/// **with** their end events.
+///
+/// The assertion is the member written after the body: it has to still be a member of the class.
+#[test]
+fn a_statement_the_parser_gives_up_on_keeps_the_block_after_it() {
+    let rubble = [
+        // A macro invocation written without its `;` — how libstdc++ writes its concept checks.
+        "  __glibcxx_function_requires(_DefaultConstructibleConcept<T>)\n  iterator i = lower_bound(k);\n",
+        // A plain missing semicolon.
+        "  int x = 1\n  int y = 2;\n",
+        // A call that is not a statement.
+        "  g(1, 2) h();\n",
+    ];
+
+    for text in rubble {
+        let source = format!("struct Base {{\n  void f() {{\n{text}  }}\n  int after;\n}};\n");
+        assert!(
+            has_a_member_containing(&source, "int after;"),
+            "the member after the block must still be a member of the class: {text:?}"
+        );
+    }
+}
+
+/// An **operator name** is a name in an expression too, in all three positions it can be written.
 /// `operator<=>(a, b)` is a call to the operator function, and the standard library asks exactly that question
 /// when it wants to know whether a type has a comparison: `{ operator<=>(x, y); }` inside a requires-expression
 /// is how `std::three_way_comparable` is written. The three positions are separate arms of the expression
@@ -706,6 +1079,33 @@ fn constructs_the_parser_reads() {
             // try's block at all, and the `catch` became a statement with no statement before it.
             "#if !defined(_DEBUG)\ntry\n#endif\n{\n    g();\n}\n#if !defined(_DEBUG)\ncatch (const E& e) {\n    h();\n}\n#endif",
             "void f() {\ntry {\n    g();\n}\n#if !defined(_DEBUG)\ncatch (const E& e) {\n#endif\n    h();\n}\n}",
+            // The **same joint on an `if`**: a directive between a branch and its `else`. This is the standard
+            // library's own shape — `bits/basic_string.h` line 490, where an `#if __cpp_lib_concepts` sits between
+            // the then-branch and an `else if constexpr` — and it used to move the file's first error from there to
+            // the `}` of a class a hundred lines away. See the seam comment in `parse_if_statement`.
+            "if (n > 0)\n  g(n);\n#if FEATURE\nelse if (n < 0)\n  h(n);\n#endif",
+            "if (n > 0) {\n  g(n);\n}\n#if FEATURE\nelse {\n  h(n);\n}\n#endif",
+            // And between `else` and the statement it introduces.
+            "if (n > 0)\n  g(n);\nelse\n#if FEATURE\n  h(n);\n#endif",
+            // A directive **between two class members**, and around an access specifier. This is the shape that
+            // made every standard-library class lose its members: the `#if` line used to be read as a *member
+            // declaration* named after the condition's first identifier, and everything after it became a child of
+            // that bogus member — lossless, diagnostic-free, and wrong. Measured: `std::basic_string` went from
+            // 7 indexed members (all typedefs, no methods) to 117. See `docs/roadmap.md` §2.1.
+            "struct S {\n  int a;\nprotected:\n#if FEATURE\n  int b;\n#else\n  int c;\n#endif\nprivate:\n  int d;\n};",
+            "struct S {\n#if FEATURE\n  int a;\n#endif\n  int b;\n};",
+            // The same seam **inside one declaration**, which is the other half of it and the one that decides
+            // whether a standard-library class has a public interface at all. Seven shapes, each with its own
+            // reading and each measured on `bits/basic_string.h`; the shape assertions are in
+            // `a_directive_inside_a_declaration_keeps_the_members_after_it_members`, which counts the members the
+            // class still has rather than asking whether the file parsed — a member read wrongly is silent.
+            "struct S {\n  S()\n  noexcept(is_nothrow_default_constructible<A>::value)\n#if CONCEPTS\n  requires is_default_constructible_v<A>\n#endif\n  : _M_dataplus(_M_local_data())\n  { }\n};",
+            "struct S {\n#if GUIDES\n  template<typename = _RequireAllocator<_Alloc>>\n#endif\n  S(const char* s);\n};",
+            "struct S {\n#if CXX11\n  template<typename It, typename = std::_RequireInputIter<It>>\n#else\n  template<typename It>\n#endif\n  S(const It& first) { }\n};",
+            "struct S {\n#if CXX11\n  template<class It, typename = std::_RequireInputIter<It>>\n  _GLIBCXX20_CONSTEXPR\n#else\n  template<class It>\n#endif\n  S& append(It first) { return *this; }\n};",
+            "struct S {\n#if CXX20\n  [[deprecated(\"use shrink_to_fit() instead\")]]\n#endif\n  void reserve();\n};",
+            "struct S {\n  _GLIBCXX_NODISCARD _GLIBCXX20_CONSTEXPR\n  bool\n  empty() const { return true; }\n};",
+            "struct S {\n  template<typename _Tp>\n  _If_sv<_Tp, S&>\n  operator=(const _Tp& __svt) { return *this; }\n};",
         ],
     );
 
@@ -1997,3 +2397,4 @@ fn modern_constructs_produce_the_right_nodes() {
         );
     }
 }
+

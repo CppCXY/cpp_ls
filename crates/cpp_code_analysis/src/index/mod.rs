@@ -122,7 +122,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             .map(|error| cpp_parser::source_range(error.range))
             .collect();
 
-        let (declarations, mut guards) =
+        let (mut declarations, mut guards) =
             build_facts(&scopes, &preprocessing, &root, &errors);
 
         let mut macros: Vec<MacroFact> = preprocessing
@@ -172,6 +172,21 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         guarded.sort_by_key(|(_, at)| *at);
 
         assign_guards(&mut guarded, &preprocessing, &mut guards);
+
+        // The file's **own include guard is not a condition**, and this is the step that makes the standard
+        // library queryable at all: a header puts its whole body inside `#ifndef _GLIBCXX_STRING`, so without this
+        // rule every `#include` written inside a header is "conditional" and every declaration reached through one
+        // is `ConditionalCompilation` — measured on the closure of `<string>`, that is *every* cross-file answer
+        // there is. See `deguard_the_files_own_guard` for why calling it unconditional is the honest reading.
+        if let Some(region) = own_guard_region(&preprocessing, &root) {
+            let mut all: Vec<&mut FactGuard> = declarations
+                .iter_mut()
+                .map(|fact| &mut fact.guard)
+                .chain(macros.iter_mut().map(|fact| &mut fact.guard))
+                .chain(includes.iter_mut().map(|fact| &mut fact.guard))
+                .collect();
+            deguard_the_files_own_guard(&mut all, region);
+        }
 
         FileSummary {
             path: path.to_path_buf(),
@@ -243,6 +258,51 @@ fn macro_fact(spanned: &SpannedDirective) -> Option<MacroFact> {
             guard: crate::summary::FactGuard::Unconditional,
         }),
         _ => None,
+    }
+}
+
+/// The region a file's own include guard opens, when it has one.
+///
+/// `Some(0)` or `None`, and the zero is not a coincidence: [`crate::detect_guard`] only recognises a guard that is
+/// the file's **first** conditional, at depth 0, with no declaration before it — so when there is a guard, the
+/// first region in the list is the one it opens. `#pragma once` is a guard with no region at all, which is why
+/// the answer is an index rather than a boolean.
+fn own_guard_region(
+    preprocessing: &crate::FilePreprocessing,
+    root: &cpp_parser::CppSyntaxNode,
+) -> Option<usize> {
+    matches!(
+        crate::guards::detect_guard(&preprocessing.directives, root),
+        crate::guards::Guard::Macro(_)
+    )
+    .then_some(0)
+}
+
+/// Treat everything inside a file's own include guard as **unconditional**.
+///
+/// # Why a guard is not a condition
+///
+/// A `#if` makes a fact conditional because whether the branch was taken depends on macros this analysis does not
+/// have — the fact might be invisible, so a consumer is told `Unknown` rather than `Yes`. A file's **own** guard is
+/// the one `#if` where that reasoning does not hold: the condition is `#ifndef _GLIBCXX_STRING`, and *entering the
+/// file at all* is what defines `_GLIBCXX_STRING`. Every inclusion of a guarded header that does anything takes
+/// the branch; the visits that do not are the ones where the header has already been read, and the declarations
+/// are visible from those too.
+///
+/// So a declaration inside the guard is visible to **any** file that includes the header, which is exactly what
+/// `Unconditional` means here, and what it does not mean is "there was no `#if` in the text" — the region is
+/// still in [`crate::SummaryGuards::regions`], and the guard macro is still a fact of the file.
+///
+/// # What it costs, measured
+///
+/// Without it, the closure of `<string>` answers **every** cross-file query with `ConditionalCompilation`: the
+/// standard library's headers guard their bodies, so every `#include` inside one is inside a region.
+/// `examples/std_query.rs` is the probe that shows it — 0 of 7 ordinary queries resolved before this rule.
+fn deguard_the_files_own_guard(facts: &mut [&mut FactGuard], region: usize) {
+    for fact in facts {
+        if **fact == FactGuard::Region(region as u32) {
+            **fact = FactGuard::Unconditional;
+        }
     }
 }
 
@@ -570,6 +630,87 @@ mod tests {
             max.body,
             MacroBody::Expression,
             "the body is one parenthesised group"
+        );
+    }
+
+    #[test]
+    fn a_declaration_inside_the_files_own_guard_is_unconditional() {
+        // The rule that makes a header's contents visible at all: `#ifndef H` … `#endif` around the whole file is
+        // not a condition anybody has to decide, because *including the file* is what defines `H`. Measured on the
+        // closure of `<string>`, without this rule every cross-file answer about the standard library is
+        // `ConditionalCompilation` — the headers guard their bodies, so every `#include` inside one is "guarded".
+        let summary =
+            summary("#ifndef H\n#define H\nstruct Widget { int size; };\n#include \"other.h\"\n#endif\n");
+
+        let widget = summary
+            .declarations
+            .iter()
+            .find(|fact| fact.name == "Widget")
+            .expect("the guarded declaration is a fact");
+        assert_eq!(
+            widget.guard,
+            FactGuard::Unconditional,
+            "the file's own guard is entered by including the file at all"
+        );
+
+        let include = summary
+            .includes
+            .iter()
+            .find(|fact| fact.spelling == "other.h")
+            .expect("the include is a fact");
+        assert_eq!(
+            include.guard,
+            FactGuard::Unconditional,
+            "and so is an `#include` written inside it"
+        );
+
+        assert_eq!(
+            summary.guards.regions.len(),
+            1,
+            "the region is still recorded: the `#if` is a fact about the text either way"
+        );
+    }
+
+    #[test]
+    fn a_conditional_that_is_not_the_files_guard_still_guards() {
+        // What the rule must not swallow: `#if defined(A)` is a real condition, and a fact inside it is still
+        // `Unknown` to a consumer that cannot evaluate it.
+        let summary = summary("#if defined(A)\nint inside;\n#endif\n");
+
+        let fact = summary
+            .declarations
+            .iter()
+            .find(|fact| fact.name == "inside")
+            .expect("the declaration is a fact");
+        assert_eq!(fact.guard, FactGuard::Region(0));
+    }
+
+    #[test]
+    fn a_header_that_declares_something_before_its_guard_is_not_guarded_by_it() {
+        // `detect_guard` refuses a guard that does not wrap the whole file, and the rule follows it rather than
+        // making up its own answer: the `#ifndef` here is an ordinary conditional and stays one.
+        let summary = summary("int early;\n#ifndef H\n#define H\nint inside;\n#endif\n");
+
+        let early = summary
+            .declarations
+            .iter()
+            .find(|fact| fact.name == "early")
+            .expect("the declaration before the guard is a fact");
+        assert_eq!(
+            early.guard,
+            FactGuard::Unconditional,
+            "it is outside every region, which is a different answer from the guard's"
+        );
+
+        let inside = summary
+            .declarations
+            .iter()
+            .find(|fact| fact.name == "inside")
+            .expect("the declaration inside is a fact");
+        assert_eq!(
+            inside.guard,
+            FactGuard::Region(0),
+            "a guard that does not wrap the file does not de-guard what it does contain"
         );
     }
 

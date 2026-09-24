@@ -74,7 +74,8 @@ pub fn parse_stats(p: &mut CppParser) {
                 // of the file rather than just this statement.
                 p.recover_to_level(level);
 
-                // Skip to next semicolon or closing brace for error recovery
+                // Skip to next semicolon or closing brace for error recovery…
+                let before = p.current_token_index();
                 while !p.is_eof()
                     && p.current_token() != CppTokenKind::Semicolon
                     && p.current_token() != CppTokenKind::RightBrace
@@ -84,7 +85,19 @@ pub fn parse_stats(p: &mut CppParser) {
                 if p.current_token() == CppTokenKind::Semicolon {
                     p.bump();
                 }
-                break;
+
+                // …**and carry on with the block**, unless the recovery consumed nothing — the one case that
+                // would spin this loop, and the one where the token is the `}` this block ends at.
+                //
+                // The `break` that used to stand here is what made a single unreadable statement cost the whole
+                // block: everything after it was left to the enclosing rule, whose recovery is coarser still. It
+                // is the shape `bits/stl_map.h` pays for — `__glibcxx_function_requires(…)` is a macro written
+                // without its `;`, so `operator[]` failed, `iterator __i = lower_bound(__k);` was swallowed by
+                // the skip, and the block ended at the next `if` with "expected `}`". `std::map`'s member list
+                // stopped at line 511 and `m.find` answered "not declared in this file".
+                if p.current_token_index() == before {
+                    break;
+                }
             }
         }
     }
@@ -517,8 +530,12 @@ fn parse_expression_statement(p: &mut CppParser) -> ParseResult {
         return Ok(m.complete(p));
     }
 
+    // **The tokens stay, so the node gets its end event.** `close_marks_above` would detach it instead, and an
+    // unpaired `NodeStart` is balanced by the tree builder at the end of the stream — so this statement would
+    // swallow everything after it, including the `}` of its own block. That is exactly what a macro written
+    // without its `;` costs (`bits/stl_map.h:530`, and with it `std::map::find`): see maintenance convention 34.
     p.emit_missing_node();
-    p.close_marks_above(base);
+    p.end_marks_to(base);
     Err(CppParseError::syntax_error_from(
         "expected `;` after expression",
         p.current_token_range(),
@@ -587,9 +604,35 @@ fn parse_if_statement(p: &mut CppParser) -> ParseResult {
         return Err(err);
     }
 
+    // The joint between an `if`'s branch and its `else` — the same seam `parse_try_statement` documents, and the
+    // one the standard library hits first:
+    //
+    // ```cpp
+    // if constexpr (__or_<…>::value)
+    //   _S_copy(…);
+    // #if __cpp_lib_concepts              // ← here: `bits/basic_string.h`, line 490, its first error
+    // else if constexpr (requires { … })
+    // ```
+    //
+    // Without it the `#endif`…`#if` pair is what the else-branch is read as, the `else` becomes a statement with
+    // nothing before it, and the error is reported against the `}` of a class whose body is a hundred lines away.
+    // Read as the node it is, then **ask again whether the token is `else`** rather than assuming: a `#` that is
+    // not a directive is still an error, and this seam only accepts directives.
+    if let Err(err) = eat_preprocessor_directives(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
     if p.current_token() == CppTokenKind::ElseKeyword {
         let else_m = p.mark(CppSyntaxKind::ElseStat);
         p.bump();
+
+        // The other side of the same joint: `else` and the statement it introduces.
+        if let Err(err) = eat_preprocessor_directives(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+
         if let Err(err) = parse_statement_body(p) {
             p.close_marks_above(base);
             return Err(err);

@@ -377,6 +377,69 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
             parse_an_implementation_keyword(p);
         }
 
+        // A **directive between two specifiers**, which is the same seam as the ones `parse_try_statement`,
+        // `parse_if_statement` and `parse_class_body_members` document, and it has the same justification: a `#`
+        // cannot be a specifier, so it is read as the node it is and the question is asked again about the token
+        // that follows.
+        //
+        // ```cpp
+        // #if __cplusplus > 201703L              // bits/basic_string.h:1310
+        //   [[deprecated("use shrink_to_fit() instead")]]
+        // #endif
+        //   _GLIBCXX20_CONSTEXPR
+        //   void
+        //   reserve();
+        // ```
+        //
+        // The `#if` is read where a class member goes (see `parse_class_body_members`); the `#endif` arrives
+        // *inside* the declaration, after the attribute the sequence has already taken as a specifier. Without
+        // this the sequence stopped at the `#`, the declaration failed, and the whole attempt was rolled back —
+        // so the attribute and the directive became rubble, and the `reserve()` overload written after them was
+        // not a member of the class at all.
+        //
+        // Only **between** specifiers, and only in a declaration: a `#` where the *first* specifier should be is
+        // not this rule's, because a declaration never begins with a directive — the loop that asked for the
+        // declaration reads directives itself, and one read here would be one it can no longer see.
+        if allow_second_name && specifiers > 0 && p.current_token() == CppTokenKind::Hash {
+            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+
+            // **The other branch's head.** libstdc++ writes two variants of one member with a head each, and the
+            // `#else` falls *between* the first head's specifiers and the second head:
+            //
+            // ```cpp
+            // #if __cplusplus >= 201103L                  // bits/basic_string.h:1673
+            //   template<class _InputIterator,
+            //            typename = std::_RequireInputIter<_InputIterator>>
+            //     _GLIBCXX20_CONSTEXPR
+            // #else
+            //   template<class _InputIterator>
+            // #endif
+            //     basic_string&
+            //     append(_InputIterator __first, _InputIterator __last)
+            // ```
+            //
+            // The sequence has already taken `_GLIBCXX20_CONSTEXPR` — the first branch's specifier — so the head
+            // that follows the directive cannot be read by the caller's head loop, which is behind the cursor.
+            // Read here, and go round again: the second `#endif` is this branch's again, and `basic_string&` is
+            // the next specifier.
+            //
+            // The head ends up **inside** the `DeclSpecifierSeq`, which is the honest place for it: the declaration
+            // has one leading part, the file wrote both branches of it there, and a consumer that reads the type
+            // off this node sees both branches' specifiers rather than only the first. What it must not do is take
+            // the whole text for a spelling — see the note on `DeclFact::returns`.
+            while p.current_token() == CppTokenKind::TemplateKeyword {
+                p.set_a_template_id_may_be_the_name(true);
+                if let Err(err) = super::decls::parse_template_head(p) {
+                    p.close_marks_above(base);
+                    return Err(err);
+                }
+            }
+            continue;
+        }
+
         let specifier_seen = specifiers > 0;
         // May a **further** name still join the type, beyond the one that is already in it?
         //
@@ -825,13 +888,25 @@ fn parse_one_decl_specifier_inner(
         // tilde shows up. Accepting it continues the same name, which is what makes an out-of-line destructor a
         // declaration of `Foo::~Foo` instead of a name-less declaration with an error node where the tilde was.
         //
-        // Conditional on a name having been **written**, not merely on a specifier having been consumed. That
-        // distinction is load-bearing and it was worth a bug: `virtual ~Shape();` has a specifier (`virtual`) and
-        // no name, so a check for "a specifier was seen" let this arm claim the tilde and the declaration became
-        // `virtual ~ Shape()` — an abstract declarator for a function type. Inside a namespace that member then
-        // consumed its way past the namespace's closing brace, and the namespace swallowed the rest of the file.
-        // `Foo::~Foo` is the only shape that reaches here with a name already in hand.
-        CppTokenKind::Tilde if p.declaration_type_name().is_some() => {
+        // The condition is **the token just consumed is the `::`**, and it used to be "a type name is already in
+        // hand". That older test was true of `Foo::~Foo` and false of an ordinary destructor only as long as a
+        // type name meant a *type*: an unexpanded macro is a name specifier too, so `bits/stl_vector.h:372`
+        //
+        // ```cpp
+        // _GLIBCXX20_CONSTEXPR          // an unknown macro: it joins the type, and it is a "type name" by that test
+        // ~_Vector_base() _GLIBCXX_NOEXCEPT
+        // { _M_deallocate(_M_impl._M_start, _M_impl._M_end_of_storage - _M_impl._M_start); }
+        // ```
+        //
+        // had its destructor read as a *further name of the type*: `~_Vector_base` became a `TemplateType`,
+        // the `()` after it had no rule, and the class — `_Vector_base`, and with it everything `std::vector`
+        // inherits — collapsed into error nodes from there to the end of the file.
+        //
+        // `::` is the whole difference and it is what the grammar says: a destructor's name is qualified in a
+        // definition written outside the class and unqualified inside it. Nothing else can precede a `~` with a
+        // name in hand. `virtual ~Shape();` still never reaches this arm — there the last token is `virtual`, and
+        // the declarator's own [`parse_destructor_name`] claims the pair.
+        CppTokenKind::Tilde if p.last_consumed_token_kind() == Some(CppTokenKind::Scope) => {
             let m = p.mark(CppSyntaxKind::TemplateType);
             if let Err(err) = parse_name(p) {
                 p.close_marks_above(base);
@@ -1179,7 +1254,77 @@ pub(super) fn a_declarator_still_follows_the_name(p: &CppParser) -> bool {
             | CppTokenKind::Star
             | CppTokenKind::Ampersand
             | CppTokenKind::LogicalAnd
+            // **An operator-function-name is a declarator**, and it is the one that does not begin with an
+            // identifier:
+            //
+            // ```cpp
+            // #ifdef __glibcxx_string_view          // bits/basic_string.h:1025
+            //   template<typename _Tp>
+            //     _GLIBCXX20_CONSTEXPR
+            //     _If_sv<_Tp, basic_string&>
+            //     operator=(const _Tp& __svt)
+            //     { return this->assign(__svt); }
+            // #endif
+            // ```
+            //
+            // Read without this, `_If_sv<_Tp, basic_string&>` was the *declarator's* name — the template-id
+            // allowance below the caller makes for a variable template's partial specialization took it — so the
+            // member came out as a **variable** called `_If_sv`, and the real declarator, its parameter list and
+            // its body had nowhere to go: they landed beside the declarator instead of inside it, and every member
+            // written after them was read as a child of that one declaration rather than as a member of the class.
+            //
+            // Nothing valid is taken from the expression reading by this: `Name operator` is not an expression in
+            // any grammar, so the only statements that change are the ones that had no reading at all.
+            | CppTokenKind::OperatorKeyword
     )
+        // **A type keyword after the name**: the type has not started yet, so the name is still part of it.
+        //
+        // ```cpp
+        // _GLIBCXX_NODISCARD _GLIBCXX20_CONSTEXPR    // bits/basic_string.h:1329
+        // bool
+        // empty() const _GLIBCXX_NOEXCEPT
+        // { return _M_string_length == 0; }
+        // ```
+        //
+        // Two unexpanded macros and then a keyword type. The first name joined the type (the sequence had nothing
+        // yet), and the second was refused here because `bool` is not an identifier, a `*`, a `&` or an `operator`
+        // — so `_GLIBCXX20_CONSTEXPR` became the *declarator's* name, the declaration came out as a **variable**
+        // of that name, and `empty()`, its body and every member after it were read as children of it instead of
+        // as members of the class. That is what `std::basic_string::empty` was missing for.
+        //
+        // A keyword type is what a declaration writes where a declarator cannot go, so it is evidence for the same
+        // reason the `*` is: `Name bool` is not an expression in any grammar.
+        || is_type_specifier_keyword(p.token_kind_at(after))
+        // …and **a specifier keyword** for the same reason, one step further into the type:
+        //
+        // ```cpp
+        // template<typename _CharT, typename _Traits, typename _Alloc>
+        //   _GLIBCXX_NODISCARD _GLIBCXX20_CONSTEXPR      // bits/basic_string.h:3837
+        //   inline basic_string<_CharT, _Traits, _Alloc>
+        //   operator+(const basic_string<…>& __lhs, const basic_string<…>& __rhs)
+        // ```
+        //
+        // Here the follower of the second macro is `inline`, and *its* follower question is asked about the
+        // template-id, whose follower is the `operator`. Neither `inline` nor a keyword type can begin a
+        // declarator, so each one says the same thing: the sequence has not reached the declarator yet, and the
+        // name in front of it is still part of the type. Without this the file's first error sat on the
+        // `operator+` — the whole tail of `bits/basic_string.h` unread, and the two `operator+` overloads, which
+        // are how `std::string` is concatenated, were not members of anything.
+        || is_a_declaration_specifier(p.token_kind_at(after))
+}
+
+/// May this keyword stand among a declaration's leading words — where a *declarator* can never go?
+///
+/// The companion of [`is_type_specifier_keyword`], and deliberately built from the lists that already exist
+/// rather than from a third one: `storage_or_function_specifier` is the set the specifier sequence itself reads
+/// as specifiers, and `const`/`volatile` are the two cv-qualifiers, which name no type but continue one.
+///
+/// It answers the same question for the *other* kind of specifier: a type keyword says the type is still coming,
+/// and a specifier keyword says the same — `MY_API Widget const w;` and `MY_API inline Widget f();` are both
+/// declarations whose type is not finished at the name.
+fn is_a_declaration_specifier(kind: CppTokenKind) -> bool {
+    storage_or_function_specifier(kind).is_some()
+        || matches!(kind, CppTokenKind::ConstKeyword | CppTokenKind::VolatileKeyword)
 }
 
 /// Is the identifier at the cursor immediately followed by a `(`?
@@ -1574,12 +1719,41 @@ fn a_brace_follows_the_base_clause(p: &CppParser) -> bool {
 /// the `class` keyword, and only the first has a body. It is answered by looking ahead for a `{`
 /// that no `;` or `}` intervenes — which is exactly what "the head is followed by a definition"
 /// means.
+///
+/// # Why a head inside a directive ends the question
+///
+/// Because a conditional can hold **another head for the same declaration**, and then the `{` belongs to that one:
+///
+/// ```cpp
+/// template<typename _Tp, typename _Up>                                   // bits/alloc_traits.h:72
+/// #if __cpp_concepts
+///   requires requires { typename _Tp::template rebind<_Up>::other; }
+///   struct __rebind<_Tp, _Up>                    // ← this head has no body: the other branch does
+/// #else
+///   struct __rebind<_Tp, _Up, __void_t<typename _Tp::template rebind<_Up>::other>>
+/// #endif
+///   { using type = …; };
+/// ```
+///
+/// Reading through the directive, the first head saw the second branch's `{` and took it for its own body: the
+/// body rule was entered with a `#` at the cursor, failed, and the whole declaration came apart — `bits/alloc_traits.h`
+/// lost `__allocator_traits_base` and everything after it. A class-like keyword *after a directive* is what says
+/// "the head this body belongs to is not me", and it is the only thing that does: a base clause may also live
+/// inside a conditional (`struct S #if X : public B #endif { }`), and there the `{` really is this head's.
 fn a_body_follows_the_class_head(p: &CppParser) -> bool {
     let mut depth = 0isize;
+    let mut after_a_directive = false;
+
     for kind in p.peek_token_kind_at(0..64) {
+        if after_a_directive && is_class_like_keyword(kind) {
+            return false;
+        }
+
         match kind {
             CppTokenKind::LeftBrace if depth <= 0 => return true,
             CppTokenKind::Semicolon | CppTokenKind::RightBrace | CppTokenKind::Eof => return false,
+            // The `#` of a directive: everything past it is on another line, and may be another branch.
+            CppTokenKind::Hash => after_a_directive = true,
             kind => depth += angle_depth_delta(kind),
         }
     }
@@ -2256,6 +2430,36 @@ pub fn parse_abstract_declarator(p: &mut CppParser, name_possible: bool) -> Pars
                     break;
                 }
             }
+            // **A directive inside the run of pointer/reference operators**, which is the same seam as
+            // everywhere else in this file and the one that decides how much of `bits/basic_string.h` reads:
+            //
+            // ```cpp
+            // #else                                        // bits/basic_string.h:2631
+            //   template<class _InputIterator>
+            // #ifdef _GLIBCXX_DISAMBIGUATE_REPLACE_INST
+            //     typename __enable_if_not_native_iterator<_InputIterator>::__type
+            // #else
+            //     basic_string&
+            // #endif
+            //     replace(iterator __i1, iterator __i2, _InputIterator __k1, _InputIterator __k2)
+            // ```
+            //
+            // One declaration with a conditional *return type*, so the `&` of `basic_string&` is followed by the
+            // `#endif` that closes the type's alternation and only then by the declarator's name. The `#ifdef` half
+            // is read by the specifier sequence, which is where the other branch's head is read too; this directive
+            // is the last token of the construct and had no owner at all — the declarator came out **nameless**,
+            // the declaration ended at the `&`, and every member written after it was read as a child of that
+            // nameless declarator instead of as a member of the class. Silent, lossless, no diagnostic.
+            //
+            // Read as the node it is and go round again — the next token is the name, or another operator. A `#`
+            // cannot be part of a declarator: nothing in `int * # x` has a reading in any grammar.
+            //
+            // Only once an operator has been read (`container` is open): a directive *before* the first one is not
+            // this rule's, and taking it here would take it away from the loop that owns the declaration's
+            // specifiers — the rule that has to see it to keep its own sequence going.
+            CppTokenKind::Hash if container.is_some() => {
+                super::stats::parse_preprocessor_directive(p)?;
+            }
             _ => break,
         }
     }
@@ -2325,12 +2529,21 @@ pub fn parse_abstract_declarator(p: &mut CppParser, name_possible: bool) -> Pars
 /// whatever goes wrong — and it is deliberately *not* satisfied by a pointer or reference operator, because
 /// `(*)(int)` is the parenthesised-declarator form and is handled before this is asked.
 ///
-/// A `)` is excluded as well: `void ()` is a function type with no parameters, and it is the one case where
-/// the parentheses hold nothing at all. It is admitted only when the `(` follows a complete type, which is
-/// the caller's state rather than this function's, so the trade is made there — see the branch above.
+/// A `)` is excluded as well **unless a keyword type stands in front of it**: `void ()` is a function type with no
+/// parameters, and it is the one case where the parentheses hold nothing at all, so nothing inside them can
+/// answer. The token before them does: a keyword type is a type whatever follows it — `std::function<void()>` is
+/// everywhere, and it was read as `void` with a stray `()` after it, which cost the whole argument — while a
+/// *name* before an empty group may be a call (`f()`), and stays one: the argument reader falls back to the
+/// expression reading for that case, and it is the more useful reading of the two.
 fn a_parameter_list_is_the_type(p: &CppParser) -> bool {
     if p.current_token() != CppTokenKind::LeftParen {
         return false;
+    }
+
+    if p.peek_token_kind_at(1..2).first() == Some(&CppTokenKind::RightParen) {
+        return p
+            .last_consumed_token_kind()
+            .is_some_and(is_type_specifier_keyword);
     }
 
     matches!(
@@ -2966,13 +3179,28 @@ fn parse_template_argument(p: &mut CppParser) -> ParseResult {
     // splits a `>>` into two `>`s and changes what the scan counts. "Did this reading consume
     // something, and is the cursor now on a token that cannot continue a type?" has one answer
     // whenever it is asked.
+    //
+    // **A `(` that cannot hold a parameter list is not an end**, because the type reading is then one token short
+    // of the right answer rather than finished: `_S_use_relocate()` is a call, and the type reading stops after
+    // the name (see [`a_parameter_list_is_the_type`] for the two spellings that share the shape).
+    let stopped_at_a_group_that_is_not_a_parameter_list =
+        p.current_token() == CppTokenKind::LeftParen && !a_parameter_list_is_the_type(p);
+
     if p.current_token_index() > start
         && (type_read.is_ok() || !continues_a_type(p.current_token()))
+        && !stopped_at_a_group_that_is_not_a_parameter_list
     {
         return Ok(CompleteMarker::empty());
     }
 
     // Nothing usable: read it as an expression instead.
+    //
+    // And **nothing more than that**: a `rollback` only truncates the event stream, so the type reading just
+    // thrown away cannot be put back — it would have to be read again. An earlier version of this tried to
+    // "keep the type reading" by rolling forward to a checkpoint taken after it, which truncates nothing (the
+    // events are already gone) and returns `Ok` with the cursor wherever the *failed* expression stopped: the
+    // markers left open that way came out as an unpaired forward reference, and `bits/tuple` panicked the tree
+    // builder with "forward parent must point at a NodeStart, found Trivia". One reading, one rewind.
     p.rollback(checkpoint);
     super::exprs::parse_expr(p)
 }
@@ -3294,3 +3522,4 @@ fn parse_an_implementation_keyword(p: &mut CppParser) -> CompleteMarker {
         }
     }
 }
+

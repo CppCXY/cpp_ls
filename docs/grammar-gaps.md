@@ -4,7 +4,7 @@
 
 它存在的理由和 `crates/cpp_parser/tests/gaps.rs` 是同一个，只是回答的问题不同：那个文件回答"哪些构造**会**工作"，是回归护栏；这里回答"哪些**不**工作、为什么、打算怎么办"，是工作队列。构造一旦修好，就把它从这里删掉、写进 `gaps.rs` 的已支持清单。
 
-**要开始干活，先读 [`next-steps.md`](next-steps.md)**：那一份是当前的队列（parser 与语义两条线、每条的最小复现与做法、一轮的配方），
+**要开始干活，先读 [`roadmap.md`](roadmap.md)**：那一份是当前的队列（parser 与语义两条线、每条的最小复现与做法、一轮的配方），
 本文档是它背后的规格——每条缺口的四要素，以及末尾三十一条**维护约定**。
 
 ## 判定原则
@@ -1320,6 +1320,279 @@ operator bool() &&  // && 和 ( 分开     -> 这是成员函数的引用限定�
 
 **四、模板参数名是类型：`S<_Tp[_Nm]>`。** 这是最常见的数组偏特化写法（`is_array<_Tp[_Size]>`、`rank<_Tp[_Size]>`……闭包里 **51 处**，而且**没有一处**是"下标当非类型实参"的那种读法）。`_Tp[_Nm]` 是类型实参，当且仅当 `_Tp` 是类型；而 `S<a[0]>` 的 token 一模一样，所以只能靠"这个名字是不是文件声明的类型"来答。模板参数**正是**文件在类型位置声明的名字，但 `TypeNames` 记不下它：那张表的深度数的是**花括号**，而模板参数的作用域是**它那条声明**——记进去就会让这个名字在文件剩下部分一直是类型，正是那张表的文档明确拒绝的方向（"录得太少是安全的那一侧"）。所以给它一张自己的表：**每个头把类型参数追加进去，由拥有它的那条声明在结束时截断**（`parse_declaration` 保存长度并截回，嵌套声明各自的保存值里已经含外层的参数，所以类模板的成员照常看得见 `T`）。
 
+## 标准库那一批（第十轮）：一条接缝的九种形状，和一个类的公开接口
+
+这一轮的目标是**一个类的公开接口**。`declarations_in("std::basic_string")` 只有 **117 条**成员，全是 typedef 与私有
+辅助函数（`_M_*`、`_S_*`），公开接口一条也没有；`examples/std_query.rs` 的 7 条查询是 **0/7**。也就是说：别名跟一步、
+"文件自身守卫不算条件"、成员查找容忍重载这三处语义修复**都做完了，却没有东西可查**——挡在前面的是 parser。
+
+成因自始至终是同一个：**一条规则在等一个特定 token，文件在那里写了 `#`**（或者写了另一种"只可能属于类型"的 token）。
+这一轮把这条接缝在 `bits/basic_string.h` 里的九处一次做完。九处的后果都不是"报错"，而是**形状错**：出错的那条声明
+把后面**所有成员**吞成自己的子孙——树仍然无损、良构，多数时候**零诊断**，但成员不再是成员。
+
+| # | 形状（`bits/basic_string.h` 的行号） | 现在读在哪里 |
+|---|---|---|
+| 1 | `if` 分支与 `else` 之间的指令（490） | `parse_if_statement`（上一轮） |
+| 2 | 类体里两个成员之间、access specifier 前后 | `parse_class_body_members`（上一轮） |
+| 3 | 约束构造函数：clause 之后是 `#endif`，再是 `: _M_dataplus(…)`（585） | `finish_init_declarator` 的 requires 分支 |
+| 4 | 模板头之后的 `#endif`（700） | `parse_declaration` 的模板头循环 |
+| 5 | 一个声明**两个头**，`#else` 夹在中间（845） | 同上（头循环改成循环） |
+| 6 | 两个头之间**还夹着说明符**（1673） | `parse_decl_specifier_seq_with`：指令之后可以再读一个头 |
+| 7 | 属性之后、说明符之前（1310） | `parse_decl_specifier_seq_with`：说明符之间接受指令 |
+| 8 | 声明符的 `&` 与它的名字之间（2631） | `parse_abstract_declarator` 的前缀循环 |
+| 9 | 两个宏说明符 + 关键字类型（1329）：`_GLIBCXX_NODISCARD _GLIBCXX20_CONSTEXPR` / `bool` / `empty()` | `a_declarator_still_follows_the_name`：跟随者是类型关键字 |
+
+第 9 条不是指令，而是**同一个问题的另一面**：规则在等 token，来的不是 `#`，而是"另一种只可能属于类型的东西"。
+同形的一共三处，另两处不在 `basic_string.h`：
+
+- **`operator` 是声明符的开始**（1025）：`_GLIBCXX20_CONSTEXPR` / `_If_sv<_Tp, basic_string&>` / `operator=(…)`。
+  改前这条成员是一个名叫 `_If_sv` 的**变量**——"模板 id 可以当名字"那条为变量模板偏特化写的例外吃掉了它，
+  于是真正的声明符、形参表和函数体都无处可去，后面所有成员跟着一起丢。
+- **析构函数名前面的宏**（`bits/stl_vector.h:372`）：`_GLIBCXX20_CONSTEXPR` / `~_Vector_base() _GLIBCXX_NOEXCEPT`。
+  `~` 那一支的判据原来是"手里已经有一个类型名"，而**未展开的宏也是名字**，于是析构函数名被当成类型的又一个名字、
+  `()` 成了 `ErrorNode`，`_Vector_base` 从那里塌到文件末尾。判据换成"刚消费的 token 是 `::`"——那才是
+  "限定名里的析构函数"（`Foo::~Foo`）与"类里的析构函数声明"的区别，也正好是语法说的那件事。
+
+**量到的**（同一台机器、同一条命令，都能重跑）：
+
+```text
+declarations_in("std::basic_string")     117 → 442 条（函数 103 → 391；size/length/find/substr/begin/end/… 全在里面）
+basic_string.h 该作用域事实覆盖的行        588 → 3759（到类的收尾；类体是 93–3764）
+std_query（examples/std_query.rs）        0/7 → 5/7（s.size、s.substr、s.empty 答在 bits/basic_string.h；
+                                          v.push_back 答在 bits/stl_vector.h；m.begin 答在 bits/stl_map.h）
+bits/stl_vector.h 的事实行数               37 → 469（`std::vector` 自己 0 → 113 条）
+普查（128 个文件的闭包）                  干净 76 → 79 / 报错 52 → 49；消息总数 1435 → 1421
+std_index                                 声明 4821 → 10378；类型 2770 → 5326（其中别名 305 → 709）
+```
+
+形状断言是 `gaps.rs::a_directive_inside_a_declaration_keeps_the_members_after_it_members`（九段最小复现，
+每条断言的是"这个类**还剩几个直接成员**"，不是"解析成功"）。
+
+### 这一轮的后半段：接缝修好之后，**恢复**才是决定性的那一层
+
+九处接缝修完是 **3/7**，而 `std::vector` 依然一条事实都没有。同一套二分（把真实文件逐段外移 + 量"canary 成员
+挂在第几层"）把剩下的三个成因挖了出来——三个都不是接缝，而是**"读坏了之后怎么办"**：
+
+**一、失败的声明留下的节点必须带上结束事件。** `parse_declaration` 失败时，如果**已经吃掉了 token**，走的是
+"保留 token、就地放弃"那条路（`close_marks_above(base)`）。那条路把节点**摘掉而不发 `NodeEnd`**——而一个没有
+配对的 `NodeStart` 会被建树器在**流的末尾**补上结束，也就是说：**这条放弃掉的声明吞掉了写在它后面的所有 token**。
+
+```cpp
+struct Base {
+  int x = 1        // 少一个 `;`，声明读到这儿才放弃
+  int after;       // ← 于是这一条成了它的子孙：还在树里，但不再是成员
+};
+```
+
+`bits/stl_vector.h:192` 那一条成员就是这样让 `std::vector` **一个成员都没有**的（`v.size` 与 `v.push_back`
+都答"未声明"，类体一直拖到文件末尾）。修法是 `MarkerEventContainer::end_marks_to(target)`：**按身份、逆序、
+带上 `NodeEnd`** 地把这次尝试开的节点关掉。它与 `finish_marks_to` 的分工是明确的——那一个是"这些 token 我不要了"
+（调用方随后 `rollback`），这一个是"token 留着，但把它们关在该关的地方"。这是维护约定第 33 条。
+
+**二、一个声明符只有一个初始化式。** `bits/stl_vector.h:192`：
+
+```cpp
+struct _Grow {
+  _GLIBCXX20_CONSTEXPR void _M_grew(size_type) { }
+};
+```
+
+宏站在返回类型的位置，而这个文件不知道它的含义。后缀读取器于是要回答 `(size_type)` 是形参表还是"给变量
+`_M_grew` 的直接初始化"——它按"类型位置已经有一个名字"选了后者，把 `void` 是关键字类型这件事放了过去：成员
+成了 `_GLIBCXX20_CONSTEXPR void` 类型的**变量** `_M_grew`，用 `size_type` 初始化，**再**用函数体的 `{ }`
+初始化一次。没有哪个声明有两个初始化式，而正是这第二个让它没有 `;` 可收尾——于是接上了上面第一条。
+判据写成"声明符已经读到一个 `Initializer` 时，`{` 不是第二个初始化式"，**在这里失败**；失败之后 `ErrorNode`
+恢复只吃掉那个宏，`void f(size_type) { }` 随后被正确地读成函数（两半都断言在
+`gaps.rs::a_declarator_takes_only_one_initializer` 里）。
+
+**三、一个声明符可以有两个初始化列表，一个分支一个**（`bits/cow_string.h:515`，copy-on-write 的构造函数）：
+
+```cpp
+basic_string()
+#if _GLIBCXX_FULLY_DYNAMIC_STRING == 0
+  _GLIBCXX_NOEXCEPT                       // 宏后缀，只在一个分支里
+#endif
+#if __cpp_concepts
+  requires is_default_constructible_v<_Alloc>
+#endif
+#if _GLIBCXX_FULLY_DYNAMIC_STRING == 0
+  : _M_dataplus(_S_construct(…))          // 初始化列表，也是一个分支一个
+#else
+  : _M_dataplus(_S_construct(…))
+#endif
+  { }
+```
+
+两处都要改：**指令与宏后缀要交替读**（`#endif` 之后可能是宏，宏之后可能又是指令），以及**初始化列表后面可以
+再来一个指令 + 一个 `:`**（`parse_further_member_initializer_lists`）。改之前这个构造函数读不下来，而恢复
+**把它的 `{ }` 当成了类的收尾大括号**——`class basic_string` 提前 3400 行结束，它后面每一个成员都被读成文件
+作用域的东西（该作用域实测 159 → 48 条事实，再修好之后 **203** 条）。
+
+**教训一：这一族没有一条能靠"报错"发现。** 九处里只有两处产生诊断，其余七处的树无损、良构、零诊断，
+只是成员挂错了父亲。判据必须是形状。这也是同一件事第二次收学费（第 6 条约定）。
+
+**教训二：失败的推测解析不会把游标放回去**，所以"先试一次、失败了再补救"要先存检查点。
+`bits/stl_vector.h:464` 的 `__glibcxx_class_requires(_Tp, _SGIAssignableConcept)`（宏定义在**被包含的**
+`bits/c++config.h` 里，所以"宏表 + 本文件 `#define`"这条证据拿不到它）就是如此：`parse_declaration` 吃掉了名字、
+停在 `(` 上才失败，此时"再看一眼当前 token 是不是 `name(`"已经太晚。做法是**在尝试之前**问形状、把
+`checkpoint` 存下来，**失败之后**才 `rollback` 去读它——这样"有读法的形状"一个也不会被抢走
+（`FOO(x);` 是声明、`TEST(A, B) { }` 是定义、`x = 1;` 是语句，三条都走不到回滚）。已加成维护约定第 32 条。
+
+**教训三（同一条规则的最后一步：它是错的）**：上面那条规则写出来、隔离里全对，量下来却要撤：
+
+```text
+declarations_in("std::basic_string")   398 → 287   （闭包；它把真成员吃成了宏）
+bits/stl_vector.h 的首错               540 → 540   （为它写的那条规则，在它身上一分钱没买到）
+```
+
+**原因**：`ErrorNode` 恢复**只前进一个 token** 再让循环重试，读不下来的那条声明只赔上自己的第一个 token，
+**后面的成员仍然是成员**；宏读法把名字**和**括号组一起吃掉，那个括号组是什么构造的开头就一起没了。
+所以这一格要的证据是**宏证据**（P3 的宏环境，或一条能读到 `bits/c++config.h` 的来源），**不是形状**。
+函数保留在 `decls.rs` 里（`at_a_call_shaped_macro_member`，`#[allow(dead_code)]`），注释里带着这段数字。
+
+**教训四：这一族的收益要看"成员数"，不是"首错行"**。同一轮里 `bits/stl_vector.h` 的首错从 379 推到 541 行，
+而 `class vector` **一条事实都没有**——首错往后走只说明"前面那段读通了"，不说明这个类能被问到。
+两个数字一起看（第 29 条），再加一个"目标类到底有没有事实"。
+
+**还没做的（下一轮的直接队列）**：
+
+1. `bits/stl_vector.h` 现在的首错是 541 行 `using __do_it = __bool_constant<_S_use_relocate()>;`
+   （模板实参里是一个**函数调用**），首错之后还有二十几个错；`bits/stl_map.h` 是 532 行
+   `iterator __i = lower_bound(__k);`。两个类的**成员现在都读到了**（`std::vector` 113 条、`std::map` 有
+   `begin`/`find` 之外的若干），剩下的是这两个文件里其余的部分。
+2. 队列 2.1 里剩下的四处（`bits/move.h:221` 说明符与返回类型之间、`bits/utility.h:176` 别名名与 `=` 之间、
+   `bits/alloc_traits.h:48` 类头与基类子句之间、`include/c++/bit:94` requires-clause 与函数体之间）与 `bits/concepts` 一处。
+   `bits/stl_iterator.h` 的首错已经是 `: public __detail::__move_iter_cat<_Iterator>`，和 `alloc_traits.h:48` 同形。
+3. `bits/basic_string.h` 的首错是 3944 行的 `if _GLIBCXX17_CONSTEXPR (…)` 那一族（队列 2.6：`if` 与它的条件被
+   宏/指令切开），与 `if constexpr (requires { … })` 同族。
+4. **恢复吃掉块的 `}`**（维护约定第 20 条）：括号本身不配平的瓦砾还是会把类体提前关掉——
+   `gaps.rs` 的瓦砾断言里因此**没有**那一段，它属于这一条，不属于已修的那一条。
+
+**"接缝"这个概念本身**：九处之后，"一条规则在等一个特定 token 时，`#` 是它必须接受的前缀"已经不再是猜想。
+下一轮值得抽一个 `expect_token_allowing_directives`（**先列全部调用点**，维护约定第 5 条），但**不要**做成
+"到处都能跳指令"：现在每一处都是定点的，各有一句"为什么这个 `#` 不可能是别的意思"。
+
+## 标准库那一批（第十一轮）：一个构造写在两个分支里，和"一个 token 定读法"
+
+第十轮之后，队列里剩下的四处接缝有两处**形状已经变了**：`include/c++/bit` 已经干净，`bits/alloc_traits.h` 的首错
+也从"类头与基类子句之间"换成了别的东西。这一轮按**当前**的首错做，六条里三条是同一个模式。
+
+**一、一个构造写在两个分支里。** 名字读完之后，`#if` 把它的定义切开：
+
+```cpp
+template<typename _Tp, _Tp _Num>
+  using make_integer_sequence                     // bits/utility.h:174
+#if __has_builtin(__make_integer_seq)
+      = __make_integer_seq<integer_sequence, _Tp, _Num>;
+#else
+      = integer_sequence<_Tp, __integer_pack(_Num)...>;
+#endif
+
+template<typename _Tp>
+  concept __is_signed_int128                      // bits/iterator_concepts.h:615
+#if __SIZEOF_INT128__
+      = same_as<_Tp, __int128>;
+#else
+      = false;
+#endif
+```
+
+别名的名字与 `=` 之间、concept 的名字与 `=` 之间，都是**没有任何东西能站的位置**，所以那里的 `#` 只能是它自己。
+两处共用一个小规则 `parse_a_definition_per_branch`（`= 载荷 ;` 读一遍，`#` 之后再读一遍），构造函数上的那一份
+（第十轮修过的 `bits/cow_string.h:515` 的第二个初始化列表）是 `parse_further_member_initializer_lists`。
+
+**二、被指令推开的 clause，和"身体是谁的"。** 模板头自己的规则会读"紧随参数表的 requires-clause"，而库里把它
+写在条件里：
+
+```cpp
+template<typename _Tp, typename _Up>
+#if __cpp_concepts                                             // bits/alloc_traits.h:72
+  requires requires { typename _Tp::template rebind<_Up>::other; }
+  struct __rebind<_Tp, _Up>
+#else
+  struct __rebind<_Tp, _Up, __void_t<typename _Tp::template rebind<_Up>::other>>
+#endif
+  { using type = …; };
+```
+
+于是 clause 落到 `parse_declaration` 的**头循环**里（它已经在那儿读指令），加一格"指令之后还可能是 clause"。
+同一段还有两处要一起改，因为**两个分支各有一个类头，而身体只有一个**（在 `#endif` 之后）：
+
+* `a_body_follows_the_class_head` 靠"往后找 `{`"回答"这个头开不开身体"，而它**看穿了指令**——第一个头于是把另一
+  个分支的 `{` 当成了自己的：身体的规则带着 `#` 进不去，整条声明塌掉，`bits/alloc_traits.h` 的
+  `__allocator_traits_base` 与它后面**所有**声明一起没了。判据补一句：**指令之后出现类关键字，就说明那个身体
+  不是我的**；
+* `parse_declaration` 里"`{` 是不是身体"那一问，改成**说明符自己的事件**里有类头就算
+  （`declaration_wrote_a_class_head`）——光标前面只剩一个 `{` 时，从光标往后看什么都看不出来。
+
+**三、一个 token 定读法：模板实参是类型还是值。**
+
+```cpp
+using F = std::function<void()>;              // 函数类型：`(` 前面是关键字类型
+using C = BoolConstant<_S_use_relocate()>;    // 调用：同一个 `(` 前面是**名字**
+```
+
+改前两条都读不出来——`std::function<void()>` 在**任何地方**都读不出来，包括 `std::vector<std::function<void()>>`，
+而它大概是 C++ 里最常见的模板实参之一。读法改成两半：空括号**在关键字类型之后**才算形参表
+（`a_parameter_list_is_the_type`）；其余情况下类型读法停在 `(` 上就不算读完，实参读取器回落到表达式读法。
+
+**四、`typename` 在表达式里。** `bits/basic_string.h:3944` 的条件是
+`if _GLIBCXX17_CONSTEXPR (typename _Alloc_traits::is_always_equal{})`——依赖类型的函数式转换。一元表达式的规则里
+没有 `typename` 这一格，于是 `expected primary expression` 指着关键字，整个 `if`（以及它后面的一切）跟着丢。
+补一格：`typename` + 一个名字 +（`{…}` 或 `(…)`），读成 `CastExpr`。类型**按名字读**而不是按 type-id，理由是
+type-id 会带一个抽象声明符，把这次转换的括号本身吃掉（`typename T::f(int)` 会变成一个函数类型、载荷为空）。
+
+**教训（这一轮最贵的一条，已加成维护约定第 35 条）：`rollback` 只截断，不能"回滚到未来"。**
+第三、四条最早写成"类型读法停下之后，若表达式读法也失败，就回滚到类型读法的末尾"——那个检查点是在
+`rollback` **之前**取的，而它指向的区间已经被截掉了：`events.truncate(更大的长度)` 什么都不做，于是函数带着
+**失败读法**的游标返回 `Ok`，留下的标记成了无法配对的向前引用，`bits/tuple` 直接把建树器打崩：
+`forward parent must point at a NodeStart, found Trivia`。一个读法、一次回退。
+值得记的是这个缺陷的**形状**：它不是"读错了"，而是"**就地返回了一个错的 Ok**"——静默错树的极端形态，
+而且测试与普查都会撞上（`tuple` 在闭包里，`std_probe` 一跑就崩）。
+
+**五、同一条教训在语句层再来一次（这一条把 `std_query` 推到 7/7）。** 第十轮的第 34 条约定说的是
+"就地放弃、token 留着的错误路径必须带上 `NodeEnd` 关节点"——那一轮改的是**声明**那一层。语句层的
+`parse_expression_statement` 与 `CppParser::recover_to_level` 仍然是**摘掉**（`close_marks_above`），
+于是库里最常见的那个写法把它的一半容器带走了：
+
+```cpp
+mapped_type& operator[](const key_type& __k) {          // bits/stl_map.h:527
+  __glibcxx_function_requires(_DefaultConstructibleConcept<mapped_type>)   // 宏，没有 `;`
+  iterator __i = lower_bound(__k);
+  …
+}
+mapped_type& at(const key_type& __k) { … }              // ← 从这里开始不再是成员
+```
+
+表达式语句在缺 `;` 处失败、把开着的 `ExpressionStat` 摘掉，那个没配对的 `NodeStart` 于是吞掉了**函数体剩下的
+部分（包括收尾的 `}`）以及整个类体剩下的部分**——`std::map` 的成员表在 511 行断掉，`m.find` 答"未声明"。
+两处都改成 `end_marks_to`。同一轮里 `parse_stats` 的恢复也不再 `break`（一条读不下来的语句不再让整个块停工：
+它跳过 `;`/`}` 之后**接着读**），两处合起来把 `std::map` 的 40 条事实变成 50 条、并且把消息总数从 1318 压到 **932**。
+
+**量到的**：
+
+```text
+std_query（examples/std_query.rs）    3/7 → 7/7（七条查询全部答出来）
+普查（128 个文件的闭包）              干净 80 / 报错 48；消息总数 1421 → 932
+                                      每文件错误数：干净 80 | 只有一个 6 | 两到五个 13 | 超过五个 29
+std_index                            声明 10378 → 12550；类型 5326 → 6223（别名 709 → 744）
+bits/utility.h 与 include/c++/bit     0 报错
+bits/stl_vector.h 的首错              541 → 1865 行；bits/basic_string.h 3944 → 4531 行
+bits/alloc_traits.h 的首错            80 → 453 行；bits/iterator_concepts.h 616 → 908 行
+```
+
+形状断言四条（`gaps.rs`）：`a_declaration_written_once_per_branch_is_read_as_one_declaration`、
+`a_template_argument_may_be_a_call_or_a_function_type`、
+`a_statement_the_parser_gives_up_on_keeps_the_block_after_it`，以及"九段接缝"那条里新增的两段。
+
+**还没做的**：
+
+1. 各文件的**下一条**：`bits/move.h:233`（函数体里的 `__glibcxx_function_requires(...)`——**现在只是报一条错**，
+   块与类都不再丢，见第 2.3 节）、`bits/alloc_traits.h:453`、`bits/iterator_concepts.h:908`、
+   `bits/stl_pair.h:407`、`bits/basic_string.h:4531`、`bits/stl_vector.h:1865`。
+2. 队列里**还没碰**的：§2.2（GNU 类型拼写：`__typeof__` / `__int128`）、§2.5（模板参数表里的宏）。
+3. 剩下 29 个"超过五个错"的文件——那些是级联，按第 11 条先归类。
+
 ## 维护约定
 
 1. **修好一条**：把本文档的条目改成"已修复"（保留成因与修复过程，下一个人会需要），并写进 `crates/cpp_parser/tests/gaps.rs` 的已支持清单。`gaps.rs` 的机制是"构造一旦开始工作，钉住它的测试就会失败"，那是防漏报的护栏。
@@ -1509,4 +1782,33 @@ operator bool() &&  // && 和 ( 分开     -> 这是成员函数的引用限定�
 30. **一个计数器只回答一个问题**（第九轮第一条）。`TypeNames` 的深度同时被当成"名字可见性"和"在不在 body 里"，两者在链接规范的块上分开了：它是作用域（名字在里面、也在外面可见），但**不是** body。用错的那一侧的代价是静默的——`is_inside_a_body` 说"在 body 里"，于是两条按设计拒绝在 body 里生效的宏规则一起失效，而症状出现在**别的行**上（`using ::wint_t;` 报"expected `;` after expression"）。所以：**当一个计数/标志被第二个调用方读走时，先问它问的是不是同一个问题**；不是就再开一个（或者，像这里一样，删掉那个不该有的递增）。
 
 31. **向回走的判据要知道什么"包着"这个构造**（第九轮第三条）。`declarator_starts_with_a_type_keyword` 从游标往回找"这条声明的第一个 token"，一路走过 `;`/`{`/`}` 才停——于是模板头（`template <…>`）被走过去了，而它是**包着**声明的东西，不是声明的一部分，收上来的"第一个 token"是头的 `<`。同一个形状在第 9 条里出现过一次（那次是**起点**不同，这次是**终点**不同），两次都是"判据的边界不在它以为的地方"。写这类扫描时问三句：**从哪开始、到哪停、中间有什么是"包着"的**。
+
+32. **一次失败的推测解析不会把游标放回去**（第十轮第二条）。`parse_declaration` 是**可以失败**的——语句层与成员层都靠"试一次、失败就换一种读法"工作——但失败**不等于回退**：它可能已经消费了若干 token、发出了若干事件、留了几个没关的标记，游标停在它失败的地方。第十轮那一处（`bits/stl_vector.h:464`，`__glibcxx_class_requires(_Tp, _S…)`，宏定义在被包含的 `bits/c++config.h` 里）正是这样：名字被吃掉了，游标停在 `(` 上，此时"再看一眼当前 token 是不是 `name(`"已经太晚。写法是**在尝试之前问形状、把 `checkpoint` 存下来，失败之后才 `rollback` 去读它**（`parse_class_body_members` 里的 `call_shaped`）。这条与第 13 条是一对：那一条说"解析成功不是证据"，这一条说"解析失败也不是回到了原处"。
+
+33. **问"后面跟着什么"时，答案的类别往往是"不能出现在声明符里"，而不是一张拼写表**（第十轮第 9 条与它的两处同形）。`a_declarator_still_follows_the_name` 原来只认 `Identifier`/`*`/`&`/`&&`，于是三处真实代码掉了：跟随者是**类型关键字**（`_GLIBCXX_NODISCARD _GLIBCXX20_CONSTEXPR` / `bool` / `empty()`）、是**说明符关键字**（`… _GLIBCXX20_CONSTEXPR` / `inline basic_string<…>` / `operator+(…)`）、是 **`operator`**（`_If_sv<_Tp, basic_string&>` / `operator=(…)`）——三处的后果完全一样：名字被当成声明符，成员变成变量，后面的成员一起丢。给这张表加拼写是治标；判据本身应该是"这个 token 可能是声明符的一部分吗"，而 `is_type_specifier_keyword` + `storage_or_function_specifier` + cv 限定符**恰好就是"不可能在声明符里"的那一类**，而且它们已经在别处存在（第 14 条：别写第二张表）。
+
+34. **"就地放弃、token 留着"的错误路径必须把节点关掉，而且要带上结束事件**（第十轮后半段，这条最贵）。`close_marks_above(base)` 是**摘掉**（detach）：它把节点从开着的栈里拿掉，**不发 `NodeEnd`**，指望"主人以后会补"——而对一条已经 `return Err` 的规则来说，没有主人了。那些没配对的 `NodeStart` 由建树器在**流的末尾**补上结束，于是这条被放弃的声明**吞掉了写在它后面的所有 token**：
+
+    ```cpp
+    struct Base {
+      int x = 1        // 少一个 `;`：声明读到这儿才放弃
+      int after;       // ← 成了它的子孙：树里还有，但不再是成员
+    };
+    ```
+
+    这不是"少读了几个 token"，是**整个类体从这一刻起消失**：`bits/stl_vector.h:192` 那一条成员让 `std::vector` 一个成员都没有（`v.size`/`v.push_back` 都答"未声明"），`bits/cow_string.h:515` 那一条让 `class basic_string` 提前 3400 行结束。判据很简单，**写错误路径时问自己一句：这条路径是"token 也不要了"还是"token 留着"**——前者用 `close_marks_above`（调用方随后 `rollback`，事件被截断，什么都不欠），后者必须用 `end_marks_to`（按身份、逆序、带 `NodeEnd`）。`gaps.rs::a_member_the_parser_gives_up_on_keeps_the_members_after_it_members` 把四段瓦砾钉住了。
+
+    第十一轮接着在**语句层**又付了一次同样的学费：`parse_expression_statement` 与 `CppParser::recover_to_level` 也在"token 留着"的路径上摘节点，于是 `bits/stl_map.h` 那个没有 `;` 的宏把 `operator[]` 的函数体**和整个类体剩下的部分**一起吞了——`std::map` 因此没有 `find`。判据是同一句话，只是层的名字换了一个：**这条路径是"token 也不要了"还是"token 留着"**。
+
+    同一件事的另一面：**恢复"只前进一个 token"是有价值的性质**，值得为它让路。它让读不下来的声明只赔上自己的第一个 token，后面的成员照旧；所以第十轮那条"把 `name(...)` 整体读成宏"的规则（隔离里完全正确）被**撤掉**了——它把名字和括号组一起吃，代价是闭包里 111 个成员（第 29 条：数字先于直觉）。
+
+35. **`rollback` 只截断，回不到"未来"**（第十一轮那条最贵的教训，被建树器抓了个正着）。`Checkpoint` 记的是事件长度与游标位置，而 `rollback` 做的事是 `events.truncate(...)`——**大于当前长度时它什么都不做**。所以"先试着读 A，不行就回到 A 读完时的状态"这种写法是错的：那个检查点指向的区间在回退到起点时就已经被截掉了，回退到它只剩下**标志位**被恢复、事件却是 B 的残骸，函数于是带着 B 的游标返回 `Ok`，而 B 留下的开标记成了无法配对的向前引用。症状在建树器里：`forward parent must point at a NodeStart, found Trivia`（`bits/tuple` 当场崩）。
+
+    同一个道理的正确写法只有一种：**一个读法、一次回退**；要"两个读法都试"，就在回退之后**重新读**第一个（解析是确定性的，再读一遍拿到的是同一棵子树）。这一条与第 13 条、第 32 条是一族：**"返回 `Ok`"必须意味着"光标停在读法真的结束的地方"**——第 13 条问的是"它停在哪个 token"，这一条问的是"这个 token 是哪一次读法的"。
+
+
+
+
+
+
 

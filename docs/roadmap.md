@@ -1,7 +1,8 @@
-# 接手：做什么，以及每一步的思路
+# 路线图：做什么，以及每一步的思路
 
-给下一个动这份代码的人（或 AI）。**这一份是队列**——做什么、为什么这么做、怎么知道做对了、哪里会踩坑。
-三份已有的文档是**规格**，不要重复它们：
+**这一份是队列**——做什么、为什么这么做、怎么知道做对了、哪里会踩坑。它叫 `roadmap.md` 而不是
+"next-steps"：它是**活的队列**，每做完一条就在这里改一条，而不是一次性的交接件。
+三份规格文档不要重复它们的内容：
 
 | 文档 | 管什么 |
 |---|---|
@@ -19,13 +20,14 @@
 `cpp_parser`（无损 CST、容错、宏表、外部符号表接口）与 `cpp_code_analysis`（预处理、每文件事实、缓存、跨文件查询）。
 没有语言服务器二进制，没有 driver；**查询是产品，驱动层还没写**（这是队列里的一条）。
 
-**现在的数字**（最近一次普查，185 个文件的标准库闭包）：
-`干净 101 / 报错 81`，错误消息总数约 2252；Rust 侧 `cargo test --workspace` = **926 个测试 / 34 个套件全绿**。
+**现在的数字**（最近一次普查，`%TEMP%\stdprobe\files.txt` 的 128 个文件——`<vector>/<string>/<map>/<algorithm>` 的闭包）：
+`干净 79 / 报错 49`，错误消息总数 **1435**；每文件错误数 `干净 79 | 只有一个 1 | 两到五个 13 | 超过五个 35`；
+Rust 侧 `cargo test --workspace` = **946 个测试 / 34 个套件全绿**。
 
 **门禁三条 + 一条**（改完必须全绿，`index-design.md` §门禁有同样的表）：
 
 ```bash
-cargo test --workspace                     # 926 个测试，34 个套件
+cargo test --workspace                     # 946 个测试，34 个套件
 cargo clippy --workspace --all-targets     # 零警告
 cargo doc --no-deps -p cpp_code_analysis   # 零警告（cpp_parser 有历史链接问题，不管）
 cargo run -q -p cpp_parser --bin cpp_dump -- crates/cpp_parser/tests/real_world.cpp   # 必须 0 error
@@ -43,7 +45,7 @@ cargo run --release -p cpp_code_analysis --example std_probe -- files.txt
 
 它打三段：**代价**（文件/行/字节/耗时）、**普查**（干净 vs 报错、消息直方图、每文件错误数直方图）、
 **每个失败文件的第一个错**（带文件名与源码行——这是唯一能看见**成因**的视角，第一个错是上面什么都解释不了的那个）。
-本机的那份清单在 `%TEMP%\stdprobe\files.txt`（185 个文件；换机器要重新生成）。
+本机的那份清单在 `%TEMP%\stdprobe\files.txt`（**128 个文件**；换机器要重新生成）。
 
 **看一个文件被读成了什么**（排查缺规则唯一有效的动作）：
 
@@ -51,7 +53,9 @@ cargo run --release -p cpp_code_analysis --example std_probe -- files.txt
 cargo run -q -p cpp_parser --bin cpp_dump -- <file> --tree    # 有错也打树；不加 --tree 只在干净时打
 ```
 
-**其它探针**：`examples/std_index.rs`（闭包的事实统计）、`examples/index_includes.rs`（冷/热索引代价）、`examples/measure.rs`（构建与命中）。
+**其它探针**：`examples/std_index.rs`（闭包的事实统计：`-- <清单> <缓存目录>`）、`examples/std_query.rs`
+（**端到端**：真写一个 TU、发现工具链、索引闭包，然后按光标问成员——这一轮的 0/7 → 3/7 就是它）、
+`examples/index_includes.rs`（冷/热索引代价）、`examples/measure.rs`（构建与命中）。
 
 ---
 
@@ -82,51 +86,64 @@ cargo run -q -p cpp_parser --bin cpp_dump -- <file> --tree    # 有错也打树�
 > 本文档里的 `<文件>:<行>` 是**编辑器行号**（从 1 起）。`std_probe` 打印的是从 0 起的行号，差一；
 > 用 `cargo run -q -p cpp_parser --bin cpp_dump -- <文件> --tree` 看树时不必在意这个差。
 
-### 2.1 指令落在构造的接缝上（4+ 个文件，**最值钱的一条**）
+### 2.1 指令落在构造的接缝上（**已做完**：九处接缝 + 恢复那一层 + 两个分支的构造，`std_query` **7/7**）
 
-B23/B24/B40 已经接过几个接缝（初始化列表元素之间、字符串字面量串中间、`try`/`catch` 的每个关节），
-**下面这四个还没接**，每个都是"parser 要一个特定 token，来的却是 `#`"：
+**这一条做完了三轮**：九处接缝（第十轮上半）、"读坏了之后怎么办"三条（第十轮下半）、"一个构造写在两个分支里"
+与"一个 token 定读法"六条（第十一轮，最后一条是**同一条恢复判据在语句层的第二次**）。形状、位置、读法与
+**四条被量下来的教训**都在 [`grammar-gaps.md`](grammar-gaps.md) 的"第十轮""第十一轮"两节里，这里只留
+**结论与数字**：
+
+```text
+declarations_in("std::basic_string")   117 → 442 条（函数 103 → 391；size/find/substr/begin/… 全在里面）
+std_query（examples/std_query.rs）      0/7 → 7/7（七条查询全部答出来，都答在标准库自己的头文件上）
+bits/stl_vector.h 的事实行数             37 → 469（`std::vector` 自己 0 → 113 条）
+普查（128 个文件的闭包）                干净 76 → 80 / 报错 52 → 48；消息总数 1435 → 932
+std_index                              声明 4821 → 12550；类型 2770 → 6223（别名 305 → 744）
+bits/utility.h 与 include/c++/bit       0 报错
+bits/basic_string.h 的首错              3838 → 4531 行；bits/stl_vector.h 541 → 1865 行
+```
+
+形状断言六条（`gaps.rs`）：九段接缝、四段瓦砾、一个构造两个分支、模板实参是调用还是函数类型、一个声明符一个
+初始化式、语句失败之后块还在。五条教训进了维护约定第 32–35 条，其中第 34、35 条最贵：**"就地放弃、token 留着"
+的错误路径必须带上 `NodeEnd` 关节点**（这一条收了两轮学费，声明层与语句层各一次）；**`rollback` 只截断，
+回不到"未来"**。
+
+**还没做的**，按值排：
+
+1. 各文件的**下一条**：`bits/move.h:233`（函数体里那个没有 `;` 的宏——现在只是**一条诊断**，块与类都不再丢）、
+   `bits/alloc_traits.h:453`、`bits/iterator_concepts.h:908`、`bits/stl_pair.h:407`、`bits/basic_string.h:4531`、
+   `bits/stl_vector.h:1865`——都等着归类与缩。
+2. 队列里**还没碰**的：§2.2（GNU 类型拼写：`__typeof__` / `__int128`）、§2.5（模板参数表里的宏）。
+3. 剩下 29 个"超过五个错"的文件——那些是级联，按第 11 条先归类再动手。
+
+下面这四处是同一个模式的**记录**（第十一轮之后 `bit` 已干净、`utility.h` 已干净、`alloc_traits.h` 的那一处已改，
+留在这里是因为它们是"接缝"这个概念最好的例子，而不是待办）：
 
 ```cpp
-// bits/move.h:221    说明符与返回类型之间
+// bits/move.h:221    说明符与返回类型之间                          ← 同族，库里还有
 template<typename _Tp> _GLIBCXX20_CONSTEXPR inline
 #if __cplusplus >= 201103L
   typename enable_if<...>::type
 #endif
 f();
 
-// bits/utility.h:176  别名模板的名字与 `=` 之间
+// bits/utility.h:176  别名模板的名字与 `=` 之间                     ← 已修（一个构造两个分支）
 template<typename _Tp, _Tp _Num> using make_integer_sequence
 #if __has_builtin(__make_integer_seq)
   = __make_integer_seq<integer_sequence, _Tp, _Num>;
 #endif
 
-// bits/alloc_traits.h:48  类头与基类子句之间
+// bits/alloc_traits.h:48  类头与基类子句之间                       ← 该处已随之读通
 template<typename _Alloc, typename = typename _Alloc::value_type> struct __alloc_traits
 #if __cplusplus >= 201103L
   : std::allocator_traits<_Alloc>
 #endif
 { };
 
-// include/c++/bit:94   requires-clause 与函数体之间
-template<typename _To, typename _From> constexpr _To bit_cast(const _From& __from)
-  requires (sizeof(_To) == sizeof(_From)) && is_trivially_copyable_v<_To>
-#endif
-{ return __builtin_bit_cast(_To, __from); }
+// include/c++/bit:94   requires-clause 与函数体之间                 ← 已干净
 ```
 
-**思路**：这是**同一个模式**的第五、六、七、八处，而现成的机制就在手边：
-`stats.rs::eat_preprocessor_directives`（`parse_try_statement` 用的那个），它在光标处把 `#` 开头的行读成**指令节点**再继续。
-要点两条：**只在接缝上接**（"a `#` anywhere it cannot be a directive is still an error"），
-以及**接完要再问一次**"现在这个 token 对了没有"——不要在解析中途盲目跳过指令。
-还有一个同族的：`bits/concepts`（`concept` 的名字与 `=` 之间，`iterator_concepts.h:617` 的 `#if __SIZEOF_INT128__`）。
-
-**思路的延伸**：与其一处处打补丁，不如把"接缝"这个概念写下来——
-**一条规则在等一个特定 token 时，`#` 是它必须接受的前缀**。可以做成一个小助手
-`expect_token_allowing_directives`，用它替换现在手写的 `eat_preprocessor_directives` + `expect_token` 组合。
-但要**先列出所有调用点**（维护约定第 5 条：改公共入口前先列"谁在拼这串 token"）。
-
-### 2.2 GNU 的类型拼写（4 个文件，已确认）
+### 2.2 GNU 的类型拼写（3 个文件，已确认）
 
 ```cpp
 typedef __typeof__(x) y;                                  // stddef.h:466、stl_uninitialized.h:202
@@ -144,31 +161,43 @@ __MINGW_EXTENSION typedef unsigned __int64 size_t;        // corecrt.h:35
 - `__MINGW_EXTENSION` 这种"什么都不是"的宏：它已经在"编译器关键字"那条路上了（`an_implementation_keyword`），
   如果还不够，检查它是不是被类型表当成了**类型名**（那会让后面的 `unsigned` 变成声明符的名字）。
 
-### 2.3 小写函数式宏独占一行（4–5 个文件，待缩）
+### 2.3 小写函数式宏独占一行（类体那一半**不需要了**，函数体那一半待做）
 
 ```cpp
-__glibcxx_function_requires(_Mutable_ForwardIteratorConcept<_Iter>)   // stl_algobase.h:161
-_GLIBCXX17_CONSTEXPR reverse_iterator                                  // stl_iterator.h:302
+__glibcxx_class_requires(_Tp, _SGIAssignableConcept)                  // stl_vector.h:464 ← 恢复那一层解决了
+__glibcxx_function_requires(_Mutable_ForwardIteratorConcept<_Iter>)   // stl_algobase.h:161 ← 待做
+_GLIBCXX17_CONSTEXPR reverse_iterator                                  // stl_iterator.h:302 ← 待做
 ```
 
-**现在**：前者的形状规则要求"名字（可带括号组）之后**能开始一个声明**"，而它后面跟着的是**另一个语句**；
-后者是宏站在**返回类型**的位置（`expected ; after expression`）。
+**类体那一半不需要了，而且不是因为那条规则改对了，是因为"恢复"改对了**（§2.1 的后半段第一条）。
+`__glibcxx_class_requires(_Tp, _SGIAssignableConcept)` 这条成员现在仍然读不出来——它变成若干 `ErrorNode`——
+但**它后面的成员还在**：声明失败之后恢复只前进一个 token 再重试，所以这个类照常被读出来
+（`std::vector` 113 条事实、`v.push_back` 能答）。这条经历值得留着，因为它说明了一件容易搞反的事：
+**读不出来**和**读坏了**是两个问题，前者的代价可以只是一条声明。
 
-**思路**：这两条是同一件事的两面——**宏在声明/语句的最前面**。
-- 第 2.3 条的后一半（`_GLIBCXX17_CONSTEXPR reverse_iterator`）可以靠"说明符序列接受形状像宏的名字"解决，
-  但注意与"`Widget w;`"的边界（名字 + 名字 = 声明，两个名字都是类型时才会误判）；
-- 前一半要放宽"后面能开始什么"，**只在文件/命名空间作用域**（函数体里 `COUNT` 后面跟 `return` 是漏了分号，
-  那条拒绝是有意的，见 `at_a_macro_that_stands_for_a_declaration` 的文档）。
-放宽之后**必须**给反例：`x = 1;`（赋值）、`FOO(x);`（most vexing parse）、`TEST(A,B){ }`（定义）。
+**试过、量过、撤掉的那一版**（别再试第二次）：在类体里按"名字 + 括号组 + 没有 `;`"的形状把这种成员读成
+`MacroCall`（判据在尝试之前问、检查点在失败之后用，见维护约定第 32 条）。隔离里完全正确，量下来是
+**`declarations_in("std::basic_string")` 398 → 287**、而 `bits/stl_vector.h` 的首错一行没动：宏读法把名字**和**
+括号组一起吃，而 `ErrorNode` 恢复只吃掉一个 token。函数保留在 `decls.rs` 里
+（`at_a_call_shaped_macro_member`，`#[allow(dead_code)]`），注释里带着这段数字。
 
-### 2.4 `requires` 与它周围的构造（3–4 个文件，已确认）
+**待做的两半**：`__glibcxx_function_requires(…)` 在**函数体**里独占一行（它后面跟的是**另一个语句**，
+所以类体这条思路用不上，而"后面能开始什么"要放宽到"语句"）；`_GLIBCXX17_CONSTEXPR reverse_iterator`
+是宏站在**返回类型**位置。放宽之后**必须**给反例：`x = 1;`（赋值）、`FOO(x);`（most vexing parse）、
+`TEST(A,B){ }`（定义）——函数体里 `COUNT` 后面跟 `return` 是漏了分号，那条拒绝是有意的
+（见 `at_a_macro_that_stands_for_a_declaration` 的文档）。
+
+### 2.4 `requires` 与它周围的构造（**构造函数那一格已做**，其余 2–3 个文件已确认）
 
 ```cpp
-// bits/stl_pair.h:367   requires-clause 与构造函数的初始化列表之间
+// bits/stl_pair.h:367   requires-clause 与构造函数的初始化列表之间  ← 已修（同一处读法）
 template<typename _U1, typename _U2> constexpr pair(...)
   requires is_default_constructible_v<_T1> && is_default_constructible_v<_T2>
   : first(), second() { }
 ```
+
+**构造函数那一格已经做了**：`finish_init_declarator` 的 requires 分支现在接着读**指令**再读 `:` 的成员初始化列表
+（`bits/basic_string.h:585` 那一处，见 §2.1 的九处表）。`bits/stl_pair.h:372` 那个首错因此换人。
 
 **思路**：`requires` 是**子句**而不是表达式，它右边允许什么由"谁拥有这个子句"决定
 （declarator 的后缀、模板头之后、类头之后）。这里缺的一格是"子句之后是**构造函数的初始化列表**（`:`）"。
@@ -232,23 +261,46 @@ private:                                  // stl_pair.h:372：这一行的错来
 
 ## 3. 语义队列（按价值排）
 
-### 3.1 跟着 typedef / 别名走一步（**最大的一块**，设计已想清）
+### 3.1 跟着 typedef / 别名走一步（**已完成**，附带挖出一个更大的洞）
 
 **现象**：`s.substr(1).size` 报 `NotDeclaredHere("std::string::substr")`——`std::string` 是
 `typedef basic_string<char> string;`，而成员查找是**按名字找类**，不跟别名走。同一条边界也挡住 `std::vector`、
 `std::string_view`、所有 `*_type` 别名。
 
-**思路**：别名**本身就是一条声明**，所以它该记录自己指向什么拼写：
-- `DeclKind::Type` 的事实目前 `type_of`/`returns` 都是 `None`；让 `typedef`/`using` 的那条事实把**目标拼写**记进 `type_of`
-  （`using string = basic_string<char>` → `"basic_string<char>"`）。这是 `CODEC_VERSION` 变更，
-  而 `type_of` 的文档要改一句话：对变量是"它的类型"，对别名是"它指向的类型"。
-  **注意函数指针那类别名**：`typedef void (*F)(int);` 的类型是"说明符 + 声明符"，
-  而 `declared_type_of` 只取说明符序列（会给 `void`）——别名这条要把它自己的声明符也算进去。
-- 查询侧：`base_type_name` 之后加**一步**解析——名字在作用域/索引里是一条别名事实，就再查一次；
-  **要有深度上限**（`using A = A;`、互相引用的两条别名），并把这个事实写进文档。
-- 好处立刻可见：`std::string` 的整个表面（`substr`、`size`、`find`……）都在 `basic_string` 的摘要里，已经索引好了。
+**做完了什么**（`sema::declarations::declared_alias_target` + `index::project::resolve_aliases`）：
 
-**要量**：闭包里有多少 `DeclKind::Type` 的**别名**事实（`typedef`/`using`），以及跟一步能救回多少查询。
+- `typedef`/`using` 的事实把**目标拼写**记进 `type_of`（对变量是"它的类型"，对别名是"它指向的类型"；
+  一条 `DeclKind::Type` 且 `type_of` 有值的事实就是别名——这就是判定规则，没有加新字段）。
+  两种拼法都读：`using X = T;` 取 `TypeId`；`typedef T X;` 是**说明符 + 声明符**，
+  把别名自己的名字从声明符里**剪掉**，于是 `typedef void (*F)(int);` 得到 `void (*)(int)`。
+- 查询侧在"把一个拼写当成类"的那一个地方跟一步（`direct_member` / `direct_members` / `member_fact`），
+  **目标在别名自己的作用域里解析**（`namespace std { typedef basic_string<char> string; }` 的目标是相对写的，
+  所以要试 `std::basic_string` 再试裸的 `basic_string`），深度上限 8，成环返回最后那个拼写。
+- **`CODEC_VERSION` 不用抬**（原文写的是"这是 CODEC_VERSION 变更"，那是指纹落地之前的说法）：
+  `build.rs` 的 `READING_FINGERPRINT` 对 `cpp_parser/src` 与 `src` 取哈希，**改了生产者源码整库自动作废**。
+  只有"源码里看不出来的字段格式变化"才抬 `CODEC_VERSION`。
+
+**量到的**（`examples/std_index.rs`、`examples/std_query.rs`，闭包 = `<vector>/<string>/<map>/<algorithm>` 的 128 个文件）：
+第十轮之后是 **7407 条声明**，其中 **486 条是别名**（3881 条 `DeclKind::Type` 里的一部分）、
+**111 个类带基类**——别名这一步要跟的目标全在里面。
+
+**顺带挖出来的那个洞比别名大**：加完别名这一步，`std_query` 依然 **0/7**——因为 `std::string` 那条事实
+虽然索引里有，查询却报 `ConditionalCompilation`。成因是头文件把整个身体包在**自己的 include guard** 里，
+于是"每个 `#include` 都落在 `#if` 里"。修法是 `index::deguard_the_files_own_guard`：**文件自身守卫里的事实记为
+`Unconditional`**（理由与测量记在 `index-design.md` 的三道判据第 3 条）。修完之后 `std::string` 找到了，
+并且带着 `type_of = Some("basic_string<char>")`、`scope = Some("std")`——正是别名这一步需要的输入。
+
+**这一格现在的状态（第十轮之后：`std_query` 3/7）**：
+
+1. **`std::basic_string` 已通**（`size`/`substr`/`empty` 三条查询都答出来了）。它仍然报 `Ambiguous`——
+   在 `bits/stringfwd.h` 里前向声明、在 `bits/basic_string.h` 里定义——而成员查找**不走** `definition()`，
+   改问 `declarations_in(class)` 并按声明顺序取第一条（见上面"重载那一格"），所以歧义不再挡路。
+2. **`std::vector` / `std::map` 仍报 `NotDeclaredHere`，但成因不是条件性**：是 parser 在
+   `bits/stl_vector.h` / `bits/stl_map.h` 里读不下去（`std::vector` 一条事实都没有）。
+   第十轮把它定位到 `_Vector_impl` 体内的两个构造之上，见 §2.1 的第 1 条。
+   ——所以"要么喂宏环境、要么把'候选全是条件'与'一条候选也没有'分清"这个二选一**先搁置**：
+   等 parser 那边通了，再量 `definition()` 到底报哪一种。
+
 
 ### 3.2 解引用与下标：`(*p).size`、`arr[i].size`（`type_of_expression` 的第五、六格）
 
@@ -336,7 +388,7 @@ parser 的边际收益是"每轮 1–3 个文件"，连续磨十几轮会失去�
 
 - **工具链**：`C:\Users\xx\Desktop\mingw\mingw64\bin\g++.EXE`（gcc 15.1.0）。`discover` 会自己找到它，
   但 `crates/cpp_code_analysis/tests/toolchain.rs` 里那几个测试在没有编译器的机器上会走另一条分支（有测试钉住）。
-- **普查的清单**：`%TEMP%\stdprobe\files.txt`（185 个文件，路径指向上面的 mingw）。
+- **普查的清单**：`%TEMP%\stdprobe\files.txt`（**128 个文件**，路径指向上面的 mingw）。
   换机器或换标准库版本，数字会变——**变化本身不重要，同一台机器上的趋势才重要**。
 - **临时目录**：探针自己会在 `%TEMP%` 下建项目（`cppls-index-includes`、`cppls-returns` 之类），随时可删。
 - **`%TEMP%` 下的缓存**：`SummaryStore` 的缓存写在项目里的 `.cppls/`；探针建的是临时项目，删掉即清。
@@ -345,7 +397,20 @@ parser 的边际收益是"每轮 1–3 个文件"，连续磨十几轮会失去�
 
 ## 7. 一句话的优先级
 
-**parser**：先做 2.1（四个接缝，一个模式）与 2.2（GNU 类型拼写），这两个合起来值 8 个文件左右；
-再按队列往下。
-**语义**：先做 3.1（跟着 typedef 走一步）——它是"标准库能不能被真正用上"的那一步；
-然后 3.2（解引用/下标），再考虑 3.6（driver，产品上最短的一块）。
+**`std_query` 已经是 7/7，语义线该动了**——这一轮把因果链走完了：
+
+`std_query` 从 **0/7 → 7/7**：九处接缝与"恢复"两轮把 `std::basic_string`、`std::vector`、`std::map` 的成员
+全部读出来（442 / 113 / 50 条事实），七条查询都答在标准库自己的头文件上。所以顺序是：
+
+1. **语义侧（现在最有价值）**：3.2（解引用/下标：`(*p).size`、`arr[i].size`）、3.6（**driver——产品上最短的一块**，
+   把 `discover`/`index_includes_from`/查询串起来并接 LSP）、3.4（`DeclFact::clean` 的第一个消费者）。
+   `std::string`/`std::vector`/`std::map` 都能被问到成员了，这三件事终于有东西可查；
+2. **parser 的长尾**（可以间隔着做）：各文件的"下一条"（§2.1 第 1 条）、§2.2 的 GNU 拼写、§2.6 的 `if` 与宏
+   ——每一项 1–3 个文件，按首错归类再做（第 11 条）；
+3. **索引的规模**（3.3 的倒排表）：一万文件时才疼，现在不是瓶颈。
+
+
+
+
+
+

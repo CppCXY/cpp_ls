@@ -148,6 +148,121 @@ fn holds(node: &CppSyntaxNode, offset: usize) -> bool {
     offset >= usize::from(range.start()) && offset < usize::from(range.end())
 }
 
+/// The type a **`typedef` or `using` alias** names, as the file spells it.
+///
+/// The third of the family [`declared_type_of`], [`declared_returns_of`], [`declared_bases_of`] — and the one
+/// whose answer goes into the *same* field as the first: a fact's `type_of` is "the type this declaration is
+/// about", which for a variable is the type it has and for an alias is the type it **points at**. An alias
+/// declares no members of its own, so a consumer that reads a name written as `std::string` has to be able to get
+/// from it to `std::basic_string`, and this is where that spelling comes from. See [`DeclFact::type_of`] for the
+/// rule that tells the two apart.
+///
+/// # The two spellings a C++ alias comes in
+///
+/// ```text
+/// using String = basic_string<char>;      the target is the TypeId after the `=`
+/// typedef basic_string<char> String;      the target is the specifiers *and* the declarator
+/// ```
+///
+/// The second is the reason this is not simply "the specifier sequence", which is what [`declared_type_of`] reads:
+/// the alias's name is inside the declarator, and for `typedef void (*F)(int);` the specifiers alone are `void`.
+/// So the target is the specifier text followed by the declarator **with the name cut out** — `(*)(int)` — which
+/// joins into `void (*)(int)`: the spelling of the function-pointer type, arrived at by deleting the one word that
+/// is the alias rather than the type. For the plain shape the cut leaves nothing and the answer is the specifiers,
+/// as it should be.
+///
+/// # Why it is public
+///
+/// The query layer needs the same answer for an alias declared in the buffer it is looking at, without a summary:
+/// the same reason [`declared_type_of`] is public, and the same rule about one implementation.
+pub fn declared_alias_target(root: &CppSyntaxNode, binding: &Binding) -> Option<String> {
+    if !matches!(binding.kind, BindingKind::Alias | BindingKind::Typedef) {
+        return None;
+    }
+
+    // The declaration itself, found the way the other two helpers find it: the last `using`/`typedef` node passed
+    // on the way down to the binding, because a binding's range is the name and not the declaration around it.
+    let mut node = root.clone();
+    let mut declaration = None;
+
+    loop {
+        if matches!(
+            CppSyntaxKind::from(node.kind()),
+            CppSyntaxKind::UsingDecl | CppSyntaxKind::TypedefDecl
+        ) {
+            declaration = Some(node.clone());
+        }
+
+        match node
+            .children_with_tokens()
+            .find(|element| {
+                element
+                    .as_node()
+                    .is_some_and(|child| holds(child, binding.range.start_offset))
+            })
+            .and_then(|element| element.into_node())
+        {
+            Some(child) => node = child,
+            None => break,
+        }
+    }
+
+    let declaration = declaration?;
+
+    if CppSyntaxKind::from(declaration.kind()) == CppSyntaxKind::UsingDecl {
+        // `using X = <TypeId>;` — the target is that node's whole text, template arguments and all.
+        return declaration
+            .children()
+            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TypeId)
+            .map(|target| target.text().to_string().trim().to_string())
+            .filter(|target| !target.is_empty());
+    }
+
+    let specifiers = declaration
+        .children()
+        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq)?;
+    let declarator = declaration
+        .children()
+        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator);
+
+    // No declarator: `typedef struct { … } ;` has no name to bind either, so this cannot be reached with a fact
+    // to build — but returning the specifiers is the honest answer if it ever is.
+    let Some(declarator) = declarator else {
+        let spelling = strip_declaration_specifiers(&specifiers.text().to_string());
+        return (!spelling.is_empty()).then_some(spelling);
+    };
+
+    let spelling = format!(
+        "{} {}",
+        strip_declaration_specifiers(&specifiers.text().to_string()),
+        without(&declarator.text().to_string(), &declarator, binding.name_range)
+    );
+    let spelling = spelling.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    (!spelling.is_empty()).then_some(spelling)
+}
+
+/// `text` with the span `name` occupies removed.
+///
+/// The one place a spelling has to be *edited* rather than read, because a `typedef`'s type is its specifiers
+/// plus its declarator and the alias's own name sits inside the second: cutting it out is what turns `(*F)(int)`
+/// into `(*)(int)`. Offsets are byte offsets into the same source, so this is arithmetic on the two ranges rather
+/// than a search for a word — a search would cut the wrong one in `typedef int int32_t;`(the second `int` is the
+/// name, and the first is the type).
+fn without(text: &str, node: &CppSyntaxNode, name: cpp_parser::SourceRange) -> String {
+    let start = usize::from(node.text_range().start());
+    let (from, to) = (
+        name.start_offset.saturating_sub(start),
+        name.end_offset().saturating_sub(start),
+    );
+
+    if from > to || to > text.len() || !text.is_char_boundary(from) || !text.is_char_boundary(to) {
+        return text.to_string();
+    }
+
+    format!("{}{}", &text[..from], &text[to..])
+}
+
 /// The type a **function** declaration returns, as the file spells it.
 ///
 /// The sibling of [`declared_type_of`], with the same walk down to the declaration and the same two answers — a
@@ -352,7 +467,7 @@ fn fact_for(
         // answer a *shape* cannot give, because `void f() { int x; }` and `void f() { }` differ by a declaration
         // that is not in a scope at all. See [`ScopeTree::declares_a_local`].
         local,
-        type_of: declared_type_of(root, binding),
+        type_of: declared_type_of(root, binding).or_else(|| declared_alias_target(root, binding)),
         returns: declared_returns_of(root, binding),
         bases: declared_bases_of(root, binding),
         range: binding.range,
@@ -750,8 +865,101 @@ mod tests {
     use crate::summary::{DeclKind, FactGuard};
     use cpp_parser::{CppParser, ParserConfig};
 
-    fn facts(source: &str) -> (Vec<crate::summary::DeclFact>, crate::summary::SummaryGuards) {
-        let tree = CppParser::parse(source, ParserConfig::default());
+    #[test]
+    fn an_alias_records_the_type_it_points_at() {
+        // The two spellings a C++ alias comes in, and the function-pointer shape where the specifiers alone are
+        // not the type.
+        let source = "using A = basic_string<char>;\n\
+                      typedef basic_string<char> B;\n\
+                      typedef void (*F)(int);\n\
+                      typedef int int32_t;\n";
+        let (facts, _) = facts(source);
+
+        let type_of = |name: &str| {
+            facts
+                .iter()
+                .find(|fact| fact.name == name)
+                .unwrap_or_else(|| panic!("{name} must be a fact"))
+                .type_of
+                .clone()
+        };
+
+        assert_eq!(type_of("A").as_deref(), Some("basic_string<char>"));
+        assert_eq!(type_of("B").as_deref(), Some("basic_string<char>"));
+        assert_eq!(
+            type_of("F").as_deref(),
+            Some("void (*)(int)"),
+            "the specifiers plus the declarator with the alias's own name cut out"
+        );
+        assert_eq!(type_of("int32_t").as_deref(), Some("int"));
+    }
+
+    #[test]
+    fn a_member_whose_type_is_preceded_by_macros_is_named_by_its_declarator() {
+        // The shape every standard-library method has, and the one that made `std::basic_string` index 117
+        // members with no method among them:
+        //
+        // ```cpp
+        // _GLIBCXX_NODISCARD _GLIBCXX20_CONSTEXPR
+        // size_type
+        // size() const _GLIBCXX_NOEXCEPT;
+        // ```
+        //
+        // Two macros stand where a declaration specifier goes, so the specifier sequence holds **three** names and
+        // the declared name is in the declarator after them. A reader that takes the last name of the specifier
+        // sequence binds `size_type` — a name that is also a real member, so the mistake does not even look wrong
+        // until a query asks for `size` and finds nothing.
+        let source = "struct S {\n  _GLIBCXX_NODISCARD _GLIBCXX20_CONSTEXPR\n  size_type\n  size() const noexcept;\n};\n";
+        let (declared, _) = facts(source);
+
+        let names: Vec<&str> = declared.iter().map(|fact| fact.name.as_str()).collect();
+        assert!(
+            names.contains(&"size"),
+            "the member is named by its declarator: {names:?}"
+        );
+        assert!(
+            !names.contains(&"size_type") || names.iter().filter(|name| **name == "size_type").count() == 1,
+            "and no member is named after the type: {names:?}"
+        );
+
+        // The same member with an inline **body**, which is how `basic_string::size` is really written, and with a
+        // directive block before it — the shape the class body's member loop had to learn to walk through.
+        let defined = "struct S {\n#if FEATURE\n  int a;\n#endif\n  _GLIBCXX_NODISCARD _GLIBCXX20_CONSTEXPR\n  size_type\n  size() const noexcept\n  { return 0; }\n};\n";
+        let (defined_facts, _) = facts(defined);
+
+        let names: Vec<&str> = defined_facts.iter().map(|fact| fact.name.as_str()).collect();
+        assert!(
+            names.contains(&"size"),
+            "an inline definition is named the same way as a declaration: {names:?}"
+        );
+
+        // …and the exact suffix `basic_string::size` writes: `_GLIBCXX_NOEXCEPT` is a **macro** standing where
+        // `noexcept` would go, which is the other half of the "a macro where a specific token is expected" family.
+        let suffix_macro = "struct S {\n  _GLIBCXX_NODISCARD _GLIBCXX20_CONSTEXPR\n  size_type\n  size() const _GLIBCXX_NOEXCEPT\n  { return 0; }\n};\n";
+        let (suffix_facts, _) = facts(suffix_macro);
+
+        let names: Vec<&str> = suffix_facts.iter().map(|fact| fact.name.as_str()).collect();
+        assert!(
+            names.contains(&"size"),
+            "a macro in the function-suffix position does not rename the member: {names:?}"
+        );
+    }
+
+    #[test]
+    fn a_class_records_no_type_of_its_own() {
+        // The rule that tells an alias from a class in a stored fact, asserted where it is produced: a class *is*
+        // a type rather than pointing at one, and `type_of` is what a consumer reads to follow an alias.
+        let (facts, _) = facts("struct Widget { int size; };\nusing Alias = Widget;\n");
+        let widget = facts
+            .iter()
+            .find(|fact| fact.name == "Widget")
+            .expect("the class is a fact");
+
+        assert_eq!(widget.type_of, None);
+        assert_eq!(widget.kind, DeclKind::Type);
+    }
+
+    fn facts(source: &str) -> (Vec<crate::summary::DeclFact>, crate::summary::SummaryGuards) {        let tree = CppParser::parse(source, ParserConfig::default());
         assert_eq!(tree.get_errors(), [], "the input must parse cleanly");
 
         let root = tree.get_red_root();

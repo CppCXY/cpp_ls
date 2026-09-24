@@ -64,7 +64,11 @@ use super::{
 ///
 /// The head is kept as its own node so a consumer can ask "is this declaration templated?" without
 /// re-scanning tokens, and so the parameter list keeps its own children.
-fn parse_template_head(p: &mut CppParser) -> ParseResult {
+///
+/// Visible to the specifier sequence, which is the other rule that can meet a head: a declaration whose two
+/// conditional branches each write one puts the second head in the middle of that sequence. See the note in
+/// [`super::types::parse_decl_specifier_seq_with`].
+pub(super) fn parse_template_head(p: &mut CppParser) -> ParseResult {
     // A template parameter list has the same `>`-closes-the-list property an argument list has:
     // `template <int N = 3>` must not read the `>` as "greater than". Restored on every exit path.
     let previous_depth = p.enter_template_arguments();
@@ -138,25 +142,30 @@ fn parse_concept_declaration(p: &mut CppParser) -> ParseResult {
         ));
     }
 
-    if let Err(err) = expect_token(p, CppTokenKind::Assign) {
-        p.close_marks_above(base);
-        return Err(err);
-    }
-
     // The constraint, and then a requires-clause of its own may follow: `concept C = true && requires { … };`
     // is one expression, while `concept C = X requires Y;` is not valid — so there is no clause to read here.
     // What *is* read is the expression, and a requires-expression inside it is handled by the expression rule.
     //
     // Read with the braced-initialiser reading refused, for the same reason a requires-clause does: the
     // constraint ends at the `;`, and a `{` in it belongs to a requirement rather than to an initializer.
-    if let Err(err) = super::exprs::parse_constraint_expr(p) {
-        p.close_marks_above(base);
-        return Err(err);
-    }
+    //
+    // The definition is read **once per branch** (`#if A = X; #else = Y; #endif`), which is how libstdc++ writes
+    // `__is_signed_int128` and its neighbours; see [`parse_a_definition_per_branch`].
+    let ended = parse_a_definition_per_branch(p, super::exprs::parse_constraint_expr);
 
-    if let Err(err) = expect_semicolon(p) {
-        p.close_marks_above(base);
-        return Err(err);
+    match ended {
+        Err(err) => {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+        // `true` means the branch's own `;` was the declaration's, so there is nothing left to ask for.
+        Ok(ended) if !ended => {
+            if let Err(err) = expect_semicolon(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+        }
+        Ok(_) => {}
     }
 
     Ok(m.complete(p))
@@ -662,33 +671,98 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
     // is a template *declaration* whose payload is the class. Handling it here rather than in a
     // separate rule is what lets templates apply to classes, functions, variables, aliases and
     // concepts without five copies of the same parser.
+    //
+    // # Why it is a loop, and what the file writes
+    //
+    // Because a conditional **alternation of heads** is a real spelling, and `bits/basic_string.h` writes one —
+    // two constructors, one per standard level, each with its own head, both inside one declaration:
+    //
+    // ```cpp
+    // #if __cplusplus >= 201103L
+    //   template<typename _InputIterator,
+    //            typename = std::_RequireInputIter<_InputIterator>>
+    // #else
+    //   template<typename _InputIterator>
+    // #endif
+    //   _GLIBCXX20_CONSTEXPR
+    //   basic_string(_InputIterator __beg, _InputIterator __end, const _Alloc& __a = _Alloc())
+    // ```
+    //
+    // Reading **one** head and then one directive is what left that member unread: the second `template` reached
+    // the specifier sequence, which has no reading for it, so the declaration failed, the whole attempt was rolled
+    // back to the first `template`, and the class body's recovery then wrapped the head one token at a time. The
+    // member was not a member, and every declaration after it was read as a child of the rubble. Both halves are
+    // needed and both are the same seam: a directive between a head and what it heads, or between two of them.
     let mut seen_a_template_head = false;
-    if p.current_token() == CppTokenKind::TemplateKeyword {
-        // Whatever head it is — empty or not — the declaration it introduces is one of the three that may be
-        // **named by a template-id**, because each of them has to say *which* template it is about:
+    loop {
+        if p.current_token() == CppTokenKind::TemplateKeyword {
+            // Whatever head it is — empty or not — the declaration it introduces is one of the three that may be
+            // **named by a template-id**, because each of them has to say *which* template it is about:
+            //
+            // ```text
+            // template <> void f<int>(int);              an explicit specialization: the head is empty
+            // template <class T> bool v<T*> = true;      a partial specialization: it is not
+            // ```
+            //
+            // The empty spelling used to be the only one that set this, and the non-empty one was left to the rule
+            // that refuses a bare template-id in a declarator's name — a rule written for the *type/name* ambiguity
+            // (`C<T> x;` gives the arguments to the type), which has nothing to resolve here: a variable template's
+            // partial specialization writes its arguments in the name position and has nowhere else to put them. It
+            // cost `bits/stl_pair.h` (`__is_tuple_v<tuple<_Ts...>>`), `concepts` (`__destructible_impl<_Tp>`) and
+            // `bits/functional_hash.h` their first error each.
+            //
+            // Setting it for *every* templated declaration costs nothing: the flag is only consulted at a declarator's
+            // name, and no other declaration a head can introduce writes a template-id there — `template <class T>
+            // C<T> x;` gives the arguments to the type, which the specifier sequence has already taken.
+            p.set_a_template_id_may_be_the_name(true);
+
+            if let Err(err) = parse_template_head(p) {
+                p.rollback(checkpoint);
+                return Err(err);
+            }
+            seen_a_template_head = true;
+            continue;
+        }
+
+        // A directive between the head and what it heads — the `#endif` half of the shape above, and of
+        // `#if __cpp_deduction_guides … template<…> #endif`. Read as the node it is, and go round again: the next
+        // token is either another head or the declaration itself, and both are answers this loop already has.
+        if seen_a_template_head && p.current_token() == CppTokenKind::Hash {
+            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                p.rollback(checkpoint);
+                return Err(err);
+            }
+            continue;
+        }
+
+        // **A clause that a directive pushed away from the head.** The head rule reads a requires-clause written
+        // directly after its parameter list, but libstdc++ puts one *inside a conditional* — and then the clause
+        // arrives here, with the directive already read:
         //
-        // ```text
-        // template <> void f<int>(int);              an explicit specialization: the head is empty
-        // template <class T> bool v<T*> = true;      a partial specialization: it is not
+        // ```cpp
+        // template<typename _Tp, typename _Up>
+        // #if __cpp_concepts                                            // bits/alloc_traits.h:72
+        //   requires requires { typename _Tp::template rebind<_Up>::other; }
+        //   struct __rebind<_Tp, _Up>
+        // #else
+        //   struct __rebind<_Tp, _Up, __void_t<typename _Tp::template rebind<_Up>::other>>
+        // #endif
+        //   { using type = …; };
         // ```
         //
-        // The empty spelling used to be the only one that set this, and the non-empty one was left to the rule
-        // that refuses a bare template-id in a declarator's name — a rule written for the *type/name* ambiguity
-        // (`C<T> x;` gives the arguments to the type), which has nothing to resolve here: a variable template's
-        // partial specialization writes its arguments in the name position and has nowhere else to put them. It
-        // cost `bits/stl_pair.h` (`__is_tuple_v<tuple<_Ts...>>`), `concepts` (`__destructible_impl<_Tp>`) and
-        // `bits/functional_hash.h` their first error each.
-        //
-        // Setting it for *every* templated declaration costs nothing: the flag is only consulted at a declarator's
-        // name, and no other declaration a head can introduce writes a template-id there — `template <class T>
-        // C<T> x;` gives the arguments to the type, which the specifier sequence has already taken.
-        p.set_a_template_id_may_be_the_name(true);
-
-        if let Err(err) = parse_template_head(p) {
-            p.rollback(checkpoint);
-            return Err(err);
+        // `requires` is contextual, so the arm is a spelling test with the shape test beside it — the same pair the
+        // declarator's clause arm uses (`starts_a_requires_clause` tries the clause and reports whether it consumed
+        // anything). Read as a clause of the declaration rather than of the head, which is the only place left for
+        // it once a directive stands between: the `TemplateDecl` has been completed by then.
+        if seen_a_template_head && at_requires(p) && starts_a_requires_clause(p) {
+            if let Err(err) = parse_requires_clause(p) {
+                p.rollback(checkpoint);
+                return Err(err);
+            }
+            continue;
         }
-        seen_a_template_head = true;
+
+        break;
     }
 
     // The head may be followed by a declaration that *is* its own rule, and those rules begin with a
@@ -776,7 +850,29 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
 
     // Definitions of class-like entities: `class Foo { ... };`, `enum E { ... };`,
     // `namespace ns { ... }`. The specifier sequence already consumed the keyword and the name.
-    if p.current_token() == CppTokenKind::LeftBrace && declaration_opens_a_body(p) {
+    //
+    // The second half of the condition is the case where it consumed the head but **not** the body, because a
+    // directive stood between them:
+    //
+    // ```cpp
+    // template<typename _Tp, typename _Up>                                  // bits/alloc_traits.h:72
+    //   requires requires { typename _Tp::template rebind<_Up>::other; }
+    // #if __cpp_concepts
+    //   struct __rebind<_Tp, _Up>                     // this branch's head has no body …
+    // #else
+    //   struct __rebind<_Tp, _Up, __void_t<…>>
+    // #endif
+    //   { using type = …; };                          // … and the body after `#endif` is shared by both
+    // ```
+    //
+    // `declaration_opens_a_body` cannot see it: it is answered from the tokens **after the cursor** (the
+    // declaration's leading keywords are behind it by now, and all that is left in front is the brace). So the
+    // question is asked of the specifiers' own events instead — did they write a class-like head? A `{` after one
+    // is that head's body and nothing else, since a variable whose type is a class definition has already had its
+    // initializer read by the declarator rule.
+    if p.current_token() == CppTokenKind::LeftBrace
+        && (declaration_opens_a_body(p) || declaration_wrote_a_class_head(p, specifiers_from))
+    {
         if let Err(err) = parse_class_body(p) {
             p.close_marks_above(base);
             return Err(err);
@@ -856,8 +952,15 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
         return Ok(m.complete(p));
     }
 
+    // **A declaration that gave up but keeps its tokens** closes what it opened *with* the end events
+    // ([`MarkerEventContainer::end_marks_to`]). `close_marks_above` would detach them without an event, and an
+    // unpaired `NodeStart` is balanced by the tree builder at the end of the stream — so the declaration that
+    // failed here would swallow every token written after it. This is the path `int x = 1` (with no `;`) and
+    // `__glibcxx_class_requires(_Tp, Concept)` take inside a class body, and it is why one such member took the
+    // rest of `std::vector`'s class with it. The two paths above this one roll back instead, which is the other
+    // correct answer: no events, nothing to pair.
     if let Err(err) = expect_semicolon(p) {
-        p.close_marks_above(base);
+        p.end_marks_to(base);
         return Err(err);
     }
 
@@ -870,6 +973,25 @@ fn declaration_defined_a_class(p: &CppParser, specifiers_from: usize) -> bool {
     p.events_contain_any(
         specifiers_from,
         &[CppSyntaxKind::ClassBody, CppSyntaxKind::CompoundStat],
+    )
+}
+
+/// Did the specifier sequence just parsed write a **class-like head** — with or without its body?
+///
+/// The companion of [`declaration_defined_a_class`], and the difference is the case this exists for: a head whose
+/// body is on the *other* side of a directive, so the specifiers hold the head alone (see the note at the call
+/// site). `class Foo;` also answers yes, and that is right — a brace after it is an error either way, and letting
+/// the body rule report it is more informative than reading the brace as an initializer of nothing.
+fn declaration_wrote_a_class_head(p: &CppParser, specifiers_from: usize) -> bool {
+    p.events_contain_any(
+        specifiers_from,
+        &[
+            CppSyntaxKind::ClassDef,
+            CppSyntaxKind::StructDef,
+            CppSyntaxKind::UnionDef,
+            CppSyntaxKind::EnumDef,
+            CppSyntaxKind::EnumClassDef,
+        ],
     )
 }
 
@@ -1138,10 +1260,45 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
     // directive. Read as the node it is, and the match below is then asked about the token that really follows.
     // The same argument as the two places `docs/grammar-gaps.md` records for B23; a `#` anywhere else in an
     // expression is still an error.
-    while declarator_is_function && p.current_token() == CppTokenKind::Hash {
-        if let Err(err) = super::stats::parse_preprocessor_directive(p) {
-            m.undo(p);
-            return Err(err);
+    //
+    // # Why this alternates with the macro suffixes
+    //
+    // Because a conditional can decide **which** suffix is written, and libstdc++ writes its copy-on-write
+    // constructor exactly that way (`bits/cow_string.h:515`):
+    //
+    // ```cpp
+    // basic_string()
+    // #if _GLIBCXX_FULLY_DYNAMIC_STRING == 0
+    //   _GLIBCXX_NOEXCEPT                     // a macro suffix, in one branch only
+    // #endif
+    // #if __cpp_concepts && __glibcxx_type_trait_variable_templates
+    //   requires is_default_constructible_v<_Alloc>
+    // #endif
+    // #if _GLIBCXX_FULLY_DYNAMIC_STRING == 0
+    //   : _M_dataplus(…)                      // …and the initializer list, one per branch
+    // #else
+    //   : _M_dataplus(…)
+    // #endif
+    //   { }
+    // ```
+    //
+    // With the two loops written one after the other, the macro suffix after `#endif` reached the match below,
+    // which has no reading for a bare identifier between a declarator and its body: the declaration failed, and
+    // the recovery then took the constructor's `{ }` for the class's closing brace — so `class basic_string`
+    // ended 3400 lines early and every member after it was read at file scope. Alternating is the whole fix: a
+    // directive may be followed by a macro, and a macro by a directive.
+    loop {
+        let mut consumed = false;
+        while declarator_is_function && p.current_token() == CppTokenKind::Hash {
+            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                m.undo(p);
+                return Err(err);
+            }
+            consumed = true;
+        }
+        consumed |= eat_a_macro_suffix(p);
+        if !consumed {
+            break;
         }
     }
 
@@ -1173,6 +1330,40 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
             }
             init.complete(p);
         }
+        // **A declarator takes one initializer**, and this arm is the shape where a second one is written.
+        //
+        // The suffix reader can already have read one — `T x(y)` is a direct-initialisation, and which of the two
+        // readings `(y)` gets is the preference [`parse_function_suffix_or_initializer`] decides. When it reads it
+        // as an initializer, the declarator is **not** a function, and the `{` that follows is a *second*
+        // initializer: no declaration has two, and the tree that came out was well formed, lossless and silent —
+        //
+        // ```cpp
+        // struct Base {
+        //   _GLIBCXX20_CONSTEXPR void f(size_type) { }   // ← bits/stl_vector.h:192, in `struct _Grow`
+        //   int after;
+        // };
+        // ```
+        //
+        // read as a variable `f` of type `_GLIBCXX20_CONSTEXPR void` initialised with `size_type` **and then**
+        // with `{ }`, after which the declaration had no `;` to end on and `int after;` became its child. That one
+        // member took `std::_Vector_base`'s whole class body with it — the facts stopped at the `_Vector_impl`
+        // declaration, and `std::vector` had no members at all.
+        //
+        // Failing here is what lets the recovery do its job, and the recovery is unusually good at this one: the
+        // member loop wraps *one* token (`_GLIBCXX20_CONSTEXPR`) in an error node, tries again at `void`, and the
+        // parameter reading — which is the right one for `void f(size_type)` — wins with nothing in front of it.
+        // The member is read correctly and the ones after it are members, which is the same "advance by one token"
+        // property that makes the error-node recovery worth keeping (see the note on `at_a_macro_member`).
+        CppTokenKind::LeftBrace
+            if !declarator_is_function
+                && p.events_contain_any(declarator_from, &[CppSyntaxKind::Initializer]) =>
+        {
+            m.undo(p);
+            return Err(CppParseError::syntax_error_from(
+                "a declarator takes only one initializer",
+                p.current_token_range(),
+            ));
+        }
         CppTokenKind::LeftBrace if !declarator_is_function => {
             // Brace-or-equal initializer on a variable: `Point p{1, 2};`.
             let init = p.mark(CppSyntaxKind::Initializer);
@@ -1195,14 +1386,40 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
         // be read as a variable declaration and its member initializer list rejected.
         CppTokenKind::Colon if p.last_declarator_is_function() => {
             parse_member_initializer_list(p)?;
+            parse_further_member_initializer_lists(p)?;
         }
         // A **requires-clause** after the declarator (C++20): `void f(T t) requires C<T>;`.
         //
         // Read here because this is where a declarator ends — and it is restricted to a **function** declarator,
         // which is the flag the neighbouring arms already consult. The standard requires more than that
         // ([dcl.decl.general]/5: the clause belongs to a *templated* function), but a function is the part of it
-        // that is visible in the tokens, and it is the part that matters: the clause is followed by a body or a
-        // `;`, and nothing else can follow a declarator with the token `requires`.
+        // that is visible in the tokens, and it is the part that matters: nothing but a body, a `;` or a
+        // constructor's `:` can follow a declarator whose clause has been read.
+        //
+        // **The clause is not the last suffix**, which is the part this arm got wrong for a long time:
+        //
+        // ```cpp
+        // basic_string()                                    // bits/basic_string.h:585
+        // _GLIBCXX_NOEXCEPT_IF(is_nothrow_default_constructible<_Alloc>::value)
+        // #if __cpp_concepts && __glibcxx_type_trait_variable_templates
+        // requires is_default_constructible_v<_Alloc>
+        // #endif
+        // : _M_dataplus(_M_local_data())
+        // { _M_init_local_buf(); _M_set_length(0); }
+        // ```
+        //
+        // A clause is one of the things written *after* a declarator, and the member initializer list is another
+        // one that may follow it, with a directive in between — which is what this file does. Returning from the
+        // match at the clause left the `:` to the class body, where the only reading available is "not a member":
+        // it became an `ErrorNode`, `_M_dataplus(_M_local_data())` became a **declaration** of its own, and every
+        // member written after it — the whole public interface of `std::basic_string` — was read as a child of one
+        // bogus declaration instead of as a member of the class. Lossless, well formed, and silent: the class
+        // body's recovery wraps an unexpected token and moves on, so no error was reported at any of it.
+        //
+        // The two steps below belong to *this* suffix rather than to the arms above: a `:` with no clause in front
+        // of it is already the arm above's, and a directive *before* a clause is the loop before the match's. When
+        // a third suffix turns out to be able to follow a clause, this becomes a loop over suffixes rather than a
+        // match — see the maintenance conventions on the third occurrence of a rule.
         //
         // **`struct S requires C<T> { };` is not read, and that is deliberate.** The grammar gives a class head
         // no clause at all, and reading one used to detach the class body: the `{ }` that follows the constraint
@@ -1219,7 +1436,29 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
         CppTokenKind::Identifier
             if at_requires(p) && p.last_declarator_is_function() && starts_a_requires_clause(p) =>
         {
+            // Asked **before** the clause is parsed, because the constraint is an expression: an expression may
+            // contain a declarator of its own (`decltype(…)`, a lambda's parameter list) and parsing one resets
+            // the flag this needs to read afterwards.
+            let constrains_a_function = p.last_declarator_is_function();
             parse_requires_clause(p)?;
+
+            // A directive between the clause and what follows it, for the reason the loop before the match gives.
+            while p.current_token() == CppTokenKind::Hash {
+                if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                    m.undo(p);
+                    return Err(err);
+                }
+            }
+
+            // …and the member initializer list a constrained **constructor** may still write after its clause:
+            // `S(U u) requires C<U> : a(u) { }`. Without this the `:` is nobody's token; with it, the caller sees
+            // the body's `{` where the grammar says it should be.
+            if constrains_a_function && p.current_token() == CppTokenKind::Colon {
+                parse_member_initializer_list(p)?;
+                // …and the other branches' lists, for the same reason this arm exists at all: a conditional can
+                // put one per branch, with a directive in between.
+                parse_further_member_initializer_lists(p)?;
+            }
         }
         // A bit-field: `int bits : 3;`, `unsigned flags : 1, spare : 7;`.
         //
@@ -2670,7 +2909,40 @@ fn parse_member_initializer_list(p: &mut CppParser) -> ParseResult {
     Ok(CompleteMarker::empty())
 }
 
-/// Parse `( expr, expr, ... )`, consuming the closing delimiter.
+/// **The other branches' member initializer lists**, when a conditional repeats the list.
+///
+/// ```cpp
+/// basic_string()                                   // bits/cow_string.h:515
+/// #if _GLIBCXX_FULLY_DYNAMIC_STRING == 0
+///   : _M_dataplus(_S_construct(size_type(), _CharT(), _Alloc()), _Alloc())
+/// #else
+///   : _M_dataplus(_S_construct(size_type(), _CharT(), _Alloc()), _Alloc())
+/// #endif
+///   { }
+/// ```
+///
+/// One declarator, one initializer list **per branch**. Reading a single list and returning left the `#else` and
+/// the second `:` to the matcher, which has no reading for either: the constructor failed, and the recovery then
+/// took its `{ }` for the class's closing brace — so `class basic_string` ended 3400 lines early and every member
+/// after it was read at file scope (`docs/grammar-gaps.md`, tenth round). A directive and a `:` are the only two
+/// tokens this loop accepts, so it stops at the first body brace, `;` or anything else.
+fn parse_further_member_initializer_lists(p: &mut CppParser) -> ParseResult {
+    loop {
+        let mut saw_a_directive = false;
+        while p.current_token() == CppTokenKind::Hash {
+            super::stats::parse_preprocessor_directive(p)?;
+            saw_a_directive = true;
+        }
+
+        // The `:` of the next branch, and only after a directive: without one, the first list would be read
+        // again — `Foo() : a(1)` has one `:`, and a loop that took every `:` would take a *bit-field*'s.
+        if !saw_a_directive || p.current_token() != CppTokenKind::Colon {
+            return Ok(CompleteMarker::empty());
+        }
+
+        parse_member_initializer_list(p)?;
+    }
+}
 pub fn parse_expression_list(p: &mut CppParser, closing: CppTokenKind) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::ArgumentList);
@@ -2928,6 +3200,21 @@ fn at_a_macro_member(p: &CppParser) -> bool {
     }
 }
 
+/// Does a **call-shaped member nothing else could read** start here — a name, a parenthesised group, no `;`?
+///
+/// Kept as a named question even though **nothing calls it**, because the shape it answers for is real and the
+/// answer is "not this way": `bits/stl_vector.h:464` writes `__glibcxx_class_requires(_Tp, _SGIAssignableConcept)`
+/// on a line of its own, and that macro is defined in an *included* file, so [`at_a_macro_member`] cannot see it.
+/// Reading the shape as a macro was tried in `parse_class_body_members` and reverted — the note there has the
+/// measurement (111 members of `std::basic_string` for no file) and the reason. Left here so the next reader finds
+/// the question already asked rather than re-deriving it.
+#[allow(dead_code)]
+fn at_a_call_shaped_macro_member(p: &CppParser) -> bool {
+    p.current_token() == CppTokenKind::Identifier
+        && p.peek_next_token() == CppTokenKind::LeftParen
+        && !a_semicolon_follows_the_group(p)
+}
+
 /// The kind of the first token **after** the balanced group at the cursor.
 ///
 /// Read a **macro standing among a declarator's suffixes**, and say whether there was one.
@@ -3013,6 +3300,34 @@ fn parse_class_body_members(p: &mut CppParser) -> ParseResult {
     while p.current_token() != CppTokenKind::RightBrace && !p.is_eof() {
         let member_base = p.open_marks();
 
+        // A **directive between two members** — the class-scope side of the seam `parse_try_statement` and
+        // `parse_if_statement` document, and the one that decides whether a standard-library class has members at
+        // all:
+        //
+        // ```cpp
+        // class basic_string {
+        //   …
+        // protected:
+        // #if __cplusplus < 201103L          // ← here
+        //   typedef iterator __const_iterator;
+        // #else
+        //   typedef const_iterator __const_iterator;
+        // #endif
+        // ```
+        //
+        // Without this, the `#if` line was read as a **member declaration** whose declarator name is
+        // `__cplusplus`, and every declaration after it became a child of that bogus member: the tree stayed
+        // lossless and free of diagnostics, the class's *own* members were no longer members, and
+        // `bits/basic_string.h` indexed seven typedefs and not one method. See `docs/roadmap.md` §2.1 — the
+        // failure mode here is a wrong *shape*, which is why no error-based check could see it.
+        //
+        // Read as the node it is, then go round the loop again: the next token is a member, an access specifier, or
+        // the closing brace, and each of those is a case the loop already handles.
+        if p.current_token() == CppTokenKind::Hash {
+            super::stats::parse_preprocessor_directive(p)?;
+            continue;
+        }
+
         if matches!(
             p.current_token(),
             CppTokenKind::PublicKeyword
@@ -3037,10 +3352,40 @@ fn parse_class_body_members(p: &mut CppParser) -> ParseResult {
             continue;
         }
 
+        // # Why a **call-shaped member** is deliberately *not* read here
+        //
+        // The shape is real — `bits/stl_vector.h:464` writes `__glibcxx_class_requires(_Tp, _SGIAssignableConcept)`
+        // on a line of its own, and its macro is defined in an *included* file (`bits/c++config.h`), so
+        // [`at_a_macro_member`] cannot see it. Reading "a name, a group, and no `;`" as a macro **after the
+        // declaration reading fails** was tried: the shape was asked before the attempt (a failed attempt does not
+        // put the cursor back — a `parse_declaration` that gives up has already consumed the name and stopped on
+        // the `(`), the checkpoint was rewound only on failure, and the reading is correct in isolation. It was
+        // still **reverted**, because it is measurably worse than the recovery it replaces:
+        //
+        // ```text
+        // declarations_in("std::basic_string")   398 → 287   (closure of <string>/<vector>/<map>/<algorithm>)
+        // bits/stl_vector.h's first error        540 → 540   (it bought nothing on the file it was written for)
+        // ```
+        //
+        // The reason is the one thing the error-node recovery does that a macro reading cannot: it **advances by
+        // one token** and lets the loop try again, so a declaration this parser cannot read costs its own first
+        // token and the members written after it are still members. A macro reading takes the name *and* the
+        // group, and whatever that group was the beginning of is gone. The standard library charged 111 members
+        // for it.
+        //
+        // So the queue entry stands (`roadmap.md` §2.3) and the evidence it needs is **macro evidence**, not
+        // shape: either the macro environment (P3) or a source that reaches `bits/c++config.h`.
+
         // A member is a declaration; anything that is not gets wrapped in an error node so the
         // loop always advances.
+        //
+        // The nodes the failed attempt opened are closed **with** their end events
+        // ([`MarkerEventContainer::end_marks_to`], not `close_marks_above`): a member declaration that fails
+        // after consuming tokens — `_GLIBCXX20_CONSTEXPR void f(size_type) { }`, `int x = 1` with no `;` — would
+        // otherwise leave an unpaired `NodeStart` that the tree builder balances at the end of the file, so the
+        // abandonment swallowed every member written after it. See the note on `end_marks_to`.
         if parse_member(p).is_err() {
-            p.close_marks_above(member_base);
+            p.end_marks_to(member_base);
             if p.current_token_index() == before {
                 let error = p.mark(CppSyntaxKind::ErrorNode);
                 p.bump();
@@ -3481,42 +3826,112 @@ pub fn parse_using_declaration(p: &mut CppParser) -> ParseResult {
         return Err(err);
     }
 
-    if p.current_token() == CppTokenKind::Assign {
-        p.bump();
-
-        if let Some(name) = alias_name {
-            p.declare_type_name(&name);
+    // The type's **suffixes**: `using Arr = int[4];`, `using Fn = int(char);`, `using P = int(*)[4];`.
+    //
+    // A type-id reads the abstract declarator — the pointers, references and cv-qualifiers — and stops
+    // before the array and function parts, because everywhere else a type-id appears those belong to
+    // whatever encloses it. In an alias there is nothing enclosing it: the `=` was the last thing before
+    // the type and the `;` is the last thing after it, so anything left is part of the type.
+    //
+    // That asymmetry is why `typedef int Arr[4];` worked while `using Arr = int[4];` did not — the typedef
+    // rule reaches the suffixes through `parse_declarator`, and this rule had no equivalent step.
+    //
+    // The definition is read **once per branch** (`#if A = X; #else = Y; #endif`), which is how
+    // `make_integer_sequence` is written; see [`parse_a_definition_per_branch`].
+    let mut declared = false;
+    let ended = parse_a_definition_per_branch(p, |p| {
+        if !declared {
+            if let Some(name) = &alias_name {
+                p.declare_type_name(name);
+            }
+            declared = true;
         }
 
-        if let Err(err) = parse_type_id(p) {
-            p.close_marks_above(base);
-            return Err(err);
-        }
+        parse_type_id(p)?;
 
-        // The type's **suffixes**: `using Arr = int[4];`, `using Fn = int(char);`, `using P = int(*)[4];`.
-        //
-        // A type-id reads the abstract declarator — the pointers, references and cv-qualifiers — and stops
-        // before the array and function parts, because everywhere else a type-id appears those belong to
-        // whatever encloses it. In an alias there is nothing enclosing it: the `=` was the last thing before
-        // the type and the `;` is the last thing after it, so anything left is part of the type.
-        //
-        // That asymmetry is why `typedef int Arr[4];` worked while `using Arr = int[4];` did not — the typedef
-        // rule reaches the suffixes through `parse_declarator`, and this rule had no equivalent step.
         if (p.current_token() == CppTokenKind::LeftBracket
             || p.current_token() == CppTokenKind::LeftParen)
             && let Err(err) = super::types::parse_declarator_suffixes(p)
         {
+            return Err(err);
+        }
+
+        Ok(CompleteMarker::empty())
+    });
+
+    match ended {
+        Err(err) => {
             p.close_marks_above(base);
             return Err(err);
         }
-    }
-
-    if let Err(err) = expect_semicolon(p) {
-        p.close_marks_above(base);
-        return Err(err);
+        // `true` means the branch's own `;` was the declaration's, so there is nothing left to ask for.
+        Ok(ended) if !ended => {
+            if let Err(err) = expect_semicolon(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+        }
+        Ok(_) => {}
     }
 
     Ok(m.complete(p))
+}
+
+/// **One definition per branch**: `#if … = X; #else … = Y; #endif`.
+///
+/// Two constructs are written this way in libstdc++, and in both the *name* is read before any of it — so the
+/// directive arrives between the name and its `=`, which is a position where nothing else can stand:
+///
+/// ```cpp
+/// template<typename _Tp, _Tp _Num>
+///   using make_integer_sequence                     // bits/utility.h:174
+/// #if __has_builtin(__make_integer_seq)
+///       = __make_integer_seq<integer_sequence, _Tp, _Num>;
+/// #else
+///       = integer_sequence<_Tp, __integer_pack(_Num)...>;
+/// #endif
+///
+/// template<typename _Tp>
+///   concept __is_signed_int128                      // bits/iterator_concepts.h:615
+/// #if __SIZEOF_INT128__
+///       = same_as<_Tp, __int128>;
+/// #else
+///       = false;
+/// #endif
+/// ```
+///
+/// `payload` reads everything after the `=` **except** the `;`, which is the branch's own. The return value says
+/// whether that `;` was consumed here: it is when a definition was read and ended with one, and the caller then
+/// has nothing left to ask for — while a declaration that never reached a `=` still needs its `;` reported the
+/// ordinary way.
+fn parse_a_definition_per_branch(
+    p: &mut CppParser,
+    mut payload: impl FnMut(&mut CppParser) -> ParseResult,
+) -> Result<bool, CppParseError> {
+    let mut ended_with_a_semicolon = false;
+
+    loop {
+        // A directive **before** the `=`, and the one that closes a branch and opens the next.
+        while p.current_token() == CppTokenKind::Hash {
+            super::stats::parse_preprocessor_directive(p)?;
+        }
+
+        if p.current_token() != CppTokenKind::Assign {
+            break;
+        }
+        p.bump();
+
+        payload(p)?;
+
+        if p.current_token() != CppTokenKind::Semicolon {
+            ended_with_a_semicolon = false;
+            break;
+        }
+        p.bump();
+        ended_with_a_semicolon = true;
+    }
+
+    Ok(ended_with_a_semicolon)
 }
 
 /// Parse a `typedef` declaration: `typedef int MyInt;`.
@@ -3814,3 +4229,5 @@ fn parse_linkage_specification(p: &mut CppParser) -> ParseResult {
 
     Ok(m.complete(p))
 }
+
+
