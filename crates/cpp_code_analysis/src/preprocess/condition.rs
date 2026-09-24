@@ -140,14 +140,73 @@ pub enum BinaryOp {
     LogicalOr,
 }
 
+/// What a table has to say about one name.
+///
+/// Three answers rather than an `Option`, because the two ways of *not* having a name are different
+/// answers and folding them together is how a wrong answer gets produced:
+///
+/// ```text
+/// #ifdef _WIN32      with _WIN32 nowhere in the table
+///   Undefined   — this table has read everything there is, and _WIN32 is not defined: false.
+///   Unanswered  — this table has read a file, or an index, and _WIN32 may be defined elsewhere
+///                 (the compiler predefines it): the honest answer is `Value::Unknown`.
+/// ```
+///
+/// A table built from *one file's own directives* knows everything that file says and nothing about
+/// what its `#include`s brought in, so which variant it returns is a statement about the table, not
+/// about the name. See [`MacroValues`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lookup<'a> {
+    /// Defined, with the definition: `defined(NAME)` is true, and its body may give a value.
+    Defined(&'a MacroDef),
+    /// Defined, and this table does not hold the body — so `defined(NAME)` is true and the *value* is
+    /// not known. `#define NAME` and `#define NAME 1` are the same answer here, and a condition that
+    /// asks for the value (`#if NAME == 1`) comes out [`Value::Unknown`] rather than as a guess.
+    ///
+    /// This is what an **index** can say about a name: a summary stores macro facts without bodies
+    /// (see `MacroFact`), so "is this a macro here" is answerable and "what is its value" is not.
+    DefinedWithoutAValue,
+    /// Certainly not defined: the standard's `0`, and `defined(NAME)` is false.
+    Undefined,
+    /// Not known from here — neither `0` nor false, so the condition becomes [`Value::Unknown`].
+    Unanswered,
+}
+
+impl<'a> Lookup<'a> {
+    /// The body, when this table holds one: what an expansion pastes, and what a value is read from.
+    ///
+    /// `None` for the other three answers, for the same reason in each case: there is nothing to paste, and
+    /// pasting nothing would delete the use rather than leave it in place.
+    pub fn definition(self) -> Option<&'a MacroDef> {
+        match self {
+            Lookup::Defined(definition) => Some(definition),
+            Lookup::DefinedWithoutAValue | Lookup::Undefined | Lookup::Unanswered => None,
+        }
+    }
+
+    /// Is the name certainly a macro? The question `defined(NAME)`, `#ifdef` and `#ifndef` ask.
+    ///
+    /// `None` when the table cannot say — the answer that must not be folded into `false`.
+    pub fn is_defined(self) -> Option<bool> {
+        match self {
+            Lookup::Defined(_) | Lookup::DefinedWithoutAValue => Some(true),
+            Lookup::Undefined => Some(false),
+            Lookup::Unanswered => None,
+        }
+    }
+}
+
 /// Look up macros while evaluating.
 ///
-/// A trait rather than a `&MacroTable` because evaluation happens in two places with different
-/// tables: over a file's own directives, and — later — over a file's directives plus everything its
-/// includes brought in. The evaluator should not have to know which.
+/// A trait rather than a `&MacroTable` because evaluation happens in more than one place with
+/// different tables: over a file's own directives, over a file's directives plus everything its
+/// includes brought in, and — at query time — over what a compiler predefines. The evaluator should
+/// not have to know which, and [`Lookup`] is what lets each of them answer at its own strength: the
+/// **answer** carries whether the table is speaking about a name it read or about one it never saw, so
+/// no caller has to decide that on the table's behalf.
 pub trait MacroValues {
-    /// The definition of `name`, if it is defined at the position being evaluated.
-    fn lookup(&self, name: &str) -> Option<&MacroDef>;
+    /// What this table knows about `name` at the position being evaluated.
+    fn lookup(&self, name: &str) -> Lookup<'_>;
 }
 
 /// A table that defines nothing, so every identifier is `0`.
@@ -158,14 +217,14 @@ pub trait MacroValues {
 pub struct NoMacros;
 
 impl MacroValues for NoMacros {
-    fn lookup(&self, _name: &str) -> Option<&MacroDef> {
-        None
+    fn lookup(&self, _name: &str) -> Lookup<'_> {
+        Lookup::Undefined
     }
 }
 
 impl MacroValues for crate::macros::MacroTable {
-    fn lookup(&self, name: &str) -> Option<&MacroDef> {
-        self.get(name)
+    fn lookup(&self, name: &str) -> Lookup<'_> {
+        self.get(name).map_or(Lookup::Undefined, Lookup::Defined)
     }
 }
 
@@ -198,12 +257,23 @@ pub fn evaluate(tokens: &[Token], macros: &impl MacroValues) -> Value {
 pub fn eval(expr: &ConditionExpr, macros: &impl MacroValues) -> Value {
     match expr {
         ConditionExpr::Number(value) => Value::Known(*value),
-        ConditionExpr::Defined(name) => Value::Known(i128::from(macros.lookup(name).is_some())),
+        // `defined` asks one question — is the name a macro — and the two ways of being a macro answer it
+        // the same way. `Unanswered` is not `false`: see [`Lookup`].
+        ConditionExpr::Defined(name) => match macros.lookup(name).is_defined() {
+            Some(defined) => Value::Known(i128::from(defined)),
+            None => Value::Unknown,
+        },
         ConditionExpr::Identifier(name) => match macros.lookup(name) {
             // Undefined is `0`. This is the rule the whole feature-flag idiom rests on, and it is not
             // an error, which is why it is a `Known` value and not `Unknown`.
-            None => Value::Known(0),
-            Some(definition) => macro_value(definition),
+            Lookup::Undefined => Value::Known(0),
+            // A name that is a macro whose body this table does not hold: `#define FOO` and `#define FOO 1`
+            // are the same answer here, and reading a value out of an empty body would be a guess.
+            Lookup::DefinedWithoutAValue => Value::Unknown,
+            Lookup::Defined(definition) => macro_value(definition),
+            // The name may be defined by something this table has not read, and the standard's `0` is a
+            // statement about a *complete* input. So: not known, rather than not defined.
+            Lookup::Unanswered => Value::Unknown,
         },
         ConditionExpr::Group(inner) => eval(inner, macros),
         ConditionExpr::Unary { op, operand } => {

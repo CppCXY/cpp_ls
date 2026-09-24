@@ -950,6 +950,15 @@ pub struct Marked {
     /// header those are different answers. With this set, a name with no binding is **unknown** rather than
     /// undefined — which is what keeps an `#ifdef` from a header's includer going the wrong way.
     incomplete: bool,
+    /// Names this state passed **without being able to decide** what they are: a `#define` inside an `#if`
+    /// nobody can evaluate, or any fact of a file that may not have been included at all.
+    ///
+    /// Kept apart from [`Marked::incomplete`] because the two are different sizes of the same doubt: that one
+    /// says "a file I never read may define anything", this one says "**this** name may or may not be defined,
+    /// and I know which fact put it in doubt". A condition asking about such a name is `Unknown` — which is what
+    /// keeps `#ifndef NAME / #define NAME` in an undecidable branch from being read as "NAME is not defined",
+    /// the reading that would make the rest of the file's conditions wrong rather than unknown.
+    uncertain: HashSet<Box<str>>,
 }
 
 impl crate::condition::MacroValues for Marked {
@@ -962,8 +971,25 @@ impl crate::condition::MacroValues for Marked {
     ///
     /// That gap is deliberate and bounded: carrying every body would mean duplicating the macro table without
     /// its ordering rules, and what needs deciding at this stage is whether a region is `#if 0`d out.
-    fn lookup(&self, name: &str) -> Option<&crate::macros::MacroDef> {
+    ///
+    /// A name this state has not seen in an [`Marked::incomplete`] walk is
+    /// [`Lookup::Unanswered`](crate::Lookup::Unanswered) rather than
+    /// [`Lookup::Undefined`](crate::Lookup::Undefined), which is the same distinction [`Marked::is_unknown`] makes
+    /// for `#ifdef` — and it has to be made here too, or `#if defined(FOO)` in a header analysed on its own would
+    /// answer "no" about a macro its includer defines.
+    fn lookup(&self, name: &str) -> crate::condition::Lookup<'_> {
+        use crate::condition::Lookup;
+
+        if self.is_unknown(name) {
+            return Lookup::Unanswered;
+        }
+
+        if !self.is_defined(name) {
+            return Lookup::Undefined;
+        }
+
         self.get(name)
+            .map_or(Lookup::DefinedWithoutAValue, Lookup::Defined)
     }
 }
 
@@ -976,13 +1002,48 @@ impl Marked {
         self
     }
 
+    /// The same, for a walk that has just found out it cannot know everything: an `#include` that did not
+    /// resolve, or a file nobody indexed.
+    ///
+    /// Once set it cannot be unset, and that is the point: what the walk did not read stays unread, and every
+    /// condition after the gap is a question about a translation unit this state only knows part of.
+    pub fn mark_incomplete(&mut self) {
+        self.incomplete = true;
+    }
+
+    pub fn is_incomplete(&self) -> bool {
+        self.incomplete
+    }
+
+    /// Note that `name` **may or may not** be defined here, without saying which.
+    ///
+    /// What a walk does with a fact it could not place: a `#define NAME 1` inside an `#if` nobody can evaluate,
+    /// or anything at all in a file that may not have been included. From that point on the name is
+    /// [`Lookup::Unanswered`](crate::Lookup::Unanswered) — not `0`, and not "defined".
+    pub fn mark_uncertain(&mut self, name: &str) {
+        if !self.uncertain.iter().any(|held| &**held == name) {
+            self.uncertain.insert(name.into());
+        }
+    }
+
     /// Is `name`'s status unknown — neither defined nor definitely not?
     ///
-    /// True only when the state is [`Marked::incomplete`] and nothing in it mentions the name either way. A
-    /// name that was explicitly `#undef`ed is *not* unknown: the file that undefined it is one this state has
-    /// seen, so the answer is a definite no.
+    /// Two ways to be unknown, and both are asked about here: the state is [`Marked::incomplete`] and nothing in
+    /// it mentions the name (a file this walk never read may define it), or a fact the walk passed left the name
+    /// [`Marked::mark_uncertain`]. A name that was explicitly `#undef`ed is *not* unknown: the file that
+    /// undefined it is one this state has seen, so the answer is a definite no.
     pub fn is_unknown(&self, name: &str) -> bool {
-        self.incomplete && !self.bindings.iter().any(|(bound, _)| &**bound == name)
+        self.is_uncertain(name) || (self.incomplete && !self.mentions(name))
+    }
+
+    /// Did anything in this state mention the name, one way or the other?
+    fn mentions(&self, name: &str) -> bool {
+        self.bindings.iter().any(|(bound, _)| &**bound == name)
+    }
+
+    /// Is the name one this state passed without being able to decide?
+    pub fn is_uncertain(&self, name: &str) -> bool {
+        self.uncertain.iter().any(|held| &**held == name)
     }
 
     /// The state a translation unit starts in: the compiler's own definitions.
@@ -990,17 +1051,7 @@ impl Marked {
         let mut marked = Marked::default();
 
         for definition in &config.defines {
-            // `-DFOO` is `FOO` with the body `1`; `-DFOO=bar` is `FOO` with the body `bar`. Both are
-            // re-parsed through the ordinary `#define` reader so that the two spellings cannot drift apart.
-            let source = match &definition.value {
-                Some(value) => format!("#define {} {}\n", definition.name, value),
-                None => format!("#define {} 1\n", definition.name),
-            };
-
-            if let Some(parsed) = parse_define_source(&source) {
-                marked.command_line.push(parsed.clone());
-                marked.bindings.push((parsed.name.clone(), true));
-            }
+            marked.define_on_the_command_line(&definition.name, definition.value.as_deref());
         }
 
         for name in &config.undefines {
@@ -1010,6 +1061,31 @@ impl Marked {
         marked
     }
 
+    /// Define one name the way a command line does: `-DNAME=value`, or `-DNAME` for `NAME` as `1`.
+    ///
+    /// The two spellings are re-parsed through the ordinary `#define` reader so that they cannot drift apart
+    /// from what a file writing the same line means — and so that a *value* is available to a condition
+    /// (`#if FOO == 2`) rather than only the name.
+    ///
+    /// Public because the command line is not the only source of definitions a compilation starts with: a
+    /// compiler **predefines** about five hundred names (`_WIN32`, `__x86_64__`, `__cplusplus`) that no file
+    /// and no `-D` wrote, and they arrive in the same shape. See `Toolchain::macros`.
+    pub fn define_on_the_command_line(&mut self, name: &str, value: Option<&str>) {
+        let source = match value {
+            Some(value) => format!("#define {name} {value}\n"),
+            None => format!("#define {name} 1\n"),
+        };
+
+        let Some(parsed) = parse_define_source(&source) else {
+            return;
+        };
+
+        self.bindings.push((parsed.name.clone(), true));
+        self.command_line
+            .retain(|existing| existing.name != parsed.name);
+        self.command_line.push(parsed);
+    }
+
     pub fn define(&mut self, definition: crate::macros::MacroDef) {
         self.bindings.push((definition.name.clone(), true));
         self.command_line
@@ -1017,8 +1093,54 @@ impl Marked {
         self.command_line.push(definition);
     }
 
+    /// Account for one `#define` or `#undef` a walk has just passed.
+    ///
+    /// The translation unit's macro state is built by *reading it in order*, which is what this is for: the walk
+    /// calls it for every fact of every file it enters, and the state after the call is what a condition written
+    /// below that fact sees. See [`crate::index::environment`] — until this existed the environment was only what
+    /// the compiler and the command line define, and every condition a header's own feature macro answers stayed
+    /// `Unknown`.
+    ///
+    /// The value comes from [`crate::MacroFact::value`], which is the macro's body only when that body is one
+    /// integer literal — the one kind of body a condition can read. A fact without one defines the name and leaves
+    /// its value unknown, which is the same answer a condition gets from a `#define NAME something` it must expand
+    /// itself: `defined(NAME)` is true and `#if NAME` is undecidable.
+    pub fn observe(&mut self, fact: &crate::MacroFact) {
+        match fact.kind {
+            crate::MacroKind::Undefinition => self.undefine(&fact.name),
+            crate::MacroKind::Definition => match fact.value.as_deref() {
+                // The literal's own text, with the token kind the reader of a *value* accepts. No lexer is needed
+                // for that: `MacroFact::value` is written only when the body is one integer literal, so the text
+                // and the kind are both already known — which is why they are stored that way.
+                Some(value) => self.define(crate::macros::MacroDef {
+                    name: fact.name.as_str().into(),
+                    params: None,
+                    body: crate::macros::MacroBody {
+                        tokens: vec![crate::Token::new(
+                            cpp_parser::CppTokenKind::IntegerLiteral,
+                            value,
+                            fact.range,
+                        )],
+                        stringize: Vec::new(),
+                        paste: Vec::new(),
+                    },
+                    range: fact.range,
+                    name_range: fact.range,
+                }),
+                None => self.define_name(&fact.name),
+            },
+        }
+    }
+
+    /// Define a name whose **value is not known** — a `#define NAME` a file wrote whose body this state does not
+    /// carry, or a name a conditional certainly defines without saying as what.
+    ///
+    /// Any value the name had is **forgotten**, and that is not tidiness: a definition that shadows an earlier one
+    /// may define the name as anything, so keeping the old value would answer `#if NAME == 2` with the value of a
+    /// definition that is no longer the one in force.
     pub fn define_name(&mut self, name: &str) {
         self.bindings.push((name.into(), true));
+        self.command_line.retain(|existing| &*existing.name != name);
     }
     pub fn undefine(&mut self, name: &str) {
         self.bindings.push((name.into(), false));

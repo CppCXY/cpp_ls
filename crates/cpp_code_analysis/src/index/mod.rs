@@ -33,11 +33,14 @@ use std::path::{Path, PathBuf};
 
 use cpp_parser::{CppParser, CppSyntaxTree, ParserConfig};
 
+pub mod environment;
 pub mod project;
 pub mod references;
 pub mod store;
 pub mod watch;
 pub mod worklist;
+
+pub use environment::{MacrosHere, visibility_at};
 
 pub use project::{
     IncludeVisibility, MemberCompletions, MemberList, NameCompletions, OfferedName, ProjectDefinition,
@@ -185,6 +188,10 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // there is. See `deguard_the_files_own_guard` for why calling it unconditional is the honest reading.
         let own_guard = own_guard_region(&preprocessing, &root);
 
+        // Stored, not just used here: a *walk* evaluating a condition needs the same rule, and it has only the
+        // summary. See `SummaryGuards::own_guard` — a file's own guard is not a condition on anything.
+        guards.own_guard = own_guard.map(|region| region as u32);
+
         if let Some(region) = own_guard {
             let mut all: Vec<&mut FactGuard> = declarations
                 .iter_mut()
@@ -254,6 +261,7 @@ fn macro_fact(spanned: &SpannedDirective) -> Option<MacroFact> {
                 kind: crate::summary::MacroKind::Definition,
                 function_like: definition.is_function_like(),
                 body: macro_body_shape(definition),
+                value: macro_value(definition),
                 // The *name's* range, not the directive's: "go to macro definition" is a jump to the name a user
                 // can see, and a rename edits it. The guard sweep reads this fact's offset too, and the name is
                 // inside the same conditional region as the directive that wrote it — a `#define` cannot span an
@@ -271,12 +279,36 @@ fn macro_fact(spanned: &SpannedDirective) -> Option<MacroFact> {
             function_like: false,
             // Nothing to say about a body, and saying `Unknown` is the honest way to say it.
             body: cpp_parser::MacroBody::Unknown,
+            // An `#undef` has no value: the name stops being a macro, which is the whole of what it says.
+            value: None,
             range: spanned.range,
             guard: crate::summary::FactGuard::Unconditional,
             settles_the_name: false,
         }),
         _ => None,
     }
+}
+
+/// The value a condition could read out of a definition, or `None`.
+///
+/// One integer literal in the body, and nothing else — which is exactly what
+/// [`crate::condition::macro_value`] accepts, so the two agree by construction rather than by convention. A
+/// function-like macro is not a value at all (`#if F(x)` is not how a macro is asked about), and neither is a body
+/// of two tokens, a body that is a name, or an empty body: a condition asking about any of them is `Unknown`, and
+/// storing a spelling that no evaluator can use would only make the cache bigger.
+fn macro_value(definition: &crate::preprocess::macros::MacroDef) -> Option<Box<str>> {
+    if definition.is_function_like() {
+        return None;
+    }
+
+    let mut significant = definition.body.significant();
+    let only = significant.next()?;
+
+    if significant.next().is_some() {
+        return None;
+    }
+
+    (only.kind == cpp_parser::CppTokenKind::IntegerLiteral).then(|| only.text.clone())
 }
 
 /// The region a file's own include guard opens, when it has one.
@@ -619,6 +651,210 @@ mod tests {
 
     fn summary(source: &str) -> crate::summary::FileSummary {
         summarize(Path::new("/p/widget.cpp"), source, key())
+    }
+
+    /// Every region's branches, as `kind condition body-start..body-end`, for a short assertion.
+    ///
+    /// The regions of a summary used to be spans and nothing else, and a span of a *condition* is not a
+    /// question any layer could answer. This is the shape that replaced it: what each branch asks, and which
+    /// text it guards.
+    fn region_shapes(source: &str) -> Vec<Vec<String>> {
+        let summary = summary(source);
+
+        summary
+            .guards
+            .conditionals
+            .iter()
+            .map(|conditional| {
+                conditional
+                    .branches
+                    .iter()
+                    .map(|branch| {
+                        format!(
+                            "{:?} {} {}..{}",
+                            branch.kind,
+                            branch.condition.as_deref().unwrap_or("-"),
+                            branch.body.start_offset,
+                            branch.body.end_offset()
+                        )
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_summary_stores_what_each_conditional_asks() {
+        // The three spellings a condition comes in, and the one that has none. `#ifdef`/`#ifndef` store the
+        // *name*, `#if` stores the expression's text — read back with the lexer the evaluator will use — and
+        // `#else` stores nothing, which is not the same as storing an empty expression.
+        let shapes = region_shapes(
+            "#if defined(_WIN32)\n#include <a.h>\n#elif __cplusplus >= 201703L\n#include <b.h>\n#else\n#include <c.h>\n#endif\n",
+        );
+
+        assert_eq!(shapes.len(), 1, "one conditional, three branches");
+        let branches = &shapes[0];
+        assert_eq!(branches.len(), 3);
+        assert!(
+            branches[0].starts_with("If defined ( _WIN32 )"),
+            "the expression's tokens, joined: {}",
+            branches[0]
+        );
+        assert!(
+            branches[1].starts_with("Elif __cplusplus >= 201703L"),
+            "a version test is stored as the text a value can be compared against: {}",
+            branches[1]
+        );
+        assert!(
+            branches[2].starts_with("Else -"),
+            "`#else` asks nothing: {}",
+            branches[2]
+        );
+
+        // And the bodies are where the reader would put them: each branch's text is between its own directive
+        // and the *start of the next one*, which is where the `#endif` is — the directive itself is not body.
+        let source = "#ifdef A\n#include <a.h>\n#endif\n";
+        let shapes = region_shapes(source);
+        assert_eq!(
+            shapes[0][0],
+            format!(
+                "Ifdef A {}..{}",
+                source.find("#ifdef").expect("the directive") + "#ifdef A\n".len(),
+                source.find("#endif").expect("the #endif")
+            ),
+            "the `#ifdef` branch guards everything between its directive and the `#endif`"
+        );
+    }
+
+    #[test]
+    fn a_regions_parent_is_the_conditional_it_is_written_inside() {
+        // A nested region's condition lies inside its parent's body, and so does the text of a sibling branch —
+        // which is why the nesting is stored rather than derived from the spans.
+        let nested = summary("#ifdef A\n#ifdef B\nint x;\n#endif\n#endif\n");
+        let parents: Vec<Option<u32>> = nested
+            .guards
+            .conditionals
+            .iter()
+            .map(|conditional| conditional.parent)
+            .collect();
+        assert_eq!(parents, [None, Some(0)]);
+
+        // …and an `#elif` does not open a second region: the region *is* the conditional, and its branches are
+        // the chain written inside it.
+        let chained =
+            summary("#ifdef A\nint a;\n#elif defined(B)\nint b;\n#else\nint c;\n#endif\n");
+        assert_eq!(chained.guards.conditionals.len(), 1);
+        assert_eq!(chained.guards.conditionals[0].branches.len(), 3);
+        assert!(chained.guards.conditionals[0].exhaustive());
+    }
+
+    #[test]
+    fn the_code_a_position_is_in_is_found_by_walking_outwards() {
+        // `conditions_at` is what a fact's guard index cannot say on its own: a fact records the *innermost*
+        // region, and whether the code is compiled is a question about every region around it.
+        let source = "#ifdef A\n#ifdef B\nint x;\n#endif\n#endif\n";
+        let summary = summary(source);
+        let x = source.find("int x;").expect("the declaration");
+
+        let chain = summary.guards.conditions_at(x);
+        assert_eq!(
+            chain.iter().map(|at| at.region).collect::<Vec<_>>(),
+            [1, 0],
+            "innermost first"
+        );
+        assert!(
+            chain
+                .iter()
+                .all(|at| at.condition_at < x),
+            "and each condition is evaluated at its *own* offset, which is above the code: {chain:?}"
+        );
+
+        // Code outside every conditional is in no region at all — the common case, and the cheap one.
+        let source = "int x;\n#ifdef A\nint y;\n#endif\n";
+        assert!(summary
+            .guards
+            .conditions_at(source.find("int x;").expect("the declaration"))
+            .is_empty());
+    }
+
+    #[test]
+    fn a_position_is_looked_up_in_the_branch_it_sits_in() {
+        // The branch in force is what decides whether the code is compiled, and it is a question about the
+        // position — `#else` is not "the whole region", it is one branch of it.
+        let source = "#ifdef A\nint taken;\n#else\nint not_taken;\n#endif\n";
+        let summary = summary(source);
+        let region = summary.guards.conditionals.first().expect("one region");
+
+        let first = source.find("int taken").expect("the first branch");
+        let second = source.find("int not_taken").expect("the second branch");
+        assert_eq!(region.branch_at(first), Some(0));
+        assert_eq!(region.branch_at(second), Some(1));
+    }
+
+    #[test]
+    fn the_chain_a_guard_names_is_the_chain_the_position_is_in() {
+        // Two ways to the same answer: from the guard a fact carries (each region names its parent, so this is a
+        // walk outwards), and from the position (a search over every region's span). They must agree — the guard
+        // is the innermost region the sweep found, and the spans are that same sweep's arithmetic. Where they do
+        // not, the file's directives do not balance and the structure is two readings of one broken file; the
+        // guard is the one the rest of the index is consistent with.
+        for source in [
+            "#ifdef A\nint x;\n#endif\n",
+            "#ifdef A\n#ifdef B\nint x;\n#endif\n#endif\n",
+            "#ifdef A\nint a;\n#elif defined(B)\nint b;\n#else\nint c;\n#endif\n",
+            "#ifndef GUARD\n#define GUARD\n#ifdef A\nint x;\n#endif\n#endif\n",
+            "int early;\n#if defined(A) && defined(B)\n#ifdef C\nint x;\n#else\nint y;\n#endif\n#endif\n",
+        ] {
+            let summary = summary(source);
+
+            for (region, conditional) in summary.guards.conditionals.iter().enumerate() {
+                for branch in &conditional.branches {
+                    // Anywhere inside the branch's body is a position whose guard names this region — unless a
+                    // *nested* region is there, which is what the chain has to account for either way.
+                    if branch.body.length == 0 {
+                        continue;
+                    }
+
+                    let at = branch.body.start_offset;
+                    assert_eq!(
+                        summary.guards.conditions_at(at),
+                        summary.guards.conditions_of(region as u32),
+                        "{source:?} at {at} (region {region})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_definition_carries_a_value_exactly_when_a_condition_could_read_one() {
+        // `#if NAME` expands the name and reads the result as a number, and the evaluator accepts **one integer
+        // literal** — so the fact stores a value in exactly that case and nothing else. A name defined to a name,
+        // to an expression, to nothing, or as a function-like macro is `Unknown` to a condition, and a spelling no
+        // evaluator can use would only make the cache bigger.
+        let value_of = |source: &str, name: &str| {
+            summary(source)
+                .macros
+                .iter()
+                .find(|fact| fact.name == name)
+                .and_then(|fact| fact.value.clone())
+        };
+
+        assert_eq!(value_of("#define ABI 1\n", "ABI").as_deref(), Some("1"));
+        assert_eq!(
+            value_of("#define WIDE 0x10UL\n", "WIDE").as_deref(),
+            Some("0x10UL"),
+            "the spelling is kept as written: the evaluator is what reads it"
+        );
+        assert_eq!(value_of("#define NAME other\n", "NAME"), None);
+        assert_eq!(value_of("#define EXPR 1 + 2\n", "EXPR"), None);
+        assert_eq!(value_of("#define EMPTY\n", "EMPTY"), None);
+        assert_eq!(value_of("#define CALL(x) x\n", "CALL"), None);
+        assert_eq!(
+            value_of("#undef GONE\n", "GONE"),
+            None,
+            "an `#undef` says the name stops being a macro, which is all it says"
+        );
     }
 
     /// The facts about `name`, with their guards and the settling flag, for a short assertion.

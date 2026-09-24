@@ -77,6 +77,63 @@ fn a_real_compiler_is_found_and_answers_with_its_own_directories() {
 }
 
 #[test]
+fn a_real_compiler_answers_with_the_macros_it_predefines() {
+    // The half of the macro environment that is in no file. `#ifdef _WIN32` and `#if __cplusplus >= 201703L` are
+    // questions about *these* names, and asking the compiler is the only way to get them: they are built in, not
+    // written down.
+    let Some(toolchain) = toolchain_here() else {
+        return;
+    };
+
+    assert!(
+        toolchain.builtin_macros.len() > 100,
+        "a C++ compiler predefines hundreds of macros; {} is not a macro table: {:?}",
+        toolchain.builtin_macros.len(),
+        &toolchain.builtin_macros[..toolchain.builtin_macros.len().min(5)]
+    );
+
+    let value_of = |name: &str| {
+        toolchain
+            .builtin_macros
+            .iter()
+            .find(|define| define.name.as_ref() == name)
+            .map(|define| define.value.as_deref())
+    };
+
+    // `__cplusplus` is the one every C++ file's conditions are written against, and it has a **value**: a condition
+    // like `#if __cplusplus >= 201703L` needs the number, not just the name. Read with the evaluator's own integer
+    // reader, because that is what will compare it — `201703L` carries a suffix, and `str::parse` rejects it.
+    let standard = value_of("__cplusplus");
+    assert!(
+        standard
+            .flatten()
+            .and_then(cpp_code_analysis::condition::parse_integer)
+            .is_some_and(|value| value >= 201703),
+        "`__cplusplus` must come back with a number as its value, got {standard:?}"
+    );
+
+    // A name with no value is a fact too (`defined(NAME)` is what most conditions ask).
+    assert!(
+        toolchain
+            .macros()
+            .iter()
+            .any(|(_, value)| value.is_none()),
+        "some predefined macros have no value at all"
+    );
+
+    // And no name may carry a function-like parameter list: `-dM` prints `#define f(x) …` glued together, and a name
+    // with parentheses in it is not one any condition tests.
+    assert!(
+        toolchain
+            .builtin_macros
+            .iter()
+            .all(|define| !define.name.contains('(')),
+        "a function-like macro's parameters must not end up in its name"
+    );
+}
+
+/// A **standard header resolves** once the toolchain has been asked.
+#[test]
 fn a_standard_header_resolves_once_the_toolchain_has_been_asked() {
     // The claim P0 exists to make good on, and the reason it is worth making on its own: `index::store` refuses to
     // cache a summary whose includes did not resolve, so before this, **a file that includes any standard header

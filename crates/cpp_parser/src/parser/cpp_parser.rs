@@ -965,6 +965,62 @@ impl<'a> CppParser<'a> {
             .unwrap_or("")
     }
 
+    /// The unqualified name the declarator that began at `from_event` introduced, if it named anything.
+    ///
+    /// # Why the event stream and not a return value
+    ///
+    /// A declarator's name is not always where a rule can see it: `typedef WCHAR *PWCHAR;` has the name after a
+    /// `*`, `typedef void (*F)(int);` has it inside parentheses, and `ns::Widget *w` has a qualified spelling
+    /// whose *last* component is the name. Threading a `Option<String>` back through every return of
+    /// `parse_declarator` and its six helpers would touch rules that have no interest in the answer, and the
+    /// grammar already answers "what did I just parse?" from the events in
+    /// [`CppParser::events_contain_any_between`]. This is the same question with the text attached.
+    ///
+    /// # How the name is picked
+    ///
+    /// The **first `NameExpr` at the declarator's own depth**, and then the last identifier inside it. Both halves
+    /// are load-bearing:
+    ///
+    /// ```text
+    /// typedef WCHAR *PWCHAR;        the NameExpr is one level in: `PWCHAR`
+    /// typedef void (*F)(int);       the declarator's is two levels in: `F`
+    /// typedef void (*F)(Widget w);  …and the *parameter's* NameExpr is deeper still, so `w` cannot win
+    /// ns::Widget *w;                the NameExpr holds `ns :: Widget`, whose last identifier is the name
+    /// ```
+    ///
+    /// A declarator that names nothing — an abstract declarator in a type-id, a structured binding — answers
+    /// `None`, which is the honest answer and the one the callers act on.
+    pub fn the_name_a_declarator_introduced(&self, from_event: usize) -> Option<String> {
+        let events = self.events.get(from_event.min(self.events.len())..)?;
+
+        let mut depth = 0isize;
+        // Where the declarator's own name sits once it has been found: `None` until the first `NameExpr`.
+        let mut name_depth: Option<isize> = None;
+        let mut spelled = String::new();
+
+        for event in events {
+            match event {
+                MarkEvent::NodeStart { kind, .. } => {
+                    if name_depth.is_none() && *kind == CppSyntaxKind::NameExpr {
+                        name_depth = Some(depth);
+                    }
+                    depth += 1;
+                }
+                MarkEvent::NodeEnd => depth -= 1,
+                MarkEvent::EatToken { kind, range } => {
+                    // Only the tokens *directly* inside that `NameExpr`: a nested one — a default argument, a
+                    // parameter's own name — is deeper and must not overwrite the answer.
+                    if name_depth == Some(depth - 1) && *kind == CppTokenKind::Identifier {
+                        spelled = self.origin_text()[range.start_offset..range.end_offset()].to_string();
+                    }
+                }
+                MarkEvent::Trivia => {}
+            }
+        }
+
+        (!spelled.is_empty()).then_some(spelled)
+    }
+
     /// The table itself, for a consumer that wants to audit what the parse recorded.
     pub fn type_names(&self) -> &crate::parser::TypeNames {
         &self.type_names

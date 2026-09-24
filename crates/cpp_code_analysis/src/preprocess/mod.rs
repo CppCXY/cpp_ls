@@ -92,8 +92,12 @@ pub struct PositionalMacros<'a> {
 }
 
 impl crate::condition::MacroValues for PositionalMacros<'_> {
-    fn lookup(&self, name: &str) -> Option<&crate::macros::MacroDef> {
-        self.table.get_at(name, self.offset)
+    fn lookup(&self, name: &str) -> crate::condition::Lookup<'_> {
+        use crate::condition::Lookup;
+
+        self.table
+            .get_at(name, self.offset)
+            .map_or(Lookup::Undefined, Lookup::Defined)
     }
 }
 

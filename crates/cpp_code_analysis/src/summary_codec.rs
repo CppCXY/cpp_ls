@@ -30,7 +30,8 @@ use cpp_parser::SymbolKind;
 use crate::cache::SummaryKey;
 use crate::preprocess::directive::IncludeForm;
 use crate::summary::{
-    DeclFact, DeclKind, FactGuard, FileSummary, IncludeFact, MacroFact, MacroKind, SummaryGuards,
+    ConditionalRegion, DeclFact, DeclKind, FactGuard, FileSummary, GuardBranch, IncludeFact,
+    MacroFact, MacroKind, SummaryGuards,
 };
 
 /// The eight bytes a summary file starts with.
@@ -103,7 +104,33 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// cannot change **whether the name is a macro** afterwards (the `#ifndef NAME / #define NAME` idiom and a region
 /// whose every branch agrees). A byte per macro fact, and the field is a conclusion drawn from this file's own
 /// directives, so no other file's text can change it.
-pub const CODEC_VERSION: u32 = 10;
+///
+/// # Version 10
+///
+/// A summary's guards gained the **conditional structure** — the bump to version 11: for each region, the branches
+/// written for it with the condition each asks, the body each guards, and the region it is nested in. Until now a
+/// summary held a region's *span* and nothing else, which is enough to say "this fact is inside an `#if`" and not
+/// enough to ask whether that `#if` was taken. The question is stored rather than answered because the answer
+/// depends on the compilation (`-D`s, `-std=`, the compiler's predefined names) while the summary's key does not —
+/// see [`crate::summary::SummaryGuards`]. Only [`CODEC_VERSION`] moves: an old entry is unreachable, not wrong.
+///
+/// # Version 11
+///
+/// A macro fact gained `value` — the bump to version 12: the macro's body **when it is one integer literal**,
+/// which is the only body a condition can read a number out of (see [`crate::summary::MacroFact::value`]). It is
+/// stored for the same reason the conditions are: the walk that evaluates them has to know what a header defined
+/// before the point it is asking about, and a fact without a value answers `defined(NAME)` while leaving
+/// `#if NAME` — and therefore `#if __cplusplus >= 201703L && _GLIBCXX_USE_CXX11_ABI` — undecidable. Only
+/// [`CODEC_VERSION`] moves: this is a new field on a fact, not a different answer from the same text.
+/// # Version 12
+///
+/// A summary's guards gained `own_guard` — the bump to version 13: which region the file's **own include guard**
+/// opens, when it has one. The index already treated the facts guarded by exactly that region as unconditional
+/// (`deguard_the_files_own_guard`); storing the index is what lets a *walk* extend the same rule to the facts
+/// nested inside it, which is where a real header puts everything — `#ifndef GUARD / #define GUARD` and then a file
+/// full of `#if __cplusplus` blocks. Without it those blocks are evaluated against a state in which the guard has
+/// already defined its own name, and a `#ifndef GUARD` read second is false. Only [`CODEC_VERSION`] moves.
+pub const CODEC_VERSION: u32 = 13;
 
 /// Write a summary as bytes.
 ///
@@ -145,6 +172,7 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
         put_u8(&mut out, macro_kind_code(fact.kind));
         put_u8(&mut out, u8::from(fact.function_like));
         put_u8(&mut out, macro_body_code(fact.body));
+        put_opt_str(&mut out, fact.value.as_deref());
         put_range(&mut out, fact.range);
         put_u32(&mut out, guard_code(fact.guard));
         put_u8(&mut out, u8::from(fact.settles_the_name));
@@ -170,6 +198,23 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
     for region in &summary.guards.regions {
         put_range(&mut out, *region);
     }
+
+    put_u32(&mut out, summary.guards.conditionals.len() as u32);
+    for conditional in &summary.guards.conditionals {
+        put_u32(&mut out, conditional.branches.len() as u32);
+        for branch in &conditional.branches {
+            put_u8(&mut out, conditional_kind_code(branch.kind));
+            put_opt_str(&mut out, branch.condition.as_deref());
+            put_range(&mut out, branch.body);
+            put_range(&mut out, branch.range);
+        }
+
+        // `None` is written as `u32::MAX`, the same spelling a fact's `FactGuard::Unconditional` uses for "no
+        // region": an index no file can have, rather than a number that means something else in another field.
+        put_u32(&mut out, conditional.parent.unwrap_or(u32::MAX));
+    }
+
+    put_u32(&mut out, summary.guards.own_guard.unwrap_or(u32::MAX));
 
     out
 }
@@ -231,6 +276,7 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
             kind: macro_kind_from(reader.u8()?)?,
             function_like: reader.u8()? != 0,
             body: macro_body_from(reader.u8()?)?,
+            value: reader.optional_string()?.map(Box::from),
             range: reader.range()?,
             guard: guard_from(reader.u32()?)?,
             settles_the_name: reader.u8()? != 0,
@@ -265,6 +311,31 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
     for _ in 0..reader.count()? {
         guards.regions.push(reader.range()?);
     }
+
+    for _ in 0..reader.count()? {
+        let mut branches = Vec::new();
+        for _ in 0..reader.count()? {
+            branches.push(GuardBranch {
+                kind: conditional_kind_from(reader.u8()?)?,
+                condition: reader.optional_string()?.map(Box::from),
+                body: reader.range()?,
+                range: reader.range()?,
+            });
+        }
+
+        guards.conditionals.push(ConditionalRegion {
+            branches,
+            parent: match reader.u32()? {
+                u32::MAX => None,
+                parent => Some(parent),
+            },
+        });
+    }
+
+    guards.own_guard = match reader.u32()? {
+        u32::MAX => None,
+        region => Some(region),
+    };
 
     // Trailing bytes mean the file was written by something this decoder does not agree with — a newer producer,
     // or two records where one was expected. Ignoring them would be accepting a file whose *content* is not what
@@ -517,6 +588,35 @@ fn macro_kind_code(kind: MacroKind) -> u8 {
     }
 }
 
+/// Which conditional directive wrote a branch.
+///
+/// Only the five that can write one, and a value outside them is a failed read rather than a default: a
+/// `#define` in this position would mean the encoder and the decoder disagree about what a branch is.
+fn conditional_kind_code(kind: crate::DirectiveKind) -> u8 {
+    match kind {
+        crate::DirectiveKind::If => 1,
+        crate::DirectiveKind::Ifdef => 2,
+        crate::DirectiveKind::Ifndef => 3,
+        crate::DirectiveKind::Elif => 4,
+        crate::DirectiveKind::Else => 5,
+        // No other kind can reach here — a branch is only ever built from a directive that opens, continues or
+        // closes a conditional — and writing a code for one would make the decoder accept a structure the walk
+        // cannot produce.
+        _ => 0,
+    }
+}
+
+fn conditional_kind_from(code: u8) -> Result<crate::DirectiveKind, DecodeError> {
+    Ok(match code {
+        1 => crate::DirectiveKind::If,
+        2 => crate::DirectiveKind::Ifdef,
+        3 => crate::DirectiveKind::Ifndef,
+        4 => crate::DirectiveKind::Elif,
+        5 => crate::DirectiveKind::Else,
+        _ => return Err(DecodeError::BadDiscriminant),
+    })
+}
+
 fn macro_kind_from(code: u8) -> Result<MacroKind, DecodeError> {
     Ok(match code {
         1 => MacroKind::Definition,
@@ -606,7 +706,8 @@ mod tests {
     use crate::cache::SummaryKey;
     use crate::preprocess::directive::IncludeForm;
     use crate::summary::{
-        DeclFact, DeclKind, FactGuard, FileSummary, IncludeFact, MacroFact, SummaryGuards,
+        ConditionalRegion, DeclFact, DeclKind, FactGuard, FileSummary, GuardBranch, IncludeFact,
+        MacroFact, SummaryGuards,
     };
     use cpp_parser::{MacroBody, SourceRange};
 
@@ -672,10 +773,11 @@ mod tests {
                 kind: MacroKind::Definition,
                 function_like: false,
                 body: MacroBody::Specifier,
+                // A value rather than the common `None`, for the same reason `settles_the_name` is `true` here: a
+                // field the encoder dropped and the decoder defaulted would round-trip a *default* and look fine.
+                value: Some("1".into()),
                 range: range(80, 30),
                 guard: FactGuard::Region(0),
-                // `true` rather than the common `false`, and on purpose: a round trip that only ever carries the
-                // default value would pass with the field dropped from the encoding entirely.
                 settles_the_name: true,
             }],
             includes: vec![
@@ -701,6 +803,36 @@ mod tests {
             ],
             guards: SummaryGuards {
                 regions: vec![range(200, 12), range(240, 20), range(260, 9), range(300, 11)],
+                conditionals: vec![
+                    ConditionalRegion {
+                        branches: vec![
+                            GuardBranch {
+                                kind: crate::DirectiveKind::Ifdef,
+                                condition: Some("_WIN32".into()),
+                                body: range(216, 20),
+                                range: range(200, 12),
+                            },
+                            GuardBranch {
+                                kind: crate::DirectiveKind::Else,
+                                condition: None,
+                                body: range(252, 0),
+                                range: range(240, 20),
+                            },
+                        ],
+                        parent: None,
+                    },
+                    ConditionalRegion {
+                        branches: vec![GuardBranch {
+                            kind: crate::DirectiveKind::If,
+                            condition: Some("__cplusplus >= 201703L".into()),
+                            body: range(275, 20),
+                            range: range(260, 9),
+                        }],
+                        parent: Some(0),
+                    },
+                ],
+                // A file whose first conditional is its guard, so that the field is not the default here either.
+                own_guard: Some(0),
             },
         }
     }

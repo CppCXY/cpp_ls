@@ -35,6 +35,8 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::guard::Visibility;
+use crate::include::graph::Marked;
 use crate::include::paths::normalize_path;
 use crate::summary::{DeclFact, FactGuard, FileSummary, MacroFact};
 use crate::symbol::{Known, UnknownReason};
@@ -156,6 +158,14 @@ pub struct ProjectIndex {
     order: Vec<String>,
     /// For each file, the files that include it. Derived from the summaries; see the module documentation.
     included_by: HashMap<String, BTreeSet<String>>,
+    /// The macros a **compilation** starts with, which no summary can hold: the compiler's predefined names and the
+    /// command line's `-D`s.
+    ///
+    /// Every condition stored in a summary is a question about these, and an index that has not been told them
+    /// answers `Unknown` for every condition — which is what this type did before the field existed, and what it
+    /// still does for a caller that builds an index by hand. See [`crate::index::environment`] for what the field
+    /// is complete about and what it deliberately is not.
+    macros: Marked,
 }
 
     /// Which member a `obj.member` or `ptr->member` at `offset` names.
@@ -1903,7 +1913,48 @@ fn base_type_name(written: &str) -> &str {
 
 impl ProjectIndex {
     pub fn new() -> Self {
-        ProjectIndex::default()
+        ProjectIndex {
+            // **Incomplete**, so that a name this index has not been told about is `Unknown` rather than "not
+            // defined". An index built by hand has been told nothing, and the default has to be the answer that
+            // claims nothing: `Marked::default()` on its own would decide every `#ifdef` in every file as false.
+            macros: Marked::default().incomplete(),
+            ..ProjectIndex::default()
+        }
+    }
+
+    /// Tell the index what the **compilation** defines: the compiler's predefined names, then the command line's
+    /// `-D`s.
+    ///
+    /// One environment for the whole index, which is an approximation the caller should know about: a project
+    /// whose files are built with different `-D`s has one environment per *target*, and this models the one the
+    /// caller supplies. Recorded in `docs/roadmap.md` rather than guessed at here.
+    ///
+    /// # Complete or not, and who decides
+    ///
+    /// The state's own [`Marked::incomplete`] flag is **kept as given**, and that flag is the difference between
+    /// two answers to `#ifdef NAME` when nothing the index read defines `NAME`:
+    ///
+    /// ```text
+    /// incomplete  → Unknown  — a file nobody read, or a `-D` nobody mentioned, could define it
+    /// complete    → false    — within this compilation, nothing defines it, and the branch is not taken
+    /// ```
+    ///
+    /// The second is what makes `#ifndef NT_INCLUDED / #include <winnt.h> / #endif` decide itself, and it is a
+    /// claim about the **inputs**: the caller is saying "these are the compilation's own definitions, and every
+    /// `#include` that matters resolved and was indexed". [`crate::Session`] says it only when it read the
+    /// project's own compile database — see `compilation_environment` there — and a walk that runs into an
+    /// `#include` it cannot read takes the claim back ([`Marked::mark_incomplete`]).
+    ///
+    /// A name a *conditional* might define is a smaller doubt and is handled per name: the walk records it with
+    /// [`Marked::mark_uncertain`], so `#ifdef` on it is `Unknown` even in a complete environment.
+    pub fn with_macros(mut self, macros: Marked) -> Self {
+        self.macros = macros;
+        self
+    }
+
+    /// The macros a compilation starts with — see [`ProjectIndex::with_macros`].
+    pub fn macros(&self) -> &Marked {
+        &self.macros
     }
 
     /// Add or replace one file's summary.
@@ -2263,8 +2314,9 @@ impl ProjectIndex {
             &mut Vec::new(),
             false,
             &mut HashSet::new(),
-            name,
-            &mut candidates,
+            Collecting::Name(name, &mut candidates),
+            &mut self.macros.clone(),
+            None,
         );
 
         MacroEnvironment {
@@ -2272,6 +2324,37 @@ impl ProjectIndex {
             candidates,
         }
     }
+
+    /// **The macros in force at one point**, as a walk from that file computes them.
+    ///
+    /// The compilation's own environment (what the compiler predefines and the command line says) plus every fact
+    /// the walk passes on the way to `offset`, applied in the order a preprocessor applies them — which is the only
+    /// order that is right: a `#define` written below the point is not in force, one written in a header that comes
+    /// later is not either, and a header that comes earlier is.
+    ///
+    /// Two things this is *not*: it is not a claim that the answer is complete (a header outside the index, or a
+    /// `-D` nobody mentioned, is simply not in it — see [`crate::index::environment`]), and it is not a summary of
+    /// the whole translation unit (the walk stops at `offset`, which is what makes it a question about a point).
+    ///
+    /// Costs one traversal of the files that precede the point, so a caller asking about **one** position should use
+    /// this and a caller asking about thousands of them should use the incremental state
+    /// [`ProjectIndex::macro_environment`] builds while it walks.
+    pub fn macros_at(&self, path: &Path, offset: usize) -> Marked {
+        let mut state = self.macros.clone();
+
+        self.macro_candidates(
+            path,
+            &mut Vec::new(),
+            false,
+            &mut HashSet::new(),
+            Collecting::Nothing,
+            &mut state,
+            Some(offset),
+        );
+
+        state
+    }
+
     /// Every fact about `name` in this file and everything it includes, with where each one sits.
     ///
     /// A file is expanded once per query. That is enough for the answer — the facts are the same however many
@@ -2283,6 +2366,29 @@ impl ProjectIndex {
     /// No offset is applied here: where a fact *is* in the stream is the fact, and which of them is in force at a
     /// particular cursor is [`MacroEnvironment::at`]'s question. That split is what lets one walk answer thousands
     /// of positions.
+    ///
+    /// # The stream is one stream
+    ///
+    /// A file's `#define`s and its `#include`s are read **in offset order**, and the state in `state` is brought up
+    /// to each point before anything is asked about that point. That is not an implementation detail: it is what
+    /// makes `#ifdef X` decidable in a header whose *includer* defined `X`, which is the whole of what
+    /// `docs/roadmap.md` §3.5c's second half is about. Two lists walked separately would decide every condition
+    /// against the environment as it was before the file was read.
+    ///
+    /// # What the state is allowed to take from a fact
+    ///
+    /// Only what is **certain**, because the state decides later conditions and a wrong entry would make them
+    /// decided wrongly rather than undecided:
+    ///
+    /// ```text
+    /// the whole path is unconditional, and the fact's region is taken   → the name, with its value
+    /// the fact settles the name whatever the branch                     → definedness alone, never the value
+    /// anything else (the region is unknown, or the path is conditional) → nothing
+    /// ```
+    ///
+    /// The second line is [`MacroFact::settles_the_name`] doing the same job it does for references: `#ifndef NAME /
+    /// #define NAME` says the name *is* a macro afterwards whichever branch ran, and it does **not** say which body
+    /// it has — so the name is defined and its value stays unknown.
     #[allow(clippy::too_many_arguments)]
     fn macro_candidates(
         &self,
@@ -2290,8 +2396,9 @@ impl ProjectIndex {
         chain: &mut Vec<usize>,
         path_conditional: bool,
         visited: &mut HashSet<String>,
-        name: &str,
-        out: &mut Vec<MacroCandidate>,
+        mut collecting: Collecting<'_>,
+        state: &mut Marked,
+        upto: Option<usize>,
     ) {
         let path = normalize(path);
         if !visited.insert(path.clone()) {
@@ -2299,22 +2406,70 @@ impl ProjectIndex {
         }
 
         let Some(summary) = self.summaries.get(&path) else {
+            // A file the walk cannot read is a hole in what this state knows: it may define anything, so from here
+            // on a name nothing mentions is unknown rather than undefined.
+            state.mark_incomplete();
             return;
         };
 
-        for fact in summary.macros.iter().filter(|fact| fact.name == name) {
-            let mut position = chain.clone();
-            position.push(fact.range.start_offset);
-            out.push(MacroCandidate {
-                position,
-                file: summary.path.clone(),
-                fact: fact.clone(),
-                path_conditional,
-            });
-        }
+        // What this walk made of this file's regions, recorded the first time each is asked about. The answer is
+        // the one the *condition's own point* gives, and the first fact or include inside a region is the first
+        // point at which the walk can ask — before anything inside the region has been applied. Asking again later
+        // would read the region's own body as evidence about its condition, which is backwards for exactly the
+        // shape that matters: `#ifndef NAME / #define NAME / #include <a.h> / #endif` has to include `a.h` on the
+        // first pass, and a fresh look at the same condition after the `#define` would say it does not.
+        let mut verdicts: HashMap<u32, Option<bool>> = HashMap::new();
 
-        for include in &summary.includes {
+        // The two lists are each in offset order (the indexer sorts them), so one merge of them *is* the order a
+        // preprocessor reads in. A fact and an include can never start at the same offset.
+        let mut facts = summary.macros.iter().peekable();
+        let mut includes = summary.includes.iter().peekable();
+
+        loop {
+            let next_fact = facts.peek().map(|fact| fact.range.start_offset);
+            let next_include = includes.peek().map(|include| include.range.start_offset);
+
+            let (at, take_fact) = match (next_fact, next_include) {
+                (Some(fact), Some(include)) => (fact.min(include), fact <= include),
+                (Some(fact), None) => (fact, true),
+                (None, Some(include)) => (include, false),
+                (None, None) => break,
+            };
+
+            if upto.is_some_and(|upto| at >= upto) {
+                break;
+            }
+
+            if take_fact {
+                let fact = facts.next().expect("peeked");
+                let reach = self.fact_reach(summary, &mut verdicts, state, fact.guard, at);
+
+                if reach == FactReach::Inactive {
+                    continue;
+                }
+
+                collecting.fact(summary, chain, fact, path_conditional, reach);
+
+                // …and then the name is in force for everything below this point. After the fact was read for its
+                // own guard, which is the order a preprocessor reads in: `#ifndef NAME / #define NAME` is taken
+                // *because* the name is not defined yet.
+                apply_fact(state, fact, path_conditional, reach);
+
+                continue;
+            }
+
+            let include = includes.next().expect("peeked");
+
+            let visibility = self.include_visibility(summary, &mut verdicts, state, include.guard, at);
+
+            if visibility == Visibility::Inactive {
+                continue;
+            }
+
             let Some(target) = &include.resolved else {
+                // An `#include` that did not resolve is the one gap the walk cannot make smaller: the file it
+                // names may define anything at all, so every later "nothing defines this name" answer is off.
+                state.mark_incomplete();
                 continue;
             };
 
@@ -2322,14 +2477,173 @@ impl ProjectIndex {
             self.macro_candidates(
                 target,
                 chain,
-                path_conditional || include.guard != FactGuard::Unconditional,
+                path_conditional || visibility == Visibility::Unknown,
                 visited,
-                name,
-                out,
+                collecting.reborrow(),
+                state,
+                // An included file is pasted *at* the include, so all of it is read before the caller's next line.
+                None,
             );
             chain.pop();
         }
     }
+
+    /// What the walk makes of one fact's region, recorded per file so that every condition in it is decided the
+    /// same way.
+    fn fact_reach(
+        &self,
+        summary: &FileSummary,
+        verdicts: &mut HashMap<u32, Option<bool>>,
+        state: &Marked,
+        guard: FactGuard,
+        offset: usize,
+    ) -> FactReach {
+        match self.include_visibility(summary, verdicts, state, guard, offset) {
+            Visibility::Active => FactReach::Active,
+            Visibility::Inactive => FactReach::Inactive,
+            Visibility::Unknown => FactReach::Unknown,
+        }
+    }
+
+    /// Was the code the guard names compiled, with the state the walk has built and the verdicts it has recorded?
+    fn include_visibility(
+        &self,
+        summary: &FileSummary,
+        verdicts: &mut HashMap<u32, Option<bool>>,
+        state: &Marked,
+        guard: FactGuard,
+        offset: usize,
+    ) -> Visibility {
+        let FactGuard::Region(region) = guard else {
+            return Visibility::Active;
+        };
+
+        let mut unknown = false;
+
+        for at in summary.guards.conditions_of(region) {
+            let holds = match verdicts.get(&at.region) {
+                Some(recorded) => *recorded,
+                None => {
+                    let decided = summary
+                        .guards
+                        .region_at(at.region, offset)
+                        .and_then(|region| {
+                            region.visibility(&crate::index::environment::MacrosHere::from_walk(
+                                state,
+                                at.condition_at,
+                            ))
+                        });
+
+                    verdicts.insert(at.region, decided);
+                    decided
+                }
+            };
+
+            match holds {
+                Some(true) => {}
+                Some(false) => return Visibility::Inactive,
+                None => unknown = true,
+            }
+        }
+
+        if unknown {
+            Visibility::Unknown
+        } else {
+            Visibility::Active
+        }
+    }
+}
+
+/// What a walk is collecting as it goes: the facts about one name, or nothing.
+///
+/// The same walk answers both questions — "where is this name a macro" ([`ProjectIndex::macro_environment`]) and
+/// "what is in force at this point" ([`ProjectIndex::macros_at`]) — because they are the same traversal and the
+/// rules that make it right are the ones that must not be written twice. The second caller wants the *state* and
+/// no candidates, which is what `Nothing` says, rather than a name no macro has.
+enum Collecting<'a> {
+    Name(&'a str, &'a mut Vec<MacroCandidate>),
+    Nothing,
+}
+
+impl Collecting<'_> {
+    /// **One** fact, if the caller is collecting facts about that name.
+    fn fact(
+        &mut self,
+        summary: &FileSummary,
+        chain: &[usize],
+        fact: &MacroFact,
+        path_conditional: bool,
+        region: FactReach,
+    ) {
+        let Collecting::Name(name, out) = self else {
+            return;
+        };
+
+        if fact.name != *name {
+            return;
+        }
+
+        let mut position = chain.to_vec();
+        position.push(fact.range.start_offset);
+
+        out.push(MacroCandidate {
+            position,
+            file: summary.path.clone(),
+            fact: fact.clone(),
+            path_conditional,
+            region,
+        });
+    }
+
+    /// The same collection, for a recursive call.
+    fn reborrow(&mut self) -> Collecting<'_> {
+        match self {
+            Collecting::Name(name, out) => Collecting::Name(name, out),
+            Collecting::Nothing => Collecting::Nothing,
+        }
+    }
+}
+
+/// What a fact does to the state, if anything — see [`ProjectIndex::macro_candidates`] for the three cases.
+///
+/// Called *after* the fact's own guard has been read, which is the order a preprocessor reads in: the
+/// `#ifndef NAME / #define NAME` shape is taken because the name is not defined yet, and a state that had already
+/// absorbed the `#define` would decide it the other way round — for every include guard in the corpus.
+fn apply_fact(state: &mut Marked, fact: &MacroFact, path_conditional: bool, reach: FactReach) {
+    // A fact in a file that may not have been included at all, or in a region nobody can decide: the name may or
+    // may not be defined here, and a later condition must not be told either way.
+    if path_conditional || reach == FactReach::Unknown {
+        // …unless the region settles the name whatever its own condition says, which is the one thing an
+        // undecidable branch *can* still say — and it says it about definedness only, never about the value.
+        match (fact.settles_the_name, fact.kind) {
+            (true, crate::MacroKind::Definition) => state.define_name(&fact.name),
+            (true, crate::MacroKind::Undefinition) => state.undefine(&fact.name),
+            _ => state.mark_uncertain(&fact.name),
+        }
+
+        return;
+    }
+
+    match reach {
+        // In force: the name and its value, as the file wrote them.
+        FactReach::Active => state.observe(fact),
+        // Handled above.
+        FactReach::Inactive | FactReach::Unknown => {}
+    }
+}
+
+/// How reachable a fact is, as the walk sees it: whether its own region is decided.
+///
+/// A name of its own rather than [`Visibility`], because the walk has a fourth case the guard layer does not: a
+/// fact that is *not* written in a conditional at all, which is certain without anything being evaluated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FactReach {
+    /// The fact is outside every conditional, or its region is decided and taken.
+    Active,
+    /// The region is decided and **not** taken: a compiler would not have read this fact.
+    Inactive,
+    /// At least one enclosing condition cannot be decided here.
+    Unknown,
 }
 
 /// Every fact about one macro name that a file can reach — the answer to "what is this name here", before the
@@ -2470,6 +2784,8 @@ pub struct MacroCandidate {
     /// path through a conditional `#include` means the fact's *file* may not be part of the translation unit at
     /// all, which nothing about the fact's own text can repair.
     path_conditional: bool,
+    /// What the environment makes of the fact's own region — see [`MacroCandidate::is_conditional`].
+    region: FactReach,
 }
 
 impl MacroCandidate {
@@ -2489,21 +2805,23 @@ impl MacroCandidate {
 
     /// Is **which `#define` is in force** conditional — the question [`MacroEnvironment::at`] answers?
     ///
-    /// Yes when the path in is conditional, or when the fact is written inside an `#if` — including the
-    /// `#ifndef NAME` whose body defines the name, where the name is certainly a macro but the *definition* it has
-    /// may be somebody else's.
+    /// Yes when the path in is conditional, or when the fact is written inside an `#if` that the environment
+    /// cannot decide — including the `#ifndef NAME` whose body defines the name, where the name is certainly a
+    /// macro but the *definition* it has may be somebody else's. A region the environment **decides** is not
+    /// conditional in this sense: `#ifdef _WIN32` on a machine whose compiler defines `_WIN32` is a fact about
+    /// which `#define` is in force, not a doubt about it.
     pub fn is_conditional(&self) -> bool {
-        self.path_conditional || self.fact.guard != FactGuard::Unconditional
+        self.path_conditional || self.region == FactReach::Unknown
     }
 
     /// Is **whether the name is a macro here** settled — the question [`MacroEnvironment::is_a_macro_at`] answers?
     ///
     /// The path in still has to be unconditional: a fact in a header that may not have been included at all says
-    /// nothing. The fact's own region, on the other hand, is settled by
+    /// nothing. The fact's own region is settled when the environment decides it *is* taken, and otherwise by
     /// [`MacroFact::settles_the_name`] — which is exactly the case the two questions differ in.
     pub fn is_certain_about_the_name(&self) -> bool {
         !self.path_conditional
-            && (self.fact.guard == FactGuard::Unconditional || self.fact.settles_the_name)
+            && (self.fact.settles_the_name || self.region == FactReach::Active)
     }
 }
 

@@ -79,21 +79,22 @@ impl Branch {
     pub fn holds(&self, macros: &impl MacroValues) -> Option<bool> {
         match self.kind {
             DirectiveKind::If | DirectiveKind::Elif => evaluate(&self.tokens, macros).is_true(),
-            DirectiveKind::Ifdef => Some(
-                self.name
-                    .as_deref()
-                    .is_some_and(|name| macros.lookup(name).is_some()),
-            ),
-            DirectiveKind::Ifndef => Some(
-                !self
-                    .name
-                    .as_deref()
-                    .is_some_and(|name| macros.lookup(name).is_some()),
-            ),
+            DirectiveKind::Ifdef => is_defined(self.name.as_deref(), macros),
+            DirectiveKind::Ifndef => is_defined(self.name.as_deref(), macros).map(|defined| !defined),
             DirectiveKind::Else => Some(true),
             _ => None,
         }
     }
+}
+
+/// Is the name a macro, according to a table that may not be able to say?
+///
+/// `#ifdef NAME` asks exactly `defined(NAME)`, so it gives the same answer for the same reason: a name the
+/// table cannot speak about is **not** "not defined" — see [`crate::condition::Lookup`]. `Some(false)` is
+/// the answer only for [`Lookup::Undefined`], which is the one table state that claims completeness, and a
+/// directive with no name at all is `None` for the same reason: there is nothing to decide.
+fn is_defined(name: Option<&str>, macros: &impl MacroValues) -> Option<bool> {
+    name.and_then(|name| macros.lookup(name).is_defined())
 }
 
 /// One conditional region: the chain of branches written for a single `#if`.

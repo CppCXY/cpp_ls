@@ -912,6 +912,25 @@ fn a_typedef_declares_its_name() {
     );
 }
 
+/// **Every** name a `typedef` lists, not the first.
+///
+/// `typedef WCHAR *PWCHAR, *LPWCH, *PWCH;` introduces three type names in one declaration, and that is how every C
+/// header writes its pointer aliases — `winnt.h` hundreds of times. Binding only the first left the others
+/// undeclared: a consumer asking for `LPWCH` found nothing, and every fact about it was missing from the index.
+#[test]
+fn a_typedef_declares_every_name_it_lists() {
+    let table = scopes("typedef WCHAR *PWCHAR, *LPWCH, *PWCH;\n");
+
+    assert_eq!(shape(&table), "File{LPWCH,PWCH,PWCHAR}");
+    for name in ["PWCHAR", "LPWCH", "PWCH"] {
+        assert_eq!(
+            kind_of(&table, table.root().unwrap(), name),
+            Some(BindingKind::Typedef),
+            "`{name}` is one of the declaration's names"
+        );
+    }
+}
+
 /// `using Alias = T;` is an alias, and `using ns::f;` is a using-declaration.
 ///
 /// The same node kind for two constructs that mean different things, told apart by whether a type follows the

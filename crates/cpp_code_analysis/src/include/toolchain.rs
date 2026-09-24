@@ -51,7 +51,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::include::config::{CompileCommands, CompilerConfig, IncludePath};
+use crate::include::config::{CommandLineMacro, CompileCommands, CompilerConfig, IncludePath};
 use crate::include::paths::{FileProvider, normalize_path};
 
 /// What a program wrote to its two streams.
@@ -249,16 +249,42 @@ fn candidates_in(directory: &Path, name: &str, extensions: &[String]) -> Vec<Pat
         .collect()
 }
 
-/// Ask a compiler where it looks for its own headers.
+/// Ask a compiler where it looks for its own headers, **and what it predefines**.
 ///
 /// `None` when the list could not be obtained: the compiler did not run, or its output had no search list in it
 /// (which is what an unrelated program with the same name prints). Both mean the same thing to a caller — this
 /// toolchain cannot be asked — so they are one answer, and the caller keeps the configuration it had.
-pub fn search_paths(runner: &impl CommandRunner, compiler: &Path) -> Option<Toolchain> {
+///
+/// # Why the macro table comes from the same call
+///
+/// `-dM` makes the preprocessor print every macro it predefines instead of preprocessing, so the *same* process
+/// that prints the search list also prints `_WIN32`, `__x86_64__`, `__cplusplus` and the other 480 names that no
+/// header defines. Those names are what a condition like `#ifdef _WIN32` is about, and there is nowhere else to get
+/// them: they are the compiler's, not the project's. One process, because the two answers have the same source and
+/// a second invocation would be a second chance to ask a different compiler.
+/// # Why the standard is passed
+///
+/// `-dM` prints `__cplusplus` with the value of the language version the compiler was **invoked** for, so asking
+/// without `-std=` gets the default (`201703L` for this `g++`) while the file being read may be built as C++20.
+/// A condition like `#if __cplusplus >= 202002L` would then come out wrong — not unknown, *wrong*, which is the
+/// failure mode this whole layer is built to avoid. So the standard comes from the same place the include paths do:
+/// the compile database's entry for the file.
+pub fn search_paths(
+    runner: &impl CommandRunner,
+    compiler: &Path,
+    standard: Option<&str>,
+) -> Option<Toolchain> {
     // `-E` stops after preprocessing, `-v` prints what the driver is doing, `-x c++` says which language's
     // directories to list (without it, `g++` would still list C++'s, but `gcc` would list C's), and `-` reads an
-    // empty translation unit from standard input.
-    let output = runner.run(compiler, &["-E", "-v", "-x", "c++", "-"])?;
+    // empty translation unit from standard input. `-dM` adds the predefined macros to that output.
+    let language = standard.map(|standard| format!("-std={standard}"));
+    let mut arguments = vec!["-dM", "-E", "-v", "-x", "c++"];
+    if let Some(language) = &language {
+        arguments.push(language);
+    }
+    arguments.push("-");
+
+    let output = runner.run(compiler, &arguments)?;
     let combined = output.combined();
 
     let system_include_paths = parse_search_list(&combined);
@@ -271,10 +297,46 @@ pub fn search_paths(runner: &impl CommandRunner, compiler: &Path) -> Option<Tool
         compiler: compiler.to_path_buf(),
         version: parse_version(&combined),
         system_include_paths,
+        builtin_macros: parse_builtin_macros(&combined),
     })
 }
 
+/// The macros a compiler predefines, from `-dM`'s `#define NAME value` lines.
+///
+/// A macro with no value is stored with an empty one, which is what it has: `#define __linux` and
+/// `#define __cplusplus 202002L` are the same kind of fact with different bodies, and a consumer asking
+/// `defined(NAME)` only needs the first half.
+///
+/// Lines that are not `#define` are ignored, which is what lets one output carry both this and the search list —
+/// the version line, the `#include <…> search starts here:` markers and the rest of `-v`.
+pub fn parse_builtin_macros(output: &str) -> Vec<CommandLineMacro> {
+    output
+        .lines()
+        .filter_map(|line| line.strip_prefix("#define "))
+        .filter_map(|rest| {
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            let name = parts.next()?.trim();
+            // A function-like macro (`#define __INT_MAX__ 2147483647` is object-like; `#define f(x) …` is not,
+            // and its `(x)` is glued to the name in this output) is skipped: it is not a value a `#if` can use, and
+            // a name with parentheses in it would be a name no condition ever tests.
+            if name.is_empty() || name.contains('(') {
+                return None;
+            }
+
+            let value = parts.next().unwrap_or("").trim();
+            Some(CommandLineMacro {
+                name: name.into(),
+                value: (!value.is_empty()).then(|| value.into()),
+            })
+        })
+        .collect()
+}
+
 /// Find a compiler and ask it. The one call a caller needs.
+///
+/// The **standard** comes from the compile database's entry for `for_file`, when there is one: it decides the value
+/// of `__cplusplus` in the predefined table, and with it every `#if __cplusplus >= …` in every header. Asking the
+/// compiler for its default instead would answer a question nobody asked, with a number that looks right.
 pub fn discover(
     files: &impl FileProvider,
     runner: &impl CommandRunner,
@@ -283,7 +345,11 @@ pub fn discover(
     environment: &Environment,
 ) -> Option<Toolchain> {
     let compiler = find_compiler(files, commands, for_file, environment)?;
-    search_paths(runner, &compiler)
+    let standard = commands
+        .and_then(|commands| commands.command_for(for_file))
+        .and_then(|command| command.to_config().standard);
+
+    search_paths(runner, &compiler, standard.as_deref())
 }
 
 /// A compiler that answered, and what it said.
@@ -299,9 +365,27 @@ pub struct Toolchain {
     /// The directories it searches for `#include <…>`, in its own order, normalized with case **preserved** —
     /// they are directories to open, not keys to compare. See [`parse_search_list`].
     pub system_include_paths: Vec<PathBuf>,
+    /// Every macro the compiler **predefines**, as `#define` lines from `-dM` gave them.
+    ///
+    /// The half of the macro environment that is not in any file: `_WIN32`, `__x86_64__`, `__cplusplus` and about
+    /// 480 more. A condition like `#ifdef _WIN32` or `#if __cplusplus >= 201703L` is a question about these, and
+    /// there is nowhere else to get the answer. See [`parse_builtin_macros`], and
+    /// [`Toolchain::macros`] for how they are handed to a condition evaluator.
+    pub builtin_macros: Vec<CommandLineMacro>,
 }
 
 impl Toolchain {
+    /// The predefined macros, as the map a condition is evaluated against.
+    ///
+    /// A name with no value (`#define __linux`) maps to `None`, which is what `defined(NAME)` asks about; a name
+    /// with one (`#define __cplusplus 202002L`) keeps it, which is what `#if __cplusplus >= 201703L` needs.
+    pub fn macros(&self) -> Vec<(&str, Option<&str>)> {
+        self.builtin_macros
+            .iter()
+            .map(|define| (define.name.as_ref(), define.value.as_deref()))
+            .collect()
+    }
+
     /// This toolchain's directories as include paths — all of them **system** paths.
     ///
     /// They are what `-isystem` would name, which is why diagnostics inside them are the compiler's business
@@ -423,9 +507,7 @@ pub fn parse_version(output: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Environment, Output, parse_search_list, parse_version,
-    };
+    use super::{Environment, Output, parse_search_list, parse_version};
 
     /// GCC 15.1.0 (MinGW-w64), trimmed to three entries — the shape is verbatim, including the `..` segments
     /// and the `#include "..."` block that precedes it.
@@ -574,7 +656,7 @@ End of search list.
 
     use super::{
         COMPILER_NAMES, CommandRunner, CompilerConfig, IncludePath, Path, Toolchain, discover,
-        find_compiler, search_paths,
+        find_compiler, parse_builtin_macros, search_paths,
     };
     use crate::include::config::{CompileCommand, CompileCommands};
     use crate::include::paths::{MemoryFiles, normalize_path};
@@ -602,8 +684,24 @@ End of search list.
             }
 
             // The arguments are asserted rather than ignored: `-x c++` is what makes `gcc` list the C++
-            // directories, and a discovery that dropped it would answer about C for a C++ project.
-            assert_eq!(arguments, ["-E", "-v", "-x", "c++", "-"]);
+            // directories, `-dM` is what makes it print its predefined macros, and a discovery that dropped
+            // either would answer a different question. `-std=` is asserted where a standard was given.
+            assert!(
+                arguments.starts_with(&["-dM", "-E", "-v", "-x", "c++"]),
+                "the predefined macros and the search list come from one call: {arguments:?}"
+            );
+            assert!(
+                arguments
+                    .iter()
+                    .all(|argument| *argument == "-dM"
+                        || *argument == "-E"
+                        || *argument == "-v"
+                        || *argument == "-x"
+                        || *argument == "c++"
+                        || *argument == "-"
+                        || argument.starts_with("-std=")),
+                "and nothing else is asked for: {arguments:?}"
+            );
 
             Some(Output {
                 stdout: String::new(),
@@ -751,13 +849,14 @@ End of search list.
     }
 
     #[test]
-    fn a_compiler_that_answers_gives_its_directories_and_its_version() {
+    fn a_compiler_that_answers_gives_its_directories_its_version_and_its_macros() {
         let runner = Answers {
             program: "g++",
             output: GCC,
         };
 
-        let toolchain = search_paths(&runner, Path::new("/usr/bin/g++")).expect("the fixture answers");
+        let toolchain =
+            search_paths(&runner, Path::new("/usr/bin/g++"), None).expect("the fixture answers");
 
         assert_eq!(toolchain.compiler, Path::new("/usr/bin/g++"));
         assert_eq!(toolchain.system_include_paths.len(), 3);
@@ -780,7 +879,60 @@ End of search list.
             program: "g++",
             output: "usage: g++ [options] file\n",
         };
-        assert_eq!(search_paths(&runner, Path::new("/usr/bin/g++")), None);
+        assert_eq!(search_paths(&runner, Path::new("/usr/bin/g++"), None), None);
+    }
+
+    #[test]
+    fn the_predefined_macros_are_read_out_of_the_same_answer() {
+        // `-dM`'s lines arrive in the middle of `-v`'s, so this is the read that has to tell them apart. The three
+        // shapes that matter: a value, no value at all, and a function-like macro — whose parameter list is glued to
+        // the name in this output and must not become part of it.
+        let macros = parse_builtin_macros(
+            "#define __cplusplus 201703L\n\
+             #define __linux 1\n\
+             #define __STDC_HOSTED__ 1\n\
+             #define assert(expr) ((expr) ? (void)0 : abort())\n\
+             #define __FLT_MIN__ 1.17549435082228750797e-38F\n\
+             gcc version 11.2.0\n\
+             #include <...> search starts here:\n",
+        );
+
+        let value_of = |name: &str| {
+            macros
+                .iter()
+                .find(|define| define.name.as_ref() == name)
+                .map(|define| define.value.as_deref())
+        };
+
+        assert_eq!(value_of("__cplusplus"), Some(Some("201703L")));
+        assert_eq!(value_of("__STDC_HOSTED__"), Some(Some("1")));
+        assert_eq!(
+            value_of("assert"),
+            None,
+            "a function-like macro is not a name a condition can test"
+        );
+        assert_eq!(
+            value_of("__FLT_MIN__"),
+            Some(Some("1.17549435082228750797e-38F")),
+            "a value is everything up to the line's end, floats included"
+        );
+        assert_eq!(value_of("gcc"), None, "`-v`'s own output is not a macro");
+    }
+
+    #[test]
+    fn a_standard_the_caller_names_is_passed_to_the_compiler() {
+        // The value of `__cplusplus` is the one a condition's answer depends on, and the compiler prints the value
+        // of the language version it was **invoked** for. Asking without `-std=` answers for its default, which is a
+        // *wrong* number rather than a missing one — so the standard has to travel with the request.
+        let runner = Answers {
+            program: "g++",
+            output: GCC,
+        };
+
+        // The fixture's `run` asserts the arguments, so reaching this line at all means `-std=c++20` was passed.
+        let toolchain = search_paths(&runner, Path::new("/usr/bin/g++"), Some("c++20"))
+            .expect("the fixture answers");
+        assert_eq!(toolchain.compiler, Path::new("/usr/bin/g++"));
     }
 
     #[test]
@@ -812,6 +964,7 @@ End of search list.
             compiler: "/usr/bin/g++".into(),
             version: None,
             system_include_paths: vec!["/gcc/include/c++".into(), "/gcc/include".into()],
+            builtin_macros: Vec::new(),
         };
 
         let base = CompilerConfig::new().with_include_path("project/inc");
@@ -836,6 +989,7 @@ End of search list.
             compiler: "/usr/bin/g++".into(),
             version: None,
             system_include_paths: vec!["/gcc/include".into(), "/gcc/include".into()],
+            builtin_macros: Vec::new(),
         };
 
         let once = toolchain.config(&CompilerConfig::new());

@@ -988,6 +988,154 @@ fn valid_cpp_in_the_shapes_recovery_eats() {
     );
 }
 
+/// **A linkage block written the way every C header writes it** — with the conditional *inside* the braces.
+///
+/// This is the shape the whole of `winnt.h` hinges on, and it is the canonical C-header idiom:
+///
+/// ```cpp
+/// #ifdef __cplusplus
+/// extern "C" {
+/// #endif
+/// …
+/// #ifdef __cplusplus
+/// }
+/// #endif
+/// ```
+///
+/// The block's loop called `parse_declaration` and nothing else, so the `#endif` was one token wrapped in an
+/// `ErrorNode`, `endif` became the next declaration's **type name**, and the `}` that closes the linkage was
+/// consumed by whatever came after — the loop then ran to the end of the file. On `winnt.h` that was one
+/// `CompoundStat` over 387 000 bytes with **eight** `#endif`s inside it, which is what made the file's conditional
+/// nesting unusable for the macro layer. The assertion is the directive count inside the block and the declaration
+/// written after it.
+#[test]
+fn a_linkage_block_keeps_the_directives_written_inside_it() {
+    let source = "\
+#ifdef __cplusplus
+extern \"C\" {
+#endif
+int x;
+#ifdef __cplusplus
+}
+#endif
+int after;
+";
+
+    let tree = CppParser::parse(source, ParserConfig::default());
+    assert!(
+        tree.get_errors().is_empty(),
+        "the shape is valid C++ and must read clean: {:?}",
+        tree.get_errors()
+    );
+
+    let block = tree
+        .get_red_root()
+        .descendants()
+        .find(|node| {
+            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CompoundStat
+                && node.text().to_string().starts_with('{')
+        })
+        .expect("the linkage block is a node");
+
+    let directives = block
+        .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::PreprocessorDirective)
+        .count();
+    assert_eq!(
+        directives, 2,
+        "both directives written inside the block are directives, not error nodes: {}",
+        block.text()
+    );
+
+    assert!(
+        !block.descendants().any(|node| {
+            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ErrorNode
+        }),
+        "and nothing in it is rubble: {}",
+        block.text()
+    );
+
+    assert!(
+        !block.text().to_string().contains("int after;"),
+        "and the block ends at its own `}}`: {}",
+        block.text()
+    );
+}
+
+/// **A `typedef` declares as many names as it lists** — `typedef WCHAR *PWCHAR, *LPWCH, *PWCH;`.
+///
+/// The rule read one declarator and insisted on `;`, so every multi-declarator typedef in every C header failed at
+/// its first comma. `winnt.h` writes this shape hundreds of times; its 417 errors started here, and through them
+/// the file lost its directive structure.
+///
+/// The assertion is the *second* name being usable as a type: the parser declares each declarator's name so that
+/// `LPWCH q;` later reads as a declaration rather than as an expression.
+#[test]
+fn a_typedef_declares_every_name_it_lists() {
+    let source = "\
+typedef WCHAR *PWCHAR, *LPWCH;
+PWCHAR p;
+LPWCH q;
+";
+    let tree = CppParser::parse(source, ParserConfig::default());
+
+    assert!(
+        tree.get_errors().is_empty(),
+        "a typedef with two declarators is valid C++: {:?}",
+        tree.get_errors()
+    );
+
+    let declaration_of = |name: &str| {
+        tree.get_red_root().descendants().any(|node| {
+            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration
+                && node.text().to_string().starts_with(name)
+        })
+    };
+
+    assert!(
+        declaration_of("PWCHAR p;"),
+        "the first name is a type: {}",
+        tree.to_source_text()
+    );
+    assert!(
+        declaration_of("LPWCH q;"),
+        "**and so is the second** — the whole point of the list: {}",
+        tree.to_source_text()
+    );
+}
+
+/// **A macro between a class-key and its tag** — `typedef struct DECLSPEC_ALIGN (8) _NAME { … } NAME;`.
+///
+/// The position a compiler's alignment attribute is written in. The macro lives in `_mingw.h`, another file, so no
+/// table can know it and no spelling is evidence — what makes accepting it free is that nothing else can stand
+/// there: after a class-key the grammar allows an attribute, a name, `{`, `:` or `;`, and *a name followed by a
+/// parenthesised group* is none of them. The guard is what follows it, so a mistake is still a mistake.
+#[test]
+fn a_class_head_may_carry_a_macro_before_its_name() {
+    let source = "\
+typedef struct DECLSPEC_ALIGN (8) _XSAVE_AREA_HEADER {
+  DWORD64 Mask;
+} XSAVE_AREA_HEADER, *PXSAVE_AREA_HEADER;
+XSAVE_AREA_HEADER h;
+";
+    let tree = CppParser::parse(source, ParserConfig::default());
+
+    assert!(
+        tree.get_errors().is_empty(),
+        "the shape is how mingw-w64 writes every aligned structure: {:?}",
+        tree.get_errors()
+    );
+
+    assert!(
+        tree.get_red_root().descendants().any(|node| {
+            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration
+                && node.text().to_string().starts_with("XSAVE_AREA_HEADER h;")
+        }),
+        "and the tag is a type name the file can use: {}",
+        tree.to_source_text()
+    );
+}
+
 /// An **operator name** is a name in an expression too, in all three positions it can be written.
 /// `operator<=>(a, b)` is a call to the operator function, and the standard library asks exactly that question
 /// when it wants to know whether a type has a comparison: `{ operator<=>(x, y); }` inside a requires-expression

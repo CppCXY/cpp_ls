@@ -240,6 +240,19 @@ impl<'a, F: FileProvider> SummaryStore<'a, F> {
         self.stats
     }
 
+    /// Tell the index what the **compilation** defines, so that the conditions stored in every summary can be
+    /// evaluated: the compiler's predefined names (see `Toolchain::macros`) and the command line's `-D`s.
+    ///
+    /// Not part of the store's key, and that is the point: a summary records the *question* each `#if` asks, and
+    /// the answer belongs to the compilation. The same summary is served to a session configured with `-DX` and to
+    /// one that is not, and they get different answers to "was this code compiled" without either of them being
+    /// re-indexed — which is what keeps `-DX` from invalidating a project's cache. See
+    /// [`crate::index::environment`].
+    pub fn with_macros(mut self, macros: crate::include::graph::Marked) -> Self {
+        self.index = std::mem::take(&mut self.index).with_macros(macros);
+        self
+    }
+
     /// Every summary loaded so far — the project as the store currently understands it.
     pub fn index(&self) -> &ProjectIndex {
         &self.index

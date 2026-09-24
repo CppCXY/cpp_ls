@@ -73,6 +73,7 @@ use cpp_parser::{CppParseError, CppParser, CppSyntaxNode, CppSyntaxTree, ParserC
 
 use crate::include::config::{CompileCommand, CompileCommands, CompilerConfig, parse_compile_commands};
 use crate::include::paths::{DiskFiles, FileProvider, OverlayFiles, normalize_path};
+use crate::include::graph::Marked;
 use crate::include::toolchain::{self, DiskCommands, Environment, Toolchain};
 use crate::index::project::{
     MemberCompletions, MemberList, NameCompletions, ProjectDefinition, ProjectIndex, ProjectMacro,
@@ -373,7 +374,19 @@ impl<'a, F: FileProvider> Session<'a, F> {
     ) -> Session<'a, F> {
         let documents = files.overlay.clone();
         let project = project_files(files, &filter, &root, database.as_ref());
-        let store = SummaryStore::with_provider(root.clone(), config.clone(), files);
+
+        // **Not** `database.is_some()`, and the measurement is why: with the environment declared complete, the
+        // standard-library closure decides 440 of its 486 conditional includes instead of 85 (`condition_reach`),
+        // and two paths *lose* answers they used to give — `__attribute__` and `STDMETHODCALLTYPE` went from
+        // 767/4 078 "maybe" to "not a use", because the walk visits a header once and the first visit was through
+        // a *conditional* include (`minwindef.h` includes `winnt.h` before `windef.h` does, and the second, certain
+        // visit is skipped). See `docs/roadmap.md` §3.5c: until a certain path can improve on an uncertain first
+        // visit, a claim this strong would turn honest doubt into a wrong answer, which is the one thing this layer
+        // must not do.
+        let configured = false;
+        let store = SummaryStore::with_provider(root.clone(), config.clone(), files).with_macros(
+            compilation_environment(&config, toolchain.as_ref(), configured),
+        );
 
         let mut session = Session {
             root,
@@ -934,8 +947,54 @@ fn base_config(database: Option<&CompileCommands>) -> CompilerConfig {
         .unwrap_or_default()
 }
 
-/// The file the toolchain should be discovered for: one the database actually compiles.
+/// The macros a compilation starts with: what the compiler predefines, then what the command line says.
 ///
+/// The order is the compiler's own: a `-D` of a name the compiler also predefines is the one the translation unit
+/// sees, so the built-ins go in first and the command line last. A `-U` — which is how a project removes a
+/// compiler's built-in — is applied after both.
+///
+/// # `configured`: whether this environment is the whole of what the compilation defines
+///
+/// The flag is the difference between `Unknown` and "not defined" for every condition naming something no file
+/// defines, and it is passed in rather than assumed because it is a statement about the caller's **inputs**:
+/// [`Session::open`] sets it when it read the project's own `compile_commands.json`, which is the project saying
+/// how its files are compiled — the `-D`s, the `-std=`, the include paths. Without one, the environment is what
+/// the compiler predefines and nothing else, and a project built with flags nobody wrote down would be read as if
+/// those names were undefined — which is why the unconfigured case stays
+/// [`Marked::incomplete`](crate::Marked::incomplete) and answers `Unknown`.
+///
+/// What the flag is *not* is a promise about the files: a walk that runs into an `#include` that did not resolve,
+/// or one nobody indexed, takes the claim back with [`Marked::mark_incomplete`] — see
+/// [`crate::index::environment`], which is where the two meet.
+fn compilation_environment(
+    config: &CompilerConfig,
+    toolchain: Option<&Toolchain>,
+    configured: bool,
+) -> Marked {
+    let mut marked = Marked::default();
+
+    if let Some(toolchain) = toolchain {
+        for (name, value) in toolchain.macros() {
+            marked.define_on_the_command_line(name, value);
+        }
+    }
+
+    for definition in &config.defines {
+        marked.define_on_the_command_line(&definition.name, definition.value.as_deref());
+    }
+
+    for name in &config.undefines {
+        marked.undefine(name);
+    }
+
+    if configured {
+        marked
+    } else {
+        marked.incomplete()
+    }
+}
+
+/// The file the toolchain should be discovered for: one the database actually compiles.///
 /// [`crate::discover`] asks the database for *this* file's compiler, so naming a file no entry mentions makes it
 /// fall through to `$CXX` and `PATH` — which on a machine with two toolchains is the wrong compiler for the
 /// project's own headers.
@@ -1662,6 +1721,54 @@ mod tests {
             session.pending(),
             1,
             "the entry for a file that is not here is not work"
+        );
+    }
+
+    #[test]
+    fn a_define_the_compile_database_carries_decides_a_condition_in_a_file() {
+        // The whole way a `-D` travels: the database's flags become the configuration, the configuration becomes
+        // the macro environment, and the environment decides the `#ifdef` around an `#include`. The *answer*
+        // therefore depends on how the project is built while the *summary* does not — which is why a summary
+        // stores the question rather than the answer, and why changing `-D` does not throw the cache away.
+        let project = Project::new("conditional-include");
+        let root = project.root.to_string_lossy().replace('\\', "/");
+
+        project.write("feature.h", "#define FEATURE_ONLY int\n");
+        project.write(
+            "main.cpp",
+            "#ifdef FROM_THE_DATABASE\n#include \"feature.h\"\n#endif\nFEATURE_ONLY x;\n",
+        );
+        project.write(
+            "compile_commands.json",
+            &format!(
+                "[{{\"directory\": \"{root}\", \"file\": \"{root}/main.cpp\", \
+                 \"arguments\": [\"g++\", \"-DFROM_THE_DATABASE\", \"-c\", \"{root}/main.cpp\"]}}]\n"
+            ),
+        );
+
+        let documents = OpenDocuments::new();
+        let providers = SessionFiles::new(documents, DiskFiles);
+        let mut session = Session::open(&project.root, &providers, WatchFilter::new(&project.root));
+
+        // Both files, because the closure of `main.cpp` is what the query walks.
+        session.advance(64);
+
+        let path = project.root.join("main.cpp");
+        let source = std::fs::read_to_string(&path).expect("the fixture reads");
+        let cursor = source.find("FEATURE_ONLY x").expect("the use");
+
+        let view = session.view(&path).expect("the file was read");
+        let references = session.macro_references(&view, cursor);
+
+        let Known::Yes(found) = references else {
+            panic!("the macro is defined in the closure, got {references:?}");
+        };
+
+        assert_eq!(
+            found.uncertain(),
+            0,
+            "the `#ifdef` is decided by the database's `-D`, so the use is a use: {:#?}",
+            found.files
         );
     }
 }

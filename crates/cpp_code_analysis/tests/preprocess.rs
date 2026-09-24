@@ -459,6 +459,105 @@ fn condition_value(source: &str, macros: &impl MacroValues) -> Value {
     }
 }
 
+/// A table that has read *part* of a translation unit: a name it does not mention may still be defined by a
+/// file it has not seen, which is the state an index is always in. See [`cpp_code_analysis::Lookup`].
+struct HalfKnown;
+
+impl MacroValues for HalfKnown {
+    fn lookup(&self, name: &str) -> cpp_code_analysis::Lookup<'_> {
+        match name {
+            // Defined by a `#define` this table read, whose body it did not keep.
+            "HERE" => cpp_code_analysis::Lookup::DefinedWithoutAValue,
+            // Explicitly `#undef`ed by a file this table read: a definite no.
+            "GONE" => cpp_code_analysis::Lookup::Undefined,
+            // Nothing this table read mentions it. Not the same answer.
+            _ => cpp_code_analysis::Lookup::Unanswered,
+        }
+    }
+}
+
+/// A name nothing the table read mentions is **not** `0`: the standard's rule is about a complete input.
+#[test]
+fn a_name_the_table_cannot_speak_about_is_not_zero() {
+    // This is the shape of the mistake the distinction exists to prevent: `#ifdef NT_INCLUDED` in a header,
+    // where `NT_INCLUDED` is defined by nothing the index read. Answering `false` there greys out code that
+    // compiles — and `#if defined(X)` or `#if X` would have done it silently, because before this the
+    // evaluator had only "defined" and "not defined" to answer with.
+    for condition in [
+        "#if FOO\n",
+        "#if defined(FOO)\n",
+        "#if !defined(FOO)\n",
+        "#if FOO == 0\n",
+        "#if defined(FOO) && defined(HERE)\n",
+        "#if !FOO\n",
+        "#if FOO ? 1 : 2\n",
+    ] {
+        assert_eq!(
+            condition_value(condition, &HalfKnown),
+            Value::Unknown,
+            "{condition:?} asks about a name this table cannot speak about"
+        );
+    }
+}
+
+/// The two answers such a table *can* give, so that "cannot speak about it" does not swallow them.
+#[test]
+fn a_table_that_read_part_of_the_input_still_answers_what_it_read() {
+    assert_eq!(
+        condition_value("#if defined(HERE)\n", &HalfKnown),
+        Value::Known(1),
+        "the body is not held, and `defined` does not need it"
+    );
+    assert_eq!(
+        condition_value("#if HERE\n", &HalfKnown),
+        Value::Unknown,
+        "but a *value* cannot be read out of a body the table does not have — not even as `1`"
+    );
+    assert_eq!(
+        condition_value("#if defined(GONE)\n", &HalfKnown),
+        Value::Known(0),
+        "an `#undef` this table read is a definite no"
+    );
+    assert_eq!(
+        condition_value("#if GONE\n", &HalfKnown),
+        Value::Known(0),
+        "and the standard's `0` is right there, because the file that undefined it was read"
+    );
+    assert_eq!(
+        condition_value("#if defined(HERE) && !defined(GONE)\n", &HalfKnown),
+        Value::Known(1),
+        "a condition over names the table read is decided, whatever it does not mention"
+    );
+}
+
+/// `#ifdef` asks the same question as `defined`, so it has to answer it the same way.
+#[test]
+fn an_ifdef_on_a_name_the_table_cannot_speak_about_is_undecided() {
+    let preprocessing = run("#ifdef FOO\nint x;\n#endif\n#if HERE\nint y;\n#endif\n");
+
+    let visibility = |offset: usize| preprocessing.guard_at(offset).visibility(&HalfKnown);
+
+    let at = |kind: DirectiveKind| {
+        preprocessing
+            .directives
+            .iter()
+            .find(|spanned| spanned.directive.kind() == kind)
+            .map(|spanned| spanned.range.end_offset())
+            .expect("the directive")
+    };
+
+    assert_eq!(
+        visibility(at(DirectiveKind::Ifdef)),
+        Visibility::Unknown,
+        "`#ifdef FOO`: FOO may be defined by a file this table has not read"
+    );
+    assert_eq!(
+        visibility(at(DirectiveKind::If)),
+        Visibility::Unknown,
+        "`#if HERE`: HERE is certainly a macro, and a condition with no readable value is unknown, not false"
+    );
+}
+
 #[test]
 fn arithmetic_follows_c_precedence() {
     let cases = [

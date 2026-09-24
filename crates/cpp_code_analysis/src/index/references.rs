@@ -424,6 +424,7 @@ mod tests {
     use super::{ReferenceBudget, ReferenceKind, macro_references};
     use crate::cache::SummaryKey;
     use crate::include::config::CompilerConfig;
+    use crate::include::graph::Marked;
     use crate::include::paths::{FileProvider, MemoryFiles};
     use crate::index::{FileIndexer, ProjectIndex};
     use crate::symbol::{Known, UnknownReason};
@@ -445,6 +446,19 @@ mod tests {
         }
 
         index
+    }
+
+    /// The macros a compilation starts with, for the tests that ask what a *decided* condition does: what a
+    /// compiler predefines (`-dM`) and what the command line says (`-D`) arrive in the same shape, and only the
+    /// names matter here.
+    fn defined(names: &[&str]) -> Marked {
+        let mut marked = Marked::default();
+
+        for name in names {
+            marked.define_on_the_command_line(name, None);
+        }
+
+        marked
     }
 
     /// Every reference of `name`, as `file:kind:text` so that an assertion says *where* as well as *what*.
@@ -554,6 +568,260 @@ mod tests {
             Known::Yes(found) => assert_eq!(found.rejected, 1, "and the rejection is counted"),
             other => panic!("the macro is indexed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_condition_is_decided_by_a_define_the_closure_wrote_earlier() {
+        // The shape libstdc++ is built on: `bits/c++config.h` defines `_GLIBCXX_USE_CXX11_ABI` as `1`, and headers
+        // written after it test `#if _GLIBCXX_USE_CXX11_ABI`. The condition is about a macro **no file in the
+        // translation unit's environment defines** and the closure does — so it is the walk that decides it, by
+        // reading the unit in order: `config.h`'s facts are in force by the time `widget.h` is read.
+        //
+        // Both halves are here and they are different answers from the same machinery: `ABI == 1` needs the
+        // *value* (`MacroFact::value`, one integer literal) and `FEATURE` needs only the name.
+        let files = MemoryFiles::new()
+            .with_file("/p/config.h", "#define ABI 1\n#define FEATURE\n")
+            .with_file(
+                "/p/widget.h",
+                "#include \"config.h\"\n#if ABI == 1\n#include \"modern.h\"\n#endif\n\
+                 #ifdef FEATURE\n#include \"feature.h\"\n#endif\n",
+            )
+            .with_file("/p/modern.h", "#define MODERN int\n")
+            .with_file("/p/feature.h", "#define FEATURE_ONLY int\n")
+            .with_file("/p/main.cpp", "#include \"widget.h\"\nMODERN a;\nFEATURE_ONLY b;\n");
+
+        let index = index_of(
+            &files,
+            &[
+                "/p/config.h",
+                "/p/widget.h",
+                "/p/modern.h",
+                "/p/feature.h",
+                "/p/main.cpp",
+            ],
+        );
+
+        assert_eq!(
+            shown(&files, &index, "MODERN"),
+            ["main.cpp:use:MODERN", "modern.h:define:MODERN"],
+            "the value is read out of `config.h`, so the `#if` is taken and the include is certain"
+        );
+        assert_eq!(
+            shown(&files, &index, "FEATURE_ONLY"),
+            ["feature.h:define:FEATURE_ONLY", "main.cpp:use:FEATURE_ONLY"],
+            "and a name defined with no body at all is enough for an `#ifdef`"
+        );
+    }
+
+    #[test]
+    fn a_condition_about_a_define_that_comes_later_after_the_include_is_not_decided() {
+        // The order is the whole answer, so the *same two files* the other way round must not decide anything: a
+        // `#define` below the `#include` is not in force when the include is read. A walk that collected every fact
+        // of every reachable file and then evaluated would get this wrong, which is why the state is built as the
+        // walk passes each fact rather than in one pass at the end.
+        let files = MemoryFiles::new()
+            .with_file("/p/config.h", "#define ABI 1\n")
+            .with_file(
+                "/p/widget.h",
+                "#if ABI == 1\n#include \"modern.h\"\n#endif\n#include \"config.h\"\n",
+            )
+            .with_file("/p/modern.h", "#define MODERN int\n")
+            .with_file("/p/main.cpp", "#include \"widget.h\"\nMODERN a;\n");
+
+        let index = index_of(
+            &files,
+            &["/p/config.h", "/p/widget.h", "/p/modern.h", "/p/main.cpp"],
+        );
+
+        assert_eq!(
+            shown(&files, &index, "MODERN"),
+            ["main.cpp:maybe:MODERN", "modern.h:define:MODERN"],
+            "at the `#if` the name was not defined yet: the include may or may not have happened"
+        );
+    }
+
+    #[test]
+    fn a_define_inside_a_region_the_walk_cannot_decide_does_not_decide_a_later_condition() {
+        // The soundness rule for the state: a fact whose own region is undecidable is **not** in force, so it cannot
+        // make a later condition decided. `#ifdef SETTING / #define WIDE 1 / #endif` says nothing about `WIDE` when
+        // `SETTING` is unknown — and a state that took it anyway would answer the second `#if` with evidence that
+        // depends on the first one's unknown answer.
+        let files = MemoryFiles::new()
+            .with_file(
+                "/p/widget.h",
+                "#ifdef SETTING\n#define WIDE 1\n#endif\n#if WIDE == 1\n#include \"wide.h\"\n#endif\n",
+            )
+            .with_file("/p/wide.h", "#define WIDE_ONLY int\n")
+            .with_file("/p/main.cpp", "#include \"widget.h\"\nWIDE_ONLY a;\n");
+
+        let index = index_of(&files, &["/p/widget.h", "/p/wide.h", "/p/main.cpp"]);
+
+        assert_eq!(
+            shown(&files, &index, "WIDE_ONLY"),
+            ["main.cpp:maybe:WIDE_ONLY", "wide.h:define:WIDE_ONLY"],
+            "the value came from a branch nobody can decide"
+        );
+    }
+
+    #[test]
+    fn a_define_inside_a_settled_region_is_in_force_without_its_value() {
+        // `#ifndef NAME / #define NAME 1 / #endif` — the idiom `MacroFact::settles_the_name` exists for. The name
+        // *is* a macro after the block whichever branch ran, so a later `#ifdef` is decided; and the *value* is not
+        // certain (the other branch may have defined it differently), so a later `#if NAME == 1` is not.
+        let files = MemoryFiles::new()
+            .with_file(
+                "/p/widget.h",
+                "int early;\n#ifndef WIDE\n#define WIDE 1\n#endif\n\
+                 #ifdef WIDE\n#include \"named.h\"\n#endif\n#if WIDE == 1\n#include \"valued.h\"\n#endif\n",
+            )
+            .with_file("/p/named.h", "#define NAMED int\n")
+            .with_file("/p/valued.h", "#define VALUED int\n")
+            .with_file("/p/main.cpp", "#include \"widget.h\"\nNAMED a;\nVALUED b;\n");
+
+        let index = index_of(
+            &files,
+            &["/p/widget.h", "/p/named.h", "/p/valued.h", "/p/main.cpp"],
+        );
+
+        assert_eq!(
+            shown(&files, &index, "NAMED"),
+            ["main.cpp:use:NAMED", "named.h:define:NAMED"],
+            "definedness is settled by the shape"
+        );
+        assert_eq!(
+            shown(&files, &index, "VALUED"),
+            ["main.cpp:maybe:VALUED", "valued.h:define:VALUED"],
+            "the value is not: the other branch could have defined it as anything"
+        );
+    }
+
+    #[test]
+    fn a_guard_on_a_name_nothing_defines_is_taken_when_the_caller_declares_the_inputs_complete() {
+        // The same fixture as the test above, with the *other* environment answer — the one `Session::open` gives a
+        // project whose compile database it read. `NT_INCLUDED` is defined nowhere, and "nowhere" is a conclusion
+        // the caller is entitled to draw when it has told us how the project is compiled: the guard is taken, the
+        // include is certain, and the use behind it is a use.
+        //
+        // This is the MinGW `windef.h` shape, and the reason every one of `STDMETHODCALLTYPE`'s four thousand
+        // references was a "maybe" (`docs/std-library.md`, round 14).
+        let files = MemoryFiles::new()
+            .with_file("/p/winnt.h", "#define WIN_ONLY int\n")
+            .with_file(
+                "/p/windef.cpp",
+                "int early;\n#ifndef NT_INCLUDED\n#include \"winnt.h\"\n#endif\nWIN_ONLY x;\n",
+            );
+
+        // `Marked::default()` is a *complete* environment with nothing in it: the compiler predefines nothing and
+        // the command line said nothing, which is the whole of what this compilation defines.
+        let index = index_of(&files, &["/p/winnt.h", "/p/windef.cpp"]).with_macros(Marked::default());
+
+        assert_eq!(
+            shown(&files, &index, "WIN_ONLY"),
+            ["windef.cpp:use:WIN_ONLY", "winnt.h:define:WIN_ONLY"],
+            "the guard is not taken, so the include is in the translation unit"
+        );
+    }
+
+    #[test]
+    fn an_include_that_did_not_resolve_takes_the_completeness_claim_back() {
+        // The other half of that bargain, and the reason it is safe to make: a walk that runs into an `#include`
+        // it cannot read has a hole in what it knows — the file it names may define *anything* — so every later
+        // "nothing defines this" answer is off again. Without this, a missing header would quietly turn into
+        // negative answers about names it might have defined.
+        let files = MemoryFiles::new()
+            .with_file(
+                "/p/windef.cpp",
+                "#include \"nowhere_to_be_found.h\"\nint early;\n\
+                 #ifndef NT_INCLUDED\n#include \"winnt.h\"\n#endif\nWIN_ONLY x;\n",
+            )
+            .with_file("/p/winnt.h", "#define WIN_ONLY int\n");
+
+        let index = index_of(&files, &["/p/winnt.h", "/p/windef.cpp"]).with_macros(Marked::default());
+
+        assert_eq!(
+            shown(&files, &index, "WIN_ONLY"),
+            ["windef.cpp:maybe:WIN_ONLY", "winnt.h:define:WIN_ONLY"],
+            "the unresolved include could have defined `NT_INCLUDED`, so the guard is undecided"
+        );
+    }
+
+    #[test]
+    fn a_use_reached_through_a_conditional_include_is_certain_when_the_environment_decides_it() {
+        // The same text as the test above, and the other answer. `-DX` is a fact about the *compilation*, not a
+        // doubt about it: a compiler that was given `-DX` read `guarded.h`, so the use is a use. This is the
+        // whole point of storing each region's condition in the summary and evaluating it at query time — the
+        // summary is keyed without the macro environment, so the answer cannot be baked into it.
+        let files = fixture();
+        let index = index_of(&files, FIXTURE_FILES).with_macros(defined(&["X"]));
+
+        assert_eq!(
+            shown(&files, &index, "GUARDED"),
+            ["cond.cpp:use:GUARDED", "guarded.h:define:GUARDED"],
+            "no `maybe`: the include is in the translation unit"
+        );
+    }
+
+    #[test]
+    fn a_use_reached_through_an_include_the_environment_rules_out_is_not_a_use() {
+        // The other decided answer, and it is the stronger claim: `#if 0` is not "I do not know", it is "not
+        // compiled", so the include is not followed at all and the name in `never.cpp` is not a macro there.
+        // Before the condition was evaluated this was a *maybe*, which is a use a rename would have been shown
+        // and could have edited by mistake.
+        let files = MemoryFiles::new()
+            .with_file("/p/skipped.h", "#define SKIPPED int\n")
+            .with_file(
+                "/p/never.cpp",
+                "#if 0\n#include \"skipped.h\"\n#endif\nSKIPPED x;\n",
+            );
+        let index = index_of(&files, &["/p/skipped.h", "/p/never.cpp"]);
+
+        assert_eq!(
+            shown(&files, &index, "SKIPPED"),
+            ["skipped.h:define:SKIPPED"],
+            "only the definition: the include is not in the translation unit"
+        );
+    }
+
+    #[test]
+    fn a_guard_on_a_name_nothing_defines_is_still_unknown_rather_than_untaken() {
+        // `NT_INCLUDED` is the case this whole rule is careful about, measured in the MinGW headers:
+        // `#ifndef NT_INCLUDED / #include <winnt.h> / #endif` in `windef.h`, where nothing in the closure defines
+        // `NT_INCLUDED` at all. A closed-world reading says the guard is taken *or* not taken; the truth is that
+        // the index cannot tell, and the include has to be followed with doubt rather than dropped.
+        //
+        // The declaration before the conditional keeps it from being the file's own guard, which is the one
+        // conditional that is *not* a condition (see `deguard_the_files_own_guard`).
+        let files = MemoryFiles::new()
+            .with_file("/p/winnt.h", "#define WIN_ONLY int\n")
+            .with_file(
+                "/p/windef.cpp",
+                "int early;\n#ifndef NT_INCLUDED\n#include \"winnt.h\"\n#endif\nWIN_ONLY x;\n",
+            );
+        let index = index_of(&files, &["/p/winnt.h", "/p/windef.cpp"]);
+
+        assert_eq!(
+            shown(&files, &index, "WIN_ONLY"),
+            ["windef.cpp:maybe:WIN_ONLY", "winnt.h:define:WIN_ONLY"],
+            "the include may have happened, so the use may be a use"
+        );
+    }
+
+    #[test]
+    fn a_definition_the_environment_rules_out_is_not_a_candidate() {
+        // `#if 0` around a `#define`: the fact is in the file's text and a compiler never reads it, so the name is
+        // not a macro in any file that includes this one. The region needs no environment to decide — `0` is `0` —
+        // and the *use* in `main.cpp` is therefore not a use. Before the fact's own region was evaluated this was a
+        // "maybe", which is a reference a rename would have been offered.
+        let files = MemoryFiles::new()
+            .with_file("/p/api.h", "#if 0\n#define API int\n#endif\n")
+            .with_file("/p/main.cpp", "#include \"api.h\"\nAPI f();\n");
+        let index = index_of(&files, &["/p/api.h", "/p/main.cpp"]);
+
+        assert_eq!(
+            shown(&files, &index, "API"),
+            ["api.h:define:API"],
+            "the `#define` is a fact about the text, and the use is not a use"
+        );
     }
 
     #[test]

@@ -3934,7 +3934,26 @@ fn parse_a_definition_per_branch(
     Ok(ended_with_a_semicolon)
 }
 
-/// Parse a `typedef` declaration: `typedef int MyInt;`.
+/// Parse a `typedef` declaration: `typedef int MyInt;`, `typedef WCHAR *PWCHAR, *LPWCH;`.
+///
+/// # The list, and why it is not one declarator
+///
+/// A `typedef` is a declaration specifier, so what follows it is an ordinary **init-declarator-list**: C and C++
+/// headers introduce several names in one line everywhere, and the pointer aliases in particular are always
+/// written this way:
+///
+/// ```cpp
+/// typedef WCHAR *PWCHAR, *LPWCH, *PWCH;      winnt.h, and this shape appears hundreds of times in it
+/// typedef struct _GUID *LPGUID, GUID, *PGUID;
+/// ```
+///
+/// This rule read exactly **one** declarator and then insisted on `;`, so every one of those lines failed at the
+/// comma. The cost was not the line: the failure left the rest of the declaration to the recovery, which is where
+/// `winnt.h`'s 417 errors came from — and, through them, the loss of eight `#endif`s that made the whole file's
+/// conditional nesting unusable. One loop.
+///
+/// Each declarator introduces its **own** name, and each is recorded as a type name: without that, `PWCHAR p;`
+/// later in the file reads as an expression rather than as a declaration.
 pub fn parse_typedef_declaration(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::TypedefDecl);
@@ -3947,22 +3966,38 @@ pub fn parse_typedef_declaration(p: &mut CppParser) -> ParseResult {
         return Err(err);
     }
 
-    // `typedef int Integer;` makes `Integer` a type name, which is the whole point of the declaration — and the
-    // name is what the declarator introduces, so it is read from there rather than from the specifiers.
-    let defined_name = if p.current_token() == CppTokenKind::Identifier {
-        Some(p.current_token_text().to_string())
-    } else {
-        None
-    };
+    loop {
+        // `typedef int Integer;` makes `Integer` a type name, which is the whole point of the declaration — and
+        // the name is what the declarator introduces, so it is read from there rather than from the specifiers.
+        // Read off the events the declarator produces, because it is not always the token under the cursor:
+        // `*PWCHAR` puts it after a `*`, `(*F)(int)` inside parentheses.
+        let declarator_from = p.current_event_count();
 
-    if let Err(err) = super::types::parse_declarator(p) {
-        p.close_marks_above(base);
-        return Err(err);
+        if let Err(err) = super::types::parse_declarator(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+
+        if let Some(name) = p.the_name_a_declarator_introduced(declarator_from) {
+            p.declare_type_name(&name);
+        }
+
+        // **One initializer for the list, not one per declarator**: `typedef int A, B;` has no `=` at all, and
+        // `typedef int *p = nullptr;` is the one shape where an `=` may follow a typedef's declarator — which the
+        // ordinary declaration rule reads with the same rule, because it is the same grammar.
+        if p.current_token() == CppTokenKind::Assign
+            && let Err(err) = parse_initializer_clause(p)
+        {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+
+        if p.current_token() != CppTokenKind::Comma {
+            break;
+        }
+        p.bump();
     }
 
-    if let Some(name) = defined_name {
-        p.declare_type_name(&name);
-    }
     if let Err(err) = expect_semicolon(p) {
         p.close_marks_above(base);
         return Err(err);
@@ -4151,10 +4186,49 @@ pub fn parse_linkage_block(p: &mut CppParser) -> ParseResult {
     p.enter_block_body();
 
     while p.current_token() != CppTokenKind::RightBrace && !p.is_eof() {
+        // **A directive is not a declaration**, and this loop has to say so. Every C header in the world writes
+        // its linkage block with the conditional *inside* it:
+        //
+        // ```cpp
+        // #ifdef __cplusplus
+        // extern "C" {
+        // #endif
+        // …
+        // #ifdef __cplusplus
+        // }
+        // #endif
+        // ```
+        //
+        // which is `winnt.h`'s shape at line 11 and every MinGW header's after it. Without this branch the `#endif`
+        // went to `parse_declaration`, failed, got wrapped in an `ErrorNode` **one token wide**, and `endif` was
+        // then read as the next declaration's *type name*: `endif int x;` is a declaration of `x` with type
+        // `endif int`. From there nothing could close the block — the `}` that ends the linkage was consumed by
+        // some later declaration — so the loop ran to the end of the file: one `CompoundStat` covering 387 000
+        // bytes of `winnt.h`, every directive inside it an `ErrorNode`, and *eight* `#endif`s that the directive
+        // scanner never saw. Measured on the 455-file closure: this one construct is why the whole file's
+        // conditional nesting was unusable, which is what the branch rule needs.
+        if p.current_token() == CppTokenKind::Hash {
+            // A directive that does not read is not a reason to lose the block.
+            let directive_base = p.open_marks();
+            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                p.end_marks_to(directive_base);
+                p.push_error(err);
+            }
+            continue;
+        }
+
         let member_base = p.open_marks();
         let before = p.current_token_index();
         if parse_declaration(p).is_err() {
-            p.close_marks_above(member_base);
+            // **With their end events**, for the third time in this file's history (see `end_marks_to` and
+            // maintenance convention 34): a declaration that fails *after* consuming tokens — and inside a linkage
+            // block there are hundreds of them — would otherwise leave an unpaired `NodeStart` that the tree
+            // builder balances at the **end of the stream**. The price is not one declaration: the failed one
+            // swallows every declaration after it, which swallows the `}` that closes the linkage block, which
+            // swallows the rest of the file. `winnt.h` came out as sixty nested `TypedefDecl`s all ending at EOF,
+            // and with them the whole file's directive structure — which is what made its conditional nesting
+            // unusable for the macro layer.
+            p.end_marks_to(member_base);
             // Always advance: a declaration that consumed nothing would spin this loop forever.
             if p.current_token_index() == before {
                 let error = p.mark(CppSyntaxKind::ErrorNode);

@@ -853,6 +853,71 @@ root.AddChild("code_style_check", bool(lint["codeStyle"]));
 | **B39** | `struct S { void f() { for (auto &v: vec) { } } };` | 报 `expected ;, but get )`。位域判据问的是"上面有没有类体"而不是"**最里层的大括号是不是类体**"，于是成员函数体里的范围 `for` 的 `:` 被当成位域宽度（`v: vec`）。改成用一个**大括号栈**（类体 / 块）来判断 | `LSP.h`（5 条） | **已修复** |
 | **B40** | `try` … `#if` … `{` 与 `}` … `#if` … `catch` | 报 `expected }`。指令落在 **`try` 与它的块之间**（第二种：`}` 与 `catch` 之间）——B23 那一族的形状，只是接缝在 `try` 上，而且**两处接缝都要接**：只补 `}`/`catch` 那处，真实文件仍然报错 | `IOSession.cpp`（5 条） | **已修复** |
 
+### B44. 链接块里的指令 —— 已修复（`winnt.h` 那一族的根）
+
+```cpp
+#ifdef __cplusplus
+extern "C" {
+#endif
+int x;
+#ifdef __cplusplus
+}
+#endif
+```
+
+**现象**：`#endif` 被读成一个 token 宽的 `ErrorNode`，紧接着 `endif` 成了下一条声明的**类型名**（`endif int x;`），
+链接块的 `}` 从此再也对不上，循环一直跑到文件结尾——`winnt.h` 因此变成**一个 `CompoundStat` 覆盖 387 000 字节**，
+里面有 **八条 `#endif` 是扫描器看不见的**。
+
+**成因**：`parse_linkage_block` 的循环只调 `parse_declaration`，**没有指令分支**；而这是**每个 C 头文件**写
+链接块的方式（`winnt.h:11`）。
+
+**性质**：缺规则（接缝）。这是"指令落在构造的接缝上"（§2.1）那一族在**链接块**上的实例——九处接缝都补过，
+漏了它，因为它的症状不在本文件里：**丢的是指令，坏的是整份文件的条件嵌套**，而条件嵌套是宏层（哪个宏在这里
+生效、分支结论）唯一的输入。
+
+**护栏**：`gaps.rs::a_linkage_block_keeps_the_directives_written_inside_it`（块内两条指令都是指令节点、
+块内没有 `ErrorNode`、块止于自己的 `}`）。**量到的**：`winnt.h` 的指令从 4025 个节点 / 936 条丢失 →
+**4090 个节点 / 0 条丢失**；455 文件闭包 干净 328 → 329。
+
+### B45. 多声明符的 `typedef` —— 已修复（一族，不是一个文件）
+
+```cpp
+typedef WCHAR *PWCHAR, *LPWCH, *PWCH;          winnt.h 里成百上千行
+typedef int A, B;
+```
+
+**现象**：第一个 `,` 处报 `expected ;`，后面的声明符被读成一条**嵌套的声明**。整个文件随后级联：`winnt.h`
+的 417 条错从这里开始。
+
+**成因**：规则读**一个**声明符就要求 `;`。而 `typedef` 是声明说明符，后面跟的是普通的
+**init-declarator-list**——C/C++ 头文件到处都是"一行引入好几个名字"。
+
+**性质**：缺规则（少一层循环）。**两个半边**：parser 要读这个列表，并且**每个声明符各自的名字**都要记成类型名
+（否则 `LPWCH q;` 后面读不成声明）；`sema::scopes` 也要**绑定每一个**声明符（它原来只取第一个
+`first_child(node, Declarator)`），否则第二个名字的事实根本不存在。
+
+**护栏**：`gaps.rs::a_typedef_declares_every_name_it_lists`（第二个名字也能当类型用）+
+`tests/scopes.rs::a_typedef_declares_every_name_it_lists`（三个名字都是 `BindingKind::Typedef`）。
+
+### B46. 类头里的宏（`struct DECLSPEC_ALIGN (8) _NAME {`）—— 已修复
+
+```cpp
+typedef struct DECLSPEC_ALIGN (8) _XSAVE_AREA_HEADER { … } XSAVE_AREA_HEADER, *PXSAVE_AREA_HEADER;
+```
+
+**现象**：`DECLSPEC_ALIGN` 被当成 tag 名，`(8)` 报 `expected ;`，之后的对齐结构全部级联——`winnt.h` 剩下的
+5 层嵌套 typedef 都是它。
+
+**成因**：类头只认"关键字 → 名字 → `{`"，而编译器自己的对齐属性宏就写在关键字与名字之间。宏定义在
+`_mingw.h`（**另一个文件**），所以文件局部的宏表不可能知道它，拼写也不是证据（第 16 条）。
+
+**性质**：缺规则，但**接受它不花任何代价**：类关键字之后语法只允许属性、名字、`{`、`:`、`;`，而"名字 + 括号组"
+一个都不是——没有第二种读法可以被抢走。守卫是**后面跟什么**（名字 / `{` / `:` / `;` 才算），所以真错误仍然是错误。
+和 `namespace std _GLIBCXX_VISIBILITY(default) {` 用的是同一条形状判据（`eat_namespace_head_macros`）。
+
+**护栏**：`gaps.rs::a_class_head_may_carry_a_macro_before_its_name`。
+
 ### B42. 函数定义里的 `try`（function-try-block）—— 待修
 
 ```cpp
@@ -1845,6 +1910,10 @@ bits/alloc_traits.h 的首错            80 → 453 行；bits/iterator_concepts
     这不是"少读了几个 token"，是**整个类体从这一刻起消失**：`bits/stl_vector.h:192` 那一条成员让 `std::vector` 一个成员都没有（`v.size`/`v.push_back` 都答"未声明"），`bits/cow_string.h:515` 那一条让 `class basic_string` 提前 3400 行结束。判据很简单，**写错误路径时问自己一句：这条路径是"token 也不要了"还是"token 留着"**——前者用 `close_marks_above`（调用方随后 `rollback`，事件被截断，什么都不欠），后者必须用 `end_marks_to`（按身份、逆序、带 `NodeEnd`）。`gaps.rs::a_member_the_parser_gives_up_on_keeps_the_members_after_it_members` 把四段瓦砾钉住了。
 
     第十一轮接着在**语句层**又付了一次同样的学费：`parse_expression_statement` 与 `CppParser::recover_to_level` 也在"token 留着"的路径上摘节点，于是 `bits/stl_map.h` 那个没有 `;` 的宏把 `operator[]` 的函数体**和整个类体剩下的部分**一起吞了——`std::map` 因此没有 `find`。判据是同一句话，只是层的名字换了一个：**这条路径是"token 也不要了"还是"token 留着"**。
+
+    **第十三轮第三次收费，这次在链接块上**（B44）：`parse_linkage_block` 的成员循环也在"token 留着"的路径上摘节点。区别是这一次的代价不再是"一个类没了"，而是**整份文件的条件结构没了**——一个失败的声明吞掉后面所有声明，连带吞掉链接块的 `}`，于是一个 `CompoundStat` 覆盖 387 000 字节，里面八条 `#endif` 再也不是指令节点。三个层级（类体、语句、链接块）各一次，判据一次都没变，所以**这一条应该写在每个"继续解析"的循环旁边**，而不是只写在 `end_marks_to` 的文档里。
+
+    同一件事的另一面：**恢复"只前进一个 token"是有价值的性质**，值得为它让路。它让读不下来的声明只赔上自己的第一个 token，后面的成员照旧；所以第十轮那条"把 `name(...)` 整体读成宏"的规则（隔离里完全正确）被**撤掉**了——它把名字和括号组一起吃，代价是闭包里 111 个成员（第 29 条：数字先于直觉）。
 
     同一件事的另一面：**恢复"只前进一个 token"是有价值的性质**，值得为它让路。它让读不下来的声明只赔上自己的第一个 token，后面的成员照旧；所以第十轮那条"把 `name(...)` 整体读成宏"的规则（隔离里完全正确）被**撤掉**了——它把名字和括号组一起吃，代价是闭包里 111 个成员（第 29 条：数字先于直觉）。
 

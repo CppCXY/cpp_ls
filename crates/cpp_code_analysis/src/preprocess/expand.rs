@@ -456,7 +456,10 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
                 continue;
             }
 
-            let Some(definition) = self.macros.lookup(token.text()) else {
+            // Only a *definition* expands. A table that knows the name is a macro without holding its body
+            // (`Lookup::DefinedWithoutAValue`) cannot say what to paste, and pasting nothing would silently
+            // delete the use — the same reasoning that makes `#if NAME` unknown rather than `0`.
+            let Some(definition) = self.macros.lookup(token.text()).definition() else {
                 // Not a macro. Not a note either: most identifiers are not macros, and reporting that
                 // would bury the ones that are.
                 if !self.push(token.clone(), tokens[index].origin.clone(), region) {

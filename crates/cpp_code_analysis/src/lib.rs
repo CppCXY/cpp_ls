@@ -66,14 +66,17 @@ pub use preprocess::{condition, directive, expand, guards, macros};
 pub use sema::declarations::{build_facts, by_name, declared_type_of, scope_of};
 pub use sema::{module_info, modules, parser_symbols, scopes, symbol};
 pub use summary::{
-    DeclFact, DeclKind, FactGuard, FileSummary, IncludeFact, MacroFact, MacroKind, SummaryGuards,
+    ConditionAt, ConditionalRegion, DeclFact, DeclKind, FactGuard, FileSummary, GuardBranch,
+    IncludeFact, MacroFact, MacroKind, SummaryGuards,
 };
 // `guard` is the exception: `preprocess::guard` and `preprocess::guards` differ by one letter, which is exactly
 // the hazard the folders are meant to remove, so the *analysis* keeps the plural name and the types are reached
 // as `preprocess::guard`.
 pub use preprocess::guard;
 
-pub use condition::{ConditionExpr, EvalError, MacroValues, Value, evaluate, parse_condition};
+pub use condition::{
+    ConditionExpr, EvalError, Lookup, MacroValues, Value, evaluate, parse_condition,
+};
 pub use config::{
     CommandLineMacro, CompileCommand, CompileCommands, CompilerConfig, IncludePath,
     parse_compile_commands, split_command_line,
@@ -88,8 +91,8 @@ pub use expand::{
 };
 pub use file::{FileAnalysis, FileTokens};
 pub use graph::{
-    Edge, FileEntry, FileGraph, MAX_INCLUDE_DEPTH, SkipReason, UnresolvedInclude, Visit, WalkScope,
-    file_only, walk, walk_scoped,
+    Edge, FileEntry, FileGraph, MAX_INCLUDE_DEPTH, Marked, SkipReason, UnresolvedInclude, Visit,
+    WalkScope, file_only, walk, walk_scoped,
 };
 pub use guard::{Branch, Guard, GuardStack, Region, Visibility};
 pub use guards::{FileGuard, GuardAnalysis, analyse_guards, detect_guard};

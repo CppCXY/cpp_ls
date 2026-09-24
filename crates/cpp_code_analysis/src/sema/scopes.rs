@@ -398,13 +398,19 @@ impl ScopeWalker {
 
     /// `typedef int Integer;`.
     fn typedef_decl(&mut self, node: &CppSyntaxNode, scope: ScopeId) {
-        // The name is in the declarator, not on the node: `typedef <specifiers> <declarator>;`.
-        let Some(declarator) = first_child(node, CppSyntaxKind::Declarator) else {
-            return;
-        };
-
-        if let Some((name, name_range)) = declared_name(&declarator) {
-            self.bind(scope, name, BindingKind::Typedef, node, name_range);
+        // The names are in the declarators, not on the node: `typedef <specifiers> <declarator>, <declarator>;`.
+        //
+        // **Every** declarator, not the first: `typedef WCHAR *PWCHAR, *LPWCH, *PWCH;` introduces three names in
+        // one declaration, and that shape is how every C header writes its pointer aliases. Binding only the first
+        // left the others undeclared — so `LPWCH q;` in the same file was a declaration of a type nothing knew,
+        // and a consumer asking for the alias `LPWCH` found nothing. The parser reads the list (one loop); this is
+        // the other half of the same fact.
+        for declarator in node.children().filter(|child| {
+            CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator
+        }) {
+            if let Some((name, name_range)) = declared_name(&declarator) {
+                self.bind(scope, name, BindingKind::Typedef, node, name_range);
+            }
         }
     }
 

@@ -1609,6 +1609,43 @@ fn parse_class_like_head(p: &mut CppParser) -> ParseResult {
 
     p.bump(); // `class` / `struct` / `union` / `enum`
 
+    // A **macro between the class-key and the name**, which is where a compiler's alignment attribute is written:
+    //
+    // ```cpp
+    // typedef struct DECLSPEC_ALIGN (8) _XSAVE_AREA_HEADER { … } XSAVE_AREA_HEADER, *PXSAVE_AREA_HEADER;
+    //         ^^^^^^ ^^^^^^^^^^^^^^ (8)  the macro and its argument list, then the tag
+    // ```
+    //
+    // `winnt.h` writes this shape for every aligned structure, and the same position holds
+    // `__attribute__((packed))` and `__declspec(align(8))`. The macro is defined in `_mingw.h` — *another file* —
+    // so the file-local macro table cannot know it, and no spelling convention would be evidence here. What makes
+    // accepting it free is the shape: after a class-key the grammar allows an attribute-specifier-sequence, a
+    // name, `{`, `:` or `;`, and a **name followed by a parenthesised group** is none of those — there is no other
+    // reading to take away. The guard is what follows: this only fires when the run ends somewhere a class head
+    // can continue, so a genuine mistake is still a mistake. The same rule the namespace head uses for
+    // `namespace std _GLIBCXX_VISIBILITY(default) {` — see `eat_namespace_head_macros`.
+    while p.current_token() == CppTokenKind::Identifier
+        && p.peek_next_token() == CppTokenKind::LeftParen
+    {
+        let checkpoint = p.checkpoint();
+        p.bump(); // the macro's name
+
+        let group_is_read =
+            super::decls::parse_balanced_token_group(p, CppSyntaxKind::ArgumentList).is_ok();
+        let continues = matches!(
+            p.current_token(),
+            CppTokenKind::Identifier
+                | CppTokenKind::LeftBrace
+                | CppTokenKind::Colon
+                | CppTokenKind::Semicolon
+        );
+
+        if !group_is_read || !continues {
+            p.rollback(checkpoint);
+            break;
+        }
+    }
+
     // An optional name. `enum class` is handled before this is reached.
     // The name is read before it is parsed, because the parser needs it afterwards and re-deriving it from the
     // event stream would be a second implementation of "what did that name say".

@@ -25,6 +25,7 @@
 //! file was entered with — which is exactly what the summary's key records.
 
 use crate::cache::SummaryKey;
+use crate::guard::{Branch, Region, Visibility};
 
 /// A declaration the file writes: enough to find it, name it, and say what kind of thing it is.
 ///
@@ -236,6 +237,17 @@ pub struct MacroFact {
     pub kind: MacroKind,
     pub function_like: bool,
     pub body: cpp_parser::MacroBody,
+    /// The macro's value, when its body is **one integer literal**: `#define _GLIBCXX_USE_CXX11_ABI 1`.
+    ///
+    /// The one piece of a body a condition can read. `#if NAME` on a macro expands it and re-reads the result, and
+    /// `condition::macro_value` only accepts a single integer literal — so a body of two tokens, a body
+    /// that is a name, and no body at all are the same answer to a condition, and storing any of them would be a
+    /// longer way of saying `Unknown`. This is what makes `#if __cplusplus >= 201703L && _GLIBCXX_USE_CXX11_ABI`
+    /// decidable once the file that defines the second name has been walked (see `docs/roadmap.md` §3.5c).
+    ///
+    /// Stored as the literal's **text**, so that reading it back needs no lexer: whoever reads it knows what it is
+    /// — the same reason the fact stores a name's range rather than a way to find it.
+    pub value: Option<Box<str>>,
     /// Where the fact is, for "go to macro definition".
     pub range: cpp_parser::SourceRange,
     pub guard: FactGuard,
@@ -362,11 +374,317 @@ pub enum FactGuard {
 
 /// The conditional regions a file's facts refer to, in the order they were opened.
 ///
-/// The conditions themselves are [`crate::Guard`] values — macro expressions, which is what makes "is this code
-/// even being compiled" answerable as `Active`/`Inactive`/`Unknown` without the index knowing the machine.
+/// A region is stored as its **question**, never as its answer. Whether a region is entered depends on the
+/// macros in force, and those are a property of the compilation rather than of the file: the `-D`s, the `-std=`
+/// that fixes `__cplusplus`, and the five hundred names a compiler predefines. A summary is keyed without any of
+/// that (see `cache.rs`), so the answer cannot live here — the same reasoning that keeps a resolved type out of a
+/// declaration fact. A query that has the environment evaluates the stored question; one that does not answers
+/// `Unknown`, which is what every consumer of this type did before the questions were stored at all.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SummaryGuards {
+    /// One entry per region: the span of its conditions, which is its identity in [`FactGuard::Region`].
     pub regions: Vec<cpp_parser::SourceRange>,
+    /// One entry per region, in the same order: the branches written for it, and what encloses it.
+    pub conditionals: Vec<ConditionalRegion>,
+    /// The region the file's **own include guard** opens, when it has one.
+    ///
+    /// Not a condition, and that is the whole point: `#ifndef _GLIBCXX_STRING` at the top of `string` is the file
+    /// saying "read me once", not a feature test — entering the file at all is what the guard means, so a fact
+    /// inside it is as visible as one written outside every `#if`. The index already treats the facts whose guard
+    /// is *exactly* this region that way ([`crate::FileSummary`], `deguard_the_files_own_guard`); storing the
+    /// index is what lets a walk treat the *nested* ones that way too, and a nested fact is the common case —
+    /// `#ifndef GUARD / #define GUARD` followed by a file full of `#if __cplusplus` blocks.
+    ///
+    /// Without it those blocks read as "the guard is not taken", because by the time they are evaluated the guard
+    /// has *defined* its own name — a file whose contents are `#ifndef X / #define X / … #endif` would answer
+    /// "inactive" to everything inside it, which is exactly backwards.
+    pub own_guard: Option<u32>,
+}
+
+/// One conditional region: the chain of branches a single `#if` opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConditionalRegion {
+    /// The branches in source order; the first is the `#if`/`#ifdef`/`#ifndef` that opened the region.
+    pub branches: Vec<GuardBranch>,
+    /// The conditional this one is written inside, by region index.
+    ///
+    /// Stored rather than derived from the spans, because a region's span is its **condition**: a nested
+    /// region's condition lies inside its parent's body, and so does the text of a sibling `#elif`. Which
+    /// conditional encloses which is a fact about the nesting, and arithmetic on two ranges would be a second
+    /// way of computing it — free to disagree with the walk that knew.
+    ///
+    /// Regions are numbered in opening order, so a parent always has a smaller index than its children.
+    pub parent: Option<u32>,
+}
+
+/// One branch of a conditional: what it asks, and the body it guards.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuardBranch {
+    /// Which directive wrote it: `#if`, `#ifdef`, `#ifndef`, `#elif` or `#else`.
+    pub kind: crate::DirectiveKind,
+    /// The condition as **text to evaluate**: the expression's tokens for `#if`/`#elif` (`__cplusplus >=
+    /// 201703L`), the name for `#ifdef`/`#ifndef` (`_WIN32`), and `None` for `#else`, which has no condition and
+    /// holds when nothing before it did.
+    ///
+    /// Text rather than tokens because a token list is four fields and a range per token in every cache entry,
+    /// and because reading it back is one call to the lexer that read it the first time. Text rather than a
+    /// *value* because there is nothing to evaluate it with here — see [`SummaryGuards`].
+    pub condition: Option<Box<str>>,
+    /// The body: from after this branch's directive to the next branch's directive, or to the `#endif`.
+    ///
+    /// Zero-length for an empty branch, which is what `#if A\n#else\n...` writes and what a consumer has to
+    /// read as "no code here" rather than as "a body I could not find".
+    pub body: cpp_parser::SourceRange,
+    /// Where the directive is, so that a consumer explaining "this is not compiled" can point at the condition
+    /// that decided it.
+    pub range: cpp_parser::SourceRange,
+}
+
+/// One conditional that contains a position, and where its own condition is.
+///
+/// The two are different offsets and both are needed: which branch the position falls in is asked at the
+/// position, while *what the condition means* is decided where the condition was written — a `#define NAME`
+/// inside a region's own body changes the answer to `#ifndef NAME` if it is read at the wrong end of the region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConditionAt {
+    /// Which entry of [`SummaryGuards::regions`] this is.
+    pub region: u32,
+    /// The offset of the region's own condition, which is where it must be evaluated.
+    pub condition_at: usize,
+}
+
+impl SummaryGuards {
+    /// The conditionals containing `offset`, **innermost first**.
+    ///
+    /// Empty for code outside every `#if`, which is the common case and the cheap one. This is the general
+    /// answer, for a caller that has a position and no guard; a caller that *has* the guard — which is every
+    /// caller in this crate, because a fact records one — should use [`SummaryGuards::conditions_of`] instead:
+    /// it walks the nesting outwards from the region the guard names, where this has to look for it.
+    pub fn conditions_at(&self, offset: usize) -> Vec<ConditionAt> {
+        let mut found: Vec<ConditionAt> = Vec::new();
+
+        // Innermost first: the smallest region that contains the position, then its parent, and so on. A region
+        // contains the position when the position is inside one of its branch *bodies* — the region's own span
+        // starts at its condition, and a position before the first branch's body is not in the region at all.
+        let mut current = (0..self.conditionals.len())
+            .filter(|index| self.conditionals[*index].contains(offset))
+            .min_by_key(|index| self.span_of(*index as u32).map_or(usize::MAX, |span| span.length));
+
+        while let Some(index) = current {
+            let Some(span) = self.span_of(index as u32) else {
+                break;
+            };
+
+            if Some(index as u32) != self.own_guard {
+                found.push(ConditionAt {
+                    region: index as u32,
+                    condition_at: span.start_offset,
+                });
+            }
+
+            current = self.conditionals[index].parent.map(|parent| parent as usize);
+        }
+
+        found
+    }
+
+    /// The conditionals around the region a fact's guard names, **innermost first**.
+    ///
+    /// The same answer as [`SummaryGuards::conditions_at`] for the region that guard was assigned from — and the
+    /// walk is the *point*: the nesting is already recorded (each region names its parent), so this costs one
+    /// step per level of nesting instead of a search over every conditional in the file. A file with two hundred
+    /// conditionals would otherwise pay for all of them on every include it has, in every query that walks it.
+    ///
+    /// The file's own guard is left out: it is not a condition — see [`SummaryGuards::own_guard`].
+    pub fn conditions_of(&self, region: u32) -> Vec<ConditionAt> {
+        let mut found = Vec::new();
+        let mut current = Some(region);
+
+        while let Some(index) = current {
+            let Some(span) = self.span_of(index) else {
+                break;
+            };
+
+            if Some(index) != self.own_guard {
+                found.push(ConditionAt {
+                    region: index,
+                    condition_at: span.start_offset,
+                });
+            }
+
+            current = self
+                .conditionals
+                .get(index as usize)
+                .and_then(|conditional| conditional.parent);
+        }
+
+        found
+    }
+
+    /// The region a fact's guard names, as the preprocessor's own value, with the branch **in force at
+    /// `offset`** as its `active_branch`.
+    ///
+    /// `None` when the index names no region, which a summary whose guards were written by another producer can
+    /// have. The caller evaluates the returned region against the macros in force where the *condition* was
+    /// written — [`SummaryGuards::conditions_at`] says where that is.
+    pub fn region_at(&self, region: u32, offset: usize) -> Option<Region> {
+        let conditional = self.conditionals.get(region as usize)?;
+
+        Some(Region {
+            branches: conditional.branches.iter().map(GuardBranch::as_branch).collect(),
+            active_branch: conditional.branch_at(offset)?,
+        })
+    }
+
+    /// The span of a region's condition, when the index names one.
+    pub fn span_of(&self, region: u32) -> Option<cpp_parser::SourceRange> {
+        self.regions.get(region as usize).copied()
+    }
+
+    /// Was the code the guard names compiled, given the macros in force at each condition?
+    ///
+    /// `macros_at` is asked for a table **per condition**, and takes that condition's own offset — not
+    /// `offset`. That is not a detail: a region's condition is decided where it is written, and the tokens that
+    /// matter are the ones in force there. `#ifndef NAME` whose own body then writes `#define NAME` is the shape
+    /// that makes the difference, and reading the condition at the *fact's* offset would decide it the other way
+    /// round — for every include guard and every `#ifndef X / #define X` block in the corpus.
+    ///
+    /// The rule over the chain of enclosing regions is [`crate::Guard::visibility`]'s: one region known not to be
+    /// taken makes the code `Inactive` whatever the others say, one that cannot be decided makes it `Unknown`, and
+    /// only when every one of them is taken is it `Active`. A table that cannot speak about a name answers
+    /// [`Lookup::Unanswered`](crate::Lookup), which the evaluator turns into `Unknown` — so a condition this
+    /// index has no evidence about costs an answer, never a wrong one.
+    pub fn visibility_of<M: crate::MacroValues>(
+        &self,
+        guard: FactGuard,
+        offset: usize,
+        macros_at: impl Fn(usize) -> M,
+    ) -> Visibility {
+        // The fast path, and it is the common one: code outside every conditional is compiled without anything
+        // being evaluated, and asking would cost a walk per include of every file a query touches.
+        let FactGuard::Region(region) = guard else {
+            return Visibility::Active;
+        };
+
+        let mut unknown = false;
+
+        for at in self.conditions_of(region) {
+            let Some(region) = self.region_at(at.region, offset) else {
+                // A guard naming a region this summary does not describe — a summary written before the regions
+                // carried their conditions, or one whose bytes were produced by something else. Nothing can be
+                // said about it, and `Unknown` is what every query said about every region before this existed.
+                unknown = true;
+                continue;
+            };
+
+            match region.visibility(&macros_at(at.condition_at)) {
+                Some(true) => {}
+                Some(false) => return Visibility::Inactive,
+                None => unknown = true,
+            }
+        }
+
+        if unknown {
+            Visibility::Unknown
+        } else {
+            Visibility::Active
+        }
+    }
+}
+
+impl ConditionalRegion {
+    /// Which branch's body holds `offset`.
+    ///
+    /// The last branch that starts at or before the position when no body contains it: the position can only be
+    /// in the directives between two bodies (a fact's range starts after its directive, so this is the
+    /// degenerate case of a zero-length body), and "the branch that was open there" is the reading
+    /// [`crate::GuardStack`] itself takes — it makes the branch in force the last one it observed.
+    ///
+    /// `None` only for a region with no branches at all, which no walk produces and a foreign summary can.
+    pub fn branch_at(&self, offset: usize) -> Option<usize> {
+        if let Some(index) = self.branches.iter().position(|branch| {
+            branch.body.start_offset <= offset && offset < branch.body.end_offset()
+        }) {
+            return Some(index);
+        }
+
+        self.branches
+            .iter()
+            .rposition(|branch| branch.body.start_offset <= offset)
+            .or(if self.branches.is_empty() { None } else { Some(0) })
+    }
+
+    /// Is there an `#else`? Then one of the branches is taken whatever the conditions say.
+    pub fn exhaustive(&self) -> bool {
+        self.branches
+            .iter()
+            .any(|branch| branch.kind == crate::DirectiveKind::Else)
+    }
+
+    /// Does this region's body hold `offset`?
+    fn contains(&self, offset: usize) -> bool {
+        self.branches.iter().any(|branch| {
+            branch.body.start_offset <= offset && offset < branch.body.end_offset()
+        })
+    }
+}
+
+impl GuardBranch {
+    /// This branch as the guard layer reads it: the same condition, with its text read back into tokens.
+    ///
+    /// `#ifdef NAME` becomes a branch whose *name* is set and whose tokens are empty, which is how
+    /// [`crate::Branch::holds`] reads it — so the two layers cannot disagree about what `#ifdef` means, and
+    /// neither can they about `#else` or about an expression.
+    pub fn as_branch(&self) -> Branch {
+        match self.kind {
+            crate::DirectiveKind::Ifdef | crate::DirectiveKind::Ifndef => Branch {
+                kind: self.kind,
+                tokens: Vec::new(),
+                name: self.condition.clone(),
+                range: self.range,
+            },
+            _ => Branch {
+                kind: self.kind,
+                tokens: self.tokens(),
+                name: None,
+                range: self.range,
+            },
+        }
+    }
+
+    /// The stored condition, read back into tokens whose ranges point into the file they came from.
+    ///
+    /// The lexer rather than a split on whitespace, for the reason the reference query gives: this has to be the
+    /// same reader that produced the tokens the condition was written as, and a second reader would disagree
+    /// about `'` digit separators, about a suffix, and about a `//` comment ending a condition early.
+    ///
+    /// Ranges are shifted by the directive's own position, so a consumer that follows a token to the file lands
+    /// in the right place. A text that does not lex at all is not an error: the evaluator reads what it can, and
+    /// a condition that cannot be read is `Unknown` rather than wrong — the same answer the guard layer gives for
+    /// a condition it cannot parse.
+    fn tokens(&self) -> Vec<crate::Token> {
+        let Some(text) = self.condition.as_deref() else {
+            return Vec::new();
+        };
+
+        let mut errors = Vec::new();
+        let mut lexer = cpp_parser::CppLexer::new(text, cpp_parser::LexerConfig::default(), &mut errors);
+
+        let base = self.range.start_offset;
+        lexer
+            .tokenize()
+            .into_iter()
+            .filter(|token| !cpp_parser::is_trivia(token.kind))
+            .map(|token| {
+                crate::Token::new(
+                    token.kind,
+                    text.get(token.range.start_offset..token.range.end_offset())
+                        .unwrap_or_default(),
+                    cpp_parser::SourceRange::new(base + token.range.start_offset, token.range.length),
+                )
+            })
+            .collect()
+    }
 }
 
 /// Everything the index remembers about one file.
