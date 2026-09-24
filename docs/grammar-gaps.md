@@ -1386,3 +1386,34 @@ operator bool() &&  // && 和 ( 分开     -> 这是成员函数的引用限定�
     * 第二版把 `FOO(x);`（最令人头疼的解析，本项目读成声明）和 `TEST(A, B) { … }`（块就是体的定义）也吃了。两处都由别的规则拥有且各有测试，所以括号组后面是什么现在由 `kind_after_the_group` **一次走查**回答，四个调用方共用（第 14 条：同一条判据的第二处用法当场抽出来——这次是第四次用法，抽晚了）。
 
     `gaps.rs` 的 `a_macro_from_a_header_can_stand_where_a_declaration_goes` 把**四个反例**钉在一起（赋值、最令人头疼的解析、宏定义、函数体内的漏分号），因为"把这些再次吃掉"正是下一次放宽最容易犯的错。
+
+    **补充（同一轮的后半）：这条规则读的是一串名字，不是一个名字。** libstdc++ 会连写两个，有时三个：
+
+    ```text
+    _GLIBCXX_BEGIN_NAMESPACE_VERSION
+    _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
+      template <typename> struct _List_iterator;
+    ```
+
+    停在名字后面的**第一个** token 会答"后面是个标识符"，于是一个答案在三个 token 之外的形状被拒绝。所以扫描器跳过一串"名字 + 它自己的括号组"，再问那个 token 能不能开始一个声明。加这一层时自己带进来两个错误，都由实测数字发现、现在都有反例：
+
+    * `index_after_the_group` 已经返回"组的 `)` **之后**"，调用方却又跳过一个 token（`next_significant_index` 是"再下一个"）。于是 `size_t _Hash_bytes(const void*);` 里那串名字被扫过头，两个名字都成了宏调用，`;` 落到了下一条声明上——`bits/hash_bytes.h` 由干净变成报错。修法是把"从 index 起跳过 trivia"抽成 `significant_index_at`，`next_significant_index` 用 `index + 1` 表达它（第 14 条：一处实现）；
+    * 扫描器**从不看游标自己那一对括号**：第一轮循环先问"后面是不是标识符"，于是 `_GLIBCXX_BEGIN_INLINE_ABI_NAMESPACE(_V2)` 直接答出 `LeftParen`、被拒绝——`system_error` 由干净变成报错。修法是把"跳过括号组"放在循环的**开头**，第一轮就处理游标自己那个名字。
+
+    两次的形状是同一条教训：**扫描器的起点与终点各差一个 token，症状都是"某个文件从干净变成报错"，而只有把闭包整个跑一遍才看得见。**
+
+24. **编译器自己的属性拼写就是属性**（已修）。`__attribute__ ((…))`（GNU）与 `__declspec(…)`（MSVC）和标准里的 `[[…]]` 是**同一个概念、同一批位置**，而标准库正是用前一种写的：
+
+    ```text
+    template <typename _Tp>
+      __attribute__((__always_inline__))          bits/move.h：模板头之后、声明之前
+      inline _GLIBCXX_CONSTEXPR _Tp* __addressof(…)
+    extern "C++" __attribute__ ((__noreturn__, __always_inline__))   bits/c++config.h：说明符序列里
+    void terminate() _GLIBCXX_USE_NOEXCEPT __attribute__ ((__noreturn__,__cold__));   参数表之后
+    ```
+
+    修法是**一个**谓词 + 一个解析函数：`at_an_attribute` 认得三种拼写，`parse_attribute_specifier` 把它们都收进同一个 `AttributeList`——一个概念一个节点，消费者不必知道文件是给哪个编译器写的。三处调用点（模板头之后、说明符序列、声明符后缀）各自用的是既有的 `parse_attribute_specifiers`，所以一处改动同时生效。
+
+    **这里按拼写匹配是有依据的，和第 16 条批评的"拼写约定"不是一回事**：这两个名字由标准保留给实现，任何 `#define __attribute__` 的程序都不在需要读的范围里；而且它是**编译器**的扩展，不是文件的——没有任何头文件里的 `#define` 能把它变成别的东西。判据要同时满足这两条才算数，`MY_API` 两条都不满足（所以它继续走"表 → 兜底约定"那条路）。
+
+    属性内部的括号是**平衡 token 组**，不是语法：`__attribute__ ((__mode__ (TI)))`、`__attribute__ ((__format__ (gnu_printf, 1, 2)))` 的内容是编译器的事，这里一个字都不解释。GNU 拼写的双括号不需要特例——平衡计数把它们当普通嵌套，外层那对才是属性的界。

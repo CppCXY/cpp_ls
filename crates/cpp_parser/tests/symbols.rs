@@ -388,11 +388,18 @@ fn a_table_described_macro_can_carry_a_block_inside_a_body() {
 }
 
 #[test]
-fn a_table_described_type_joins_a_type_a_macro_started() {
-    // `MY_API Widget const w;` — a modifier macro in front of a type the file does not declare. The shape rule
-    // reads `MY_API Widget *p;` on its own, because a `*` after the name is something a declarator continues into;
-    // `const` is not, so the type would end there and the `const` would be taken for the start of the declarator.
-    // The table's `Type` answer is what carries it.
+fn a_macro_before_a_type_is_read_with_or_without_a_table() {
+    // `MY_API Widget const w;` — a modifier macro in front of a type the file does not declare.
+    //
+    // This used to be the case that **needed** the table's `Type` answer: the shape rule reads `MY_API Widget *p;`
+    // on its own, because a `*` after the name is something a declarator continues into, while `const` is not —
+    // so the type ended at `Widget` and the `const` was taken for the start of the declarator.
+    //
+    // It no longer needs one, and the reason is worth keeping: the rule for "a macro from a header standing where
+    // a declaration goes" reads the **run** of names in front of a declaration, so `MY_API` is a macro and
+    // `Widget const w;` is the declaration behind it. The table's answer is now what a table *adds* rather than
+    // what carries the reading — and both halves are asserted, because a caller that supplies a table must not
+    // get a worse tree than one that does not.
     let symbols = SymbolMap::new()
         .with(
             "MY_API",
@@ -405,12 +412,17 @@ fn a_table_described_type_joins_a_type_a_macro_started() {
 
     let source = "MY_API Widget const w;\n";
     assert!(
-        !CppParser::parse(source, ParserConfig::default())
+        CppParser::parse(source, ParserConfig::default())
             .get_errors()
             .is_empty(),
-        "without the table the specifier sequence cannot know `Widget` is a type"
+        "the shape reads it: `MY_API` is a macro standing for a declaration, and `Widget const w;` is the \
+         declaration behind it"
     );
-    assert!(errors_with(source, &symbols).is_empty());
+    assert!(
+        errors_with(source, &symbols).is_empty(),
+        "and the table's answer does not make it worse — with evidence, the name is read by the rules that know \
+         what a macro is, and this one steps aside (see `at_a_macro_that_stands_for_a_declaration`)"
+    );
 }
 
 #[test]

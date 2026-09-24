@@ -254,12 +254,21 @@ fn at_a_macro_that_stands_for_a_declaration(p: &CppParser) -> bool {
         return false;
     }
 
-    let after = if p.peek_next_token() == CppTokenKind::LeftParen {
-        super::decls::kind_after_the_group(p)
-    } else {
-        super::decls::kind_after_the_name(p)
-    };
+    // Evidence first, and this is the documented order rather than a preference: `docs/index-design.md` fixes
+    // symbol queries as **this file's table, then the caller's, then the shape**. A name the file `#define`d, or
+    // one the caller's table describes, is read by the rule that knows what a macro is — the specifier sequence
+    // for `MY_API Widget const w;` (where the macro is part of the *declaration*, which is a better answer than a
+    // sibling `MacroCall`), the definition rule for `TEST(A, B) { }`, the statement rule for `BOOL_OPTION(x)`.
+    //
+    // So this rule is the complement of [`at_a_macro_member`], which *requires* evidence: that one fires where a
+    // table can answer and this one where nothing can, and between them every "a macro stands here" shape has
+    // exactly one owner. Firing on a name the table describes would take a reading away from the rule that has
+    // evidence for it — which is what the table tests in `tests/symbols.rs` caught.
+    if p.macro_evidence(p.current_token_text()).is_some() {
+        return false;
+    }
 
+    let after = super::decls::kind_after_the_run_of_names(p);
     starts_a_new_declaration(after) || ends_the_scope(after)
 }
 

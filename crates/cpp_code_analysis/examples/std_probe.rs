@@ -122,11 +122,12 @@ fn main() {
         }
 
         details.push(format!(
-            "{:>4}:{:<3} {:<44} | {}",
+            "{:>4}:{:<3} {:<44} | {} :: {}",
             line + 1,
             column,
             errors[0].message,
-            window.last().unwrap_or(&"").trim().chars().take(84).collect::<String>()
+            window.last().unwrap_or(&"").trim().chars().take(70).collect::<String>(),
+            path.file_name().unwrap_or_default().to_string_lossy(),
         ));
     }
     let parsed = started.elapsed();

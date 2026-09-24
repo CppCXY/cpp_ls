@@ -292,6 +292,66 @@ fn a_macro_from_a_header_can_stand_where_a_declaration_goes() {
     );
 }
 
+/// The compiler's own attribute spellings are attributes, in every position the standard spelling works in.
+///
+/// `__attribute__((…))` and `__declspec(…)` mean what `[[…]]` means, and they are the *compiler's* extension
+/// rather than the file's macro: the standard reserves both names, so matching them by spelling is not the
+/// convention-without-evidence that `docs/grammar-gaps.md` entry 16 warns about — there is no `#define` anywhere
+/// that could make them something else. libstdc++ writes them in positions a declaration cannot otherwise have
+/// anything in: between a template head and the declaration it wraps, between `extern "C++"` and the declaration,
+/// and after a parameter list.
+///
+/// The three positions are pinned separately because they are read by three different call sites — the template
+/// head, the specifier sequence and the declarator's suffix — and one of them working says nothing about the
+/// others.
+#[test]
+fn the_compilers_attribute_spellings_are_attributes() {
+    let parses = |source: &str| {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert_eq!(
+            tree.get_errors(),
+            [],
+            "this must parse cleanly: {source:?}"
+        );
+        tree
+    };
+
+    // Between the template head and the declaration it wraps — `bits/move.h`.
+    let wrapped = parses("template <typename T>\n__attribute__((__always_inline__))\ninline T* addressof(T& r);\n");
+    assert!(
+        wrapped
+            .get_red_root()
+            .descendants()
+            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::AttributeList),
+        "and it is an attribute node, not a name the specifier sequence took for a type"
+    );
+
+    // In the specifier sequence, after a linkage specification — `bits/c++config.h`.
+    parses("extern \"C++\" __attribute__ ((__noreturn__, __always_inline__))\ninline void f() noexcept { }\n");
+
+    // After a parameter list, where the standard spelling already worked.
+    parses("void f() __attribute__ ((__noreturn__));\n");
+
+    // The other extension, spelled the other way.
+    parses("__declspec(dllexport) void g();\n");
+
+    // And the run: two and three macro names before the declaration they decorate, which is how libstdc++ opens
+    // a nested namespace and then a versioned one.
+    parses("namespace n { }\n_GLIBCXX_BEGIN_NAMESPACE_VERSION\n_GLIBCXX_BEGIN_NAMESPACE_CONTAINER\ntemplate <typename> struct S;\n");
+
+    // What the run must **not** swallow: a declaration whose type and name are both plain identifiers, and whose
+    // declarator happens to carry a parameter list. The first version of the run scanner stepped one token too
+    // far past a group and read this as two macro invocations, which left the `;` on the next declaration.
+    let declaration = parses("namespace std {\nsize_t\n_Hash_bytes(const void* p);\n}\n");
+    assert!(
+        !declaration
+            .get_red_root()
+            .descendants()
+            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::MacroCall),
+        "`size_t _Hash_bytes(const void*);` is a declaration with a macro-looking type, not two macros"
+    );
+}
+
 /// A construct whose statement kind is all that is asserted.
 fn shape(construct: &'static str, place: Where, kind: CppSyntaxKind) -> Shape {
     Shape {
@@ -480,6 +540,14 @@ fn constructs_the_parser_reads() {
             "namespace std _GLIBCXX_VISIBILITY(default) { int x; }",
             "_GLIBCXX_BEGIN_NAMESPACE_VERSION\nint x;\n",
             "_GLIBCXX_BEGIN_INLINE_ABI_NAMESPACE(__cxx11)\nint x;\n",
+            // A **run** of them, which is how libstdc++ opens a versioned namespace inside a container one.
+            "_GLIBCXX_BEGIN_NAMESPACE_VERSION\n_GLIBCXX_BEGIN_NAMESPACE_CONTAINER\ntemplate <typename> struct S;\n",
+            // The compiler's own attribute spellings, in the three positions the standard one works in. See
+            // `the_compilers_attribute_spellings_are_attributes`.
+            "template <typename T>\n__attribute__((__always_inline__))\ninline T* addressof(T& r);\n",
+            "extern \"C++\" __attribute__ ((__noreturn__, __always_inline__))\ninline void f() noexcept { }\n",
+            "void f() __attribute__ ((__noreturn__));\n",
+            "__declspec(dllexport) void g();\n",
             // A **conditional handler**: a directive can land at either joint of a `try`, and the first one is the
             // one that used to break the statement — with `try` separated from its block, the block was not the
             // try's block at all, and the `catch` became a statement with no statement before it.

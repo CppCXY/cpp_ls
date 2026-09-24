@@ -2041,11 +2041,22 @@ fn can_begin_a_type(kind: CppTokenKind) -> bool {
 ///
 /// Exposed to `super::types`, which asks the same question about the name a specifier sequence is looking at.
 pub(super) fn next_significant_index(p: &CppParser, index: usize) -> usize {
-    let mut next = index + 1;
-    while next < p.token_count() && is_declaration_trivia(p.token_kind_at(next)) {
-        next += 1;
+    significant_index_at(p, index + 1)
+}
+
+/// The first significant token **at or after** `index`.
+///
+/// The difference from [`next_significant_index`] is one token, and it is the difference between reading a
+/// declaration and eating it: a scanner that has just finished a group holds the index **one past** the closing
+/// paren, and that index may be sitting on the newline after it. Asking for the token *after* that one skips
+/// whatever the group was followed by — which is how `size_t _Hash_bytes(const void*);` came out as two macro
+/// invocations and the `;` landed on the next declaration.
+fn significant_index_at(p: &CppParser, index: usize) -> usize {
+    let mut index = index;
+    while index < p.token_count() && is_declaration_trivia(p.token_kind_at(index)) {
+        index += 1;
     }
-    next
+    index
 }
 
 /// Do the parentheses at the cursor hold a list of *declarators* rather than a list of values?
@@ -2789,43 +2800,6 @@ fn at_a_macro_member(p: &CppParser) -> bool {
 
 /// The kind of the first token **after** the balanced group at the cursor.
 ///
-/// The question every rule asks that has a macro invocation in front of it: what the group is followed by is what
-/// says which reading this is — `;` a call, `{` a definition whose body is the block, a declaration keyword a
-/// macro standing for a declaration. Written once, because counting parentheses is the part that is easy to get
-/// subtly wrong, and four callers should not each count for themselves.
-///
-/// [`CppTokenKind::None`] when the group never closes: an unbalanced `(` has no "after", and a caller that read
-/// one would be answering about the wrong token.
-pub(super) fn kind_after_the_group(p: &CppParser) -> CppTokenKind {
-    let mut depth = 0isize;
-    let mut offset = 0usize;
-    while let Some(kind) = p.peek_token_kind_at(offset..offset + 1).first().copied() {
-        match kind {
-            CppTokenKind::LeftParen => depth += 1,
-            CppTokenKind::RightParen => {
-                depth -= 1;
-                if depth == 0 {
-                    return p
-                        .peek_token_kind_at(offset + 1..offset + 2)
-                        .first()
-                        .copied()
-                        .unwrap_or(CppTokenKind::None);
-                }
-            }
-            CppTokenKind::Eof | CppTokenKind::None => return CppTokenKind::None,
-            _ => {}
-        }
-        offset += 1;
-    }
-
-    CppTokenKind::None
-}
-
-/// Is the balanced group at the cursor followed by a `;`?
-pub(super) fn a_semicolon_follows_the_group(p: &CppParser) -> bool {
-    kind_after_the_group(p) == CppTokenKind::Semicolon
-}
-
 /// Read a macro invocation that stands where a class member goes, into a `MacroCall`.
 ///
 /// The same node the statement rule produces, for the same reason: a macro's meaning is not knowable here, and
@@ -2986,12 +2960,90 @@ fn a_decltype_here_is_a_type(p: &mut CppParser) -> bool {
 
 /// The kind of the first significant token **after** the one at the cursor.
 ///
-/// The question a rule asks when the token at the cursor is a name and what decides the reading is what follows:
-/// [`super::stats::at_a_macro_that_stands_for_a_declaration`] wants to know whether a declaration can begin
-/// there. Written once, because the walk past trivia is the part that is easy to get subtly wrong — a rule that
-/// looked at the *next raw token* would see a newline and answer about that.
-pub(super) fn kind_after_the_name(p: &CppParser) -> CppTokenKind {
-    p.token_kind_at(next_significant_index(p, p.current_token_index()))
+/// The question a rule asks when the token at the cursor is a name and what decides the reading is what follows,
+/// and it asks it about a **run**: libstdc++ writes two macro names where a declaration goes, and sometimes
+/// three —
+///
+/// ```text
+/// _GLIBCXX_BEGIN_NAMESPACE_VERSION
+/// _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
+///   template <typename> struct _List_iterator;    <- the run ends here, at `template`
+/// ```
+///
+/// — so stopping at the first token after the name would answer "an identifier follows" and refuse a shape whose
+/// answer is three tokens further on. A group after a name is stepped over as part of it (`MACRO(a) MACRO(b)
+/// template<…>`), because the group is that invocation's.
+///
+/// What it does **not** do is decide anything: it returns the first token that is neither a name nor a group, and
+/// the caller asks its own question about that. `Widget w;` and `x = 1;` both stop on their second token, which
+/// is why the run is not a licence to skip a declaration.
+pub(super) fn kind_after_the_run_of_names(p: &CppParser) -> CppTokenKind {
+    let mut index = next_significant_index(p, p.current_token_index());
+
+    loop {
+        // A group belongs to the name in front of it, and the first pass is the name at the **cursor**:
+        // `_GLIBCXX_BEGIN_INLINE_ABI_NAMESPACE(_V2)` is one invocation wherever it is asked about, so a scanner
+        // that only stepped over groups *after* names it had already passed would stop on its own `(` and answer
+        // `LeftParen` — which is not a declaration start, so the invocation was refused and the declaration
+        // behind it came out as an error.
+        if p.token_kind_at(index) == CppTokenKind::LeftParen {
+            let Some(after) = index_after_the_group(p, index) else {
+                return CppTokenKind::None;
+            };
+            index = significant_index_at(p, after);
+            continue;
+        }
+
+        if p.token_kind_at(index) != CppTokenKind::Identifier {
+            break;
+        }
+        index = next_significant_index(p, index);
+    }
+
+    p.token_kind_at(index)
+}
+
+/// The kind of the first significant token after the balanced group at the cursor.
+///
+/// The question a rule asks when the cursor is on a macro invocation's group and the reading depends on what
+/// comes next. [`CppTokenKind::None`] when the group never closes: an unbalanced `(` has no "after", and a caller
+/// that read one would be answering about the wrong token.
+pub(super) fn kind_after_the_group(p: &CppParser) -> CppTokenKind {
+    match index_after_the_group(p, p.current_token_index()) {
+        Some(after) => p.token_kind_at(significant_index_at(p, after)),
+        None => CppTokenKind::None,
+    }
+}
+
+/// The index one past the balanced group that opens at `index`, or `None` if it never closes.
+///
+/// The one place parentheses are counted, so that the four questions asked about "what follows a group" cannot
+/// come to disagree about where a group ends.
+fn index_after_the_group(p: &CppParser, index: usize) -> Option<usize> {
+    let mut depth = 0isize;
+    let mut index = index;
+
+    while index < p.token_count() {
+        match p.token_kind_at(index) {
+            CppTokenKind::LeftParen => depth += 1,
+            CppTokenKind::RightParen => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            CppTokenKind::Eof => return None,
+            _ => {}
+        }
+        index += 1;
+    }
+
+    None
+}
+
+/// Is the balanced group at the cursor followed by a `;`?
+pub(super) fn a_semicolon_follows_the_group(p: &CppParser) -> bool {
+    kind_after_the_group(p) == CppTokenKind::Semicolon
 }
 
 /// Can a declaration begin with this token kind?///

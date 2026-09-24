@@ -549,8 +549,11 @@ fn parse_one_decl_specifier_inner(
     let type_start = p.anchor();
 
     match p.current_token() {
-        // Attributes may be interleaved anywhere a specifier may appear.
-        CppTokenKind::LeftBracket if p.peek_next_token() == CppTokenKind::LeftBracket => {
+        // Attributes may be interleaved anywhere a specifier may appear — in either spelling, which is the whole
+        // point of [`at_an_attribute`]: `extern "C++" __attribute__ ((…))` before a declaration is the same
+        // position as `[[nodiscard]]` before one, and the standard library's headers are written with the former.
+        // Checked before the name branch below, which would otherwise take the name for a type.
+        _ if at_an_attribute(p) => {
             return parse_attribute_specifier(p);
         }
 
@@ -3010,27 +3013,59 @@ pub fn eat_function_qualifiers(p: &mut CppParser) {
     }
 }
 
-/// Parse a run of attribute specifiers `[[...]]` at the cursor, consuming as many as are written.
+/// Is an attribute written at the cursor — in any of the three spellings?
+///
+/// The standard's `[[…]]` and the two extensions that mean the same thing: GNU's `__attribute__((…))` and MSVC's
+/// `__declspec(…)`. One predicate, because they are one concept at one set of positions, and every caller that
+/// allows an attribute should allow all three — the standard library is written with the GNU spelling, which sits
+/// in `bits/c++config.h` and in `bits/move.h` (`__attribute__((__always_inline__))` between a template head and
+/// the declaration it wraps).
+///
+/// A **spelling** test rather than a table one, and that is not the convention-without-evidence that
+/// `docs/grammar-gaps.md` entry 16 warns about. Two things make it evidence: the standard reserves these names to
+/// the implementation, so a program that `#define`s `__attribute__` is not a program this has to read; and the
+/// extension is the *compiler's*, not the file's, so no `#define` in any header is what makes it one. Both halves
+/// have to hold for a spelling test to be legitimate, and neither holds for `MY_API`.
+pub fn at_an_attribute(p: &CppParser) -> bool {
+    match p.current_token() {
+        CppTokenKind::LeftBracket => p.peek_next_token() == CppTokenKind::LeftBracket,
+        CppTokenKind::Identifier => {
+            matches!(p.current_token_text(), "__attribute__" | "__declspec")
+                && p.peek_next_token() == CppTokenKind::LeftParen
+        }
+        _ => false,
+    }
+}
+
+/// Parse a run of attribute specifiers at the cursor, consuming as many as are written.
 ///
 /// A *run*, because C++ lets attributes repeat — `[[nodiscard]] [[deprecated]] int f();` — and because the
-/// grammar writes them as a list of specifiers rather than as one.
+/// grammar writes them as a list of specifiers rather than as one. The GNU spelling repeats too
+/// (`__attribute__((a)) __attribute__((b))`), and so does a mixture of the two in a header that supports both.
 ///
 /// Silent when there is nothing to read: this is called at positions where an attribute is *allowed* rather
-/// than required, so `p.current_token() != LeftBracket` returns without touching the cursor and without an
-/// error. The `[[` test is what keeps it away from the forms where a `[` means something else — an array
-/// bound, a lambda capture, a structured binding, an index.
+/// than required, so a cursor that is not on one returns without touching the cursor and without an error.
+/// [`at_an_attribute`] is what keeps it away from the forms where a `[` means something else — an array bound, a
+/// lambda capture, a structured binding, an index — and from every ordinary name.
 pub fn parse_attribute_specifiers(p: &mut CppParser) -> ParseResult {
-    while p.current_token() == CppTokenKind::LeftBracket
-        && p.peek_next_token() == CppTokenKind::LeftBracket
-    {
+    while at_an_attribute(p) {
         parse_attribute_specifier(p)?;
     }
 
     Ok(CompleteMarker::empty())
 }
 
-/// Parse an attribute specifier `[[...]]`.
+/// Parse an attribute specifier, in any of the three spellings, into one [`CppSyntaxKind::AttributeList`].
+///
+/// One node kind for all three, because a consumer asking "what attributes does this declaration carry" must not
+/// have to know which compiler's spelling the file used — and because the *positions* are the same, so a consumer
+/// that finds one in a place where only `[[…]]` was expected is looking at a file written for another compiler
+/// rather than at a different construct.
 pub fn parse_attribute_specifier(p: &mut CppParser) -> ParseResult {
+    if p.current_token() == CppTokenKind::Identifier {
+        return parse_word_attribute(p);
+    }
+
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::AttributeList);
 
@@ -3068,4 +3103,29 @@ pub fn parse_attribute_specifier(p: &mut CppParser) -> ParseResult {
         "unterminated attribute specifier",
         p.current_token_range(),
     ))
+}
+
+/// Read `__attribute__ ((…))` or `__declspec(…)`, into the same node the standard spelling produces.
+///
+/// The parentheses are a **balanced token group**, not a grammar: `__attribute__ ((noreturn))`,
+/// `__attribute__ ((__mode__ (TI)))`, `__attribute__ ((__format__ (gnu_printf, 1, 2)))` — the contents are the
+/// compiler's business, and nothing here may interpret them. Note the double parentheses of the GNU spelling:
+/// they are not a special case for this reader, because balancing counts them like any other nesting, and the
+/// *outer* group is the one that ends the attribute.
+fn parse_word_attribute(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::AttributeList);
+
+    // The name is read as a `NameExpr`, like any other name in the tree, so that the spelling stays visible and
+    // a consumer can tell `__declspec` from `__attribute__` without counting parentheses.
+    let name = p.mark(CppSyntaxKind::NameExpr);
+    p.bump();
+    name.complete(p);
+
+    if let Err(err) = super::decls::parse_balanced_token_group(p, CppSyntaxKind::ArgumentList) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    Ok(m.complete(p))
 }
