@@ -18,16 +18,17 @@
 
 **是什么**：`cpp_ls` 是一个 C++ 语言服务器的内核，两个 crate——
 `cpp_parser`（无损 CST、容错、宏表、外部符号表接口）与 `cpp_code_analysis`（预处理、每文件事实、缓存、跨文件查询）。
-没有语言服务器二进制，没有 driver；**查询是产品，驱动层还没写**（这是队列里的一条）。
+**驱动层已经落地**（`session.rs`：开项目 → 发现工具链 → 惰性索引 → 接 `didOpen`/`didChange` → 查询），
+**还没有语言服务器二进制**——也就是把 `Session` 接到 JSON-RPC 上的那一层，它是队列里的下一条。
 
 **现在的数字**（最近一次普查，`%TEMP%\stdprobe\files.txt` 的 128 个文件——`<vector>/<string>/<map>/<algorithm>` 的闭包）：
-`干净 79 / 报错 49`，错误消息总数 **1435**；每文件错误数 `干净 79 | 只有一个 1 | 两到五个 13 | 超过五个 35`；
-Rust 侧 `cargo test --workspace` = **946 个测试 / 34 个套件全绿**。
+`干净 80 / 报错 48`，错误消息总数 **932**；每文件错误数 `干净 80 | 只有一个 6 | 两到五个 13 | 超过五个 29`；
+Rust 侧 `cargo test --workspace` = **967 个测试 / 34 个套件全绿**。
 
 **门禁三条 + 一条**（改完必须全绿，`index-design.md` §门禁有同样的表）：
 
 ```bash
-cargo test --workspace                     # 946 个测试，34 个套件
+cargo test --workspace                     # 967 个测试，34 个套件
 cargo clippy --workspace --all-targets     # 零警告
 cargo doc --no-deps -p cpp_code_analysis   # 零警告（cpp_parser 有历史链接问题，不管）
 cargo run -q -p cpp_parser --bin cpp_dump -- crates/cpp_parser/tests/real_world.cpp   # 必须 0 error
@@ -55,7 +56,8 @@ cargo run -q -p cpp_parser --bin cpp_dump -- <file> --tree    # 有错也打树�
 
 **其它探针**：`examples/std_index.rs`（闭包的事实统计：`-- <清单> <缓存目录>`）、`examples/std_query.rs`
 （**端到端**：真写一个 TU、发现工具链、索引闭包，然后按光标问成员——这一轮的 0/7 → 3/7 就是它）、
-`examples/index_includes.rs`（冷/热索引代价）、`examples/measure.rs`（构建与命中）。
+`examples/index_includes.rs`（冷/热索引代价）、`examples/open_project.rs`（**驱动层**：开项目 → 惰性索引 →
+按光标问；冷/热两遍，以及"缓冲区就是文本"）、`examples/measure.rs`（构建与命中）。
 
 ---
 
@@ -95,7 +97,7 @@ cargo run -q -p cpp_parser --bin cpp_dump -- <file> --tree    # 有错也打树�
 
 ```text
 declarations_in("std::basic_string")   117 → 442 条（函数 103 → 391；size/find/substr/begin/… 全在里面）
-std_query（examples/std_query.rs）      0/7 → 7/7（七条查询全部答出来，都答在标准库自己的头文件上）
+std_query（examples/std_query.rs）      0/7 → 9/9（含解引用与下标两条，见 §3.2）
 bits/stl_vector.h 的事实行数             37 → 469（`std::vector` 自己 0 → 113 条）
 普查（128 个文件的闭包）                干净 76 → 80 / 报错 52 → 48；消息总数 1435 → 932
 std_index                              声明 4821 → 12550；类型 2770 → 6223（别名 305 → 744）
@@ -302,14 +304,37 @@ private:                                  // stl_pair.h:372：这一行的错来
    等 parser 那边通了，再量 `definition()` 到底报哪一种。
 
 
-### 3.2 解引用与下标：`(*p).size`、`arr[i].size`（`type_of_expression` 的第五、六格）
+### 3.2 解引用与下标：`(*p).size`、`arr[i].size`（**已完成**，`type_of_expression` 的第五、六格）
 
-**思路**：这两条和刚做完的"调用"那一格同形——**先算出对象的类型，再去成员查找**，而算法是对**拼写**做算术：
-- `*p`：对象的类型是 `Widget*` / `Widget&` → 去掉尾部的 `*`/`&`（`base_type_name` 已经会做的反向操作）；
-- `arr[i]`：类型是 `Widget[4]` / `std::vector<Widget>` → 前者去掉 `[N]`，后者要看模板实参（**实例化**，
-  属于更后面那一格，先答 `Unknown` 更诚实）。
-- `a.b.c` 的递归已经在了，所以这两格插进 `type_of_expression` 的形状分派即可。
-- 反面断言要跟上：`int*` 解引用得 `int`（不是"去掉星号后剩下的名字"），`Widget*` 才是 `Widget`。
+**做完了，而且是一次"边界移动"的完整例子**：两条读法和一条事实层的补充。
+
+* **`*p`**：对象是指针/引用时，`*` 是**对拼写做算术**——声明已经写了指向什么（`Widget*` → `Widget`），
+  没有查找。`&x` 是同一个规则的另一个方向（拼写后面接 `*`），一起做了：`(&r)->size` 也因此能答。
+* **`arr[i]`**：数组的元素类型写在声明里（`Widget[4]` → `Widget`，`int[2][3]` → `int[2]`），取**最后一对**
+  方括号。**类**的下标（`v[0]`）仍然答 `Unknown`，而且理由写在代码里：那是 `operator[]` 的返回类型，
+  要**实例化**模板；从拼写里取第一个模板实参对 `vector` 对、对 `map` 错，而这一层分不出两者。
+* **两层事实补上了缺的一半**（否则前两条无从谈起）：
+  - `DeclFact::returns` 只读说明符序列，于是 `Widget* make()` 的返回类型是 `Widget`——**指针丢了**。
+    现在把**声明符里名字之前的那段**（并且只有纯 `*`/`&`）接上去。
+  - `DeclFact::type_of` 同样只读说明符序列，于是 `Widget* p` 的类型是 `Widget`、`Widget arr[4]` 是 `Widget`。
+    现在接上声明符里**除名字与初始化式之外**的部分（`Widget w(1, 2)` 的直接初始化括号在声明符**里面**，
+    所以这是"多个区间一起剪"）。
+
+**量到的**（`examples/std_query.rs`，分母从 7 扩到 9 —— 新增的两条各自要跨三步：别名、解引用/下标、跨文件成员查找）：
+
+```text
+(*p).size       -> bits/basic_string.h  std::basic_string::size     （p 是 std::string* 形参）
+arr[0].empty    -> bits/basic_string.h  std::basic_string::empty    （arr 是 std::string[4] 形参）
+std_query 7/7 → 9/9
+```
+
+**落地的信号是两条测试先失败**（这个仓库记能力的办法）：`a_member_access_on_an_expression_that_is_not_a_call_is_an_unknown_type`
+与 `a_completion_on_an_expression_with_no_type_offers_nothing_and_says_why` 两条断言"这里答 Unknown"的测试，
+改成了断言新答案；剩下的边界换成**算术表达式**（`(a.size + a.size).` 仍然 Unknown——它的类型要语言自己做转换）。
+
+**顺带修掉的两个"读错了一半"**（都不是新功能，是旧字段不完整）：形参的 `Binding.range` 覆盖的是**整个形参**
+（`Widget* p` 从 `Widget` 开始），所以按它下潜会走进说明符序列、永远见不到声明符——改成按**名字**下潜，
+并且取路径上**最内层**的那个声明符（形参的路径上最外层是函数的声明符）。
 
 ### 3.3 作用域/名字的倒排表（一万文件时才疼，但设计现在就该定）
 
@@ -330,12 +355,65 @@ private:                                  // stl_pair.h:372：这一行的错来
 摘要里**没有标识符位置**，所以"哪些位置的名字解析到这条事实"要么逐文件解析（先用文本子串筛一遍），
 要么在事实里加一份 token 位置表。**先量**：一个真实项目里"找引用"要扫多少文件、筛完还剩多少要解析。
 
-### 3.6 "打开一个项目"的入口（产品上最短的一块）
+### 3.6 "打开一个项目"的入口（**驱动层已做完**：`session.rs`；差一个 LSP 二进制）
 
-今天 `discover`/`index_includes_from`/`Worklist` 都能跑，但**没有把它们串起来的那个函数**，
-也没有语言服务器二进制。这一条不需要新语义，只需要一个 driver：
-打开项目 → 发现工具链 → 惰性索引 → 接 `didOpen`/`didChange` → 把查询接到 LSP 的响应上。
-**它是"能不能被用上"的分界线**，而且是纯工程活。
+**这一条原本写的是**："今天 `discover`/`index_includes_from`/`Worklist` 都能跑，但没有把它们串起来的那个函数"。
+现在有了，而且是**一个类型**：`Session`（`crates/cpp_code_analysis/src/session.rs`，15 条测试）。它把四件事串起来：
+
+```text
+开项目      Session::open   发现工具链 + 读 compile_commands.json + 扫描源文件列表（三者都进队列）
+说变了什么  did_open / did_change / did_save / did_close / changed(事件)
+索引多少    advance(n)      一次 n 个文件；顺序是"开着的文件 → 它 include 的 → 项目其余"
+回答问题    view(路径)      → definition / macro_definition / member_completions / name_completions / members_of
+```
+
+**几个设计上真正花了心思的地方**（都是被实测或借用检查器逼出来的）：
+
+* **provider 归调用方所有**。`SummaryStore` 借 provider 过活，所以 `Session` 只能借那串
+  `OverlayFiles<OpenDocuments, DiskFiles>`——而那个 **handle 就是编辑器的入口**：缓冲区放在 `Arc<RwLock<…>>`
+  里，`did_change` 能在 store 还活着的时候改文本。自引用结构（store 借着自己所在结构的一个字段）Rust 没有
+  安全写法，也不值得为它写 unsafe。
+* **队列不是 `Worklist`**。理由有两条：它会**活过一批**（通知会重新播种），而 `Worklist` 可变借用 store，
+  拿着它的 Session 在两步之间答不了任何查询。顺序是同一条（`outcome_of` 这条"这一步干了什么"的判据两边共用）。
+* **两个半边 + 升级**。项目扫描在开项目时就把所有文件放进 rest 半边，用户随后打开其中一个——如果不去管它，
+  那个文件就排在"项目其余"后面，**而所有"从不打开任何文件"的测试都会是绿的**。所以路径带 standing
+  （`Queued(Open)`/`Queued(Rest)`/`Worked`），升级只加一条队列项、不重复算一个文件，
+  旧的那条浮上来时被跳过（有测试钉住"它不会被读第二遍"）。
+* **`again` 与 `requeue`**：前者是"用户正在等的那个文件变了"（进它那半边的**队首**），后者是"整库的键都作废了"
+  （配置变了，进队尾）。两者都会清掉 standing——`add` 的职责恰恰是拒绝已经读过的路径，而变更必须越过它。
+* **诚实那一条在驱动层是"两句话"**。惰性索引让 `NotDeclaredHere` 同时表示"这里没有"和"还没读到"，
+  而这**不是**能靠改查询解决的：`ProjectIndex::definition` 的文档早就写了索引永远是全集的一个子集，从不声称"哪儿都没有"。
+  所以分界线留给上层，规则写在这里：**`pending() > 0` 时不要报"名字不存在"，`pending() == 0` 时它才是关于项目的结论**。
+* **缓冲区就是文本**。`OverlayFiles` 让没保存的 buffer 参与 include 解析（`#include "widget.h"` 找到的是
+  buffer，不是磁盘），而 `store.forget` 让"改了但还没重读"这段时间的查询答 `Unknown` 而不是答旧文本——
+  探针里 `widget.h` 磁盘写 `on_disk`、buffer 写 `in_buffer`，报出来的是 `in_buffer`；`did_close` 之后又变回 `on_disk`。
+
+**量到的**（`examples/open_project.rs`，release，本机 mingw gcc 15.1.0；项目里 `main.cpp` include
+`<string>/<vector>/<map>` 加一个本地头，工具链自己发现）：
+
+```text
+冷启动  开项目（发现工具链+扫描） 72 ms ；`s.size` 的成员在第 32 个文件后答出来，2.58 s
+        整个闭包 454 个文件 9.4 s（全部要解析，0 个命中）
+热启动  开项目 74 ms ；`s.size` 同样是第 32 个文件，但只用 26 ms（**快 100 倍**）
+        其余 422 个文件：3 个解析、451 个从盘上读回，命中率 99%
+查询    9/9（`s.size`/`s.substr`/`s.empty`/`v.push_back`/`v.size`/`m.find`/`m.begin`/`(*p).size`/`arr[0].empty`）
+```
+
+冷启动那两个数字连起来看才是产品结论：**"第一个答案"是 32 个文件 2.6 s，而"整个项目就绪"是 454 个文件 9.4 s**——
+差的 420 个文件就是惰性索引省下来的东西，也正是"打开项目"和"打开项目并等它读完"的区别。
+（3 个"每次都要重解析"的文件是那两个**开着的 buffer** 和 1 个"include 没解析到、故意不入缓存"的文件，
+理由在 `index/store.rs` 的模块文档里。）同机重跑这些数字在 ±10% 内波动，**文件数是硬的、毫秒数只用来比大小**。
+
+**这一格还没做的两件事**（都在这一节里留着）：
+
+1. **LSP 二进制**：JSON-RPC 帧 + `textDocument/*` 到 `Session` 的映射。它不需要新语义，但要定几件事：
+   `TextDocumentSyncKind.Full`（客户端发全文，增量编辑的 UTF-16 区间换算是协议层的事）、
+   **位置换算**（这里全是字节 offset，`cpp_parser::LineIndex::get_offset/get_line_col` 就是那个映射，
+   而 LSP 的列是 UTF-16 码元——非 ASCII 行上两者不同，这层不做协议，所以不做这个转换）、
+   以及 `pending() > 0` 时**不报**未解析的名字（见上）。
+2. **每个文件一份配置**：`Session` 现在是"整项目一份配置"（编译数据库的第一条），真实项目不同 target 的 `-D` 不同。
+   修法在 `SummaryStore`（它对所有文件持有一个 `config`），而键里已经记了完整编译上下文，所以是可表示的，
+   只是没实现。
 
 ---
 
@@ -374,9 +452,14 @@ parser 的边际收益是"每轮 1–3 个文件"，连续磨十几轮会失去�
 - **第 9 条："旁边有个同名判据"不等于能复用。** 先问它从哪里开始看。
 - **改"公共入口"之前先列调用点**（第 5 条）；**第三次出现同一个判据就抽出来**（第 14 条）。
 
-**另外三条不成文的**：
+**另外几条不成文的**：
 
 - **`Binding.range` 是 declarator，不是整条声明**（`Widget w;` 里只有 `w`）。要类型就从根走到声明处取 `DeclSpecifierSeq`。
+- **两条队列的路径要能"升级"**。项目扫描先把所有文件排进 rest 半边，用户随后打开其中一个——不升级的话，
+  用户正看着的文件排在"项目其余"后面，**而所有"从不打开任何文件"的测试都会是绿的**。
+  找这条 bug 的测试必须是"先扫描、后打开"那个顺序（`session.rs` 有）。
+- **`Session::pending() > 0` 时不要报"名字不存在"**。惰性索引下 `NotDeclaredHere` 同时意味着"这里没有"和
+  "还没读到"，而查询层分不出这两件事（它也不该分——索引永远是全集的一个子集）。分界线在上层。
 - **`FileIndexer` 只喂 `ParserConfig::default()`**：`-D`/`-std` 不参与解析。哪天要喂进去，
   **键里必须同时把宏环境加回来**并抬 `FORMAT_VERSION`（`cache.rs` 与"第三个被测试抓出来的键错误"都记着）。
 - **缓存键里有 `reading_fingerprint`**（`build.rs` 算的源码哈希）：改了 parser 或语义层的源码，整库自动作废，
@@ -397,17 +480,19 @@ parser 的边际收益是"每轮 1–3 个文件"，连续磨十几轮会失去�
 
 ## 7. 一句话的优先级
 
-**`std_query` 已经是 7/7，语义线该动了**——这一轮把因果链走完了：
+**驱动层落地了，下一步是把 `Session` 接到协议上**——这一轮把因果链走完了：
 
-`std_query` 从 **0/7 → 7/7**：九处接缝与"恢复"两轮把 `std::basic_string`、`std::vector`、`std::map` 的成员
-全部读出来（442 / 113 / 50 条事实），七条查询都答在标准库自己的头文件上。所以顺序是：
+第十一轮之后是 `std_query` **0/7 → 9/9**（九处接缝 + 恢复 + 解引用/下标），**这一轮**是
+`examples/open_project.rs` 的 **9/9 走驱动层**（同一个答案，但走的是"开项目 → `did_open` → `advance` →
+按光标问"这条路），冷启动 454 文件 9.4 s、热启动 99% 命中、第一个答案 32 文件。所以顺序是：
 
-1. **语义侧（现在最有价值）**：3.2（解引用/下标：`(*p).size`、`arr[i].size`）、3.6（**driver——产品上最短的一块**，
-   把 `discover`/`index_includes_from`/查询串起来并接 LSP）、3.4（`DeclFact::clean` 的第一个消费者）。
-   `std::string`/`std::vector`/`std::map` 都能被问到成员了，这三件事终于有东西可查；
+1. **语义侧（现在最有价值）**：3.6 的**后半**（LSP 二进制：JSON-RPC + 位置换算 + `pending()` 那条规则），
+   然后 3.4（`DeclFact::clean` 的第一个消费者）、3.5（宏的找引用）。3.2（解引用/下标）和 3.6 的前半**已经做完了**。
 2. **parser 的长尾**（可以间隔着做）：各文件的"下一条"（§2.1 第 1 条）、§2.2 的 GNU 拼写、§2.6 的 `if` 与宏
    ——每一项 1–3 个文件，按首错归类再做（第 11 条）；
-3. **索引的规模**（3.3 的倒排表）：一万文件时才疼，现在不是瓶颈。
+3. **索引的规模**（3.3 的倒排表）：一万文件时才疼，现在不是瓶颈（惰性索引还把"什么时候需要它"推得更远了）。
+
+
 
 
 

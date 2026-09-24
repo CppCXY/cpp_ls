@@ -51,7 +51,7 @@ use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use crate::include::paths::{FileProvider, normalize_path};
-use crate::index::store::SummaryStore;
+use crate::index::store::{StoreStats, SummaryStore};
 
 /// The order to work a project in, growing as it goes. See the module documentation.
 pub struct Worklist<'s, 'a, F: FileProvider> {
@@ -114,12 +114,6 @@ impl<'s, 'a, F: FileProvider> Worklist<'s, 'a, F> {
             }
         };
 
-        // The counters are cumulative and comparable on purpose: the difference they moved by *is* this step's
-        // outcome, and asking the store for it separately would be a second account of the same fact.
-        //
-        // The three arms of `get` each move at least one counter — a hit moves `reused`, a build moves `rebuilt`,
-        // and a build that is not stored moves that and `unstored` — so counters that did not move at all mean
-        // the file was never read, which is exactly `Missing`.
         let before = self.store.stats();
         let includes = self
             .store
@@ -134,15 +128,7 @@ impl<'s, 'a, F: FileProvider> Worklist<'s, 'a, F> {
             .unwrap_or_default();
         let after = self.store.stats();
 
-        let outcome = if after == before {
-            StepOutcome::Missing
-        } else if after.reused > before.reused {
-            StepOutcome::Reused
-        } else if after.unstored > before.unstored {
-            StepOutcome::Unstored
-        } else {
-            StepOutcome::Built
-        };
+        let outcome = outcome_of(before, after);
 
         // Everything this file includes joins the same half of the list the file came from, one level further out.
         // An include that resolved to nothing contributes nothing: there is no file to work.
@@ -228,6 +214,29 @@ pub enum StepOutcome {
 /// A path as [`Worklist`] compares them — the same normalization the store and the index use.
 fn key(path: &Path) -> String {
     normalize_path(path, cfg!(windows))
+}
+
+/// What one file's turn did, read from the store's counters.
+///
+/// The counters are cumulative and comparable on purpose: the difference they moved by *is* a step's outcome, and
+/// asking the store for it separately would be a second account of the same fact. The three arms of
+/// [`SummaryStore::get`] each move at least one counter — a hit moves `reused`, a build moves `rebuilt`, and a
+/// build that is not stored moves that and `unstored` — so counters that did not move at all mean the file was
+/// never read, which is exactly `Missing`.
+///
+/// Public rather than private to [`Worklist`] because a caller with its own queue reports the same outcomes:
+/// [`crate::Session`] holds a list that notifications re-seed, which a one-shot [`Worklist`] cannot express, and
+/// two implementations of "what just happened" would drift.
+pub fn outcome_of(before: StoreStats, after: StoreStats) -> StepOutcome {
+    if after == before {
+        StepOutcome::Missing
+    } else if after.reused > before.reused {
+        StepOutcome::Reused
+    } else if after.unstored > before.unstored {
+        StepOutcome::Unstored
+    } else {
+        StepOutcome::Built
+    }
 }
 
 impl<'a, F: FileProvider> SummaryStore<'a, F> {

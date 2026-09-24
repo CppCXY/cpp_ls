@@ -1072,6 +1072,62 @@ fn type_of_expression(
         return type_of_a_call(index, scopes, root, path, expression);
     }
 
+    // A **parenthesised** expression has the type of what it wraps, and the parentheses are a node of their own:
+    // `(*p).size` makes the object of the `.` a `ParenExpr`, so a recursion that did not step through it would
+    // stop one level above the answer — which is exactly where it used to stop.
+    if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::ParenExpr {
+        return match expression.children().next() {
+            Some(inner) => type_of_expression(index, scopes, root, path, &inner),
+            None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+        };
+    }
+
+    // A **dereference**: `*p` has the type `p` points at. Nothing is looked up — the pointer's own declaration
+    // already spells the pointee, and the `*` is arithmetic on that spelling.
+    if let Some(operand) = unary_operand_with(expression, "*") {
+        let operand_type = type_of_expression(index, scopes, root, path, &operand);
+        return match operand_type {
+            Known::Yes((type_of, file)) => match pointee_type_name(&type_of) {
+                Some(pointee) => Known::Yes((pointee, file)),
+                // An operand whose type has no `*` on it: the program is ill-formed, and a type invented here
+                // would be a wrong answer rather than a missing one.
+                None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+            },
+            Known::Unknown(reason) => Known::Unknown(reason),
+            Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+        };
+    }
+
+    // An **address-of**: `&x` is a pointer to `x`, which is the same arithmetic the other way round. It is here
+    // so that the two operators are one rule rather than one rule and one hole: `(&r)->size` is a member access
+    // whose object is this, and the `->` already knows what to do with a pointer.
+    if let Some(operand) = unary_operand_with(expression, "&") {
+        let operand_type = type_of_expression(index, scopes, root, path, &operand);
+        return match operand_type {
+            Known::Yes((type_of, file)) => {
+                let pointed_at = pointee_type_name(&type_of).unwrap_or(type_of);
+                Known::Yes((format!("{pointed_at}*"), file))
+            }
+            Known::Unknown(reason) => Known::Unknown(reason),
+            Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+        };
+    }
+
+    // A **subscript**: `arr[0]` has the array's element type. That is the whole of it for an array; a *class*
+    // with an `operator[]` — `v[0]` on a `std::vector` — needs the template instantiated, and this answers
+    // `Unknown` for the same reason it does everywhere else: see [`element_type_name`].
+    if let Some(base) = subscript_base(expression) {
+        let base_type = type_of_expression(index, scopes, root, path, &base);
+        return match base_type {
+            Known::Yes((type_of, file)) => match element_type_name(&type_of) {
+                Some(element) => Known::Yes((element, file)),
+                None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+            },
+            Known::Unknown(reason) => Known::Unknown(reason),
+            Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+        };
+    }
+
     // A member access: the type of the member, which is a fact on its declaration.
     if let Some(inner) = crate::sema::resolve::member_access_of(expression) {
         let Known::Yes((inner_type, _)) =
@@ -1105,6 +1161,128 @@ fn type_of_expression(
     }
 
     Known::Unknown(UnknownReason::UnknownType(Box::from(written)))
+}
+
+/// The operand of the unary expression this node is, when its operator is `operator`.
+///
+/// `*p` and `&x` are `UnaryExpr` — the node every unary operator gets — so what makes one a dereference is the
+/// **operator**, exactly as it is for a member access (`w.size` and `arr[0]` share a node kind too). The operator
+/// is matched by text rather than by token kind for the same reason: a shape reader that had to know the token's
+/// name would be a second place to update if the name changed.
+///
+/// `-x` and `!x` are `UnaryExpr`s as well and are deliberately not this: what they have is not a pointer.
+fn unary_operand_with(
+    node: &cpp_parser::CppSyntaxNode,
+    operator: &str,
+) -> Option<cpp_parser::CppSyntaxNode> {
+    if cpp_parser::CppSyntaxKind::from(node.kind()) != cpp_parser::CppSyntaxKind::UnaryExpr {
+        return None;
+    }
+
+    let first = node.children_with_tokens().next()?;
+    if first
+        .as_token()
+        .is_none_or(|token| token.text() != operator)
+    {
+        return None;
+    }
+
+    // The operand is the node after it, which is what a type is inferred *from*.
+    node.children().next()
+}
+
+/// The base of a `[…]` expression, when that is what this node is.
+///
+/// `arr[0]` and `w.size` are both `IndexExpr` — the parser reads `w.size` as an index expression with a `.`
+/// where the brackets would be (see `docs/grammar-gaps.md`, maintenance convention 18) — so the operator is
+/// what tells them apart. A member access is not a subscript and never reaches the inference for one.
+fn subscript_base(node: &cpp_parser::CppSyntaxNode) -> Option<cpp_parser::CppSyntaxNode> {
+    if cpp_parser::CppSyntaxKind::from(node.kind()) != cpp_parser::CppSyntaxKind::IndexExpr {
+        return None;
+    }
+
+    let has_brackets = node.children_with_tokens().any(|element| {
+        element
+            .as_token()
+            .is_some_and(|token| token.text() == "[")
+    });
+    if !has_brackets {
+        return None;
+    }
+
+    node.children().next()
+}
+
+/// What a `*` on this spelling gives: `Widget*` → `Widget`, `Widget&` → `Widget`, `Widget**` → `Widget*`.
+///
+/// The operators written after the type are removed, and so is a cv-qualifier written after *them* — `Widget *
+/// const` is a const pointer to a `Widget`, so what the `*` gives is the `Widget` and not `Widget * const`.
+/// Everything else is kept as written, template arguments included: how much of a spelling names the *class* is
+/// the member lookup's question, and it answers that one itself with [`base_type_name`].
+///
+/// `None` when there is no operator to remove, which is the honest answer for `*x` where the declaration says
+/// `x` is an `int`: nothing in a declaration of `x` says otherwise, and a type invented here would be a wrong
+/// answer rather than a missing one.
+fn pointee_type_name(written: &str) -> Option<String> {
+    let mut name = written.trim().to_string();
+
+    // The qualifiers of the *pointer* come first because they are written last: `Widget* const`.
+    loop {
+        let trimmed = name.trim_end();
+        let Some(rest) = trimmed
+            .strip_suffix("const")
+            .or_else(|| trimmed.strip_suffix("volatile"))
+        else {
+            break;
+        };
+        name = rest.trim_end().to_string();
+    }
+
+    let trimmed = name.trim_end();
+    let stripped = trimmed
+        .strip_suffix("&&")
+        .or_else(|| trimmed.strip_suffix('*'))
+        .or_else(|| trimmed.strip_suffix('&'))?;
+
+    let pointee = stripped.trim().to_string();
+    (!pointee.is_empty()).then_some(pointee)
+}
+
+/// What a subscript on this spelling gives, for the one case this layer can compute: an **array**.
+///
+/// ```text
+/// Widget[4]     →  Widget
+/// int[2][3]     →  int[2]      the last `[ … ]` is the one the subscript applies to
+/// ```
+///
+/// `None` for everything else, and the case that matters is a *class*: subscripting a `std::vector<Widget>`
+/// gives a `Widget&`, and reaching that means **instantiating** the template rather than reading a spelling.
+/// `None` becomes [`UnknownReason::UnknownType`] at the call site, which is the honest answer until that layer
+/// exists — the alternative, taking the first template argument of whatever the spelling names, would be right
+/// for a `vector` and wrong for a `map`, and nothing here can tell them apart.
+fn element_type_name(written: &str) -> Option<String> {
+    let trimmed = written.trim_end();
+    if !trimmed.ends_with(']') {
+        return None;
+    }
+
+    // From the right, so that the *last* bracket pair is the one found: `int[2][3]` is an array of arrays.
+    let mut depth = 0isize;
+    for (index, character) in trimmed.char_indices().rev() {
+        match character {
+            ']' => depth += 1,
+            '[' => {
+                depth -= 1;
+                if depth == 0 {
+                    let element = trimmed[..index].trim();
+                    return (!element.is_empty()).then(|| element.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 /// The declaration an expression **names**, from the file being edited or from the index.
@@ -3281,16 +3459,117 @@ mod tests {
     }
 
     #[test]
-    fn a_member_access_on_an_expression_that_is_not_a_call_is_an_unknown_type() {
-        // What is left of the old boundary, and the reason it is still a boundary: a dereference, a subscript and
-        // an arithmetic expression each need a type *computed* rather than read off a declaration.
-        let source = "struct Widget {\n  int size;\n};\nWidget* make();\n\
-                      void f() {\n  (*make()).size = 1;\n}\n";
+    fn a_member_access_through_a_dereference_resolves() {
+        // **`(*make()).size` and `(*p).size`** — the dereference, which is arithmetic on a spelling rather than a
+        // lookup: the pointer's declaration already says what it points at.
+        //
+        // This test asserted the *opposite* until the dereference was implemented, and its comment said so: "the
+        // object is a dereference, not a call … a dereference, a subscript and an arithmetic expression each need
+        // a type *computed* rather than read off a declaration". Two of the three are now computed, so the
+        // boundary moved — the failure of this test is what said so, which is the way this file records a
+        // capability landing.
+        let through_a_call = member_of(
+            &[],
+            "/p/a.cpp",
+            "struct Widget {\n  int size;\n};\nWidget* make();\nvoid f() {\n  (*make()).size = 1;\n}\n",
+            "size = 1;",
+        );
+        let Known::Yes(found) = through_a_call else {
+            panic!("`make()` returns a `Widget*`, so `(*make())` is a `Widget`: {through_a_call:?}");
+        };
+        assert_eq!(found.fact.name, "size");
+
+        // …and the same spelling through a declaration in the file: `Widget* p;`.
+        let through_a_pointer = member_of(
+            &[],
+            "/p/a.cpp",
+            "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget* p;\n  (*p).size = 1;\n}\n",
+            "size = 1;",
+        );
+        let Known::Yes(found) = through_a_pointer else {
+            panic!("`p` points at a `Widget`: {through_a_pointer:?}");
+        };
+        assert_eq!(found.fact.name, "size");
+
+        // …and the same spelling through a **parameter**, whose declarator is written inside the parameter list
+        // rather than at the top of a declaration: `void f(Widget* p)`.
+        let through_a_parameter = member_of(
+            &[],
+            "/p/a.cpp",
+            "struct Widget {\n  int size;\n};\nvoid f(Widget* p) {\n  (*p).size = 1;\n}\n",
+            "size = 1;",
+        );
+        let Known::Yes(found) = through_a_parameter else {
+            panic!("`p` points at a `Widget`: {through_a_parameter:?}");
+        };
+        assert_eq!(found.fact.name, "size");
+
+        // A reference is the other operator that says "the object is elsewhere", and `*` on it gives the same
+        // answer — the declaration spells the type the same way up to the operator.
+        let through_a_reference = member_of(
+            &[],
+            "/p/a.cpp",
+            "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget& r = w;\n  (&r)->size = 1;\n}\n",
+            "size = 1;",
+        );
+        assert!(
+            matches!(through_a_reference, Known::Yes(_)),
+            "`&r` is a `Widget*`: {through_a_reference:?}"
+        );
+    }
+
+    #[test]
+    fn a_dereference_of_something_that_is_not_a_pointer_is_an_unknown_type() {
+        // The boundary that is left, and it is a *refusal* rather than a wrong answer: `int* p` dereferenced is
+        // an `int`, and an `int` has no members — so the member lookup on it says "not declared here", which is
+        // the honest thing to tell a consumer. What must not happen is an invented type.
+        let source = "struct Widget {\n  int size;\n};\nvoid f() {\n  int* q;\n  (*q).size = 1;\n}\n";
         let found = member_of(&[], "/p/a.cpp", source, "size = 1;");
 
         assert!(
-            matches!(found, Known::Unknown(UnknownReason::UnknownType(_))),
-            "the object is a dereference, not a call: {found:?}"
+            matches!(found, Known::Unknown(UnknownReason::NotDeclaredHere(_))),
+            "an `int` has no members, and saying so beats inventing a class: {found:?}"
+        );
+
+        // The other refusal: a subscript on a *class* is `operator[]`, and reaching its element type means
+        // instantiating the template. Nothing about the spelling says which argument that is — `vector`'s is the
+        // first and `map`'s is the second — so this answers `Unknown` rather than guessing.
+        let vector = member_of(
+            &[],
+            "/p/a.cpp",
+            "struct Widget {\n  int size;\n};\ntemplate<typename T> struct Box { T first; };\n\
+             void f() {\n  Box<Widget> box;\n  box[0].size = 1;\n}\n",
+            "size = 1;",
+        );
+        assert!(
+            matches!(vector, Known::Unknown(UnknownReason::UnknownType(_))),
+            "a class subscript needs the template instantiated: {vector:?}"
+        );
+    }
+
+    #[test]
+    fn a_member_access_through_a_subscript_of_an_array_resolves() {
+        // `arr[0].size` — an array's element type is written in the declaration: `Widget[4]` is four `Widget`s,
+        // and the subscript takes the last `[…]` off.
+        let source = "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget arr[4];\n  arr[0].size = 1;\n}\n";
+        let found = member_of(&[], "/p/a.cpp", source, "size = 1;");
+
+        let Known::Yes(found) = found else {
+            panic!("`arr[0]` is a `Widget`: {found:?}");
+        };
+        assert_eq!(found.fact.name, "size");
+
+        // An index that is not a literal is the same question, and so is the second dimension of an array of
+        // arrays: the subscript takes *one* pair of brackets off, outermost last.
+        let two_dimensional = member_of(
+            &[],
+            "/p/a.cpp",
+            "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget grid[2][3];\n  grid[i][j].size = 1;\n}\n",
+            "size = 1;",
+        );
+        assert!(
+            matches!(two_dimensional, Known::Yes(_)),
+            "`grid[i][j]` is a `Widget`: {two_dimensional:?}"
         );
     }
 
@@ -4234,16 +4513,36 @@ mod tests {
     }
 
     #[test]
-    fn a_completion_on_an_expression_with_no_type_offers_nothing_and_says_why() {
-        // What is left of the boundary, and this is where a user meets it. Offering the members of some other
-        // class would be worse than offering none: the list looks like an answer.
+    fn a_completion_after_a_dereference_offers_the_pointees_members() {
+        // The completion form of [`a_member_access_through_a_dereference_resolves`], and the one a user meets:
+        // typing `(*make()).` should offer the `Widget`'s members, not nothing.
+        //
+        // This test asserted the *opposite* until the dereference was implemented — "a call's return type is not
+        // computed yet" — and the failing assertion is what said the boundary had moved.
         let source = "struct Widget {\n  int size;\n};\nWidget* make();\n\
                       void f() {\n  (*make()).\n}\n";
         let found = completions_at(&[], "/p/a.cpp", source, "(*make()).");
 
+        let Known::Yes(completions) = found else {
+            panic!("`(*make())` is a `Widget`, so its members are the answer: {found:?}");
+        };
+        assert_eq!(completions.class, "Widget");
+    }
+
+    #[test]
+    fn a_completion_on_an_expression_with_no_type_offers_nothing_and_says_why() {
+        // What is left of the boundary, and this is where a user meets it. Offering the members of some other
+        // class would be worse than offering none: the list looks like an answer.
+        //
+        // An **arithmetic expression** is the case that is still out of reach, and it is the honest one: `a + b`
+        // has a type the language computes from conversions this layer does not model, so there is nothing to
+        // read off a declaration.
+        let source = "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget a;\n  (a.size + a.size).\n}\n";
+        let found = completions_at(&[], "/p/a.cpp", source, "(a.size + a.size).");
+
         assert!(
             matches!(found, Known::Unknown(UnknownReason::UnknownType(_))),
-            "a call's return type is not computed yet: {found:?}"
+            "an arithmetic expression's type is not read off a declaration: {found:?}"
         );
     }
 

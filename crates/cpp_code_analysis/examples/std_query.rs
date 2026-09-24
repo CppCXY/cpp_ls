@@ -48,6 +48,10 @@ void f() {\n\
   std::map<int, int> m;\n\
   m.find(1);\n\
   m.begin();\n\
+}\n\
+void g(std::string* p, std::string arr[4]) {\n\
+  (*p).size();\n\
+  arr[0].empty();\n\
 }\n";
 
 /// The member accesses to ask about, in the order the text writes them.
@@ -59,6 +63,12 @@ const QUERIES: &[&str] = &[
     "v.size",
     "m.find",
     "m.begin",
+    // The two that need a type **computed** rather than read off a declaration: a dereference and a subscript,
+    // on an object whose class is `std::string` — a typedef of a class template — in a header. That is three
+    // steps of this layer at once (alias, dereference/subscript, cross-file member lookup), which is why they
+    // are in this probe rather than only in the unit tests.
+    "(*p).size",
+    "arr[0].empty",
 ];
 
 fn main() {

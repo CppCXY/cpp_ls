@@ -49,7 +49,7 @@ pub use store::{
     UnresolvedEdge,
 };
 pub use watch::{ChangeBatch, EventKind, FileEvent, Response, WatchFilter};
-pub use worklist::{Priority, Step, StepOutcome, Worklist};
+pub use worklist::{Priority, Step, StepOutcome, Worklist, outcome_of};
 
 use crate::cache::{SummaryKey, content_hash};
 use crate::include::config::CompilerConfig;

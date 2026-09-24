@@ -44,6 +44,7 @@ pub mod include;
 pub mod index;
 pub mod preprocess;
 pub mod sema;
+pub mod session;
 pub mod summary;
 pub mod summary_codec;
 
@@ -107,7 +108,8 @@ pub use index::{
     ProjectDefinition, ProjectIndex, ProjectMacro, ProjectMember, Response, Step, StepOutcome,
     StoreStats, SummaryReadError, SummaryStore, UnlistedBase, UnresolvedEdge, VisibleDeclaration,
     WatchFilter, Worklist, definition_across_files, macro_across_files, member_across_files,
-    member_completions_at, members_of, name_completions_at, read_summary, summarize, write_summary,
+    member_completions_at, members_of, name_completions_at, outcome_of, read_summary, summarize,
+    write_summary,
 };
 pub use macros::{MacroBody, MacroDef, MacroTable, Parameter, ParameterKind};
 pub use module_info::{ImportDeclaration, ImportTarget, ModuleInfo, ModuleUnit};
@@ -121,6 +123,10 @@ pub use paths::{
 };
 pub use preprocess::{FilePreprocessing, PositionalMacros, preprocess};
 pub use scopes::{build_scopes, declared_module_names};
+// The driver sits above the folders rather than in one of them: it is the join of all four — the toolchain, the
+// include configuration, the summaries and the queries — and putting it inside any one of them would make that
+// folder the owner of the others.
+pub use session::{FileView, OpenDocuments, Session, SessionFiles};
 pub use symbol::{
     Binding, BindingKind, BindingOrigin, DeclName, HeaderName, Known, MaybeName, Name, NameKind,
     QualifiedName, Scope, ScopeId, ScopeKind, ScopeTree, UnknownReason,

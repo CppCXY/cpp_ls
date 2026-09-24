@@ -113,7 +113,9 @@ pub fn declared_type_of(root: &CppSyntaxNode, binding: &Binding) -> Option<Strin
     // front of it is empty and every variable's type came out as `None`. Descending from the root costs one walk
     // down the spine and asks the tree a structural question instead of reading text and hoping about geometry.
     let mut node = root.clone();
+    let anchor = the_offset_to_descend_by(binding);
     let mut found = None;
+    let mut declarator = None;
 
     loop {
         if let Some(specifiers) = node
@@ -122,13 +124,22 @@ pub fn declared_type_of(root: &CppSyntaxNode, binding: &Binding) -> Option<Strin
         {
             found = Some(specifiers.text().to_string());
         }
+        // The declarator, whose own text holds the operators the specifiers do not — see below. The **innermost**
+        // one on the path wins, because the path follows the name: for a parameter the outermost declarator is
+        // the *function's* (`f(Widget* p)`), and the one that holds `p` is the parameter's own.
+        if let Some(found) = node
+            .children()
+            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+        {
+            declarator = Some(found);
+        }
 
         match node
             .children_with_tokens()
             .find(|element| {
                 element
                     .as_node()
-                    .is_some_and(|child| holds(child, binding.range.start_offset))
+                    .is_some_and(|child| holds(child, anchor))
             })
             .and_then(|element| element.into_node())
         {
@@ -137,9 +148,85 @@ pub fn declared_type_of(root: &CppSyntaxNode, binding: &Binding) -> Option<Strin
         }
     }
 
-    let spelling = strip_declaration_specifiers(&found?);
+    let spelling = strip_declaration_specifiers(found.as_deref()?);
+    let Some(declarator) = declarator else {
+        return (!spelling.is_empty()).then_some(spelling);
+    };
+
+    // **The declarator's own type syntax**, which the specifier sequence does not have: the `*` of `Widget* p`,
+    // the `[4]` of `Widget arr[4]`, the `(*)(int)` of a function pointer. Cut out of the declarator's text are
+    // the name itself and every **initializer** — `Widget w(1, 2)` is a `Widget` and not a `Widget(1, 2)`, and
+    // the parentheses of a direct-initialisation live *inside* the declarator, which is what makes this more
+    // than one cut.
+    //
+    // This is the same arithmetic [`declared_alias_target`] does with one span (a `typedef`'s declarator has no
+    // initializer), and the reason both need it is the same: the type a declaration is about is written in two
+    // places, and a spelling assembled from one of them is missing the operators.
+    let initializers: Vec<cpp_parser::SourceRange> = declarator
+        .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Initializer)
+        .map(|node| cpp_parser::source_range(node.text_range()))
+        .collect();
+
+    let mut spans = vec![binding.name_range];
+    spans.extend(initializers);
+
+    let declarator_type = without_spans(&declarator.text().to_string(), &declarator, &spans);
+    let spelling = format!("{spelling} {declarator_type}");
+    let spelling = spelling.split_whitespace().collect::<Vec<_>>().join(" ");
 
     (!spelling.is_empty()).then_some(spelling)
+}
+
+/// `text` with every span in `spans` removed, trimmed and re-spaced.
+///
+/// The many-span form of [`without`], which is what a declarator needs: the name is one cut and an
+/// initializer's parentheses are another, and they are nested inside one another's text.
+fn without_spans(text: &str, node: &CppSyntaxNode, spans: &[cpp_parser::SourceRange]) -> String {
+    let start = usize::from(node.text_range().start());
+
+    let mut cuts: Vec<(usize, usize)> = spans
+        .iter()
+        .map(|span| {
+            (
+                span.start_offset.saturating_sub(start),
+                span.end_offset().saturating_sub(start),
+            )
+        })
+        .filter(|(from, to)| {
+            from <= to && *to <= text.len() && text.is_char_boundary(*from) && text.is_char_boundary(*to)
+        })
+        .collect();
+    cuts.sort_unstable();
+
+    let mut kept = String::new();
+    let mut at = 0usize;
+    for (from, to) in cuts {
+        if from > at {
+            kept.push_str(&text[at..from]);
+        }
+        at = at.max(to);
+    }
+    if at < text.len() {
+        kept.push_str(&text[at..]);
+    }
+
+    kept.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Which offset the walks in this module descend by: the **name**, not the binding's range.
+///
+/// A `Binding`'s range is "the declarator" for a variable declared in a statement, and that is what the walks
+/// used to follow. It is not that for a **parameter**: `void f(Widget* p)` binds `p` over the whole parameter, so
+/// a walk anchored on its start enters the *specifier* sequence and never meets the declarator — the `*` was
+/// lost, and `(*p).size` answered "the type of `p` is not known here". The name is inside the declarator on every
+/// declaration this is asked about, which is the property the walk actually needs.
+fn the_offset_to_descend_by(binding: &Binding) -> usize {
+    if binding.name_range.length > 0 {
+        binding.name_range.start_offset
+    } else {
+        binding.range.start_offset
+    }
 }
 
 /// Is `offset` inside this node?
@@ -183,6 +270,7 @@ pub fn declared_alias_target(root: &CppSyntaxNode, binding: &Binding) -> Option<
     // The declaration itself, found the way the other two helpers find it: the last `using`/`typedef` node passed
     // on the way down to the binding, because a binding's range is the name and not the declaration around it.
     let mut node = root.clone();
+    let anchor = the_offset_to_descend_by(binding);
     let mut declaration = None;
 
     loop {
@@ -198,7 +286,7 @@ pub fn declared_alias_target(root: &CppSyntaxNode, binding: &Binding) -> Option<
             .find(|element| {
                 element
                     .as_node()
-                    .is_some_and(|child| holds(child, binding.range.start_offset))
+                    .is_some_and(|child| holds(child, anchor))
             })
             .and_then(|element| element.into_node())
         {
@@ -284,11 +372,14 @@ pub fn declared_returns_of(root: &CppSyntaxNode, binding: &Binding) -> Option<St
     }
 
     // The walk `declared_type_of` makes, and for the same reason: a binding's range is the *declarator*, so the
-    // tree is asked where the declaration is rather than the geometry of a range. Two things are collected on the
-    // way: the last specifier sequence passed, and the last trailing return type.
+    // tree is asked where the declaration is rather than the geometry of a range. Three things are collected on the
+    // way: the last specifier sequence passed, the last trailing return type, and the declarator itself — whose
+    // text *before the name* is the other half of the return type (see below).
     let mut node = root.clone();
+    let anchor = the_offset_to_descend_by(binding);
     let mut specifiers = None;
     let mut trailing = None;
+    let mut declarator = None;
 
     loop {
         if let Some(found) = node
@@ -306,13 +397,23 @@ pub fn declared_returns_of(root: &CppSyntaxNode, binding: &Binding) -> Option<St
         {
             trailing = Some(type_id.text().to_string());
         }
+        // The **outermost** declarator seen on the way down, which is the one whose own text holds the name: the
+        // nested ones are its pointer/reference parts, and reading the text before the name off the outer one
+        // gets every operator in order.
+        if declarator.is_none()
+            && let Some(found) = node
+                .children()
+                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+        {
+            declarator = Some(found);
+        }
 
         match node
             .children_with_tokens()
             .find(|element| {
                 element
                     .as_node()
-                    .is_some_and(|child| holds(child, binding.range.start_offset))
+                    .is_some_and(|child| holds(child, anchor))
             })
             .and_then(|element| element.into_node())
         {
@@ -326,7 +427,27 @@ pub fn declared_returns_of(root: &CppSyntaxNode, binding: &Binding) -> Option<St
         return (!spelling.is_empty()).then_some(spelling);
     }
 
-    let spelling = strip_declaration_specifiers(&specifiers?);
+    // **The operators written before the name are part of the return type**: `Widget* make()`, `const Widget&
+    // get()`. They live in the *declarator*, so the specifier sequence does not have them, and reading only the
+    // specifiers answered `Widget` for `Widget* make()` — a return type with no pointer on it. Everything that
+    // follows a return type reads that spelling, so `(*make()).size` looked like a member lookup on a value and
+    // `make()->size` was unanswerable.
+    //
+    // Only the operators, and only when they are *purely* operators: `int (*f)(int)` returns a function pointer
+    // and its text before the name is `(*` — a spelling this cannot assemble, so it keeps the specifiers instead
+    // of returning something that is not a type.
+    let before_the_name = declarator
+        .as_ref()
+        .map(|declarator| before(&declarator.text().to_string(), declarator, binding.name_range))
+        .filter(|operators| operators.chars().all(|c| c == '*' || c == '&' || c.is_whitespace()))
+        .unwrap_or_default();
+
+    let spelling = format!(
+        "{} {}",
+        strip_declaration_specifiers(&specifiers?),
+        before_the_name
+    );
+    let spelling = spelling.split_whitespace().collect::<Vec<_>>().join(" ");
 
     // A **deduced** return type is not a type this layer can name. `auto` and `decltype(auto)` are the two
     // spellings, and both would otherwise be looked up as class names — answering "no member `size` in `auto`"
@@ -336,6 +457,25 @@ pub fn declared_returns_of(root: &CppSyntaxNode, binding: &Binding) -> Option<St
     }
 
     (!spelling.is_empty()).then_some(spelling)
+}
+
+/// `text` up to the span `name` occupies — the mirror of [`without`], which cuts the name *out*.
+///
+/// Both are arithmetic on byte offsets into the same source rather than a search for a word, for the reason
+/// [`without`] gives: `Widget Widget(1);` has two spellings of one name, and a search cuts the wrong one.
+fn before(text: &str, node: &CppSyntaxNode, name: cpp_parser::SourceRange) -> String {
+    if name.length == 0 {
+        return String::new();
+    }
+
+    let start = usize::from(node.text_range().start());
+    let to = name.start_offset.saturating_sub(start);
+
+    if to > text.len() || !text.is_char_boundary(to) {
+        return String::new();
+    }
+
+    text[..to].trim().to_string()
 }
 
 /// The base classes a class-like declaration was written with, in declaration order.
@@ -357,6 +497,7 @@ pub fn declared_bases_of(root: &CppSyntaxNode, binding: &Binding) -> Vec<String>
     // `declared_type_of` makes and for the same reason: a binding's range does not cover the construct that
     // declared it, so the *tree* is asked where the declaration is rather than the geometry of a range.
     let mut node = root.clone();
+    let anchor = the_offset_to_descend_by(binding);
     let mut owner = None;
 
     loop {
@@ -372,7 +513,7 @@ pub fn declared_bases_of(root: &CppSyntaxNode, binding: &Binding) -> Vec<String>
             .find(|element| {
                 element
                     .as_node()
-                    .is_some_and(|child| holds(child, binding.range.start_offset))
+                    .is_some_and(|child| holds(child, anchor))
             })
             .and_then(|element| element.into_node())
         {
@@ -1333,3 +1474,5 @@ mod tests {
         assert_eq!(of("plain").returns.as_deref(), Some("void"));
     }
 }
+
+
