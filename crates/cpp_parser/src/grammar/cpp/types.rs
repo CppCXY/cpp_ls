@@ -59,6 +59,10 @@ pub fn is_type_specifier_keyword(kind: CppTokenKind) -> bool {
 fn storage_or_function_specifier(kind: CppTokenKind) -> Option<CppSyntaxKind> {
     Some(match kind {
         CppTokenKind::StaticKeyword => CppSyntaxKind::StaticSpec,
+        // `register` — a storage-class specifier, removed in C++17 and still written by C headers (see
+        // [`CppSyntaxKind::RegisterSpec`]). It is in this table rather than in a rule of its own because it *is*
+        // a storage class: it stands wherever `static` stands, and the specifier loop is what knows that.
+        CppTokenKind::RegisterKeyword => CppSyntaxKind::RegisterSpec,
         CppTokenKind::ExternKeyword => CppSyntaxKind::ExternSpec,
         CppTokenKind::ThreadLocalKeyword => CppSyntaxKind::ThreadLocalSpec,
         CppTokenKind::MutableKeyword => CppSyntaxKind::MutableSpec,
@@ -70,6 +74,105 @@ fn storage_or_function_specifier(kind: CppTokenKind) -> Option<CppSyntaxKind> {
         | CppTokenKind::ConstinitKeyword => CppSyntaxKind::ConstexprSpec,
         _ => return None,
     })
+}
+
+/// Is this name written the way an **unexpanded macro that stands for a type** is written?
+///
+/// `__int64`, `_Float16`, `__m128h`, `HUGEP`, `MY_API` — the MinGW and libstdc++ spellings, and it is the
+/// `_`-leading half that [`super::decls::looks_like_a_macro_name`] (all capitals) does not cover. Used in exactly
+/// one place: [`name_joins_the_type`]'s decision whether a name may join a type that is already there, where the
+/// same three tokens
+///
+/// ```text
+/// unsigned __int64 x;      the name joining is the *type*: `unsigned __int64`, and `x` is the declarator
+/// int x MY_DECL_SUFFIX;    the name joining would be the *declarator*, and the macro is a suffix
+/// ```
+///
+/// would otherwise be decided the same way. The convention is the same last resort [`looks_like_a_macro_name`]
+/// documents — it is a spelling, not a grammar rule — and it is used here only to choose between two readings
+/// that both occur in real code, never to decide that something *is* a macro.
+pub(super) fn written_like_a_macro(name: &str) -> bool {
+    name.starts_with('_') || super::decls::looks_like_a_macro_name(name)
+}
+
+/// Is this name one the **implementation reserved** — a leading underscore, which the standard gives to the
+/// compiler and its library and to nobody else?
+///
+/// The narrower half of [`written_like_a_macro`], and the two are separate because they answer different
+/// questions. That one chooses between two readings of *type* tokens (`unsigned __int64 x` against
+/// `int x MY_DECL_SUFFIX`), where an all-caps name is as good as an underscored one. This one decides whether a
+/// **statement** may be read as an invocation whose `;` the macro's body supplies — a reading that accepts code
+/// which is not valid C++ unless the macro supplies the rest — and there the reserved namespace is what says the
+/// name is the implementation's and not the user's:
+///
+/// ```cpp
+/// __glibcxx_function_requires(_LessThanComparableConcept<_Tp>)     // bits/stl_algobase.h:237 — that rule
+/// FOO(x)                                                          // a user's function or macro — still an error
+/// ```
+///
+/// `FOO` is *also* spelled the way a macro is spelled, but a macro of the user's own written in this file would be
+/// `#define`d here, and that is evidence the other rule has and this one does not. See
+/// [`crate::grammar::cpp::stats::at_a_macro_call_statement_without_evidence`].
+pub(super) fn written_in_the_implementations_namespace(name: &str) -> bool {
+    name.starts_with('_')
+}
+
+/// Does a **macro invocation with an argument list** begin a declaration, with the declaration's own declarator
+/// after it?
+///
+/// The shape is `NAME ( tokens ) NAME …`, and the second name is what makes it a declaration rather than the two
+/// things that look like it:
+///
+/// ```text
+/// WINOLEAPI_(void) CoFreeLibrary (HINSTANCE hInst);   a declaration of `CoFreeLibrary` — this rule
+/// _GLIBCXX_BEGIN_NAMESPACE_VERSION                    a macro standing for a whole declaration — the statement rule
+/// IF_EXIST(k) { … }                                   a macro whose body is a block — the statement rule
+/// ```
+///
+/// Three conditions, each of which keeps a shape with an owner away from this rule:
+///
+/// * the name is **not one this file `#define`s** — evidence first, the same order [`crate::parser::MacroNames`]
+///   documents, because a macro the file defines has a *body* and the rules that know it read it better;
+/// * the name is **not one of the compiler's own spellings** — `__attribute__((__nonnull__)) void f();` is a name,
+///   a balanced group and an identifier too, and it has a reader that knows what it is
+///   ([`at_an_attribute`]). Reading it here as a macro specifier ended the specifier sequence at the attribute, so
+///   `_Rb_tree_node_base* _Rb_tree_rebalance_for_erase(…)` had no type and `bits/stl_tree.h` — which was clean —
+///   reported `expected ;` in the middle of the declaration;
+/// * the group after the name is **balanced** and what follows it is an **identifier** — the declarator's name. A
+///   `;` after the group is `FOO(x);` (a statement or a macro standing for a declaration), a `{` is a definition,
+///   and neither is this;
+/// * the scan gives up at the first `;` that is not inside the group, so a declaration that ends before the shape
+///   completes is not read as one.
+fn a_macro_call_begins_the_declaration(p: &CppParser) -> bool {
+    if p.current_token() != CppTokenKind::Identifier
+        || p.peek_next_token() != CppTokenKind::LeftParen
+        || p.macro_evidence(p.current_token_text()).is_some()
+        || at_an_attribute(p)
+    {
+        return false;
+    }
+
+    // The `(` is the next significant token, and the scan counts parentheses from there. An unbalanced group, or a
+    // `;` before it closes, means this is not the shape.
+    let mut index = super::decls::next_significant_index(p, p.current_token_index());
+    let mut depth = 0isize;
+    while index < p.token_count() {
+        match p.token_kind_at(index) {
+            CppTokenKind::LeftParen => depth += 1,
+            CppTokenKind::RightParen => {
+                depth -= 1;
+                if depth == 0 {
+                    let after = super::decls::next_significant_index(p, index);
+                    return p.token_kind_at(after) == CppTokenKind::Identifier;
+                }
+            }
+            CppTokenKind::Semicolon | CppTokenKind::Eof | CppTokenKind::None => return false,
+            _ => {}
+        }
+        index += 1;
+    }
+
+    false
 }
 
 /// Does this token *end* a decl-specifier-seq / type-id beyond doubt?
@@ -474,10 +577,43 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
             continue;
         }
 
+        // A **macro invocation standing where the declaration's specifiers go** — a macro from a header nobody
+        // indexed, called with an argument list, with the declaration's own declarator after it:
+        //
+        // ```cpp
+        // WINOLEAPI_(void) CoFreeLibrary (HINSTANCE hInst);      // objbase.h:96
+        // WINOLEAPI_ (void) OleUninitialize (void);              // ole2.h:58
+        // ```
+        //
+        // The macro is the whole type (`EXTERN_C DECLSPEC_IMPORT type STDAPICALLTYPE` in `combaseapi.h`), so the
+        // three readings that could apply are all wrong: the specifier loop cannot take `WINOLEAPI_` for a type and
+        // `(void)` for a declarator's parameter list — that would declare a function called `WINOLEAPI_` and leave
+        // `CoFreeLibrary` with nowhere to go — and the expression reading (B70's fallback) makes the call a
+        // *statement*, after which the declarator is a syntax error. What the file wrote is a name, a group, and a
+        // declaration, which is what this reads.
+        //
+        // Claimed **before** the specifier loop asks its question, and only where the shape has no competitor: a
+        // name **with a balanced group** followed by an **identifier** — `MACRO(args) name (…)`. A `;` or a `{`
+        // after the group is the shapes that already own them (a macro standing for a whole declaration, a macro
+        // definition), and evidence keeps its precedence: a name this file `#define`s is read by the rule that knows
+        // what a macro is.
+        if allow_second_name && specifiers == 0 && a_macro_call_begins_the_declaration(p) {
+            if let Err(err) = super::stats::parse_a_macro_that_stands_for_a_declaration(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+            // **The sequence ends here**, and that is the point rather than a shortcut: what the macro expands to
+            // is not knowable, so a name read after it could be either the declarator or another word of the type
+            // this layer cannot see. Stopping leaves the declarator to the reader that owns it — `CoFreeLibrary
+            // (HINSTANCE hInst)` is an ordinary function declarator, read by `parse_declarator`.
+            specifiers += 1;
+            break;
+        }
+
         let specifier_seen = specifiers > 0;
         // May a **further** name still join the type, beyond the one that is already in it?
         //
-        // Two conditions, and both are load-bearing:
+        // Three conditions, and the third is the one this question had to grow:
         //
         // * **This is a declaration, not a type-id.** `allow_second_name` is the caller's answer, and in a type-id
         //   it is `false` because the sequence has to end at the type — there is no declarator for a second name
@@ -488,8 +624,48 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
         //   the real type. Read back from the events the sequence produced rather than tracked as a flag, for the
         //   same reason [`parse_one_decl_specifier`] reads `has_type_specifier` back from them — a branch that
         //   forgot to set a flag is a silent one. A name-based type specifier is a `TemplateType`.
+        // * **or the name joining is written like a macro and a type is already there** — the *mirror* shape, with
+        //   the macro on the other side of the type:
+        //
+        // ```cpp
+        // void HUGEP **ppvData                 // windef.h's macro, in every COM signature (oleauto.h:71)
+        // unsigned __int64 POINTER_64_INT;     // basetsd.h:11, corecrt.h:35
+        // unsigned __int64 x;                  // …the same shape without a typedef
+        // ```
+        //
+        // The spelling is what separates this from the tokens' other meaning, and they are the same tokens:
+        //
+        // ```cpp
+        // int x MY_DECL_SUFFIX;                // `x` is the declarator, the macro is a **suffix** (gaps.rs)
+        // ```
+        //
+        // `x` is not written like a macro and `__int64`/`HUGEP` are, so both readings survive — which the first
+        // version of this rule did not manage: relaxing the condition to "a type has been named" read the second
+        // line as the type `int x` with a declarator named `MY_DECL_SUFFIX`, losing the variable's name and
+        // producing an A0-class wrong tree instead of the silent one it was written to fix. Two existing tests
+        // caught it (`a_macro_can_stand_among_a_declarators_suffixes`, and the asm-label assertion of B71).
+        //
+        // Nothing else changes: with no type named yet the name is the type whatever it looks like (the branch
+        // above `a_further_name_may_join` in [`name_joins_the_type`]), and `MY_API Widget *p` still joins
+        // `Widget` — an ordinary name — through the second condition.
         let a_further_name_may_join = allow_second_name
-            && p.events_contain_any(specifiers_from, &[CppSyntaxKind::TemplateType]);
+            && (p.events_contain_any(specifiers_from, &[CppSyntaxKind::TemplateType])
+                || (has_type_specifier && written_like_a_macro(p.current_token_text())));
+        // …and the same question one context along, where there is **no declarator at all**: a **type-id**.
+        //
+        // ```cpp
+        // static __inline unsigned __LONG32 HandleToULong (const void *h)          // basetsd.h:68
+        // { return ((unsigned __LONG32) (ULONG_PTR) h); }                          // the cast's type-id
+        // ```
+        //
+        // `allow_second_name` is `false` here, and for the question it was written for that is right — a second
+        // *name* in a type-id would run `template <typename T, typename U>` together. A name **written like a
+        // macro** is a different claim: it is what an unexpanded type spelling looks like, and a type-id has no
+        // declarator for it to be, so it can only be another word of the type. Nothing else is relaxed —
+        // `-> int requires C<T>` still ends at `int`, because `requires` is not written like a macro.
+        let a_macro_shaped_name_closes_a_type_id = !allow_second_name
+            && has_type_specifier
+            && written_like_a_macro(p.current_token_text());
         // …and has the sequence written a **class-like definition**, body and all?
         //
         // That body is a complete type, and the backward walk [`type_is_already_complete`] makes cannot see it: it
@@ -506,7 +682,10 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
             &mut has_specifier,
             &mut has_type_specifier,
             &mut name_allowed,
-            a_further_name_may_join,
+            NamesMayJoin {
+                a_further_name: a_further_name_may_join,
+                a_macro_shaped_name_closes_a_type_id,
+            },
             a_class_definition_was_written,
             specifier_seen,
         ) {
@@ -558,7 +737,7 @@ fn parse_one_decl_specifier(
     has_specifier: &mut bool,
     has_type_specifier: &mut bool,
     name_allowed: &mut bool,
-    a_further_name_may_join: bool,
+    names_may_join: NamesMayJoin,
     a_class_definition_was_written: bool,
     specifier_seen: bool,
 ) -> ParseResult {
@@ -567,7 +746,7 @@ fn parse_one_decl_specifier(
         p,
         has_type_specifier,
         name_allowed,
-        a_further_name_may_join,
+        names_may_join,
         a_class_definition_was_written,
         specifier_seen,
     );
@@ -649,7 +828,7 @@ fn parse_one_decl_specifier_inner(
     p: &mut CppParser,
     has_type_specifier: &mut bool,
     name_allowed: &mut bool,
-    a_further_name_may_join: bool,
+    names_may_join: NamesMayJoin,
     a_class_definition_was_written: bool,
     specifier_seen: bool,
 ) -> ParseResult {
@@ -975,7 +1154,7 @@ fn parse_one_decl_specifier_inner(
                 p,
                 *has_type_specifier,
                 *name_allowed,
-                a_further_name_may_join,
+                names_may_join,
                 a_class_definition_was_written,
             ) {
                 return Err(CppParseError::syntax_error_from(
@@ -1116,6 +1295,27 @@ fn pointer_to_member_operator_length(p: &CppParser, at: usize) -> Option<usize> 
     }
 }
 
+/// The two ways a name may still become a **word of the type**, computed by the specifier loop and asked about
+/// again inside it.
+///
+/// One value rather than two parameters because they answer the same question in two contexts — "may this name be
+/// part of the type?" — and because the specifier loop's signature is already at the limit a reader can hold:
+///
+/// ```text
+/// a_further_name                            a declaration: `MY_API Widget *p`, `unsigned __int64 x;`
+/// a_macro_shaped_name_closes_a_type_id      a type-id, where there is no declarator: `(unsigned __LONG32) h`
+/// ```
+#[derive(Clone, Copy)]
+struct NamesMayJoin {
+    /// A further name may join a type that is already in the sequence — see [`name_joins_the_type`] for the three
+    /// conditions and for the two spellings it decides between (`unsigned __int64 x;` against `int x
+    /// MY_DECL_SUFFIX;`).
+    a_further_name: bool,
+    /// A **macro-shaped** name may close a **type-id**, where there is no declarator to make room for: the cast in
+    /// `return ((unsigned __LONG32) (ULONG_PTR) h);`. See [`written_like_a_macro`] and `docs/grammar-gaps.md` B74.
+    a_macro_shaped_name_closes_a_type_id: bool,
+}
+
 /// May the name at the cursor still be part of the type being parsed, rather than the declarator?
 ///
 /// This is *the* ambiguity of a declaration, and it cannot be settled by looking at one token:
@@ -1154,11 +1354,59 @@ fn name_joins_the_type(
     p: &CppParser,
     has_type_specifier: bool,
     name_allowed: bool,
-    a_further_name_may_join: bool,
+    names_may_join: NamesMayJoin,
     a_class_definition_was_written: bool,
 ) -> bool {
+    // A **class-like definition** is a complete type, body and all, and the name after it is the declarator:
+    //
+    // ```text
+    // struct S { int a; } x;          declares `x`
+    // struct { int a; } x[] = { … };  the C idiom this was found in — an unnamed struct and its variable
+    // union { int a; } u = { 1 };     …and the same shape at block scope, which is where it was missed
+    // enum E { A } e;                 the same for an enum
+    // typedef struct { … } Alias;     the body is the type, `Alias` is the name
+    // ```
+    //
+    // Read the other way the name joined the *type*, so the declaration had no declarator at all: silently for
+    // `struct S { … } x;` (a well-formed declaration of nothing, no diagnostic), and loudly as soon as the
+    // declarator carried anything — `x = { 1 }` reported `expected a declarator name` against the `=`, and
+    // `x[2]` reported `expected ], but get integer literal`. `LuaDefine.h` in the first real C++ project is the
+    // third shape, 45 diagnostics from one declaration.
+    //
+    // **Asked before the "no type yet" early return below**, and that order is the whole of B75: an **anonymous**
+    // definition never writes a name, so `has_type_specifier` is still false when the declarator arrives and the
+    // early return took it for the type —
+    //
+    // ```cpp
+    // union { __m128h __a[2]; __m256h __v; } __u = { .__v = __A };     // avx512fp16vlintrin.h:155
+    // ```
+    //
+    // — leaving a declaration whose type is `union { … } __u` and which declares nothing. Without an initializer
+    // that was **silent** (no diagnostic, no `ErrorNode`, no `MissingNode`); with one it was reported at the `=`,
+    // because an initializer needs something to initialise. The body is a complete type whatever the sequence's
+    // flags say, so the question is asked first.
+    if a_class_definition_was_written {
+        return false;
+    }
     // No type yet, so this name can only be the type.
     if !has_type_specifier {
+        return true;
+    }
+    // A **type-id**, where a macro-shaped name after a type is simply another word of the type and there is no
+    // declarator to make room for:
+    //
+    // ```cpp
+    // static __inline unsigned __LONG32 HandleToULong (const void *h)
+    // { return ((unsigned __LONG32) (ULONG_PTR) h); }        // basetsd.h:68 — the cast's type-id
+    // ```
+    //
+    // `allow_second_name` is `false` in a type-id, and that is right for the question it was written for (a second
+    // *name* would run two template parameters together); what it must not do is refuse a name that is written the
+    // way an unexpanded macro is written. The caller has already checked that: `has_type_specifier` says a type is
+    // there, [`written_like_a_macro`] says this name is spelled like a macro, and there is no follower question to
+    // ask because a type-id has no declarator. Nothing else is relaxed — `-> int requires C<T>` still ends at
+    // `int` because `requires` is not written like a macro.
+    if names_may_join.a_macro_shaped_name_closes_a_type_id {
         return true;
     }
     // An **elaborated type specifier**: `struct S`, `union U`, `enum class E`. The keyword is not the type — the
@@ -1205,25 +1453,8 @@ fn name_joins_the_type(
     //
     // Nothing valid is taken from the expression reading by this: `Name Name Name` and `Name Name * Name` are not
     // expressions in any grammar, so the only statements that change are the ones that had no reading at all.
-    if a_further_name_may_join && a_declarator_still_follows_the_name(p) {
+    if names_may_join.a_further_name && a_declarator_still_follows_the_name(p) {
         return true;
-    }
-    // A **class-like definition** is a complete type, body and all, and the name after it is the declarator:
-    //
-    // ```text
-    // struct S { int a; } x;          declares `x`
-    // struct { int a; } x[] = { … };  the C idiom this was found in — an unnamed struct and its variable
-    // enum E { A } e;                 the same for an enum
-    // typedef struct { … } Alias;     the body is the type, `Alias` is the name
-    // ```
-    //
-    // Read the other way the name joined the *type*, so the declaration had no declarator at all: silently for
-    // `struct S { … } x;` (a well-formed declaration of nothing, no diagnostic), and loudly as soon as the
-    // declarator carried anything — `x = { 1 }` reported `expected a declarator name` against the `=`, and
-    // `x[2]` reported `expected ], but get integer literal`. `LuaDefine.h` in the first real C++ project is the
-    // third shape, 45 diagnostics from one declaration.
-    if a_class_definition_was_written {
-        return false;
     }
     // A name the **caller's table** says is a type, joining a sequence that has already taken a name: that is the
     // shape a modifier macro leaves behind —
@@ -1236,7 +1467,7 @@ fn name_joins_the_type(
     //
     // The first name is what makes this safe to ask: before a name has joined, a type name is what the *sequence*
     // is for, and `name_allowed` already decides it.
-    if a_further_name_may_join
+    if names_may_join.a_further_name
         && p.symbol_kind(p.current_token_text())
             .is_some_and(|kind| matches!(kind, SymbolKind::Type | SymbolKind::Template))
     {
@@ -1291,6 +1522,8 @@ pub(super) fn a_declarator_still_follows_the_name(p: &CppParser) -> bool {
         after = super::decls::next_significant_index(p, index.saturating_sub(1));
     }
 
+    // An **identifier** after the name means the declaration has not reached its declarator yet — `unsigned
+    // __int64 x`, `MY_API Widget *p`.
     matches!(
         p.token_kind_at(after),
         CppTokenKind::Identifier
@@ -2915,6 +3148,41 @@ fn a_parenthesised_declarator_with_a_name_follows(p: &CppParser) -> bool {
         return true;
     }
 
+    // `(WINAPI PM_OPEN_PROC)` — a **macro before the name**, which is how the COM headers write a calling
+    // convention, and the group is followed by the parameter list that belongs to it:
+    //
+    // ```cpp
+    // typedef DWORD (WINAPI PM_OPEN_PROC)(LPWSTR);          // winperf.h:180 — `WINAPI` is `__stdcall`
+    // ```
+    //
+    // Two identifiers and the `)` close the group. Read as a parameter list instead — which is what happened
+    // before this case existed — `WINAPI` becomes a parameter of type `PM_OPEN_PROC` and the declaration falls
+    // apart at its `;`. A declarator cannot *begin* with a parameter list (a function's name comes first), so
+    // claiming this group takes nothing from the reading that owns parameter lists; and the first identifier must
+    // be spelled like a macro, so an ordinary pair of names is left exactly as it was.
+    //
+    // The **follower** is what keeps it out of a parameter list that looks the same: `void C::f(_Predicate __pred)
+    // { }` has the identical group, and claiming it there turned a member definition into rubble (the body's
+    // declarations landed outside it, and the error surfaced on a `typedef` three lines down). A parameter list is
+    // never followed by another `(` that belongs to the same declarator, and the function-pointer typedef this
+    // case was written for always is:
+    //
+    // ```cpp
+    // typedef DWORD (WINAPI PM_OPEN_PROC)(LPWSTR);      // the `(LPWSTR)` is the declarator's suffix
+    // ```
+    if matches!(
+        p.peek_token_kind_at(1..4).as_slice(),
+        [
+            CppTokenKind::Identifier,
+            CppTokenKind::Identifier,
+            CppTokenKind::RightParen
+        ]
+    ) && p.peek_token_kind_at(4..5) == [CppTokenKind::LeftParen]
+        && written_like_a_macro(p.peek_token_text_at(1))
+    {
+        return true;
+    }
+
     // `(C::*h)`, `(A::B::*h)` — a **pointer to member**, whose class name stands where the operator would, and
     // whose name stands after the `*`. The same group is also written without a name — `(C::*)`, which is the
     // abstract spelling a type-id uses (`void g(int (C::*)(int));`) — and both are groups this rule has to claim,
@@ -3196,6 +3464,32 @@ fn parse_parenthesised_declarator(p: &mut CppParser) -> ParseResult {
     // there: `(*f)` is a pointer and `(*f(int))` a pointer to a *function*, whose parameter list is read by
     // the outer declarator's suffix loop.
     parse_abstract_declarator(p, false)?;
+
+    // A **macro before the name** inside the parentheses — the call convention a COM header writes:
+    //
+    // ```cpp
+    // typedef DWORD (WINAPI PM_OPEN_PROC)(LPWSTR);          // winperf.h:180 — `WINAPI` is `__stdcall`
+    // typedef DWORD (WINAPI PM_COLLECT_PROC)(LPWSTR, …);    // winperf.h:181
+    // ```
+    //
+    // Two names in a row cannot be a declarator — `NAME NAME` is not one in any grammar, so the first can only be
+    // a macro and the second is the name this declarator is about. The same "the sequence is impossible" argument
+    // B72 and B73 use, one level down: there the name stood between the type and the declarator, here *inside* the
+    // parentheses, before the name.
+    //
+    // `written_like_a_macro` keeps it from firing on a pair that is merely broken code: `(x y)` is still read the
+    // way it was, and only a name spelled the way a macro is spelled takes this reading.
+    if p.current_token() == CppTokenKind::Identifier
+        && p.peek_next_token() == CppTokenKind::Identifier
+        && written_like_a_macro(p.current_token_text())
+    {
+        let m = p.mark(CppSyntaxKind::MacroCall);
+        let name = p.mark(CppSyntaxKind::NameExpr);
+        p.bump();
+        name.complete(p);
+        m.complete(p);
+    }
+
     parse_name(p)?;
     expect_token(p, CppTokenKind::RightParen)?;
 

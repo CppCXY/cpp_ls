@@ -1740,6 +1740,373 @@ if a_trailing_return_type_follows || p.current_token() == CppTokenKind::LeftBrac
 455 个文件的分析闭包 干净 388 → **400**、报错 67 → **55**、消息 464 → **352**。12 个文件变干净，
 另有三个文件（`compare`、`intrin-impl.h`、`winbase.h`）的首错往后移。
 
+### B69. 形参表里的一条接缝：指令在形参之间，或把形参按分支写两遍 —— 已修复
+
+```cpp
+      _M_insert_(_Base_ptr __x, _Base_ptr __p,                       // bits/stl_tree.h:2468
+#if __cplusplus >= 201103L
+		 _Arg&& __v,
+#else
+		 const _Val& __v,
+#endif
+		 _NodeGen& __node_gen)
+      {
+
+    random_shuffle(_RAIter, _RAIter,                                 // parallel/algorithmfwd.h:700
+#if __cplusplus >= 201103L
+		   _RandomNumberGenerator&&);
+#else
+		   _RandomNumberGenerator&);
+#endif
+```
+
+**现象**：`expected ), but get identifier` / `expected primary expression` 打在指令后面那个形参那一行，
+整条声明成瓦砾（`stl_tree.h` 是 `2468:27`，`algorithmfwd.h` 是 `704:28`）。模板形参表和 requires 表达式
+**体内**早就各有接缝（B57/B64），**形参表**没有。
+
+**成因**：`parse_parameter_list` 的循环第一次遇到 `#` 就当作列表结束，于是 `(` 之后紧跟的指令被丢在列表外，
+列表只剩前半截。而这条接缝上一个 `#` 有三种写法，处理各不相同：
+
+```cpp
+void f(int a, #if X int b, #endif int c);        // ① 指令**在形参之间**：读掉，继续读形参
+void f(int a, #if X int b #else long b #endif ); // ② 形参**按分支写两遍**：`#else`/`#elif` 说的是
+                                                 //    "**这个**形参换个拼法"，所以接着再读**一个**形参
+void f(int a, int b, #if X int c); #else int c); #endif
+                                                 // ③ 其它指令只"关闭"什么，接着是终结符（`)`）
+```
+
+②与③靠指令的**名字**分开，不是靠"这里有没有 `#`"——这是量出来的：`algorithmfwd.h:703` 的 `#else`
+恰恰属于③（它结束的是**第一支整条声明**），把它当②会多读一个形参。
+
+**性质**：缺规则（接缝位置），与维护约定"接缝要知道自己坐在谁里面"同族。三种写法一次落地，因为它们是
+同一条接缝的三个面：读完指令**之后**要回答的问题只有一个——"这里是形参，还是终结符"。
+
+**护栏**：`gaps.rs::a_directive_may_decide_a_parameter_or_stand_between_two`——五种读得出的拼写（指令在
+两个形参之间、在第一个形参之前、`#elif` 三分支、带函数体的定义）＋**形状**断言（整条列表**只有一个**
+`ParameterList`，形参一个不少）＋一条如实的断言：②的两种拼法出**两个** `Parameter` 节点（parser 没有
+"这两个分支互斥"的表，把两个拼法都留下是诚实的树；错的是一条列表变成两条、或者 `long b` 消失）。
+B65 那条（第二支是**片段**）用 `assert_does_not_read_yet` 钉住，并写明文件与行号。
+
+**量到的**：128 个文件的闭包 干净 100 → **101**、报错 28 → **27**、消息 283 → **280**；455 个文件的分析闭包
+干净 400 → **401**、报错 55 → **54**、消息 352 → **348**。`bits/stl_tree.h`（2468 那条首错）整个文件变干净；
+`parallel/algorithmfwd.h` 的首错 701 → **704**，也就是被推到这条接缝管不着的那个**片段**上——那正是 B65。
+
+### B70. 宏的实参不是表达式：调用读不出来时，实参组按 token 留下 —— 已修复
+
+```cpp
+_MM_REDUCE_OPERATOR_BASIC_EPI16 (+);                                    // avx512vlbwintrin.h:4992
+if constexpr (__is_same(const volatile _Tp, const volatile void))       // bits/new:234
+return __reference_constructs_from_temporary(_Elements, _Up&&);         // tuple:922
+_GLIBCXX_TYPEID(typename std::iterator_traits<_Iterator>::value_type);  // bits/formatter.h:485
+if (TlsSetValue (__key, CONST_CAST2(void *, const void *, __ptr)))      // gthr-default.h:723
+auto n = __glibcxx_min(char);                                           // limits:465
+SHSTDAPI_(WINBOOL) InitNetworkAddressControl (void);                    // shellapi.h:883
+```
+
+**现象**：`expected primary expression` 打在实参上（`+`、`const`、`void`、`char`、`typename`），整条语句成瓦砾。
+**9 个文件**的首错是它：`avx512vlbwintrin.h`、`bits/stl_pair.h`、`bits/formatter.h`、`limits`、`new`、
+`gthr-default.h`、`emmintrin.h`、`xmmintrin.h`、`shellapi.h`。
+
+**成因**：宏的实参是**宏自己的 token**，这条读法 parser 早就有（`parse_balanced_token_group`，语句形式与
+"宏站在声明位置"两条规则都在用，见 B32/B36 那一族）——缺的是**调用**这条 arm：它只认实参是表达式或
+花括号初始化式。文件 `#define` 过的函数式宏走不了"语句宏"那条（它的体不是完整语句），于是 `M (+);`
+被当普通调用、实参 `(+)` 读不出。而语料里这类宏**绝大多数来自被包含的头文件**——`__is_same`、
+`_GLIBCXX_TYPEID`、`CONST_CAST2` 的 `#define` 都不在这个文件里，parser 手里的表没有它们。所以判据不能问
+"这个名字是不是宏"（问不到），只能问"这次调用的实参读得出来吗"。
+
+**性质**：缺规则，而且是**判据的收尾**（与 B62/B66/B68 同类，见"一个反复出现的教训"）：偏好（实参是表达式）
+先试，失败才换成 token 组，且失败那次的诊断随 `rollback` 一起消失。**代价是真的，且写在护栏里**：
+`g(1 +)` 这样真正坏掉的调用现在**不报错**了——没有任何形状能分开这两者，因为宏的实参**就是**任意
+token（`_MM_REDUCE_OPERATOR_BASIC_EPI16 (+)` 与 `g(1 +)` 的 token 序列本身没有区别）。选的是"一个坏调用的
+诊断"与"每个头文件里每个宏的每次使用"之间的取舍：**取舍不是缺口**，所以它是 B70 而不是待修条目。
+
+**护栏**：`gaps.rs::a_macros_arguments_that_are_not_expressions_stay_tokens`——七种读得出的拼写，全写在函数体里
+（含 `__attribute__` 转换做实参、`typename` 做实参、`if constexpr` 里、`return` 里），外加文件作用域那条
+邻接形状（`SHSTDAPI_(WINBOOL) f (void);`）＋**形状**断言两侧：读不出来的那组是 `CallExpr > ArgumentList`
+（原样的 token），而 `g(1, 2)`、`g(h(x), {1, 2})` **没有** `ArgumentList` 节点＋那条**代价**本身
+（`g(1 +)` 有 `ArgumentList`、无诊断）。钉住代价是为了将来收窄这条规则时，第一个失败在写清理由的地方。
+邻接形状的边界也钉着：`SHSTDAPI_(WINBOOL) f (void);` 读得出（那是**声明**读法），
+`WINOLEAPI_(void) CoUninitialize (void);` 读出**调用**、后面的声明符仍读不出（Mingw 五个头文件那一族，
+还在队列上）。
+
+**量到的**：128 个文件的闭包 干净 101 → **103**、报错 27 → **25**、消息 280 → **260**；455 个文件的分析闭包
+干净 401 → **410**、报错 54 → **45**、消息 348 → **278**。9 个文件变干净，**两份清单都没有一个文件从干净
+变报错**。一处如实记下：`bits/stl_algobase.h` 的首错往前挪了一行（161 → 160），是**同一个缺陷**（宏调用
+当语句、没写分号）报在了参数组收尾处，而不是下一行那个标识符上。
+
+### B71. `using enum E;` 与 `register`：两条**根本没有规则**的拼写 —— 已修复
+
+```cpp
+	  using enum _Fp_fmt;                          // compare:710（C++20 using-enum-declaration）
+register unsigned int r0 __asm__("r0") = code;     // _mingw.h:607（C 头文件遗留的存储类 + GNU asm 标签）
+```
+
+**现象**：`using enum _Fp_fmt;` 报 `expected a name`（`using` 规则把关键字 `enum` 当成了要引入的那个名字）；
+`register` 开头的声明报 `expected primary expression` 落在 `register` 上——它**不在**"声明可以以什么开始"
+那张表里，于是语句层根本没问过声明那条读法，直接把 `register` 当表达式读。
+
+**成因**：两条都不是"哪种读法"的问题，是**缺规则**：C++20 的 using-enum-declaration 从来没写；
+`register` 在 lexer 里是一个 token kind（`RegisterKeyword`），但在 grammar 里没有任何一处接受它——既不在
+`can_begin_a_declaration`，也不在存储类说明符表里。
+
+**性质**：缺规则，两条都**没有第二种读法**可争：`using` 后面的名字不可能是关键字 `enum`；`register` 不能
+开始一个表达式。所以两条都不需要偏好或回退，各加一处即可。
+
+**做法**：`using enum` 在 `parse_using_declaration` 里加一条——读掉 `enum`、读**一个**名字（可带限定，
+和 `using ns::f;` 同形）、要分号；**不记录**这个名字是类型：这条声明引入的是枚举量，不是类型名，而本
+parser 只记"一个名字是什么"（与别名形式的注释同一条理由）。`register` 进 `storage_or_function_specifier`
+（新节点 `RegisterSpec`，与 `StaticSpec`/`MutableSpec` 同一张表、同一个位置）并进 `can_begin_a_declaration`。
+新 kind 照 B67 的规矩**加在枚举最末**（原始值转换是 `transmute`、上界是最后一个 variant），
+`kind::tests::out_of_range_raw_is_rejected` 的名字跟着改。
+
+**顺带读出来的第三件事（如实钉住，不算功劳）**：`r0 __asm__("r0")` 这种 **GNU asm 标签**此前也没有规则，
+`register` 一放行它就跟着通了——它被读成 `InitDeclarator > Declarator(r0) + MacroCall(__asm__("r0"))`。
+`asm` 的 payload 不是 C++（B67 同一条理由），所以"原样留 token"是能接受的读法，但它**不是**声明"这就是
+宏调用"；护栏里把形状钉住，将来给它一个自己的节点时，第一个失败会落在写清理由的地方。
+
+**护栏**：`gaps.rs::a_using_enum_declaration_and_the_register_specifier_read`——`using enum` 在文件/函数体/
+类体三处、带限定名；`register` 在函数体（含 `for` 头里）、文件作用域；**形状**断言：`register` 出
+`RegisterSpec` 且 `using enum` 出 `UsingDecl` 且没有 `MissingNode`；asm 标签那条如实断言"无诊断 + token 在
+`MacroCall` 里"。
+
+**量到的**：128 个文件的闭包 干净 103 → **105**、报错 25 → **23**、消息 260 → **255**；455 个文件的分析闭包
+干净 410 → **412**、报错 45 → **43**、消息 278 → **273**。两个文件变干净（`compare`、`_mingw.h`），
+两份清单都**没有一个文件从干净变报错**。
+
+### B72. "宏站在声明的头部"这一族：七种写法、四种成因 —— 部分已修（三条已修，两条待修）
+
+上一批（B70）之后，首错清单里**最大的一族**是 Mingw 的 CRT/COM 头，一共 **8 个文件**。逐条量过（每条都在
+`fixtures` 里最小复现过），**它们不是一个构造**——这正是这一族难的地方：
+
+```text
+文件:行                          写法                                            状态
+basetsd.h:11 / corecrt.h:35     __MINGW_EXTENSION typedef unsigned __int64 …   **已修**（`__int64` 是宏写法的名字）
+oleauto.h:71                    WINOLEAUTAPI SafeArrayAccessData(SAFEARRAY *psa, void HUGEP **ppvData);
+                                                                               **已修**（两层：前缀宏 + 形参里的宏）
+rpcnsi.h:25                     RPCNSAPI RPC_STATUS RPC_ENTRY RpcNsBindingExportA(…)
+                                                                               **已修**（宏 + 类型 + 宏 + 声明符）
+objbase.h:96 / ole2.h:58        WINOLEAPI_(void) CoFreeLibrary (HINSTANCE hInst);   **已修**（B73）
+commdlg.h:577                   STDMETHOD(QueryInterface) (THIS_ REFIID riid,…) PURE;  待修
+winperf.h:180                   typedef DWORD (WINAPI PM_OPEN_PROC)(LPWSTR);        待修
+```
+
+**已修的三条有一个共同的机制**：一个**写成宏样子的名字**可以站在**类型与声明符之间**（或紧跟类型之后），
+成为类型的又一个词——
+
+```cpp
+unsigned __int64 POINTER_64_INT;   // 类型 `unsigned __int64`，声明符 `POINTER_64_INT`
+void HUGEP **ppvData               // 类型 `void HUGEP`，声明符 `**ppvData`
+RPCNSAPI RPC_STATUS RPC_ENTRY f(); // 三个名字里两个是宏，`RPC_STATUS` 才是类型
+```
+
+**成因**：`name_joins_the_type` 原本只在**已经写进类型的那个词是"名字"**（`MY_API Widget *p` 这一形）时才允许
+第二个名字加入；类型是**内建关键字**时（`void`、`unsigned`）一律不许——于是 `unsigned __int64 x;` 被读成
+"类型 `unsigned` + 声明符 `__int64` + `x` 是一个**替声明站位的 MacroCall**"。那是 **A0 类静默错树**：没有诊断、
+没有 `ErrorNode`、token 一个不少，构造却是错的。MinGW 头文件里"`unsigned __int64` + 变量"到处都是，
+所以这不是角落。
+
+**性质**：这条是**拼写约定**在起作用，必须说清为什么这次可以用：`Type Name Name` 这三个 token 有**两种相反的
+真实读法**，而**形状本身分不开它们**——
+
+```cpp
+unsigned __int64 x;      // 加入类型的那个名字是**类型**：`__int64` 写成宏的样子
+int x MY_DECL_SUFFIX;    // 加入类型的那个名字是**声明符**：`x` 不写成宏的样子，宏是**后缀**
+```
+
+第一版把条件放宽成"已经命名过类型就算"，于是第二行被读成"类型 `int x` + 声明符 `MY_DECL_SUFFIX`"——变量名
+丢了，等于用一个 A0 错树换另一个。**两个已有测试当场抓住**：`a_macro_can_stand_among_a_declarators_suffixes`
+（宏后缀那一形）与 B71 的 asm 标签那条断言。所以判据收窄成"**加入的那个名字要写成宏的样子**"
+（`types::written_like_a_macro`：下划线开头，或 `decls::looks_like_a_macro_name` 的全大写），而它与
+B32/B36 里被否掉的用法不同：那里是问"这东西**是不是**宏"（没有证据，只能猜），这里是**在两种都真实的读法
+之间选一个**，且只在有类型、且有声明符跟在后面时才问（`a_declarator_still_follows_the_name`）。
+
+**护栏**：`gaps.rs::a_macro_may_stand_between_the_type_and_the_declarator`——十二种文件作用域的写法（含
+`typedef unsigned __int64 POINTER_64_INT;`、`void f(void HUGEP **ppvData);`、真实的 `WINOLEAUTAPI …` 行）
+＋两种函数体里的写法＋**形状**断言三条，正反都钉：`unsigned __int64 x;` 是"说明符两个词、没有 `MacroCall`、
+声明符是 `x`"；`int x MY_DECL_SUFFIX;` 正好相反（说明符一个词、有 `MacroCall`、声明符仍是 `x`）；
+`MY_API Widget *p;` 保持"宏在类型里"。
+
+**量到的**：128 个文件的闭包 干净 105 → **106**、报错 23 → **22**、消息 255 → **249**；455 个文件的分析闭包
+干净 412 → **417**、报错 43 → **38**、消息 273 → **212**。**5 个文件变干净**（`avx512fintrin.h`、`_bsd_types.h`、
+`corecrt.h`、`oleauto.h`、`rpcnsi.h`），**两份清单都没有一个文件从干净变报错**。
+放宽的第一版在同一份语料上量到同样的数字（417/38/212）——也就是说**收窄没有花掉任何收益**，
+而它保住了那两条读法。
+
+**还剩下的两条**（下一轮）：
+1. ~~`typedef DWORD (WINAPI PM_OPEN_PROC)(LPWSTR);`~~ —— **已修**（B74：宏在括号声明符里、名字之前）。
+2. `STDMETHOD(QueryInterface) (THIS_ REFIID riid, LPVOID *ppvObj) PURE;`（`commdlg.h:577`）——宏站在声明头部
+   （B73 已经会读这一半），但它的声明符**没有名字**：名字在宏自己的实参里
+   （`#define STDMETHOD(method) virtual HRESULT STDMETHODCALLTYPE method`）。读成声明就会声明一个没有名字的函数，
+   所以这条要么等**按位置**的宏证据，要么明说成"名字不可知"，不能靠形状。
+3. `basetsd.h` 的首错已经推到 68 行（`static __inline unsigned __LONG32 HandleToULong (const void *h)` 的函数体里），
+   是另一条形状，下一轮重新量。
+另外 `combaseapi.h` 的首错已经推到 327 行（`COWAIT_DISPATCH_CALLS = 8,` 那种枚举值），与这一族无关了。
+这**不写进** `assert_does_not_read_yet`：三条的形状各不相同，钉成"永远读不出"会挡住第 1、3 条。
+
+### B73. 宏调用站在**声明头部**（`WINOLEAPI_(void) CoFreeLibrary (HINSTANCE hInst);`）—— 已修复
+
+```cpp
+WINOLEAPI_(void) CoFreeLibrary (HINSTANCE hInst);      // objbase.h:96
+WINOLEAPI_ (void) OleUninitialize (void);              // ole2.h:58
+```
+
+（`combaseapi.h:35` 把 `WINOLEAPI_(type)` 展开成 `EXTERN_C DECLSPEC_IMPORT type STDAPICALLTYPE`——也就是说这个宏
+**就是**整条声明的类型部分，而它的 `#define` 在**另一个文件**里。）
+
+**现象**：`expected ; after expression` 打在那条声明的**声明符**上（`CoFreeLibrary`，列 17）。B70 之后
+`WINOLEAPI_(void)` 被读成一个**调用**，错误只是从"实参读不出"变成"调用后面还有声明符"。
+
+**成因**：三种读法都不对——说明符序列把 `WINOLEAPI_` 当类型、把 `(void)` 当它的形参表，声明出来的是一个叫
+`WINOLEAPI_` 的函数，`CoFreeLibrary` 无处可去；表达式读法（B70 的回退）把调用读成**语句**；而"宏替声明站位"
+那条只认"名字后面什么都没有，或只有 `}` `#`"。
+
+**性质**：缺规则（"宏带实参表当说明符"这一形），判据是**形状**而不是证据——名字**带一个配平组**、组后紧跟
+**一个标识符**（`MACRO(args) name (…)`）。三条边界，每条都让已有的主人继续拥有自己的形状：
+- 名字是本文件 `#define` 过的 → 它有**体**，交给知道体的规则（证据优先，`MacroNames` 的老次序）；
+- 组后面是 `;` 或 `{` → `FOO(x);`（语句 / 替声明站位的宏）与 `FOO(x) { }`（定义）各有主人；
+- 名字是**编译器自己的拼写**（`__attribute__` / `__declspec`）→ 它有读者。**这一条是被量出来的**：第一版没有
+  它，于是 `__attribute__((__nonnull__)) void f(…)` 也满足"名字 + 配平组 + 标识符"，被读成"宏说明符"，说明符
+  序列在属性处就结束，跟在后面的 `_Rb_tree_node_base* _Rb_tree_rebalance_for_erase(…)` 没有类型——
+  **`bits/stl_tree.h` 从干净变成报错**。同一次普查的三个数字（干净 +3、消息 −30）本来已经"赢了"，
+  把逐文件清单对一遍才看见这一条；这就是"**按文件数报进度**"那条约定存在的理由。
+
+**读数的方式**：宏调用产生的是 `MacroCall`（名字 + `ArgumentList`，token 原样），放在 `DeclSpecifierSeq` 里，
+然后**说明符序列到此为止**——宏展开成什么是这一层不知道的，所以它后面读到的名字可能是声明符、也可能是类型的
+又一个词；把它留给拥有声明符的读取器，`CoFreeLibrary (HINSTANCE hInst)` 就是一条普通的函数声明符。
+
+**护栏**：`gaps.rs::a_macro_may_stand_between_the_type_and_the_declarator`（与 B72 前半同一个测试）——正面四种
+写法之外，把**那条回归的两个真实声明**（`__attribute__((__nonnull__)) void f(const bool __insert_left);` 和
+`_Rb_tree_rebalance_for_erase` 那条三行的）钉进"读得出"清单，再加一条"**声明符是谁**"的形状断言：
+`WINOLEAPI_(void) CoFreeLibrary (HINSTANCE hInst);` 的 `InitDeclarator` 必须是 `CoFreeLibrary (HINSTANCE hInst)`
+——反过来的读法会声明一个叫 `WINOLEAPI_` 的函数。边界也写着：`STDMETHOD(QueryInterface) (…) PURE;` **不在**这里，
+它的声明符**没有名字**（名字在宏自己的实参里，见 B72）。
+
+**量到的**：128 个文件的闭包 干净 106 → **108**、报错 22 → **20**、消息 249 → **124**；455 个文件的分析闭包
+干净 417 → **420**、报错 38 → **35**、消息 212 → **181**。`objbase.h`、`ole2.h`、`stl_map.h` 变干净，
+`stl_heap.h` 在 128 那份清单里也变干净；**两份清单都没有一个文件从干净变报错**（含修掉的那次回归）。
+
+
+
+### B74. 同一个宏写法的名字，再往下两层：**type-id 里**与**括号声明符里** —— 已修复
+
+```cpp
+static __inline unsigned __LONG32 HandleToULong (const void *h)              // basetsd.h:68
+{ return ((unsigned __LONG32) (ULONG_PTR) h); }                              // 转换的 **type-id**
+typedef DWORD (WINAPI PM_OPEN_PROC)(LPWSTR);                                 // winperf.h:180
+typedef DWORD (WINAPI PM_COLLECT_PROC)(LPWSTR,LPVOID *,LPDWORD,LPDWORD);     // winperf.h:181
+```
+
+**现象**：两个位置各报各的——转换 `(unsigned __LONG32)` 报 `expected primary expression`（`basetsd.h` 全局 7 条错，
+全是这一形），`typedef` 那四条报 `expected ;` 打在第 15 列的 `WINAPI` 上。
+
+**成因**：B72/B73 让"写成宏样子的名字"站在**类型与声明符之间**，但同一拼写还有两个位置：
+- **type-id 没有声明符**，于是调用方给的 `allow_second_name` 是 `false`——这对它本来要回答的问题是对的
+  （type-id 里多一个*名字*会把 `template <typename T, typename U>` 连成一个），但对"这个名字写成宏的样子"
+  就错了：`(unsigned __LONG32)` 是一个转换，拒了它整条转换就读不出来；
+- **括号声明符里名字之前**：`(WINAPI PM_OPEN_PROC)` 里 `WINAPI` 是 `__stdcall`，而守卫
+  `a_parenthesised_declarator_with_a_name_follows` 只认 `(*f)`、`(&f)`、`(C::*f)` 三形，于是这一组被
+  `parse_abstract_declarator` 当**形参表**读——`WINAPI` 成了一个参数的类型，`PM_OPEN_PROC` 成了参数名。
+
+**性质**：缺规则，两处都用同一个判据（[`written_like_a_macro`]）收口：type-id 里"类型已经命名过 + 这个名字写成
+宏的样子 ⇒ 它是类型的又一个词"（type-id 没有声明符，所以没有"后面还有没有声明符"可问）；声明符里
+"括号内两个标识符连写 ⇒ 前一个是宏、后一个是这个名字"（`NAME NAME` 在任何文法里都不是一个声明符）。
+
+**第一版把 `debug/safe_sequence.tcc` 弄脏了**——同一个族的第二例回归，而它比 B73 那次更隐蔽：
+`void C::f(_Predicate __pred) { }` 的组与 `(WINAPI PM_OPEN_PROC)` **一模一样**，被当成括号声明符之后，
+函数体里的声明落到了函数外面，错误浮现在**三行以下**的一个 `typedef` 上（`expected primary expression`）。
+分开这两者的是**组的后面是什么**：形参表后面永远不会跟着另一个属于同一声明符的 `(`，而函数指针 typedef
+永远跟着。加上这一条之后，`safe_sequence.tcc` 回来、`winperf.h` 的收益保住。
+
+**顺带量到、但**没修**的一条**：`typedef DWORD (PM_OPEN_PROC)(LPWSTR);`（**不带宏**的同形）本来也读不出
+（`expected ;` 打在第 29 列）——它的组里只有一个名字，本条的判据（两个标识符连写）不覆盖它。它不在语料的
+首错清单上，所以只记在这里，不顺手放宽：那是"`(NAME)(params)` 是不是声明符"的另一个问题。
+
+**护栏**：`gaps.rs::a_macro_shaped_name_inside_a_type_id_and_a_parenthesised_declarator`——type-id 三形
+（`(unsigned __LONG32)`、转换链 `(void *) (LONG_PTR) (__LONG32) h`、`sizeof(unsigned __LONG32)`）＋
+声明符四形（`PM_OPEN_PROC`/`PM_COLLECT_PROC`/`PM_CLOSE_PROC` 与真实的 basetsd 函数）＋**共形但必须保持原读法**
+的五形（`void C::f(_Predicate __pred) { }`、`void C::g(_Predicate __pred);`、`void f(int (_Predicate __pred));`、
+`typedef void (*fp)(int);`、`int x MY_DECL_SUFFIX;`）＋两条**形状**断言：形参表里 `__pred` 仍是参数名且没有
+`MacroCall`（回归那一形），以及 `(WINAPI PM_OPEN_PROC)` 的 `MacroCall` 是 `WINAPI`、声明符文本带上了属于它的
+`(LPWSTR)`（这正是"它是指向函数的指针"那句话）。
+
+**量到的**：128 个文件的闭包不动（108 / 20 / 124——这一族全在 MinGW 头文件里，libstdc++ 闭包没有它们）；
+455 个文件的分析闭包 干净 420 → **423**、报错 35 → **32**、消息 181 → **155**。`winperf.h`、`intrin-impl.h`、
+`winbase.h` 变干净；**没有一个文件从干净变报错**（含修掉的那次回归）。`basetsd.h` 的错 7 → **3** 条，
+首错推到 90 行（`return ((void *) (LONG_PTR) (__LONG32) (ULONG_PTR) h);` 那种成串转换里更靠后的一形）。
+
+### B75. **匿名**类定义后面的那个名字：早退把它当成了类型 —— 已修复（一类 A0 静默错树）
+
+```cpp
+  union
+  {
+    __m128h __a[2];
+    __m256h __v;
+  } __u = { .__v = __A };          // avx512fp16vlintrin.h:155（avx512fp16intrin.h:2986 同形）
+```
+
+**现象**：带初始化式的那些报 `expected a declarator name`，打在 `=` 上（两个 `avx512fp16*` 头文件各一条首错）；
+而**不带**初始化式的那些**什么也不报**——树里没有 `ErrorNode`、没有 `MissingNode`、token 一个不少，
+只是那个变量**没有声明**。两种现象一个成因。
+
+**成因**：`name_joins_the_type` 的第一条是"**还没有类型，所以这个名字只能是类型**"（`!has_type_specifier`）。
+**有名字**的类定义（`struct S { … } x;`）会写一个名字，于是序列到声明符时 `has_type_specifier` 已经为真；
+**匿名**定义（`union { … } u;`）一个名字都不写，那个标志仍是假——早退于是把 `u` 当成类型的又一个词，
+声明出来的是"类型 `union { … } u`、一个声明符也没有"。类体**本身就是**一个完整的类型（这条判断早就在函数里，
+只是排在早退**后面**，永远轮不到）：把它挪到早退**之前**就对了。
+
+**性质**：判断顺序错（不是缺判据），属于 **A0 类静默错树**——它没有诊断，所以 `gaps.rs` 原来的三种护栏
+（errors ∪ `ErrorNode` ∪ `MissingNode`）一条都拦不住；带初始化式的写法**之所以**会报错，只是因为
+"初始化式需要一个名字"那条护栏（`an_initializer_needs_a_name`）顺手把它顶了出来。这也是为什么两种写法
+必须**同时**钉住：只修报错的那一半，静默的那一半会留下来。
+
+**护栏**：`gaps.rs::a_name_after_an_anonymous_class_definition_is_the_declarator`——函数体里六形
+（有/无初始化式、`struct`/`union`、匿名成员类型、指针声明符）＋文件作用域五形（`typedef struct { … } Alias;`、
+`enum E { A } e;`、`struct S { int a; } x;`、数组、`static union { … } value = { … };`）＋**形状**断言三条：
+带初始化式时 `InitDeclarator` 是 `u = { 1 }`、不带时是 `u`（静默那一半），以及**含 `UnionDef` 的那个
+`DeclSpecifierSeq` 的文本就是 `union { int a; }`**——`u` 不在类型里。
+
+**量到的**：128 个文件的闭包 干净 108 → **109**、报错 20 → **19**、消息 124 → **119**；455 个文件的分析闭包
+干净 423 → **426**、报错 32 → **29**、消息 155 → **147**。`avx512fp16intrin.h`、`avx512fp16vlintrin.h`、
+`basic_string.tcc` 变干净（第三个是顺带：它的守卫对象写法同形），**两份清单都没有一个文件从干净变报错**。
+
+### B76. 头文件里的宏**自己就是一条语句**（`__glibcxx_function_requires(…)`，没有分号）—— 已修复
+
+```cpp
+      __glibcxx_function_requires(_LessThanComparableConcept<_Tp>)     // bits/stl_algobase.h:237
+      //return __b < __a ? __b : __a;
+      if (__b < __a)
+	return __b;
+```
+
+紧跟 `#endif` 的那一形（`bits/move.h:233`）与"连着两次调用"（`bits/stl_algobase.h:170`）同族。
+
+**现象**：`expected ; after expression` 打在**下一条语句**上（`if`、`#endif`、下一个宏调用），
+`move.h`、`stl_iterator_base_funcs.h`、`find.h` 的首错都是它。
+
+**成因**：libstdc++ 把这些概念要求宏定义成**空的**，所以一次调用本身就是一条完整语句、没有分号；而它们的
+`#define` 在**别的文件**里。**两种读法都真实**：`NAME ( 参数 )` 也是一条**函数声明**（名字是宏名、参数没有
+名字），所以问题不是"读不出来"，而是"声明读法**成功**了，只是没有分号"——护栏
+（`an_initializer_needs_a_name` 那一类）看不见这一形。
+
+**性质**：缺规则 + **判据次序**，三条边界各由一次失败买来：
+1. 名字必须是**实现保留的**（下划线开头）。`FOO(x)` 同样是宏的写法，但也是用户函数的写法，而用户自己的宏
+   会在本文件 `#define`（那是证据，这条规则没有）。所以 `FOO(x)` 少了分号仍然是错误；
+2. 组之后必须是一个**不能继续表达式**的 token（`if`、`#`、`}`、`return`、后面的名字、一条声明的开头）。
+   `{` **不在**集合里 —— `g(x) { }` 是块形那条规则（B36）一直要权衡的错误；
+3. 这条读法**排在声明读法之后**，而声明读法在这里会**成功**，所以还要一条"**它没有吃掉 `;`**"的判据把
+   两者分开。**第一版把顺序反了**（抢在声明读法之前），于是把 B73 的 `WINOLEAPI_(void) CoFreeLibrary (…)`
+   从"宏是声明的说明符"抢成了"宏语句 + 另一条声明"——`a_macro_may_stand_between_the_type_and_the_declarator`
+   当场抓住。这一条与 B73 是**同一个形状的两种读法**，分开它们的是分号在不在。
+
+**护栏**：`gaps.rs::a_macro_from_a_header_can_be_a_statement_of_its_own`——四种读得出的写法（`if` 之前、
+`#endif` 之前、连着两次、`return` 之前）＋文件作用域两形（类体后的 `_GLIBCXX11_DEPRECATED_SUGGEST("…");`、
+后面跟着声明）＋**三条边界**（`FOO(x)`、`g(x)` 换行、`g(x) { }` 都必须仍然报错）＋一条**次序**断言
+（B73 那条仍然**是**一个声明、`MacroCall` 在说明符序列里，而不是"宏语句 + 另一条声明"）。
+
+**量到的**：128 个文件的闭包 干净 109 → **111**、报错 19 → **17**、消息 119 → **91**；455 个文件的分析闭包
+干净 426 → **429**、报错 29 → **26**、消息 147 → **129**。`move.h`、`stl_iterator_base_funcs.h`、`find.h`
+变干净；**两份清单都没有一个文件从干净变报错**。`bits/stl_algobase.h` 的首错 239 → **906**（该文件只剩 8 条错）。
+
 ### B42. 函数定义里的 `try`（function-try-block）—— 待修
 
 ```cpp

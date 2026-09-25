@@ -2067,7 +2067,7 @@ pub(super) fn a_macro_definition_follows(p: &CppParser, declarator_from: usize) 
 /// them is how the name is spelled, and it is the same signal a reader uses. `EmmyLuaCodeStyle`'s
 /// `IF_EXIST(...) { … }` is the case that made the inside-of-a-body half necessary — 68 diagnostics from the
 /// macro invocations in one file.
-fn looks_like_a_macro_name(name: &str) -> bool {
+pub(super) fn looks_like_a_macro_name(name: &str) -> bool {
     let mut characters = name.chars();
     let Some(first) = characters.next() else {
         return false;
@@ -3287,17 +3287,69 @@ pub fn parse_parameter_list(p: &mut CppParser) -> ParseResult {
     }
 
     loop {
-        if let Err(err) = parse_parameter(p) {
+        // A **directive between parameters** — the same seam as the one in the template parameter list, and the
+        // spelling `bits/algorithmfwd.h:700` writes:
+        //
+        // ```cpp
+        //     random_shuffle(_RAIter, _RAIter,
+        // #if __cplusplus >= 201103L
+        // 		   _RandomNumberGenerator&&);
+        // #else
+        //     random_shuffle(_RAIter, _RAIter,
+        // 		   _RandomNumberGenerator&);
+        // #endif
+        // ```
+        //
+        // A `#` at a parameter position cannot be anything else: a parameter begins with a type — or a directive.
+        while p.current_token() == CppTokenKind::Hash {
+            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+        }
+
+        if let Err(err) = parse_one_parameter(p) {
             p.close_marks_above(base);
             return Err(err);
         }
 
-        // A pack expansion marker belonging to the parameter just parsed: `Args&&... args`, `Ts... rest`. It
-        // comes *before* the name in the first spelling, so it is not something [`parse_parameter`] can attach
-        // — by the time it returns, the cursor is past the name. The trailing `...` of an old-style variadic
-        // function lands here too, which is why it is consumed on every path and not only before a comma.
-        if p.current_token() == CppTokenKind::Ellipsis {
-            p.bump();
+        // **A parameter written once per branch** — an `#else`/`#elif` here spells *this* parameter the other way,
+        // so another parameter follows rather than a new one starting:
+        //
+        // ```cpp
+        //   void f(int a,
+        // #if X
+        //          int b
+        // #else
+        //          long b
+        // #endif
+        //          );
+        // ```
+        //
+        // Any other directive (`#endif`, and the `#else` that ends the *first* branch's whole declaration in
+        // `bits/algorithmfwd.h`) only closes something, and the terminator is what comes next — which is why the
+        // two cases are told apart by the directive's name and not by "is there a `#`".
+        loop {
+            if p.current_token() != CppTokenKind::Hash {
+                break;
+            }
+
+            let another_spelling_of_this_parameter =
+                matches!(p.peek_token_text_at(1), "else" | "elif");
+
+            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+
+            if !another_spelling_of_this_parameter {
+                continue;
+            }
+
+            if let Err(err) = parse_one_parameter(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
         }
 
         match p.current_token() {
@@ -3316,6 +3368,25 @@ pub fn parse_parameter_list(p: &mut CppParser) -> ParseResult {
 
     expect_token(p, CppTokenKind::RightParen)?;
     Ok(m.complete(p))
+}
+
+/// One parameter, with the **pack marker** that belongs to it.
+///
+/// `Args&&... args` and `Ts... rest` write the marker *before* the name in one spelling and after the type in the
+/// other, so it is not something [`parse_parameter`] can attach: by the time it returns, the cursor is past the
+/// name. The trailing `...` of an old-style variadic function lands here too, which is why it is consumed on every
+/// path and not only before a comma.
+///
+/// Factored out because the list reads a parameter in **two** places — once at the top of its loop and once for
+/// each branch of a conditional (`#if X int b #else long b #endif`), where the same parameter is spelled again.
+fn parse_one_parameter(p: &mut CppParser) -> ParseResult {
+    parse_parameter(p)?;
+
+    if p.current_token() == CppTokenKind::Ellipsis {
+        p.bump();
+    }
+
+    Ok(CompleteMarker::empty())
 }
 
 /// Parse one parameter: a type, an optional declarator, and an optional default argument.
@@ -3945,6 +4016,11 @@ pub(super) fn can_begin_a_declaration(kind: CppTokenKind) -> bool {
             | CppTokenKind::FriendKeyword
             | CppTokenKind::MutableKeyword
             | CppTokenKind::ThreadLocalKeyword
+            // `register` belongs in this list for the same reason `static` does: a declaration may start with it,
+            // and a *statement* that starts this way (`register int x = 0;` inside a body, `_mingw.h:607` at file
+            // scope) is a declaration. It cannot begin an expression, so there is no second reading to weigh it
+            // against — see [`CppSyntaxKind::RegisterSpec`].
+            | CppTokenKind::RegisterKeyword
     )
 }
 
@@ -4095,6 +4171,27 @@ pub fn parse_using_declaration(p: &mut CppParser) -> ParseResult {
         parse_name(p)?;
         let _ = expect_semicolon(p);
         directive.complete(p);
+        return Ok(m.complete(p));
+    }
+
+    // `using enum E;` — C++20's using-enum-declaration (libstdc++'s `compare:710`). The `enum` keyword is the
+    // whole evidence and it is unambiguous: an alias is `using NAME = …`, and the name of a using-*declaration*
+    // cannot be the keyword `enum`. What follows is the enum's **name** — an identifier or a qualified name —
+    // and it is read as one name, exactly like `using ns::f;` below: there is no type and no declarator here.
+    //
+    // Nothing is *recorded* about it, and that is deliberate: the declaration introduces the enum's
+    // **enumerators** into the scope, not a type name, and this parser records only what a name is — see the
+    // comment on the alias form. Recording `E` as a type would be recording something that was already true.
+    if p.current_token() == CppTokenKind::EnumKeyword {
+        p.bump();
+        if let Err(err) = parse_name(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+        if let Err(err) = expect_semicolon(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
         return Ok(m.complete(p));
     }
 

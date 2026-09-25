@@ -239,6 +239,52 @@ pub fn parse_argument(p: &mut CppParser) -> ParseResult {
     parse_assignment_expr(p)
 }
 
+/// Read the argument list of a call — and, when the arguments are **not expressions at all**, keep them as tokens.
+///
+/// The second half is the whole reason this is a function rather than four lines in the call arm. A macro's
+/// arguments are the macro's own tokens, and a macro written in an *included* header is not in any table this
+/// parser is handed: libstdc++ writes
+///
+/// ```text
+/// if constexpr (__is_same(const volatile _Tp, const volatile void))                    // bits/new:234
+/// return __reference_constructs_from_temporary(_Elements, _Up&&) …                     // tuple:922
+/// _GLIBCXX_TYPEID(typename std::iterator_traits<_Iterator>::value_type);               // bits/formatter.h:485
+/// _MM_REDUCE_OPERATOR_BASIC_EPI16 (+);                                                 // avx512vlbwintrin.h:4992
+/// ```
+///
+/// — a *call* whose argument is a type, a qualifier or a bare operator, which is nothing the expression grammar
+/// can read. The reading that fits is the one the macro rules already use: a balanced group of raw tokens, kept
+/// under an `ArgumentList` node (see [`super::decls::parse_balanced_token_group`]).
+///
+/// # The criterion, and what it costs
+///
+/// The **preference comes first and its failure is what is handled** — the same shape as B62, B66 and B68 in
+/// `docs/grammar-gaps.md`: arguments are expressions until that reading fails, and only then are they tokens.
+/// Nothing about the callee is consulted, because nothing about it is knowable: the macro's `#define` is in
+/// another file.
+///
+/// The cost is real, and it is why this is a fallback and not a rule: `f(1 +)`, a genuinely broken call, is read
+/// as a macro's arguments and reported by nobody. No shape separates the two cases — the arguments of a macro
+/// *are* arbitrary tokens — so the choice is between the diagnostic on the broken call and every use of the
+/// macro. B70 in `docs/grammar-gaps.md` records the measurement behind taking the second.
+pub fn parse_call_arguments(p: &mut CppParser) -> ParseResult {
+    expect_token(p, CppTokenKind::LeftParen)?;
+
+    // Each argument is read *below* the comma operator, because the commas here are the list's own — see
+    // [`parse_assignment_expr`]. It is [`parse_argument`] rather than that reader directly, so that a
+    // braced-init-list is an argument (`v.push_back({1, 2})`).
+    if p.current_token() != CppTokenKind::RightParen {
+        parse_argument(p)?;
+        while p.current_token() == CppTokenKind::Comma {
+            p.bump(); // consume ','
+            parse_argument(p)?;
+        }
+    }
+
+    expect_token(p, CppTokenKind::RightParen)?;
+    Ok(crate::parser::CompleteMarker::empty())
+}
+
 /// An expression that must **not** swallow a `{` as a braced initializer, for a constraint.
 ///
 /// This exists for one construct and one failure: a requires-clause sits between a declarator and the body of a
@@ -1331,23 +1377,16 @@ fn parse_postfix_suffixes(
             CppTokenKind::LeftParen => {
                 // 函数调用
                 let m = expr.precede(p, CppSyntaxKind::CallExpr);
-                p.bump(); // consume '('
 
-                // 解析参数列表。Each argument is read *below* the comma operator, because the commas here are
-                // the list's own — see [`parse_assignment_expr`].
-                //
-                // An argument may also be a **braced-init-list** — `v.push_back({1, 2})` — which is an
-                // initializer-clause rather than an expression, exactly as on the right of an assignment. A `{`
-                // in argument position cannot be anything else, so the reading is chosen by the token.
-                if p.current_token() != CppTokenKind::RightParen {
-                    parse_argument(p)?;
-                    while p.current_token() == CppTokenKind::Comma {
-                        p.bump(); // consume ','
-                        parse_argument(p)?;
-                    }
+                // 解析参数列表。The listed reading is [`parse_call_arguments`]; the fallback below is the other
+                // half of that rule — a macro's arguments are tokens, not expressions, and a call whose
+                // arguments do not read is the only place the two can be told apart.
+                let before_the_arguments = p.checkpoint();
+                if parse_call_arguments(p).is_err() {
+                    p.rollback(before_the_arguments);
+                    super::decls::parse_balanced_token_group(p, CppSyntaxKind::ArgumentList)?;
                 }
 
-                expect_token(p, CppTokenKind::RightParen)?;
                 expr = m.complete(p);
             }
             CppTokenKind::LeftBracket => {

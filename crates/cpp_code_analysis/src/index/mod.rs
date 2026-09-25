@@ -662,16 +662,23 @@ mod tests {
 
     #[test]
     fn a_summary_is_read_for_the_compiler_it_was_configured_with() {
-        // The dialect has to reach the **parser**, not just the key: `unsigned __int128 x;` declares `x` when the
-        // compiler spells `__int128` as a type (GNU), and something else when it does not (MSVC). A configuration
-        // that stopped at the cache key would hash two targets apart and then read both the same way, which is
-        // the worst of both.
+        // The dialect has to reach the **parser**, not just the key: `int __int128;` declares a variable called
+        // `__int128` when the compiler spells `__int128` as an ordinary name (MSVC), and declares **nothing** when
+        // it is a type keyword (GNU) — a name cannot be a declarator if it is a type. A configuration that stopped
+        // at the cache key would hash two targets apart and then read both the same way, which is the worst of
+        // both.
+        //
+        // The spelling this test used before was `unsigned __int128 x;`, and it stopped distinguishing the two
+        // dialects when the specifier sequence learned to let a name join a type that is already there
+        // (`docs/grammar-gaps.md` B72): `__int128 x` is a type and a declarator under *both* dialects now, which
+        // is the better reading of both. What the dialect decides is whether the token **can** be a declarator, and
+        // that is what this spelling asks.
         let files = MemoryFiles::new();
         let names = |dialect: cpp_parser::Dialect| {
             let config = CompilerConfig::default().with_dialect(dialect);
             let summary = FileIndexer::new(&files, &config).index(
                 Path::new("/p/a.cpp"),
-                "unsigned __int128 x;\n",
+                "int __int128;\n",
                 key(),
             );
             summary
@@ -683,12 +690,13 @@ mod tests {
 
         assert_eq!(
             names(cpp_parser::Dialect::Gnu),
-            vec!["x".to_string()],
-            "under GNU the declaration names `x`"
+            Vec::<String>::new(),
+            "under GNU `__int128` is a type, so `int __int128;` has no declarator"
         );
-        assert!(
-            !names(cpp_parser::Dialect::Msvc).contains(&"x".to_string()),
-            "and under MSVC the same text does not declare `x`, because `__int128` is not a type there"
+        assert_eq!(
+            names(cpp_parser::Dialect::Msvc),
+            vec!["__int128".to_string()],
+            "and under MSVC the same text declares a variable called `__int128`"
         );
     }
 

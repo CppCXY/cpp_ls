@@ -601,7 +601,8 @@ impl<'a> CppParser<'a> {
         self.declaration_type_name = checkpoint.declaration_type_name;
         self.previous_declaration_type_name = checkpoint.previous_declaration_type_name;
         self.declaration_type_is_qualified = checkpoint.declaration_type_is_qualified;
-        self.errors.truncate(checkpoint.errors_len);        self.token_index = checkpoint.token_index;
+        self.errors.truncate(checkpoint.errors_len);
+        self.token_index = checkpoint.token_index;
         self.current_token = self
             .tokens
             .get(self.token_index)

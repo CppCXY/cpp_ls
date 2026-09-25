@@ -189,7 +189,7 @@ let config = toolchain.map_or_else(CompilerConfig::new, |toolchain| toolchain.co
 跑一次编译器问搜索路径、扫一遍源文件清单），之后 `advance(n)` 一步一个文件地把闭包读进来，`view` + 五个查询
 按光标回答。P0 的收益因此从"可兑现"变成**已兑现**，实测见下面"驱动层"那一节。
 
-### P1 让闭包干净解析（**进行中**：48 → 101 个文件干净；第十七/十八轮之后 335 → **400**，128 个文件那份 80 → **100**）
+### P1 让闭包干净解析（**进行中**：48 → 111 个文件干净；第十七/十八轮之后 335 → **429**，128 个文件那份 80 → **111**）
 
 **按形状放宽，而不是接表**——这是这一轮最重要的一条计划修正，理由见下。
 
@@ -261,6 +261,14 @@ let config = toolchain.map_or_else(CompilerConfig::new, |toolchain| toolchain.co
 + B66  推导指引 `M(I) -> M<I>;`                     97    31   353         386    69   480
 + B67  `asm` 语句（新节点 `AsmStat`）               97    31   347         388    67   464
 + B68  转换读法失败要回退成括号表达式               100   28   283         400    55   352
++ B69  形参表里的指令接缝（形参之间 / 形参按分支写两遍）  101   27   280         401    54   348
++ B70  宏的实参不是表达式：实参组按 token 留下        103   25   260         410    45   278
++ B71  `using enum E;` 与 `register`（两条缺规则）     105   23   255         412    43   273
++ B72  宏可以站在**类型与声明符之间**（`unsigned __int64 x;` 那类 A0 错树）  106   22   249         417    38   212
++ B73  宏调用站在**声明头部**（`WINOLEAPI_(void) CoFreeLibrary (…)`）  108   20   124         420    35   181
++ B74  宏写法的名字在 **type-id** 里与**括号声明符**里     108   20   124         423    32   155
++ B75  **匿名**类定义后的名字（A0 静默错树）             109   19   119         426    29   147
++ B76  头文件里的宏**自己就是一条语句**（没有分号）        111   17    91         429    26   129
 
 alloc_traits.h 的首错   454 → 536 → 689 → 941 → **1053（文件最后一行）→ 干净**（B53 → … → B57）
 basic_string.h         4532 行那条首错（`noexcept` 那一族）随 B55 消失，文件变干净
@@ -272,7 +280,16 @@ avx10_2-512minmax / avx10_2minmax / avx10_2convert / avx10_2-512convert  随 B63
 bits/map、bits/multimap、stl_multimap.h、string_view  随 B66 变干净（4 个）
 amxtileintrin.h、_mingw.h                              随 B67 变干净（2 个）
 tr1 的九个 .tcc 数学实现、parallel/types.h、stl_bvector.h、max_size_type.h、type_traits.h  随 B68 变干净（12 个）
+stl_tree.h                                             随 B69 变干净；parallel/algorithmfwd.h 首错 701 → 704（推到 B65 的片段上）
+avx512vlbwintrin.h、stl_pair.h、formatter.h、limits、new、gthr-default.h、emmintrin.h、xmmintrin.h、
+shellapi.h                                             随 B70 变干净（9 个）
 predefined_ops.h 65 → 80、stl_iterator.h 1633 → 3094、stl_tree.h 1086 → 2468、compare 568 → 672（首错后移）
+compare（`using enum`）、_mingw.h（`register` + GNU asm 标签）  随 B71 变干净（2 个）
+avx512fintrin.h、_bsd_types.h、corecrt.h、oleauto.h、rpcnsi.h  随 B72 变干净（5 个）；basetsd.h 的首错 11 → 68 行
+objbase.h、ole2.h、stl_map.h（+ 128 那份清单里的 stl_heap.h）  随 B73 变干净（3 个）；combaseapi.h 的首错 883 → 327 行
+winperf.h、intrin-impl.h、winbase.h  随 B74 变干净（3 个）；basetsd.h 的错 7 → 3 条，首错 68 → 90 行
+avx512fp16intrin.h、avx512fp16vlintrin.h、basic_string.tcc  随 B75 变干净（3 个）
+move.h、stl_iterator_base_funcs.h、find.h  随 B76 变干净（3 个）；stl_algobase.h 的首错 239 → 906 行
 ```
 
 **B68 是这一轮第二大的单次收益，而它只改了四行**：`(T)…` 的转换读法靠"括号里的名字是已知类型"这条证据，
@@ -280,6 +297,57 @@ predefined_ops.h 65 → 80、stl_iterator.h 1633 → 3094、stl_tree.h 1086 → 
 `(_Tp(2) * __mu)` 被当成转换、期待 `)`、却遇到 `(`。守卫的注释**早就写好了答案**——"转换读法失败就回退成
 括号表达式"——缺的只是**类型那一半**失败时也回退。12 个文件（九个 `.tcc` 数学实现加三个 bits 头）因此变干净，
 消息 −112；它与 B62/B66 是同一类："判据给了偏好，却没人负责偏好失败之后"。
+
+**B69 是同一条接缝的第三、第四种写法**：模板形参表和 requires 表达式**体内**早就各有一条指令接缝（B57/B64），
+形参表没有——`stl_tree.h:2468` 的 `_M_insert_(_Base_ptr __x, _Base_ptr __p,` 后面跟着 `#if`，列表就断在那里。
+一条接缝上坐着三种写法（指令在形参**之间**、形参**按分支写两遍**、指令只"关闭"什么），而②③靠指令的
+**名字**分开：`#else`/`#elif` 说的是"**这个**形参换个拼法"，`#endif` 以及 `algorithmfwd.h` 里那个结束第一支
+整条声明的 `#else` 都不是。代价是"交替写出的两种拼法"在树里是**两个** `Parameter` 节点——parser 没有说
+"两个分支互斥"的表，把两个拼法都留下是诚实的树。
+
+**B70 是这一轮收尾时最划算的一条**：宏的实参是**宏自己的 token**，这条读法 parser 早就有
+（`parse_balanced_token_group`），缺的是**调用**这条 arm——它只认实参是表达式。语料里这类宏几乎都来自
+**被包含的头文件**（`__is_same`、`_GLIBCXX_TYPEID`、`CONST_CAST2` 的 `#define` 不在当前文件里），
+所以判据问不了"这个名字是不是宏"，只能问"这次调用的实参读得出来吗"：读不出来就按 token 组留下。
+**9 个文件**因此变干净、消息 −70，代价是 `g(1 +)` 这样真正坏掉的调用不再报错——这条代价写进了
+`gaps.rs` 的断言里，因为**没有任何形状**能把它和 `_MM_REDUCE_OPERATOR_BASIC_EPI16 (+)` 分开。
+
+**B71 是"缺规则"里最干净的两条**：`using enum _Fp_fmt;`（`compare:710`）此前完全没有规则（`using` 把关键字
+`enum` 当成要引入的名字），`register`（`_mingw.h:607`）也是——它有 token kind，却在 grammar 里没有任何一处
+接受它，连"声明可以以什么开始"那张表里都没有，于是语句层根本没问过声明那条读法。两条都**没有第二种读法
+可争**，各加一处；`register` 拿到自己的存储类节点（新 kind 照 B67 的规矩加在枚举最末）。白捡的第三件事
+如实钉住：`r0 __asm__("r0")` 这种 **GNU asm 标签**被读成"token 原样留在 `MacroCall` 里"，`asm` 的 payload
+不是 C++（B67 同一条理由），但这不是"它就是宏调用"，所以形状进了护栏。
+
+**B72 修的是一类 A0 静默错树，而它的第一版用一个测试当场抓住了自己**：说明符序列原本只在"已经写进类型的
+那个词是**名字**"（`MY_API Widget *p`）时才让第二个名字加入，类型是**内建关键字**时一律不许——于是
+`unsigned __int64 x;` 被读成"类型 `unsigned` + 声明符 `__int64` + 一个替声明站位的 `MacroCall`"：
+没有诊断、没有 `ErrorNode`、token 一个不少，构造却是错的，而 MinGW 头文件里这种写法到处都是。
+把条件放宽成"已经命名过类型就算"之后，**同样三个 token 的另一种读法**坏了：`int x MY_DECL_SUFFIX;`
+里声明符是 `x`、宏是**后缀**，却被读成"类型 `int x` + 声明符 `MY_DECL_SUFFIX`"——变量名丢了。
+两个已有测试（宏后缀那一形、B71 的 asm 标签）抓住了它，于是判据收窄成"**加入的那个名字要写成宏的样子**"；
+收窄之后同一份语料上量到**同样的 417/38/212**，也就是说**收窄没有花掉任何收益**。
+
+**B73 修的是同一个族的另一半：宏调用站在声明头部**（`WINOLEAPI_(void) CoFreeLibrary (HINSTANCE hInst);`，
+`combaseapi.h` 把它展开成 `EXTERN_C DECLSPEC_IMPORT type STDAPICALLTYPE`——宏**就是**整条声明的类型部分）。
+判据仍是形状（名字 + 配平组 + **标识符**），而它第一版**弄脏了一个文件**：`__attribute__((__nonnull__)) void f(…)`
+也满足那个形状，被读成"宏说明符"，说明符序列在属性处结束，`bits/stl_tree.h`（此前干净）在声明中间报
+`expected ;`。同一次普查是**干净 +3、消息 −30**——数字上已经赢了，把**逐文件清单**对一遍才看见那一个变脏的
+文件；加上"名字不是编译器自己的拼写"这条边界后，干净 +3 保住了，`stl_tree.h` 也回来了（消息 −31）。
+
+**B74 把同一个拼写往下推了两层**：**type-id 里**（`(unsigned __LONG32)` 是一个转换，而 type-id 的
+`allow_second_name` 是 `false`——它对"多一个*名字*会把两个模板形参连起来"是对的，对"这个名字写成宏的样子"
+就错了）与**括号声明符里**（`(WINAPI PM_OPEN_PROC)`，`WINAPI` 是 `__stdcall`）。判据仍是拼写 + 位置。而**第一版
+又弄脏了一个文件**：`void C::f(_Predicate __pred) { }` 的组与 `(WINAPI PM_OPEN_PROC)` 一模一样，被当成括号
+声明符之后函数体里的声明落到了函数外面，错误浮现在三行以下的一个 `typedef` 上（`debug/safe_sequence.tcc`，
+此前干净）。分开两者的是**组的后面是什么**——形参表后面永远不会跟着另一个属于同一声明符的 `(`，函数指针
+typedef 永远跟着。两次回归都由**逐文件清单**（不是总数）抓到，这是这一轮最值得记的工程事实。
+
+**B76 修的是"头文件里的宏自己就是一条语句"**：libstdc++ 的概念要求宏 `__glibcxx_function_requires(…)` 被定义成
+**空的**，所以一次调用就是完整语句、没有分号，而 `NAME ( 参数 )` 同时也是一条**函数声明**——声明读法会成功，
+缺的分号由宏体提供。判据因此是"名字是实现保留的（下划线开头）＋组之后不能继续表达式＋这条读法排在声明读法
+之后、且那条声明没有吃掉 `;`"。**第一版把顺序反了**，把 B73 的 `WINOLEAPI_(void) CoFreeLibrary (…)` 从
+"宏是声明的说明符"抢成了"宏语句 + 另一条声明"——**已有测试当场抓住**（这是同一轮里第三次）。
 
 **B67 是一整族"编译器自己的语句"**：语料里 **69 处** `asm` 拼写（多在 `#define` 体内，所以只值 2 个文件的首错），
 而 payload 完全不是 C++——`"int {$}3":`、`"a" (leaf)`，第二、三段还常常是空的。所以读法是**原样留 token**

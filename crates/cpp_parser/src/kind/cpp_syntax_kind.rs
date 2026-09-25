@@ -875,4 +875,15 @@ pub enum CppSyntaxKind {
     /// `kind/mod.rs` is a `transmute` bounded by the last variant, and renumbering it would change what a stored
     /// kind means.
     AsmStat,
+
+    /// The **`register` storage class** — a hint removed in C++17 and still written by C headers and by MinGW's
+    /// own (`_mingw.h:607`, `xmmintrin.h`).
+    ///
+    /// It sits beside [`CppSyntaxKind::StaticSpec`] and the other storage-class specifiers in meaning; it is
+    /// declared here, at the end, only because a variant's discriminant may not move (see
+    /// [`CppSyntaxKind::AsmStat`]). `types::storage_or_function_specifier` is the one place that maps the token
+    /// to this kind, so the guard and the node cannot drift apart.
+    ///
+    /// e.g.: `register int x;`, `register unsigned int r0;`
+    RegisterSpec,
 }

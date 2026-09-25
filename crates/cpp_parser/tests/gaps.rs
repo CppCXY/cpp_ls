@@ -1673,6 +1673,725 @@ fn a_group_holding_a_call_is_an_expression_not_a_cast() {
     );
 }
 
+/// **A parameter list is written once per branch, or has a directive between its parameters.**
+///
+/// A `#` at a parameter position cannot be anything else — a parameter begins with a type, or with a directive —
+/// and the same is true one line up, between the parameters. `parallel/algorithmfwd.h:700` is the spelling that
+/// put the seam in:
+///
+/// ```cpp
+///     random_shuffle(_RAIter, _RAIter,
+/// #if __cplusplus >= 201103L
+///            _RandomNumberGenerator&&);
+/// #else
+///            _RandomNumberGenerator&);
+/// #endif
+/// ```
+///
+/// Three readings came out of one seam: a directive **before** a parameter (the loop that reads them), a
+/// parameter list **split** by one, and a parameter **spelled once per branch** — an `#else`/`#elif` at that
+/// position writes *this* parameter the other way, so another parameter follows rather than a new one starting.
+/// The two are told apart by the directive's **name**, and the measurement is what says the name is the evidence:
+/// `#endif` only closes something, and the `#else` that ends the *first branch's whole declaration* in
+/// `parallel/algorithmfwd.h` closes one too.
+///
+/// What stayed open is the second branch of that same declaration: its text is a **fragment** (`_RandomIterator&);`
+/// with the head written above the `#if`, so no rule that starts at a token can read it — the entry is B65 in
+/// `docs/grammar-gaps.md`, and it is pinned below rather than left to be rediscovered.
+#[test]
+fn a_directive_may_decide_a_parameter_or_stand_between_two() {
+    assert_reads(
+        Where::File,
+        &[
+            // A directive between two parameters.
+            "void f(int a,\n#if X\n  int b,\n#endif\n  int c);",
+            // …and one before the first of them.
+            "void f(\n#if X\n  int a,\n#endif\n  int b);",
+            // The parameter list split by a directive, with the terminator inside the branch is **not** here:
+            // `parallel/algorithmfwd.h:700` writes its second branch as a fragment, and that is B65 (pinned
+            // below).
+            // A parameter written once per branch: the `#else` spells *this* parameter another way.
+            "void f(int a,\n#if X\n  int b\n#else\n  long b\n#endif\n  );",
+            "void f(int a,\n#if X\n  int b\n#elif Y\n  long b\n#else\n  short b\n#endif\n  );",
+            // The same shape in a definition, where the body follows the list.
+            "void f(int a,\n#if X\n  int b\n#else\n  long b\n#endif\n  ) { }",
+        ],
+    );
+
+    // **One list, every parameter in it**: the seam must not end the list and re-open one per branch. A second
+    // `ParameterList` (or a missing `Parameter`) is exactly the silent wrong tree this test exists to catch.
+    let parameters = |source: &str| {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        let root = tree.get_red_root();
+        let lists: Vec<_> = root
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ParameterList)
+            .collect();
+        assert_eq!(lists.len(), 1, "one parameter list, not one per branch");
+        lists[0]
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Parameter)
+            .count()
+    };
+
+    assert_eq!(
+        parameters("void f(int a,\n#if X\n  int b,\n#endif\n  int c);"),
+        3,
+        "the parameter between two directives is a parameter"
+    );
+    assert_eq!(
+        parameters("void f(int a,\n#if X\n  int b\n#else\n  long b\n#endif\n  );"),
+        3,
+        "two parameters written with an alternation are `int a`, `int b` and `long b`: the parser has no table \
+         that says the branches are exclusive, so each **spelling** is a parameter and keeping both is the honest \
+         tree. What would be wrong is a second list, or the `long b` disappearing."
+    );
+
+    // The fragment the seam cannot reach, with the file it is in.
+    assert_does_not_read_yet(
+        Where::File,
+        &[(
+            "void random_shuffle(_RAIter, _RAIter,\n#if X\n  _RandomNumberGenerator&&);\n#else\n  \
+             _RandomNumberGenerator&);\n#endif",
+            "B65: the second branch is a declaration *fragment* — the head is above the `#if`, so nothing that \
+             starts at a token can read it (`parallel/algorithmfwd.h:700`)",
+        )],
+    );
+}
+
+/// **A macro's arguments are tokens, not expressions — and a call whose arguments do not read is where that
+/// shows.**
+///
+/// A macro written in an *included* header is in no table this parser is handed, and its arguments are pasted
+/// into types, qualifiers and operators alike:
+///
+/// ```cpp
+/// if constexpr (__is_same(const volatile _Tp, const volatile void))     // bits/new:234
+/// return __reference_constructs_from_temporary(_Elements, _Up&&) …;     // tuple:922
+/// _GLIBCXX_TYPEID(typename std::iterator_traits<_Iterator>::value_type); // bits/formatter.h:485
+/// _MM_REDUCE_OPERATOR_BASIC_EPI16 (+);                                   // avx512vlbwintrin.h:4992
+/// ```
+///
+/// Every one of those is a *call* — the name, the parentheses, the arguments — and not one argument is an
+/// expression. Measured before the fallback, on the 455-file closure: **nine files** had one of these as their
+/// first error (`avx512vlbwintrin.h`, `bits/stl_pair.h`, `bits/formatter.h`, `limits`, `new`, `gthr-default.h`,
+/// `emmintrin.h`, `xmmintrin.h`, `shellapi.h`), and `CHANGELOG`-style declarations like
+/// `WINOLEAPI_(void) CoUninitialize (void);` went with them, because the macro's `(void)` is read as arguments
+/// too. All nine became clean, and no file on either closure changed from clean to failing.
+///
+/// The negative half is the price, and it is pinned here rather than left implicit: **a genuinely broken call is
+/// read as a macro's arguments and reported by nobody.** No shape separates the two — the arguments of a macro
+/// *are* arbitrary tokens — so the choice is between the diagnostic on `g(1 +)` and every use of every macro from
+/// every header. B70 in `docs/grammar-gaps.md` records it as a cost rather than as a gap.
+#[test]
+fn a_macros_arguments_that_are_not_expressions_stay_tokens() {
+    assert_reads(
+        Where::Body,
+        &[
+            "_MM_REDUCE_OPERATOR_BASIC_EPI16 (+);",
+            "if constexpr (__is_same(const volatile _Tp, const volatile void)) { }",
+            "return __reference_constructs_from_temporary(_Elements, _Up&&);",
+            "_GLIBCXX_TYPEID(typename std::iterator_traits<_Iterator>::value_type);",
+            "if (TlsSetValue (__key, CONST_CAST2(void *, const void *, __ptr))) { }",
+            "auto n = __glibcxx_min(char);",
+            // The same shape where the macro's argument is a *cast*: `(__attribute__((__vector_size__ (16))) int)`.
+            "auto v = __builtin_shuffle ((__attribute__((__vector_size__ (16))) int) __A, __B);",
+        ],
+    );
+
+    // The neighbouring shape — a **declaration whose head is such a macro** — used to be the boundary of this
+    // rule and is now read by the one that owns it: `WINOLEAPI_(void) CoUninitialize (void);` is a declaration
+    // whose specifiers are a macro invocation (`docs/grammar-gaps.md` B72), and it is asserted there.
+    assert_reads(
+        Where::File,
+        &["SHSTDAPI_(WINBOOL) InitNetworkAddressControl (void);"],
+    );
+
+    // **Which reading came out.** An argument list that did not read is kept as one `ArgumentList` of raw tokens;
+    // the one that did read has no such node, because its arguments are the expressions they were written as.
+    let arguments_are_tokens = |statement: &str| {
+        let source = format!("void probe() {{ {statement} }}");
+        let tree = CppParser::parse(&source, ParserConfig::default());
+        assert!(
+            tree.get_errors().is_empty(),
+            "`{statement}` is reported: {:?}",
+            tree.get_errors().iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        tree.get_red_root().descendants().any(|node| {
+            matches!(
+                CppSyntaxKind::from(node.kind()),
+                CppSyntaxKind::CallExpr
+            ) && node.children().any(|child| {
+                CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ArgumentList
+            })
+        })
+    };
+
+    assert!(
+        arguments_are_tokens("_MM_REDUCE_OPERATOR_BASIC_EPI16 (+);"),
+        "an argument that is a bare operator is kept as a token group"
+    );
+    assert!(
+        !arguments_are_tokens("g(1, 2);"),
+        "an ordinary call's arguments are expressions, and an `ArgumentList` node here would say they are not"
+    );
+    assert!(
+        !arguments_are_tokens("g(h(x), {1, 2});"),
+        "…including the braced-init-list the call arm already reads"
+    );
+
+    // The price, on purpose: `g(1 +)` is not read as an expression and is **not** reported. Pinned so that a
+    // later narrowing of the fallback fails here first, which is where the reason for it is written down.
+    assert!(
+        arguments_are_tokens("g(1 +);"),
+        "a broken call is read as a macro's arguments — the documented cost of B70"
+    );
+}
+
+/// **`using enum E;` and `register` — two spellings the grammar had no rule for at all.**
+///
+/// Neither is a question about *which* reading: `using enum _Fp_fmt;` (`compare:710`) was reported as
+/// `expected a name` because the `using` rule read the keyword `enum` as the name being introduced, and a
+/// `register` at the start of a declaration (`_mingw.h:607`, `register unsigned int r0 __asm__("r0") = code;`)
+/// was not in the list of tokens a declaration may start with — so the statement reader never asked the
+/// declaration question and read `register` as an expression.
+///
+/// C++20's using-enum-declaration introduces the enum's **enumerators**, not a type name, so nothing is recorded
+/// about it: the tree is a `UsingDecl` holding the `enum` keyword and the name. `register` is a storage-class
+/// specifier and gets the storage-class treatment — a node of its own (`RegisterSpec`, declared **last** among
+/// the kinds so that no stored discriminant changes meaning) produced by the same table `static` and `mutable`
+/// come from, and an entry in `can_begin_a_declaration`.
+///
+/// The third shape below came along with the second and is pinned rather than claimed: a **GNU asm label** on a
+/// declarator (`r0 __asm__("r0")`) has no C++ grammar behind it — like the `asm` *statement* of B67 — so it is
+/// read as a `MacroCall` with every token kept. That is a tolerant reading and not a declaration of what it is;
+/// pinning it means a later node of its own fails here first, which is where the reason will be written down.
+#[test]
+fn a_using_enum_declaration_and_the_register_specifier_read() {
+    // `using enum` in all three places a using-declaration may stand, and with a qualified name.
+    assert_reads(
+        Where::File,
+        &[
+            "enum class E { a };\nusing enum E;",
+            "namespace ns { enum class E { a }; }\nusing enum ns::E;",
+            "enum class E { a };\ntemplate<class T> void f() { using enum E; }",
+        ],
+    );
+    assert_reads(
+        Where::Body,
+        &["using enum E;", "using enum ns::E;"],
+    );
+    assert_reads(Where::Class, &["using enum E;"]);
+
+    // `register` where a declaration may stand, alone and among other specifiers.
+    assert_reads(
+        Where::Body,
+        &[
+            "register int x = 0; (void)x;",
+            "register const char *p = nullptr; (void)p;",
+            "for (register int i = 0; i < 3; ++i) { }",
+        ],
+    );
+    assert_reads(
+        Where::File,
+        &[
+            "register int counter;",
+            "register unsigned int r0 __asm__(\"r0\") = code;",
+        ],
+    );
+
+    // **Which reading came out**, in both halves. A `RegisterSpec` inside the specifier sequence — and the
+    // `using enum` is a `UsingDecl` whose name is the enum's, not a declaration of `enum` as a name.
+    let specifier = |source: &str, kind: CppSyntaxKind| {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert!(
+            tree.get_errors().is_empty(),
+            "`{source}` is reported: {:?}",
+            tree.get_errors().iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        tree.get_red_root()
+            .descendants()
+            .any(|node| CppSyntaxKind::from(node.kind()) == kind)
+    };
+
+    assert!(
+        specifier("void probe() { register int x = 0; }", CppSyntaxKind::RegisterSpec),
+        "`register` is a storage-class specifier, so it gets a specifier node"
+    );
+    assert!(
+        specifier("enum class E { a };\nusing enum E;", CppSyntaxKind::UsingDecl),
+        "`using enum E;` is a using-declaration"
+    );
+    assert!(
+        !specifier("enum class E { a };\nusing enum E;", CppSyntaxKind::MissingNode),
+        "and nothing in it is missing"
+    );
+
+    // The asm label, as tokens under the macro reading (see the test's documentation).
+    let label = CppParser::parse(
+        "register unsigned int r0 __asm__(\"r0\") = code;",
+        ParserConfig::default(),
+    );
+    assert!(
+        label.get_errors().is_empty(),
+        "the asm label on a declarator is not an error: {:?}",
+        label.get_errors().iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+    assert!(
+        label.get_red_root().descendants().any(|node| {
+            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::MacroCall
+        }),
+        "…and its tokens are kept, under the macro reading, with nothing interpreted"
+    );
+}
+
+/// **A macro may stand between the type and the declarator** — and the same three tokens mean the opposite when
+/// the macro is a *suffix*.
+///
+/// ```cpp
+/// void HUGEP **ppvData                  // windef.h's macro, in every COM signature (oleauto.h:71)
+/// unsigned __int64 POINTER_64_INT;      // basetsd.h:11, corecrt.h:35
+/// unsigned __int64 x;                   // …and the same shape with an ordinary declarator
+/// int x MY_DECL_SUFFIX;                 // the *other* reading of `Type Name Name`: `x` declares, the macro is a suffix
+/// ```
+///
+/// The specifier sequence let a name join a type only when the type already written was a **name** — the
+/// `MY_API Widget *p;` shape — so `unsigned __int64 x;` was read as the type `unsigned`, a declarator named
+/// `__int64`, and `x` as a `MacroCall` standing for a declaration: no diagnostic, no `ErrorNode`, every token in
+/// the tree, and the wrong construct (an A0-class wrong tree, and `__int64` is a MinGW typedef, so this is how
+/// most of the Windows headers write a 64-bit variable).
+///
+/// Relaxing that condition to "a type has been named" fixed the three shapes above and **broke the fourth** —
+/// the two are the same tokens with opposite meanings, and two existing tests caught it: the variable's name was
+/// lost (`int x MY_DECL_SUFFIX;` read as a type `int x` with a declarator named `MY_DECL_SUFFIX`) and B71's asm
+/// label stopped being a macro. What separates them is the **spelling of the name that joins**: `__int64`,
+/// `HUGEP`, `MY_API` are written the way a macro is, `x` is not. See `types::written_like_a_macro` — a convention
+/// used here only to choose between two readings that both occur, which is the same last-resort role
+/// `decls::looks_like_a_macro_name` documents.
+#[test]
+fn a_macro_may_stand_between_the_type_and_the_declarator() {
+    assert_reads(
+        Where::File,
+        &[
+            "unsigned __int64 x;",
+            "typedef unsigned __int64 POINTER_64_INT;",
+            "signed __int64 y;",
+            "void f(void HUGEP **ppvData);",
+            "WINOLEAUTAPI SafeArrayAccessData(SAFEARRAY *psa, void HUGEP **ppvData);",
+            "unsigned __int64 f(unsigned __int64 a);",
+            // A **macro invocation as the whole declaration head**, with the declarator after it (B72's second
+            // half): `WINOLEAPI_` expands to `EXTERN_C DECLSPEC_IMPORT type STDAPICALLTYPE`.
+            "WINOLEAPI_(void) CoFreeLibrary (HINSTANCE hInst);",
+            "WINOLEAPI_ (void) OleUninitialize (void);",
+            "MY_API(x) int g(void);",
+            // **Not** here, and it is the boundary of this rule: `STDMETHOD(QueryInterface) (THIS_ REFIID riid,
+            // LPVOID *ppvObj) PURE;` (`commdlg.h:577`). Its declarator has **no name** — the name is inside the
+            // macro's own argument list (`#define STDMETHOD(method) virtual HRESULT STDMETHODCALLTYPE method`) — so
+            // the parameter list that follows the macro belongs to a name this layer cannot see. Reading it as a
+            // declaration would declare a function with no name; the shape is left to B72's third item.
+            // The shapes that were already read, which must keep reading.
+            "MY_API Widget *p;",
+            "MY_API Widget const w;",
+            // **The false positive this rule had to grow a guard for**: `__attribute__((…))` is also a name, a
+            // balanced group and then an identifier, and it has a reader that knows what it is. Reading it as a
+            // macro specifier ended the specifier sequence at the attribute, so the declaration below had no type
+            // and `bits/stl_tree.h` — clean before this rule — reported `expected ;` in the middle of it.
+            "__attribute__((__nonnull__)) void f(const bool __insert_left);",
+            "__attribute__((__nonnull__,__returns_nonnull__))\n  _Rb_tree_node_base*\n  _Rb_tree_rebalance_for_erase(_Rb_tree_node_base* const __z,\n                               _Rb_tree_node_base& __header) throw ();",
+            "__declspec(align(8)) int aligned;",
+            "_GLIBCXX_NODISCARD _GLIBCXX20_CONSTEXPR bool empty() const;",
+            "int x;",
+            "T x;",
+            "int a, b;",
+        ],
+    );
+    assert_reads(
+        Where::Body,
+        &[
+            "unsigned __int64 n = 0; (void)n;",
+            "void *HUGEP p = nullptr; (void)p;",
+        ],
+    );
+
+    // **Which reading came out.** A specifier sequence of two words, no `MacroCall` anywhere in the declaration,
+    // and the declarator is the *second* name — for the macro-between-type-and-declarator shape; and for the
+    // suffix shape the exact opposite on all three counts.
+    let shape = |source: &str| {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert!(
+            tree.get_errors().is_empty(),
+            "`{source}` is reported: {:?}",
+            tree.get_errors().iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        let root = tree.get_red_root();
+        let specifiers = root
+            .descendants()
+            .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::DeclSpecifierSeq)
+            .map(|sequence| sequence.text().to_string().trim().to_string())
+            .unwrap_or_default();
+        let macros = root
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::MacroCall)
+            .count();
+        let declarator = root
+            .descendants()
+            .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declarator)
+            .map(|node| node.text().to_string().trim().to_string())
+            .unwrap_or_default();
+        (specifiers, macros, declarator)
+    };
+
+    assert_eq!(
+        shape("unsigned __int64 x;"),
+        ("unsigned __int64".to_string(), 0, "x".to_string()),
+        "the macro is a word of the *type*, and `x` is the declarator — the reading that was silently wrong"
+    );
+    assert_eq!(
+        shape("int x MY_DECL_SUFFIX;"),
+        ("int".to_string(), 1, "x".to_string()),
+        "…and here the macro is a suffix: the declarator is `x` and the macro is its own node"
+    );
+    assert_eq!(
+        shape("MY_API Widget *p;"),
+        ("MY_API Widget".to_string(), 0, "*p".to_string()),
+        "the shape the rule was written for is unchanged: the macro is in the type"
+    );
+
+    // **Who the declaration names.** A macro standing for the specifiers must not become the declared name: the
+    // declarator after it does. `WINOLEAPI_(void) CoFreeLibrary (HINSTANCE hInst);` declares `CoFreeLibrary` — a
+    // function with a parameter list — and the macro is a `MacroCall` inside the specifier sequence, with its
+    // argument list kept as tokens. Read the other way round, the file would declare a function called
+    // `WINOLEAPI_` and `CoFreeLibrary` would be rubble.
+    let declared = |source: &str| {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert!(
+            tree.get_errors().is_empty(),
+            "`{source}` is reported: {:?}",
+            tree.get_errors().iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        tree.get_red_root()
+            .descendants()
+            .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::InitDeclarator)
+            .map(|node| node.text().to_string().trim().to_string())
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        declared("WINOLEAPI_(void) CoFreeLibrary (HINSTANCE hInst);"),
+        "CoFreeLibrary (HINSTANCE hInst)".to_string(),
+        "the declarator after the macro is the declaration's declarator"
+    );
+    assert_eq!(
+        declared("WINOLEAPI_ (void) OleUninitialize (void);"),
+        "OleUninitialize (void)".to_string(),
+        "…including the spelling with a space before the macro's parenthesis"
+    );
+}
+
+/// **The same macro-shaped name, one level down: inside a type-id, and inside a parenthesised declarator.**
+///
+/// B72 and B73 put a macro-shaped name between a type and a declarator. The same spelling turns up in two other
+/// places, and each has its own reason:
+///
+/// ```cpp
+/// static __inline unsigned __LONG32 HandleToULong (const void *h)              // basetsd.h:68
+/// { return ((unsigned __LONG32) (ULONG_PTR) h); }                              // the cast's *type-id*
+/// typedef DWORD (WINAPI PM_OPEN_PROC)(LPWSTR);                                 // winperf.h:180
+/// typedef DWORD (WINAPI PM_COLLECT_PROC)(LPWSTR,LPVOID *,LPDWORD,LPDWORD);     // winperf.h:181
+/// ```
+///
+/// A **type-id** has no declarator, so `allow_second_name` is `false` there — which is right for the question it
+/// was written for (a second *name* would run `template <typename T, typename U>` together) and wrong for a name
+/// spelled the way an unexpanded type is spelled: `(unsigned __LONG32)` is a cast, and refusing the name left the
+/// cast unreadable and every one of those inline functions broken. A **parenthesised declarator** has the macro
+/// *before* the name — `(WINAPI PM_OPEN_PROC)`, where `WINAPI` is `__stdcall` — and the group is followed by the
+/// parameter list that belongs to the declarator.
+///
+/// The third assertion is the one that matters most, because the first version of the declarator half broke it:
+/// `void C::f(_Predicate __pred) { }` has the *identical* group `(IDENTIFIER IDENTIFIER)`, and claiming it as a
+/// parenthesised declarator turned a member definition into rubble — the body's declarations landed outside it and
+/// the error surfaced on a `typedef` three lines further down (`debug/safe_sequence.tcc`, which had been clean).
+/// What separates the two is the **follower**: a parameter list is never followed by another `(` belonging to the
+/// same declarator, and the function-pointer typedef always is.
+#[test]
+fn a_macro_shaped_name_inside_a_type_id_and_a_parenthesised_declarator() {
+    assert_reads(
+        Where::Body,
+        &[
+            "auto v = ((unsigned __LONG32) h);",
+            "auto v = ((void *) (LONG_PTR) (__LONG32) h);",
+            "auto n = sizeof(unsigned __LONG32);",
+            "auto p = (unsigned __int64 *) h;",
+        ],
+    );
+    assert_reads(
+        Where::File,
+        &[
+            "typedef DWORD (WINAPI PM_OPEN_PROC)(LPWSTR);",
+            "typedef DWORD (WINAPI PM_COLLECT_PROC)(LPWSTR,LPVOID *,LPDWORD,LPDWORD);",
+            "typedef DWORD (WINAPI PM_CLOSE_PROC)(void);",
+            "static int HandleToULong (const void *h) { return ((unsigned __LONG32) h); }",
+            // …and the shapes that share the tokens, which must keep their own readings.
+            "void C::f(_Predicate __pred) { }",
+            "void C::g(_Predicate __pred);",
+            "void f(int (_Predicate __pred));",
+            "typedef void (*fp)(int);",
+            "int x MY_DECL_SUFFIX;",
+        ],
+    );
+
+    // **A parameter list stays a parameter list.** The group `(_Predicate __pred)` is the shape the declarator
+    // half claims when another `(` follows, so this is where a mis-claim would show: the parameter's name must be
+    // `__pred` and the group must still be a `ParameterList`.
+    let parameter_list = |source: &str| {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert!(
+            tree.get_errors().is_empty(),
+            "`{source}` is reported: {:?}",
+            tree.get_errors().iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        let root = tree.get_red_root();
+        let parameters = root
+            .descendants()
+            .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ParameterList)
+            .map(|list| {
+                list.descendants()
+                    .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Parameter)
+                    .map(|parameter| parameter.text().to_string().trim().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let macros = root
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::MacroCall)
+            .count();
+        (parameters, macros)
+    };
+
+    assert_eq!(
+        parameter_list("void C::f(_Predicate __pred) { }"),
+        (vec!["_Predicate __pred".to_string()], 0),
+        "a parameter list with a macro-shaped type and a name is a parameter list"
+    );
+    assert_eq!(
+        parameter_list("void C::g(_Predicate __pred);"),
+        (vec!["_Predicate __pred".to_string()], 0),
+        "…and the same in a declaration"
+    );
+
+    // **The macro before the name is a `MacroCall`, and the name after it is the declarator's.** The group is
+    // followed by the parameter list that belongs to that declarator, which is the follower that told the two
+    // shapes apart in the first place.
+    let declared = |source: &str| {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert!(
+            tree.get_errors().is_empty(),
+            "`{source}` is reported: {:?}",
+            tree.get_errors().iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        let root = tree.get_red_root();
+        let macros = root
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::MacroCall)
+            .map(|node| node.text().to_string().trim().to_string())
+            .collect::<Vec<_>>();
+        let declarator = root
+            .descendants()
+            .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declarator)
+            .map(|node| node.text().to_string().trim().to_string())
+            .unwrap_or_default();
+        (macros, declarator)
+    };
+
+    assert_eq!(
+        declared("typedef DWORD (WINAPI PM_OPEN_PROC)(LPWSTR);"),
+        (
+            vec!["WINAPI".to_string()],
+            "(WINAPI PM_OPEN_PROC)(LPWSTR)".to_string()
+        ),
+        "the calling convention is a macro, the name after it is the declarator's, and the parameter list binds \
+         to that same declarator — which is what makes this a function-pointer typedef"
+    );
+}
+
+/// **The name after an anonymous class definition is the declarator** — including when nothing follows it.
+///
+/// ```cpp
+/// union
+/// {
+///   __m128h __a[2];
+///   __m256h __v;
+/// } __u = { .__v = __A };        // avx512fp16vlintrin.h:155
+/// ```
+///
+/// A *named* definition writes a name, so the sequence has a type by the time the declarator arrives and
+/// `has_type_specifier` decides correctly. An **anonymous** one never does: `union { … }` sets no flag, so the
+/// early return in `name_joins_the_type` — "no type yet, so this name can only be the type" — took `__u` for a
+/// word of the type, and the declaration came out as `union { … } __u` **with no declarator at all**.
+///
+/// Two faces, and the quiet one is worse: with no initializer there was **no diagnostic** — no error, no
+/// `ErrorNode`, no `MissingNode`, every token in the tree, and a variable that is not declared; with one, the
+/// `expected a declarator name` was reported against the `=` (because an initializer needs something to
+/// initialise). The body is a complete type whatever the flags say, so the class-definition question is asked
+/// **before** the "no type yet" return.
+#[test]
+fn a_name_after_an_anonymous_class_definition_is_the_declarator() {
+    assert_reads(
+        Where::Body,
+        &[
+            "union { int a; } u;",
+            "union { int a; } u = { 1 };",
+            "struct { T a; } x = { 1 };",
+            "struct { __m128h a[2]; __m256h v; } __u = { .__v = __A };",
+            "union { __m128h __a[2]; __m256h __v; } __u;",
+            "struct { int a; } *p = nullptr;",
+        ],
+    );
+    assert_reads(
+        Where::File,
+        &[
+            "typedef struct { int a; } Alias;",
+            "enum E { A } e;",
+            "struct S { int a; } x;",
+            "struct { int a; } arr[] = { { 1 }, { 2 } };",
+            "static union { int a; float b; } value = { .b = 1.0f };",
+        ],
+    );
+
+    // **Where the name ended up.** It is the declarator of an `InitDeclarator` — for the shape *with* an
+    // initializer, which used to be reported, and for the silent one, which used to be accepted with the name
+    // swallowed into the type. `MY_DECL_SUFFIX` after it must stay out of the way of both.
+    let declarator = |source: &str| {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert!(
+            tree.get_errors().is_empty(),
+            "`{source}` is reported: {:?}",
+            tree.get_errors().iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        let root = tree.get_red_root();
+        // The **last** one: the first is the enclosing function's own declarator (`probe()`), and the one this
+        // test is about is inside its body.
+        let all: Vec<_> = root
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::InitDeclarator)
+            .map(|node| node.text().to_string().trim().to_string())
+            .collect();
+        all.last().cloned().unwrap_or_default()
+    };
+
+    assert_eq!(
+        declarator("void probe() { union { int a; } u = { 1 }; }"),
+        "u = { 1 }".to_string(),
+        "the initializer's declarator is `u`"
+    );
+    assert_eq!(
+        declarator("void probe() { union { int a; } u; }"),
+        "u".to_string(),
+        "…and with nothing after it, `u` is still the declarator — the silence was the defect"
+    );
+
+    // The type half: the definition is in the specifier sequence and the name is **not**.
+    let tree = CppParser::parse(
+        "void probe() { union { int a; } u = { 1 }; }",
+        ParserConfig::default(),
+    );
+    let root = tree.get_red_root();
+    let specifiers = root
+        .descendants()
+        .find(|node| {
+            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::DeclSpecifierSeq
+                && node
+                    .children()
+                    .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::UnionDef)
+        })
+        .map(|node| node.text().to_string().trim().to_string())
+        .unwrap_or_default();
+    assert_eq!(
+        specifiers, "union { int a; }",
+        "the type is the definition, and `u` is not a word of it"
+    );
+}
+
+/// **A macro from a header is a statement of its own**, and the three boundaries that keep it from eating
+/// anything else.
+///
+/// ```cpp
+/// __glibcxx_function_requires(_LessThanComparableConcept<_Tp>)     // bits/stl_algobase.h:237
+/// //return __b < __a ? __b : __a;
+/// if (__b < __a)                                                   // the next token cannot continue a call
+///   return __b;
+/// ```
+///
+/// libstdc++ defines these concept-requirement macros as **nothing at all**, so the invocation is a whole
+/// statement with no `;` — and the name is in no table this parser is handed. What makes the reading available is
+/// three things at once, and each was bought by something going wrong without it:
+///
+/// * the name is one the **implementation reserved** (`_`-leading). `FOO(x)` is spelled like a macro too, but it
+///   is also how a user's own function is spelled, and a macro of theirs written in this file would be `#define`d
+///   here — evidence this rule does not have;
+/// * what follows the group **cannot continue the expression**: `if`, `#`, `}`, `return`, a following name, a
+///   declaration's first word. A block is not in that set (`g(x) { }` keeps its error);
+/// * the reading is asked for **after** the declaration reading — and when that reading *succeeds*, which it does
+///   here (`NAME ( parameter )` is a function declaration), the `;` is what tells the two apart: a declaration has
+///   one, this macro's body supplies it. The first version asked before the declaration attempt and took B73's
+///   `WINOLEAPI_(void) f(…)` away from it.
+#[test]
+fn a_macro_from_a_header_can_be_a_statement_of_its_own() {
+    assert_reads(
+        Where::Body,
+        &[
+            "__glibcxx_function_requires(_Concept<T>) if (a < b) return;",
+            "#if X\n  __glibcxx_function_requires(_Concept<T>)\n#endif\n  g();",
+            // Two in a row: the second one's follower is whatever comes after both.
+            "__glibcxx_function_requires(_ConvertibleConcept<A, B>) __glibcxx_function_requires(_ConvertibleConcept<B, A>) typedef int T1;",
+            "__glibcxx_function_requires(_Concept<T>) return;",
+        ],
+    );
+    assert_reads(
+        Where::File,
+        &[
+            "class B { } _GLIBCXX11_DEPRECATED_SUGGEST(\"std::bind\");",
+            "__glibcxx_function_requires(_Concept<T>) void g();",
+        ],
+    );
+
+    // **The boundaries.** A call with its `;` missing is still a call when the name is not reserved, and a block
+    // after a call is still the mistake it was.
+    let reported = |source: &str| {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        !tree.get_errors().is_empty()
+    };
+    assert!(
+        reported("void f() { FOO(x) }"),
+        "`FOO(x)` is not reserved: a call with its `;` missing is an error"
+    );
+    assert!(
+        reported("void f() { g(x)\n  return; }"),
+        "…and a lowercase name is not a macro either"
+    );
+    assert!(
+        reported("void f() { g(x) { } }"),
+        "a block after a call is the mistake the block form of this rule weighs"
+    );
+
+    // **B73's shape is untouched**, which is the ordering this rule had to learn: the macro is the declaration's
+    // *specifier* there, not a statement of its own.
+    let tree = CppParser::parse(
+        "WINOLEAPI_(void) CoFreeLibrary (HINSTANCE hInst);",
+        ParserConfig::default(),
+    );
+    assert!(tree.get_errors().is_empty(), "B73's shape still reads");
+    assert!(
+        tree.get_red_root().descendants().any(|node| {
+            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration
+        }) && !tree
+            .get_red_root()
+            .children()
+            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::MacroCall),
+        "it is one declaration whose specifiers hold the macro — not a macro statement and a second declaration"
+    );
+}
+
 /// The empty string when the parse is clean, or a description of the first thing wrong with it.
 fn report(source: &str, tree: &CppSyntaxTree) -> Result<(), String> {
     if let Some(error) = tree.get_errors().first() {

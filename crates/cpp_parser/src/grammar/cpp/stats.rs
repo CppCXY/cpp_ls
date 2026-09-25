@@ -394,11 +394,139 @@ fn parse_asm_statement(p: &mut CppParser) -> ParseResult {
 /// supplies the rest, so it needs evidence rather than a guess. The convention stays where it was — as the
 /// fallback for a macro from a header, in [`super::decls::a_macro_definition_follows`], where the alternative is a
 /// syntax error either way.
+///
+/// # The second form: a macro from a header, where the tokens *end* the statement
+///
+/// One family of macros from an included header is used this way and *only* this way — the concept-requirement
+/// macros libstdc++ defines as nothing at all:
+///
+/// ```cpp
+/// __glibcxx_function_requires(_LessThanComparableConcept<_Tp>)     // bits/stl_algobase.h:237
+/// //return __b < __a ? __b : __a;
+/// if (__b < __a)                                                   // the next token cannot continue a call
+///   return __b;
+/// ```
+///
+/// and the same shape at the end of an `#if` branch, where the next token is the directive:
+///
+/// ```cpp
+/// #if __cplusplus < 201103L
+///   __glibcxx_function_requires(_SGIAssignableConcept<_Tp>)        // bits/move.h:233
+/// #endif
+/// ```
+///
+/// Neither name is in any table this parser is handed, and both readings of those tokens are real, so that rule is
+/// drawn as narrowly as the shapes allow — see [`at_a_macro_call_statement_without_evidence`], which is where it
+/// lives and where its three boundaries are written down.
 fn at_a_macro_call_statement(p: &CppParser) -> bool {
     p.current_token() == CppTokenKind::Identifier
         && p.peek_next_token() == CppTokenKind::LeftParen
         && p.macro_evidence(p.current_token_text())
             .is_some_and(MacroEvidence::may_be_a_statement_without_a_semicolon)
+}
+
+/// Is there a **macro invocation from an included header** at the token `index`?
+///
+/// The form [`at_a_macro_call_statement`] cannot claim, because no table knows the name. Three boundaries, each
+/// one bought by something going wrong without it:
+///
+/// * the name must be one the **implementation reserved** — it starts with an underscore
+///   ([`super::types::written_in_the_implementations_namespace`]). A name like `FOO` is *also* how a macro is
+///   written, but it is how a user's function is written too, and a file-local macro of their own would be
+///   `#define`d in this file — which is evidence, and this rule has none. `FOO(x)` with no `;` keeps its error
+///   (`a_macro_from_a_header_can_stand_where_a_declaration_goes` says so);
+/// * what follows the group must be a token that **cannot continue the expression** — see [`ends_a_statement`]. A
+///   block is deliberately **not** one of them, because `g(x) { }` is the mistake the block form of this rule
+///   already has to weigh (see [`super::decls::a_macro_definition_follows`]);
+/// * the reading is asked for **after** the declaration reading. At file scope `MACRO(args) name (…)` is a
+///   *declaration whose specifiers are the macro* (`docs/grammar-gaps.md` B73), and a rule that claimed it first
+///   would take that reading away — the first version of this one did exactly that, and
+///   `a_macro_may_stand_between_the_type_and_the_declarator` caught it.
+///
+/// The declaration-or-expression rule asks this about the token the statement *began* at, because the declaration
+/// reading may have consumed the whole shape and reported nothing: `__glibcxx_function_requires(_Concept<T>)` is a
+/// perfectly good **function declaration** of that name with one unnamed parameter, and what tells the two apart is
+/// that a declaration ends at its `;` — the macro's body supplies that `;`, so there is none, and the token after
+/// the group cannot continue a declaration.
+pub(super) fn a_macro_invocation_starts_at(p: &CppParser, index: usize) -> bool {
+    let name = p.token_text_at(index);
+    p.token_kind_at(index) == CppTokenKind::Identifier
+        && p.token_kind_at(super::decls::next_significant_index(p, index)) == CppTokenKind::LeftParen
+        && p.macro_evidence(name).is_none()
+        && super::types::written_in_the_implementations_namespace(name)
+        && kind_after_the_balanced_group(p, index).is_some_and(ends_a_statement)
+}
+
+/// The kind of the first significant token **after** the balanced group that follows the token at `index`.
+///
+/// `None` when there is no such group (an unbalanced one, or a `;` before it closes — the call already ended, so
+/// the question does not arise).
+fn kind_after_the_balanced_group(p: &CppParser, index: usize) -> Option<CppTokenKind> {
+    let mut index = super::decls::next_significant_index(p, index);
+    let mut depth = 0isize;
+    while index < p.token_count() {
+        match p.token_kind_at(index) {
+            CppTokenKind::LeftParen => depth += 1,
+            CppTokenKind::RightParen => {
+                depth -= 1;
+                if depth == 0 {
+                    let after = super::decls::next_significant_index(p, index);
+                    return Some(p.token_kind_at(after));
+                }
+            }
+            CppTokenKind::Semicolon | CppTokenKind::Eof | CppTokenKind::None => return None,
+            _ => {}
+        }
+        index += 1;
+    }
+
+    None
+}
+
+/// Can this token **not** continue the expression that ends with the group before it — so that the group was the
+/// whole of what the file wrote there?
+///
+/// The list is deliberately made of answers that end a statement rather than of operators: `if`, `#`, `}`, `return`
+/// and a following name all say the invocation is complete, while `.`, `[`, `(`, `->` and every operator say it
+/// continues. A **block** is not in the list, because `g(x) { }` is the mistake the block form of the
+/// macro-statement rule already has to weigh (see [`super::decls::a_macro_definition_follows`]).
+fn ends_a_statement(kind: CppTokenKind) -> bool {
+    matches!(
+        kind,
+        // The scope, and the directives that end a line inside it.
+        CppTokenKind::RightBrace
+            | CppTokenKind::Hash
+            | CppTokenKind::Eof
+            | CppTokenKind::None
+            // A statement keyword: what follows a complete invocation.
+            | CppTokenKind::IfKeyword
+            | CppTokenKind::WhileKeyword
+            | CppTokenKind::ForKeyword
+            | CppTokenKind::SwitchKeyword
+            | CppTokenKind::DoKeyword
+            | CppTokenKind::ReturnKeyword
+            | CppTokenKind::TryKeyword
+            | CppTokenKind::ThrowKeyword
+            | CppTokenKind::BreakKeyword
+            | CppTokenKind::ContinueKeyword
+            | CppTokenKind::GotoKeyword
+            | CppTokenKind::CaseKeyword
+            | CppTokenKind::DefaultKeyword
+            | CppTokenKind::ElseKeyword
+            | CppTokenKind::CatchKeyword
+            // …and a name, which starts the next declaration or statement rather than continuing this expression.
+            // Two invocations in a row are ordinary in these headers, and the second one's follower is whatever
+            // comes after both:
+            //
+            // ```cpp
+            // __glibcxx_function_requires(_ConvertibleConcept<_ValueType1, _ValueType2>)   // :170
+            // __glibcxx_function_requires(_ConvertibleConcept<_ValueType2, _ValueType1>)   // :172
+            // typedef typename iterator_traits<_ForwardIterator1>::reference _ReferenceType1;
+            // ```
+            | CppTokenKind::Identifier
+    )
+        // …or the start of a **declaration**, which is the same answer one step along.
+        || starts_a_new_declaration(kind)
 }
 
 /// Does a **macro invocation that stands for a declaration** start at the cursor?
@@ -500,7 +628,7 @@ fn ends_the_scope(kind: CppTokenKind) -> bool {
 /// The same node the statement form produces, for the same reason — a macro's meaning is not knowable here, and
 /// dressing it up as a declaration would hide that. No `;` is consumed: a macro standing for a declaration does
 /// not write one, and a `;` that is there belongs to the empty statement rule.
-fn parse_a_macro_that_stands_for_a_declaration(p: &mut CppParser) -> ParseResult {
+pub(super) fn parse_a_macro_that_stands_for_a_declaration(p: &mut CppParser) -> ParseResult {
     let m = p.mark(CppSyntaxKind::MacroCall);
 
     let name = p.mark(CppSyntaxKind::NameExpr);
@@ -569,12 +697,35 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
         return super::decls::parse_declaration(p);
     }
 
+    let start = p.current_token_index();
     let checkpoint = p.checkpoint();
     match super::decls::parse_declaration(p) {
-        Ok(marker) => Ok(marker),
+        Ok(marker) => {
+            // The declaration reading **succeeded**, and that is not the end of the question: a macro invocation
+            // from an included header reads as a function declaration too — `__glibcxx_function_requires(_Concept<T>)`
+            // is `NAME ( parameter )`, and the declaration rule has no reason to refuse it. What separates the two
+            // is the `;`: a declaration has one and the macro's body supplies it, so there is none and the token
+            // after the group cannot continue a declaration. Only a name the implementation reserved is asked
+            // about, so `Widget w(1);` and every ordinary missing-`;` mistake keep their readings.
+            if p.last_consumed_token_kind() != Some(CppTokenKind::Semicolon)
+                && a_macro_invocation_starts_at(p, start)
+            {
+                p.rollback(checkpoint);
+                return parse_macro_call(p);
+            }
+            Ok(marker)
+        }
         Err(_) => {
-            // Not a declaration. Rewind and read it as an expression.
+            // Not a declaration. Rewind **first**: the question below is asked about the token the statement began
+            // at, and the failed attempt left the cursor somewhere past it.
             p.rollback(checkpoint);
+            // The same reading is asked for once more, because a shape the declaration rule *refuses* may be this
+            // one: `_foo(x)` in front of `}` reads as a declaration of a type `_foo` with a parameter list, which
+            // is a declaration of nothing. See [`at_a_macro_call_statement_without_evidence`].
+            if a_macro_invocation_starts_at(p, start) {
+                return parse_macro_call(p);
+            }
+            // Not a declaration, and not a macro from a header. Read it as an expression.
             parse_expression_statement(p)
         }
     }
