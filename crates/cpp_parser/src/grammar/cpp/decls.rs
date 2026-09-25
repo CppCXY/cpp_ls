@@ -2544,7 +2544,7 @@ fn the_declaration_has_a_type(p: &CppParser, declarator_from: usize) -> bool {
     if declarator_starts_with_a_type_keyword(p) || declarator_starts_with_a_known_type_name(p) {
         return true;
     }
-    if p.has_qualified_declaration_type_name() {
+    if p.has_qualified_declaration_type_name() || the_head_of_the_declaration_is_qualified(p) {
         return true;
     }
 
@@ -3519,6 +3519,33 @@ pub fn parse_parameter_list(p: &mut CppParser) -> ParseResult {
         return Ok(m.complete(p));
     }
 
+    // **How many conditionals were open when this list began** — the gate of the tail seam at the end, and the
+    // thing that separates the two spellings which otherwise look identical from there:
+    //
+    // ```cpp
+    //     random_shuffle(_RAIter, _RAIter,              // parallel/algorithmfwd.h:700 — the tail per branch
+    // #if __cplusplus >= 201103L                        ← the conditional is *inside* the list
+    //            _RandomNumberGenerator&&);
+    // #else
+    //            _RandomNumberGenerator&);
+    // #endif
+    //
+    // #if X
+    //   void f(int a);                                  // …and this one is a whole declaration per branch:
+    // #else                                             the `#if` belongs to the statement, and `void g(int a)`
+    //   void g(long a);                                 reads as *parameters* just as well as the tail above does
+    // #endif
+    // ```
+    //
+    // Without the comparison, the second spelling was read as the first: the `;` before the `#else` is the
+    // declaration's, and reading the next branch's text as more parameters produced garbage —
+    // `type_traits:1177` and `stl_iterator.h:3023` were how that showed up. With it, the tail seam fires only when
+    // the branch it closes was opened after this list began.
+    //
+    // The count comes from the directive rule rather than from this function, because a nested reading may consume
+    // a directive the list never sees — see [`CppParser::open_conditionals`].
+    let conditionals_when_the_list_began = p.open_conditionals();
+
     loop {
         // A **directive between parameters** — the same seam as the one in the template parameter list, and the
         // spelling `bits/algorithmfwd.h:700` writes:
@@ -3600,7 +3627,124 @@ pub fn parse_parameter_list(p: &mut CppParser) -> ParseResult {
     }
 
     expect_token(p, CppTokenKind::RightParen)?;
+
+    // **The list's tail written once per branch** — `parallel/algorithmfwd.h:700`:
+    //
+    // ```cpp
+    //     random_shuffle(_RAIter, _RAIter,
+    // #if __cplusplus >= 201103L
+    //            _RandomNumberGenerator&&);
+    // #else
+    //            _RandomNumberGenerator&);
+    // #endif
+    // ```
+    //
+    // The `)` just consumed closes the list **in this branch**, and the `;` after it is the declaration's — but
+    // the `#else` branch writes the same tail again: more parameters, another `)`, another `;`. So the `)` is not
+    // the end of the list, it is the end of *this spelling* of it, and the branches are alternatives of one list.
+    //
+    // Each spelling's `;` is read here with its tail, and the declaration is told
+    // ([`CppParser::note_the_terminator_came_from_a_branch`]) — it would otherwise ask for a `;` and find
+    // `#endif`. The last spelling's `;` is consumed here too, because the construct being read is the whole
+    // per-branch tail and not just its first spelling.
+    //
+    // The gate is two conditions rather than one: a `;` immediately followed by a directive that **opens another
+    // branch**, *and* a conditional opened after this list began (`conditionals_when_the_list_began`). A `;`
+    // followed by an `#endif`, or by the next declaration, stays where it has always been — with the declaration.
+    let mut read_a_branch_of_the_tail = false;
+    while p.open_conditionals() > conditionals_when_the_list_began
+        && let Some(writes_the_terminator) = a_branch_continues_the_tail(p)
+    {
+        if writes_the_terminator {
+            p.bump(); // this branch's `;`
+            p.note_the_terminator_came_from_a_branch();
+            read_a_branch_of_the_tail = true;
+        }
+
+        while p.current_token() == CppTokenKind::Hash {
+            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+        }
+
+        // …and the branch's own tail: the parameters it repeats, and the `)` that closes the list there.
+        while p.current_token() != CppTokenKind::RightParen && !p.is_eof() {
+            if let Err(err) = parse_one_parameter(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+            if p.current_token() != CppTokenKind::Comma {
+                break;
+            }
+            p.bump();
+        }
+
+        if let Err(err) = expect_token(p, CppTokenKind::RightParen) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+    }
+
+    // The **last** spelling's `;`: this construct read the tail on both sides of the conditional, so it reads the
+    // terminator the last branch wrote as well — and if the file wrote none, the declaration still has the flag.
+    if read_a_branch_of_the_tail && p.current_token() == CppTokenKind::Semicolon {
+        p.bump();
+    }
+
     Ok(m.complete(p))
+}
+
+/// Does a **branch** follow the construct whose tail may be written once per branch — and does it carry the
+/// declaration's terminator?
+///
+/// The gate of the tail seams — [`parse_parameter_list`], the template argument list's, and a conditional's, which
+/// all ask the same question about the same spelling. Two answers, because the two spellings differ in exactly
+/// this:
+///
+/// ```cpp
+///     random_shuffle(_RAIter, _RAIter,                      // parallel/algorithmfwd.h:700 — a `;` per branch
+/// #if __cplusplus >= 201103L
+///            _RandomNumberGenerator&&);
+/// #else
+///            _RandomNumberGenerator&);
+/// #endif
+///
+///     void random_shuffle(…,                                // bits/stl_algo.h:4600 — the terminator is shared
+/// #if __cplusplus >= 201103L
+///            _RandomNumberGenerator&& __rand)
+/// #else
+///            _RandomNumberGenerator& __rand)
+/// #endif
+///     { … }
+/// ```
+///
+/// * `Some(true)` — `;` then `#else`/`#elif`: the branch writes the declaration's terminator, so the construct
+///   reads it (and the caller is told, since it would otherwise ask for one and find `#endif`);
+/// * `Some(false)` — the branch opener directly after the tail: nothing is written, and what ends the declaration
+///   (here a body) stands after the `#endif` and stays the caller's business;
+/// * `None` — no branch follows: a `;` followed by anything else is the declaration's own terminator, and reading
+///   it here would take it from the rule that owns it.
+///
+/// Nothing is consumed: this is a lookahead, because the answer decides whether the `;` belongs to the construct
+/// being read or to the declaration around it. The other half of the gate is a *count* — how many conditionals are
+/// open now against how many were open when the construct began — and it comes from the directive rule, not from
+/// the construct: see [`CppParser::open_conditionals`].
+pub(super) fn a_branch_continues_the_tail(p: &CppParser) -> Option<bool> {
+    let mut index = p.current_token_index();
+    let mut writes_the_terminator = false;
+
+    if p.token_kind_at(index) == CppTokenKind::Semicolon {
+        writes_the_terminator = true;
+        index = next_significant_index(p, index);
+    }
+
+    if p.token_kind_at(index) != CppTokenKind::Hash {
+        return None;
+    }
+
+    let directive = next_significant_index(p, index);
+    matches!(p.token_text_at(directive), "else" | "elif").then_some(writes_the_terminator)
 }
 
 /// One parameter, with the **pack marker** that belongs to it.
@@ -4085,6 +4229,13 @@ fn parse_member(p: &mut CppParser) -> ParseResult {
 
 /// Consume a `;`, or report it as missing without consuming anything.
 pub fn expect_semicolon(p: &mut CppParser) -> ParseResult {
+    // **A `;` a conditional branch already carried.** The construct just read was written once per branch and its
+    // tail included the terminator, so there is nothing to ask for — see
+    // [`CppParser::take_the_terminator_came_from_a_branch`], which is a *take* precisely so that one declaration's
+    // answer cannot excuse the next one's missing `;`.
+    if p.take_the_terminator_came_from_a_branch() {
+        return Ok(CompleteMarker::empty());
+    }
 
     if p.current_token() == CppTokenKind::Semicolon {
         p.bump();
@@ -4488,6 +4639,20 @@ pub fn parse_using_declaration(p: &mut CppParser) -> ParseResult {
         p.close_marks_above(base);
         return Err(err);
     }
+
+    // …and the **macro** spelling of the same attribute, which is what `type_traits` writes and what the standard
+    // library spells nearly every other deprecation with:
+    //
+    // ```cpp
+    //   template<class _Tp, size_t _Len>
+    //     using aligned_storage_t _GLIBCXX23_DEPRECATED
+    //       = typename aligned_storage<_Len, _Alignof<_Tp>>::type;
+    // ```
+    //
+    // A name between an alias's own name and its `=` cannot be anything else — the next token is the `=` or it is
+    // not an alias — so it is read by [`eat_a_macro_suffix`], the same reader the declarator's suffixes use, and
+    // which already knows a macro invocation with arguments from one without.
+    while eat_a_macro_suffix(p) {}
 
     // The type's **suffixes**: `using Arr = int[4];`, `using Fn = int(char);`, `using P = int(*)[4];`.
     //

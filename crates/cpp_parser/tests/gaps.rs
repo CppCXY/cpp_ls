@@ -1409,18 +1409,19 @@ fn a_conditional_may_decide_a_template_head() {
          list is what the conditional spells twice"
     );
 
-    // The one that is still not read: a declaration whose **tail** — and whose `;` — is written per branch.
-    assert_does_not_read_yet(
-        Where::File,
-        &[(
-            "template<typename I>\n  using K = remove_const_t<\n#if X\n    tuple_element_t<0, T>>;\n#else\n    \
-             typename I::first_type>;\n#endif",
-            "a declaration written once per branch where each branch supplies its own tail **and its own `;`** \
-             (`bits/stl_iterator.h:3090`): the shared part is `remove_const_t<`, and branch one closes it and ends \
-             the declaration, so branch two's text arrives at a declaration that is already finished. Reading it \
-             needs the alias rule to take a *tail* per branch the way `parse_a_definition_per_branch` takes a \
-             *payload* per branch — with the `=` shared rather than repeated",
-        )],
+    // **The tail per branch reads now**, and it is the *list* that reads it: a `>` closes this list in one
+    // spelling, and when the `;` after it is followed by an `#else`/`#elif` — and this list opened that
+    // conditional inside itself — the branch's own tail is read as the same list. The claim is the one every
+    // spelling of the seam makes: one list, every spelling in it, and the directives are its own nodes.
+    let source = "template<typename I>\n  using K = remove_const_t<\n#if X\n    tuple_element_t<0, T>>;\n#else\n    \
+                  typename I::first_type>;\n#endif";
+    assert_reads(Where::File, &[source]);
+    assert_eq!(
+        argument_list_holds(source),
+        (2, 4),
+        "one argument list: the `#if` and the `#else` are its own, and each branch contributes its own arguments \
+         (`tuple_element_t<0, T>` with its two nested ones, and the second branch's one). The `#endif` stands after \
+         the `;` that ends the declaration, so it is the enclosing declaration's directive, not the list's"
     );
 }
 
@@ -1695,9 +1696,13 @@ fn a_group_holding_a_call_is_an_expression_not_a_cast() {
 /// `#endif` only closes something, and the `#else` that ends the *first branch's whole declaration* in
 /// `parallel/algorithmfwd.h` closes one too.
 ///
-/// What stayed open is the second branch of that same declaration: its text is a **fragment** (`_RandomIterator&);`
-/// with the head written above the `#if`, so no rule that starts at a token can read it — the entry is B65 in
-/// `docs/grammar-gaps.md`, and it is pinned below rather than left to be rediscovered.
+/// **The fourth reading — the list's tail per branch — was B65 and is now closed.** That file's second branch is a
+/// *fragment* (`_RandomNumberGenerator&);`: the head is above the `#if`), and what reads it is the list itself: a
+/// `)` is the end of the list *in one spelling*, and when the `;` after it is followed by an `#else`/`#elif` **and**
+/// the list opened that conditional inside itself, the branch's own tail is read as the same list. The two
+/// conditions matter together — without the second one, `#if X void f(int a); #else void g(long a); #endif` is read
+/// as one list with `void g(long a)` as parameters, which is the regression the corpus showed as `type_traits:1177`
+/// and `stl_iterator.h:3023`.
 #[test]
 fn a_directive_may_decide_a_parameter_or_stand_between_two() {
     assert_reads(
@@ -1747,15 +1752,39 @@ fn a_directive_may_decide_a_parameter_or_stand_between_two() {
          tree. What would be wrong is a second list, or the `long b` disappearing."
     );
 
-    // The fragment the seam cannot reach, with the file it is in.
-    assert_does_not_read_yet(
+    // **B65's fragment reads now**, and the claim is the same one every spelling of this seam makes: one list,
+    // every spelling of every parameter in it.
+    assert_reads(
         Where::File,
-        &[(
+        &["void random_shuffle(_RAIter, _RAIter,\n#if X\n  _RandomNumberGenerator&&);\n#else\n  \
+           _RandomNumberGenerator&);\n#endif"],
+    );
+    assert_eq!(
+        parameters(
             "void random_shuffle(_RAIter, _RAIter,\n#if X\n  _RandomNumberGenerator&&);\n#else\n  \
-             _RandomNumberGenerator&);\n#endif",
-            "B65: the second branch is a declaration *fragment* — the head is above the `#if`, so nothing that \
-             starts at a token can read it (`parallel/algorithmfwd.h:700`)",
-        )],
+             _RandomNumberGenerator&);\n#endif"
+        ),
+        4,
+        "one list, and both branches' spellings of the last parameter in it"
+    );
+
+    // The gate's **second** condition, which is what keeps a declaration written per branch out of this reading:
+    // the `#else` here belongs to a conditional opened *outside* the list, so the `;` before it is the
+    // declaration's and the next branch's text is a declaration rather than more parameters.
+    assert_reads(
+        Where::File,
+        &["#if X\nvoid f(int a);\n#else\nvoid g(long a);\n#endif"],
+    );
+    let source = "#if X\nvoid f(int a);\n#else\nvoid g(long a);\n#endif";
+    assert_eq!(
+        count_of(source, CppSyntaxKind::ParameterList),
+        2,
+        "each branch writes a whole declaration, so each has its own list"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::Parameter),
+        2,
+        "and one parameter in each — the `;` before the `#else` was the declaration's, not the list's"
     );
 }
 
@@ -6114,6 +6143,267 @@ fn a_conditional_inside_template_arguments_keeps_its_colon() {
         count_of(source, CppSyntaxKind::BaseSpecifier),
         1,
         "and it is a base specifier"
+    );
+}
+
+#[test]
+fn a_declarations_tail_may_be_written_once_per_branch() {
+    // **The three spellings of one shape**, each in the file the census found it in: a construct's *tail* — its
+    // last element, the token that closes it, and the `;` that ends the declaration — written once per branch,
+    // with the head shared. Every one of them used to read as far as the first branch's `;` and then fail on the
+    // second branch's text, because the declaration was already finished.
+    //
+    // ```cpp
+    //     random_shuffle(_RAIter, _RAIter,                       // parallel/algorithmfwd.h:700 — a parameter list
+    // #if __cplusplus >= 201103L
+    // 		   _RandomNumberGenerator&&);
+    // #else
+    // 		   _RandomNumberGenerator&);
+    // #endif
+    //
+    //   using __iter_key_t = remove_const_t<                     // bits/stl_iterator.h:3090 — an argument list
+    // #ifdef __glibcxx_tuple_like
+    //       tuple_element_t<0, typename iterator_traits<_It>::value_type>>;
+    // #else
+    //       typename iterator_traits<_It>::value_type::first_type>;
+    // #endif
+    //
+    //     return __len > (…) ? _Max_align::value                 // type_traits:2269 — a conditional's `:` branch
+    // # if _GLIBCXX_USE_BUILTIN_TRAIT(__builtin_clzg)
+    // 	     : 1 << (__SIZE_WIDTH__ - __builtin_clzg(__len - 1u));
+    // # else
+    // 	     : 1 << (__LLONG_WIDTH__ - __builtin_clzll(__len - 1ull));
+    // # endif
+    // ```
+    //
+    // The rule is the same in all three: the `)`/`>` in this branch closes the construct *in this spelling*, the
+    // `;` after it is that branch's, and when the `;` is followed by an `#else`/`#elif` **and** a conditional was
+    // opened after the construct began, the next branch's tail is read as the same construct. The declaration is
+    // told the terminator came from a branch, because it would otherwise ask for a `;` and find `#endif`.
+    let cases = [
+        "void random_shuffle(_RAIter, _RAIter,\n#if X\n  _RandomNumberGenerator&&);\n#else\n  \
+         _RandomNumberGenerator&);\n#endif",
+        "using K = remove_const_t<\n#if X\n  T<0, I>>;\n#else\n  I::first_type>;\n#endif",
+        "int f(int n) {\n  return n > 2\n    ? 3\n#if X\n    : 1 << (n - 1);\n#else\n    : 1 << (n - 2);\n#endif\n}",
+    ];
+    for source in cases {
+        assert_eq!(
+            reads(source, Where::File),
+            Ok(()),
+            "the tail written once per branch reads: {source:?}"
+        );
+    }
+
+    // **One construct, not one per branch.** A second `ParameterList`/`TemplateArgumentList`/`TernaryExpr` is the
+    // silent wrong tree this seam could produce, so the counts are the assertion.
+    assert_eq!(
+        count_of(cases[0], CppSyntaxKind::ParameterList),
+        1,
+        "one parameter list, with both branches' spellings of the tail in it"
+    );
+    assert_eq!(
+        count_of(cases[0], CppSyntaxKind::Parameter),
+        4,
+        "and four parameters: `_RAIter` twice, then both spellings of the last one"
+    );
+    assert_eq!(
+        count_of(cases[1], CppSyntaxKind::TemplateArgumentList),
+        2,
+        "one argument list for the alias and one for the `T<0, I>` inside it"
+    );
+    assert_eq!(
+        count_of(cases[2], CppSyntaxKind::TernaryExpr),
+        1,
+        "one conditional, with both spellings of its `:` branch"
+    );
+
+    // …and the **terminator shared** spelling of the same shape, which is what a *definition* with a per-branch
+    // parameter list looks like (`bits/stl_algo.h:4600`): no `;` in either branch, and the body after the `#endif`
+    // — so nothing about the terminator is the list's, and the declaration still owns its `{`.
+    let source = "void random_shuffle(int __first, int __last,\n#if X\n  long&& __rand)\n#else\n  long& __rand)\n\
+                  #endif\n{ }";
+    assert_eq!(
+        reads(source, Where::File),
+        Ok(()),
+        "a per-branch parameter list whose terminator is shared reads"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::ParameterList),
+        1,
+        "one list, with both branches' spellings in it"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::CompoundStat),
+        1,
+        "and the body after the `#endif` is still the function's body"
+    );
+
+    // The control is a **declaration** written per branch, which looks the same from the `;` and must not be read
+    // as a per-branch tail: the `#if` there belongs to the statement, not to the list.
+    let source = "#if X\nvoid f(int a);\n#else\nvoid g(long a);\n#endif";
+    assert_eq!(reads(source, Where::File), Ok(()), "a declaration per branch reads");
+    assert_eq!(
+        count_of(source, CppSyntaxKind::ParameterList),
+        2,
+        "with one parameter list in each branch"
+    );
+}
+
+#[test]
+fn an_implementation_keyword_may_stand_where_an_operand_goes() {
+    // `bits/uniform_int_dist.h:318` — `__extension__` *inside* an expression, which is where GCC's own headers
+    // write it when they use an extension on purpose:
+    //
+    // ```cpp
+    // 		__ret = __extension__ _S_nd<unsigned __int128>(__urng, __u64erange);
+    // ```
+    //
+    // The word is the implementation's own, so reading it as one costs no ordinary name — while the operand rule
+    // would otherwise take it for the operand's *name* and leave the real operand as two expressions in a row.
+    let source = "template<typename T> int nd(T a, T b);\n\
+                  void f(unsigned long a, unsigned long b, int& r) {\n\
+                    r = __extension__ nd<unsigned long>(a, b);\n\
+                  }\n";
+    assert_eq!(reads(source, Where::File), Ok(()), "the operand reads");
+    assert_eq!(
+        count_of(source, CppSyntaxKind::CallExpr),
+        1,
+        "and the call after the keyword is one call"
+    );
+
+    // The control is an ordinary name in the same position, which keeps its reading as the operand.
+    let source = "int g(int);\nvoid f(int a) { int r = g(a); }\n";
+    assert_eq!(reads(source, Where::File), Ok(()), "an ordinary call reads");
+    assert_eq!(
+        count_of(source, CppSyntaxKind::CallExpr),
+        1,
+        "as one call"
+    );
+}
+
+#[test]
+fn a_qualified_head_is_a_type_even_when_it_ends_in_template_arguments() {
+    // `bits/ranges_util.h:483` — a **variable template's partial specialisation**, whose name is qualified and
+    // ends in an argument list:
+    //
+    // ```cpp
+    //   template<typename _Iter, typename _Sent, subrange_kind _Kind>
+    //     inline constexpr bool __detail::__is_subrange<subrange<_Iter, _Sent, _Kind>> = true;
+    // ```
+    //
+    // The specifier sequence reads the whole qualified name as the *type* — which is what a qualified name in type
+    // position is, the head of a definition — so nothing is left to name the declarator, and the guard that
+    // refuses an initializer without a name fired. It asks the *recorded* qualified flag first, and for this
+    // spelling that record is empty: the name ends in a template argument list, so the walk that recovers a name
+    // stops on the `>`. The token-level walk is the one that answers.
+    let source = "enum class K { a };\n\
+                  template<typename T, typename U, K k> struct sub { };\n\
+                  template<typename I, typename S, K k>\n\
+                    inline constexpr bool n::is_sub<sub<I, S, k>> = true;\n";
+    assert_eq!(
+        reads(source, Where::File),
+        Ok(()),
+        "the qualified head is the definition's name, and `= true` initialises it"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::Declaration),
+        3,
+        "the enum, the primary template and the specialization"
+    );
+
+    // The control is the shape the guard exists for: an assignment with no declaration's type in front of it is
+    // an expression, and a bare name is not a type.
+    assert_eq!(
+        reads("void f(int n) { x = 1; }\n", Where::File),
+        Ok(()),
+        "an assignment reads"
+    );
+    assert_eq!(
+        count_of("void f(int n) { x = 1; }\n", CppSyntaxKind::Initializer),
+        0,
+        "and it is not a declaration with an initializer"
+    );
+}
+
+#[test]
+fn a_requires_expression_may_be_a_template_argument() {
+    // `type_traits:3946` — a class head whose base clause carries a requires-expression as an argument, and the
+    // `;` *inside* its body is what the scans had to learn about.
+    //
+    // ```cpp
+    //   template<typename _Tp>
+    //     struct is_scoped_enum<_Tp>
+    //     : bool_constant<!requires(_Tp __t, void(*__f)(int)) { __f(__t); }>
+    //     { };
+    // ```
+    //
+    // Two scans read those tokens before any rule does: the one that decides whether a `<` opens an argument list,
+    // and the one that decides whether a class head is followed by a body. Both stopped at a `;` — a structural
+    // boundary, and it is, but only at depth zero: a `;` inside a matched `{ … }` is a statement in the body of a
+    // lambda or of a requires-expression, and neither ends the declaration.
+    let source = "template<bool B> struct bool_constant { };\n\
+                  template<typename T> struct is_scoped_enum\n\
+                    : bool_constant<!requires(T t, void(*f)(int)) { f(t); }> { };\n";
+    assert_eq!(
+        reads(source, Where::File),
+        Ok(()),
+        "the requires-expression is an argument, and the base clause reads"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::BaseSpecifier),
+        1,
+        "as a base specifier"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::RequiresExpr),
+        1,
+        "with the requires-expression in the tree"
+    );
+
+    // The control is the boundary the stop set is *for*: a `;` at depth zero still ends the scan, so a class head
+    // with no body in front of it is not read as one.
+    assert!(
+        reads("template<bool B> struct C { };\nstruct S : C<true>;\n", Where::File).is_err(),
+        "a class head with no body is still an error"
+    );
+}
+
+#[test]
+fn an_alias_may_carry_an_attribute_macro_before_its_equals() {
+    // `type_traits:2825` and the rest of the library's deprecations, written with a macro rather than the
+    // attribute keyword:
+    //
+    // ```cpp
+    //   template<class _Tp, size_t _Len>
+    //     using aligned_storage_t _GLIBCXX23_DEPRECATED
+    //       = typename aligned_storage<_Len, _Alignof<_Tp>>::type;
+    // ```
+    //
+    // The position is the one `[[deprecated]]` already had — between an alias's own name and its `=` — read with
+    // the reader the declarator's suffixes use, which knows a macro invocation with arguments from one without.
+    let source = "template<class T> struct storage { using type = T; };\n\
+                  template<class T>\n\
+                    using storage_t DEPRECATED23\n\
+                      = typename storage<T>::type;\n";
+    assert_eq!(reads(source, Where::File), Ok(()), "the alias reads");
+    assert_eq!(
+        count_of(source, CppSyntaxKind::MacroCall),
+        1,
+        "and the macro between the name and the `=` is read as an invocation"
+    );
+
+    // The control is the attribute spelling of the same position, which has to keep working and is not a macro.
+    let source = "using T [[deprecated]] = int;\n";
+    assert_eq!(reads(source, Where::File), Ok(()), "the attribute reads");
+    assert_eq!(
+        count_of(source, CppSyntaxKind::AttributeList),
+        1,
+        "it is an attribute list"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::MacroCall),
+        0,
+        "and not a macro invocation"
     );
 }
 

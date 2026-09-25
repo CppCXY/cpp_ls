@@ -474,6 +474,12 @@ fn parse_ternary_expr(p: &mut CppParser) -> ParseResult {
     let mut expr = parse_binary_expr_with_precedence(p, 0)?;
 
     if p.current_token() == CppTokenKind::Question {
+        // **How many conditionals were open when this conditional began** — taken here, before the true branch is
+        // read, because the `# if` of the per-branch spelling is consumed *by the true expression* (its
+        // operator-position seam reads it, since no operator follows it and it opens no branch). A snapshot taken
+        // at the seam below would already include it and the tail's comparison would come out even.
+        let conditionals_when_the_conditional_began = p.open_conditionals();
+
         let m = expr.precede(p, CppSyntaxKind::TernaryExpr);
         p.bump(); // consume '?'
 
@@ -500,12 +506,61 @@ fn parse_ternary_expr(p: &mut CppParser) -> ParseResult {
         // Only **between** the branches, and not before the `?`: there the directive belongs to whatever
         // construct is being conditioned (`_GLIBCXX_NOEXCEPT_IF(…)` and the template-parameter seam are read by
         // their own rules), and a directive read here would be one they can no longer see.
+        //
+        // The count is asked of the **directive rule** rather than kept here, and that is the point: the true
+        // expression above *is* an expression, and its operator-position seam consumes a `# if` on its way past —
+        // so a count kept by this function would have to know about every rule that can read a directive between
+        // here and there. See [`CppParser::open_conditionals`], and the snapshot at the top of this arm.
         while p.current_token() == CppTokenKind::Hash {
             super::stats::parse_preprocessor_directive(p)?;
         }
 
         expect_token(p, CppTokenKind::Colon)?;
         parse_ternary_expr(p)?; // false expression
+
+        // **The `:` branch written once per branch** — the same file, four lines on:
+        //
+        // ```cpp
+        //     return __len > (_Max_align::value / 2)          // type_traits:2269
+        //          ? _Max_align::value
+        // # if _GLIBCXX_USE_BUILTIN_TRAIT(__builtin_clzg)
+        //          : 1 << (__SIZE_WIDTH__ - __builtin_clzg(__len - 1u));
+        // # else
+        //          : 1 << (__LLONG_WIDTH__ - __builtin_clzll(__len - 1ull));
+        // # endif
+        // ```
+        //
+        // Each branch writes the `:` **and the `;` that ends the statement** — the conditional is a *return*, and
+        // the two spellings are two complete returns as far as the preprocessor is concerned. So the `;` after the
+        // false expression is this branch's, and the next branch's `:` follows it; the conditional reads both
+        // spellings, and the statement is told the terminator came from a branch
+        // ([`CppParser::note_the_terminator_came_from_a_branch`]).
+        //
+        // The gate is the one the parameter list and the argument list use, for the same reason: a `;` followed by
+        // an `#else`/`#elif`, **and** a conditional this conditional opened inside itself. Without the second
+        // condition, `#if X a ? b : c; #else a ? d : e; #endif` would have the next branch's statement read as
+        // another `:` branch.
+        let mut read_a_branch_of_the_tail = false;
+        while p.open_conditionals() > conditionals_when_the_conditional_began
+            && let Some(writes_the_terminator) = super::decls::a_branch_continues_the_tail(p)
+        {
+            if writes_the_terminator {
+                p.bump(); // this branch's `;`
+                p.note_the_terminator_came_from_a_branch();
+                read_a_branch_of_the_tail = true;
+            }
+
+            while p.current_token() == CppTokenKind::Hash {
+                super::stats::parse_preprocessor_directive(p)?;
+            }
+
+            expect_token(p, CppTokenKind::Colon)?;
+            parse_ternary_expr(p)?;
+        }
+
+        if read_a_branch_of_the_tail && p.current_token() == CppTokenKind::Semicolon {
+            p.bump();
+        }
 
         expr = m.complete(p);
     }
@@ -828,6 +883,26 @@ fn parse_unary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
             parse_unary_expr(p, fold_operand)?;
             Ok(m.complete(p))
         }
+
+        // **A compiler keyword standing where an operand goes** — `__extension__`, the spelling GCC uses to say
+        // "this is an extension, do not warn about it in a `-pedantic` build", and it is written *inside*
+        // expressions rather than only in declarations:
+        //
+        // ```cpp
+        //         __ret = __extension__ _S_nd<unsigned __int128>(__urng,   // bits/uniform_int_dist.h:318
+        //                                __u64erange);
+        // ```
+        //
+        // It is the implementation's own name ([`an_implementation_keyword`]), so reading it as one costs no
+        // ordinary name: the arm below would otherwise take it for the operand's *name* and leave the real operand
+        // as two expressions in a row — which is how that file reported ``expected `;` after expression`` against
+        // the `__extension__` itself. Stepped over, with the node the specifier sequence gives it, and the operand
+        // asked for again.
+        _ if super::types::at_an_implementation_keyword(p) => {
+            super::types::parse_an_implementation_keyword(p);
+            parse_unary_expr(p, fold_operand)
+        }
+
         _ => parse_postfix_expr(p, fold_operand),
     }
 }

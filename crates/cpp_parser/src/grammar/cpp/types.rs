@@ -2520,6 +2520,12 @@ fn a_body_follows_the_class_head(p: &CppParser) -> bool {
             CppTokenKind::LeftBrace if depth <= 0 => return true,
             CppTokenKind::LeftBrace => braces += 1,
             CppTokenKind::RightBrace if braces > 0 => braces -= 1,
+            // **A `;` inside a braced group is not the head's end.** The same "a matched group hides the
+            // structural boundary" rule the angle scan states: `type_traits:3946` writes a class head whose base
+            // clause carries a *requires-expression*, and the `;` in its body ended this scan — so the head was
+            // read as body-less, the base clause became rubble, and the diagnostic landed on the `:` of a head
+            // that is perfectly good C++20.
+            CppTokenKind::Semicolon if braces > 0 => {}
             CppTokenKind::Semicolon | CppTokenKind::RightBrace | CppTokenKind::Eof => return false,
             // The `#` of a directive: everything past it is on another line, and may be another branch.
             CppTokenKind::Hash => after_a_directive = true,
@@ -2955,13 +2961,23 @@ fn a_matching_angle_bracket_follows(p: &CppParser) -> bool {
                 // structural boundaries of the enclosing declaration. A template argument list never
                 // contains an unmatched one of these, so reaching one means this `<` was a less-than
                 // after all.
+                //
+                // **A matched group hides them**, and that is the second half of the rule the counters above
+                // state: a `;` inside a `{ … }` is a statement in a lambda's body or in a *requires-expression*
+                // (`bool_constant<!requires(_Tp __t, void(*__f)(int)) { __f(__t); }>`, `type_traits:3947`), a `=`
+                // or a `->` inside `( … )` is part of an expression, and none of them ends the enclosing
+                // declaration. Only at depth zero are they the boundaries this set is for.
                 CppTokenKind::Semicolon
-                | CppTokenKind::RightBrace
-                | CppTokenKind::RightParen
-                | CppTokenKind::RightBracket
-                | CppTokenKind::Colon
                 | CppTokenKind::Assign
                 | CppTokenKind::Arrow
+                | CppTokenKind::Colon
+                    if parens == 0 && brackets == 0 && braces == 0 =>
+                {
+                    break 'scan false;
+                }
+                CppTokenKind::RightBrace
+                | CppTokenKind::RightParen
+                | CppTokenKind::RightBracket
                 | CppTokenKind::Eof
                 | CppTokenKind::None
                 | CppTokenKind::LineComment
@@ -4260,6 +4276,13 @@ fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
 
     expect_token(p, CppTokenKind::Less)?;
 
+    // **How many conditionals were open when this list began** — see the note on the same comparison in
+    // `decls::parse_parameter_list`, which is where the two spellings it separates are written out. In short: a
+    // list whose *tail* is written per branch must not be confused with a declaration that is written per branch.
+    // The count comes from the directive rule, because a nested reading may consume a directive this list never
+    // sees.
+    let conditionals_when_the_list_began = p.open_conditionals();
+
     while !p.is_eof() {
         // A **`>>` standing where an argument would begin** is two closers, and the first of them closes this
         // list. That is the *empty* argument list: `std::less<>` inside `std::map<K, V, std::less<>>`.
@@ -4291,6 +4314,73 @@ fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
         // this is the only place the closer is consumed.
         if p.current_token() == CppTokenKind::Greater {
             p.bump();
+
+            // **The list's tail written once per branch** — `bits/stl_iterator.h:3090`:
+            //
+            // ```cpp
+            //     using __iter_key_t = remove_const_t<
+            // #ifdef __glibcxx_tuple_like // >= C++23
+            //       tuple_element_t<0, typename iterator_traits<_InputIterator>::value_type>>;
+            // #else
+            //       typename iterator_traits<_InputIterator>::value_type::first_type>;
+            // #endif
+            // ```
+            //
+            // Each branch writes the last argument **and the `>` that closes this list**, plus the `;` that ends
+            // the alias — the head (`remove_const_t<`) stands above the `#if`. So the `>` just consumed closes the
+            // list *in this spelling*, and the branch's tail belongs to the same list. Read here, the branch's `;`
+            // with it, and the declaration is told
+            // ([`CppParser::note_the_terminator_came_from_a_branch`]) — it would otherwise ask for a `;` and find
+            // `#endif`.
+            //
+            // Two conditions gate it, the same two the parameter list uses: a `;` followed by an `#else`/`#elif`,
+            // **and** a conditional this list opened inside itself. Without the second one a declaration written
+            // per branch (`#if X using A = B<int>; #else using A = B<long>; #endif`) would have the next branch's
+            // text read as more arguments.
+            let mut read_a_branch_of_the_tail = false;
+            while p.open_conditionals() > conditionals_when_the_list_began
+                && let Some(writes_the_terminator) = super::decls::a_branch_continues_the_tail(p)
+            {
+                if writes_the_terminator {
+                    p.bump(); // this branch's `;`
+                    p.note_the_terminator_came_from_a_branch();
+                    read_a_branch_of_the_tail = true;
+                }
+
+                while p.current_token() == CppTokenKind::Hash {
+                    super::stats::parse_preprocessor_directive(p)?;
+                }
+
+                // …and the branch's own tail: its arguments, and the `>` that closes the list there. Each one is
+                // marked the way the loop above marks an argument — a `TemplateArgument` node — because a consumer
+                // counting a list's arguments must not have to know which branch it was reading.
+                loop {
+                    let argument = p.mark(CppSyntaxKind::TemplateArgument);
+                    if parse_template_argument(p).is_err() {
+                        argument.undo(p);
+                        p.close_marks_above(base);
+                        return Err(CppParseError::syntax_error_from(
+                            "expected a template argument",
+                            p.current_token_range(),
+                        ));
+                    }
+                    argument.complete(p);
+
+                    if p.current_token() == CppTokenKind::Comma {
+                        p.bump();
+                        continue;
+                    }
+                    break;
+                }
+
+                split_closing_angle(p);
+                expect_token(p, CppTokenKind::Greater)?;
+            }
+
+            if read_a_branch_of_the_tail && p.current_token() == CppTokenKind::Semicolon {
+                p.bump();
+            }
+
             return Ok(m.complete(p));
         }
 
@@ -4311,6 +4401,7 @@ fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
         // braced initialiser and between the members of a class: a `#` here cannot be anything else, because an
         // argument begins with a type, an expression — or a directive.
         if p.current_token() == CppTokenKind::Hash {
+
             if let Err(err) = super::stats::parse_preprocessor_directive(p) {
                 p.close_marks_above(base);
                 return Err(err);
@@ -4357,6 +4448,7 @@ fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
         // (the one above) never sees it: the loop came back around to a comma check, not to an argument. Both
         // sides of the comma need the seam, exactly as in the enumerator list.
         while p.current_token() == CppTokenKind::Hash {
+
             if let Err(err) = super::stats::parse_preprocessor_directive(p) {
                 p.close_marks_above(base);
                 return Err(err);
@@ -4663,6 +4755,16 @@ enum ImplementationKeyword {
 /// one closed set of reserved names: adding `__stdcall` when a file needs it would be the same rule again. What
 /// is deliberately **not** here is `__int64`: the closure's own `_mingw.h` `#define`s it to `long long`, so it is
 /// a macro, and the reading it already has (a name in type position) coincides with what it means.
+/// Is one of the compiler's own keywords written at the cursor?
+///
+/// The question the *expression* grammar asks, where the answer is the only thing needed: it steps over one and
+/// reads the operand again — see the `__extension__` arm of `parse_unary_expr`. Kept as a separate predicate
+/// rather than exposing [`an_implementation_keyword`], whose return type says *which* keyword it is and is this
+/// module's business.
+pub(super) fn at_an_implementation_keyword(p: &CppParser) -> bool {
+    an_implementation_keyword(p).is_some()
+}
+
 fn an_implementation_keyword(p: &CppParser) -> Option<ImplementationKeyword> {
     if p.current_token() != CppTokenKind::Identifier {
         return None;
@@ -4865,7 +4967,7 @@ fn parse_word_attribute(p: &mut CppParser) -> ParseResult {
 /// * a **calling convention** stays a bare token in the sequence it was written in. It is not nothing — it is in
 ///   the tree, and a consumer can see and print it — but this layer reads no meaning out of it, and inventing a
 ///   node for a meaning nobody reads is how a tree ends up claiming more than it knows.
-fn parse_an_implementation_keyword(p: &mut CppParser) -> CompleteMarker {
+pub(super) fn parse_an_implementation_keyword(p: &mut CppParser) -> CompleteMarker {
     match an_implementation_keyword(p) {
         Some(ImplementationKeyword::Qualifier) => {
             let m = p.mark(CppSyntaxKind::RestrictQual);

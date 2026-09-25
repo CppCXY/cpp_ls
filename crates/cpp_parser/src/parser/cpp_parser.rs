@@ -47,6 +47,12 @@ pub struct Checkpoint {
     /// problem with a reading nobody kept is a problem the file does not have. [`CppParser::rollback`] truncates
     /// the list back to this, so a speculative attempt leaves the tree **and** the diagnostics as it found them.
     errors_len: usize,
+    /// See [`CppParser::note_the_terminator_came_from_a_branch`] — the fifth piece of state outside the events.
+    ///
+    /// It is here for the reason the docs on that flag give, and it is worth reading beside `open_bodies`, which
+    /// is *not* here: the difference is whether a speculative region can set the state and then rewind past it.
+    /// For this one it can, so it must be restored.
+    terminator_came_from_a_branch: bool,
 }
 
 /// A position in the parse, for a question asked later about the tokens around it.
@@ -350,6 +356,38 @@ pub struct CppParser<'a> {
     /// which the cursor alone cannot say. Cleared when a declaration begins, so it always describes the
     /// sequence just parsed.
     declaration_ended_inside_specifiers: bool,
+    /// Did a rule just consume the `;` that ends the declaration, because it stood **inside one branch of a
+    /// conditional**?
+    ///
+    /// The shape is a declaration whose *tail* is written once per branch, so each branch writes the terminator
+    /// itself:
+    ///
+    /// ```cpp
+    ///     random_shuffle(_RAIter, _RAIter,                       // parallel/algorithmfwd.h:700
+    /// #if __cplusplus >= 201103L
+    ///            _RandomNumberGenerator&&);
+    /// #else
+    ///            _RandomNumberGenerator&);
+    /// #endif
+    /// ```
+    ///
+    /// The parameter list reads the second branch's tail as well (they are alternatives of the same list), and
+    /// with it the branch's own `;` — so the declaration, which would otherwise ask for one and find `#endif`,
+    /// has to be told. **A take**, like [`CppParser::take_declaration_ended_inside_specifiers`], because the
+    /// answer describes the construct just parsed and must not leak into the next declaration.
+    ///
+    /// **Part of [`Checkpoint`]**, and that is the difference between this flag and
+    /// [`CppParser::open_bodies`], which is deliberately not: a speculative region *does* run through the
+    /// readers that set this one — `parse_declaration` is tried and rewound at every statement that might be an
+    /// expression, and the parameter list inside it sets the flag on the way. Left out of the checkpoint, a
+    /// rewound attempt would leave it set and the next declaration would skip its own `;`.
+    terminator_came_from_a_branch: bool,
+    /// How many conditionals the directives read so far have left open — see [`CppParser::open_conditionals`].
+    ///
+    /// Not part of [`Checkpoint`], and that is deliberate: unlike the flag above, this one describes *where in the
+    /// file* the cursor is rather than what a construct decided, and a rollback rewinds the cursor through the
+    /// same directives the count was taken over. Restoring a stale count would make it disagree with the tokens.
+    open_conditionals: isize,
     pub parse_config: ParserConfig<'a>,
     pub(crate) errors: &'a mut Vec<CppParseError>,
 }
@@ -463,6 +501,8 @@ impl<'a> CppParser<'a> {
             declaration_type_is_qualified: false,
             open_bodies: Vec::new(),
             declaration_ended_inside_specifiers: false,
+            terminator_came_from_a_branch: false,
+            open_conditionals: 0,
             parse_config: config,
             errors,
         }
@@ -610,6 +650,7 @@ impl<'a> CppParser<'a> {
             previous_declaration_type_name: self.previous_declaration_type_name.clone(),
             declaration_type_is_qualified: self.declaration_type_is_qualified,
             errors_len: self.errors.len(),
+            terminator_came_from_a_branch: self.terminator_came_from_a_branch,
         }
     }
 
@@ -636,6 +677,7 @@ impl<'a> CppParser<'a> {
         self.previous_declaration_type_name = checkpoint.previous_declaration_type_name;
         self.declaration_type_is_qualified = checkpoint.declaration_type_is_qualified;
         self.errors.truncate(checkpoint.errors_len);
+        self.terminator_came_from_a_branch = checkpoint.terminator_came_from_a_branch;
         self.token_index = checkpoint.token_index;
         self.current_token = self
             .tokens
@@ -1332,6 +1374,52 @@ impl<'a> CppParser<'a> {
     /// sequence just parsed, and the caller that asks is the one that parses the declaration around it.
     pub fn take_declaration_ended_inside_specifiers(&mut self) -> bool {
         std::mem::take(&mut self.declaration_ended_inside_specifiers)
+    }
+
+    /// Record that this rule consumed the `;` that ends the declaration, from inside a conditional branch.
+    ///
+    /// See the field's documentation: the readers that call this are the ones that read a construct's *tail* once
+    /// per branch, and the `;` each branch writes is part of the tail they read.
+    pub fn note_the_terminator_came_from_a_branch(&mut self) {
+        self.terminator_came_from_a_branch = true;
+    }
+
+    /// Take the flag above: did the construct just parsed already consume the declaration's `;`?
+    ///
+    /// A *take* for the reason every flag here is: the answer describes one construct, and the caller that asks
+    /// (the rule that would otherwise require a `;`) is the one that parses around it.
+    pub fn take_the_terminator_came_from_a_branch(&mut self) -> bool {
+        std::mem::take(&mut self.terminator_came_from_a_branch)
+    }
+
+    /// How many conditionals are **open** at the cursor, as far as the directives read so far say.
+    ///
+    /// A construct whose tail is written once per branch has to tell the `#else` that closes a conditional **it
+    /// opened itself** from the `#else` of a conditional opened around it — the two spellings are otherwise
+    /// identical (`void f(int a);` / `#else` / `void g(long a);` reads as parameters just as well as a per-branch
+    /// tail does). Counting the directives a construct *read* does not answer that: a nested reading may have
+    /// consumed one on its way past, which is exactly what happens in `type_traits:2269`, where the expression
+    /// grammar's operator-position seam takes the `# if` before the conditional can see it.
+    ///
+    /// So the count is kept by the directive reader itself, and a construct records the value when it starts and
+    /// compares it where the question is asked.
+    pub fn open_conditionals(&self) -> isize {
+        self.open_conditionals
+    }
+
+    /// Record the directive **name** at the cursor, for [`CppParser::open_conditionals`].
+    ///
+    /// Called by the directive rule, which is the one place a directive is read — including the ones read by rules
+    /// that are not that rule's caller. It is called with the cursor on the name (not on the `#`), and only when
+    /// the directive has one: the null directive (`#` alone on a line) names nothing.
+    pub fn note_a_directive_name(&mut self) {
+        let opens_or_closes = match self.current_token_text() {
+            "if" | "ifdef" | "ifndef" => 1,
+            "endif" => -1,
+            _ => 0,
+        };
+
+        self.open_conditionals += opens_or_closes;
     }
 
     /// Leave a class body.

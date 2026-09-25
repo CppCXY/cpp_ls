@@ -2446,6 +2446,93 @@ include 链是 `winapifamily.h` / `_mingw_unicode.h` / `prsht.h` / `pshpack1.h` 
 **翻译单元**喂环境（compile database，或"谁包含这个头"）。探针的 `MACRO <名> in <文件> …` 与首错行上的
 `bodies in force:` 就是为这类问题准备的。
 
+### B114–B118. 收尾的五条：**按分支写的尾巴**、别名上的属性宏、扫描里的 `;`、限定名的头、表达式里的实现关键字 —— 已修复
+
+这五条落地之后，**两份带 seeds 的读数都是零错误**：455 那份 **455/0/0**、128 那份 **128/0/0**（不带 seeds 的 455 是
+454/1，剩下的那个是 `commdlg.h` 的 `STDMETHOD`——它**必须**有闭包的体，带 seeds 的读数里它是干净的）。
+
+```text
+B114 声明/别名/条件的**尾巴**按分支写（形参表的 `… ) ;`、模板实参表的 `… > ;`、三目的 `: expr ;`，
+     以及**终结符共享**的那种：分支只写 `… )`，`{` 在 `#endif` 之后）→ algorithmfwd.h、stl_iterator.h、
+     type_traits.h（2274）三个文件修好
+B115 别名名字与 `=` 之间的**属性宏**（`using aligned_storage_t _GLIBCXX23_DEPRECATED = …`）→ type_traits.h 下一层
+B116 两处扫描里**配对花括号内的 `;`** 不再是边界（`bool_constant<!requires(…) { __f(__t); }>`）→ type_traits.h 再下一层
+B117 `the_declaration_has_a_type` 要问**token 级**的"头是不是限定名"（变量模板的偏特化
+     `bool __detail::__is_subrange<subrange<…>> = true;`）→ ranges_util.h **修好**
+B118 `__extension__` 站在**操作数位置**（`__ret = __extension__ _S_nd<unsigned __int128>(…)`）→ 128 那份最后一个
+```
+
+**B114（按分支写的尾巴）是这一批的主体，也是唯一一次动"归属"的**。四份形状、一条规则：
+
+```cpp
+    random_shuffle(_RAIter, _RAIter,                       // parallel/algorithmfwd.h:700 —— 形参表，分支带 `;`
+#if __cplusplus >= 201103L
+		   _RandomNumberGenerator&&);
+#else
+		   _RandomNumberGenerator&);
+#endif
+
+    void random_shuffle(…,                                 // bits/stl_algo.h:4600 —— 同一形状，**终结符共享**
+#if __cplusplus >= 201103L
+		   _RandomNumberGenerator&& __rand)
+#else
+		   _RandomNumberGenerator& __rand)
+#endif
+    { … }
+
+  using __iter_key_t = remove_const_t<                     // bits/stl_iterator.h:3090 —— 实参表，分支带 `;`
+#ifdef __glibcxx_tuple_like
+      tuple_element_t<0, typename iterator_traits<_It>::value_type>>;
+#else
+      typename iterator_traits<_It>::value_type::first_type>;
+#endif
+
+    return __len > (…) ? _Max_align::value                 // type_traits:2269 —— 三目的 `:` 支，分支带 `;`
+# if _GLIBCXX_USE_BUILTIN_TRAIT(__builtin_clzg)
+	     : 1 << (__SIZE_WIDTH__ - __builtin_clzg(__len - 1u));
+# else
+	     : 1 << (__LLONG_WIDTH__ - __builtin_clzll(__len - 1ull));
+# endif
+```
+
+规则一句话：**本支里的 `)`/`>` 只是"这一支的写法"的结尾**，它后面的 `;` 是这一支的；当那个 `;` 之后是 `#else`/`#elif`
+**并且**这个构造开始之后有**条件被打开**，下一支的尾巴就按同一个构造读。三件事缺一不可：
+
+① **归属**用的是 B77 学到的那一课：`parse_a_definition_per_branch` 已经把答案放在**返回值**里（"`;` 是不是在这里吃掉的"），
+而不是放在一个会活过声明的标志里。这一批照做，但形态更轻：一个**取用式**标志
+（`note_the_terminator_came_from_a_branch` / `take_the_terminator_came_from_a_branch`），由 `expect_semicolon` 取走。
+**它进 `Checkpoint`**——与 `open_bodies` 相反，因为投机读法**真的会**经过设置它的读取器：语句级的"先试声明"在每个
+可能是表达式的语句上都会跑一遍形参表，回滚之后标志必须跟着回滚，否则下一个声明就会跳过自己的 `;`。
+
+② **两道门的第二道是"谁打开了那个条件"**，而它**不能**由构造自己数：`type_traits:2269` 的 `# if` 是**真分支里的表达式**
+在算符位置的接缝上吃掉的，构造自己根本没看见它。所以计数放在**读指令的那一处**（`parse_preprocessor_directive` →
+`note_a_directive_name`），构造只记下开始时的值再比较（`CppParser::open_conditionals`）。第一道门是形状：
+`;` + `#else`/`#elif`，**或者**尾巴后面直接跟 `#else`/`#elif`（终结符共享的那种）。
+**这道门是被量出来的**：只看形状时，`#if X void f(int a); #else void g(long a); #endif` 会被读成"一个形参表、两个
+实参"，`type_traits:1177` 与 `stl_iterator.h:3023` 就是这么冒出来的。
+
+③ **同一批 token 谁先看见谁说了算**这一课又来了一次：`a_conditional_opens_here` 原来按**token 种类**判断指令名，
+而 `#if`/`#else` 的 `if`/`else` 是 **C++ 关键字**（`IfKeyword`/`ElseKeyword`），种类判断把它们全漏掉；改成按**文本**
+判断，并用**行尾偏移**挡住"空指令 `#` 读到下一行的 `if`"。
+
+**量到**（带 seeds）：451/4 → **455/0**，消息 8 → **0**；128 那份 122/6 → **128/0**。断言：
+`gaps.rs::a_declarations_tail_may_be_written_once_per_branch`（三种拼法各一条 + 终结符共享那条 + "一个构造不是一支一个"的
+计数 + 反例"分支各写整条声明 ⇒ 两个形参表"）、以及把两个**过时的反例**（`assert_does_not_read_yet` 里钉着 B65 与
+stl_iterator 那条的两处）改成**正例**——这是这一批最好的证据：那两个"读不出来"的钉子被拔掉了。
+
+**B115–B118**（每条都是"偏好缺一条证据"的老形状，各值一个首错）：
+① 别名名字与 `=` 之间的属性**宏**（attribute 关键字那条早就有，宏这条用声明符后缀的同一个读者
+`eat_a_macro_suffix`）；② 数尖括号的扫描与"类头有没有 body"的扫描都把 `;` 当边界，但只在**深度 0** 才是——匹配花括号
+里的 `;` 是 lambda / requires-expression 体里的语句（`type_traits:3946` 的基类子句里正好有一个 requires 表达式）；
+③ `the_declaration_has_a_type` 原来只问**记录下来的**限定名标志，而 `A::f<int>` 这条拼法**记录是空的**（名字以实参表
+结尾，找回名字的走法停在 `>` 上）——那个函数自己的文档就写着这件事，于是补上 **token 级**的那一问
+（`the_head_of_the_declaration_is_qualified`）；④ `__extension__` 站在操作数位置，按实现关键字跳过、再读操作数
+（实现关键字表是既有的 `an_implementation_keyword`，新加的只是一个布尔谓词，免得把它的私有返回类型暴露出去）。
+
+**剩下的一个**（不带 seeds 455 那份：`commdlg.h:577` 的 `STDMETHOD(QueryInterface) (…) PURE;`）**不是缺陷**：那个
+读法要 `STDMETHOD` 的体，而体在 `combaseapi.h` 里——只有带索引的那条路才有，所以带 seeds 的读数里它是干净的。
+这正是"两份读数必须分开报"的最后一条注脚。
+
 ### B107–B113. 从 445/10 压到 451/4 的**七条**（两条成对修好四个文件）—— 已修复
 
 这一批的共同点：**每条都是"偏好写好了，缺的是一条证据或一次统一"**，而不是缺一条规则。逐条如下，每条都带**量到的**。
@@ -2850,18 +2937,14 @@ cast 的 type-id 在 `*` 之后撞上一个名字就断了。
                            stl_algobase.h（B77 那个刻意不读的形状）
 ```
 
-**这一族按"值多少文件"的下一刀**（带 seeds 现在 **445/10**，目标已达成；下面是继续往下压的队列）：
+**这一族按"值多少文件"的下一刀**（带 seeds **455/0**、128 那份 **128/0**——两份都是零错误；不带 seeds 的 455 是
+454/1，剩下的是必须有闭包才成立的那一条）：
 
 ```text
-1. B77 那一族现在一个人挡着**五个**文件：tuple:2532、type_traits:2274、riemann_zeta.tcc:182、algorithmfwd.h:704、
-   stl_algobase.h:912 —— 全都是"一个构造写在 `#if` 的两支里"（语句 / 表达式 / 初始化式 / 形参加那个 `)`）。
-   它是现在**唯一**的成族形状，也就是下一刀该打的地方：三种试法的代价记在 B77 那一节
-   （`;` 是分支的还是声明的，三个读者不同意），而 B100/B103/B105 之后"接缝"这一侧已经补齐，
-   剩下的正是**归属**问题——谁拥有分支末尾那个 `;`
-2. 单条四条：iterator_concepts.h:909、stl_function.h:1042、stl_iterator.h:3094、safe_iterator.h:284，
-   都还没缩到一行。其中 stl_function.h 与 B102 是同一族（说明符位置的函数式属性宏），差别只在
-   组后面跟的是**名字**（`_GLIBCXX14_CONSTEXPR`）——那一半现在归 `a_macro_call_begins_the_declaration`，
-   它读完调用就结束序列；要修就得让那条规则在"声明符没读成"时把序列交还回来
+1. 没有剩下的成族形状了。带 seeds 的语料**零错误**，而 455 那份不带 seeds 的读数里唯一失败的文件
+   （commdlg.h:577 的 STDMETHOD）不是缺陷：它的读法要 STDMETHOD 的体，而体在 combaseapi.h 里
+2. 下一步不是"再修一个文件"，而是换清单：**把 index-design.md 的索引队列往前推**（本节记的都是 parser 的账），
+   或者拿一份**更大的闭包**（整份 libstdc++ + Windows SDK）来量——现在这两份清单已经量不出东西了
 ```
 
 ### B42. 函数定义里的 `try`（function-try-block）—— 待修

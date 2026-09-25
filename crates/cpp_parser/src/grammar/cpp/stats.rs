@@ -1090,6 +1090,23 @@ pub(super) fn parse_preprocessor_directive(p: &mut CppParser) -> ParseResult {
 
     p.bump(); // `#`
 
+    // **How deep the conditional nesting is**, kept here because this is the one place a directive is read: a
+    // construct that asks "did I open a conditional inside myself?" cannot count the directives it *read* — a
+    // nested reading may have consumed one on its way past (the expression grammar's operator-position seam does
+    // exactly that, and the conditional that follows it is the case). The question is instead "how many were open
+    // when I started, and how many are open now", and this is what keeps that answer.
+    //
+    // `#else`/`#elif` stay at the level they were opened at; `#endif` closes one; everything else — `#define`,
+    // `#include`, `#pragma`, the null directive — does not nest.
+    //
+    // The name is matched by **text** rather than by kind, and the two spellings that need that are the common
+    // ones: `if` and `else` are C++ keywords, so `#if`/`#else` arrive as `IfKeyword`/`ElseKeyword` and a
+    // kind-based test would miss every one of them. The line bound is what keeps the null directive (`#` alone on
+    // a line) from reading the *next* line's `if` as its own name.
+    if p.current_token_range().start_offset < line_end {
+        p.note_a_directive_name();
+    }
+
     // The directive name is a plain identifier (`include`, `define`, `if`, ...); the null directive
     // `#` alone on a line has none.
     let directive_is_include = p.current_token() == CppTokenKind::Identifier
