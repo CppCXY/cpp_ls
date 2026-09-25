@@ -187,6 +187,11 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
         // [`at_the_implementations_try`] for why the spelling is the right thing to match on here rather than a
         // table lookup, and for the measurements behind it.
         CppTokenKind::Identifier if at_the_implementations_try(p) => parse_try_statement(p),
+
+        // An **`asm` statement** — the compilers' own statement, whose payload is not C++ at all. Claimed here,
+        // before the name is read as an expression, because `asm` is an ordinary identifier to this lexer and the
+        // declaration/expression rule has nothing to make of the operands. See [`at_an_asm_statement`].
+        CppTokenKind::Identifier if at_an_asm_statement(p) => parse_asm_statement(p),
         CppTokenKind::ReturnKeyword => parse_return_statement(p),
         // Coroutine statements. `co_return` is `return` under another name — the same operand, the same optional
         // value, the same `;` — so it is the same rule through a different keyword rather than a copy of it.
@@ -248,8 +253,132 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
     result
 }
 
-/// Does a **macro invocation used as a statement** start at the cursor?
+/// Does an **`asm` statement** start at the cursor?
 ///
+/// The compilers' own statement, and the one whose payload this grammar must not try to read:
+///
+/// ```cpp
+/// __asm__ volatile ("tilerelease" ::);                        // amxtileintrin.h:56
+/// __asm__ __volatile__ ("pconfig\n\t" : "=a" (retval) : "a" (leaf) : "cc");
+/// __asm__ ("int {$}3" : );                                    // _mingw.h:584
+/// ```
+///
+/// `asm` is not a C++ keyword — it is C's, and an extension spelled the same way by GCC and by MSVC — so this
+/// lexer produces an ordinary identifier and the *shape* has to claim it: one of the three spellings, an
+/// optional `volatile`/`inline`/`goto` (and GCC's `__volatile__`, which is a plain name to the lexer), and then a
+/// **balanced group** — `( … )` for GCC, `{ … }` for MSVC's `__asm { … }`.
+///
+/// That shape has no competitor at statement position: a name followed by a parenthesised group is otherwise a
+/// *call*, and a call is read — the difference is the spelling, and the three spellings are the compilers' own.
+/// The one thing that outranks a spelling here is **evidence**: a file that `#define`s `asm` (or a caller whose
+/// table describes it) is asking for the macro rules instead, and it gets them.
+fn at_an_asm_statement(p: &CppParser) -> bool {
+    if p.current_token() != CppTokenKind::Identifier
+        || !matches!(p.current_token_text(), "asm" | "__asm" | "__asm__")
+        || p.macro_evidence(p.current_token_text()).is_some()
+    {
+        return false;
+    }
+
+    let mut offset = 1usize;
+    loop {
+        match p.peek_token_kind_at(offset..offset + 1).first() {
+            Some(
+                &CppTokenKind::VolatileKeyword
+                | &CppTokenKind::InlineKeyword
+                | &CppTokenKind::GotoKeyword,
+            ) => offset += 1,
+            Some(&CppTokenKind::Identifier)
+                if matches!(p.peek_token_text_at(offset), "__volatile__" | "__volatile") =>
+            {
+                offset += 1;
+            }
+            Some(&CppTokenKind::LeftParen | &CppTokenKind::LeftBrace) => return true,
+            _ => return false,
+        }
+    }
+}
+
+/// Read an `asm` statement: its keyword, its qualifiers, and its payload **as tokens**.
+///
+/// The payload is the compiler's operand language, not C++ — `"int {$}3":`, `[ret] "=r" (ret)`, `"a" (leaf)` —
+/// so it is kept as the balanced group it is, with the tokens in order inside [`CppSyntaxKind::AsmStat`]. Reading
+/// it as anything else would mean inventing a grammar for a language this layer does not implement, and would
+/// lose the text a consumer wants to show.
+///
+/// The `;` is required after a `( … )` payload and **not** after a `{ … }` one: MSVC's `__asm { … }` is a block
+/// and ends without a semicolon, which is a difference in the language rather than in this rule's convenience.
+fn parse_asm_statement(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::AsmStat);
+
+    p.bump(); // the keyword
+
+    loop {
+        match p.current_token() {
+            CppTokenKind::VolatileKeyword
+            | CppTokenKind::InlineKeyword
+            | CppTokenKind::GotoKeyword => p.bump(),
+            CppTokenKind::Identifier
+                if matches!(p.current_token_text(), "__volatile__" | "__volatile") =>
+            {
+                p.bump();
+            }
+            _ => break,
+        }
+    }
+
+    let (open, close, closes_itself) = match p.current_token() {
+        CppTokenKind::LeftParen => (CppTokenKind::LeftParen, CppTokenKind::RightParen, false),
+        CppTokenKind::LeftBrace => (CppTokenKind::LeftBrace, CppTokenKind::RightBrace, true),
+        _ => {
+            p.close_marks_above(base);
+            return Err(CppParseError::syntax_error_from(
+                "expected `(` after `asm`",
+                p.current_token_range(),
+            ));
+        }
+    };
+
+    // The balanced group, token by token. The lexer has already made strings and comments single tokens, so a
+    // bracket inside one cannot be mistaken for the payload's own.
+    let mut depth = 0isize;
+    while !p.is_eof() {
+        let kind = p.current_token();
+        if kind == open {
+            depth += 1;
+        } else if kind == close {
+            depth -= 1;
+            if depth == 0 {
+                p.bump();
+                break;
+            }
+        }
+        p.bump();
+    }
+
+    if depth != 0 {
+        p.close_marks_above(base);
+        return Err(CppParseError::syntax_error_from(
+            "unterminated `asm` payload",
+            p.current_token_range(),
+        ));
+    }
+
+    if p.current_token() == CppTokenKind::Semicolon {
+        p.bump();
+    } else if !closes_itself {
+        p.emit_missing_node();
+        p.push_error(CppParseError::syntax_error_from(
+            "expected `;`",
+            p.current_token_range(),
+        ));
+    }
+
+    Ok(m.complete(p))
+}
+
+/// Does a **macro invocation used as a statement** start at the cursor?///
 /// The shape is a name, a parenthesised group, and then whatever the macro's body supplies — nothing at all for
 /// `#define NUMBER_OPTION(op) if (…) { … }`, a block for `#define IF_EXIST(op) if (…)`, a `;` for an ordinary
 /// function-like macro. What makes the reading available is that the name is one this file **`#define`s**, and

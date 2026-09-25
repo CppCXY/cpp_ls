@@ -95,8 +95,10 @@ impl CppKind {
     }
 
     fn syntax_from_raw(raw: u16) -> Option<CppSyntaxKind> {
-        // `MissingNode` is the last variant, so a discriminant is valid exactly when it is <= it.
-        if raw > CppSyntaxKind::MissingNode as u16 {
+        // `AsmStat` is the last variant, so a discriminant is valid exactly when it is <= it. (Every kind that
+        // is added goes **after** the one named here, never before it: the variants before it are the ones a
+        // stored discriminant could already mean.)
+        if raw > CppSyntaxKind::AsmStat as u16 {
             return None;
         }
         // Safety: `raw` is within the enum's discriminant range, and `CppSyntaxKind` is a
@@ -168,9 +170,10 @@ mod tests {
 
     #[test]
     fn out_of_range_raw_is_rejected() {
+        // The bound is the **last** variant, whatever it happens to be — that is the invariant, and this test is
+        // how the next person finds out that adding a kind means moving the bound (`syntax_from_raw` names it).
         assert!(
-            CppKind::try_from_raw(CppSyntaxKind::MissingNode as u16 + 1 + SYNTAX_KIND_TAG)
-                .is_none()
+            CppKind::try_from_raw(CppSyntaxKind::AsmStat as u16 + 1 + SYNTAX_KIND_TAG).is_none()
         );
         assert!(CppKind::try_from_raw(CppTokenKind::Error as u16 + 1).is_none());
         assert!(CppKind::try_from_raw(0xFFFF).is_none());

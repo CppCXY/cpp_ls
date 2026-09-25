@@ -1545,6 +1545,201 @@ token，所以这个扫描是安全的：`(f)(a)`（后面什么都没有）与 
 **量到的**：455 个文件的分析闭包 干净 375 → **379**、报错 80 → **76**、消息 596 → **496**（4 个 `avx10_2*`
 文件一起变干净，`winbase.h` 的首错从 1095 行推到 3493 行）；128 个文件的闭包不受影响（那些头不在它的闭包里）。
 
+### B64. 条件写在**模板头里**、或写在**名字段**的位置 —— 已修复
+
+```cpp
+template<typename _Tp, bool _TreatAsBytes =           // bits/cpp_type_traits.h:620
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+      __is_integer<_Tp>::__value
+#else
+      __is_byte<_Tp>::__value
+#endif
+        >
+```
+
+```cpp
+    basic_string<_CharT, _Traits, _Alloc>::           // bits/cow_string.h:3900（vector.tcc:133 同形）
+#ifdef __glibcxx_string_resize_and_overwrite
+    resize_and_overwrite(const size_type __n, _Operation __op)
+#else
+    __resize_and_overwrite(const size_type __n, _Operation __op)
+#endif
+```
+
+**现象**：三处各自的首错——`expected primary expression`（模板实参）、`expected a name`（`::` 之后）、
+`expected a template argument`。**4 个文件**因此失败：`cpp_type_traits.h`、`cow_string.h`、`vector.tcc`、
+`stl_iterator.h`（第四个见下）。
+
+**成因**：指令接缝这一族（§2.1）此前的十处都在**语句/声明/成员/初始化式/要求**上，模板头里那几处没有：
+
+```text
+模板实参表里（`X<` 与参数之间、以及参数与参数之间）    parse_template_argument_list_inner
+模板形参表里（参数之间、以及 `=` 与默认值之间）        parse_template_parameter_list / parse_template_parameter
+名字段的位置（`::` 之后，或者文件作用域的第一个段）    parse_name
+```
+
+**性质**：缺规则（同一族的最后三处），但**不是照抄一句 `while Hash` 就完**——两处需要"分支意识"：
+
+1. **默认值按分支各写一遍**：`= #if X 1 #else 2 #endif >` 里 `#else` 不是"下一个形参"，而是**同一个形参**的
+   另一种拼法，所以读完一个值之后要看下一条指令是不是 `else`/`elif`，是就再读一个值（值读取被抽成
+   `parse_a_default_value`，两处调用，不抄第二遍）。
+2. **`#endif` 结束的是形参，不是列表**：读完值之后游标在 `#endif` 上，列表要问的是 `,`/`>`——第一版写成
+   "读指令后 `continue`"（那是在要求**另一个形参**），于是 `>` 上又报一次 `expected a type specifier`。
+   正确做法是先把指令读完、再拿终止符去 match。
+
+**护栏**：`gaps.rs::a_conditional_may_decide_a_template_head`——十一个读得出的拼写（单分支/双分支的默认值、
+`typename` 默认值、参数之间、实参、名字段、两段真实文件的整行）＋**形状**断言（三条指令属于**实参表**自己，
+且**每个分支各贡献一个实参**——条件写了两遍，实参就有两个）＋一条 `assert_does_not_read_yet` 钉住下面那个形状。
+
+**量到的**：128 个文件的闭包 干净 93 → **95**、消息 366 → **358**；455 个文件的分析闭包 干净 379 → **382**、
+报错 76 → **73**、消息 496 → **487**。`cow_string.h`、`cpp_type_traits.h`、`vector.tcc` 三个文件变干净。
+
+### B65. 声明按分支各写一遍，而每个分支自带**尾巴和分号** —— 待修
+
+```cpp
+template<typename _InputIterator>
+    using __iter_key_t = remove_const_t<               // bits/stl_iterator.h:3090
+#ifdef __glibcxx_tuple_like // C++ >= 23
+      tuple_element_t<0, typename iterator_traits<_InputIterator>::value_type>>;   // ← 关掉 `remove_const_t<` 并结束声明
+#else
+      typename iterator_traits<_InputIterator>::value_type::first_type>;           // ← 同样关掉并结束
+#endif
+```
+
+**现象**：`expected (, but get >` 打在**第二个分支**的尾巴上——第一个分支已经把声明读完了（`>>;`），
+第二个分支的文本落在一个"已经结束的声明"后面。
+
+**成因**：共享的部分是 `remove_const_t<`（**在 `#if` 之前**），每个分支各写"实参 + 闭合的 `>`/`>>` + `;`"。
+所以这不是 B64 那三处接缝的形状——那三处是"一个位置上的 token 被条件替换"，这里是**一条声明的尾巴被条件
+替换了两遍**。与第十一轮的 `parse_a_definition_per_branch` 同族，但那一条要求每轮重新出现 `=`，而这里
+`=` 是共享的。
+
+**性质**：缺规则（"按分支写一遍"的第三种用法）。做法：让别名/声明读取器接受"每条分支一个尾巴"，即
+在 `;` 之后若游标在 `#else`/`#elif` 上，就读指令、再读一条尾巴与它的 `;`；`#endif` 收尾。
+**先量再改**：它现在只值 1 个文件（`stl_iterator.h`），而改动落在"声明何时结束"这条最敏感的判据上——
+所以先把它钉住（`gaps.rs` 的 `assert_does_not_read_yet`），等队列里它升到前面再动。
+
+**护栏**：`gaps.rs::a_conditional_may_decide_a_template_head` 末尾那条 `assert_does_not_read_yet`。
+
+### B66. 推导指引（deduction guide）：`M(I) -> M<I>;` —— 已修复
+
+```cpp
+  template<typename _InputIterator, typename _Allocator,
+	   typename = _RequireInputIter<_InputIterator>,
+	   typename = _RequireAllocator<_Allocator>>
+    multimap(_InputIterator, _InputIterator, _Allocator)          // bits/stl_multimap.h:1153
+    -> multimap<__iter_key_t<_InputIterator>, __iter_val_t<_InputIterator>,
+		less<__iter_key_t<_InputIterator>>, _Allocator>;
+```
+
+**现象**：`expected ;` 打在 `->` 那一行的**续行**上（`less<…>` / `M<I>`）。
+
+**成因**：C++17 的推导指引没有返回类型，写成"模板头 + 看着像调用的东西 + `-> 类型`"。这个 parser 的初始化式
+偏好（为 `Widget w(T)`、以及没有类型的 `Max(a, b);` 而设）把那个括号组读成**直接初始化**，于是 `->` 落在
+"初始化式之后"——而初始化式后面不能有 `->`，声明到此为止。
+
+**性质**：缺规则，而且证据是 B62 那条证据**旁边的一个 token**：`-> T` **只属于函数声明符**（变量的初始化式
+后面不可能有它）。所以修法是在 B62 那段试读里再加一条保留条件——而且必须**在限定符读取器之前问**：
+
+```rust
+let a_trailing_return_type_follows = p.current_token() == CppTokenKind::Arrow;  // ← 先问
+super::types::eat_function_qualifiers(p);                                       // ← 它会把 `-> T` 吃掉
+if a_trailing_return_type_follows || p.current_token() == CppTokenKind::LeftBrace { 保留函数读法 }
+```
+
+第一版把这一步写在 `eat_function_qualifiers` **之后**，于是什么都没看见——尾随返回类型已经被包进
+`TrailingReturnType` 节点了。
+
+**护栏**：`gaps.rs::a_deduction_guide_is_a_declarator_with_a_trailing_return_type`——十个读得出的拼写
+（四种指引形状含真实的 `multimap` 与 `basic_string_view`、普通尾随返回类型、成员函数、lambda 的 `->`）＋
+**形状**断言（指引是"一个形参表 + 一个 `TrailingReturnType` + 零个 `Initializer`"）。反面在这里格外重要：
+`->` 同时是**成员访问**运算符，所以 `(a)->b` 必须仍然是初始化式里的表达式，而不是被读成声明符
+（断言：那个 `auto r = …` 有一个 `Initializer`、零个 `TrailingReturnType`）。
+
+**量到的**：128 个文件的闭包 干净 95 → **97**、消息 358 → **353**；455 个文件的分析闭包 干净 382 → **386**、
+报错 73 → **69**、消息 487 → **480**。四个文件变干净：`bits/map`、`bits/multimap`、`bits/stl_multimap.h`、
+`string_view`。
+
+### B67. `asm` 语句（payload 不是 C++）—— 已修复
+
+```cpp
+  __asm__ volatile ("tilerelease" ::);                    // amxtileintrin.h:56
+  __asm__ __volatile__("int {$}3":);                      // _mingw.h:584
+  __asm__ __volatile__ ("pconfig\n\t" : "=a" (retval) : "a" (leaf) : "cc");
+```
+
+**现象**：`expected ; after expression` 打在 `__asm__ volatile (…` 这一行上——`asm` 被读成一个普通名字，
+于是整条语句按"表达式语句缺分号"处理。2 个文件的首错是它（`amxtileintrin.h`、`_mingw.h`），
+而语料里 **69 处** `asm` 拼写分布在 8 个文件里（多数在 `#define` 体内，所以只值 2 个文件的首错）。
+
+**成因**：这一族根本没有规则——parser 里没有任何 `asm` 处理（grep 零命中）。而且**payload 不是 C++**：
+`"int {$}3":`、`[ret] "=r" (ret)`、`"a" (leaf)` 是编译器的操作数语言，任何表达式/形参规则都读不了；
+第二、第三个操作数段还经常是**空的**（`::` 与 `:`），所以它连"逗号分隔的列表"都不是。
+
+**性质**：缺规则。做法与理由都值得记：
+
+```text
+形状    asm | __asm | __asm__            ← 三个拼写都是编译器自己的（C 的关键字 + GCC/MSVC 的扩展）
+        + 可选 volatile / inline / goto（GCC 的 __volatile__ 在词法上是普通名字，一并接受）
+        + 一个**配平的组**：GCC 是 ( … )，MSVC 是 { … }
+读法    payload **一个 token 一个 token** 收进 AsmStat 节点——它是什么就留什么
+        分号：`( … )` 之后要有；`{ … }`（MSVC 的块）之后不要
+```
+
+**一个 token 一个 token 地留**是这一条的要点：给 payload 编一套文法等于给一门这一层不实现的语语言编文法，
+而且会把用户想看的文本弄丢（高亮、hover、成块搬动 asm，要的都是**原文**）。这与宏调用的实参用
+`ArgumentList` 装"原始配平 token"是同一个安排。
+
+**新节点 `CppSyntaxKind::AsmStat`** 有两个细节：① 它**加在枚举最末**——`kind/mod.rs` 的原始值转换是
+`transmute`、上界就是"最后一个 variant"，加在中间会把已存下来的 kind 判别值改掉；② 那个上界与断言它的
+单元测试（`out_of_range_raw_is_rejected`）要跟着改，测试里现在写的是 `AsmStat`，并且注释说明了**新增 kind
+要加在它之后**。
+
+**证据优先于拼写**：`asm` 不是 C++ 关键字（所以词法器给的是普通标识符），三个拼写是"编译器自己的"这条依据
+撑起这条形状判据；但**本文件的 `#define`（或调用方的表）优先**——文件自己 `#define asm(x)` 时走宏的规则，
+测试里钉了这一条。
+
+**护栏**：`gaps.rs::an_asm_statement_keeps_its_payload_as_tokens`——九种读得出的拼写（两个真实文件的整行、
+四个操作数段的完整形态、空的 `::` 与 `:`、`asm goto`、折行版、MSVC 的 `__asm { … }`）＋**形状**断言
+（节点文本从 `__asm__` 到 `);`、每个操作数都还在文本里、没有 `ErrorNode`）＋宏证据的反面。
+
+**量到的**：128 个文件的闭包 消息 353 → **347**；455 个文件的分析闭包 干净 386 → **388**、报错 69 → **67**、
+消息 480 → **464**（`amxtileintrin.h` 与 `_mingw.h` 两个文件变干净）。
+
+### B68. 转换读法是**偏好**：组里其实是函数式转换时，它要退回去 —— 已修复
+
+```cpp
+      __gam1 = (__gammi - __gampl) / (_Tp(2) * __mu);                 // tr1/bessel_function.tcc:114
+      __fact *= __k / (_Tp(2) * __numeric_constants<_Tp>::__pi());    // tr1/gamma.tcc:117
+      static const _CASable _CASable_mask = ((_CASable(1) << (_CASable_bits / 2)) - 1);
+      _Tp __p_lm = (_Tp(2 * __j - 1) * __x * __P_lm1m …);             // tr1/legendre_function.tcc:175
+```
+
+**现象**：`expected ), but get (`（或 `get *`）打在那一行的中段，整条声明成瓦砾。**12 个文件**的首错是它：
+九个 `.tcc` 数学实现加 `parallel/types.h`、`bits/stl_bvector.h`、`bits/max_size_type.h`、`bits/type_traits.h`。
+
+**成因**：`(T)…` 是靠**证据**读成 C 风格转换的——括号里那个名字是**本文件知道的类型**。而这条证据对
+"**组里的表达式**用了函数式转换"同样成立：`_Tp` 是模板参数（模板头把它记成了类型名），于是 `(_Tp(2) * __mu)`
+被当成转换 `(_Tp` + 期待 `)`，可下一个 token 是 `(`——那是 `_Tp(2)` 这个**调用**的开头。
+真正的问题是**失败的尝试没有回退**：守卫说"转换"，那条 arm 就一路走到报错，括号表达式那条读法根本没轮到。
+
+**性质**：缺规则（缺的是"偏好失败之后怎么办"这一步），而**守卫自己的注释早就写好了答案**：
+"a cast whose operand fails to parse is rewound and read as a parenthesised expression"——缺的只是**类型那一半**
+失败时也回退。一个 checkpoint 就够：失败的 `parse_type_id` 与它报的错一起消失（`rollback` 会截断诊断，
+"没人采纳的读法报的问题不是这个文件的问题"），表达式规则拿到本该属于它的 token。
+
+这一条因此是**判据的收尾**而不是新判据：守卫给的"可能是转换"本来就只是偏好，现在失败时会真的退回去。
+
+**护栏**：`gaps.rs::a_group_holding_a_call_is_an_expression_not_a_cast`——十四个读得出的拼写（四种真实形状、
+`(T(2 * j - 1) * x * y)`、`((T(1) << (n / 2)) - 1)`、带模板头的两种）＋**形状**断言两侧：
+`(T)x` 与 `(T(*)(int))x` 仍然是 `CastExpr`；`(T(2) * c)` 是 `ParenExpr(BinaryExpr(CallExpr(T, 2), *, c))`——
+**没有** `CastExpr`；`(T(2))` 同样是调用而不是"把 2 转成 T"＋一条**诊断**断言（被放弃的转换尝试报的
+`expected ), but get (` 必须被回退收回去）。
+
+**量到的**：128 个文件的闭包 干净 97 → **100**、报错 31 → **28**、消息 347 → **283**；
+455 个文件的分析闭包 干净 388 → **400**、报错 67 → **55**、消息 464 → **352**。12 个文件变干净，
+另有三个文件（`compare`、`intrin-impl.h`、`winbase.h`）的首错往后移。
+
 ### B42. 函数定义里的 `try`（function-try-block）—— 待修
 
 ```cpp

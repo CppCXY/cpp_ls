@@ -856,4 +856,23 @@ pub enum CppSyntaxKind {
     /// Missing node - represents a missing syntax element
     /// Used for handling incomplete syntax structures
     MissingNode,
+
+    // ========== The compilers' own constructs ==========
+    /// An **`asm` statement** — GCC's `asm volatile ("…" : … : … : …);`
+    ///
+    /// ```cpp
+    /// __asm__ volatile ("tilerelease" ::);                    // amxtileintrin.h:56
+    /// __asm__ __volatile__ ("pconfig\n\t" : "=a" (retval) : "a" (leaf) : "cc");
+    /// ```
+    ///
+    /// The **payload is not C++**: `"int {$}3":`, `[ret] "=r" (ret)` and `"a" (leaf)` are the compiler's own
+    /// operand language, which no expression or parameter rule can read. So this node keeps them **as tokens** —
+    /// what the file wrote, in order — the same treatment a macro invocation's arguments get, and for the same
+    /// reason: the text is what a consumer needs (a highlight, a hover, an asm block moved as a unit), and the
+    /// meaning belongs to a compiler this layer does not have.
+    ///
+    /// Declared **last** among the kinds so that no other variant's discriminant moves: the raw conversion in
+    /// `kind/mod.rs` is a `transmute` bounded by the last variant, and renumbering it would change what a stored
+    /// kind means.
+    AsmStat,
 }

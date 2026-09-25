@@ -189,7 +189,7 @@ let config = toolchain.map_or_else(CompilerConfig::new, |toolchain| toolchain.co
 跑一次编译器问搜索路径、扫一遍源文件清单），之后 `advance(n)` 一步一个文件地把闭包读进来，`view` + 五个查询
 按光标回答。P0 的收益因此从"可兑现"变成**已兑现**，实测见下面"驱动层"那一节。
 
-### P1 让闭包干净解析（**进行中**：48 → 101 个文件干净；第十七/十八轮之后 335 → **379**，128 个文件那份 80 → **93**）
+### P1 让闭包干净解析（**进行中**：48 → 101 个文件干净；第十七/十八轮之后 335 → **400**，128 个文件那份 80 → **100**）
 
 **按形状放宽，而不是接表**——这是这一轮最重要的一条计划修正，理由见下。
 
@@ -258,6 +258,9 @@ let config = toolchain.map_or_else(CompilerConfig::new, |toolchain| toolchain.co
 + B61  方言：`__int128` / `_Float16` / `__int64` 由目标编译器决定  92    36   372         371    84   607
 + B62  `T f(U) { … }`：花括号体说明括号组是形参表     93    35   366         375    80   596
 + B63  `(T)(U) x`：成串的括号组也要跨过去看后面       93    35   366         379    76   496
++ B66  推导指引 `M(I) -> M<I>;`                     97    31   353         386    69   480
++ B67  `asm` 语句（新节点 `AsmStat`）               97    31   347         388    67   464
++ B68  转换读法失败要回退成括号表达式               100   28   283         400    55   352
 
 alloc_traits.h 的首错   454 → 536 → 689 → 941 → **1053（文件最后一行）→ 干净**（B53 → … → B57）
 basic_string.h         4532 行那条首错（`noexcept` 那一族）随 B55 消失，文件变干净
@@ -266,8 +269,22 @@ avx512bw/cd/f/vlbw/vl、avxintrin、emmintrin、mmintrin、nested_exception  随
 bmi2intrin.h           随 B61 变干净；ranges_base.h 的首错 86 → 214 行
 exception_ptr.h / predefined_ops.h / cmath / helper_functions.h  随 B62 变干净；type_traits.h 165 → 231 行
 avx10_2-512minmax / avx10_2minmax / avx10_2convert / avx10_2-512convert  随 B63 变干净；winbase.h 1095 → 3493 行
-predefined_ops.h 65 → 80、stl_iterator.h 1633 → 3091、stl_tree.h 1086 → 2468、compare 568 → 672（首错后移）
+bits/map、bits/multimap、stl_multimap.h、string_view  随 B66 变干净（4 个）
+amxtileintrin.h、_mingw.h                              随 B67 变干净（2 个）
+tr1 的九个 .tcc 数学实现、parallel/types.h、stl_bvector.h、max_size_type.h、type_traits.h  随 B68 变干净（12 个）
+predefined_ops.h 65 → 80、stl_iterator.h 1633 → 3094、stl_tree.h 1086 → 2468、compare 568 → 672（首错后移）
 ```
+
+**B68 是这一轮第二大的单次收益，而它只改了四行**：`(T)…` 的转换读法靠"括号里的名字是已知类型"这条证据，
+而这条证据对"组里的表达式用了函数式转换"同样成立（模板参数 `_Tp` 就是已知类型），于是
+`(_Tp(2) * __mu)` 被当成转换、期待 `)`、却遇到 `(`。守卫的注释**早就写好了答案**——"转换读法失败就回退成
+括号表达式"——缺的只是**类型那一半**失败时也回退。12 个文件（九个 `.tcc` 数学实现加三个 bits 头）因此变干净，
+消息 −112；它与 B62/B66 是同一类："判据给了偏好，却没人负责偏好失败之后"。
+
+**B67 是一整族"编译器自己的语句"**：语料里 **69 处** `asm` 拼写（多在 `#define` 体内，所以只值 2 个文件的首错），
+而 payload 完全不是 C++——`"int {$}3":`、`"a" (leaf)`，第二、三段还常常是空的。所以读法是**原样留 token**
+（新节点 `AsmStat`），这也正是"不改写、不解释"这条纪律在扩展语法上的样子：能给用户看原文、能让 asm 成块搬动，
+就已经够了。
 
 **B62 是"偏好缺一条证据"**：`T f(U)` 既是"取无名形参（类型 `U`）的函数"，也是"用 `U` 初始化的变量 `f`"，
 而 parser 的偏好是初始化式优先（为没有类型的 `Max(a, b);` 而设）。缺的那条证据是"后面跟着 `{`"——

@@ -636,16 +636,34 @@ fn parse_unary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
         // and the type reading has to be tried first because it is the one that can be refused: `(x + 1)`
         // parses as neither a type nor an abstract declarator, so the rollback is what makes it an expression.
         CppTokenKind::LeftParen if is_a_type_in_parentheses(p) => {
+            let before_the_cast = p.checkpoint();
             let base = p.open_marks();
             let m = p.mark(CppSyntaxKind::CastExpr);
             p.bump(); // `(`
-            if let Err(err) = super::types::parse_type_id(p) {
-                p.close_marks_above(base);
-                return Err(err);
-            }
-            if let Err(err) = expect_token(p, CppTokenKind::RightParen) {
-                p.close_marks_above(base);
-                return Err(err);
+
+            // **The cast reading is a preference, and here is where it is dropped.** The guard above answers
+            // "the name inside these parentheses is a type", which is evidence for `(Widget)x` — and it is also
+            // true of a **functional conversion used as a value inside a grouped expression**, which is what a
+            // template-parameter name looks like everywhere in libstdc++'s math implementations:
+            //
+            // ```cpp
+            // __gam1 = (__gammi - __gampl) / (_Tp(2) * __mu);     // tr1/bessel_function.tcc:114
+            // __fact *= __k / (_Tp(2) * __numeric_constants<_Tp>::__pi());   // tr1/gamma.tcc:117
+            // static const _CASable _CASable_mask = ((_CASable(1) << (_CASable_bits / 2)) - 1);
+            // ```
+            //
+            // There the type-id is `_Tp` and then a `(` follows, so requiring the `)` fails and the whole
+            // statement came out as rubble with `expected ), but get (`. Seven files had that as their first
+            // error, and the reading that is right for all of them is the one the guard's own comment promises:
+            // when the cast does not hold up, the group is a parenthesised **expression**. A rewind is what makes
+            // that promise good — the type reading and its failure both disappear, diagnostics included
+            // ([`CppParser::rollback`]), and the expression rule gets the tokens it should have had.
+            let the_type_and_its_closing = super::types::parse_type_id(p)
+                .and_then(|_| expect_token(p, CppTokenKind::RightParen));
+
+            if let Err(_the_cast_reading_did_not_hold) = the_type_and_its_closing {
+                p.rollback(before_the_cast);
+                return parse_parenthesized_expression(p);
             }
 
             // The operand of a cast is a unary expression, which is what keeps `(int)a + b` a sum of a cast

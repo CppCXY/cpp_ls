@@ -1314,6 +1314,365 @@ fn a_cast_of_a_cast_is_still_a_cast() {
     );
 }
 
+/// **A conditional inside a template head, or where a name segment stands** — three seams of the same family.
+///
+/// The directive seams were done for statements, declarations, class members, initialisers and requirements
+/// (`docs/grammar-gaps.md` §2.1 and B57/B60); these are the three that were left, and each is a real spelling in
+/// libstdc++:
+///
+/// ```cpp
+/// template<typename _Tp, bool _TreatAsBytes =           // bits/cpp_type_traits.h:620 — the default argument
+/// #if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+///       __is_integer<_Tp>::__value
+/// #else
+///       __is_byte<_Tp>::__value
+/// #endif
+///         >
+///
+///     vector<_Tp, _Alloc>::                             // bits/vector.tcc:133 — a name segment
+/// #if __cplusplus >= 201103L
+///     insert(const_iterator __position, const value_type& __x)
+/// #else
+///     insert(iterator __position, const value_type& __x)
+/// #endif
+///     { … }
+///
+/// X<                                                   // the argument itself
+/// #if A
+///   1
+/// #else
+///   2
+/// #endif
+///   > x;
+/// ```
+///
+/// Two of the three needed more than "read the directive and go round": the default argument is written **once
+/// per branch**, so an `#else` there spells the same parameter's value again rather than starting a new
+/// parameter (the value reading is factored into `parse_a_default_value` for exactly that), and the `#endif`
+/// after it ends the *parameter*, so the list must re-ask for its `,`/`>` rather than for another parameter.
+///
+/// Still **not** read, and pinned below: a declaration written once per branch where each branch supplies its own
+/// tail *and its own `;`* (`bits/stl_iterator.h:3090`).
+#[test]
+fn a_conditional_may_decide_a_template_head() {
+    assert_reads(
+        Where::File,
+        &[
+            // The default argument of a template parameter, one branch and two.
+            "template<int N =\n#if X\n  1\n#endif\n  > void f();",
+            "template<int N =\n#if X\n  1\n#else\n  2\n#endif\n  > void f();",
+            "template<typename T, bool B =\n#if X\n  A<T>::value\n#else\n  B<T>::value\n#endif\n  > struct C { };",
+            // …and the same with the directive *between* parameters.
+            "template<typename T,\n#if X\n  typename U\n#else\n  typename U\n#endif\n  > void f();",
+            // A template argument written per branch.
+            "X<\n#if A\n  1\n#else\n  2\n#endif\n  > x;",
+            // A name segment, which in the real file is a member definition whose head is written per branch.
+            "void S::\n#if X\nf()\n#else\ng()\n#endif\n{ }",
+            "template<typename T>\ntypename V<T>::iterator\nV<T>::\n#if X\ninsert(int x)\n#else\ninsert(long x)\n#endif\n{ }",
+            // The shapes that must keep reading: an ordinary head, an ordinary argument, and a default with no
+            // directive at all.
+            "template<typename T, int N = 3, typename... R> void f();",
+            "template<typename T = int> struct X { };",
+            "std::map<K, std::less<>> m;",
+            "X<1, 2> x;",
+        ],
+    );
+
+    // The shape: the directive is a node of *the thing it was written inside* — the argument list, or the
+    // parameter list — and the value it guards is still read as a value.
+    let argument_list_holds = |source: &str| {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        tree.get_red_root()
+            .descendants()
+            .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::TemplateArgumentList)
+            .map(|list| {
+                (
+                    list.descendants()
+                        .filter(|node| {
+                            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::PreprocessorDirective
+                        })
+                        .count(),
+                    list.descendants()
+                        .filter(|node| {
+                            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::TemplateArgument
+                        })
+                        .count(),
+                )
+            })
+            .unwrap_or_default()
+    };
+
+    assert_eq!(
+        argument_list_holds("X<\n#if A\n  1\n#else\n  2\n#endif\n  > x;"),
+        (3, 2),
+        "the three directives are the argument list's, and **each branch contributes its own argument** — the \
+         list is what the conditional spells twice"
+    );
+
+    // The one that is still not read: a declaration whose **tail** — and whose `;` — is written per branch.
+    assert_does_not_read_yet(
+        Where::File,
+        &[(
+            "template<typename I>\n  using K = remove_const_t<\n#if X\n    tuple_element_t<0, T>>;\n#else\n    \
+             typename I::first_type>;\n#endif",
+            "a declaration written once per branch where each branch supplies its own tail **and its own `;`** \
+             (`bits/stl_iterator.h:3090`): the shared part is `remove_const_t<`, and branch one closes it and ends \
+             the declaration, so branch two's text arrives at a declaration that is already finished. Reading it \
+             needs the alias rule to take a *tail* per branch the way `parse_a_definition_per_branch` takes a \
+             *payload* per branch — with the `=` shared rather than repeated",
+        )],
+    );
+}
+
+/// **A deduction guide is a declarator with a trailing return type** — `M(I) -> M<I>;`.
+///
+/// C++17's deduction guide is written as a template head, then what looks like a call, then `-> type` — and the
+/// `->` is the whole evidence, because a **trailing return type belongs to a function declarator and to nothing
+/// else**: a variable's initializer cannot be followed by one. Without that, the preference for the initializer
+/// reading (which is right for `Widget w(T)`, and exists for `Max(a, b);`) took the group for a
+/// direct-initialisation and the `->` for what came after it:
+///
+/// ```cpp
+///   template<typename _InputIterator, typename _Allocator, typename = …>
+///     multimap(_InputIterator, _InputIterator, _Allocator)      // bits/stl_multimap.h:1153
+///     -> multimap<__iter_key_t<_InputIterator>, __iter_val_t<_InputIterator>,
+///                 less<__iter_key_t<_InputIterator>>, _Allocator>;
+/// ```
+///
+/// Four files of the closure had one of these as their first error (`bits/map`, `bits/multimap`,
+/// `bits/stl_multimap.h`, `string_view`), and all four are clean now.
+///
+/// The negative half matters more than usual here, because `->` is also the **member access** operator: an
+/// expression like `(a)->b` is not a declaration, and the reading below must not turn it into one.
+#[test]
+fn a_deduction_guide_is_a_declarator_with_a_trailing_return_type() {
+    assert_reads(
+        Where::File,
+        &[
+            "template<typename I> M(I) -> M<I>;",
+            "template<typename I> M(I, I) -> M<int>;",
+            "template<typename I>\n  M(I, I)\n  -> M<K<I>, V<I>>;",
+            "template<typename I>\n  multimap(I, I)\n  -> multimap<K<I>, V<I>,\n              less<K<I>>, A>;",
+            // The real one, spelled out.
+            "template<typename _InputIterator, typename _Allocator, typename = _RequireInputIter<_InputIterator>>\n\
+             \x20 multimap(_InputIterator, _InputIterator, _Allocator)\n\
+             \x20 -> multimap<__iter_key_t<_InputIterator>, __iter_val_t<_InputIterator>,\n\
+             \x20             less<__iter_key_t<_InputIterator>>, _Allocator>;",
+            "template<typename _It> basic_string_view(_It, _It) -> basic_string_view<iter_value_t<_It>>;",
+            // What must keep reading: an ordinary trailing return type, a variable with an initializer, and the
+            // arrow used as the member-access operator inside an expression.
+            "auto f(int) -> int;",
+            "struct S { auto f() -> int { return 1; } };",
+            "void f() { auto r = (a)->b; }",
+            "void f() { auto l = []() -> int { return 1; }; }",
+            "void f() { T x(y); }",
+        ],
+    );
+
+    // The shape: the group is a **parameter list** and the `->` its trailing return type, with no initializer in
+    // sight — and the member-access expression keeps its own reading.
+    let parts = |source: &str| {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        let root = tree.get_red_root();
+        let count = |kind| {
+            root.descendants()
+                .filter(|node| CppSyntaxKind::from(node.kind()) == kind)
+                .count()
+        };
+        (
+            count(CppSyntaxKind::ParameterList),
+            count(CppSyntaxKind::TrailingReturnType),
+            count(CppSyntaxKind::Initializer),
+        )
+    };
+
+    assert_eq!(
+        parts("template<typename I> M(I) -> M<I>;"),
+        (1, 1, 0),
+        "a guide is a function declarator: one parameter list, one trailing return type, no initializer"
+    );
+    assert_eq!(
+        parts("void f() { auto r = (a)->b; }"),
+        (1, 0, 1),
+        "and `(a)->b` is an initializer — the outer function's parameter list, and no trailing return type"
+    );
+}
+
+/// **An `asm` statement**, whose payload is the compiler's language rather than C++.
+///
+/// `asm` is not a C++ keyword (it is C's, and an extension spelled the same way by GCC and by MSVC), so this
+/// lexer produces an ordinary identifier and the shape is what claims the statement. The payload is the point:
+///
+/// ```cpp
+/// __asm__ volatile ("tilerelease" ::);                       // amxtileintrin.h:56
+/// __asm__ __volatile__("int {$}3":);                         // _mingw.h:584
+/// __asm__ __volatile__ ("pconfig\n\t" : "=a" (retval) : "a" (leaf) : "cc");
+/// ```
+///
+/// `"int {$}3":` and `"a" (leaf)` are GCC's operand language — no expression rule can read them, and inventing one
+/// would both lose the text and be wrong about what is there. So the payload is kept **as tokens** inside one
+/// [`CppSyntaxKind::AsmStat`] node, which is what a consumer wants: a highlight, a hover, an asm block moved as a
+/// unit. Both the empty second operand section (`::`) and the empty third (`:`) are in the corpus, which is why
+/// the rule reads a *balanced group* rather than anything with structure.
+///
+/// The negative half is the spelling evidence: a name followed by a parenthesised group is otherwise a **call**,
+/// and the difference is the three spellings. A file that `#define`s `asm` is asking for the macro rules, and it
+/// gets them.
+#[test]
+fn an_asm_statement_keeps_its_payload_as_tokens() {
+    assert_reads(
+        Where::Body,
+        &[
+            "__asm__ volatile (\"tilerelease\" ::);",
+            "__asm__ __volatile__(\"int {$}3\":);",
+            "__asm__ __volatile__ (\"pconfig\\n\\t\" : \"=a\" (retval) : \"a\" (leaf) : \"cc\");",
+            "__asm__ (\"nop\");",
+            "asm(\"nop\");",
+            "asm volatile (\"dmb\" ::: \"memory\");",
+            "asm goto (\"jmp %l0\" :::: label);",
+            "__asm__ __volatile__ (\"pconfig\\n\\t\"\t\\\n\t: \"=a\" (retval)\t\t\t\\\n\t: \"a\" (leaf), \"b\" (b)\t\t\\\n\
+             \t: \"cc\");",
+            // MSVC's spelling: a block, and no `;` after it.
+            "__asm { mov eax, 1 }",
+            // What must keep reading as it did: a call, and a name that only *looks* similar.
+            "g(1, 2);",
+            "asmbl(1);",
+        ],
+    );
+
+    // The shape: one node holding the tokens in order — including the ones no rule could read.
+    let tree = CppParser::parse(
+        "void f() { __asm__ volatile (\"pconfig\\n\\t\" : \"=a\" (retval) : \"a\" (leaf) : \"cc\"); }",
+        ParserConfig::default(),
+    );
+    let root = tree.get_red_root();
+    let asm = root
+        .descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::AsmStat)
+        .expect("the statement is an asm statement");
+    let text = asm.text().to_string();
+    assert!(
+        // `trim_end`, because the trivia *after* the `;` belongs to the enclosing node as well — the tree keeps
+        // every byte, and a node's text is allowed to end in the space before the next one.
+        text.starts_with("__asm__ volatile (") && text.trim_end().ends_with(");"),
+        "the node spans the whole statement: {text:?}"
+    );
+    assert!(
+        text.contains("\"=a\" (retval)") && text.contains("\"cc\""),
+        "and every operand is still in it, as text: {text:?}"
+    );
+    assert!(
+        !root.descendants().any(|node| {
+            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ErrorNode
+        }),
+        "nothing in an asm statement is rubble"
+    );
+
+    // …and a file whose own `#define` claims the name keeps the macro reading.
+    let tree = CppParser::parse(
+        "#define asm(x) g(x)\nvoid f() { asm(1); }",
+        ParserConfig::default(),
+    );
+    assert!(
+        !tree
+            .get_red_root()
+            .descendants()
+            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::AsmStat),
+        "a name this file defines as a macro is not the compiler's keyword"
+    );
+}
+
+/// **The cast reading is a preference, and a group that holds a call is an expression.**
+///
+/// `(T)…` is read as a C-style cast on evidence — the name inside the parentheses is a type this file knows —
+/// and that evidence is *also* true of a **functional conversion used as a value inside a grouped expression**,
+/// which is what a template parameter looks like everywhere in libstdc++'s math implementations:
+///
+/// ```cpp
+/// __gam1 = (__gammi - __gampl) / (_Tp(2) * __mu);                          // tr1/bessel_function.tcc:114
+/// __fact *= __k / (_Tp(2) * __numeric_constants<_Tp>::__pi());             // tr1/gamma.tcc:117
+/// static const _CASable _CASable_mask = ((_CASable(1) << (_CASable_bits / 2)) - 1);
+/// _Tp __p_lm = (_Tp(2 * __j - 1) * __x * __P_lm1m …);                      // legendre_function.tcc:175
+/// ```
+///
+/// There the type-id is `_Tp` and a `(` follows, so the `)` the cast demands never comes: the declaration came
+/// out as rubble with `expected ), but get (`, and **twelve files** of the closure had that as their first error
+/// (the nine `.tcc` math implementations, `parallel/types.h`, `bits/stl_bvector.h`, `bits/max_size_type.h`,
+/// `bits/type_traits.h`).
+///
+/// The guard's own comment already promised the answer — "a cast whose operand fails to parse is rewound and
+/// read as a parenthesised expression" — and what was missing was the rewind for the *type* half of the attempt.
+/// A checkpoint taken before the cast does it: the failed type reading and its diagnostics disappear
+/// ([`CppParser::rollback`] truncates both), and the expression rule gets the tokens.
+///
+/// The negative half is what a cast is: `(T)x`, `(int)x` and the abstract-declarator spellings
+/// (`(T(*)(int))x`) must all still come out as `CastExpr`.
+#[test]
+fn a_group_holding_a_call_is_an_expression_not_a_cast() {
+    assert_reads(
+        Where::Body,
+        &[
+            "auto r = (T(2) * c);",
+            "auto r = (a - b) / (T(2) * c);",
+            "z = (a - b) / (T(2) * c);",
+            "auto r = ((T(1) << (n / 2)) - 1);",
+            "auto r = (T(2 * j - 1) * x * y);",
+            "auto r = (x + T(1)) / (T(2) * y);",
+            "auto r = (T(2));",
+            // The same, with the template parameter the real files use.
+            "template<typename T>\n  void f() { T x = (a - b) / (T(2) * c); }",
+            "template<typename _Tp>\n  _Tp g(_Tp a, _Tp b, _Tp c)\n  {\n    _Tp x;\n    x = (a - b) / (_Tp(2) * c);\n    \
+             return x;\n  }",
+            // …and what a cast is, which must keep reading as one.
+            "auto r = (T)x;",
+            "auto r = (int)x;",
+            "auto r = (T(*)(int))x;",
+            "auto r = (const T&)x;",
+            "auto r = (a + b);",
+        ],
+    );
+
+    // **Which of the two readings came out**, and that the failed attempt left nothing behind.
+    let kinds = |source: &str| {
+        let tree = CppParser::parse(&format!("void probe() {{ {source} }}"), ParserConfig::default());
+        let root = tree.get_red_root();
+        let found = |kind| {
+            root.descendants()
+                .any(|node| CppSyntaxKind::from(node.kind()) == kind)
+        };
+        (found(CppSyntaxKind::CastExpr), found(CppSyntaxKind::CallExpr))
+    };
+
+    assert_eq!(kinds("auto r = (T)x;"), (true, false), "`(T)x` is a cast");
+    assert_eq!(
+        kinds("auto r = (T(*)(int))x;"),
+        (true, false),
+        "…and so is one whose type has an abstract declarator"
+    );
+    assert_eq!(
+        kinds("auto r = (T(2) * c);"),
+        (false, true),
+        "`(T(2) * c)` is a product, and `T(2)` inside it is a call"
+    );
+    assert_eq!(
+        kinds("auto r = (T(2));"),
+        (false, true),
+        "…and a lone `(T(2))` is the same call, not a cast of `2` to `T`"
+    );
+
+    // The **diagnostics** of the abandoned attempt are gone with it: a problem with a reading nobody kept is a
+    // problem the file does not have.
+    assert!(
+        CppParser::parse(
+            "void probe() { auto r = (T(2) * c); }",
+            ParserConfig::default()
+        )
+        .get_errors()
+        .is_empty(),
+        "the cast attempt reported `expected ), but get (` — the rewind must take that back"
+    );
+}
+
 /// The empty string when the parse is clean, or a description of the first thing wrong with it.
 fn report(source: &str, tree: &CppSyntaxTree) -> Result<(), String> {
     if let Some(error) = tree.get_errors().first() {

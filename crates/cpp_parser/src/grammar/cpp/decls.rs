@@ -260,12 +260,57 @@ pub fn parse_template_parameter_list(p: &mut CppParser) -> ParseResult {
     }
 
     loop {
+        // A **directive between parameters** — and, like the argument list's own seam, in front of a parameter's
+        // default argument, which is where `bits/cpp_type_traits.h:620` writes one:
+        //
+        // ```cpp
+        // template<typename _Tp, bool _TreatAsBytes =
+        // #if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        //       __is_integer<_Tp>::__value
+        // #else
+        //       __is_byte<_Tp>::__value
+        // #endif
+        //         >
+        // ```
+        if p.current_token() == CppTokenKind::Hash {
+            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+            continue;
+        }
+
         if let Err(err) = parse_template_parameter(p) {
             p.close_marks_above(base);
             return Err(err);
         }
 
-        match p.current_token() {
+        // **The directive that closes a conditional default argument** — the far end of the seam the parameter
+        // rule opens after its `=`:
+        //
+        // ```cpp
+        // template<int N =
+        // #if X
+        //   1
+        // #else
+        //   2
+        // #endif          // ← arrives here, where the list expects `,` or `>`
+        //   >
+        // ```
+        //
+        // Read *before* the terminator is matched rather than by going round the loop again: a directive here
+        // ends something, so the next token is the `,`/`>` this parameter was always going to end with — going
+        // round would ask for another *parameter* and report a missing type specifier at the `>`.
+        let mut terminator = p.current_token();
+        while terminator == CppTokenKind::Hash {
+            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+            terminator = p.current_token();
+        }
+
+        match terminator {
             CppTokenKind::Comma => {
                 p.bump();
                 continue;
@@ -441,16 +486,53 @@ fn parse_template_parameter(p: &mut CppParser) -> ParseResult {
     if p.current_token() == CppTokenKind::Assign {
         p.bump();
 
-        let type_checkpoint = p.checkpoint();
-        let before = p.current_token_index();
-        let parsed_a_type = parse_type_id(p).is_ok() && p.current_token_index() > before;
-        if !parsed_a_type {
-            p.rollback(type_checkpoint);
+        // **A directive where the default argument begins** — the conditional default, which is a real spelling
+        // in libstdc++ and not only in the file this was found in:
+        //
+        // ```cpp
+        // template<typename _Tp, bool _TreatAsBytes =        // bits/cpp_type_traits.h:620
+        // #if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        //       __is_integer<_Tp>::__value
+        // #else
+        //       __is_byte<_Tp>::__value
+        // #endif
+        //         >
+        // ```
+        //
+        // A `#` after the `=` cannot be anything else: a default argument begins with a type, an expression — or
+        // a directive.
+        while p.current_token() == CppTokenKind::Hash {
+            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+        }
 
-            // Read **below the comma operator**: the comma after a default argument separates the next
-            // parameter. `template <typename T, int N = 3, typename... Rest>` is three parameters, and a reader
-            // that took the comma swallowed the third — which is how this rule was found.
-            if let Err(err) = super::exprs::parse_assignment_expr(p) {
+        // **…and the value itself may be written once per branch.** An `#else`/`#elif` here does *not* start a new
+        // parameter — it spells the same argument the other way, so another value follows:
+        //
+        // ```cpp
+        // template<int N =
+        // #if X
+        //   1
+        // #else
+        //   2          // ← the same parameter's other spelling, not a parameter with no type
+        // #endif
+        //   >
+        // ```
+        //
+        // The `#endif` is read on the way *out*, by the parameter list's own seam, which is why only `else`/`elif`
+        // is the loop's business here.
+        loop {
+            parse_a_default_value(p, base)?;
+
+            if p.current_token() != CppTokenKind::Hash
+                || !matches!(p.peek_token_text_at(1), "else" | "elif")
+            {
+                break;
+            }
+
+            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
                 p.close_marks_above(base);
                 return Err(err);
             }
@@ -458,6 +540,33 @@ fn parse_template_parameter(p: &mut CppParser) -> ParseResult {
     }
 
     Ok(m.complete(p))
+}
+
+/// One value of a template parameter's default argument: a type, or an expression.
+///
+/// The two readings are tried in this order for the reason [`parse_template_parameter`] gives: a type-id is the
+/// narrower question, and `std::vector<int>` is also a perfectly good expression to the other one. Factored out
+/// because the value can be written **once per branch** — see the loop that calls it.
+fn parse_a_default_value(p: &mut CppParser, base: usize) -> ParseResult {
+    let type_checkpoint = p.checkpoint();
+    let before = p.current_token_index();
+    let parsed_a_type = parse_type_id(p).is_ok() && p.current_token_index() > before;
+
+    if parsed_a_type {
+        return Ok(CompleteMarker::empty());
+    }
+
+    p.rollback(type_checkpoint);
+
+    // Read **below the comma operator**: the comma after a default argument separates the next parameter.
+    // `template <typename T, int N = 3, typename... Rest>` is three parameters, and a reader that took the comma
+    // swallowed the third — which is how this rule was found.
+    if let Err(err) = super::exprs::parse_assignment_expr(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    Ok(CompleteMarker::empty())
 }
 ///
 /// Returns `Err` without having consumed anything when the input does not look like a declaration,
@@ -1808,9 +1917,23 @@ pub fn parse_function_suffix_or_initializer(
         let before_the_function_reading = p.checkpoint();
 
         if parse_parameter_list(p).is_ok() {
+            // **A trailing return type is the same evidence one token along**: `-> T` belongs to a function
+            // declarator and to nothing else — a variable's initializer cannot be followed by one — so a
+            // deduction guide reads, and so does any declaration whose head is written that way:
+            //
+            // ```cpp
+            //   template<typename _InputIterator, typename _Allocator, …>
+            //     multimap(_InputIterator, _InputIterator, _Allocator)      // bits/stl_multimap.h:1153
+            //     -> multimap<__iter_key_t<_InputIterator>, __iter_val_t<_InputIterator>, …>;
+            // ```
+            //
+            // Asked *before* the qualifier reader consumes it: that reader owns `-> T` (it wraps it in a
+            // `TrailingReturnType`), so afterwards there is nothing left to notice. `M(I) -> M<I>;` was read as a
+            // variable named by nothing, initialised with `(I)`, and the error landed on the `M<I>`.
+            let a_trailing_return_type_follows = p.current_token() == CppTokenKind::Arrow;
             super::types::eat_function_qualifiers(p);
 
-            if p.current_token() == CppTokenKind::LeftBrace {
+            if a_trailing_return_type_follows || p.current_token() == CppTokenKind::LeftBrace {
                 // Kept — so the flag is set *after* the decision, not inside the speculative part: the flag is
                 // not part of a checkpoint, and a rollback would leave it saying "function" about a declarator
                 // this rule decided was a variable.

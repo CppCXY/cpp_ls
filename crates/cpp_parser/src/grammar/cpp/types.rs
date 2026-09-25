@@ -2044,6 +2044,29 @@ pub fn parse_name(p: &mut CppParser) -> ParseResult {
     }
 
     loop {
+        // A **directive where a name segment begins** — after a `::`, or where the first segment stands:
+        //
+        // ```cpp
+        //     vector<_Tp, _Alloc>::                    // bits/vector.tcc:133
+        // #if __cplusplus >= 201103L
+        //     insert(const_iterator __position, const value_type& __x)
+        // #else
+        //     insert(iterator __position, const value_type& __x)
+        // #endif
+        //     { … }
+        // ```
+        //
+        // A `#` at a segment position cannot be anything else: a segment is a name, a `template` disambiguator,
+        // `operator`/`~` — or a directive. Read it and ask again, which is what every other seam in this grammar
+        // does. (In `bits/vector.tcc` the branch's parameter list follows the name, and the `#else` after it is
+        // read by the declarator's own suffix reader — the same alternation, one position later.)
+        while p.current_token() == CppTokenKind::Hash {
+            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+        }
+
         // `template` as a disambiguator rather than a name: `T::template rebind<U>`. It says the `<` after
         // the name that follows starts template arguments instead of a comparison, which is the one thing
         // that cannot be known about a dependent name before its arguments are. It is a keyword in this
@@ -3313,6 +3336,30 @@ fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
         if p.current_token() == CppTokenKind::Greater {
             p.bump();
             return Ok(m.complete(p));
+        }
+
+        // A **directive between arguments** — including in front of the first one, which is the spelling a
+        // conditional default argument is written with:
+        //
+        // ```cpp
+        // template<typename _Tp, bool _TreatAsBytes =        // bits/cpp_type_traits.h:620
+        // #if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        //       __is_integer<_Tp>::__value
+        // #else
+        //       __is_byte<_Tp>::__value
+        // #endif
+        //         >
+        // ```
+        //
+        // The same seam as the one between requirements (`parse_requires_expression`), between the elements of a
+        // braced initialiser and between the members of a class: a `#` here cannot be anything else, because an
+        // argument begins with a type, an expression — or a directive.
+        if p.current_token() == CppTokenKind::Hash {
+            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+            continue;
         }
 
         let before = p.current_token_index();
