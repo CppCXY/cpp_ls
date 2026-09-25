@@ -610,7 +610,7 @@ loc          没有限定符：从游标所在的作用域往外，每一层能�
 ### 门禁：三件事必须全绿
 
 ```bash
-cargo test --workspace                              # 1055 个测试，34 个套件
+cargo test --workspace                              # 1059 个测试，34 个套件
 cargo clippy --workspace --all-targets              # 零警告
 cargo doc --no-deps -p cpp_code_analysis            # 零警告（cpp_parser 还有 32 条历史链接问题，不管）
 ```

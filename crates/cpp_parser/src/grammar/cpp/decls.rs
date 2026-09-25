@@ -1488,6 +1488,29 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
                 return Ok(m.complete(p));
             }
 
+            // **An initializer written once per branch is *not* read here, and that is a measured decision.**
+            // The spelling is real — `ext/concurrence.h:58` writes the value of one variable in three branches, a
+            // `;` in each — and it can be read by [`parse_a_definition_per_branch`], which the alias and concept
+            // rules already use for exactly that shape. Routing variable initializers through it was tried three
+            // ways and each one cost more than it bought:
+            //
+            // ```text
+            // 1. every `=` through the machinery     `int x = 1;` came back as rubble: the machinery consumes the
+            //                                        branch's `;`, and the declaration reader one frame up then asked
+            //                                        for a second one
+            // 2. … plus a flag saying "the `;` was the    concurrence.h was fixed and **five files broke** —
+            //    initializer's" (taken by `expect_semicolon`)  formatfwd.h, nested_exception.h, cmath, aligned_buffer.h,
+            //                                        type_traits.h, all of them asking for a specifier they no longer
+            //                                        knew how to read: the flag outlived the declaration that set it
+            // 3. … plus "consume a branch's `;` only when     the same five files broke again, because the alias and
+            //    `#else`/`#elif` follows it"        concept rules *rely* on the old answer for their own branches
+            // ```
+            //
+            // What the three attempts agree on is that the `;` of the last branch is the *declaration's* `;` and
+            // the three readers that share this machinery do not agree on who owns it. That is a design question
+            // about `parse_a_definition_per_branch` rather than a missing rule, and it is written up in
+            // `docs/grammar-gaps.md` B77 with the numbers — the enumerator seam beside it, which shares nothing with
+            // it, landed.
             let init = p.mark(CppSyntaxKind::Initializer);
             if let Err(err) = parse_initializer_clause(p) {
                 init.undo(p);
@@ -3852,6 +3875,7 @@ fn parse_member(p: &mut CppParser) -> ParseResult {
 
 /// Consume a `;`, or report it as missing without consuming anything.
 pub fn expect_semicolon(p: &mut CppParser) -> ParseResult {
+
     if p.current_token() == CppTokenKind::Semicolon {
         p.bump();
         return Ok(CompleteMarker::empty());

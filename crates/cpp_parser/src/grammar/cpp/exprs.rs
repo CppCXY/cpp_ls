@@ -1507,7 +1507,23 @@ fn parse_postfix_suffixes(
             // **Except inside a constraint**, where the `{` belongs to the definition the constraint is written
             // on. See [`CppParser::is_in_a_constraint`]: `requires C<T> { }` would otherwise come out as a
             // constraint of `C<T>{}` with the body missing.
-            CppTokenKind::LeftBrace if !p.is_in_a_constraint() => {
+            //
+            // **…and except inside a compound requirement's braces**, where the `{` cannot be that body: it is
+            // nested inside the requirement's own `{ }`, and the reading it gets is the ordinary one for a `{`
+            // after an expression:
+            //
+            // ```cpp
+            // { _Begin{}(__t) } -> bidirectional_iterator;        // bits/ranges_base.h:214
+            // ```
+            //
+            // There the `{` after `_Begin` is a **list-initialised temporary** and the `(__t)` that follows calls
+            // it — read as the requirement's closing brace instead, the rule reported `expected }, but get {` and
+            // every requirement after it in the body became rubble (24 diagnostics in `bits/ranges_base.h`). The
+            // `Requirement` node is open exactly while the cursor is inside those braces, which is what makes the
+            // question answerable without a second flag.
+            CppTokenKind::LeftBrace
+                if !p.is_in_a_constraint() || p.is_open(CppSyntaxKind::Requirement) =>
+            {
                 let marks_before = p.open_marks();
                 let m = expr.precede(p, CppSyntaxKind::InitListExpr);
                 if let Err(err) = super::decls::parse_braced_initializer(p) {

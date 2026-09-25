@@ -7,6 +7,19 @@
 **要开始干活，先读 [`roadmap.md`](roadmap.md)**：那一份是当前的队列（parser 与语义两条线、每条的最小复现与做法、一轮的配方），
 本文档是它背后的规格——每条缺口的四要素，以及末尾三十六条**维护约定**。
 
+## 现在的队列（打开着的条目）
+
+本文档按批次编号，**未修好的**只剩这几条；其余条目是已修构造的规格与教训，按需要查，不必通读：
+
+| 条目 | 是什么 | 值多少 |
+|---|---|---|
+| **B42** | 函数定义里的 `try`（function-try-block）：`void f() try { } catch (…) { }` | 语料里 0 个文件 |
+| **B65** | 声明按分支各写一遍，每个分支自带尾巴和分号（第二支是**片段**） | 1 个文件（`parallel/algorithmfwd.h:700`） |
+| **B72**（剩） | `STDMETHOD(QueryInterface) (…) PURE;`：声明符的名字在**宏自己的实参**里 | 1 个文件（`commdlg.h:577`） |
+| **B77**（剩） | 初始化式里的指令：`parse_a_definition_per_branch` 的**最后那个 `;` 归谁**是设计问题 | 1 个文件（`ext/concurrence.h:58`，三版撤回） |
+| 语料队列 | 其余失败文件的清单随时可重排：`%TEMP%\stdprobe\run_*.txt` 里"每个失败文件的首错"那一节 | 22 个文件（455 那份） |
+
+驱动这一切的队列与逐批数字在 [`roadmap.md`](roadmap.md) §2.0；本文档是它背后的**规格**。
 ## 判定原则
 
 本项目放弃上下文式解析，不等符号表。这决定了缺漏分两类，处置方式完全不同：
@@ -2107,6 +2120,145 @@ typedef DWORD (WINAPI PM_COLLECT_PROC)(LPWSTR,LPVOID *,LPDWORD,LPDWORD);     // 
 干净 426 → **429**、报错 29 → **26**、消息 147 → **129**。`move.h`、`stl_iterator_base_funcs.h`、`find.h`
 变干净；**两份清单都没有一个文件从干净变报错**。`bits/stl_algobase.h` 的首错 239 → **906**（该文件只剩 8 条错）。
 
+### B77. 枚举表里的指令（已修）与初始化式里的指令（**量过三版、撤回**）
+
+```cpp
+      bad_file_descriptor = EBADF,
+#ifdef EBADMSG
+      bad_message = EBADMSG,                     // x86_64-w64-mingw32/bits/error_constants.h:52
+#endif
+      broken_pipe = EPIPE,
+```
+
+**现象**：`expected ;` 打在枚举项那一行（`error_constants.h:53`，`#endif` 之后）。另一条同族的写法在
+`ext/concurrence.h:58`：一个变量的值按分支写三遍，每个分支自带 `;`。
+
+**成因（枚举表这一条）**：枚举项的循环里没有接缝——读到一个枚举项、一个逗号之后，下一个 token 若是 `#`，
+循环就把它当成"列表结束了"，而列表其实还没结束。这与 B57（requires 体内）、B64（模板参数表）、
+B69（形参表）是**同一条接缝**的第五、第六处。
+
+**性质**：缺规则（接缝位置）。两处接缝：**逗号之后、枚举项之前**（`#ifdef`/`#else`/`#endif` 都落在这里），
+以及**枚举项之后、逗号之前**（`b = 2` `#endif` `,` 这一形）。第二处是量出来的：只做第一处时，
+`enum class E : int { a = 1, #ifdef X b = 2 #endif };`（最后一项没有尾逗号）仍报 `expected ;`。
+
+**初始化式那一条：量过三版，全部撤回。** 那条接缝可以复用 `parse_a_definition_per_branch`（别名与 concept
+规则已经用它读"每个分支一个定义"），但**最后那个 `;` 归谁**三家读者意见不一致，三版都不成：
+
+```text
+1  每个 `=` 都走那台机器         `int x = 1;` 成瓦砾：机器吃掉了分支的 `;`，上一层的声明读取器又要一个
+2  ＋一个"这个 `;` 是初始化式的"     concurrence.h 修好了，**五个文件从干净变报错**：formatfwd.h、
+   标志（`expect_semicolon` 取用）  nested_exception.h、cmath、aligned_buffer.h、type_traits.h——那个标志
+                                 活过了设置它的那条声明，邻居于是不再要分号
+3  ＋"只有 `#else`/`#elif` 跟在     同样五个文件再坏一次：别名与 concept 规则**依赖**旧答案来读它们自己的
+   `;` 后面时才吃掉它"            分支
+```
+
+三版共同说明的是：**最后那个 `;` 是"声明的 `;`"，而共用这台机器的三个读取器对"谁拥有它"没有共识**——
+这是 `parse_a_definition_per_branch` 的**设计问题**，不是缺一条规则，所以记在这里而不是硬修。
+每一次的账都在 `%TEMP%\stdprobe\run_b77*.txt` 里（干净 426/25 与 429/25 的对照）。
+**枚举表那条只值 1 个文件，两版都干净落地**——它的接缝与初始化式那条没有任何共用。
+
+**护栏**：`gaps.rs::a_directive_may_stand_between_enumerators`——四种拼写（逗号后 `#ifdef`、`#else` 分支、
+`#endif` 在最后一项与 `}` 之间、无指令的普通枚举）＋**形状**断言：三个枚举项**一个不少**，且文本各自正确
+（接缝吞掉一个枚举项的树是干净的，正是这条断言要拦的）。
+
+**量到的**：128 个文件的闭包不动（111 / 17 / 91——`error_constants.h` 在 MinGW 那一支，不在 libstdc++ 闭包）；
+455 个文件的分析闭包 干净 429 → **430**、报错 26 → **25**、消息 129 → **126**。`error_constants.h` 变干净，
+**没有一个文件从干净变报错**。
+
+### B78. 复合要求里的花括号（`{ _Begin{}(__t) } -> bidirectional_iterator;`）—— 已修复
+
+```cpp
+template<typename _Tp>
+  concept __reversable = requires(_Tp& __t)
+	{
+	  { _Begin{}(__t) } -> bidirectional_iterator;      // bits/ranges_base.h:214
+	  { _End{}(__t) } -> same_as<decltype(_Begin{}(__t))>;
+	};
+```
+
+**现象**：`expected }, but get {` 打在内层 `{` 上，而**要求体里它后面的每一条要求都成瓦砾**——`ranges_base.h` 一处
+首错带 24 条诊断，`concepts` 同形（它的首错 `_Tp{};` 也在要求体里）。
+
+**成因**：**约束里的 `{` 一律被当成"被约束的那个定义的身体"**，于是后缀循环拒绝把 `{` 读成表达式的一部分
+（`requires C<T> { }` 若读成 `C<T>{}`，函数体就丢了——这条判据是对的）。但**复合要求自己的 `{ }` 里面**那个 `{`
+不可能是身体：它已经嵌在要求的括号里一层了，读法就是"表达式后面的 `{`"（列表初始化的临时量，紧跟的
+`(__t)` 再调用它）。
+
+**性质**：判据**用在了一处它不适用的位置**（判据本身没错），所以修法是给它加一个例外而不是改判据：
+`Requirement` 节点开着的期间，光标一定在复合要求的花括号里，`p.is_open(CppSyntaxKind::Requirement)` 就是
+这个问题的答案——不需要再加一个标志。
+
+**护栏**：`gaps.rs::a_compound_requirement_may_hold_a_braced_temporary`——六种读得出的写法（`_Begin{}(t)`、
+`T{1}`、`{ t.f() } noexcept -> B`、同一个要求体里两条带花括号的要求、以及两种被约束的函数定义）＋**形状**断言
+三条：`_Begin{}` 是 `InitListExpr` 且落在 `Requirement` 里；被约束函数的身体仍是 `CompoundStat`；
+**类头仍然没有子句的位置**（`struct S requires C<T> { };` 照旧报错——那正是这条判据存在的原因，`tests/concepts.rs`
+一直在钉它）。
+
+**量到的**：128 个文件的闭包 干净 111 → **113**、报错 17 → **15**、消息 91 → **66**；455 个文件的分析闭包
+干净 430 → **432**、报错 25 → **23**、消息 126 → **101**。`ranges_base.h` 与 `concepts` 变干净，
+**两份清单都没有一个文件从干净变报错**。
+### B79. 基类子句里的 `decltype`，与模板实参表**逗号两侧**的指令 —— 已修复
+
+```cpp
+  template<typename... _Bn>
+    struct __or_
+    : decltype(__detail::__or_fn<_Bn...>(0))          // type_traits:199——算出来的基类
+    { };
+
+    using __is_signed_integer = __is_one_of<__remove_cv_t<_Tp>,
+	  signed char, signed long long
+#if defined(__GLIBCXX_TYPE_INT_N_0)
+	  , signed __GLIBCXX_TYPE_INT_N_0                   // type_traits:811——指令在逗号之前
+#endif
+```
+
+**现象**：`expected a name` 打在 `:` 上（基类子句那一行），整个类头跟着坏掉；第二条报
+`expected a template argument` 打在 `#if` 那一行。
+
+**成因**：两处都是**规则只覆盖了一半**：
+* 基类子句只调 `parse_name`，而标准的 base-specifier 是 `class-or-decltype`——`decltype(…)` 是另一半，
+  而 libstdc++ 的 `__or_`/`__and_` 全部用这一半命名"算出来的基类"；
+* 模板实参表**有**指令接缝，但只在**参数之前**（B64 做的），而 `#if` 也可以站在**参数之后、逗号之前**——
+  循环这时回到的是逗号检查，不是参数读取，所以那道接缝永远看不到它。
+
+**性质**：缺规则，两处各补一半；第二处与 B77 的枚举表**同形**（逗号两侧各要一道接缝），这正是"同一条接缝的
+第二处"——第一次就该两边都做。
+
+**护栏**：`gaps.rs::a_base_may_be_a_decltype_and_an_argument_list_holds_directives`——八种读得出的写法
+（`decltype(d::f<int>(0))`、包展开版、`public decltype(0)`、三种普通基类子句、逗号前后的两种指令）＋
+**形状**断言两条：基类子句里是 `TypeId` 而不是裸名字；逗号两侧有指令时**两个实参都在**
+（接缝吞掉一个实参的树是干净的，正是这条要拦的）。
+
+**量到的**：文件数一个没动（这条是把首错往后推的那一类）——128 个文件的闭包 消息 66 → **62**；
+455 个文件的分析闭包 消息 101 → **97**。`type_traits` 的错 13 → **9** 条，首错 198 → 811 → **986**
+（下一个形状是 `struct __is_signed_helper<_Tp, true>`，记在队列里）。**没有一个文件从干净变报错**。
+### B80. 定位 `new` 的初始化式里有表达式（`::new (p) T(a.c())`）—— 已修复
+
+```cpp
+	::new (std::__addressof(_M_alloc)) _NodeAlloc(__nh._M_alloc.release());   // bits/node_handle.h:157
+```
+
+**现象**：`expected ), but get .` 打在初始化式里的 `.` 上（`node_handle.h:157` 那一条首错）。
+
+**成因**：`new` 的类型读完之后，`parse_abstract_declarator` 里有一条分支把后面的括号组读成**函数类型**（那是
+`new (Widget)(1)`、`sizeof(void(int))` 那一形的来源）。判据 `a_parameter_list_is_the_type` 只看**每个元素的第一个
+token** 能不能开始一个形参——而 `(__nh._M_alloc.release())` 以名字开头，于是整组被认成形参表，形参读取器接着撞上
+`.` 就报错。这些括号其实是**分配式的初始化式**，类型读完就该停在那里，由 `parse_new_initializer` 接手。
+
+**性质**：判据**看得不够远**（与 B74 的"答案缺一条收尾"同族，但这里是判据本身的视野问题）。补法是：在元素级别上
+出现**只有表达式才有的 token**（`.`、`->`、`+`、`/`、`%`、`|`、`^`、`~`、`||`、`==`、`!=`、`?`）就说明这一组不是
+形参表。`-` **刻意不在**表里：`= -1` 是默认实参，形参表可以有。风险可以忽略——这条判据只在 type-id 里被问
+（那里形参不能有名字、默认实参也没有意义）。
+
+**护栏**：`gaps.rs::a_placement_new_initialiser_may_hold_an_expression`——八种读得出的写法（`T(a.b)`、
+`T(a.c())`、`T(x + 1)`、`new N(a.c(), 2)`，以及判据本来要保住的 `::new (p) T(1)`、`sizeof(void(int))`、
+`new (Widget)(1)`、`void g(int)`）＋**形状**断言两条：分配式的 `TypeId` 文本是 `T`（不是 `T(a.c())`），
+且 `NewExpr` 里有一个 `Initializer`。
+
+**量到的**：128 个文件的闭包 干净 113 → **114**、报错 15 → **14**、消息 62 → **60**；455 个文件的分析闭包
+干净 432 → **433**、报错 23 → **22**、消息 97 → **95**。`node_handle.h` 在**两份清单**上都变干净，
+**没有一个文件从干净变报错**。
 ### B42. 函数定义里的 `try`（function-try-block）—— 待修
 
 ```cpp

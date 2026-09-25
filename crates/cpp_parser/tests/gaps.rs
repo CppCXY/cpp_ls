@@ -2392,6 +2392,250 @@ fn a_macro_from_a_header_can_be_a_statement_of_its_own() {
     );
 }
 
+/// **A directive between enumerators**, which is the same seam as the one in a parameter list.
+///
+/// ```cpp
+///       bad_file_descriptor = EBADF,
+/// #ifdef EBADMSG
+///       bad_message = EBADMSG,
+/// #endif
+///       broken_pipe = EPIPE,          // x86_64-w64-mingw32/bits/error_constants.h:52
+/// ```
+///
+/// A `#` where an enumerator should be is not an enumerator, so the directive is read as the node it is and the
+/// question is asked again about the token after it. The seam sits **after the comma and before the enumerator**,
+/// which is also where a directive that closes a branch lands, so one loop covers both spellings.
+#[test]
+fn a_directive_may_stand_between_enumerators() {
+    assert_reads(
+        Where::File,
+        &[
+            "enum E {\n  a = 1,\n#ifdef X\n  b = 2,\n#endif\n  c = 3\n};",
+            "enum E {\n  a,\n#if X\n  b,\n#else\n  c,\n#endif\n  d\n};",
+            "enum class E : int {\n  a = 1,\n#ifdef X\n  b = 2\n#endif\n};",
+            "enum E { a = 1, b = 2 };",
+        ],
+    );
+
+    // **Which enumerators the enum has**, because a seam that swallowed one would leave a clean tree with a member
+    // missing — the defect the comma rule already cost this rule once.
+    let enumerators = |source: &str| {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert!(
+            tree.get_errors().is_empty(),
+            "`{source}` is reported: {:?}",
+            tree.get_errors().iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        tree.get_red_root()
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::EnumeratorDecl)
+            .map(|node| node.text().to_string().trim().to_string())
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        enumerators("enum E {\n  a = 1,\n#ifdef X\n  b = 2,\n#endif\n  c = 3\n};"),
+        vec!["a = 1".to_string(), "b = 2".to_string(), "c = 3".to_string()],
+        "all three, with the directive between the second and the third"
+    );
+}
+
+/// **A compound requirement may hold a braced temporary** — and the `{` that opens a *body* must stay a body.
+///
+/// ```cpp
+/// template<typename _Tp> concept __reversable = requires(_Tp& __t)
+///   {
+///     { _Begin{}(__t) } -> bidirectional_iterator;      // bits/ranges_base.h:214
+///   };
+/// ```
+///
+/// Inside a constraint, a `{` after an expression is refused by the postfix rule: `requires C<T> { }` would
+/// otherwise come out as the constraint `C<T>{}` with the body missing. But a `{` **inside a compound
+/// requirement's own braces** cannot be that body — it is nested one level in, and the reading it gets is the
+/// ordinary one for a `{` after an expression (a list-initialised temporary, which `(__t)` then calls). Read as the
+/// requirement's closing brace instead, the rule reported `expected }, but get {` and every requirement after it in
+/// the body became rubble: 24 diagnostics in `bits/ranges_base.h`, which is now clean.
+#[test]
+fn a_compound_requirement_may_hold_a_braced_temporary() {
+    assert_reads(
+        Where::File,
+        &[
+            "struct Fn { template<class T> int operator()(T) const; };\ninline constexpr Fn _Begin{};\ntemplate<class T> concept B = true;\ntemplate<class T> concept R = requires(T& t) { { _Begin{}(t) } -> B; };",
+            "template<class T> concept B = true;\ntemplate<class T> concept R = requires(T& t) { { T{1} } -> B; };",
+            "template<class T> concept B = true;\ntemplate<class T> concept R = requires(T& t) { { t.f() } noexcept -> B; };",
+            "template<class T> concept B = true;\ntemplate<class T> concept R = requires(T& t) { { _Begin{}(t) } -> B; { _Begin{}(t) } -> B; };",
+            // …and the body of a constrained declaration is still the body.
+            "template<class T> concept C = true;\ntemplate<class T> void f(T t) requires C<T> { }",
+            "template<class T> concept C = true;\nint g(T t) requires C<T> { return 0; }",
+        ],
+    );
+
+    // **Which reading came out.** The braced temporary is an `InitListExpr` inside the requirement, and the
+    // constrained function's body is a `CompoundStat` — not part of an initializer and not part of the constraint.
+    let tree = CppParser::parse(
+        "struct Fn { template<class T> int operator()(T) const; };\ninline constexpr Fn _Begin{};\ntemplate<class T> concept B = true;\ntemplate<class T> concept R = requires(T& t) { { _Begin{}(t) } -> B; };",
+        ParserConfig::default(),
+    );
+    assert!(tree.get_errors().is_empty(), "no diagnostics");
+    let kinds: Vec<CppSyntaxKind> = tree
+        .get_red_root()
+        .descendants()
+        .map(|node| CppSyntaxKind::from(node.kind()))
+        .collect();
+    assert!(kinds.contains(&CppSyntaxKind::InitListExpr), "`_Begin{{}}` is a list-initialised temporary");
+    assert!(kinds.contains(&CppSyntaxKind::Requirement), "…inside the requirement");
+
+    let constrained = CppParser::parse(
+        "template<class T> concept C = true;\ntemplate<class T> void f(T t) requires C<T> { }",
+        ParserConfig::default(),
+    );
+    assert!(
+        constrained
+            .get_red_root()
+            .descendants()
+            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CompoundStat),
+        "the body of a constrained function is a body, not an initializer"
+    );
+
+    // **Not weakened: the class head still has no room for a clause.** `struct S requires C<T> { };` is refused,
+    // which is what keeps the body from being detached (see `tests/concepts.rs`).
+    assert!(
+        !CppParser::parse(
+            "template<class T> concept C = true;\ntemplate<class T> struct S requires C<T> { int member; };",
+            ParserConfig::default()
+        )
+        .get_errors()
+        .is_empty(),
+        "the refusal the constraint marker exists for is untouched"
+    );
+}
+
+/// **A base may be a `decltype`**, and a template argument list may carry a directive on either side of its comma.
+///
+/// ```cpp
+///   template<typename... _Bn>
+///     struct __or_
+///     : decltype(__detail::__or_fn<_Bn...>(0))          // type_traits:199 — a *computed* base
+///     { };
+///
+///     using __is_signed_integer = __is_one_of<__remove_cv_t<_Tp>,
+///           signed char, signed long long
+/// #if defined(__GLIBCXX_TYPE_INT_N_0)
+///           , signed __GLIBCXX_TYPE_INT_N_0                // type_traits:811 — a directive before the comma
+/// #endif
+/// ```
+///
+/// The base clause read only a **name**, so `decltype(…)` — the spelling every `__or_`/`__and_` in libstdc++ uses
+/// to name a base it computes rather than writes — was reported as `expected a name` against the `:`, and the whole
+/// class head went with it (13 diagnostics in `type_traits`). The argument list had a directive seam **in front of**
+/// an argument, which never sees a directive that stands after one and before the comma — so both sides of the comma
+/// need it, exactly as in the enumerator list (B77).
+#[test]
+fn a_base_may_be_a_decltype_and_an_argument_list_holds_directives() {
+    assert_reads(
+        Where::File,
+        &[
+            "namespace d { template<class T> int f(int); }\nstruct O : decltype(d::f<int>(0)) { };",
+            "namespace d { template<class... B> int f(int); }\ntemplate<class... B> struct O : decltype(d::f<B...>(0)) { };",
+            "struct S : public decltype(0) { };",
+            // The ordinary base clauses, which must keep their readings.
+            "struct B { };\nstruct D : public B { };",
+            "struct B { };\ntemplate<class T> struct D : B, T { };",
+            "struct B { };\ntemplate<class... T> struct D : B, T... { };",
+            // The argument list with a directive on either side of its comma.
+            "template<class T> struct O { };\ntemplate<class T> using A = O<\n  int\n#if X\n  , long\n#endif\n>;",
+            "template<class T> struct O { };\ntemplate<class T> using A = O<\n  int,\n#if X\n  long\n#endif\n  >;",
+        ],
+    );
+
+    // **What the base holds, and how many arguments there are.** A directive that swallowed an argument would
+    // leave a clean tree with a member missing — the same defect the comma rule cost this list once already.
+    let tree = CppParser::parse(
+        "namespace d { template<class T> int f(int); }\nstruct O : decltype(d::f<int>(0)) { };",
+        ParserConfig::default(),
+    );
+    assert!(tree.get_errors().is_empty(), "no diagnostics");
+    assert!(
+        tree.get_red_root().descendants().any(|node| {
+            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::BaseSpecifier
+                && node
+                    .descendants()
+                    .any(|inner| CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::TypeId)
+        }),
+        "the base specifier holds a type-id — `decltype(d::f<int>(0))` — rather than a bare name"
+    );
+
+    let list = CppParser::parse(
+        "template<class T> struct O { };\ntemplate<class T> using A = O<\n  int\n#if X\n  , long\n#endif\n>;",
+        ParserConfig::default(),
+    );
+    assert_eq!(
+        list.get_red_root()
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::TemplateArgument)
+            .count(),
+        2,
+        "both arguments, with the directive between them"
+    );
+}
+
+/// **A placement `new`'s initialiser may hold an expression** — and the parentheses that hold one are not a
+/// function type.
+///
+/// ```cpp
+///     ::new (std::__addressof(_M_alloc)) _NodeAlloc(__nh._M_alloc.release());   // bits/node_handle.h:157
+/// ```
+///
+/// The group after the type begins with a name, so `a_parameter_list_is_the_type` — which asked only about each
+/// element's *first* token — claimed it as a **function type**, and the parameter reader then met the `.` and
+/// reported `expected ), but get .`. The parentheses are the allocation's **initializer**, which is what
+/// `parse_new_initializer` reads once the type stops where it should. A token only an expression has (`.`, `->`,
+/// `+`, …) now says so; `-` is deliberately not in that list, because `= -1` is a default argument.
+#[test]
+fn a_placement_new_initialiser_may_hold_an_expression() {
+    assert_reads(
+        Where::File,
+        &[
+            "struct T { T(int); };\nstruct A { int b; int c(); };\nvoid f(void* p, A& a) { ::new (p) T(a.b); }",
+            "struct T { T(int); };\nstruct A { int c(); };\nvoid f(void* p, A& a) { ::new (p) T(a.c()); }",
+            "struct T { T(int); };\nvoid f(void* p, int x) { ::new (p) T(x + 1); }",
+            "struct N { N(int, int); };\nstruct A { int c(); };\nvoid f(A& a) { new N(a.c(), 2); }",
+            // The shapes the predicate exists for, which must keep their readings.
+            "struct T { T(int); };\nvoid f(void* p) { ::new (p) T(1); }",
+            "auto n = sizeof(void(int));",
+            "struct Widget { Widget(int); };\nWidget* w = new (Widget)(1);",
+            "void g(int);",
+        ],
+    );
+
+    // **What the type is, and that the parentheses became the initializer.** A `FunctionType` here would be the
+    // mis-reading: the type of the allocation is `T`, and `(…)` initialises it.
+    let tree = CppParser::parse(
+        "struct T { T(int); };\nstruct A { int c(); };\nvoid f(void* p, A& a) { ::new (p) T(a.c()); }",
+        ParserConfig::default(),
+    );
+    assert!(tree.get_errors().is_empty(), "no diagnostics");
+    let type_id: Vec<String> = tree
+        .get_red_root()
+        .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::TypeId)
+        .map(|node| node.text().to_string().trim().to_string())
+        .collect();
+    assert!(
+        type_id.iter().any(|text| text == "T"),
+        "the allocated type is `T`, not `T(a.c())`: {type_id:?}"
+    );
+    assert!(
+        tree.get_red_root().descendants().any(|node| {
+            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NewExpr
+                && node
+                    .descendants()
+                    .any(|inner| CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::Initializer)
+        }),
+        "the parentheses are the allocation's initializer"
+    );
+}
+
 /// The empty string when the parse is clean, or a description of the first thing wrong with it.
 fn report(source: &str, tree: &CppSyntaxTree) -> Result<(), String> {
     if let Some(error) = tree.get_errors().first() {

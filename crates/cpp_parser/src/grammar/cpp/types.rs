@@ -2180,7 +2180,25 @@ fn parse_base_clause(p: &mut CppParser) -> ParseResult {
             p.bump();
         }
 
-        if let Err(err) = parse_name(p) {
+        // A base is a **class-or-decltype**: a name, or a `decltype`-specifier. The second spelling is the one
+        // every `__or_`/`__and_` in libstdc++ uses to name a base it computes rather than writes —
+        //
+        // ```cpp
+        //   template<typename... _Bn>
+        //     struct __or_
+        //     : decltype(__detail::__or_fn<_Bn...>(0))     // type_traits:199
+        //     { };
+        // ```
+        //
+        // — and reading only a name reported `expected a name` against the `:`, which took the whole class head
+        // with it. Nothing else about the clause changes: what follows the type is still either a pack expansion
+        // or the end of this base.
+        if p.current_token() == CppTokenKind::DecltypeKeyword {
+            if let Err(err) = parse_type_id(p) {
+                p.close_marks_above(base_marks);
+                return Err(err);
+            }
+        } else if let Err(err) = parse_name(p) {
             p.close_marks_above(base_marks);
             return Err(err);
         }
@@ -2210,6 +2228,27 @@ fn parse_enumerator_body(p: &mut CppParser) -> ParseResult {
     expect_token(p, CppTokenKind::LeftBrace)?;
 
     while p.current_token() != CppTokenKind::RightBrace && !p.is_eof() {
+        // A **directive between enumerators**, which is the same seam as the one in the parameter list, the
+        // template parameter list and the specifier sequence, and it is written the same way:
+        //
+        // ```cpp
+        //       bad_file_descriptor = EBADF,
+        // #ifdef EBADMSG
+        //       bad_message = EBADMSG,
+        // #endif
+        //       broken_pipe = EPIPE,              // x86_64-w64-mingw32/bits/error_constants.h:52
+        // ```
+        //
+        // A `#` where an enumerator should be is not an enumerator, so the directive is read as the node it is and
+        // the question is asked again about the token that follows it. The seam is **before** the enumerator and
+        // after the comma, so it also covers a directive that closes a branch in the middle of the list.
+        while p.current_token() == CppTokenKind::Hash {
+            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+        }
+
         if p.current_token() != CppTokenKind::Identifier {
             break;
         }
@@ -2242,6 +2281,16 @@ fn parse_enumerator_body(p: &mut CppParser) -> ParseResult {
             }
         }
         enumerator.complete(p);
+
+        // …and the same seam on the **other side of the enumerator**, because a directive may also close a branch
+        // before the comma: `b = 2` `#endif` `,` is written as often as the comma-first spelling, and the comma is
+        // what the loop below is looking for.
+        while p.current_token() == CppTokenKind::Hash {
+            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+        }
 
         if p.current_token() == CppTokenKind::Comma {
             p.bump();
@@ -3018,6 +3067,42 @@ fn a_parameter_list_is_the_type(p: &CppParser) -> bool {
             return false;
         }
 
+        // **A token only an expression has** means the group is an initializer, not a parameter list — and the
+        // element-start check above cannot see it, because it only looks at each element's *first* token:
+        //
+        // ```text
+        // ::new (std::__addressof(_M_alloc)) _NodeAlloc(__nh._M_alloc.release());   // bits/node_handle.h:157
+        // new T(x + 1)          an allocation initialised with `x + 1`
+        // ```
+        //
+        // `(__nh._M_alloc.release())` begins with a name, so every element started like a parameter, the group was
+        // claimed as a *function type*, and the parameter reader then met the `.` and reported `expected ), but get
+        // .` — while the parentheses are the allocation's own **initializer**, which is what
+        // `parse_new_initializer` reads once the type stops where it should.
+        //
+        // `-` is deliberately **not** in the list: `= -1` is a default argument, which a parameter list may hold.
+        // Nothing here can cost a real parameter list much either way — this predicate is only asked in a type-id,
+        // where a parameter has no name and a default argument has no meaning.
+        if depth == 1
+            && matches!(
+                kind,
+                CppTokenKind::Dot
+                    | CppTokenKind::Arrow
+                    | CppTokenKind::Plus
+                    | CppTokenKind::Slash
+                    | CppTokenKind::Percent
+                    | CppTokenKind::Pipe
+                    | CppTokenKind::Caret
+                    | CppTokenKind::Tilde
+                    | CppTokenKind::LogicalOr
+                    | CppTokenKind::Equal
+                    | CppTokenKind::NotEqual
+                    | CppTokenKind::Question
+            )
+        {
+            return false;
+        }
+
         match kind {
             CppTokenKind::LeftParen | CppTokenKind::LeftBracket | CppTokenKind::LeftBrace => depth += 1,
             CppTokenKind::RightParen => {
@@ -3677,6 +3762,28 @@ fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
                 "expected a template argument",
                 p.current_token_range(),
             ));
+        }
+
+        // …and the same seam **after** the argument, before the comma that would separate it from the next one —
+        // the spelling this list is written with when the *arguments* are the thing being conditioned:
+        //
+        // ```cpp
+        //     using __is_signed_integer = __is_one_of<__remove_cv_t<_Tp>,
+        // 	  signed char, signed short, signed int, signed long,
+        // 	  signed long long
+        // #if defined(__GLIBCXX_TYPE_INT_N_0)
+        // 	  , signed __GLIBCXX_TYPE_INT_N_0
+        // #endif
+        // ```
+        //
+        // The `#if` sits between an argument and the comma that follows it, so a seam only at the top of the loop
+        // (the one above) never sees it: the loop came back around to a comma check, not to an argument. Both
+        // sides of the comma need the seam, exactly as in the enumerator list.
+        while p.current_token() == CppTokenKind::Hash {
+            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
         }
 
         match p.current_token() {
