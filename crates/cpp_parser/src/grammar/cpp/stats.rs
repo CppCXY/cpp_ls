@@ -448,7 +448,51 @@ fn at_a_macro_call_statement(p: &CppParser) -> bool {
 /// perfectly good **function declaration** of that name with one unnamed parameter, and what tells the two apart is
 /// that a declaration ends at its `;` — the macro's body supplies that `;`, so there is none, and the token after
 /// the group cannot continue a declaration.
+/// Read the invocation at `start` as a statement.
+///
+/// Two shapes, and the difference is not cosmetic. A macro whose body is a statement or a whole definition
+/// (`TEST(A, B) { … }`) can be followed by a block and a `;`, which [`parse_macro_call`] reads. One whose body
+/// is a **brace** — `namespace __8 {`, `}` — is the whole of what the file wrote: no group, no block, no `;`,
+/// and the group-reading rule refuses a bare name outright (B87).
+fn parse_a_macro_invocation_statement(p: &mut CppParser, start: usize) -> ParseResult {
+    if body_shapes_the_braces(p, start) {
+        return parse_a_macro_that_stands_for_a_declaration(p);
+    }
+
+    parse_macro_call(p)
+}
+
+/// Does the macro written at `index` have a body — in this file — that opens a namespace or closes a brace?
+///
+/// `bits/c++config.h` writes `inline _GLIBCXX_BEGIN_NAMESPACE_VERSION` and, twenty lines later,
+/// `_GLIBCXX_END_NAMESPACE_VERSION`, and the two macros are `namespace __8 {` and `}` **in that same file**:
+/// nothing among the file's own tokens says a namespace opened or a brace closed, so the declarations that
+/// followed were read as the continuation of a declaration that never ends — ``expected `;` `` at the `inline`,
+/// and then at every `#if` boundary down the file. The question is asked of the macro's own `#define` body,
+/// which the directive rule records as token kinds ([`CppParser::record_macro_body`]) — no include, no index,
+/// no expansion pass, and the answer is about *this* file's text.
+///
+/// The two shapes are the whole of it. A body that opens a namespace is a namespace definition whose head the
+/// file wrote as an invocation, and a body that is `}` closes the innermost brace — so the invocation is the
+/// whole of the statement, and what the macro stands for is decided by the body rather than guessed by shape.
+/// `namespace` must be the **first** token: `_GLIBCXX_MATH_NS` is `__8` (a namespace *name*, not a head) and
+/// belongs to the declarator rules, not this one.
+fn body_shapes_the_braces(p: &CppParser, index: usize) -> bool {
+    if p.token_kind_at(index) != CppTokenKind::Identifier {
+        return false;
+    }
+
+    p.macro_body_kinds(p.token_text_at(index)).is_some_and(|kinds| {
+        kinds.first() == Some(&CppTokenKind::NamespaceKeyword)
+            || kinds.as_slice() == [CppTokenKind::RightBrace]
+    })
+}
+
 pub(super) fn a_macro_invocation_starts_at(p: &CppParser, index: usize) -> bool {
+    if body_shapes_the_braces(p, index) {
+        return true;
+    }
+
     let name = p.token_text_at(index);
     p.token_kind_at(index) == CppTokenKind::Identifier
         && p.token_kind_at(super::decls::next_significant_index(p, index)) == CppTokenKind::LeftParen
@@ -691,6 +735,23 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
         return parse_using_declaration(p);
     }
 
+    // `inline _GLIBCXX_BEGIN_NAMESPACE_VERSION`: the `inline` is the file's own token and everything the
+    // declaration would say after it belongs to a macro whose own body is `namespace __8 {` — so the statement
+    // **is** that invocation, and there is no `;` to expect because the body supplies the `{` (B87). Asked
+    // before the declaration pass, which reads `inline NAME` as a declaration and then reports a missing `;`
+    // at the directive that follows.
+    if p.current_token() == CppTokenKind::InlineKeyword {
+        let index = p.current_token_index();
+        if body_shapes_the_braces(p, super::decls::next_significant_index(p, index)) {
+            let m = p.mark(CppSyntaxKind::MacroCall);
+            p.bump(); // `inline`, part of what the macro stands for
+            let name = p.mark(CppSyntaxKind::NameExpr);
+            p.bump();
+            name.complete(p);
+            return Ok(m.complete(p));
+        }
+    }
+
     // Anchors let the speculative declaration pass be skipped: `static`, `class`, `typename` and
     // friends can never begin an expression, so there is nothing to disambiguate.
     if super::decls::starts_declaration(p) {
@@ -711,7 +772,7 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
                 && a_macro_invocation_starts_at(p, start)
             {
                 p.rollback(checkpoint);
-                return parse_macro_call(p);
+                return parse_a_macro_invocation_statement(p, start);
             }
             Ok(marker)
         }
@@ -723,7 +784,7 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
             // one: `_foo(x)` in front of `}` reads as a declaration of a type `_foo` with a parameter list, which
             // is a declaration of nothing. See [`at_a_macro_call_statement_without_evidence`].
             if a_macro_invocation_starts_at(p, start) {
-                return parse_macro_call(p);
+                return parse_a_macro_invocation_statement(p, start);
             }
             // Not a declaration, and not a macro from a header. Read it as an expression.
             parse_expression_statement(p)
@@ -777,12 +838,66 @@ pub(super) fn parse_preprocessor_directive(p: &mut CppParser) -> ParseResult {
         p.bump();
     }
 
+    // A `#define` body is read as token kinds too, so a later reading can ask what the macro stands
+    // for without parsing its body a second time (B87). Neither the name nor a parameter list that
+    // touches it names a token of the body, so neither is recorded.
+    struct BodyRecording {
+        name: Box<str>,
+        /// The name's end offset: a `(` that touches the name is the parameter list, while
+        /// `#define f (x)` is an object-like macro whose body begins with `(`.
+        name_ends_at: usize,
+        kinds: Vec<CppTokenKind>,
+        /// 0 on the name, 1 inside the parameter list, 2 in the body.
+        state: u8,
+        depth: u32,
+    }
+
+    impl BodyRecording {
+        fn take(&mut self, p: &CppParser) {
+            let kind = p.current_token();
+            match self.state {
+                0 => {
+                    // The name is not a token of the body; it is only what tells a parameter list from a
+                    // body that begins with `(`.
+                    self.state = if kind == CppTokenKind::LeftParen
+                        && p.current_token_range().start_offset == self.name_ends_at
+                    {
+                        self.depth = 1;
+                        1
+                    } else {
+                        2
+                    };
+                }
+                1 => {
+                    if kind == CppTokenKind::LeftParen {
+                        self.depth += 1;
+                    } else if kind == CppTokenKind::RightParen {
+                        self.depth = self.depth.saturating_sub(1);
+                        if self.depth == 0 {
+                            self.state = 2;
+                        }
+                    }
+                }
+                _ => self.kinds.push(kind),
+            }
+        }
+    }
+
+    let mut recording = None;
+
     if defines_a_macro && p.current_token() == CppTokenKind::Identifier {
         let name = p.current_token_text().to_string();
         if undefines_a_macro {
             p.undefine_macro_name(&name);
         } else {
             p.declare_macro_name(&name);
+            recording = Some(BodyRecording {
+                name: Box::from(name.as_str()),
+                name_ends_at: p.current_token_range().end_offset(),
+                kinds: Vec::new(),
+                state: 0,
+                depth: 0,
+            });
         }
     }
 
@@ -804,7 +919,15 @@ pub(super) fn parse_preprocessor_directive(p: &mut CppParser) -> ParseResult {
                 continue;
             }
         }
+
+        if let Some(recording) = recording.as_mut() {
+            recording.take(p);
+        }
         p.bump();
+    }
+
+    if let Some(recording) = recording {
+        p.record_macro_body(&recording.name, recording.kinds);
     }
 
     Ok(m.complete(p))

@@ -325,6 +325,31 @@ pub fn parse_template_parameter_list(p: &mut CppParser) -> ParseResult {
                 p.bump();
                 break;
             }
+            // **A macro that is the rest of the list.** `bits/refwrap.h:142` writes
+            //
+            // ```cpp
+            // template<typename _Res, typename... _ArgTypes _GLIBCXX_NOEXCEPT_PARM>
+            // ```
+            //
+            // and that macro is `, bool _NE` in `bits/c++config.h` — the **separator and a parameter** live in a
+            // header, so nothing among this file's tokens says the list continues (B88). The position carries as
+            // much of the answer as the evidence does: an identifier here can neither continue the parameter that
+            // was just read nor close the list, so the file is already wrong unless this name is a macro standing
+            // where the separator goes. Read as an invocation, then let the loop continue: the body may supply
+            // `, more`, and a body that is empty leaves the next token to close the list.
+            CppTokenKind::Identifier if super::types::written_like_a_macro(p.current_token_text()) => {
+                let m = p.mark(CppSyntaxKind::MacroCall);
+                let name = p.mark(CppSyntaxKind::NameExpr);
+                p.bump();
+                name.complete(p);
+                m.complete(p);
+
+                if p.current_token() == CppTokenKind::Greater {
+                    p.bump();
+                    break;
+                }
+                continue;
+            }
             _ => {
                 p.close_marks_above(base);
                 return Err(CppParseError::syntax_error_from(

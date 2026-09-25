@@ -146,9 +146,12 @@ pub(super) fn written_in_the_implementations_namespace(name: &str) -> bool {
 fn a_macro_call_begins_the_declaration(p: &CppParser) -> bool {
     if p.current_token() != CppTokenKind::Identifier
         || p.peek_next_token() != CppTokenKind::LeftParen
-        || p.macro_evidence(p.current_token_text()).is_some()
         || at_an_attribute(p)
     {
+        return false;
+    }
+
+    if p.macro_evidence(p.current_token_text()).is_some() {
         return false;
     }
 

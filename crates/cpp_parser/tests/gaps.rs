@@ -5365,3 +5365,78 @@ fn modern_constructs_produce_the_right_nodes() {
     }
 }
 
+#[test]
+fn a_macro_whose_own_body_opens_a_namespace_is_its_own_statement() {
+    // `bits/c++config.h` writes `inline _GLIBCXX_BEGIN_NAMESPACE_VERSION` and, twenty lines later,
+    // `_GLIBCXX_END_NAMESPACE_VERSION`, and defines both of them **in that file** as `namespace __8 {` and `}`.
+    // Nothing among the file's own tokens says a namespace opened or a brace closed, so the declarations that
+    // followed were read as the continuation of a declaration that never ends. The reading has to come from the
+    // macro's own `#define` body, which the directive rule records as token kinds (B87).
+    let source = "#define BEGIN_N namespace __8 {\n#define END_N }\ninline BEGIN_N\nint x;\nEND_N\n";
+    let root = CppParser::parse(source, ParserConfig::default()).get_red_root();
+
+    assert_eq!(
+        root.descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ErrorNode)
+            .count(),
+        0,
+        "an invocation whose own body opens the namespace is a statement of its own"
+    );
+    assert_eq!(
+        root.descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::MacroCall)
+            .count(),
+        2,
+        "`inline BEGIN_N` and `END_N` are invocations, not a declaration and an expression"
+    );
+
+    // A macro whose body *begins* with another token is not a namespace head: `_GLIBCXX_MATH_NS` is `__8`, and
+    // reading it as one would take the declarator rules' job away.
+    let source = "#define NS __8\ninline NS n;\n";
+    let root = CppParser::parse(source, ParserConfig::default()).get_red_root();
+    assert_eq!(
+        root.descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::MacroCall)
+            .count(),
+        0,
+        "a macro that names a namespace rather than opening one is not a head"
+    );
+}
+
+#[test]
+fn a_macro_may_supply_the_rest_of_a_template_parameter_list() {
+    // `bits/refwrap.h:142` writes
+    //
+    // ```cpp
+    // template<typename _Res, typename... _ArgTypes _GLIBCXX_NOEXCEPT_PARM>
+    // ```
+    //
+    // and `_GLIBCXX_NOEXCEPT_PARM` is `, bool _NE` **in `bits/c++config.h`**: the list's separator and a whole
+    // parameter live in a header, so nothing among this file's tokens says the list continues. What carries the
+    // answer is the position — an identifier there can neither continue the parameter that was just read nor close
+    // the list, so the file is already wrong unless the name is a macro standing where the separator goes (B88).
+    let source = "template<typename _Res, typename... _ArgTypes _GLIBCXX_NOEXCEPT_PARM>\nstruct S;\n";
+    assert_eq!(
+        reads(source, Where::File),
+        Ok(()),
+        "a macro-shaped name may stand where the `,` of the list goes"
+    );
+    assert!(
+        contains(source, CppSyntaxKind::MacroCall),
+        "and it reads as an invocation, not as the parameter's name"
+    );
+
+    // The control has to be the **pack** form, which is the shape the real file writes: after `typename... _Args`
+    // there is no room for another name, so the same position with an ordinary name is a mistake and only a name
+    // written like a macro is rescued. (After a *non*-pack parameter the reader accepts a name there — `template
+    // <typename T foo>` is clean today — so that shape cannot tell the two readings apart.)
+    assert!(
+        reads("template<typename... _Args foo> struct S;\n", Where::File).is_err(),
+        "an ordinary name there is not a macro"
+    );
+    assert!(
+        reads("template<typename... _Args int> struct S;\n", Where::File).is_err(),
+        "a keyword there is not a macro either"
+    );
+}
+

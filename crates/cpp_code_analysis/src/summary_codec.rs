@@ -174,6 +174,13 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
         put_u8(&mut out, macro_body_code(fact.body));
         put_opt_str(&mut out, fact.value.as_deref());
         put_range(&mut out, fact.range);
+        match fact.body_range {
+            Some(range) => {
+                put_u8(&mut out, 1);
+                put_range(&mut out, range);
+            }
+            None => put_u8(&mut out, 0),
+        }
         put_u32(&mut out, guard_code(fact.guard));
         put_u8(&mut out, u8::from(fact.settles_the_name));
     }
@@ -278,6 +285,11 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
             body: macro_body_from(reader.u8()?)?,
             value: reader.optional_string()?.map(Box::from),
             range: reader.range()?,
+            body_range: match reader.u8()? {
+                0 => None,
+                1 => Some(reader.range()?),
+                _ => return Err(DecodeError::BadDiscriminant),
+            },
             guard: guard_from(reader.u32()?)?,
             settles_the_name: reader.u8()? != 0,
         });
@@ -777,6 +789,9 @@ mod tests {
                 // field the encoder dropped and the decoder defaulted would round-trip a *default* and look fine.
                 value: Some("1".into()),
                 range: range(80, 30),
+                // Present rather than `None`, for the same reason: a field the encoder dropped and the
+                // decoder defaulted would round-trip a default and look fine.
+                body_range: Some(range(95, 12)),
                 guard: FactGuard::Region(0),
                 settles_the_name: true,
             }],

@@ -80,6 +80,13 @@ pub struct EventStreamAudit {
     /// Number of zero-width nodes. Expected to be non-zero — `Marker::complete` drops empty nodes
     /// on purpose — but tracked so the count can be asserted to stay stable.
     pub empty_nodes: usize,
+    /// **How many times the grammar asked what a name is as a macro.** The decision-point count
+    /// `docs/index-design.md` gates expansion on: the work a parse would add is
+    /// `Σ(decision points) × O(body)`, and this is the upper bound of that sum.
+    pub macro_questions: usize,
+    /// How many **distinct** names those questions were about — the number that decides whether the expansion
+    /// work is "per question" or "per name", and therefore whether memoisation by definition makes it cheap.
+    pub macro_question_names: usize,
     /// Kinds of the `NodeStart` events that never received a matching `NodeEnd`. Must be empty.
     pub unclosed: Vec<crate::kind::CppSyntaxKind>,
 }
@@ -260,6 +267,26 @@ pub struct CppParser<'a> {
     /// knowing it is the difference between reading `BOOL_OPTION(x)` (a macro whose body supplies the `;`) and
     /// reading `g(x)` with its `;` missing (a typo). See [`crate::parser::MacroNames`].
     macro_names: crate::parser::MacroNames,
+    /// **How often the grammar asks what a name is as a macro, and about how many distinct names** — the
+    /// measurement `docs/index-design.md` gates expansion on ("count the decision points before building it").
+    ///
+    /// Counted here rather than in the probe because the question is asked *inside* the grammar and nowhere else.
+    /// `&self` forces interior mutability: a `Cell` for the count and a `RefCell` for the names, both of which
+    /// cost a store, so the counters can stay on in every build rather than behind a feature flag nobody runs.
+    /// **What each of this file's own `#define`s expands to, as token kinds** — the first piece of the file that a
+    /// rule can *read* rather than guess at, and the reason it is here rather than in the analysis layer:
+    ///
+    /// ```cpp
+    /// #define _GLIBCXX_BEGIN_NAMESPACE_VERSION namespace __8 {
+    /// inline _GLIBCXX_BEGIN_NAMESPACE_VERSION        // the body says what this invocation stands for
+    /// ```
+    ///
+    /// Only the **kinds**, not the spellings: a rule asks "does this body open a namespace", "is it a lone `}`",
+    /// "does it start with a comma" — and the kinds answer all three. The text stays where it is (the directive's
+    /// tokens are in the tree), so nothing here re-spells a body. See `docs/index-design.md`, the expansion section.
+    macro_bodies: std::cell::RefCell<std::collections::HashMap<Box<str>, Vec<CppTokenKind>>>,
+    macro_questions: std::cell::Cell<usize>,
+    macro_question_names: std::cell::RefCell<std::collections::HashSet<Box<str>>>,
     /// The names the **open template heads** declared as parameters that are types.
     ///
     /// The second half of [`CppParser::is_a_known_type_name`], and the construct that made it necessary:
@@ -424,6 +451,9 @@ impl<'a> CppParser<'a> {
             type_names: TypeNames::new(),
             template_parameters: Vec::new(),
             macro_names: crate::parser::MacroNames::new(),
+            macro_bodies: std::cell::RefCell::new(std::collections::HashMap::new()),
+            macro_questions: std::cell::Cell::new(0),
+            macro_question_names: std::cell::RefCell::new(std::collections::HashSet::new()),
             declaration_type_name: None,
             previous_declaration_type_name: None,
             declaration_type_is_qualified: false,
@@ -1072,6 +1102,66 @@ impl<'a> CppParser<'a> {
         self.macro_names.define(name);
     }
 
+    /// Record what a `#define`'s **body** is, as token kinds. See [`CppParser::macro_body_kinds`].
+    ///
+    /// An **empty** body is not recorded, and that is deliberate: `None` already means "this file does not say
+    /// what the macro stands for", and one name can be defined twice with different bodies — `bits/c++config.h`
+    /// defines `_GLIBCXX_BEGIN_NAMESPACE_VERSION` as `namespace __8 {` at line 393 and, in the other branch of the
+    /// same `#if`, as nothing at all at line 423. Every branch is read and none is "selected", so an empty body
+    /// must not take the shaped one's place: the empty branch says nothing about the tokens a use site wrote.
+    pub fn record_macro_body(&self, name: &str, kinds: Vec<CppTokenKind>) {
+        if kinds.is_empty() {
+            return;
+        }
+
+        self.macro_bodies.borrow_mut().insert(name.into(), kinds);
+    }
+
+    /// What this file's own `#define` of `name` expands to, as token kinds — `None` when this file does not define
+    /// it (which includes "a header did", the ordinary case) or when its body is empty.
+    ///
+    /// The first piece of the file a rule can **read** instead of guessing at, and the answer expansion needs for
+    /// the shapes that are structural: `namespace __8 {` opens a scope, a lone `}` closes one, a leading `,` is a
+    /// parameter-list fragment.
+    pub fn macro_body_kinds(&self, name: &str) -> Option<Vec<CppTokenKind>> {
+        self.macro_bodies.borrow().get(name).cloned()
+    }
+
+    /// What `name` stands for **at the offset `at`**, from whatever can answer: this file's own `#define` first —
+    /// its text is better evidence than an included header's, and it is the file being read — and then the
+    /// environment the caller built out of the include graph.
+    ///
+    /// This is the reading the whole expansion layer was for. A body that is `namespace __8 {`, `, bool _NE` or
+    /// `virtual HRESULT __stdcall method` decides the *reading* of tokens the file did write, and the file's own
+    /// tokens stay the only thing in the tree. Offsets rather than names because the environment is positional:
+    /// `_GLIBCXX_NOEXCEPT_PARM` is a macro after `bits/c++config.h` is included and an ordinary identifier before.
+    pub fn macro_body_kinds_at(&self, name: &str, at: usize) -> Option<Vec<CppTokenKind>> {
+        if let Some(kinds) = self.macro_body_kinds(name) {
+            return Some(kinds);
+        }
+
+        let environment = self.parse_config.macros_from_includes()?;
+
+        if let Some(text) = environment.body_text_of(name, at) {
+            return Some(kinds_of_a_body_text(text, &self.parse_config));
+        }
+
+        // The second channel: a macro whose definition is conditional **but whose branch is in force**. Asked only
+        // for a body — never to answer "is this a macro" — see [`MacroEnvironment::body_text_in_force`].
+        environment
+            .body_text_in_force(name)
+            .map(|text| kinds_of_a_body_text(text, &self.parse_config))
+    }
+
+    /// The source range of the token at `index`, or `None` when there is none.
+    ///
+    /// Beside [`CppParser::token_text_at`] for the rules that ask the **evidence** about a token that is not at the
+    /// cursor: a macro's body is in force from an offset, so "what does this name stand for here" needs to know
+    /// where *here* is.
+    pub fn token_range_at(&self, index: usize) -> Option<SourceRange> {
+        self.tokens.get(index).map(|token| token.range)
+    }
+
     /// Record an `#undef`.
     pub fn undefine_macro_name(&mut self, name: &str) {
         self.macro_names.undefine(name);
@@ -1089,16 +1179,47 @@ impl<'a> CppParser<'a> {
     /// What this parse can say about `name` **as a macro**, in the order the evidence is consulted.
     ///
     /// 1. this file's own `#define`s — the text being parsed, so the freshest thing there is;
-    /// 2. the caller's external table — everything the file cannot see;
-    /// 3. nothing, and the caller falls back to a shape preference.
+    /// 2. what the file's **includes** contribute **at this offset** — the caller's positional table, which is the
+    ///    only kind that can say "this name is a macro *here*" (see [`MacroEnvironment`]);
+    /// 3. the caller's flat table — everything the file cannot see, and kept for callers that have one;
+    /// 4. nothing, and the caller falls back to a shape preference.
     ///
     /// The order is the one [`crate::symbols`] documents, and the reason it is *this* way round is staleness: an
     /// index lags the buffer, while a `#define` in the buffer is a fact about the text in front of us.
     pub fn macro_evidence(&self, name: &str) -> Option<MacroEvidence> {
+        // The decision-point count — see [`CppParser::macro_questions`].
+        self.macro_questions.set(self.macro_questions.get() + 1);
+        if self.macro_question_names.borrow().len() < 4096
+            && !self.macro_question_names.borrow().contains(name)
+        {
+            self.macro_question_names.borrow_mut().insert(name.into());
+        }
         if self.macro_names.is_a_macro(name) {
             // The name is `#define`d here. What its body expands to is *in* the file but uninterpreted — the
             // directive keeps its tokens and nothing evaluates them — so only the name is known.
             return Some(MacroEvidence::DefinedHere);
+        }
+
+        // **Positional evidence**: what the includes contribute, as of the token being read. A name that a header
+        // defines *later* than this offset is not in force here, which is the whole difference between this table
+        // and the flat one — `_GLIBCXX_BEGIN_NAMESPACE_VERSION` is `namespace __8 {` in one region of a file and
+        // nothing at all in another, and a name's shape is not a property of the name.
+        if let Some(macros) = self.parse_config.macros_from_includes() {
+            match macros.kind_of(name, self.current_token_range().start_offset) {
+                Some(SymbolKind::Macro {
+                    function_like,
+                    body,
+                }) => {
+                    return Some(MacroEvidence::Described {
+                        function_like,
+                        body,
+                    });
+                }
+                // The includes say the name is something else, or an `#undef` took it away: that is an answer —
+                // no evidence — and it must not fall through to a flat table that would contradict it.
+                Some(_) | None if macros.knows(name) => return None,
+                _ => {}
+            }
         }
 
         match self.parse_config.symbol_table()?.kind_of(name)? {
@@ -1747,6 +1868,8 @@ impl<'a> CppParser<'a> {
             // exactly the leak reported above.
             min_depth: 0,
             empty_nodes: empty_nodes + empty_unclosed,
+            macro_questions: self.macro_questions.get(),
+            macro_question_names: self.macro_question_names.borrow().len(),
             unclosed,
         }
     }
@@ -1761,6 +1884,25 @@ impl<'a> CppParser<'a> {
 /// phase 2 removes `\`-newline before the grammar ever sees it, so `int \<newline> x;` is one
 /// declaration. The preprocessor layer reads the splices back out of the tree when it needs to know
 /// that a directive continued onto the next line.
+/// The token kinds a macro body's **text** lexes to, trivia left out.
+///
+/// An included macro's body reaches the parser as text ([`MacroEnvironment::body_text_of`]), and the rules compare
+/// shapes — so it is lexed here, at this parse's dialect, rather than re-spelled or classified by hand. One
+/// vocabulary then serves both answers: a body this file wrote ([`CppParser::macro_body_kinds`]) and a body a
+/// header wrote ([`CppParser::macro_body_kinds_at`]) are read by the same lexer. Trivia is dropped so that "the
+/// body's last token is a name" is a question about the body, not about the comment after it.
+fn kinds_of_a_body_text(text: &str, config: &ParserConfig) -> Vec<CppTokenKind> {
+    let mut errors = Vec::new();
+    let mut lexer = CppLexer::new(text, config.lexer_config(), &mut errors);
+
+    lexer
+        .tokenize()
+        .into_iter()
+        .map(|token| token.kind)
+        .filter(|kind| !is_trivia_kind(*kind))
+        .collect()
+}
+
 fn is_trivia_kind(kind: CppTokenKind) -> bool {
     is_comment_kind(kind) || is_line_layout_kind(kind)
 }

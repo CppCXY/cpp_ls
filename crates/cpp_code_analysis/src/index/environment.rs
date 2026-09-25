@@ -137,6 +137,30 @@ impl<'a> MacrosHere<'a> {
 ///
 /// # Why this builds a state per condition
 ///
+/// Is this fact **in force** — is the branch of the `#if` that wrote it the branch that was taken?
+///
+/// The question the evidence layer asks before it hands a conditional `#define` to the parser: the fact knows which
+/// region it was written in, [`SummaryGuards`](crate::SummaryGuards) stores that region's **question**, and this is
+/// where the question meets the macros the compilation starts with (`-D`s, `-std=`, the compiler's own names — a
+/// [`Marked`]).
+///
+/// [`MacrosHere::from_walk`] rather than [`MacrosHere::from_summary`]: the seed already holds the compilation's
+/// macros, and borrowing it costs nothing where owning it would copy the whole table once per condition. What is
+/// given up is the defining file's **own** earlier `#define`s — a name one of those defines reads as unanswered,
+/// which is `Unknown`, and `Unknown` keeps the fact out. That is the safe direction: this can lose evidence, never
+/// invent it.
+pub fn fact_in_force(seed: &Marked, file: &FileSummary, fact: &MacroFact) -> bool {
+    if matches!(fact.guard, FactGuard::Unconditional) {
+        return true;
+    }
+
+    file.guards
+        .visibility_of(fact.guard, fact.range.start_offset, |condition_at| {
+            MacrosHere::from_walk(seed, condition_at)
+        })
+        == Visibility::Active
+}
+
 /// Each condition is evaluated against the macros **at its own offset**, which is a walk
 /// ([`ProjectIndex::macros_at`]) rather than the environment the index was seeded with. Two reasons, and both are
 /// the difference between an answer and a wrong one:
@@ -238,6 +262,45 @@ mod tests {
         let (guard, offset) = guard_in(&index, source, needle);
 
         (index, guard, offset)
+    }
+
+    #[test]
+    fn a_conditional_define_is_in_force_only_when_its_branch_was_taken() {
+        // The question the evidence layer asks before it lets a conditional `#define` be read at all (B89). Three
+        // answers, and the third is the one nothing may be guessed at: an unanswered condition keeps the fact out,
+        // because this layer can lose evidence but must not invent it.
+        let source = "#if FOO\n#define X 1\n#endif\n#if BAR\n#define Y 2\n#endif\n";
+        let path = Path::new("/p/widget.h");
+        let summary = crate::index::summarize(path, source, SummaryKey::new(0, 0));
+
+        let fact = |name: &str| {
+            summary
+                .macros
+                .iter()
+                .find(|fact| &*fact.name == name)
+                .expect("the fixture defines it")
+        };
+
+        let mut seed = crate::Marked::default();
+        seed.define_on_the_command_line("FOO", Some("1"));
+
+        assert!(
+            super::fact_in_force(&seed, &summary, fact("X")),
+            "`FOO` is defined, so that branch was taken"
+        );
+        assert!(
+            !super::fact_in_force(&seed, &summary, fact("Y")),
+            "nothing defines `BAR`, so that branch was not taken"
+        );
+
+        // Outside every `#if` there is nothing to ask — and the fast path is what keeps a closure's tens of
+        // thousands of unconditional facts from costing an evaluation each.
+        let source = "#define Z 3\n";
+        let summary = crate::index::summarize(path, source, SummaryKey::new(0, 0));
+        assert!(
+            super::fact_in_force(&crate::Marked::default(), &summary, &summary.macros[0]),
+            "a `#define` outside every conditional is a fact about the file"
+        );
     }
 
     #[test]

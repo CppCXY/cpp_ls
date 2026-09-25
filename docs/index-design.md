@@ -382,6 +382,342 @@ Unanswered               这张表**说不出** —— 既不是 0，也不是 f
 
 **风险写在明处**：判定用的是**配置**。`Session::open` 从编译数据库取 `-std=`/`-D`，没有数据库时用编译器的默认（本机 g++ 15 = C++17）。用 `-std=c++20` 构建却没有数据库的项目会被按 C++17 读，`>= 202002L` 的块会被判成"不取"而跳过——**配置的错，以"少了声明"的形式出现**，所以这一句同时写在 `std-library.md` 第十五轮和 `Session` 的配置来源旁边。
 
+### 位置化的宏，第二个消费者：**parser**（B81，parser 侧已落地）
+
+上面那一节的流是给**条件求值**用的。同一个流还有第二个消费者，而它一直是缺的：**parser**。
+
+原因写在 `roadmap.md` §2.0 的开头——**一张无位置的宏表是负收益**（干净 80 → 43，消息 941 → 1081，46 个文件变脏）："某个头文件定义了这个名字"被读成"**这里**这个名字是宏"，而 `_GLIBCXX_BEGIN_NAMESPACE_VERSION` 在一个位置是 `namespace __8 {`、在另一个位置什么都没有。**一个名字的形态不是这个名字的属性**，是它在翻译顺序中那个位置的属性。
+
+现在 parser 侧接上了这个流的**形状**，也就是把"位置"这件事变成了类型：
+
+```rust
+/// 某个 `#include` 带进来的宏，从它自己的偏移起生效。
+pub struct IncludedMacro {
+    pub from_offset: usize,       // 这条 `#include` 结束的位置
+    pub name: Box<str>,
+    pub definition: Option<SymbolKind>,   // `None` = 从这里起 `#undef`
+}
+
+/// 一个文件的包含贡献的全部宏，按偏移查。
+pub struct MacroEnvironment { /* name -> [(offset, definition)] 有序 */ }
+impl MacroEnvironment {
+    pub fn from_included_macros(entries: impl IntoIterator<Item = IncludedMacro>) -> Self;
+    pub fn kind_of(&self, name: &str, offset: usize) -> Option<SymbolKind>;  // 二分，O(log n)
+}
+```
+
+`ParserConfig::with_macros_from_includes(&env)` 把它交给 parser，而 `macro_evidence` 的证据次序变成：
+
+```text
+1  本文件自己的 `#define`          —— 就在被解析的文字里，最新鲜
+2  包含在**这个偏移**上贡献的宏     —— 位置化，唯一能说"这里"的那种
+3  调用方的平面表                  —— 留给已经有表的调用方
+4  没有证据                        —— 退回形状偏好
+```
+
+第 2 条的**否定答案也算答案**：包含说"这个名字在这里不是宏"（或一条 `#undef` 把它拿走了）时，不再去问平面表——否则 Plane 表会把一个已经被位置证据否掉的名字重新说成宏。
+
+**现在做到了哪一步**（写清楚，免得下一轮重新猜）：
+
+```text
+✔ parser 侧：IncludedMacro / MacroEnvironment / ParserConfig::with_macros_from_includes
+✔ 证据次序、按偏移生效、`#undef` 撤销、乱序输入自行排序  —— 单元测试
+✔ 端到端：`BOOL_OPTION(flag)` 在证据生效时读成 `MacroCall`（无诊断），
+  把 `#include` 写在调用**之后**时读法退回"漏了 `;`"（有诊断）—— tests/symbols.rs
+✔ seeds 的计算：`macros_from_direct_includes`（直接包含、取 `#include` 的偏移、只取无条件事实、带 `#undef`）
+✔ 语料实测（探针 `--seeds`）：**35 510 条 seeds、257 个文件 —— 干净 433 / 报错 22 / 消息 95 一条没动**
+```
+
+**那次实测的结论是"没动"，而它比一次"动了"更值钱**，因为两件事同时被量了出来：
+
+1. **仪器先说清自己**：探针现在打印 `positional macro evidence: N seeds over M files`。第一版用的是便利函数
+   `summarize`（内部是 `NoFiles`，**一个 include 都不解析**），于是 seeds 恒为 0、两次普查逐字相同——
+   "没效果"和"没接线"在输出上无法区分。这一行就是为那次沉默加的。
+2. **"有证据"会**压掉**那条没有证据的形状规则**：`at_a_macro_call_begins_the_declaration`（B73）明确要求
+   `macro_evidence(...).is_none()`，因为"文件自己 `#define` 过"或"调用方的表有描述"时应当走有体的那条路。
+   把 35 510 条证据铺上去之后，剩下那 22 个文件里恰好有几条（`STDMETHOD`、`_GLIBCXX_NOEXCEPT_PARM`、
+   `_GLIBCXX_MATH_NS`）**从形状规则手里被拿走**，而证据给的形态（多半是 `Unknown`，有些还是"同一个名字两种形态"）
+   并没有替上。这正是 `macro_shape` 探针量的那 168 个"一个名字多种形态"的名字。
+
+**形态分布量出来了，而它把问题钉死在一个地方：**
+
+```text
+positional macro evidence: 35079 seeds over 249 files
+seed shapes: Unknown 27925 (80%) | Expression 2295 | Block 47 | Specifier 20 | Statement 14 | Type 1
+```
+
+**80% 的证据只说"这个名字是宏"，一个字都没说"它能站在哪"。** 而 parser 里**读形态的地方只有两处**
+（`may_be_a_statement_without_a_semicolon` 与"能否独立成一个成员"），两处都只认 `Statement`/`Block`——整个语料里
+这样的 seeds 一共 **61 条（0.17%）**。也就是说：证据**到达了、按位置生效了，而它说的话不是任何规则要听的话**。
+
+**两个假设都被量过、都被否掉**（这是这一轮真正的产出）：
+
+```text
+假设 1  "证据压掉了形状规则"    把 `at_a_macro_call_begins_the_declaration` 的门槛从"有证据"改成
+                              "证据带形态"（`Unknown` 不算）→ 带 seeds 的普查仍是 433 / 22 / 95
+                              → **否掉**，改动已撤回（不凭信念保留）
+假设 2  "形态推断不够细"        80% 是 Unknown，可 `Specifier`/`Type`/`Expression` 这些**没有任何消费者**，
+                              推断得再细也不会有读数变化 → **否掉**
+```
+
+**结论：缺的不是证据，也不是形态的名字，而是"形态 → 规则"的这一段。** 剩下那 22 个文件需要的形态，按首错行归类，
+没有一个落在现有六个变体里：
+
+```text
+_GLIBCXX_NOEXCEPT_PARM      形参表的一个**片段**（`, noexcept`）
+STDMETHOD(method)           声明符的头（`virtual HRESULT STDMETHODCALLTYPE method`——名字在实参里）
+_GLIBCXX_MATH_NS            一个**命名空间名**（`std::__math`），用在 `::` 左边
+STDAPICALLTYPE *            调用约定 + 指针声明符（`typedef HRESULT (STDAPICALLTYPE *LPFN…) (…)`）
+__attribute((dllimport))    属性（现有的 `Specifier` 只覆盖 `__declspec(...)` 的拼写）
+```
+
+这一族要真的买下来，是**新变体 + 消费它们的规则**，或者干脆是**按位置的展开**（把体的 token 真的代入）——
+也就是 `roadmap.md` §2.0 一开始就写下的那句"展开是有界的第二件事、且必须是按位置的"。现在这句话有了**账单**：
+5 种形态、约 8–10 个文件，而位置化的管道（B81/B82）已经在手。
+
+seeds 的来源不是新东西：`ProjectIndex` 已经在按翻译顺序走"文件的事实 + include"合成流（见上一节），第 2 步只是把同一个 walk 的输出再喂一个消费者。
+### 展开：按位置、按调用点、**有来源**（B84 起）
+
+位置化证据（B81/B82）把"这个宏在这个偏移上是什么"接通了，B83 又量出它的天花板：**80% 的条目形态是 `Unknown`，
+而 parser 只在一个地方读形态，且只认 `Statement`/`Block`**（全语料 61 条）。缺的不是证据也不是形态的名字，而是
+**"形态 → 规则"那一段**——换句话说，**要把宏体真正展开出来读**。
+
+好消息是：**展开机已经在仓库里**，只是从来没接到 parser 上：
+
+```text
+preprocess::macros::{MacroDef, MacroBody{tokens, stringize, paste}, Parameter}   ← 展开需要的形式
+preprocess::expand::{expand, expand_with_budget, substitute}                     ← 带预算的展开器
+preprocess::expand_range / expand_node / expand_line_at                          ← 现在只服务语义查询
+MacroFact{ name, function_like, body, value, range, guard }                      ← 每个文件的事实
+MacroEnvironment{ kind_of, body_text_of }                                        ← 按位置问（B81/B82/B84）
+```
+
+**设计：三层，各管一段，互不越界。**
+
+```text
+1  可见性（已做）     MacroEnvironment：某个名字在**这个偏移**上是不是宏、形态是什么、体是什么
+2  展开（引擎已有）   expand(MacroDef, args) → token 流；参数代入、# / ##、预算与递归上限
+3  读数（新的）       parser 在**调用点**问"它展开成什么"，然后**按那个构造读文件自己的 token**
+```
+
+第 3 层的关键决定，也是与 clang 分道扬镳的地方：**展开的 token 不进树**。parser 不构造"合成缓冲区"，而是把
+展开结果当成**读法的证据**——体是 `namespace __8 {`，那么这次调用就按**命名空间头**读，花括号与后面的声明仍按
+**文件自己的 token** 读进同一个 `NamespaceDef`；体是 `virtual HRESULT STDMETHODCALLTYPE method`，那么这次调用
+按**声明符的头**读，声明符的名字取宏自己的实参。于是：
+
+```text
+✔ 无损不变：树里的每个 token 仍然是**这个文件**的 token，`to_source_text() == source` 照旧
+✔ 事实的区间不变：`DeclFact` 的 range 仍指向用户写的那个名字（hover / 跳转都对）
+✔ 容错不变：展开读不出来时，退回今天那条形状规则，再退回"宏调用"这个诚实的节点
+✔ 递归与预算：展开器早有 `expand_with_budget`，展开结果**只用于一次决策**，不递归进树
+✘ 不做的事：不展开 include（一次查询走一遍 include 图，见上文）、不把展开结果当源码、不改写 token
+```
+
+**为什么这是"预处理"而不是"又一条形状规则"**：形状规则是**猜**（`MACRO(args) name(…)` 看起来像声明），
+展开是**读**（宏体里就写着 `namespace __8 {`）。B83 的账单上那五种形态——形参表片段、声明符的头、命名空间名、
+调用约定 + 指针声明符、属性——每一种都能从体里读出来，而它们今天都只能靠猜或者读不出。
+
+**"展开不进树"不等于"树不可用"，而代价必须算清（这一节是回答"是不是要两棵树"的）。**
+
+先看一个具体的：`WINOLEAPI_(void) CoFreeLibrary (HINSTANCE hInst);`
+
+```text
+树里能表达的（全部是**文件自己的 token**）：
+  Declaration
+    DeclSpecifierSeq > MacroCall(NameExpr "WINOLEAPI_", ArgumentList "(void)")     ← 宏站在说明符的位置
+    InitDeclarator > Declarator(NameExpr "CoFreeLibrary", ParameterList "(HINSTANCE hInst)")
+
+树里表达不了的（展开才知道的）：
+  这条声明的**类型**是 `EXTERN_C DECLSPEC_IMPORT HRESULT STDAPICALLTYPE`
+  ⇒ 它属于**事实**，不属于语法：`DeclFact{ type_text: HRESULT, provenance: MacroBody{ file: combaseapi.h:35,
+     invocation: objbase.h:96 } }`
+```
+
+于是分工是清楚的：**树负责"文件写下的形状"，事实负责"它实际上是什么"并带上来源。** 一个消费者问"这个函数的
+返回类型是什么"，答案来自事实(带 provenance)；问"这个宏站在哪、它的实参是什么"，答案来自树。两边都不需要对方。
+这不是妥协，正是这个仓库一开始就定的"事实，不是结论"。
+
+**"两棵树"这条路要看清它到底贵在哪。** 唯一真正需要"展开后的树"的情形，是**宏体自己有语法要看**——而它的正确
+粒度不是"每个文件一棵展开树"，而是**每个宏定义一棵**：
+
+```text
+✘ 按文件展开再解析    文本翻倍、区间失效(每个 offset 都要 origin map)、编辑/补全要映射回去、
+                      一次 parse 的代价变成两次 —— 这正是 clang 的账，它付得起，因为它有 Sema 与
+                      一整套 SourceManager；我们没有，也不该有
+✔ 按定义懒解析        只有**真的被结构化使用**的宏才需要体树，几十个而不是三万两千个；
+                      同一个定义的每次调用**共享**那一棵；缓存的键是"定义的位置"，与调用点无关
+✔ 更省的一层          大多数决策根本不需要树——只需要**体的前几个 token**（`namespace` + 名字 + `{`、
+                      `virtual` + …+ 名字、`,` + `noexcept`）。模式匹配 O(体长)、按定义缓存，
+                      连一次 fragment parse 都不需要
+```
+
+**量到的（B85，第一个数——它决定方案是否成立）：**
+
+```text
+455 个文件 / 310k 行：37 357 次"这个名字是什么宏"的提问 | 最忙的文件 4 684 次
+parse alone 2.86 s（与加计数器之前同量级）
+```
+
+提问数远小于 token 数（310k 行 ≈ 千万级 token），最忙的文件也只有 4 684 次；而**同一个宏的重复提问在展开时按
+`(定义位置, 实参序列)` 记忆化**，所以真正要算的展开次数还要再降一个量级。计数器本身在
+`CppParser::parse_with_audit` 的 `EventStreamAudit::{macro_questions, macro_question_names}` 里（两个
+`Cell`/`RefCell` 计数，任何构建都开着），所以这个数随时可重测。
+**代价模型（下一轮要量的东西，不是猜的）：**
+
+```text
+每次 parse 的额外工作 = Σ(需要展开的**决策点**) × O(体长)，按**定义**记忆化
+  · 决策点很少：声明头、说明符序列、形参表、模板实参、命名空间头 —— 每个文件几十个量级
+  · 记忆化的键是 (定义位置, 实参 token 序列)，所以同一个宏用一百次只算一次（实参不同才算新的）
+  · 上界由 expand_with_budget 兜住（引擎已有预算参数）
+要量三件事：每个文件的决策点数、展开次数(缓存命中率)、455 份普查的 parse 时间增量
+```
+
+**所以答案是：一次 parse 仍然只有一棵树，展开是一张按调用点索引的**旁表**（像今天的 `MacroNames`/`TypeNames`
+一样挂在 parse 结果上），**按需计算、按定义缓存**；真要"展开后的树"，粒度是每个宏定义一棵，不是每个文件一棵。
+**已落地的第一步（B84，parser 侧）**：证据现在能带**体本身**
+
+```rust
+IncludedMacro::defined_with_body(offset, name, function_like, body, body_text)
+MacroEnvironment::body_text_of(name, offset) -> Option<&str>
+```
+
+**B85 的进展与"下一刀切在哪"（写给下一次接手的人，三处都点了位置）**
+
+```text
+已做  parser 的决策点计数：CppParser::parse_with_audit → EventStreamAudit::{macro_questions,
+      macro_question_names}；455 个文件 37 357 次提问、最忙文件 4 684 次、parse 2.86 s（方案的门是过的）
+已做  IncludedMacro::defined_with_body / MacroEnvironment::body_text_of（证据能带体）
+已做  macros_from_direct_includes_with_bodies（带体的 seeds 构造，**暂时传 None**）
+```
+
+**已做（B86）：体真的取出来了。** 三处改动都落地了——`MacroFact::body_range`（**派生**自 `MacroDef::body.tokens`
+的首尾范围，不是从 `#define` 行里搜出来的）、造事实处填它、`summary_codec` 补一格编解码；`macros_from_direct_includes_with_bodies`
+随即把真实的切片接上。**量到的**：455 个文件的普查里
+
+```text
+positional macro evidence: 35430 seeds over 253 files (27733 with body text)
+seed shapes: Unknown 28027 | Expression 2295 | Block 47 | Specifier 20 | Statement 14 | Type 1
+decision points: 37317 macro questions | 321 name-questions | busiest file 4684
+```
+
+**78% 的证据现在带着真正的替换列表**——也就是说 B83 账单上那五种形态第一次有了"料"可读，而语料读数没变
+（433 / 22 / 95——那是 **B87 之前**的读数）。**B87 之后这句话不再成立**：体的头与尾两条规则已经在读它，
+`c++config.h` 因此变干净（128 那份 115/13/55、455 那份 434/21/90）。
+
+下一刀：让规则读它——**B87 的进度与确切位置**
+
+```text
+已做  parser 侧的体表：`CppParser::macro_bodies`（名字 → 体的 **token kind 序列**）
+      + `record_macro_body(name, kinds)` + `macro_body_kinds(name)`
+      —— 只记**种类**不记拼写：规则要问的是"这个体开一个命名空间吗""它是不是一个孤零零的 `}`"
+        "它是不是以 `,` 开头"，种类足够回答三个问题，而文字仍在树里（指令的 token 一个没动）
+已做  `stats::parse_preprocessor_directive` 里 `#define` 分支已经知道名字与"名字后面紧邻的是不是 `(`"
+      （函数式宏的形参表不是体，判据与预处理器同一条：`(` 必须**紧邻**名字，于是 `#define A (1)` 的体仍是 `(1)`）
+
+未做（下一个人照着做就行，两处）
+  1  在同一个分支里真正记下来：把上面那段注释里描述的 `record_body_of_the_macro_being_defined(&name, …)`
+      换成一个就地的小循环——`p.bump()` 掉名字 →（若紧邻 `(`）跳过配平组 → 读到 `line_end` 为止，
+      把沿途 token kind 收进 `Vec`，`p.record_macro_body(&name, kinds)`
+  2  第一条消费规则：**命名空间头的宏**。`_GLIBCXX_BEGIN_NAMESPACE_VERSION` 的体是 `namespace __8 {`，
+      `_GLIBCXX_END_NAMESPACE_VERSION` 的体是 `}`（两个都在 `c++config.h` **自己的文件**里，
+      所以不需要索引）。判据是"调用点的名字有体 + 体的种类序列匹配"，
+      **树仍然只用文件自己的 token**：头是那次调用（`MacroCall`），体是它后面的声明，尾是另一次调用。
+```
+
+**（下面这三步是 B86 的账单，已做完；B87 的账单在最上面那节。）**
+
+  1  summary::MacroFact 加 `body_range: Option<SourceRange>`
+     —— 事实今天记了"形态"和"名字在哪"（`range` = `MacroDef::name_range`），没记**体在哪**
+  2  index/mod.rs 造事实的地方（`Some(MacroFact { … })`）填它：**不用新字段**，体可以从
+     `definition.body.tokens` 的首尾 token 范围直接算出来（`MacroDef::body: MacroBody{tokens}` 每个 token
+     都带范围），所以这一格是纯派生
+  3  summary_codec.rs 给 `MacroFact` 的编解码补一格（两个 varint 的范围，或一个 `Option` 标记 + 范围）
+      —— **不要**在别处"从 `#define` 行里再切一次体"：那是同一条规则的第二个实现，仓库的维护约定里
+      `MacroDef::name_range` 的注释已经把这条道理写过一遍（"a search is a second implementation of the same
+      rule, free to disagree with the one that assigned the name"）
+
+做完之后 `macros_from_direct_includes_with_bodies` 把 `None` 换成真实切片，B83 账单上的五种形态就有料可读。
+先做**命名空间头**那种（`#define _GLIBCXX_BEGIN_NAMESPACE_VERSION namespace __8 {`），因为它同时出现在
+`c++config.h` **自己的文件**里——也就是说规则可以先在**没有索引**的情况下写完、测完，再谈索引。
+
+**下一步（B85 的清单，第 1、2 条已在 B86/B87 里做完，留着当账单）**：
+
+```text
+1  MacroFact::body_range（+ 编解码一个字节）：事实现在只记形态和"事实在哪"，没记**体在哪**，
+   没有它 `macros_from_direct_includes_with_bodies` 就切不出体（函数已就位，暂时传 None）
+2  第一条消费规则：**命名空间头的宏**（`#define _GLIBCXX_BEGIN_NAMESPACE_VERSION namespace __8 {`）
+   ——**已做完（B87）**：`body_shapes_the_braces` 读体的头与尾（第一个 kind 是 `namespace` ⇒ 开了命名空间；
+   体恰是 `[}]` ⇒ 关掉最里面那个花括号），`c++config.h` 在两份清单上都变干净（128 那份 115/13/55、
+   455 那份 434/21/90），没有一个文件从干净变报错
+3  接着按账单逐个（这四种**都要索引里的体**，B86 已经能切出来）：
+   a 声明符的头（`STDMETHOD(x)`——名字在宏自己的实参里，`combaseapi.h:358` 那种调用约定 + 指针声明符）
+   b 形参表片段（`_GLIBCXX_NOEXCEPT_PARM`）
+   c 命名空间名（`_GLIBCXX_MATH_NS`，体是 `__8`）
+   d 属性（`__attribute((dllimport))`，`compatibility.h:49`）
+4  每一条都走同一套纪律：反向应用回工作树实测、**逐文件对照**、形状断言、第一次失败留在条目里
+```
+**B88：证据从"一跳"扩到"闭包"，以及它量出来的一个坏消息**
+
+```text
+已做  summary::macros_from_the_closure_with_bodies
+      —— 每个直接 include 走**它自己的闭包**（BFS + seen 集，环不会挂死），闭包里的宏都从那条
+        `#include` 结束的 offset 起生效（位置性不变）。名字先按翻译顺序去重（后来的定义赢），
+        **去重之后才切体文本**：一个闭包把同一个名字定义好几次，留下的替换列表是"每个名字一份"，
+        不是"每个定义一份"
+量到  455 份：1 452 018 条 seeds（其中 1 240 225 条带体），**全部 455 个文件建证据共 467 ms**；
+      parse alone 3.11 s → 4.10 s（每文件 +2 ms）；语料读数 **434 / 21 / 90 一条没动**
+      —— 证据到位而读数不动，正是纪律要求的（规则还没消费它）
+注意  seeds 计数**不是常量**：它既随索引顺序变（summary 是边索引边填的，闭包走到的文件越多 seeds 越多），
+      也随被测文件的解析结果变（宏事实来自解析）——两次跑出 1.45M 与 1.57M，所以这个数是**下界**
+欠账  闭包走法本身**没有单元测试**：替它把关的是端到端的 seeds 计数和 B88 那条规则。写它的第一步是给
+      `FileSummary`/`MacroFact` 一个测试用的构造器，而不是在测试里堆字面量（去重、last-wins、
+      "环不挂死"这三条都值得钉住）
+```
+
+**B89：条件层接上，以及"证据不是单调的"这条量出来的规矩**
+
+```text
+已做  index::environment::fact_in_force(seed, file, fact)
+      —— 摘要把条件存成**问题**，这里把问题交给答案：`seed` 是**编译起点**的宏（`-D`、`-std=`、编译器
+        `-dM` 预定义的那约 480 个名字），求值走 `MacrosHere::from_walk`（借，不复制整张表）+
+        `SummaryGuards::visibility_of`。答 `Unknown` 一律**不当证据**——这一层可以丢证据，不能编证据
+量到  455 份：**条件事实 2 652 007 条，其中分支成立 1 111 056 条**
+翻车  第一版把"分支成立的条件定义"**当定义**喂进去：干净 435 → **432**、报错 20 → **23**、消息 86 → **98**，
+      三个文件（`corecrt.h`、`swprintf.inl`、`types.h`）从干净变报错，**没有一个反向**。成因：好几条规则
+      之所以读**形状**，正是因为**没有表知道这个名字**（`macro_evidence(..).is_none()` 是它们的前置），
+      而一条**读不出体**的条目恰好把这些规则关掉了。**证据不是单调的**
+已做  于是分两条通道（`ClosureEvidence { macros, conditional_bodies }`）：
+      **定义**只走无条件的那批 —— 它回答"这个名字在这里是不是宏"；
+      **条件成立而带体的**走 `MacroEnvironment::with_bodies_in_force`，只被 `macro_body_kinds_at` 的最后
+      一次询问读到 —— 它只回答"它说什么"。判据：**体只会打开一条读法，不会关掉一条**
+量到  改完 **353 414 条体在生效**，语料回到 **435 / 20 / 86**（与无条件版逐文件一致），
+      `parse alone` 4.1 s → 7.1 s（2.4M 条证据的环境，每文件 +6.6 ms）
+下一步 第一个消费者：**`STDMETHOD(x)` 那种声明符的头**（名字在宏自己的实参里）；料的通道现在是通的，
+      而且它是"读体"型规则，正好走第二条通道
+```
+
+**B90：第一个消费者的第一次尝试，没落地（位置定位了）**。规则、测试、两处钩子都写了，两份语料**一条没动**——
+说明它在语料上一次都没被问到。打印出来的原因是：`DECLARE_INTERFACE_(A,B) { … };`（`commdlg.h:575`）里，
+`DECLARE_INTERFACE_` 先被 `types.rs` 的 `a_macro_call_begins_the_declaration`（B73）读成**声明说明符**，于是
+`parse_declaration_here` 只在游标落到 `(` 上时被进入一次，那个块被整块吞掉，里面的 `STDMETHOD(…) (…) PURE;`
+从不进语句分发——而"成员那一行本身"放进类体是能读的（第一版测试直接通过）。规则与两件使能件（空体记录、
+形参表里跳过空体宏）都按纪律**撤回**，细节写在 [`grammar-gaps.md`](grammar-gaps.md) B90。
+
+**下一刀（确切位置）**：`types.rs` 的 `a_macro_call_begins_the_declaration` 之后——宏调用成为声明说明符时，
+**由体决定它后面那个块按类体还是函数体读**：`DECLARE_INTERFACE_` 的体是
+`interface DECLSPEC_NOVTABLE iface : public baseiface`（有 `interface`、有基类子句），gtest 的 `TEST(A, B)` 的体
+是语句/块，而今天一律按函数体读（`set_last_declarator_is_function(true)`）。
+
+**B89 之后账单的料到位了**：`_GLIBCXX_NOEXCEPT_PARM`（`c++config.h:268-274`）、`STDMETHOD` / `PURE` / `THIS_`
+（`combaseapi.h:53-58` 的 `#ifdef __cplusplus` 里）、`_GLIBCXX_MATH_NS` 这些名字，**在分支成立时**带着体进来
+（`bodies in force` 那个计数就是它们），而**定义**那一栏一如既往只收无条件的——两栏为什么必须分开，见上面那次翻车。
+
+**B88 本身绕开了它，靠的是位置**：`bits/refwrap.h:142` 的 `_GLIBCXX_NOEXCEPT_PARM` 站在模板形参表**该写
+`,` 或 `>` 的位置**上，而那个位置上任何标识符都不可能继续刚才那个形参、也不可能关掉表——文件已经在
+"错"里了，除非这个拼法（`_` 开头或全大写）的名字是宏。于是读成一次调用（`MacroCall`），循环继续：体若供
+`, 更多` 就继续，体为空则由下一个 token 关表。语料 455 干净 434 → **435**，报错 21 → **20**，
+**没有一个文件从干净变报错**。
+
 ### 成员访问：第一个需要**类型**的查询
 
 `index::project::member_across_files` 回答 `widget.size` 里的 `size` 指向哪条声明。它不是"在作用域里找 `size`"——是**在 `widget` 的类型里找 `size`**。三步，每一步都已经存在：
@@ -656,12 +992,3 @@ cargo doc --no-deps -p cpp_code_analysis            # 零警告（cpp_parser 还
 
 - **`Binding.range` 是 declarator，不是整条声明**（`Widget w;` 里只有 `w`）。任何"名字之前的文本就是类型"的写法都会静默地得到空字符串。要类型就**从根往下走到声明处，取 `DeclSpecifierSeq`**（`declared_type_of`）。
 - **`FileIndexer` 只给 parser 喂 `ParserConfig::default()`**：`-D`/`-std` 不参与解析，所以摘要与宏环境无关（这就是键里没有宏环境的原因）。哪天要把 `-D` 喂进去，**键里必须同时把宏环境加回来**，并且抬 `FORMAT_VERSION`——`cache.rs` 与"第三个被测试抓出来的键错误"都记着。
-
-
-
-
-
-
-
-
-

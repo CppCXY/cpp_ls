@@ -99,6 +99,205 @@ impl SymbolTable for NoSymbols {
     }
 }
 
+/// A macro the file **includes** rather than writes, with the offset it becomes visible at.
+///
+/// The whole point of the offset is the measurement `docs/roadmap.md` §2.0 opens with: a **position-less** table of
+/// the closure's macros made 46 files *worse*, because "some header defines this name" was read as "this name is a
+/// macro **here**" — `_GLIBCXX_BEGIN_NAMESPACE_VERSION` is `namespace __8 {` in one place and nothing at all in
+/// another, and a name's shape is not a property of the name.
+///
+/// What the index *does* know is the **translation order** of the file it is reading: which `#include` comes where,
+/// and which `#define` each included file writes. Feeding that as offsets is what this type carries. It is the same
+/// stream `docs/index-design.md` §"闭包自己的宏：按翻译顺序边走边喂" already builds for **conditions** — the parser
+/// is the second consumer of it, not a new source of truth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncludedMacro {
+    /// The offset in **this** file from which the entry applies: the end of the `#include` that brought it in.
+    pub from_offset: usize,
+    pub name: Box<str>,
+    /// What the name is from that offset on — or `None` for an `#undef`, which takes it away again.
+    pub definition: Option<SymbolKind>,
+    /// The macro's **replacement list as text**, when the caller has it.
+    ///
+    /// The shape in `definition` says what *kind of thing* the name stands for; this says **what it says**, and
+    /// it is what turns "this name is a macro" into a reading: `namespace __8 {` is a namespace head, `, noexcept`
+    /// is a parameter-list fragment, `virtual HRESULT STDMETHODCALLTYPE method` is a declarator head whose name is
+    /// the macro's own argument. See the expansion section of `docs/index-design.md`.
+    ///
+    /// `None` is the ordinary answer — an `#undef`, a body nobody stored, or a caller that only had shapes.
+    pub body_text: Option<Box<str>>,
+}
+
+impl IncludedMacro {
+    /// A macro that becomes visible at `from_offset`.
+    pub fn defined_at(from_offset: usize, name: &str, function_like: bool, body: MacroBody) -> Self {
+        Self {
+            from_offset,
+            name: name.into(),
+            definition: Some(SymbolKind::Macro {
+                function_like,
+                body,
+            }),
+            body_text: None,
+        }
+    }
+
+    /// A macro that stops being one at `from_offset` (an `#undef` in this file, which the parser sees anyway —
+    /// kept for an `#undef` written by an included file).
+    /// A macro that becomes visible at `from_offset`, **with its replacement list as text** — what expansion
+    /// needs. See [`IncludedMacro::body_text`].
+    pub fn defined_with_body(
+        from_offset: usize,
+        name: &str,
+        function_like: bool,
+        body: MacroBody,
+        body_text: Option<&str>,
+    ) -> Self {
+        Self {
+            from_offset,
+            name: name.into(),
+            definition: Some(SymbolKind::Macro {
+                function_like,
+                body,
+            }),
+            body_text: body_text.map(Box::from),
+        }
+    }
+
+    pub fn undefined_at(from_offset: usize, name: &str) -> Self {
+        Self {
+            from_offset,
+            name: name.into(),
+            definition: None,
+            body_text: None,
+        }
+    }
+}
+
+/// The macros a file's **includes** contribute, each with the offset it applies from.
+///
+/// Built once per file by the caller that knows the include graph (the index), queried by the parser at the offset
+/// it is reading. The answer is positional by construction: [`MacroEnvironment::kind_of`] returns whatever was in
+/// force **at that offset**, so the same name may be a macro in one region of a file and an ordinary identifier in
+/// another — which is exactly what the flat table could not say, and the reason it lost.
+///
+/// Not `Clone` on purpose: it is built once and borrowed for the parse.
+#[derive(Debug, Default)]
+pub struct MacroEnvironment {
+    /// One entry per name: `(offset, definition)` in offset order, with `None` for an `#undef`.
+    ///
+    /// Sorted per name rather than globally because a query is by name — the parser asks "what is `MY_API` here",
+    /// never "what is visible here" — and because a name's own history is short.
+    by_name: std::collections::HashMap<Box<str>, Vec<(usize, Option<SymbolKind>)>>,
+    /// The replacement list per `(offset, name)`, kept beside the history rather than inside it so that the
+    /// common lookup — "is this a macro here" — stays a binary search over a slice of small values.
+    body_texts: std::collections::HashMap<(usize, Box<str>), Box<str>>,
+    /// The replacement lists of macros whose definition is **conditional but in force** — read for *what they say*,
+    /// never for *whether the name is a macro*.
+    ///
+    /// Two channels rather than one, and the split is **measured** rather than aesthetic: handing a conditional
+    /// definition out as a definition switches off every rule that reads *shape* precisely because no table knows
+    /// the name, which cost 3 files clean→failing on the corpus (`corecrt.h`, `swprintf.inl`, `types.h`, each a
+    /// declaration headed by an `__MINGW_EXTENSION`-style macro) and gained none. A **body** cannot do that: no
+    /// rule asks "is there a body" in order to refuse a reading, so this channel can only enable one.
+    bodies_in_force: std::collections::HashMap<Box<str>, Box<str>>,
+}
+
+impl MacroEnvironment {
+    /// Build the environment from what the file's includes contribute.
+    ///
+    /// Entries may arrive in any order; they are sorted per name here, once.
+    pub fn from_included_macros(entries: impl IntoIterator<Item = IncludedMacro>) -> Self {
+        let mut by_name: std::collections::HashMap<Box<str>, Vec<(usize, Option<SymbolKind>)>> =
+            std::collections::HashMap::new();
+        let mut body_texts = std::collections::HashMap::new();
+        for entry in entries {
+            if let Some(text) = entry.body_text {
+                body_texts.insert((entry.from_offset, entry.name.clone()), text);
+            }
+            by_name
+                .entry(entry.name)
+                .or_default()
+                .push((entry.from_offset, entry.definition));
+        }
+        for history in by_name.values_mut() {
+            history.sort_by_key(|(offset, _)| *offset);
+        }
+
+        Self {
+            by_name,
+            body_texts,
+            bodies_in_force: std::collections::HashMap::new(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_name.is_empty()
+    }
+
+    /// How many names the includes contribute.
+    pub fn len(&self) -> usize {
+        self.by_name.len()
+    }
+
+    /// What `name` is **at `offset`** — the last entry that has come into force by then, or `None` when the name is
+    /// not a macro there (including when an `#undef` has taken it away).
+    pub fn kind_of(&self, name: &str, offset: usize) -> Option<SymbolKind> {
+        let history = self.by_name.get(name)?;
+        // The last entry whose offset has been reached. `partition_point` on a sorted slice, so a query is
+        // logarithmic and the parser can ask at every token without a cursor to keep in step.
+        let in_force = history[..history.partition_point(|(from, _)| *from <= offset)].last()?;
+        in_force.1
+    }
+
+    /// What `name` expands to **at `offset`**, as text, when the caller stored it.
+    ///
+    /// The second half of the positional answer, and the one expansion needs: a shape says which *rule* may look,
+    /// this says what the rule will read. See [`IncludedMacro::body_text`].
+    /// Add the bodies of macros whose definition is conditional **but in force** — the second channel. See the
+    /// field's note for the measurement that keeps the two apart.
+    pub fn with_bodies_in_force(
+        mut self,
+        bodies: impl IntoIterator<Item = (Box<str>, Box<str>)>,
+    ) -> Self {
+        self.bodies_in_force.extend(bodies);
+        self
+    }
+
+    /// What a macro's replacement list says, when the only definition of it that is in force is a conditional one.
+    ///
+    /// For **reading only**: a rule that wants to know whether a name is a macro must ask
+    /// [`MacroEnvironment::is_a_macro_at`], which does not consult this.
+    pub fn body_text_in_force(&self, name: &str) -> Option<&str> {
+        self.bodies_in_force.get(name).map(Box::as_ref)
+    }
+
+    pub fn body_text_of(&self, name: &str, offset: usize) -> Option<&str> {
+        let history = self.by_name.get(name)?;
+        let in_force = history[..history.partition_point(|(from, _)| *from <= offset)].last()?;
+        self.body_texts
+            .get(&(in_force.0, name.into()))
+            .map(Box::as_ref)
+    }
+
+    /// Is `name` a macro at `offset`? The question almost every caller asks.
+    pub fn is_a_macro_at(&self, name: &str, offset: usize) -> bool {
+        matches!(
+            self.kind_of(name, offset),
+            Some(SymbolKind::Macro { .. })
+        )
+    }
+
+    /// Does the environment have **any** entry for `name` — even one that says it is not a macro there?
+    ///
+    /// The difference matters at the call site: "no entry" means the includes say nothing and a weaker source of
+    /// evidence may still be consulted, while "an entry that is not a macro" is an answer, and a table that
+    /// contradicts it must not be.
+    pub fn knows(&self, name: &str) -> bool {
+        self.by_name.contains_key(name)
+    }
+}
+
 /// A table backed by a map — the reference implementation, for tests and for a caller whose index is simple
 /// enough that it does not need a type of its own.
 ///
@@ -250,7 +449,50 @@ pub enum MacroBody {
 
 #[cfg(test)]
 mod tests {
-    use super::{MacroBody, NoSymbols, SymbolKind, SymbolMap, SymbolTable};
+    use super::{
+        IncludedMacro, MacroBody, MacroEnvironment, NoSymbols, SymbolKind, SymbolMap, SymbolTable,
+    };
+
+    /// **The evidence is positional**, which is the whole reason this exists: the same name is a macro in one
+    /// region of a file and not in another, and a flat table cannot say so — feeding one cost 46 files in
+    /// `docs/roadmap.md` §2.0.
+    #[test]
+    fn a_macro_from_an_include_is_in_force_only_from_its_own_offset() {
+        let environment = MacroEnvironment::from_included_macros([
+            IncludedMacro::defined_at(100, "BOOL_OPTION", true, MacroBody::Statement),
+            IncludedMacro::undefined_at(300, "BOOL_OPTION"),
+        ]);
+
+        assert_eq!(environment.len(), 1, "one name, one history");
+        assert!(!environment.is_a_macro_at("BOOL_OPTION", 99), "not yet included");
+        assert!(
+            environment.is_a_macro_at("BOOL_OPTION", 100),
+            "the offset it becomes visible at is its own"
+        );
+        assert!(environment.is_a_macro_at("BOOL_OPTION", 299), "still in force");
+        assert!(
+            !environment.is_a_macro_at("BOOL_OPTION", 300),
+            "an `#undef` takes it away again"
+        );
+        assert!(
+            environment.knows("BOOL_OPTION"),
+            "…and 'not a macro here' is an answer, not an absence"
+        );
+        assert!(!environment.knows("SOMETHING_ELSE"), "a name it never heard of");
+    }
+
+    /// Entries may arrive in any order — the index walks the include graph, not the offsets — and the answer must
+    /// not depend on that.
+    #[test]
+    fn the_environment_sorts_what_it_is_given() {
+        let environment = MacroEnvironment::from_included_macros([
+            IncludedMacro::undefined_at(300, "M"),
+            IncludedMacro::defined_at(100, "M", false, MacroBody::Specifier),
+        ]);
+
+        assert!(environment.is_a_macro_at("M", 150));
+        assert!(!environment.is_a_macro_at("M", 350));
+    }
 
     #[test]
     fn a_map_answers_what_was_inserted_and_nothing_else() {

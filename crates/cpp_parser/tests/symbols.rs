@@ -16,8 +16,8 @@
 //!   through `ParserConfig`.
 
 use cpp_parser::{
-    CppParser, CppSyntaxKind, CppSyntaxTree, MacroBody, NoSymbols, ParserConfig, SymbolKind,
-    SymbolMap, SymbolTable,
+    CppParser, CppSyntaxKind, CppSyntaxTree, IncludedMacro, MacroBody, MacroEnvironment, NoSymbols,
+    ParserConfig, SymbolKind, SymbolMap, SymbolTable,
 };
 
 /// A parse, reduced to what a test can compare: the node kinds with their ranges, the diagnostics, and the text.
@@ -470,4 +470,52 @@ fn a_table_can_be_built_and_shared_from_outside_the_crate() {
 
     // No table at all is the ordinary case, and it is not an error.
     assert!(ParserConfig::default().symbol_table().is_none());
+}
+
+/// **What a file's includes define decides a reading — and only from the offset it is in force at.**
+///
+/// `BOOL_OPTION(flag)` on a line of its own is the shape the statement rule owns, and the *only* thing that makes
+/// the reading available is evidence that the name is a macro whose body is a whole statement (see
+/// `at_a_macro_call_statement`, and B36 in `docs/grammar-gaps.md`): without it, the tokens are a call with its `;`
+/// missing, which is an error, and with it they are a macro invocation.
+///
+/// The second half is the whole reason the evidence carries an **offset**: the same file, the same call, the same
+/// table — only the position of the `#include` differs, and with it the answer. That is the property a flat table
+/// cannot have, and the one that cost 46 files when it was tried.
+#[test]
+fn an_included_macro_decides_a_reading_only_from_its_own_offset() {
+    let source = "void f() {\n  BOOL_OPTION(flag)\n}\n";
+    let at_end_of_the_file = source.len();
+
+    let macro_call_at = |from_offset: usize| {
+        let environment = MacroEnvironment::from_included_macros([IncludedMacro::defined_at(
+            from_offset,
+            "BOOL_OPTION",
+            true,
+            MacroBody::Statement,
+        )]);
+        let config = ParserConfig::default().with_macros_from_includes(&environment);
+        let tree = CppParser::parse(source, config);
+        let calls = tree
+            .get_red_root()
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::MacroCall)
+            .count();
+        (calls, tree.get_errors().len())
+    };
+
+    // The include is at the top of the file, so the invocation is inside what it brought in.
+    assert_eq!(
+        macro_call_at(0),
+        (1, 0),
+        "the macro is in force: one `MacroCall`, no diagnostics"
+    );
+
+    // The same table, but the `#include` is written *after* the call — the evidence is not in force yet, so the
+    // reading is the one a file with no table gets: a call with its `;` missing.
+    assert_eq!(
+        macro_call_at(at_end_of_the_file),
+        (0, 1),
+        "not in force here: no `MacroCall`, and the missing `;` is reported"
+    );
 }

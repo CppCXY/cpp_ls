@@ -237,6 +237,17 @@ pub struct MacroFact {
     pub kind: MacroKind,
     pub function_like: bool,
     pub body: cpp_parser::MacroBody,
+    /// Where the macro's **replacement list** is, in the file that defines it — the one piece of a body expansion
+    /// needs and the fact did not carry.
+    ///
+    /// `range` above is the *name*, deliberately ("go to macro definition" jumps to the name, and a rename edits
+    /// it); this is everything after the parameters, and it is what lets a consumer slice the body's **text** out of
+    /// the defining file rather than re-deriving it by searching the directive — the mistake
+    /// `MacroDef::name_range`'s own note warns about ("a search is a second implementation of the same rule, free to
+    /// disagree with the one that assigned the name").
+    ///
+    /// `None` for an `#undef` (there is no body) and for a `#define` with an empty replacement list.
+    pub body_range: Option<cpp_parser::SourceRange>,
     /// The macro's value, when its body is **one integer literal**: `#define _GLIBCXX_USE_CXX11_ABI 1`.
     ///
     /// The one piece of a body a condition can read. `#if NAME` on a macro expands it and re-reads the result, and
@@ -351,6 +362,232 @@ impl IncludeFact {
             is_next: self.is_next,
         }
     }
+}
+
+/// The macros a file's **direct includes** contribute, each in force from the end of its own `#include`.
+///
+/// This is the first half of the answer `docs/index-design.md` §"位置化的宏，第二个消费者" describes: the index
+/// already stores, per file, where each macro is defined (`MacroFact`) and where each `#include` resolved
+/// (`IncludeFact::resolved`) — this turns those two into the **positional** evidence the parser asks for, stamped
+/// with the offset the include ended at.
+///
+/// Four rules, and each one is a decision rather than a detail:
+///
+/// * **direct includes only** — a header's own includes are *its* evidence, and following the graph here would need
+///   the translation order to be read again, which is what `ProjectIndex` does for conditions;
+/// * **the include's offset, not the macro's** — a macro becomes visible where it is brought in, which is what makes
+///   the evidence positional at all;
+/// * **unconditional facts only** — a `#define` inside an `#if` may not have run, and seeding it would be the flat
+///   table's mistake in a new disguise (see the measured cost in `docs/roadmap.md` §2.0);
+/// * **`#undef` is carried** — a name that stops being a macro is evidence too, and dropping it would leave the
+///   earlier definition in force for the rest of the file.
+///
+/// This variant also carries the **replacement list as text**, when the caller can supply the defining file's
+/// source — which is what expansion reads: `namespace __8 {` decides a namespace head, `, noexcept` a
+/// parameter-list fragment, `virtual HRESULT STDMETHODCALLTYPE method` a declarator head.
+///
+/// The text is sliced out of the defining file by the fact's own range, so it stays **the file's text** — including
+/// whatever whitespace and comments the body has — and nothing here re-spells a body.
+pub fn macros_from_direct_includes_with_bodies<'a>(
+    summary: &FileSummary,
+    mut look_up: impl FnMut(&std::path::Path) -> Option<(&'a FileSummary, &'a str)>,
+) -> Vec<cpp_parser::IncludedMacro> {
+    let mut entries = Vec::new();
+
+    for include in &summary.includes {
+        let Some((included, source)) = include.resolved.as_deref().and_then(&mut look_up) else {
+            continue;
+        };
+        // Where the name becomes visible: the end of the `#include` directive, which is where a consumer of the
+        // tree would put a marker.
+        let from_offset = include.range.start_offset + include.range.length;
+
+        for fact in &included.macros {
+            if !matches!(fact.guard, FactGuard::Unconditional) {
+                continue;
+            }
+
+            // The body's **text**, sliced out of the file that defines it by the fact's own range — the piece
+            // expansion reads. `None` when the body is empty (`#define FOO`), or when the range does not index
+            // the source (a summary from a different revision of that file, which is the caller's to detect).
+            let body_text = fact
+                .body_range
+                .and_then(|range| source.get(range.start_offset..range.start_offset + range.length));
+
+            entries.push(if fact.kind.is_definition() {
+                cpp_parser::IncludedMacro::defined_with_body(
+                    from_offset,
+                    &fact.name,
+                    fact.function_like,
+                    fact.body,
+                    body_text,
+                )
+            } else {
+                cpp_parser::IncludedMacro::undefined_at(from_offset, &fact.name)
+            });
+        }
+    }
+
+    entries
+}
+
+/// The macros a file's **whole include closure** contributes, each in force from the `#include` that brought it in.
+///
+/// [`macros_from_direct_includes_with_bodies`] is the honest minimum, and the measurement says it is not enough:
+/// of the 21 remaining failures, **15 have a macro on their first-error line that the closure defines and no direct
+/// include does** (`bits/refwrap.h` uses `_GLIBCXX_NOEXCEPT_PARM`, which `bits/c++config.h` defines — two includes
+/// away through `bits/move.h`). Evidence that only ever reaches one hop answers for the wrong file.
+///
+/// So each direct include is walked **through its own closure**, and every macro found is in force from the offset
+/// of that direct include — which is where a consumer of the tree would put a marker, and what keeps the answer
+/// positional. Three things make this affordable rather than a second index:
+///
+/// * **one pass per direct include, names deduplicated before any text is sliced** — a closure defines the same
+///   name in several files, and last-wins by translation order is the answer the preprocessor gives, so the
+///   replacement lists that survive are one per *name*, not one per definition;
+/// * **the walk stops at files already seen**, so an include cycle is not a hang;
+/// * **nothing is re-spelled**: a body is the defining file's own bytes, sliced by the fact's range.
+///
+/// # Two channels
+///
+/// The evidence a file's include closure contributes — **two channels**, and the split is measured, not aesthetic.
+///
+/// `macros` is what says *whether a name is a macro here*: only unconditional definitions, because a name that is
+/// a macro only inside a branch the file may not be in is not a fact about the file.
+///
+/// `conditional_bodies` is what a rule **reads**: the replacement list of a macro whose definition is conditional
+/// but whose branch is in force. Feeding these into `macros` as well is what the first version did, and the census
+/// said no — 3 files clean→failing, none the other way (`corecrt.h`, `swprintf.inl`, `types.h`, all three a
+/// declaration headed by `__MINGW_EXTENSION`-style macro): several rules read *shape* **because** no table knows
+/// the name, and an entry with an unreadable body switches exactly those rules off. Evidence is not monotone. A
+/// body, on the other hand, can only ever *enable* a reading: no rule asks "is there a body" to refuse something.
+pub struct ClosureEvidence {
+    pub macros: Vec<cpp_parser::IncludedMacro>,
+    /// `(name, replacement list)` — last definition in translation order wins, like everything else here.
+    pub conditional_bodies: Vec<(Box<str>, Box<str>)>,
+}
+
+pub fn macros_from_the_closure_with_bodies<'a>(
+    summary: &FileSummary,
+    mut look_up: impl FnMut(&std::path::Path) -> Option<(&'a FileSummary, &'a str)>,
+    in_force: impl Fn(&FileSummary, &MacroFact) -> bool,
+) -> ClosureEvidence {
+    let mut entries = Vec::new();
+    let mut conditional_bodies: std::collections::BTreeMap<Box<str>, Box<str>> =
+        std::collections::BTreeMap::new();
+
+    for include in &summary.includes {
+        let Some(root) = include.resolved.as_deref() else {
+            continue;
+        };
+        let from_offset = include.range.start_offset + include.range.length;
+
+        let mut seen: std::collections::HashSet<&std::path::Path> = std::collections::HashSet::new();
+        let mut queue: std::collections::VecDeque<&std::path::Path> = std::collections::VecDeque::new();
+        let mut definitions: std::collections::BTreeMap<&str, (&MacroFact, &str)> =
+            std::collections::BTreeMap::new();
+        queue.push_back(root);
+
+        while let Some(path) = queue.pop_front() {
+            if !seen.insert(path) {
+                continue;
+            }
+
+            let Some((file, source)) = look_up(path) else {
+                continue;
+            };
+
+            for fact in &file.macros {
+                // **A `#define` inside an `#if` is a fact about one branch**, and the branch has to be the one that
+                // was taken — which is the caller's question to answer, because only the caller has the macros the
+                // compilation starts with (`-D`s, `-std=`, the compiler's own names). The answer is asked **once per
+                // (file, region)** rather than once per fact: every fact in a region gets the same answer, and a
+                // closure holds tens of thousands of facts.
+                if !matches!(fact.guard, FactGuard::Unconditional) {
+                    if !in_force(file, fact) {
+                        continue;
+                    }
+
+                    // In force, and **that is a body to read** — not a definition to hand out. See
+                    // [`ClosureEvidence`] for the measurement that drew this line.
+                    if fact.kind.is_definition()
+                        && let Some(text) = fact
+                            .body_range
+                            .and_then(|range| source.get(range.start_offset..range.start_offset + range.length))
+                    {
+                        conditional_bodies.insert(Box::from(&*fact.name), Box::from(text));
+                    }
+                    continue;
+                }
+
+                definitions.insert(&fact.name, (fact, source));
+            }
+
+            for nested in &file.includes {
+                if let Some(next) = nested.resolved.as_deref() {
+                    queue.push_back(next);
+                }
+            }
+        }
+
+        for (_, (fact, source)) in definitions {
+            let body_text = fact
+                .body_range
+                .and_then(|range| source.get(range.start_offset..range.start_offset + range.length));
+
+            entries.push(if fact.kind.is_definition() {
+                cpp_parser::IncludedMacro::defined_with_body(
+                    from_offset,
+                    &fact.name,
+                    fact.function_like,
+                    fact.body,
+                    body_text,
+                )
+            } else {
+                cpp_parser::IncludedMacro::undefined_at(from_offset, &fact.name)
+            });
+        }
+    }
+
+    ClosureEvidence {
+        macros: entries,
+        conditional_bodies: conditional_bodies.into_iter().collect(),
+    }
+}
+
+pub fn macros_from_direct_includes<'a>(
+    summary: &FileSummary,
+    mut look_up: impl FnMut(&std::path::Path) -> Option<&'a FileSummary>,
+) -> Vec<cpp_parser::IncludedMacro> {
+    let mut entries = Vec::new();
+
+    for include in &summary.includes {
+        let Some(included) = include.resolved.as_deref().and_then(&mut look_up) else {
+            continue;
+        };
+        // Where the name becomes visible: the end of the `#include` directive, which is where a consumer of the
+        // tree would put a marker.
+        let from_offset = include.range.start_offset + include.range.length;
+
+        for fact in &included.macros {
+            if !matches!(fact.guard, FactGuard::Unconditional) {
+                continue;
+            }
+
+            entries.push(if fact.kind.is_definition() {
+                cpp_parser::IncludedMacro::defined_at(
+                    from_offset,
+                    &fact.name,
+                    fact.function_like,
+                    fact.body,
+                )
+            } else {
+                cpp_parser::IncludedMacro::undefined_at(from_offset, &fact.name)
+            });
+        }
+    }
+
+    entries
 }
 
 /// `#include "local.h"` against `#include <system.h>`.

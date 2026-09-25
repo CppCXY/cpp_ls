@@ -17,7 +17,8 @@
 | **B65** | 声明按分支各写一遍，每个分支自带尾巴和分号（第二支是**片段**） | 1 个文件（`parallel/algorithmfwd.h:700`） |
 | **B72**（剩） | `STDMETHOD(QueryInterface) (…) PURE;`：声明符的名字在**宏自己的实参**里 | 1 个文件（`commdlg.h:577`） |
 | **B77**（剩） | 初始化式里的指令：`parse_a_definition_per_branch` 的**最后那个 `;` 归谁**是设计问题 | 1 个文件（`ext/concurrence.h:58`，三版撤回） |
-| 语料队列 | 其余失败文件的清单随时可重排：`%TEMP%\stdprobe\run_*.txt` 里"每个失败文件的首错"那一节 | 22 个文件（455 那份） |
+| 语料队列 | 其余失败文件的清单随时可重排：`%TEMP%\stdprobe\run_*.txt` 里"每个失败文件的首错"那一节 | 20 个文件（455 那份） |
+| **宏族**（设计级） | 约一半首错行上有**闭包定义过、形态 Unknown** 的宏（`_GLIBCXX_NOEXCEPT_PARM`、`STDAPICALLTYPE`、`_CONST_RETURN`、`_GLIBCXX_MATH_NS`…）。修法不是又一条形状规则，而是把**位置化的宏证据**喂给 parser——`index-design.md` §"位置化的宏，第二个消费者"记着做法，parser 侧的 API 与测试已落地（B81），剩下每个文件 seeds 的计算与实测 | 约 8–10 个文件 |
 
 驱动这一切的队列与逐批数字在 [`roadmap.md`](roadmap.md) §2.0；本文档是它背后的**规格**。
 ## 判定原则
@@ -2259,6 +2260,123 @@ token** 能不能开始一个形参——而 `(__nh._M_alloc.release())` 以名�
 **量到的**：128 个文件的闭包 干净 113 → **114**、报错 15 → **14**、消息 62 → **60**；455 个文件的分析闭包
 干净 432 → **433**、报错 23 → **22**、消息 97 → **95**。`node_handle.h` 在**两份清单**上都变干净，
 **没有一个文件从干净变报错**。
+### B87. 文件自己的 `#define` 体定读法：命名空间头与 `}` —— 已修复
+
+```cpp
+namespace std
+{
+inline _GLIBCXX_BEGIN_NAMESPACE_VERSION          // bits/c++config.h:401
+#if __cplusplus >= 201402L
+  inline namespace literals { … }
+…
+_GLIBCXX_END_NAMESPACE_VERSION                   // 同上:412
+}
+```
+
+**现象**：`c++config.h` 五条消息，第一条是 ``expected `;` `` 打在 401 行那个 `inline` 上，其余四条都是它往下滚的结果。
+
+**成因**：`_GLIBCXX_BEGIN_NAMESPACE_VERSION` / `_GLIBCXX_END_NAMESPACE_VERSION` 的体是 `namespace __8 {` 与 `}`，
+而且**就在这个文件自己里**（393/394 行）。文件自己的 token 里没有一个字说"命名空间开了"或"花括号关了"，
+于是 401 行的 `inline NAME` 被读成一条缺分号的声明，后面的声明全成了它的尾巴。**缺的不是证据，是没人读它**：
+这是 B83 那张账单上第一条只用文件自己的材料就能做完的形态（另外四种——形参表片段、声明符的头、调用约定 +
+指针声明符、属性——都还要索引）。
+
+**做法**：`#define` 分支读完一行时把体的 **token kind** 记进 parser 侧的 `macro_bodies` 表
+（`record_macro_body` / `macro_body_kinds`；名字与形参表都不进体），再由两条规则消费它：
+
+* `body_shapes_the_braces`：第一个 kind 是 `namespace` ⇒ 这个调用**开了一个命名空间**；体恰是 `[}`]` ⇒ 它
+  **关掉最里面那个花括号**。两个形状就是"头"与"尾"，其余形态不碰（`_GLIBCXX_MATH_NS` 的体是 `__8`，那是
+  命名空间**名**而不是头，归声明符规则）。
+* 读法：`MacroCall`（`parse_a_macro_invocation_statement`）。体是花括号的宏没有实参组、没有 body、没有分号，
+  用组读取器（`parse_macro_call`）会**直接失败**——第一版就是这么错的，测出来的树里一个 `MacroCall` 都没有。
+  `inline` + 宏这一形在**声明尝试之前**问：声明读法会先报一条缺分号，然后才轮到回退。
+
+**空体不记**：`c++config.h` 在同一条 `#if` 的另一支里把这两个名字定义成**空**（423/424 行）。两支都会读到、
+没有"选中哪支"这一说，所以空体不覆盖有形状的体——否则 393 行那条真定义会被 423 行抹掉，规则又哑了。
+
+**护栏**：`gaps.rs::a_macro_whose_own_body_opens_a_namespace_is_its_own_statement`——零报错、**两个 `MacroCall`**，
+外加反例 `#define NS __8` 必须一个都不产生（名字不是头）。
+
+**量到的**：128 个文件的闭包 干净 114 → **115**、报错 14 → **13**、消息 60 → **55**；455 个文件的分析闭包
+干净 433 → **434**、报错 22 → **21**、消息 95 → **90**。`c++config.h` 在**两份清单**上都变干净，
+**没有一个文件从干净变报错**。
+
+**代价与边界**（写下来，不当事没发生）：树在头与尾这两处是**平的**——`namespace __8 {` 的 `{` 不在文件里，
+那层作用域没有真实的 `{`/`}` 可挂，规则只把调用读成一条语句，不假装嵌套。要真嵌套，粒度是
+"**每个宏定义一棵树**"（见 [`index-design.md`](index-design.md) 的展开一节），不是这一刀。另外这里只问
+**本文件**的 `#define`：头文件里的 `#define` 仍然要有索引才问得到，那是 B83 账单剩下的四种形态。
+
+### B88. 模板形参表里的宏：分隔符与一整个形参都在头文件里 —— 已修复
+
+```cpp
+template<typename _Res, typename... _ArgTypes _GLIBCXX_NOEXCEPT_PARM>   // bits/refwrap.h:142
+```
+
+**现象**：``expected `,` or `>` in template parameter list`` 打在表尾那个 `>` 上。
+
+**成因**：`_GLIBCXX_NOEXCEPT_PARM` 是 `, bool _NE`（`bits/c++config.h:269`）——**分隔符和一整个形参**都在头文件里，
+本文件的 token 里没有一个字说表还要继续。这一条本该由"读宏的体"解决，体也确实取得到了（B86 的 `body_range`，
+加上这一轮新落的**闭包 seeds**）；**量出来的坏消息是**：这两个 `#define` 落在
+`#if __cpp_noexcept_function_type` / `#else` 两支里，也就是**条件定义**，而 seeds 的构造一直在跳过
+`!FactGuard::Unconditional` 的事实（理由正当：`#if` 里的 `#define` 可能根本没跑，拿它当无条件事实喂进去就是
+**扁平表那个错误换了个马甲**）。于是**闭包走完了，这个名字一条都没进来**——账单上剩下的宏恰好全是这一类。
+
+**做法**：改由**位置**定读法。模板形参表读到"这里该写 `,` 或 `>`"的位置时，若那里是一个**写成宏样子的名字**
+（`_` 开头或全大写，`types::written_like_a_macro`），就读成一次调用（`MacroCall`）并继续循环：体若供 `, 更多`
+就继续，体为空则由下一个 token 关表，下一个 token 是 `>` 就地关表。
+
+**为什么这条判据站得住**：位置本身已经把大部分选项排除了——真实形态是**参数包**（`typename... _ArgTypes`），
+包名之后没有第二个名字的位置，所以那里出现标识符时，文件已经在"错"里了。边界也量过并写进了测试：**非包**
+形参后面这个读取器**会**接受一个名字（`template<typename T foo>` 今天是干净的），所以那种形态不能当对照，
+对照只能用包形态。
+
+**护栏**：`gaps.rs::a_macro_may_supply_the_rest_of_a_template_parameter_list`——正例干净且**有一个 `MacroCall`**；
+反例两条都用包形态：`typename... _Args foo` 与 `typename... _Args int` 都仍然报错。
+
+**量到的**：128 个文件的闭包 干净 115 → **116**、报错 13 → **12**、消息 55 → **51**；455 个文件的分析闭包
+干净 434 → **435**、报错 21 → **20**、消息 90 → **86**。**没有一个文件从干净变报错**。
+
+**下一步（这一条量出来的）**：账单上剩下的形态需要的正是**条件那一层**——某个 `#if` 支是否成立、条件能不能
+求值——而不是更多形状规则。料已经在库里（`ConditionAt` / `ConditionalRegion` / `preprocess::condition`），
+缺的只是"把'这支成立'翻译成'这条 `#define` 可以当证据'"。细节写在 [`index-design.md`](index-design.md) 的展开一节。
+
+### B90. 声明头由宏供给（`STDMETHOD(QueryInterface) (…) PURE;`）—— **试过、量过、未落地**（位置已定位）
+
+```cpp
+DECLARE_INTERFACE_(IPrintDialogCallback,IUnknown) {      // commdlg.h:575
+#ifndef __cplusplus
+    STDMETHOD(QueryInterface) (THIS_ REFIID riid,LPVOID *ppvObj) PURE;   // :577
+```
+
+`combaseapi.h` 在 `__cplusplus` 那一支里（条件层会把它放进生效集合）写着：`STDMETHOD(method)` =
+`virtual COM_DECLSPEC_NOTHROW HRESULT STDMETHODCALLTYPE method`、`PURE` = `= 0`、`THIS_` = **空**。
+
+**现象**：`577:65 expected ';' after expression`，`commdlg.h` 的首错。
+
+**量到的三件事**（都带工具，不是读代码猜的）：
+
+1. **成员那一行本身能读**。`struct I { STDMETHOD(QueryInterface) (THIS_ REFIID riid, LPVOID *ppvObj) PURE; };`
+   放进**类体**，今天就是零报错——第一版测试用它当正例，直接通过。
+2. **真正卡住的是外层**。`DECLARE_INTERFACE_` 先被**声明说明符**那条路当成宏说明符吃掉（B73 的
+   `a_macro_call_begins_the_declaration`），于是 `parse_declaration_here` 在整个文件里只在游标落到 `(` 上时被
+   进入一次——插在它开头的钩子**永远不会在这个形状上被问到**（`B90 no: LeftParen […]` 的打印为证）。
+3. **块因此被整块吞掉**，里面的成员行不是"语句"，语句层的钩子也不问它（同一份打印里，语句分发只在
+   `VoidKeyword` / `LeftParen` 上出现过）。
+
+**试过的做法（已撤回）**：`a_macro_head_with_a_parameter_list`（体以标识符结尾 ＋ 体里有只有声明才有的说明符
+⇒ 这次调用是**声明的头**）＋ `parse_a_declaration_head_macro`（读成 `Declaration(MacroCall, ParameterList,
+MacroCall(PURE), ;)`），分别挂在语句分发与 `parse_declaration_here`。**两份语料读数一条没动**
+（455 那份 435/20/86、128 那份 116/12/51）——它**一次都没在语料上生效**，按纪律撤回：不改变任何读数的规则就是
+没被量到的重量。一起撤回的还有它的两件使能件——`#define THIS_` 的**空体记录**（`macro_bodies_empty`）与形参表里
+"空体宏跳过"——后者**同样没有可观测差别**：`void f(THIS_ int x);` 在没有宏表时今天也是零报错（这正是第二版测试
+断言反例时量出来的）。
+
+**下一刀切在哪（确切位置）**：不是声明层，是**说明符那一层**。`types.rs` 的 `a_macro_call_begins_the_declaration`
+（B73）把宏调用读成声明说明符之后，那个块该按**类体**还是**函数体**读，应该由**体**决定：
+`DECLARE_INTERFACE_` 的体是 `interface DECLSPEC_NOVTABLE iface : public baseiface`（有 `interface`、有基类
+子句），而 gtest 的 `TEST(A, B)` 的体是语句/块。今天一律读成函数体（`set_last_declarator_is_function(true)`），
+于是成员行成了语句、而语句里宏规则本来就受限制。下次先在那儿加一行打印确认块是谁读的，再按体分流。
+
 ### B42. 函数定义里的 `try`（function-try-block）—— 待修
 
 ```cpp

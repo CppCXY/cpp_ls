@@ -3,7 +3,7 @@ use rowan::NodeCache;
 use crate::{
     kind::{CppLanguageLevel, Dialect},
     lexer::LexerConfig,
-    symbols::SymbolTable,
+    symbols::{MacroEnvironment, SymbolTable},
 };
 
 pub struct ParserConfig<'cache> {
@@ -17,6 +17,9 @@ pub struct ParserConfig<'cache> {
     lexer_config: LexerConfig,
     node_cache: Option<&'cache mut NodeCache>,
     symbol_table: Option<&'cache dyn SymbolTable>,
+    /// What the file's **includes** contribute, each entry in force from its own offset — see
+    /// [`MacroEnvironment`].
+    macros_from_includes: Option<&'cache MacroEnvironment>,
 }
 
 impl<'cache> ParserConfig<'cache> {
@@ -27,6 +30,7 @@ impl<'cache> ParserConfig<'cache> {
             lexer_config: LexerConfig::new(level),
             node_cache,
             symbol_table: None,
+            macros_from_includes: None,
         }
     }
 
@@ -68,6 +72,21 @@ impl<'cache> ParserConfig<'cache> {
         self.symbol_table
     }
 
+    /// Parse with what the file's **includes** contribute, each macro in force from the offset its `#include`
+    /// ended at. See [`MacroEnvironment`]: the evidence is *positional*, which is what a flat table failed to be.
+    pub fn with_macros_from_includes(mut self, macros: &'cache MacroEnvironment) -> Self {
+        self.macros_from_includes = Some(macros);
+        self
+    }
+
+    /// What the includes contribute, if the caller supplied it.
+    ///
+    /// `None` is the ordinary case for a buffer parsed on its own, and every caller must read it as no evidence
+    /// from outside — never as nothing is a macro.
+    pub fn macros_from_includes(&self) -> Option<&'cache MacroEnvironment> {
+        self.macros_from_includes
+    }
+
     pub fn node_cache(&mut self) -> Option<&mut NodeCache> {
         self.node_cache.as_deref_mut()
     }
@@ -84,6 +103,7 @@ impl Default for ParserConfig<'_> {
             lexer_config: LexerConfig::default(),
             node_cache: None,
             symbol_table: None,
+            macros_from_includes: None,
         }
     }
 }

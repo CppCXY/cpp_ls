@@ -67,7 +67,8 @@ pub use sema::declarations::{build_facts, by_name, declared_type_of, scope_of};
 pub use sema::{module_info, modules, parser_symbols, scopes, symbol};
 pub use summary::{
     ConditionAt, ConditionalRegion, DeclFact, DeclKind, FactGuard, FileSummary, GuardBranch,
-    IncludeFact, MacroFact, MacroKind, SummaryGuards,
+    IncludeFact, MacroFact, MacroKind, SummaryGuards, macros_from_direct_includes,
+    macros_from_direct_includes_with_bodies, macros_from_the_closure_with_bodies, ClosureEvidence,
 };
 // `guard` is the exception: `preprocess::guard` and `preprocess::guards` differ by one letter, which is exactly
 // the hazard the folders are meant to remove, so the *analysis* keeps the plural name and the types are reached

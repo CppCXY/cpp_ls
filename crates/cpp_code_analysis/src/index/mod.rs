@@ -275,6 +275,11 @@ fn macro_fact(spanned: &SpannedDirective) -> Option<MacroFact> {
                 // `#endif`.
                 range: definition.name_range,
                 guard: crate::summary::FactGuard::Unconditional,
+                // **Where the body is**, derived from the body's own tokens rather than searched for in the
+                // directive's text: `MacroDef::body.tokens` each carry their range, so the span from the first
+                // to the last *is* the replacement list. `None` for an empty body (`#define FOO`), which is the
+                // ordinary feature flag and has nothing to expand.
+                body_range: body_range_of(definition),
                 // Filled in by `mark_settling_macro_facts`, which is the only place that knows where the
                 // conditionals are; see `MacroFact::settles_the_name`.
                 settles_the_name: false,
@@ -289,6 +294,7 @@ fn macro_fact(spanned: &SpannedDirective) -> Option<MacroFact> {
             // An `#undef` has no value: the name stops being a macro, which is the whole of what it says.
             value: None,
             range: spanned.range,
+            body_range: None,
             guard: crate::summary::FactGuard::Unconditional,
             settles_the_name: false,
         }),
@@ -392,6 +398,17 @@ fn deguard_the_files_own_guard(facts: &mut [&mut FactGuard], region: usize) {
 ///
 /// `MacroBody::Unknown` is the answer when nothing matches, and it is not a failure: it already rules out the
 /// *call* reading, which is most of what a caller gets from knowing a name is a macro.
+/// The range of a macro's **replacement list** inside its `#define` — see [`crate::summary::MacroFact::body_range`].
+///
+/// Derived from the body's own tokens, never searched for: each token carries the range it was lexed at, so the
+/// span from the first to the last *is* the body, whatever spelling the directive used around it.
+fn body_range_of(definition: &crate::preprocess::macros::MacroDef) -> Option<cpp_parser::SourceRange> {
+    let first = definition.body.tokens.first()?;
+    let last = definition.body.tokens.last()?;
+    let start = first.range.start_offset;
+    let end = last.range.start_offset + last.range.length;
+    Some(cpp_parser::SourceRange::new(start, end.saturating_sub(start)))
+}
 fn macro_body_shape(definition: &crate::preprocess::macros::MacroDef) -> cpp_parser::MacroBody {
     use cpp_parser::MacroBody;
     use cpp_parser::CppTokenKind;
