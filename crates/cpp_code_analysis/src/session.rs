@@ -994,6 +994,15 @@ fn compilation_environment(
         }
     }
 
+    // **What the configuration itself decides** — the standard it was compiled with, the target it was compiled
+    // for. A toolchain's `-dM` output answers for the *compiler's own default invocation*, which is a different
+    // question from the one the project asked: `-std=c++11` in the compile database means `__cplusplus` is
+    // `201103L` however the compiler would have been run by hand. Applied over the toolchain and under the
+    // project's own `-D`s, which are the last word.
+    for definition in crate::predefined_macros_of(config) {
+        marked.define_on_the_command_line(&definition.name, definition.value.as_deref());
+    }
+
     for definition in &config.defines {
         marked.define_on_the_command_line(&definition.name, definition.value.as_deref());
     }

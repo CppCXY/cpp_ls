@@ -519,3 +519,172 @@ fn an_included_macro_decides_a_reading_only_from_its_own_offset() {
         "not in force here: no `MacroCall`, and the missing `;` is reported"
     );
 }
+
+
+/// **A macro whose body is a specifier** stands where a specifier goes — `wchar.h:1461`, and the boundary that
+/// keeps the reading narrow (B91).
+///
+/// The line is `return (_CONST_RETURN wchar_t *)(_S);`, and `_mingw.h:376` writes `#define _CONST_RETURN` with
+/// **nothing** after it — the `const` spelling is in the branch that is not in force — so what the cast needs is
+/// for the name to stand for nothing at all. Three cases, and the third is the one the corpus measured.
+#[test]
+fn a_macro_that_is_a_specifier_reads_where_a_specifier_goes() {
+    // (a) The file's own `#define`, with a body: `const` written as a macro.
+    let source =
+        "#define _CONST_RETURN const\nwchar_t *f(const wchar_t *s) { return (_CONST_RETURN wchar_t *)(s); }\n";
+    let tree = CppParser::parse(source, ParserConfig::default());
+    assert_eq!(tree.get_errors().len(), 0, "`const` written as a macro is a specifier");
+
+    // (b) From an include, with an **empty** body — and in a **type-id** that is the whole answer: there is no
+    // declarator name to lose, so a name that stands for nothing can only stand for nothing.
+    let empty = || {
+        MacroEnvironment::from_included_macros([IncludedMacro::defined_with_body(
+            0,
+            "_CONST_RETURN",
+            false,
+            MacroBody::Unknown,
+            Some(""),
+        )])
+    };
+    let environment = empty();
+    let config = ParserConfig::default().with_macros_from_includes(&environment);
+    let tree = CppParser::parse(
+        "wchar_t *f(const wchar_t *s) { return (_CONST_RETURN wchar_t *)(s); }\n",
+        config,
+    );
+    assert_eq!(
+        tree.get_errors().len(),
+        0,
+        "an empty macro inside a cast's type-id is nothing at all"
+    );
+
+    // (c) **The boundary, and it is measured**: the same empty body in a *declaration* must **not** be swallowed,
+    // because the name after it is the declarator rather than a type. Accepting it there took the corpus from 435
+    // clean to 424 with 617 messages — the reading is worth exactly one file, and only in a type-id.
+    let environment = empty();
+    let config = ParserConfig::default().with_macros_from_includes(&environment);
+    let tree = CppParser::parse("_CONST_RETURN int x = 1;\n", config);
+    assert_eq!(tree.get_errors().len(), 0, "the declaration still reads");
+    assert_eq!(
+        tree.get_red_root()
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration)
+            .count(),
+        1,
+        "and `x` is still the declarator it declares"
+    );
+}
+
+/// **A declaration head whose name is the macro's own argument** — `commdlg.h:577`, and the consumer of the *body*
+/// channel (B90, landed once the evidence arrived in B97).
+///
+/// `combaseapi.h` writes, in the branch the condition layer puts in force for a C++ compilation:
+///
+/// ```cpp
+/// #define DECLARE_INTERFACE_(iface, baseiface) interface DECLSPEC_NOVTABLE iface : public baseiface
+/// #define STDMETHOD(method) virtual COM_DECLSPEC_NOTHROW HRESULT STDMETHODCALLTYPE method
+/// #define PURE = 0
+/// #define THIS_
+/// ```
+///
+/// and `commdlg.h:575-577` uses them as `DECLARE_INTERFACE_(IPrintDialogCallback,IUnknown) { … }` with
+/// `STDMETHOD(QueryInterface) (THIS_ REFIID riid, LPVOID *ppvObj) PURE;` inside. By every **shape** that inner line
+/// is a call: the name the declaration declares — `QueryInterface` — is the macro's argument, which the file never
+/// writes out, so the head has to come from the body, and the body says "a declaration head that ends at a name".
+///
+/// Both routes are asserted, because they are different code: a file that `#define`s the macro itself is claimed by
+/// the statement rule, and one that got it from an include reaches the declaration path instead.
+#[test]
+fn a_declaration_head_whose_name_is_the_macros_argument() {
+    let body = "  STDMETHOD(QueryInterface) (THIS_ REFIID riid, LPVOID *ppvObj) PURE;\n";
+
+    // (a) The macros defined in this file.
+    let source = format!(
+        "#define STDMETHOD(method) virtual COM_DECLSPEC_NOTHROW HRESULT STDMETHODCALLTYPE method\n\
+         #define PURE = 0\n\
+         #define THIS_\n\
+         DECLARE_INTERFACE_(IPrintDialogCallback,IUnknown) {{\n{body}}};\n"
+    );
+    let tree = CppParser::parse(&source, ParserConfig::default());
+    assert_eq!(
+        tree.get_errors().len(),
+        0,
+        "a macro whose body is a declaration head heads a declaration"
+    );
+    assert_eq!(
+        tree.get_red_root()
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ParameterList)
+            .count(),
+        1,
+        "the declarator the file wrote reads as a parameter list, not as a call's arguments"
+    );
+
+    // (b) The same macros from an included header — the corpus case, in the context `commdlg.h` writes them in.
+    let source = "DECLARE_INTERFACE_(IPrintDialogCallback,IUnknown) {\n".to_string() + body + "};\n";
+    let environment = MacroEnvironment::from_included_macros([
+        IncludedMacro::defined_with_body(
+            0,
+            "DECLARE_INTERFACE_",
+            true,
+            MacroBody::Unknown,
+            Some("interface DECLSPEC_NOVTABLE iface : public baseiface"),
+        ),
+        IncludedMacro::defined_with_body(
+            0,
+            "STDMETHOD",
+            true,
+            MacroBody::Unknown,
+            Some("virtual COM_DECLSPEC_NOTHROW HRESULT STDMETHODCALLTYPE method"),
+        ),
+        IncludedMacro::defined_with_body(0, "PURE", false, MacroBody::Unknown, Some("= 0")),
+        IncludedMacro::defined_with_body(0, "THIS_", false, MacroBody::Unknown, Some("")),
+    ]);
+    let config = ParserConfig::default().with_macros_from_includes(&environment);
+    let tree = CppParser::parse(&source, config);
+    assert_eq!(
+        tree.get_errors().len(),
+        0,
+        "and the same reading holds when the bodies came from the environment"
+    );
+
+    // The negative half, and it is the one the first attempt was measured wrong without: a macro whose body is a
+    // declaration head but whose invocation is **not** followed by a declarator keeps its old reading.
+    // `DECLARE_HANDLE(CO_MTA_USAGE_COOKIE);` is that shape, and claiming it took the corpus from 435 clean to 432.
+    let environment = MacroEnvironment::from_included_macros([IncludedMacro::defined_with_body(
+        0,
+        "DECLARE_HANDLE",
+        true,
+        MacroBody::Unknown,
+        Some("typedef struct DECLARE_HANDLE__ *DECLARE_HANDLE"),
+    )]);
+    let config = ParserConfig::default().with_macros_from_includes(&environment);
+    let tree = CppParser::parse("DECLARE_HANDLE (CO_MTA_USAGE_COOKIE);\n", config);
+    assert_eq!(
+        tree.get_red_root()
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ParameterList)
+            .count(),
+        0,
+        "a head with no declarator after it is not read as a declaration a macro heads"
+    );
+
+    // And an expression macro is not a head either: `MAXIMUM(a, b)` ends at `)`, not at the hole.
+    let environment = MacroEnvironment::from_included_macros([IncludedMacro::defined_with_body(
+        0,
+        "MAXIMUM",
+        true,
+        MacroBody::Unknown,
+        Some("((a) > (b) ? (a) : (b))"),
+    )]);
+    let config = ParserConfig::default().with_macros_from_includes(&environment);
+    let tree = CppParser::parse("int m = MAXIMUM(1, 2) (3);\n", config);
+    assert_eq!(
+        tree.get_red_root()
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ParameterList)
+            .count(),
+        0,
+        "an expression macro is not a declaration head"
+    );
+}

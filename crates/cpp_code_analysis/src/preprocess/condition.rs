@@ -32,6 +32,7 @@
 
 use cpp_parser::{CppTokenKind, SourceRange};
 
+use crate::token::is_trivia;
 use crate::{macros::MacroDef, token::Token};
 
 /// The value of a conditional expression, or the reason there is not one.
@@ -247,10 +248,80 @@ pub fn parse_condition(tokens: &[Token]) -> Result<ConditionExpr, EvalError> {
 /// A condition that does not parse is [`Value::Unknown`] rather than an error, because that is what
 /// the answer means to every caller: this region's visibility cannot be decided.
 pub fn evaluate(tokens: &[Token], macros: &impl MacroValues) -> Value {
-    match parse_condition(tokens) {
+    // **Macro replacement happens before the expression is read**, and that is what makes a *function-like* macro in
+    // a condition work at all: `#if WINAPI_FAMILY_PARTITION (WINAPI_PARTITION_APP)` is a call, the condition grammar
+    // has no call production, and by the time an expression is read it is `((WINAPI_FAMILY & 0x2) == 0x2)`. Reading
+    // the unexpanded tokens answered `Unknown` for every guard written that way — which is most of the Windows
+    // headers, and the reason `STDMETHOD` never reached `commdlg.h` (`docs/index-design.md` B96/B97).
+    let expanded = expand_condition(tokens, macros);
+
+    match parse_condition(&expanded) {
         Ok(expr) => eval(&expr, macros),
         Err(_) => Value::Unknown,
     }
+}
+
+/// Expand a condition's tokens, leaving the operands of `defined` and `__has_include` **alone**.
+///
+/// That exception is the standard's, and it is load-bearing: `defined`'s operand is not replaced, so `defined (FOO)`
+/// must reach the evaluator with the identifier the file wrote. Expanding it would turn "is the macro `FOO`
+/// defined" into "is `1` defined" — a different question with a different answer.
+fn expand_condition(tokens: &[Token], macros: &impl MacroValues) -> Vec<Token> {
+    let mut expanded: Vec<Token> = Vec::new();
+    let mut run: Vec<Token> = Vec::new();
+    let mut index = 0;
+
+    while index < tokens.len() {
+        let token = tokens[index].clone();
+
+        let is_a_question_about_a_name = token.kind == CppTokenKind::Identifier
+            && matches!(token.text(), "defined" | "__has_include");
+
+        if !is_a_question_about_a_name {
+            run.push(token);
+            index += 1;
+            continue;
+        }
+
+        expanded.extend(expand_a_run(&run, macros));
+        run.clear();
+        expanded.push(token);
+        index += 1;
+
+        // Its parenthesised operand, verbatim.
+        let mut depth = 0isize;
+        while index < tokens.len() {
+            let held = tokens[index].clone();
+            if held.kind == CppTokenKind::LeftParen {
+                depth += 1;
+            } else if held.kind == CppTokenKind::RightParen {
+                depth -= 1;
+            }
+
+            expanded.push(held);
+            index += 1;
+
+            if depth == 0 {
+                break;
+            }
+        }
+    }
+
+    expanded.extend(expand_a_run(&run, macros));
+    expanded
+}
+
+/// Everything between two of those operands is ordinary macro replacement.
+fn expand_a_run(tokens: &[Token], macros: &impl MacroValues) -> Vec<Token> {
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+
+    crate::expand::expand_with_budget(tokens, macros, EXPANSION_BUDGET)
+        .tokens
+        .into_iter()
+        .map(|expanded| expanded.token)
+        .collect()
 }
 
 /// Evaluate a parsed condition.
@@ -270,7 +341,7 @@ pub fn eval(expr: &ConditionExpr, macros: &impl MacroValues) -> Value {
             // A name that is a macro whose body this table does not hold: `#define FOO` and `#define FOO 1`
             // are the same answer here, and reading a value out of an empty body would be a guess.
             Lookup::DefinedWithoutAValue => Value::Unknown,
-            Lookup::Defined(definition) => macro_value(definition),
+            Lookup::Defined(definition) => macro_value(definition, macros),
             // The name may be defined by something this table has not read, and the standard's `0` is a
             // statement about a *complete* input. So: not known, rather than not defined.
             Lookup::Unanswered => Value::Unknown,
@@ -349,24 +420,64 @@ pub fn eval(expr: &ConditionExpr, macros: &impl MacroValues) -> Value {
 /// doing that properly is the expansion engine's job, not this evaluator's. Guessing here would be
 /// worse than not answering, because `#if FOO` deciding "true" on no evidence would visibly compile
 /// the wrong branch.
-fn macro_value(definition: &MacroDef) -> Value {
-    let mut significant = definition.body.significant();
+/// How many tokens a macro body may expand to before the answer becomes `Unknown`.
+///
+/// A body is expanded to evaluate it, and a definition that is **self-referential** (`#define A A`, which real
+/// headers do write by accident) never stops. The expander carries its own depth cap; this is the other half — how
+/// much *output* is still an answer rather than a runaway.
+const EXPANSION_BUDGET: usize = 4096;
 
+/// What a **definition** contributes to a condition.
+///
+/// `#if FOO` asks what `FOO` is, and the answer is its body — **expanded first**, because a body is an expression
+/// like any other: `#define FAMILY (PART_DESKTOP | PART_APP)` is an operator and two more names,
+/// `#define WINAPI_FAMILY WINAPI_FAMILY_DESKTOP_APP` is another name. Reading a single integer literal out of the
+/// body — which is what this did — answers `Unknown` for everything else, and the Windows and libstdc++ headers are
+/// full of those: it is what made `#if WINAPI_FAMILY_PARTITION (WINAPI_PARTITION_APP)` undecidable and kept
+/// `STDMETHOD` out of `commdlg.h` (`docs/index-design.md` B96/B97).
+///
+/// The expander does the nesting, so this stays one step: it resolves `FAMILY`'s two names, and its own depth cap
+/// and budget are what stop a self-referential definition. A body that still names **its own macro** afterwards is
+/// `Unknown` — a preprocessor does not expand a name inside its own body, and saying so here is what keeps that
+/// rule from becoming a hang.
+fn macro_value(definition: &MacroDef, macros: &impl MacroValues) -> Value {
+    let body: Vec<Token> = definition.body.significant().cloned().collect();
+
+    // `#define FOO` with an empty body: `#if FOO` is a syntax error in a real preprocessor, and `Unknown` is what
+    // keeps the caller quiet about it.
+    if body.is_empty() {
+        return Value::Unknown;
+    }
+
+    let expanded = crate::expand::expand_with_budget(&body, macros, EXPANSION_BUDGET);
+    let tokens: Vec<Token> = expanded
+        .tokens
+        .into_iter()
+        .map(|expanded| expanded.token)
+        .collect();
+
+    if tokens.iter().any(|token| {
+        token.kind == CppTokenKind::Identifier && token.text() == &*definition.name
+    }) {
+        return Value::Unknown;
+    }
+
+    // What came back should be a number: `3`, `0x2`, or an expression of them. Anything else — a type, a string, a
+    // call that did not expand — is not a value, and `Unknown` is the answer that costs a reading rather than
+    // making one up.
+    let mut significant = tokens.iter().filter(|token| !is_trivia(token.kind));
     let Some(first) = significant.next() else {
-        // `#define FOO` with an empty body. In `#if FOO` this is a syntax error in a real
-        // preprocessor (an empty expression); treating it as `Unknown` lets the caller stay quiet.
         return Value::Unknown;
     };
-    if significant.next().is_some() {
-        return Value::Unknown;
+
+    if significant.next().is_none()
+        && first.kind == CppTokenKind::IntegerLiteral
+        && let Some(value) = parse_integer(first.text())
+    {
+        return Value::Known(value);
     }
 
-    match first.kind {
-        CppTokenKind::IntegerLiteral => {
-            parse_integer(first.text()).map_or(Value::Unknown, Value::Known)
-        }
-        _ => Value::Unknown,
-    }
+    evaluate(&tokens, macros)
 }
 
 fn eval_binary(op: BinaryOp, left: i128, right: i128) -> Value {

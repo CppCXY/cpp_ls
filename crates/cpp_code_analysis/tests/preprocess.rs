@@ -660,20 +660,35 @@ fn a_numeric_macro_evaluates_to_its_value() {
     );
 }
 
-/// **A macro whose value cannot be read is `Unknown`, not `false`.** This is the case that dominates
-/// real code: `_MSC_VER` on a machine that is not MSVC is not "0", it is "not knowable here", and
-/// answering `false` would grey out the Windows branch on every other platform.
+/// **A macro's body is an expression, and it is read as one** — and a body that is not an expression is `Unknown`,
+/// not `false`.
+///
+/// The second half is the case that dominates real code: `_MSC_VER` on a machine that is not MSVC is not "0", it is
+/// "not knowable here", and answering `false` would grey out the Windows branch on every other platform.
+///
+/// The first half is what used to be wrong (B97): a body that is not a **single integer literal** was `Unknown`, so
+/// `#define _MSC_VER (1900 + 1)` — an expression, a name, an operator — answered nothing. The Windows and libstdc++
+/// headers are full of those bodies, and `#if WINAPI_FAMILY_PARTITION (…)` could never be decided because of it.
 #[test]
-fn a_macro_with_an_unreadable_body_is_unknown() {
+fn a_macros_body_is_read_as_an_expression() {
     let mut macros = MacroTable::new();
     macros.define(macro_of("#define _MSC_VER (1900 + 1)\n"));
 
     assert_eq!(
         condition_value("#if _MSC_VER > 1900\n", &macros),
-        Value::Unknown
+        Value::Known(1),
+        "`(1900 + 1) > 1900` is an expression, and a body is one too"
     );
+
+    // A body that is **not** an expression stays `Unknown`: `do { } while (0)` is a statement, and no value can be
+    // read out of it.
+    let mut macros = MacroTable::new();
+    macros.define(macro_of("#define ASSERT_ALL(x) do { } while (0)\n"));
+    macros.define(macro_of("#define WEIRD int x\n"));
+
+    assert_eq!(condition_value("#if WEIRD\n", &macros), Value::Unknown);
     assert_eq!(
-        condition_value("#if _MSC_VER > 1900\n", &macros).is_true(),
+        condition_value("#if WEIRD\n", &macros).is_true(),
         None,
         "and `is_true` says so rather than guessing"
     );
@@ -798,10 +813,10 @@ fn code_inside_if_zero_is_inactive() {
 /// is called an error.
 #[test]
 fn an_undecidable_guard_is_reachable_but_not_diagnosable() {
-    // `_MSC_VER` has to be *defined* for its value to be unreadable; an identifier that is not defined
-    // at all is `0` by the standard, which is a decided answer. The unreadable case is a macro whose
-    // body is not a number, which is what a real toolchain's headers produce.
-    let preprocessing = run("#define _MSC_VER BUILD_NUMBER\n#if _MSC_VER > 1900\nint x;\n#endif\n");
+    // The undecidable case has to be a body nothing can be read out of — **not** a name: an identifier that is not
+    // defined is `0` by the standard, which is a decided answer, so `#define _MSC_VER BUILD_NUMBER` is `0 > 1900`,
+    // and that is `Known(0)`. What really cannot be decided is a body that is not an expression at all.
+    let preprocessing = run("#define _MSC_VER int x\n#if _MSC_VER > 1900\nint x;\n#endif\n");
 
     let offset_of_x = preprocessing
         .directives
@@ -1169,4 +1184,67 @@ fn every_token_points_inside_the_file() {
             );
         }
     }
+}
+
+// ============================================================================
+// What a condition does with the names it reads
+// ============================================================================
+
+/// The definitions a file writes, as the table a condition is evaluated against.
+fn table_of(source: &str) -> MacroTable {
+    run(source).macros
+}
+
+/// Evaluate one condition against a table, the way every caller does: lex it, then ask.
+fn evaluate(condition: &str, macros: &impl MacroValues) -> Value {
+    let mut errors = Vec::new();
+    let mut lexer =
+        cpp_parser::CppLexer::new(condition, cpp_parser::LexerConfig::default(), &mut errors);
+    let tokens: Vec<Token> = lexer
+        .tokenize()
+        .into_iter()
+        .filter(|token| !cpp_parser::is_trivia(token.kind))
+        .map(|token| {
+            let text = &condition[token.range.start_offset..token.range.end_offset()];
+            Token::new(token.kind, text, token.range)
+        })
+        .collect();
+
+    cpp_code_analysis::condition::evaluate(&tokens, macros)
+}
+
+/// **A condition expands the names it reads** — the question the whole Windows-header family turns on.
+///
+/// `#if WINAPI_FAMILY_PARTITION (WINAPI_PARTITION_APP)` is `((WINAPI_FAMILY & 0x2) == 0x2)`, and `WINAPI_FAMILY` is
+/// a name that another `#define` gives a value to, written across two lines with a `\` splice. If the evaluator
+/// only read literals, every one of those guards would be `Unknown` — and that is exactly the shape measured as the
+/// blocker for `STDMETHOD` reaching `commdlg.h` (`docs/index-design.md` B96).
+#[test]
+fn a_condition_expands_a_name_whose_body_names_another() {
+    // The plain nesting first: `A` is `B`, and `B` is `3`.
+    let table = table_of("#define B 3\n#define A B\n");
+    assert_eq!(evaluate("A", &table), Value::Known(3), "`A` is `B` is `3`");
+    assert_eq!(evaluate("A + 1", &table), Value::Known(4), "and it is a value");
+
+    // Then the splice, which is how `WINAPI_FAMILY_DESKTOP_APP` is written: the definition is one line to the
+    // preprocessor, and the tokens after the splice are part of the same body.
+    let table = table_of("#define PART_DESKTOP 0x1\n#define PART_APP 0x2\n#define DESKTOP (PART_DESKTOP \\\n | PART_APP)\n");
+    assert_eq!(
+        evaluate("DESKTOP", &table),
+        Value::Known(3),
+        "a body written across two lines is `0x1 | 0x2`"
+    );
+
+    // And the function-like macro that puts the two together — the real guard, in miniature.
+    let table = table_of(
+        "#define PART_DESKTOP 0x1\n\
+         #define PART_APP 0x2\n\
+         #define FAMILY (PART_DESKTOP \\\n | PART_APP)\n\
+         #define PARTITION(v) ((FAMILY & v) == v)\n",
+    );
+    assert_eq!(
+        evaluate("PARTITION ( PART_APP )", &table),
+        Value::Known(1),
+        "`(0x1 | 0x2) & 0x2` is `0x2`, so the partition holds"
+    );
 }

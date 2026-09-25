@@ -416,6 +416,74 @@ fn starts_a_function_type(p: &CppParser, a_name_may_be_a_type: bool) -> bool {
 /// them freely (`long long unsigned int`), so anything more structured would have to invent an
 /// order the language does not have. Consumers that care about, say, the base type can look at the
 /// type-specifier tokens specifically.
+/// Is the name at the cursor a macro whose **whole** body is a declaration-specifier list?
+///
+/// `Some(names_a_type)` when it is — and `names_a_type` is `true` only when the body holds a token that **is** a
+/// type (`long`, `int`, `unsigned`, …), because then the sequence has named a type and a name written after it is
+/// the declarator rather than a second type. `const` alone names none: in `(_CONST_RETURN wchar_t *)` the `wchar_t`
+/// is still the type.
+///
+/// Every token of the body has to be a specifier. That is what keeps `#define THIS_ INTERFACE *This,` — and every
+/// expression macro — out, and a name nobody has a body for is not claimed at all. The bodies come from this file's
+/// own `#define` or from the include closure, which is the channel B89 opened for exactly this kind of reading.
+///
+/// **An empty body is accepted only in a type-id** (`at_a_type_id`), and that boundary is measured rather than
+/// argued: `_mingw.h:376` writes `#define _CONST_RETURN` with nothing after it (its `const` spelling is in the
+/// other branch), so `(_CONST_RETURN wchar_t *)(_S)` needs the name to stand for nothing — but accepting empty
+/// bodies in a **declaration**'s specifier sequence swallowed the declarator's own name and took the corpus from
+/// 435 clean to **424** with 617 messages. A type-id has no declarator name to lose, so there the empty answer is
+/// safe; a declaration has one.
+fn a_macro_that_is_a_specifier(p: &CppParser, at_a_type_id: bool) -> Option<bool> {
+    if p.current_token() != CppTokenKind::Identifier {
+        return None;
+    }
+
+    let offset = p.current_token_range().start_offset;
+    let kinds = p.macro_body_kinds_at(p.current_token_text(), offset)?;
+
+    if kinds.is_empty() {
+        return at_a_type_id.then_some(false);
+    }
+
+    if !kinds.iter().all(|kind| is_a_specifier_kind(*kind)) {
+        return None;
+    }
+
+    Some(kinds.iter().any(|kind| is_a_type_specifier_kind(*kind)))
+}
+
+/// The tokens a declaration-specifier list may be made of — the body test of [`a_macro_that_is_a_specifier`].
+fn is_a_specifier_kind(kind: CppTokenKind) -> bool {
+    is_a_type_specifier_kind(kind)
+        || matches!(
+            kind,
+            CppTokenKind::ConstKeyword
+                | CppTokenKind::VolatileKeyword
+                | CppTokenKind::InlineKeyword
+                | CppTokenKind::StaticKeyword
+                | CppTokenKind::ExternKeyword
+                | CppTokenKind::RegisterKeyword
+                | CppTokenKind::VirtualKeyword
+        )
+}
+
+/// The subset of those that **name a type**, which is the question `has_type_specifier` asks.
+fn is_a_type_specifier_kind(kind: CppTokenKind) -> bool {
+    matches!(
+        kind,
+        CppTokenKind::SignedKeyword
+            | CppTokenKind::UnsignedKeyword
+            | CppTokenKind::ShortKeyword
+            | CppTokenKind::LongKeyword
+            | CppTokenKind::IntKeyword
+            | CppTokenKind::CharKeyword
+            | CppTokenKind::FloatKeyword
+            | CppTokenKind::DoubleKeyword
+            | CppTokenKind::VoidKeyword
+            | CppTokenKind::AutoKeyword
+    )
+}
+
 pub fn parse_decl_specifier_seq(p: &mut CppParser) -> ParseResult {
     parse_decl_specifier_seq_with(p, true)
 }
@@ -481,6 +549,32 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
         // `DeclSpecifierSeq` this loop has open.
         while an_implementation_keyword(p).is_some() {
             parse_an_implementation_keyword(p);
+        }
+
+        // **A macro whose body is a specifier list** — `_CONST_RETURN` is `const`, `__LONG32` is `long` — stands
+        // exactly where a specifier goes, and reading it as one is not a guess: the body is a real file's text
+        // (this file's `#define`, or one the include closure carried in) and **every** token of it is a specifier.
+        //
+        // Two casts in the corpus are written this way, and both were reported at the name the macro stands for:
+        //
+        // ```cpp
+        // return (_CONST_RETURN wchar_t *)(_S);      // wchar.h — `expected ), but get identifier`
+        // … (unsigned __LONG32) …                    // basetsd.h — `expected primary expression`
+        // ```
+        //
+        // Read as an invocation inside the sequence rather than expanded: the file's own tokens are all that enters
+        // the tree, and the body is what says the name is a specifier. See `docs/grammar-gaps.md` B91.
+        if let Some(names_a_type) = a_macro_that_is_a_specifier(p, !allow_second_name) {
+            let call = p.mark(CppSyntaxKind::MacroCall);
+            let name = p.mark(CppSyntaxKind::NameExpr);
+            p.bump();
+            name.complete(p);
+            call.complete(p);
+
+            specifiers += 1;
+            has_specifier = true;
+            has_type_specifier |= names_a_type;
+            continue;
         }
 
         // A **directive between two specifiers**, which is the same seam as the ones `parse_try_statement`,

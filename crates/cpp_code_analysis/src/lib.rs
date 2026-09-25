@@ -69,6 +69,7 @@ pub use summary::{
     ConditionAt, ConditionalRegion, DeclFact, DeclKind, FactGuard, FileSummary, GuardBranch,
     IncludeFact, MacroFact, MacroKind, SummaryGuards, macros_from_direct_includes,
     macros_from_direct_includes_with_bodies, macros_from_the_closure_with_bodies, ClosureEvidence,
+    macros_in_force_before_the_include, MacroDefinitions,
 };
 // `guard` is the exception: `preprocess::guard` and `preprocess::guards` differ by one letter, which is exactly
 // the hazard the folders are meant to remove, so the *analysis* keeps the plural name and the types are reached
@@ -80,7 +81,7 @@ pub use condition::{
 };
 pub use config::{
     CommandLineMacro, CompileCommand, CompileCommands, CompilerConfig, IncludePath,
-    parse_compile_commands, split_command_line,
+    parse_compile_commands, predefined_macros_of, split_command_line,
 };
 pub use directive::{
     Define, Directive, DirectiveKind, Include, IncludeForm, SpannedDirective,

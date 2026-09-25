@@ -150,15 +150,31 @@ impl<'a> MacrosHere<'a> {
 /// which is `Unknown`, and `Unknown` keeps the fact out. That is the safe direction: this can lose evidence, never
 /// invent it.
 pub fn fact_in_force(seed: &Marked, file: &FileSummary, fact: &MacroFact) -> bool {
+    a_guard_is_in_force(file, fact, |condition_at| {
+        MacrosHere::from_walk(seed, condition_at)
+    })
+}
+
+/// The same question, asked of **any** table of macros — which is what a walk that feeds its own state needs.
+///
+/// `macros_at` answers for one condition's own offset, because a region's condition is decided where it is
+/// written: `#ifndef NAME` whose body then writes `#define NAME` is the shape that makes the difference. A table
+/// that answers [`Lookup::Unanswered`](crate::Lookup) for a name makes the whole guard `Unknown`, and `Unknown`
+/// keeps the fact out — this can lose evidence, never invent it.
+pub fn a_guard_is_in_force<M: crate::MacroValues>(
+    file: &FileSummary,
+    fact: &MacroFact,
+    macros_at: impl Fn(usize) -> M,
+) -> bool {
     if matches!(fact.guard, FactGuard::Unconditional) {
         return true;
     }
 
-    file.guards
-        .visibility_of(fact.guard, fact.range.start_offset, |condition_at| {
-            MacrosHere::from_walk(seed, condition_at)
-        })
-        == Visibility::Active
+    let visibility = file
+        .guards
+        .visibility_of(fact.guard, fact.range.start_offset, &macros_at);
+
+    visibility == Visibility::Active
 }
 
 /// Each condition is evaluated against the macros **at its own offset**, which is a walk

@@ -26,6 +26,9 @@
 
 use crate::cache::SummaryKey;
 use crate::guard::{Branch, Region, Visibility};
+use crate::index::environment::a_guard_is_in_force;
+use crate::macros::MacroDef;
+use crate::Marked;
 
 /// A declaration the file writes: enough to find it, name it, and say what kind of thing it is.
 ///
@@ -465,96 +468,488 @@ pub struct ClosureEvidence {
     pub macros: Vec<cpp_parser::IncludedMacro>,
     /// `(name, replacement list)` — last definition in translation order wins, like everything else here.
     pub conditional_bodies: Vec<(Box<str>, Box<str>)>,
+    /// Conditional facts the walk met, and how many of them the conditions put **in force**. Two numbers rather
+    /// than one, because "nothing here was conditional" and "every condition was unanswerable" look the same in
+    /// the evidence — and because the second number is what moves when the environment gets better at answering.
+    pub conditional_facts: usize,
+    pub facts_in_force: usize,
 }
 
+/// What the translation unit has defined **so far** — the state a condition written later is answered against.
+///
+/// This is the "边走边喂" half of `docs/index-design.md`: a condition is a question about what the unit had seen
+/// when the preprocessor reached it, and the answer changes as the walk moves on. `#ifdef STDMETHOD` is false
+/// before `objbase.h` and true after it, in the *same* translation unit.
+///
+/// Only **definedness** is carried, not values. A file's body is text whose meaning is the parser's business, so a
+/// name the walk has seen defined answers `#ifdef`/`defined()` and leaves a *value* question (`#if FOO == 2`) to
+/// the compilation's own table — which is a lost reading rather than a wrong branch, the direction this layer must
+/// always fail in.
+struct UnitState {
+    /// What the unit has in force, as **definitions** rather than names (B95) — each carrying **where** it was
+    /// written, because a definition is only in force from its own line (see [`UnitMacros::lookup`]).
+    definitions: std::collections::HashMap<Box<str>, Binding>,
+}
+
+/// One definition the unit has in force: what it says, and where it was said.
+struct Binding {
+    definition: std::sync::Arc<MacroDef>,
+    /// The file that wrote it — a position means nothing without it, and only the file being walked can have
+    /// written something *below* the condition being answered.
+    defined_in: Box<std::path::Path>,
+    defined_at: usize,
+}
+
+impl UnitState {
+    fn define(
+        &mut self,
+        name: &str,
+        definition: std::sync::Arc<MacroDef>,
+        file: &std::path::Path,
+        at: usize,
+    ) {
+        self.definitions.insert(
+            name.into(),
+            Binding {
+                definition,
+                defined_in: Box::from(file),
+                defined_at: at,
+            },
+        );
+    }
+
+    fn undefine(&mut self, name: &str) {
+        self.definitions.remove(name);
+    }
+}
+
+/// The `MacroDef`s a walk feeds into a translation unit's state, parsed **once per *(file, name)***.
+///
+/// Parsing is the cost of feeding definitions: a closure holds tens of thousands of `#define`s and every one of
+/// them is read back out of the defining file's text. A definition does not depend on *which* file is being
+/// seeded, so the cache is the difference between one parse per definition and one per definition per file —
+/// 455 files in this corpus, which is the difference between seconds and minutes.
+#[derive(Default)]
+pub struct MacroDefinitions {
+    parsed: std::collections::HashMap<(std::path::PathBuf, Box<str>), Option<std::sync::Arc<MacroDef>>>,
+}
+
+impl MacroDefinitions {
+    /// The definition behind one fact, read from the file that wrote it.
+    ///
+    /// The `#define` is **put back together** from what the fact carries — its name, and the rest of its logical
+    /// line, which is the parameter list and the body — and read by the ordinary `#define` reader, so a definition
+    /// fed into a condition cannot mean something different from the same line read in the file. The offsets in the
+    /// result are relative to that reconstructed line, which is all the evaluator does with them.
+    fn definition_of(
+        &mut self,
+        path: &std::path::Path,
+        source: &str,
+        fact: &MacroFact,
+    ) -> Option<std::sync::Arc<MacroDef>> {
+        let key = (path.to_path_buf(), Box::from(&*fact.name));
+
+        if let Some(known) = self.parsed.get(&key) {
+            return known.clone();
+        }
+
+        let definition = read_back_a_define(source, fact).map(std::sync::Arc::new);
+        self.parsed.insert(key, definition.clone());
+
+        definition
+    }
+
+    fn get_or_read(
+        &mut self,
+        path: &std::path::Path,
+        source: &str,
+        fact: &MacroFact,
+    ) -> Option<std::sync::Arc<MacroDef>> {
+        self.definition_of(path, source, fact)
+    }
+}
+
+/// `#define NAME(params) body`, read back out of the file's own text.
+///
+/// A `\`-newline is **removed**, not copied: translation phase 2 does that before anything reads the line, and a
+/// splice left in the middle of a body makes the body unreadable — the evaluator meets a line-continuation token
+/// between two operands and answers `Unknown`. Measured, and it is what kept `STDMETHOD` out of `commdlg.h` for
+/// three batches: `WINAPI_FAMILY_DESKTOP_APP` is written across two lines in `winapifamily.h`, so
+/// `#if WINAPI_FAMILY_PARTITION (WINAPI_PARTITION_APP)` — the guard around `combaseapi.h`'s C++ `#define
+/// STDMETHOD` — could never be answered (`docs/grammar-gaps.md` B90, `docs/index-design.md` B94/B95).
+fn read_back_a_define(source: &str, fact: &MacroFact) -> Option<MacroDef> {
+    let raw = source.get(fact.range.start_offset..)?;
+
+    // The fact's range may start at the **name** or at the directive — both spellings exist in the index — so the
+    // line is taken from wherever `#define` ends, and the keyword is put back exactly once.
+    let rest = match raw.strip_prefix('#') {
+        Some(after_the_hash) => {
+            let after_the_hash = after_the_hash.trim_start();
+            match after_the_hash.strip_prefix("define") {
+                Some(after_the_keyword) => after_the_keyword.trim_start(),
+                None => raw,
+            }
+        }
+        None => raw,
+    };
+
+    let bytes = rest.as_bytes();
+
+    let mut logical = String::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' if bytes.get(index + 1) == Some(&b'\n') => index += 2,
+            b'\\' if bytes.get(index + 1) == Some(&b'\r') && bytes.get(index + 2) == Some(&b'\n') => {
+                index += 3;
+            }
+            b'\n' => break,
+            _ => {
+                let character = rest[index..].chars().next()?;
+                logical.push(character);
+                index += character.len_utf8();
+            }
+        }
+    }
+
+    let line = format!("#define {logical}");
+    let mut errors = Vec::new();
+    let mut lexer =
+        cpp_parser::CppLexer::new(&line, cpp_parser::LexerConfig::default(), &mut errors);
+    let tokens: Vec<crate::token::Token> = lexer
+        .tokenize()
+        .into_iter()
+        .map(|token| {
+            let text = &line[token.range.start_offset..token.range.end_offset()];
+            crate::token::Token::new(token.kind, text, token.range)
+        })
+        .collect();
+
+    // `parse_define` reads from the **name**: the directive's own `#` and `define` are the directive scanner's
+    // business and not the definition reader's, so the two leading significant tokens are dropped here.
+    let mut significant = 0usize;
+    let mut from = 0usize;
+    for (index, token) in tokens.iter().enumerate() {
+        if crate::token::is_trivia(token.kind) {
+            continue;
+        }
+
+        significant += 1;
+        from = index + 1;
+        if significant == 2 {
+            break;
+        }
+    }
+
+    crate::macros::parse_define(tokens.get(from..)?, fact.range)
+}
+
+/// The table a condition inside the unit is answered against: what the walk has seen, over what the compilation
+/// started with.
+#[derive(Clone, Copy)]
+struct UnitMacros<'a> {
+    seed: &'a Marked,
+    state: &'a UnitState,
+    /// The file the condition being answered was written in, and the offset it was written at. `None` asks the
+    /// question **without a position** — "what does the unit say now, at the end of what has been read" — which is
+    /// what the expansion *inside* a body wants.
+    here: Option<(&'a std::path::Path, usize)>,
+}
+
+impl crate::condition::MacroValues for UnitMacros<'_> {
+    fn lookup(&self, name: &str) -> crate::condition::Lookup<'_> {
+        if let Some(binding) = self.state.definitions.get(name) {
+            // **A definition written below this condition has not happened yet.** An include guard is
+            // `#ifndef X / #define X`, so a table read at the end of the file answers "`X` is defined" — and that
+            // makes the guard's own region inactive and every fact inside it invisible. Measured: it is what kept
+            // `combaseapi.h`'s `STDMETHOD` out of `commdlg.h` after the condition itself had been made answerable
+            // (`docs/index-design.md` B97).
+            let written_below = self
+                .here
+                .is_some_and(|(file, at)| &*binding.defined_in == file && binding.defined_at >= at);
+
+            if !written_below {
+                return crate::condition::Lookup::Defined(&binding.definition);
+            }
+        }
+
+        self.seed.lookup(name)
+    }
+}
+
+/// The macros a file's own include closure contributes.
+///
+/// `definitions` is the cache of parsed `#define`s the walk feeds into a unit's state; one cache serves every file
+/// seeded from the same corpus, which is what keeps the feeding affordable (see [`MacroDefinitions`]).
 pub fn macros_from_the_closure_with_bodies<'a>(
-    summary: &FileSummary,
-    mut look_up: impl FnMut(&std::path::Path) -> Option<(&'a FileSummary, &'a str)>,
-    in_force: impl Fn(&FileSummary, &MacroFact) -> bool,
+    summary: &'a FileSummary,
+    look_up: impl FnMut(&std::path::Path) -> Option<(&'a FileSummary, &'a str)>,
+    seed: &Marked,
+    definitions: &mut MacroDefinitions,
 ) -> ClosureEvidence {
-    let mut entries = Vec::new();
-    let mut conditional_bodies: std::collections::BTreeMap<Box<str>, Box<str>> =
-        std::collections::BTreeMap::new();
+    walk_the_translation_unit(summary, None, None, look_up, seed, definitions)
+}
+
+/// The macros in force in a translation unit **before the point where it includes this file** — what a *header*
+/// needs, and the one thing its own closure structurally cannot give it.
+///
+/// `commdlg.h:577` writes `STDMETHOD(QueryInterface) (…) PURE;` and never sees a `#define` of `STDMETHOD`: its own
+/// includes are `winapifamily.h`, `_mingw_unicode.h`, `prsht.h`, `pshpack1.h`, `poppack.h`, and the definition
+/// arrives because `windows.h:108` includes `commdlg.h` **after** `objbase.h` — the *includer's order* is the
+/// translation unit, and a per-file walk stops at the file's own edge. Measured: the seed for that line is empty,
+/// which is why the reading rules could not fix the file (see `docs/grammar-gaps.md` B90).
+///
+/// The entries are seeded at offset **0** and not at the includer's offsets: the offsets of a *different* file mean
+/// nothing here, and every macro the unit had in force before the inclusion is in force from this file's first
+/// token on. What this file does to those names afterwards is its own facts' business, which the parser reads
+/// itself.
+pub fn macros_in_force_before_the_include<'a>(
+    includer: &'a FileSummary,
+    before: usize,
+    look_up: impl FnMut(&std::path::Path) -> Option<(&'a FileSummary, &'a str)>,
+    seed: &Marked,
+    definitions: &mut MacroDefinitions,
+) -> ClosureEvidence {
+    walk_the_translation_unit(includer, Some(before), Some(0), look_up, seed, definitions)
+}
+
+/// Walk a file's includes — or, with `only_before`, only the ones written **before** that offset — and collect what
+/// the closure they reach defines.
+///
+/// # Why the walk carries a state (B94)
+///
+/// A condition is a question about what the translation unit had **seen** when the preprocessor reached it:
+/// `#ifdef STDMETHOD` in `commdlg.h` is false until `objbase.h` has been read, and
+/// `#if WINAPI_FAMILY_PARTITION (WINAPI_PARTITION_APP)` in `combaseapi.h` is a question about a macro
+/// `winapifamily.h` defines. Answering every condition against one fixed table — which is what this walk did
+/// before — reports `Unknown`, and an `Unknown` branch is a `#define` that never becomes evidence. That is why
+/// nothing from `combaseapi.h` reached `commdlg.h` (`docs/grammar-gaps.md` B90, `docs/index-design.md` B92/B94).
+///
+/// So the walk visits the closure in **include order** (depth first: the first `#include` of a file is read
+/// before its second, and before the file's own next sibling) and feeds every definition it puts in force into
+/// [`UnitState`]. Only **definedness** is carried, never values: a file's body is text whose meaning the parser
+/// owns, so a name the walk has seen defined answers `#ifdef`/`defined()` and leaves a *value* question to the
+/// compilation's own table — a lost reading rather than a wrong branch.
+///
+/// `all_from` moves every entry onto one offset, which is what reading a file *inside* another one needs; without it
+/// each entry lands where its own `#include` ended.
+fn walk_the_translation_unit<'a>(
+    summary: &'a FileSummary,
+    only_before: Option<usize>,
+    all_from: Option<usize>,
+    mut look_up: impl FnMut(&std::path::Path) -> Option<(&'a FileSummary, &'a str)>,
+    seed: &Marked,
+    definitions_of: &mut MacroDefinitions,
+) -> ClosureEvidence {
+    let mut walked = Walked::default();
+    let mut unit = UnitState {
+        definitions: std::collections::HashMap::new(),
+    };
 
     for include in &summary.includes {
+        // The includes are facts in source order, so the first one at or past the limit ends the walk.
+        if only_before.is_some_and(|limit| include.range.start_offset >= limit) {
+            break;
+        }
+
         let Some(root) = include.resolved.as_deref() else {
             continue;
         };
-        let from_offset = include.range.start_offset + include.range.length;
+        let from_offset = all_from.unwrap_or(include.range.start_offset + include.range.length);
 
         let mut seen: std::collections::HashSet<&std::path::Path> = std::collections::HashSet::new();
-        let mut queue: std::collections::VecDeque<&std::path::Path> = std::collections::VecDeque::new();
-        let mut definitions: std::collections::BTreeMap<&str, (&MacroFact, &str)> =
-            std::collections::BTreeMap::new();
-        queue.push_back(root);
-
-        while let Some(path) = queue.pop_front() {
-            if !seen.insert(path) {
-                continue;
-            }
-
-            let Some((file, source)) = look_up(path) else {
-                continue;
-            };
-
-            for fact in &file.macros {
-                // **A `#define` inside an `#if` is a fact about one branch**, and the branch has to be the one that
-                // was taken — which is the caller's question to answer, because only the caller has the macros the
-                // compilation starts with (`-D`s, `-std=`, the compiler's own names). The answer is asked **once per
-                // (file, region)** rather than once per fact: every fact in a region gets the same answer, and a
-                // closure holds tens of thousands of facts.
-                if !matches!(fact.guard, FactGuard::Unconditional) {
-                    if !in_force(file, fact) {
-                        continue;
-                    }
-
-                    // In force, and **that is a body to read** — not a definition to hand out. See
-                    // [`ClosureEvidence`] for the measurement that drew this line.
-                    if fact.kind.is_definition()
-                        && let Some(text) = fact
-                            .body_range
-                            .and_then(|range| source.get(range.start_offset..range.start_offset + range.length))
-                    {
-                        conditional_bodies.insert(Box::from(&*fact.name), Box::from(text));
-                    }
-                    continue;
-                }
-
-                definitions.insert(&fact.name, (fact, source));
-            }
-
-            for nested in &file.includes {
-                if let Some(next) = nested.resolved.as_deref() {
-                    queue.push_back(next);
-                }
-            }
-        }
-
-        for (_, (fact, source)) in definitions {
-            let body_text = fact
-                .body_range
-                .and_then(|range| source.get(range.start_offset..range.start_offset + range.length));
-
-            entries.push(if fact.kind.is_definition() {
-                cpp_parser::IncludedMacro::defined_with_body(
-                    from_offset,
-                    &fact.name,
-                    fact.function_like,
-                    fact.body,
-                    body_text,
-                )
-            } else {
-                cpp_parser::IncludedMacro::undefined_at(from_offset, &fact.name)
-            });
-        }
+        walk_one_file(
+            root,
+            from_offset,
+            &mut seen,
+            &mut look_up,
+            seed,
+            definitions_of,
+            &mut unit,
+            &mut walked,
+        );
     }
 
-    ClosureEvidence {
-        macros: entries,
-        conditional_bodies: conditional_bodies.into_iter().collect(),
+    walked.into_evidence()
+}
+
+/// Everything one walk collects, in the order it was walked.
+#[derive(Default)]
+struct Walked<'a> {
+    /// `(where the name becomes visible, the fact, the file that wrote it)` in translation order, last wins.
+    entries: Vec<(usize, &'a MacroFact, &'a str)>,
+    /// Bodies of definitions a condition guards that came out **in force** — the second channel (B89).
+    conditional_bodies: std::collections::BTreeMap<Box<str>, Box<str>>,
+    conditional_facts: usize,
+    facts_in_force: usize,
+}
+
+impl<'a> Walked<'a> {
+    /// The two channels, and the preprocessor's rule for a name defined twice: the later definition wins.
+    fn into_evidence(self) -> ClosureEvidence {
+        let mut by_name: std::collections::BTreeMap<&str, (usize, &MacroFact, &str)> =
+            std::collections::BTreeMap::new();
+        for (from_offset, fact, source) in self.entries {
+            by_name.insert(&fact.name, (from_offset, fact, source));
+        }
+
+        let macros = by_name
+            .into_values()
+            .map(|(from_offset, fact, source)| {
+                let body_text = fact
+                    .body_range
+                    .and_then(|range| source.get(range.start_offset..range.start_offset + range.length));
+
+                if fact.kind.is_definition() {
+                    cpp_parser::IncludedMacro::defined_with_body(
+                        from_offset,
+                        &fact.name,
+                        fact.function_like,
+                        fact.body,
+                        body_text,
+                    )
+                } else {
+                    cpp_parser::IncludedMacro::undefined_at(from_offset, &fact.name)
+                }
+            })
+            .collect();
+
+        ClosureEvidence {
+            macros,
+            conditional_bodies: self.conditional_bodies.into_iter().collect(),
+            conditional_facts: self.conditional_facts,
+            facts_in_force: self.facts_in_force,
+        }
     }
 }
 
+/// Walk **one file in translation order**: its macros and its includes **merged by offset**, descending into each
+/// `#include` at the point it is written.
+///
+/// That order is the whole point, and getting it wrong is invisible until a condition depends on it: a header
+/// includes `winapifamily.h` at its top and asks `#if WINAPI_FAMILY_PARTITION (…)` sixty lines later, so a walk
+/// that read a file's macros *before* its includes judges that condition against a table which does not have the
+/// macro yet. Measured: that is exactly why `combaseapi.h`'s `STDMETHOD` never came into force, and therefore
+/// never reached `commdlg.h` (`docs/grammar-gaps.md` B90, `docs/index-design.md` B94/B95).
+#[allow(clippy::too_many_arguments)]
+fn walk_one_file<'a>(
+    path: &'a std::path::Path,
+    from_offset: usize,
+    seen: &mut std::collections::HashSet<&'a std::path::Path>,
+    look_up: &mut impl FnMut(&std::path::Path) -> Option<(&'a FileSummary, &'a str)>,
+    seed: &Marked,
+    definitions_of: &mut MacroDefinitions,
+    unit: &mut UnitState,
+    walked: &mut Walked<'a>,
+) {
+    // Each file is read once per walk. A preprocessor would re-read one that is included twice, but the guard
+    // idiom (`#ifndef X / #define X`) is what every header in this corpus uses, and a second read of a guarded
+    // file defines nothing new.
+    if !seen.insert(path) {
+        return;
+    }
+
+    let Some((file, source)) = look_up(path) else {
+        // A file this walk cannot read is a file **outside the analysis**: none of the files the caller indexed.
+        // Pretending it defines nothing is the reading every walk here has always taken — a name nobody saw is
+        // `Undefined`, which is what lets `#ifndef GUARD` open a header at all.
+        //
+        // Marking the unit incomplete instead — "this file may define anything" — was tried and measured: it turns
+        // every `#ifndef` of every header into `Unknown`, and the conditional evidence the corpus produces
+        // collapses from millions of facts to tens of thousands. The honest answer for one file must not cost the
+        // whole unit's evidence.
+        return;
+    };
+
+    let mut macros = file.macros.iter().peekable();
+    let mut includes = file.includes.iter().peekable();
+
+    loop {
+        // Whichever the file writes **first**: that is the order a preprocessor reads them in, and a condition
+        // depends on it.
+        let next_is_a_macro = match (macros.peek(), includes.peek()) {
+            (Some(fact), Some(include)) => fact.range.start_offset <= include.range.start_offset,
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+
+        if next_is_a_macro {
+            let fact = macros.next().expect("peeked just above");
+            let in_force = if matches!(fact.guard, FactGuard::Unconditional) {
+                true
+            } else {
+                walked.conditional_facts += 1;
+                let taken = a_guard_is_in_force(file, fact, |at| UnitMacros {
+                    seed,
+                    state: unit,
+                    here: Some((path, at)),
+                });
+                if taken {
+                    walked.facts_in_force += 1;
+                }
+                taken
+            };
+
+            if !in_force {
+                continue;
+            }
+
+            // What a preprocessor's table would have: the name with its body and parameter list, or taken away
+            // again. Fed for conditional facts too — a `#define` in a branch that **was** taken is a definition like
+            // any other, and it is what the next file's conditions are answered against.
+            if fact.kind.is_definition() {
+                if let Some(definition) = definitions_of.get_or_read(path, source, fact) {
+                    unit.define(&fact.name, definition, path, fact.range.start_offset);
+                } else {
+                    // A `#define` this reader cannot put back together is a name the unit has seen and cannot
+                    // describe: defined, with nothing more to say. Better than dropping it — an `#ifdef` about it
+                    // is a real question with a real answer.
+                    // A #define this reader cannot put back together is not fed at all: the compilation's own
+                    // table answers instead, which is Undefined — a lost reading rather than a wrong one.
+                }
+            } else {
+                unit.undefine(&fact.name);
+            }
+
+            // The **evidence** is still two channels (B89): definitions only from what no condition guards, and
+            // bodies from everything in force. The state above is a third, separate thing — it exists to answer
+            // *conditions*, and it deliberately carries no bodies.
+            if matches!(fact.guard, FactGuard::Unconditional) {
+                walked.entries.push((from_offset, fact, source));
+            } else if fact.kind.is_definition()
+                && let Some(text) = fact
+                    .body_range
+                    .and_then(|range| source.get(range.start_offset..range.start_offset + range.length))
+            {
+                walked
+                    .conditional_bodies
+                    .insert(Box::from(&*fact.name), Box::from(text));
+            }
+
+            continue;
+        }
+
+        let Some(include) = includes.next() else {
+            break;
+        };
+
+        if let Some(nested) = include.resolved.as_deref() {
+            walk_one_file(
+                nested,
+                from_offset,
+                seen,
+                look_up,
+                seed,
+                definitions_of,
+                unit,
+                walked,
+            );
+        }
+    }
+}
+
+/// The macros a file's **direct** includes define — the one-hop variant, kept as the measured comparison for the
+/// closure walk above.
 pub fn macros_from_direct_includes<'a>(
     summary: &FileSummary,
     mut look_up: impl FnMut(&std::path::Path) -> Option<&'a FileSummary>,
@@ -1018,3 +1413,4 @@ impl DeclKind {
 // stored, not a place that knows about directives. There was a `build_declarations` here that took only a scope
 // tree and filled every guard with `Unconditional`; it was deleted rather than kept, because a function whose
 // contract is "the guards are wrong" is one a caller reaches for by accident.
+

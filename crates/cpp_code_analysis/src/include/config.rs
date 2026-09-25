@@ -160,6 +160,15 @@ impl CompilerConfig {
         self
     }
 
+    /// Compile for a **target**: the triple (`x86_64-w64-mingw32`) or the flag (`-m32`) the command line named.
+    ///
+    /// It decides the platform macros a condition may ask about — see [`predefined_macros_of`], which is where the
+    /// names a triple fixes are turned into definitions.
+    pub fn with_target(mut self, target: impl Into<Box<str>>) -> Self {
+        self.target = Some(target.into());
+        self
+    }
+
     /// Parse for a **target compiler**: what its reserved spellings mean. See [`CompilerConfig::dialect`].
     pub fn with_dialect(mut self, dialect: Dialect) -> Self {
         self.dialect = dialect;
@@ -655,4 +664,253 @@ pub fn split_command_line(command: &str) -> Vec<String> {
     }
 
     arguments
+}
+
+/// The macros a **configuration decides by itself** — before a single file is read, and whether or not a compiler
+/// was found.
+///
+/// A discovered toolchain's `-dM` output is the fuller answer and stays the base (see `Toolchain::macros`); this is
+/// the other half. A compile database that says `-std=c++20` and nothing else has already **decided**
+/// `__cplusplus`, and every `#if __cplusplus >= 201703L` in every header is a question about it — a question the
+/// condition layer can only answer `Unknown` (and therefore keeps every branch's `#define` out of the evidence)
+/// when nobody puts the number there. The same goes for the platform a `--target` triple names.
+///
+/// # What is deliberately *not* here
+///
+/// Nothing whose value the configuration does not fix. `__GNUC__`'s **version** is not in `-std=c++20`, and a
+/// guessed `__GNUC__ 1` answers `#if __GNUC__ >= 5` with a confident **false** — the one kind of answer this
+/// layer must never give, because `Unknown` costs a reading while a wrong `false` loses a branch. The compiler's
+/// family and version are the toolchain's to report.
+///
+/// # Order
+///
+/// Callers apply these **over** the toolchain's predefined macros and **under** the configuration's own `-D`s: a
+/// project that says `-std=c++11` means it, even when the compiler's default invocation would have said
+/// `202002L` — which is exactly the point `Toolchain::search_paths` makes about passing the standard on.
+pub fn predefined_macros_of(config: &CompilerConfig) -> Vec<CommandLineMacro> {
+    let mut macros = Vec::new();
+
+    if let Some(standard) = config.standard.as_deref() {
+        if let Some(value) = cplusplus_value(standard) {
+            macros.push(CommandLineMacro::with_value("__cplusplus", value));
+
+            // MSVC's own headers ask `_MSVC_LANG` for the same number, and its value is the language version
+            // rather than the compiler's — so it is decided by the standard here too.
+            if config.dialect() == Dialect::Msvc {
+                macros.push(CommandLineMacro::with_value("_MSVC_LANG", value));
+            }
+        } else if let Some(value) = c_version(standard) {
+            macros.push(CommandLineMacro::with_value("__STDC__", "1"));
+            macros.push(CommandLineMacro::with_value("__STDC_VERSION__", value));
+        }
+    }
+
+    if let Some(target) = config.target.as_deref() {
+        macros.extend(target_macros(target));
+    }
+
+    macros
+}
+
+/// The standard with the dialect prefix (`gnu`) taken off: `gnu++20` → `++20`, `c++17` → `c++17`, `gnu11` → `11`.
+fn without_the_gnu_prefix(standard: &str) -> &str {
+    standard.strip_prefix("gnu").unwrap_or(standard)
+}
+
+/// `c++17` → `201703L`, `gnu++20` → `202002L`, and the older `c++2a`/`c++2b` spellings.
+///
+/// `None` for anything this table does not know — an unset standard, a typo, or a draft whose number is not settled
+/// (`c++26`): a wrong `__cplusplus` is worse than an absent one, because absent is `Unknown`.
+fn cplusplus_value(standard: &str) -> Option<&'static str> {
+    // `-std=c++17` and `-std=gnu++17` differ only in whose extensions are on, and only the first writes the `c`.
+    let rest = without_the_gnu_prefix(standard);
+    let year = rest
+        .strip_prefix("c++")
+        .or_else(|| rest.strip_prefix("++"))?;
+
+    Some(match year {
+        "98" | "03" => "199711L",
+        "11" => "201103L",
+        "14" => "201402L",
+        "17" => "201703L",
+        "20" | "2a" => "202002L",
+        "23" | "2b" => "202302L",
+        _ => return None,
+    })
+}
+
+/// `c11` → `201112L`, `gnu99` → `199901L`. `None` for a C++ standard or an unknown spelling.
+fn c_version(standard: &str) -> Option<&'static str> {
+    // `-std=c11` and `-std=gnu11` are the same standard, and only the first has a `c` to take off.
+    let rest = without_the_gnu_prefix(standard);
+    let year = rest.strip_prefix('c').unwrap_or(rest);
+
+    Some(match year {
+        "89" | "90" => "199409L",
+        "99" => "199901L",
+        "11" => "201112L",
+        "17" | "18" => "201710L",
+        "23" | "2x" => "202311L",
+        _ => return None,
+    })
+}
+
+/// The platform names a target triple — or `-m32`/`-m64` — decides.
+///
+/// Only the names the target **fixes**: the operating system and the pointer width. Sizes, versions and the
+/// compiler's family are not in a triple's spelling, and guessing them is what [`predefined_macros_of`] refuses.
+fn target_macros(target: &str) -> Vec<CommandLineMacro> {
+    let lowered = target.to_ascii_lowercase();
+    let mut macros = Vec::new();
+
+    // 64- and 32-bit are marked by the **architecture** name, which is why the answer is a pair: `_WIN64` is about
+    // the target being a 64-bit one, and `x86_64-w64-mingw32`'s `w64` is the *vendor's* spelling — a `i686-w64-…`
+    // target is 32-bit with the same vendor string, which is how a `contains("64")` test gets it wrong.
+    let architecture = if lowered.contains("x86_64") || lowered.contains("amd64") || lowered == "-m64" {
+        Some(("__x86_64__", true))
+    } else if lowered.contains("i686")
+        || lowered.contains("i386")
+        || lowered.contains("x86")
+        || lowered == "-m32"
+    {
+        Some(("__i386__", false))
+    } else if lowered.contains("aarch64") || lowered.contains("arm64") {
+        Some(("__aarch64__", true))
+    } else if lowered.contains("arm") {
+        Some(("__arm__", false))
+    } else {
+        None
+    };
+
+    let is_windows = lowered.contains("windows") || lowered.contains("mingw") || lowered.contains("msvc");
+
+    if let Some((name, _)) = architecture {
+        macros.push(CommandLineMacro::with_value(name, "1"));
+    }
+
+    if is_windows {
+        macros.push(CommandLineMacro::with_value("_WIN32", "1"));
+        if architecture.is_some_and(|(_, wide)| wide) {
+            macros.push(CommandLineMacro::with_value("_WIN64", "1"));
+        }
+    }
+
+    if lowered.contains("apple") || lowered.contains("darwin") {
+        macros.push(CommandLineMacro::with_value("__APPLE__", "1"));
+    }
+
+    if lowered.contains("linux") {
+        macros.push(CommandLineMacro::with_value("__linux__", "1"));
+    }
+
+    macros
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The standard is a **decision**, and the one every header asks about.
+    #[test]
+    fn the_standard_decides_cplusplus() {
+        for (standard, expected) in [
+            ("c++98", "199711L"),
+            ("gnu++03", "199711L"),
+            ("c++11", "201103L"),
+            ("gnu++14", "201402L"),
+            ("c++17", "201703L"),
+            ("gnu++20", "202002L"),
+            ("c++2a", "202002L"),
+            ("c++23", "202302L"),
+        ] {
+            let config = CompilerConfig::default().with_standard(standard);
+            let macros = predefined_macros_of(&config);
+            let cplusplus = macros.iter().find(|entry| &*entry.name == "__cplusplus");
+
+            assert_eq!(
+                cplusplus.and_then(|entry| entry.value.as_deref()),
+                Some(expected),
+                "{standard} means {expected}"
+            );
+        }
+
+        // A standard this table does not know, and no standard at all: **nothing** is said, which is `Unknown`
+        // rather than a wrong number. `c++26`'s value is not settled, so it is not guessed either.
+        for standard in ["c++26", "c++29", "c90", "nonsense"] {
+            let config = CompilerConfig::default().with_standard(standard);
+            assert!(
+                !predefined_macros_of(&config)
+                    .iter()
+                    .any(|entry| &*entry.name == "__cplusplus"),
+                "{standard} says nothing about `__cplusplus`"
+            );
+        }
+    }
+
+    /// MSVC's headers ask the same question under a different name.
+    #[test]
+    fn the_msvc_dialect_gets_the_language_version_too() {
+        let config = CompilerConfig::default()
+            .with_standard("c++17")
+            .with_dialect(Dialect::Msvc);
+        let macros = predefined_macros_of(&config);
+
+        assert_eq!(
+            macros
+                .iter()
+                .find(|entry| &*entry.name == "_MSVC_LANG")
+                .and_then(|entry| entry.value.as_deref()),
+            Some("201703L")
+        );
+        // And GCC's dialect does not: a name that compiler never defines is a name its headers never ask about.
+        let config = CompilerConfig::default().with_standard("c++17");
+        assert!(
+            !predefined_macros_of(&config)
+                .iter()
+                .any(|entry| &*entry.name == "_MSVC_LANG")
+        );
+    }
+
+    /// C is a different language with a different macro — and its own spellings.
+    #[test]
+    fn a_c_standard_decides_the_c_version() {
+        let config = CompilerConfig::default().with_standard("gnu11");
+        let macros = predefined_macros_of(&config);
+
+        let value = |name: &str| {
+            macros
+                .iter()
+                .find(|entry| &*entry.name == name)
+                .and_then(|entry| entry.value.as_deref())
+        };
+
+        assert_eq!(value("__STDC_VERSION__"), Some("201112L"));
+        assert_eq!(value("__STDC__"), Some("1"));
+        assert_eq!(value("__cplusplus"), None, "C has no `__cplusplus`");
+    }
+
+    /// The target decides the platform, and **only** what it says.
+    #[test]
+    fn the_target_decides_the_platform_names() {
+        let names = |target: &str| {
+            predefined_macros_of(&CompilerConfig::default().with_target(target))
+                .into_iter()
+                .map(|entry| entry.name.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        assert!(names("x86_64-w64-mingw32").contains(&"_WIN32".to_string()));
+        assert!(names("x86_64-w64-mingw32").contains(&"_WIN64".to_string()));
+        assert!(names("x86_64-w64-mingw32").contains(&"__x86_64__".to_string()));
+        assert!(names("x86_64-unknown-linux-gnu").contains(&"__linux__".to_string()));
+        assert!(!names("x86_64-unknown-linux-gnu").contains(&"_WIN32".to_string()));
+        assert!(names("i686-w64-mingw32").contains(&"__i386__".to_string()));
+        assert!(!names("i686-w64-mingw32").contains(&"_WIN64".to_string()));
+        assert!(names("-m32").contains(&"__i386__".to_string()));
+        assert!(names("-m64").contains(&"__x86_64__".to_string()));
+
+        // A target nobody described says nothing: the platform macros are a claim about the *target*, and a
+        // spelling this table does not know is not one.
+        assert!(names("wasm32-unknown-unknown").is_empty());
+    }
 }

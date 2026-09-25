@@ -49,6 +49,28 @@ fn main() {
     // different questions — one hop is what the file literally includes, the closure is what the preprocessor
     // sees — and the difference is what the bill of remaining failures turns on (see `docs/index-design.md`).
     let closure = std::env::args().any(|argument| argument == "--closure");
+    // `--macro NAME` asks what the environment knows about **one name** in each file, channel by channel. It is the
+    // question that separates "the evidence was never built" from "the evidence is there and no rule used it" —
+    // the same distinction the seed counts make one level up, asked about the macro a rule is waiting for.
+    // `--macro NAME[,NAME…]` asks what the environment knows about those names in each file, channel by channel. It
+    // is the question that separates "the evidence was never built" from "the evidence is there and no rule used
+    // it" — the same distinction the seed counts make one level up, asked about the macros a rule is waiting for.
+    // A list, because a condition is answered from a *chain* of names: asking about one of them at a time is how a
+    // chain takes five runs to trace.
+    let watched: Vec<String> = std::env::args()
+        .position(|argument| argument == "--macro")
+        .and_then(|at| std::env::args().nth(at + 1))
+        .map(|names| names.split(',').map(str::to_string).collect())
+        .unwrap_or_default();
+    // `--standard c++17`: what the **configuration** decides, injected as predefined macros. It is a flag rather
+    // than a constant because the point is to measure it: a corpus read as C++11 and the same corpus read as C++20
+    // answer `#if __cplusplus >= …` differently, and which branches that wakes up is a fact about the corpus.
+    let standard: Option<String> = std::env::args()
+        .position(|argument| argument == "--standard")
+        .and_then(|at| std::env::args().nth(at + 1));
+    // `--no-toolchain` is the "no compiler was found" world: then the **configuration alone** is what the
+    // condition layer has, which is exactly what injecting the standard and the target is for.
+    let without_toolchain = std::env::args().any(|argument| argument == "--no-toolchain");
 
     // **A real indexer, not the convenience `summarize`**: that one resolves no includes at all (`NoFiles`), so a
     // probe built on it seeds nothing and the whole positional experiment would be a silent no-op — which the
@@ -70,15 +92,23 @@ fn main() {
             .with_include_path(directory.clone())
             .with_system_include_path(directory.clone());
     }
+    if let Some(standard) = standard.as_deref() {
+        config = config.with_standard(standard);
+    }
     let indexer = cpp_code_analysis::FileIndexer::new(&files, &config);
 
-    // **What the compilation starts with**: the `-D`s, the standard, and the ~480 names the compiler predefines.
-    // Every `#if` in every header is a question about these, so without them the condition layer can only answer
-    // `Unknown` — and an `Unknown` branch is a `#define` that is not evidence. Discovered once, from the same
-    // compiler the corpus came from, and only when the seeds are asked for (it spawns the compiler).
-    let macros_the_compilation_starts_with = (seeded && closure)
-        .then(|| {
-            paths.first().and_then(|first| {
+    // **What the compilation starts with** — and it is built even when no compiler was found, because that is the
+    // case the configuration is supposed to cover by itself: `-std=c++17` decides `__cplusplus`, a target triple
+    // decides the platform names, and a compiler that answered `-dM` is the *fuller* answer rather than the only
+    // one. A run with neither is `incomplete()` — "nobody said" — which the evaluator turns into `Unknown`, so no
+    // branch is answered wrongly; see `predefined_macros_of` and `Session`'s environment, which is built the same
+    // way.
+    let seed = if seeded && closure {
+        let mut marked = cpp_code_analysis::graph::Marked::default();
+        let mut found_a_toolchain = false;
+
+        if !without_toolchain
+            && let Some(toolchain) = paths.first().and_then(|first| {
                 cpp_code_analysis::discover(
                     &files,
                     &cpp_code_analysis::DiskCommands,
@@ -87,13 +117,45 @@ fn main() {
                     &cpp_code_analysis::Environment::current(),
                 )
             })
-        })
-        .flatten()
-        .map(|toolchain| {
-            cpp_code_analysis::graph::Marked::from_config(
-                &toolchain.config(&cpp_code_analysis::CompilerConfig::default()),
-            )
-        });
+        {
+            found_a_toolchain = true;
+            for (name, value) in toolchain.macros() {
+                marked.define_on_the_command_line(name, value);
+            }
+        }
+
+        // …and then what the **configuration** decides, over the top: the project's `-std=` beats the compiler's
+        // own default invocation, which is the point `Toolchain::search_paths` makes about passing it on.
+        for definition in cpp_code_analysis::predefined_macros_of(&config) {
+            marked.define_on_the_command_line(&definition.name, definition.value.as_deref());
+        }
+
+        if found_a_toolchain { marked } else { marked.incomplete() }
+    } else {
+        // Not seeding at all: an empty, incomplete state, so that nothing here pretends to know anything.
+        cpp_code_analysis::graph::Marked::default().incomplete()
+    };
+
+    // The seed is what every `#ifdef __cplusplus` in the corpus is answered against, so whether it really holds the
+    // compiler's names is worth one line rather than an assumption: `Unknown` silently keeps every conditional
+    // `#define` out of the evidence, and a wrong branch answers the wrong reading. Printed whether or not a
+    // toolchain was found, because "no compiler" is a case the configuration is supposed to cover by itself — the
+    // **value** `__cplusplus` holds is asserted by `predefined_macros_of`'s own tests.
+    if seeded && closure {
+        use cpp_code_analysis::condition::MacroValues;
+
+        println!(
+            "compilation seed: __cplusplus defined {:?} | _WIN32 defined {:?} | uncertain about __cplusplus {} | \
+standard {}",
+            seed.lookup("__cplusplus").is_defined(),
+            seed.lookup("_WIN32").is_defined(),
+            seed.is_uncertain("__cplusplus"),
+            standard.as_deref().unwrap_or("(none — the configuration decides nothing)"),
+        );
+    }
+
+    // One cache of parsed #defines for the whole run: a definition does not depend on which file is being seeded, so the feed costs one parse per definition rather than one per definition per file (B95).
+    let mut macro_definitions = cpp_code_analysis::MacroDefinitions::default();
 
     let started = std::time::Instant::now();
     for path in &paths {
@@ -113,6 +175,23 @@ fn main() {
         definition_sources.insert(path.clone(), source);
     }
     let indexed = started.elapsed();
+
+    // **Who includes each file**, and where — the translation unit's half of the environment. Read off the include
+    // facts of the indexed files, first includer wins: a header may be reached from several places, and any one of
+    // them is a real translation unit it belongs to (the compile database would name the intended one).
+    let mut includers: HashMap<PathBuf, (PathBuf, usize)> = HashMap::new();
+    for (path, summary) in &summaries {
+        for include in &summary.includes {
+            let Some(resolved) = include.resolved.as_ref() else {
+                continue;
+            };
+            if summaries.contains_key(resolved) {
+                includers
+                    .entry(resolved.clone())
+                    .or_insert_with(|| (path.clone(), include.range.start_offset));
+            }
+        }
+    }
 
     let mut clean = 0usize;
     let mut failing = 0usize;
@@ -138,11 +217,14 @@ fn main() {
     // How many conditional facts the closure walk met, and how many of them the condition layer put **in force**.
     // Two numbers rather than one, because "no conditional evidence" and "conditional evidence that was asked
     // about and refused" are different worlds and the corpus numbers look the same in both.
-    let conditional_asked = std::cell::Cell::new(0usize);
-    let conditional_taken = std::cell::Cell::new(0usize);
+    let mut conditional_asked = 0usize;
+    let mut conditional_taken = 0usize;
     // Replacement lists of macros whose definition is conditional but in force — the second channel, the one a rule
     // reads (`MacroEnvironment::with_bodies_in_force`). Counted apart from the definitions on purpose.
     let mut bodies_in_force = 0usize;
+    // How many files were read **inside** a translation unit that includes them — the includer's macros are part
+    // of what a header sees, and this says whether the corpus could supply them at all.
+    let mut files_with_context = 0usize;
     // The **shape** distribution of what the seeds say. A name alone enables the rules that ask "is this a macro",
     // and a shape is what enables the ones that ask "what may stand here" — so "the evidence arrived and changed
     // nothing" has two very different causes, and this is what tells them apart.
@@ -163,42 +245,58 @@ fn main() {
         let Some(summary) = summaries.get(path) else {
             continue;
         };
+        // What the **includer** contributed, for the `--macro` line below: whether the translation unit's half of the
+        // environment was built at all, and whether it carries the name being watched.
+        let mut context_seeds = 0usize;
+        let mut context_carries_the_watched_name = false;
         let environment = seeded.then(|| {
             // Building the evidence is itself a measurement: the closure version reads the whole include graph of
             // every direct include, so its cost is the thing that decides whether this layer can be per-file.
             let started = std::time::Instant::now();
             let (seeds, bodies) = if closure {
-                let table = macros_the_compilation_starts_with.as_ref();
-                let evidence = cpp_code_analysis::macros_from_the_closure_with_bodies(
-                    summary,
-                    |wanted| {
-                        summaries.get(wanted).map(|summary| {
-                            (summary, definition_sources.get(wanted).map(String::as_str).unwrap_or(""))
-                        })
-                    },
-                    // **The condition layer, in one line.** A `#define` inside an `#if` is read only when that
-                    // branch was taken, and the branch is decided against the macros the compilation starts with —
-                    // `-D`s, `-std=`, and the ~480 names the compiler predefines. Without a toolchain every
-                    // condition is `Unknown`, which is why the two counts below are printed at all: "no conditional
-                    // evidence" and "conditional evidence asked about and refused" look alike in the corpus numbers.
-                    //
-                    // What comes back is **two channels**: definitions that are in force (which say *whether a name
-                    // is a macro*) and bodies that are in force (which a rule *reads*). Handing the second lot out as
-                    // definitions is what the first version did, and it cost 3 files — see `ClosureEvidence`.
-                    |file, fact| match table {
-                        Some(table) => {
-                            conditional_asked.set(conditional_asked.get() + 1);
-                            let in_force =
-                                cpp_code_analysis::index::environment::fact_in_force(table, file, fact);
-                            if in_force {
-                                conditional_taken.set(conditional_taken.get() + 1);
-                            }
-                            in_force
-                        }
-                        None => false,
-                    },
-                );
-                (evidence.macros, evidence.conditional_bodies)
+                let look_up = |wanted: &std::path::Path| {
+                    summaries.get(wanted).map(|summary| {
+                        (summary, definition_sources.get(wanted).map(String::as_str).unwrap_or(""))
+                    })
+                };
+                let evidence =
+                    cpp_code_analysis::macros_from_the_closure_with_bodies(summary, look_up, &seed, &mut macro_definitions);
+                conditional_asked += evidence.conditional_facts;
+                conditional_taken += evidence.facts_in_force;
+
+                // **This file as part of the translation unit that includes it**: the includer's own macros up to
+                // the point of its `#include`, seeded at offset 0 because another file's offsets mean nothing here.
+                // That is the only way a header sees a name none of its own includes define — `commdlg.h` and
+                // `STDMETHOD`, whose definition is in a file its own include list does not mention
+                // (`docs/grammar-gaps.md` B90/B91).
+                let context = includers.get(path).map(|(includer, at)| {
+                    let summary = summaries.get(includer).expect("an includer is indexed");
+                    cpp_code_analysis::macros_in_force_before_the_include(summary, *at, look_up, &seed, &mut macro_definitions)
+                });
+                if context.is_some() {
+                    files_with_context += 1;
+                }
+                if let Some(context) = context.as_ref() {
+                    context_seeds = context.macros.len() + context.conditional_bodies.len();
+                    context_carries_the_watched_name = watched.iter().any(|name| {
+                        context.macros.iter().any(|entry| &*entry.name == name)
+                            || context
+                                .conditional_bodies
+                                .iter()
+                                .any(|(defined, _)| &**defined == name)
+                    });
+                    conditional_asked += context.conditional_facts;
+                    conditional_taken += context.facts_in_force;
+                }
+
+                // The file's **own** closure comes second, so a name its own includes define wins over the unit's.
+                let (mut seeds, mut bodies) = match context {
+                    Some(context) => (context.macros, context.conditional_bodies),
+                    None => (Vec::new(), Vec::new()),
+                };
+                seeds.extend(evidence.macros);
+                bodies.extend(evidence.conditional_bodies);
+                (seeds, bodies)
             } else {
                 (
                     cpp_code_analysis::macros_from_direct_includes_with_bodies(summary, |wanted| {
@@ -239,6 +337,26 @@ fn main() {
             Some(environment) => cpp_parser::ParserConfig::default().with_macros_from_includes(environment),
             None => cpp_parser::ParserConfig::default(),
         };
+
+        if let Some(environment) = environment.as_ref() {
+            for name in &watched {
+                let Some(at) = source.find(name.as_str()) else {
+                    continue;
+                };
+
+                let trim = |text: Option<&str>| {
+                    text.map(|text| text.trim().chars().take(48).collect::<String>())
+                };
+                println!(
+                    "MACRO {name} in {:<24} evidence {:<5} | positional body {:?} | in-force body {:?} | context \
+{context_seeds} seeds, carries it {context_carries_the_watched_name}",
+                    path.file_name().unwrap_or_default().to_string_lossy(),
+                    environment.kind_of(name, at).is_some(),
+                    trim(environment.body_text_of(name, at)),
+                    trim(environment.body_text_in_force(name)),
+                );
+            }
+        }
         let (tree, audit) = cpp_parser::CppParser::parse_with_audit(&source, config);
         macro_questions += audit.macro_questions;
         if audit.macro_question_names > macro_question_names {
@@ -294,13 +412,37 @@ fn main() {
             explained_by_closure += 1;
         }
 
+        // **Which of the names on the line the environment can actually *read*** — the question that separates
+        // "the evidence was never built" from "the evidence is there and no rule used it", which look identical in
+        // every other number this probe prints. A name is listed when a **body** for it is in force: the file's own
+        // `#define` or one the closure carried in.
+        let line_text = window.join(" ");
+        let readable: Vec<&str> = line_text
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .filter(|word| word.len() > 2)
+            .filter(|word| {
+                environment.as_ref().is_some_and(|environment| {
+                    // **Both channels**, because a body can arrive either way: positionally (an unconditional
+                    // `#define`) or through the conditional one that only a branch in force fills.
+                    environment.body_text_of(word, 0).is_some()
+                        || environment.body_text_in_force(word).is_some()
+                })
+            })
+            .collect();
+        let readable = if readable.is_empty() {
+            String::new()
+        } else {
+            format!(" | bodies in force: {}", readable.join(", "))
+        };
+
         details.push(format!(
-            "{:>4}:{:<3} {:<44} | {} :: {}",
+            "{:>4}:{:<3} {:<44} | {} :: {}{}",
             line + 1,
             column,
             errors[0].message,
             window.last().unwrap_or(&"").trim().chars().take(70).collect::<String>(),
             path.file_name().unwrap_or_default().to_string_lossy(),
+            readable,
         ));
     }
     let parsed = started.elapsed();
@@ -319,8 +461,6 @@ fn main() {
         );
     }
 
-    let conditional_asked = conditional_asked.get();
-    let conditional_taken = conditional_taken.get();
 
     println!(
         "files {} | clean {} | failing {} | {} KB | {} lines\n\
@@ -331,6 +471,7 @@ fn main() {
 built in {seeding_time:?}\n\
          conditional facts met {conditional_asked} | branches in force {conditional_taken} | bodies in force \
 {bodies_in_force} (no toolchain means none can be answered)\n\
+         read inside an includer {files_with_context} files (the translation unit's half of the environment)\n\
          seed shapes: {}\n\
          decision points: {macro_questions} macro questions | {macro_question_names} name-questions, summed \
 over the files | busiest file {busiest_questions}",

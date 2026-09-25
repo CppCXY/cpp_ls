@@ -220,6 +220,13 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
         //
         // Claimed here, before the declaration/expression question is even asked, and only for a name this file
         // **`#define`s** — evidence rather than a convention. See [`at_a_macro_call_statement`].
+        //
+        // **A macro that is a declaration head comes first** (B90): `STDMETHOD(QueryInterface) (…) PURE;` is also
+        // "a name this file defines, invoked", and claiming it as a whole statement is what takes the rest of the
+        // line away from the declaration reading. The body is what tells the two apart — see
+        // [`a_macro_head_with_a_parameter_list`].
+        _ if a_macro_head_with_a_parameter_list(p) => parse_a_declaration_head_macro(p),
+
         _ if at_a_macro_call_statement(p) => parse_macro_call(p),
 
         // A label: `foo:` at the start of a statement.
@@ -448,6 +455,115 @@ fn at_a_macro_call_statement(p: &CppParser) -> bool {
 /// perfectly good **function declaration** of that name with one unnamed parameter, and what tells the two apart is
 /// that a declaration ends at its `;` — the macro's body supplies that `;`, so there is none, and the token after
 /// the group cannot continue a declaration.
+/// Does a macro invocation stand here **where a declaration head goes**, with the file's own parameter list after it?
+///
+/// `commdlg.h:577` writes, inside the block that `DECLARE_INTERFACE_(IPrintDialogCallback,IUnknown) {` opened:
+///
+/// ```cpp
+///     STDMETHOD(QueryInterface) (THIS_ REFIID riid,LPVOID *ppvObj) PURE;
+/// ```
+///
+/// and `combaseapi.h` — in the branch the condition layer puts in force for a C++ compilation — says
+/// `STDMETHOD(method)` is `virtual COM_DECLSPEC_NOTHROW HRESULT STDMETHODCALLTYPE method`: a declaration head that
+/// **ends at a name**, and that name is the parameter the file's own argument (`QueryInterface`) replaces. So the
+/// head is not a call: a body that is a declaration head cannot be the callee of one, and the declarator the file
+/// wrote — the parameter list — is what follows.
+///
+/// Asked of the **body** rather than of the spelling, because this file's `MacroNames` never saw the definition
+/// (it is in an included header) and the shape alone is a call. Four conditions, and each one is what keeps a
+/// mistake out:
+///
+/// * the body ends at an identifier — the hole the argument fills;
+/// * the body holds a specifier only a **declaration** has (`virtual`, `typedef`, `class`, `struct`, `union`,
+///   `inline`, `static`, `extern`): `#define MAX(a, b) ((a) > (b) ? (a) : (b))` ends at `)` and is not claimed;
+/// * the invocation is followed by `(`, which is the declarator the file wrote for the name the macro holds;
+/// * and **that group is not the end of the statement** — the predicate added after the first attempt was measured
+///   wrong without it. `DECLARE_HANDLE(CO_MTA_USAGE_COOKIE);` and `__glibcxx_numbers(_Float16, F16);` are also
+///   "a body that ends at a name, invoked", and claiming them took the corpus from 435 clean to 432 (and left
+///   `numbers` a *worse* file than before). A declaration head is followed by the **declarator**, so a `(` must
+///   come after the invocation's own group.
+pub(super) fn a_macro_head_with_a_parameter_list(p: &CppParser) -> bool {
+    if p.current_token() != CppTokenKind::Identifier || p.peek_next_token() != CppTokenKind::LeftParen {
+        return false;
+    }
+
+    let index = p.current_token_index();
+    if kind_after_the_balanced_group(p, index) != Some(CppTokenKind::LeftParen) {
+        return false;
+    }
+
+    let offset = p.current_token_range().start_offset;
+    let Some(kinds) = p.macro_body_kinds_at(p.current_token_text(), offset) else {
+        return false;
+    };
+
+    if kinds.last() != Some(&CppTokenKind::Identifier) {
+        return false;
+    }
+
+    kinds.iter().any(|kind| {
+        matches!(
+            kind,
+            CppTokenKind::VirtualKeyword
+                | CppTokenKind::TypedefKeyword
+                | CppTokenKind::ClassKeyword
+                | CppTokenKind::StructKeyword
+                | CppTokenKind::UnionKeyword
+                | CppTokenKind::InlineKeyword
+                | CppTokenKind::StaticKeyword
+                | CppTokenKind::ExternKeyword
+        )
+    })
+}
+
+/// Read a macro invocation that **is** a declaration's head: `NAME ( arguments ) ( parameters ) [ MACRO ] ;`.
+///
+/// The declarator's **name** is in the macro's arguments and is not a token of this file — the one thing this
+/// reading cannot put in the tree, and the reason the head stays a `MacroCall` rather than being dressed up as a
+/// specifier sequence. Everything the file *did* write is read as what it is: the arguments are the macro's, the
+/// parameter list is the declarator's, and the `;` ends the declaration.
+fn parse_a_declaration_head_macro(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::Declaration);
+
+    let call = p.mark(CppSyntaxKind::MacroCall);
+    let name = p.mark(CppSyntaxKind::NameExpr);
+    p.bump();
+    name.complete(p);
+    if p.current_token() == CppTokenKind::LeftParen {
+        super::decls::parse_balanced_token_group(p, CppSyntaxKind::ArgumentList)?;
+    }
+    call.complete(p);
+
+    // The declarator the file wrote. Its `(…)` is a **parameter list** and not a call's arguments, which is the
+    // whole difference this reading makes.
+    super::decls::parse_parameter_list(p)?;
+
+    // What stands between the parameter list and the `;`: `PURE` is `= 0` in the same header the head came from,
+    // and it is read as a macro here for the same reason the head is — the body is what says so.
+    while p.current_token() == CppTokenKind::Identifier
+        && p.macro_body_kinds_at(p.current_token_text(), p.current_token_range().start_offset).is_some()
+    {
+        let call = p.mark(CppSyntaxKind::MacroCall);
+        let name = p.mark(CppSyntaxKind::NameExpr);
+        p.bump();
+        name.complete(p);
+        call.complete(p);
+    }
+
+    if p.current_token() == CppTokenKind::Semicolon {
+        p.bump();
+    } else {
+        p.close_marks_above(base);
+        return Err(CppParseError::syntax_error_from(
+            "expected `;` after a declaration a macro heads",
+            p.current_token_range(),
+        ));
+    }
+
+    Ok(m.complete(p))
+}
+
 /// Read the invocation at `start` as a statement.
 ///
 /// Two shapes, and the difference is not cosmetic. A macro whose body is a statement or a whole definition
@@ -750,6 +866,13 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
             name.complete(p);
             return Ok(m.complete(p));
         }
+    }
+
+    // **A macro that is the declaration's head** (B90) — the second route to the same shape: a file that does not
+    // `#define` the name itself never reaches [`parse_stat`]'s macro-statement branch, and the declaration reading
+    // gets no further than the invocation's own group before it reports the `(…)` it cannot place.
+    if a_macro_head_with_a_parameter_list(p) {
+        return parse_a_declaration_head_macro(p);
     }
 
     // Anchors let the speculative declaration pass be skipped: `static`, `class`, `typename` and

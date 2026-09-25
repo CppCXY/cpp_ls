@@ -708,6 +708,170 @@ decision points: 37317 macro questions | 321 name-questions | busiest file 4684
 `interface DECLSPEC_NOVTABLE iface : public baseiface`（有 `interface`、有基类子句），gtest 的 `TEST(A, B)` 的体
 是语句/块，而今天一律按函数体读（`set_last_declarator_is_function(true)`）。
 
+**但在写读法之前，先量证据到不到**：第二轮把钩子挂对了（`parse_stat` 的宏-语句臂**之前**那条，加上声明那一问），
+真实上下文的测试也就读得出来——可它在语料上**打坏了两个文件**（"体像声明头、调用后面没有第二个括号组"，
+而 `parse_stat` 那条臂不回滚），并且**根本没碰到 `commdlg.h`**：探针新增的 `bodies in force:` 打在每个失败文件的
+首错行上，`commdlg.h:577` 那行**一个体都没有**（它的直接 include 里没有 `objbase.h`，`STDMETHOD` 的体要从更远的
+一条链上传过来）。**所以下一轮的第一件事是量闭包走法为什么没把它带到**，判据里也先补上"实参组之后还有 `(`"。
+
+**B91：第一条真正落地的"读体"规则，以及头文件的证据边界。** `parse_decl_specifier_seq` 现在让**体全是说明符**的宏
+按说明符读（`_CONST_RETURN` 在生效的那一支里是**空体**、`__LONG32` 是 `long`），而**空体只在 type-id 里**算"什么都
+没有"——后者在**声明**里会把声明符的名字吞掉，量到的是语料从干净 435 掉到 424、消息 617。落地后**带 seeds** 的普查
+455 那份 干净 435 → **436** / 报错 20 → **19** / 消息 86 → **84**（只有 `wchar.h`，无一反向），不带 seeds 的一条不动。
+
+**同一条规则量出的边界，比它修好的文件更重要**：`commdlg.h` 的 `STDMETHOD` 来自**包含它的翻译单元的顺序**
+（`windows.h:108` 先 `#include <objbase.h>` 再 `#include <commdlg.h>`），它的直接 include 链里根本没有 `objbase.h`
+——**单文件闭包在结构上到不了这种宏**。所以"按位置喂宏"这条路对**头文件**需要一个新维度：**它被谁包含**（compile
+database 的那条命令，或项目里任何包含它的 TU）。探针已经把这个问题变成一行输出（`MACRO <名> in <文件> …` 与首错行
+上的 `bodies in force:`），下一步该做的是让**环境**能按 TU 组装，而不是继续加读法。
+
+**B92：按 TU 组装环境——一层做完了，另一层被量出来挡在后面。**
+```text
+已做  summary::macros_in_force_before_the_include(includer, at, …)
+      —— 走**包含者**的闭包，但只走到它自己那条 `#include` 之前（`only_before`），条目一律落在 offset 0
+        （另一个文件的 offset 在这里没有意义；这条 include 之前生效的宏，对本文件是"从头就生效"）。
+        内部共用一个 `walk_the_closure(summary, only_before, all_from, …)`，闭包那条路只是两个参数取 None
+量到  455 份：**428 个文件被放进了一个包含者的 TU 里**读（441 条不同的包含关系），seeds 1.45M → **6.16M**
+      （带体 4.89M），`bodies in force` 340k → **1.26M**；代价：建证据 2.3 s → **14.4 s**、parse alone
+      5.2 s → **19.2 s**（每文件约 42 ms），语料读数 **436 / 19 / 84 一条没动**
+翻出一个 bug  探针的"编译起点"是 `Marked::from_config(&toolchain.config(…))` 造的，而
+      `Toolchain::config` **只加 include 路径、不装预定义宏** —— 于是那份种子里 `__cplusplus` 是
+      **Some(false)**：**每一个 `#ifdef __cplusplus` 分支都被判成不生效**，所有 C++ 分支的宏一条都没进来。
+      产品路径（`session::compilation_environment`）是对的；探针现在照它做（`toolchain.macros()` 逐个
+      `define_on_the_command_line`），探针也把 `compilation seed: __cplusplus defined …` 打在输出第一行
+```
+
+**结论性的坏消息，也是最精确的一个**：`STDMETHOD` 仍然进不来，原因不是链没接上，而是**条件求值缺少 TU 自己的宏**：
+
+```cpp
+combaseapi.h:41   #if WINAPI_FAMILY_PARTITION (WINAPI_PARTITION_APP)   // ← 函数式宏，定义在 winapifamily.h
+combaseapi.h:42     #if defined (__cplusplus) && !defined (CINTERFACE)
+combaseapi.h:53       #define STDMETHOD(method) virtual COM_DECLSPEC_NOTHROW HRESULT STDMETHODCALLTYPE method
+```
+
+`WINAPI_FAMILY_PARTITION` **不在编译器的预定义里**（它在 `winapifamily.h` 里），所以这条 `#if` 求值是 `Unknown`
+⇒ 它里面的 `#define` 判不出"生效"，被丢掉 ⇒ `commdlg.h` 那行的证据永远是空的。**这正是设计里写的"闭包自己的宏：
+按翻译顺序边走边喂"那一层**：求值要拿"此刻 TU 里已经定义了什么"，而 B92 给的种子只有编译器预定义。索引侧的走法
+（`ProjectIndex` 的 `macros_at` 边走边喂）本来就有，缺的是把它接到**建证据这条路上**——那是下一刀，也是解开
+`commdlg.h` 那一族的唯一一条路。
+
+**B93：配置与标准自己就能把预定义宏补上一部分——量出来了，而且没有编译器也算数。**
+
+```text
+已做  config::predefined_macros_of(&CompilerConfig) -> Vec<CommandLineMacro>
+      —— **由配置决定的那批**：`-std=c++17`/`gnu++20`/`c++2a` ⇒ `__cplusplus`（MSVC 方言下还补 `_MSVC_LANG`）、
+        C 标准 ⇒ `__STDC__`/`__STDC_VERSION__`、`--target`/`-m32`/`-m64` ⇒ `__x86_64__`/`__i386__`/
+        `__aarch64__`/`__arm__` 与 `_WIN32`/`_WIN64`（`_WIN64` 只由**架构**决定——`i686-w64-mingw32` 的 `w64`
+        是厂商拼法，按 `contains("64")` 判会判错，这条是测试抓出来的）
+        **刻意不猜**：`__GNUC__` 的版本不在 `-std=c++20` 里，猜一个 1 会让 `#if __GNUC__ >= 5` 得到一个
+        **自信的 false**——`Unknown` 只是少一条读法，错的 false 会丢一个分支
+已接  session::compilation_environment 与探针都按同一顺序装：**工具链 `-dM` → 配置/标准 → 工程的 `-D`**
+      （工程说 `-std=c++11` 就是它说了算，编译器自己的默认调用是另一个问题）
+量到  探针三个世界，同一份语料（455）：
+
+      世界                              __cplusplus   条件事实"生效"数   带体的
+      没有编译器、也没给标准             Unknown             1 918          437
+      没有编译器、给了 --standard c++17  201703L            31 167        9 000
+      有编译器（-dM，约 480 个名字）     201703L          数百万        1.26M
+
+      也就是说：**编译器的名字一个都没有时，光凭配置就能把条件证据放大 16 倍**；而语料读数在这三档里是
+      436/19（有编译器）与 435/20（只有配置）——差的正是那约 480 个 `__GNUC__`/`_WIN32` 之类的名字，
+      配置不该、也没有替它们编造。`_WIN32` 在没给 target 时是 **None（未知）** 而不是 false，这一条是刻意的
+```
+
+探针现在把 `compilation seed: __cplusplus defined … | _WIN32 defined … | standard …` 打在**第一行**，
+`--standard`/`--no-toolchain` 两个开关让这三个世界随时可以重跑。
+
+**B94：走法按翻译顺序了，"边走边喂"落地——但它量出的是一条纠正，不是一个新读法。**
+
+```text
+已做  walk_the_translation_unit（原来叫 walk_the_closure）
+      —— 闭包按**深度优先、include 顺序**走（栈 + 反向压入），并且带一个 `UnitState`：**当前 TU 已经定义了什么**
+        （`defined` / `mentioned` 两个集合，O(1) 查询）。每遇到一个"生效"的 `#define`/`#undef` 就喂进状态，下一个
+        文件的**条件**就是拿它回答的（`UnitMacros { seed, state }` 实现 `MacroValues`）。这就是"闭包自己的宏：
+        按翻译顺序边走边喂"——`#ifdef STDMETHOD` 在 `objbase.h` 之前是假、之后是真，同一个 TU
+已做  `FactGuard` 的求值抽成 `index::environment::a_guard_is_in_force(file, fact, macros_at)`，任何表都能问
+      （原来只能问 `Marked`）
+量到  455 份（带 seeds --closure）：条件事实 10.0M → **8.2M**，"生效" 4.9M → **1.66M**，带体的 1.26M → **0.58M**
+      ——**变少了，而且这才是对的**：以前那些"生效"里有一大类是把 `#if FOO` 当成 0 判的（`FOO` 是**头文件里**定义的，
+      走法没喂，于是查不到 ⇒ Undefined ⇒ 0 ⇒ 读的是 `#else` 分支）。现在这类名字的回答是 `DefinedWithoutAValue`，
+      `#if FOO` 成了 `Unknown`，那条分支**不再假称生效**。语料读数 **436/19/84 一条没动**（那批分支的体还没有规则读），
+      代价：建证据 9.1 s → **10.9 s**，整轮 23-25 s
+没做  **值**没有带：`UnitMacros` 只回答"定义过没有"，所以 `#if __cplusplus >= 201703L` 这类**值问题**仍走编译起点那
+      张表，而 `#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_APP)`（**函数式**宏）仍是无解 ⇒ `commdlg.h` 还是修不了。
+      下一刀要的是"喂**定义**（含参数表）而不是名字"，代价也已经量出来了：`MacroDef` 是**独占**的（`Marked::define`
+      拿走所有权），每个 (文件, 名字) 解析一次并跨目标缓存是唯一可行的形状——`DefinitionCache` 那条路
+翻车过  第一版把读不到的 include 记成"本单元不完整"（于是未提及的名字一律 `Unknown`）：`#ifndef` 全部变 Unknown，
+      证据从数百万掉到几万 ✗。**一个文件的不确定性不该由整个单元付账**——现在那条边界的怀疑只留在闭包边缘
+```
+
+**B95：喂**定义**而不是名字——函数式宏终于能展开，但 `commdlg.h` 仍被一个 `Unknown` 挡住。**
+
+```text
+已做  UnitState 装的是 **MacroDef**（`Arc` 共享）：`#if WINAPI_FAMILY_PARTITION (WINAPI_PARTITION_APP)` 是"体 + 形参表"
+      的问题，名字表答不了——它正是 `combaseapi.h:53` 的 `STDMETHOD` 与 `commdlg.h` 之间的那道门
+已做  MacroDefinitions：每个 *(文件, 名字)* 解析**一次**、跨目标复用。`MacroDef` 是独占的（`Marked::define` 拿走
+      所有权），不缓存就退化成"每个定义 × 每个文件"；`#define` 是从文件自己的文本里**拼回来**的（名字 + 那一
+      逻辑行 = 形参表 + 体），再由普通的 `#define` 读取器读——与文件里读到的意思不可能不同
+量到  455 带 seeds：条件事实 8.2M → 8.3M，**"生效" 1.66M → 4.35M**，带体 0.58M → **1.15M**（函数式宏现在真的会展开）；
+      建证据 ~14 s、整轮 ~32 s；语料读数 **436/19 逐文件相同**
+仍然挡住  `commdlg.h`：watch 打印量到 `STDMETHOD` 的守卫是 `Region(7)`，链上四条分支——
+      `defined ( __cplusplus ) && ! defined ( CINTERFACE )`、`#else`、`WINAPI_FAMILY_PARTITION ( WINAPI_PARTITION_APP )`、
+      `#ifndef _COMBASEAPI_H_`——整条判成 **Unknown**，于是那条 `#define` 不进证据
+下一刀  把这个 `Unknown` **拆开**：逐分支求值（`examples/condition_reach.rs` 已经在做同一件事——把 condition 文本
+      lex 成 token 再 `condition::evaluate`），看是 `WINAPI_FAMILY`、`WINAPI_PARTITION_APP` 还是 `&`/`==` 的求值
+      没走通。这一步一旦通，`STDMETHOD` 的体就会到达 `commdlg.h`，B90 那条读法也就有了料
+```
+
+**B96：`Unknown` 拆开了——拆出来的不是条件，是我的读回器。**
+
+```text
+已做  include 与宏**按 offset 合并**（`walk_one_file` 递归）：一个文件先读它前面的 `#include`、再读后面的条件。
+      这就是翻译顺序，也正是这条规则缺了会看不见的地方：`combaseapi.h` 第 6 行 include `apiset.h`（→
+      `winapifamily.h`），第 41 行才问 `#if WINAPI_FAMILY_PARTITION (…)`
+已做  `#define` 读回时**去掉 `\`-换行**（translation phase 2 就是干这个的）：留着它等于在体的中间塞一个
+      行接续 token。就这么一条，语料上"生效" 4.35M → **4.76M**、带体 1.15M → 1.23M（这两组数是**栈版走法**下量的；
+      紧接着走法改成偏移合并的递归版，计数变成 **1.82M / 0.62M**——两版不可直接比，读数才是可比的那一项，两版都是
+      **436/19**。这个差异本身记在这里，下次量走法时先对齐"哪一版"）
+量到  逐分支求值（临时 watch）把 `STDMETHOD` 的守卫链拆开：`defined(__cplusplus) && !defined(CINTERFACE)` → Known(1) ✓、
+      `#ifndef _COMBASEAPI_H_` → Known(0) ✓、**`WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_APP)` → Unknown** ✗
+      而它的每一个零件都在环境里（`((WINAPI_FAMILY & v) == v)`、`WINAPI_FAMILY` → `WINAPI_FAMILY_DESKTOP_APP`、
+      `WINAPI_PARTITION_APP` → `0x2`）——所以问题不在"名字没喂到"，在**读回来的定义不会展开**
+新发现  `summary.rs::tests::a_define_read_back_from_the_file_expands_in_a_condition`（写出来又被我删掉的那条）把这一点
+      钉成了三小步：`PART_APP` → `Known(2)` ✓、`WINAPI_FAMILY_DESKTOP_APP`（跨行那个）→ **Unknown** ✗、
+      于是 `F(PART_APP)` 也是 Unknown ✗。**读回器产出的 `MacroDef` 解析得出来，却不展开**——而 `Marked` 那条路
+      （`define_on_the_command_line` → 内部同一个 `#define` 读取器）是展开的，所以差别在这两处产物的某个字段上
+      （怀疑：体里 trivia 的取舍、或 `stringize`/`paste` 索引）。**测试已删，不是留着当真相**：它现在断言的是一个
+      bug。下一次把两条路产出的 `MacroDef` 直接对比就能定位
+结论  `STDMETHOD` 仍然没到 `commdlg.h`（`carries it false`），所以 B90 那条读法还是没料；**但这次知道卡在哪一层了**：
+      不是走法（B94 已按顺序）、不是证据（B95 已喂定义）、不是条件求值（B96 已拆到具体那一条），而是**读回器**
+```
+
+**B97：两处修好，`STDMETHOD` 的体真的到 `commdlg.h` 了。**
+
+```text
+修复一  条件的**宏替换先于表达式**（`condition::evaluate` → `expand_condition` → `parse_condition` → `eval`）：
+        `#if WINAPI_FAMILY_PARTITION (WINAPI_PARTITION_APP)` 是一次**调用**，而条件文法里没有调用产生式——
+        展开之后它才是 `((WINAPI_FAMILY & 0x2) == 0x2)`。`defined`/`__has_include` 的**操作数不展开**
+        （标准就是这么规定的：展开它会把"`FOO` 定义了吗"变成"`1` 定义了吗"）
+修复二  宏的体**按表达式读**（`macro_value`）：`#define FAMILY (PART_DESKTOP | PART_APP)` 是运算符加两个名字，
+        `#define WINAPI_FAMILY WINAPI_FAMILY_DESKTOP_APP` 是另一个名字。原来只认**单个整数字面量**，其余一律
+        `Unknown`——Windows 与 libstdc++ 的头文件里几乎全是"其余"。展开器负责嵌套（自带深度上限与预算），
+        体展开后仍出现**自己**的名字就 `Unknown`（预处理器不在自己的体里展开自己，这条规则在这里就是防死循环）
+修复三  守卫求值**带位置**（`UnitMacros::here`）：写在条件**下面**的 `#define` 还没发生。包含卫哨就是
+        `#ifndef X / #define X`，拿文件末尾的表去回答"`X` 定义了吗"会说"定义了"——于是卫哨自己的区域成了
+        Inactive，里面每一条事实都不可见。**这正是最后挡住 `STDMETHOD` 的那一条**（B97 拆出来的）
+量到    455 带 seeds：条件事实 8.2M → 8.3M，**"生效" 3.0M → 6.15M**，**带体 1.03M → 1.68M**；读数
+        **436/19 一条没动**（还没有规则消费这些体——B90 那条读法就是消费者，它现在有料了）
+里程碑  探针的 `--macro` 直接打出来：
+        `MACRO STDMETHOD in commdlg.h … in-force body Some("virtual COM_DECLSPEC_NOTHROW HRESULT STDMETHODCA") |
+         carries it true`、`DECLARE_INTERFACE_` 同样是 `… interface DECLSPEC_NOVTABLE iface : public basei`。
+        从 B90 起追了四轮的那个"体到不了"，到此结束
+测试    新增 `preprocess.rs::a_condition_expands_a_name_whose_body_names_another`（三步：名字嵌套 ✓、跨行拼接 ✓、
+        条件里的函数式调用 ✓）；两条旧测试改写成**标准正确**的行为（体的表达式读得出来；真正不可判定的是
+        "体不是表达式"而不是"体是个名字"——未定义的名字按标准就是 0，那是**已判定**）
+```
+
 **B89 之后账单的料到位了**：`_GLIBCXX_NOEXCEPT_PARM`（`c++config.h:268-274`）、`STDMETHOD` / `PURE` / `THIS_`
 （`combaseapi.h:53-58` 的 `#ifdef __cplusplus` 里）、`_GLIBCXX_MATH_NS` 这些名字，**在分支成立时**带着体进来
 （`bodies in force` 那个计数就是它们），而**定义**那一栏一如既往只收无条件的——两栏为什么必须分开，见上面那次翻车。

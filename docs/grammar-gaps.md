@@ -2340,7 +2340,7 @@ template<typename _Res, typename... _ArgTypes _GLIBCXX_NOEXCEPT_PARM>   // bits/
 求值——而不是更多形状规则。料已经在库里（`ConditionAt` / `ConditionalRegion` / `preprocess::condition`），
 缺的只是"把'这支成立'翻译成'这条 `#define` 可以当证据'"。细节写在 [`index-design.md`](index-design.md) 的展开一节。
 
-### B90. 声明头由宏供给（`STDMETHOD(QueryInterface) (…) PURE;`）—— **试过、量过、未落地**（位置已定位）
+### B90. 声明头由宏供给（`STDMETHOD(QueryInterface) (…) PURE;`）—— **已修复**（B97 之后有料了）
 
 ```cpp
 DECLARE_INTERFACE_(IPrintDialogCallback,IUnknown) {      // commdlg.h:575
@@ -2376,6 +2376,75 @@ MacroCall(PURE), ;)`），分别挂在语句分发与 `parse_declaration_here`�
 `DECLARE_INTERFACE_` 的体是 `interface DECLSPEC_NOVTABLE iface : public baseiface`（有 `interface`、有基类
 子句），而 gtest 的 `TEST(A, B)` 的体是语句/块。今天一律读成函数体（`set_last_declarator_is_function(true)`），
 于是成员行成了语句、而语句里宏规则本来就受限制。下次先在那儿加一行打印确认块是谁读的，再按体分流。
+
+**第二轮（把钩子挂对了，仍然撤回）——又量到三件事，都要留下**：
+
+1. **钩子挂在哪**：语句块里的成员走的是 `parse_stat`，而它在 L223 有一条
+   `_ if at_a_macro_call_statement(p) => parse_macro_call(p)`——**先于**声明/表达式那一问。所以文件自己
+   `#define` 了 `STDMETHOD` 时（`di2.cpp` 那个复现），规则必须排在**那条臂之前**；从 include 拿到名字时则走
+   声明/表达式那一问。两条路都挂上之后，`di2.cpp` 与 `symbols.rs` 的真实上下文测试**都能读**（
+   `Declaration(MacroCall, ParameterList, MacroCall(PURE), ;)`）。
+2. **规则会在语料上生效，而且会打坏两个文件**：`numbers`（`__glibcxx_numbers (_Float16, F16);`）从干净变报错、
+   `combaseapi.h` 的首错从 358 行**提前**到 171 行（`DECLARE_HANDLE (CO_MTA_USAGE_COOKIE);`）。两个都是
+   "体以标识符结尾 + 体内有声明专有说明符"，但**调用后面没有第二个括号组**——`parse_stat` 那条臂**没有回滚**，
+   于是一条本来读得通的语句被吃掉了。**判据必须再加一条：实参组之后还要有 `(`**（那次没量到这一步就撤回了，
+   下一次先加它再量）。
+3. **`commdlg.h` 根本修不了——证据到不了它**：探针新增的 `| bodies in force: …` 打在每个失败文件的首错行上，
+   `combaseapi.h:171` 那行显示 **`DECLARE_HANDLE` 有体在生效**，而 `commdlg.h:577` 那行**一个都没有**。原因是
+   它的直接 include 只有 `winapifamily.h`、`_mingw_unicode.h`、`prsht.h`、`pshpack1.h`、`poppack.h`——
+   **不含 `objbase.h`**，`STDMETHOD` 的体得从更远的一条链上传过来（或者那条 `#ifdef __cplusplus` 的体没被判成
+   生效）。**这是下一轮的第一件事**：先量清楚闭包走法为什么没把 `STDMETHOD` 的体带到 `commdlg.h`，再谈读法——
+   否则规则写了也是空转。
+
+**撤回后的状态**：两份语料 128 那份 **116/12/51**、455 那份 **435/20/86**，`cargo test --workspace` **1066 个
+测试 / 34 个套件**全绿（新增的 `symbols.rs` 那条测试按"能力落地那天会失败"的写法留着：两条路今天都读不出来，
+断言的是"读不出来"）。探针那条 `bodies in force:` 是这一轮的**工具**收获，它把"证据没建"与"证据没用"分开了。
+
+**第三轮：落地了（B97 把料送到之后）。** 规则本体与两处钩子照旧，**判据多了一条**——正是第二轮量出来的那一条：
+这次调用后面**还得有 `(`**（`kind_after_the_balanced_group(p, index) == Some(LeftParen)`）。理由写在判据的注释里：
+`DECLARE_HANDLE(CO_MTA_USAGE_COOKIE);` 与 `__glibcxx_numbers(_Float16, F16);` 同样是"体以名字结尾、被调用"，
+第一版把这两条也claim了，语料从干净 435 掉到 432；声明头后面跟的是**声明符**，所以必须有第二个括号组。
+
+**量到的（带 seeds，也就是带索引的产品形态）**：455 那份 干净 436 → **437**、报错 19 → **18**，逐文件对照
+**只有 `commdlg.h` 变化**、**没有一个文件反向**（`commdlg.h` 就是这一族追了四轮的那个文件）；128 那份 116/12/51 不动；
+不带 seeds 的普查 435/20/86 不动——规则要吃体，体只有带索引那条路才有。
+
+**护栏**：`symbols.rs::a_declaration_head_whose_name_is_the_macros_argument`——两条路各断言"零报错 + 恰好一个
+`ParameterList`"（文件自己的 `#define`、以及从环境来的体），外加两条反例：`DECLARE_HANDLE (X);`（没有第二个括号组）
+与 `MAXIMUM(1, 2) (3)`（体是表达式）都必须**不**产生 `ParameterList`。
+
+### B91. 宏的体是**说明符**（`(_CONST_RETURN wchar_t *)(_S)`）—— 已修复
+
+```cpp
+return (_CONST_RETURN wchar_t *)(_S);        // wchar.h:1461
+… (unsigned __LONG32) …                      // basetsd.h:88-90
+```
+
+**现象**：`wchar.h:1461` 的首错是 ``expected ), but get identifier``，打在那行 `wchar_t` 上——括号里的 type-id 读到
+一半就断了。
+
+**成因**：`_mingw.h:376` 在**生效的那一支**里写的是 `#define _CONST_RETURN`——**空体**（`const` 那种拼法在另一支
+里）；`basetsd.h:16` 的 `POINTER_32` 同样是空体，`__LONG32` 是 `long`。文件自己的 token 里没有一个字说"这里什么
+都没有"或"这里是一个说明符"，于是 type-id 把 `_CONST_RETURN` 读成一个名字、把后面的 `wchar_t` 当成多余的名字。
+
+**做法**：`parse_decl_specifier_seq` 的循环里加一条——**体全是说明符的宏**按说明符读（读成 `MacroCall`，文件自己的
+token 一个不动）；体里含 `long`/`int`/`unsigned` 这类**真的命名了类型**的 token 时，它同时算"已命名类型"
+（`const` 只算说明符，于是 `wchar_t` 仍是那个类型）。体来自 B89 的两条通道：文件自己的 `#define`，或闭包带进来的。
+
+**空体只在 type-id 里当"什么都没有"**（`!allow_second_name`），这条边界是**量出来的**：把空体也接受在**声明**的
+说明符序列里，语料从干净 435 掉到 **424**、消息 **617**——因为声明里跟在后面的是**声明符的名字**，被吞掉就整条
+声明没了。type-id 里没有名字可丢，所以那里安全。测试把这条边界钉住了（`symbols.rs`）。
+
+**量到的**（**带 seeds 的普查**，也就是带索引的产品形态）：455 那份 干净 435 → **436**、报错 20 → **19**、
+消息 86 → **84**，只有 `wchar.h` 变化，**没有一个文件反向**；128 那份仍是 116/12/51。**不带 seeds 的普查一条不动**
+（435/20/86）——这条规则要吃体，而体只有带索引的那条路才有：**两份读数要一起看，别把"没带索引"当成"没效果"**。
+
+**顺带量到的一件大事（写给下一次）**：**头文件的宏可能来自"包含它的那个翻译单元"的顺序**。`commdlg.h` 自己的
+include 链是 `winapifamily.h` / `_mingw_unicode.h` / `prsht.h` / `pshpack1.h` / `poppack.h`——**没有 `objbase.h`**；
+`STDMETHOD` 之所以在那里可见，是因为 `windows.h:108` 先 `#include <objbase.h>` 再 `#include <commdlg.h>`。
+所以**单文件闭包在结构上就到不了它**——B90 那条规则修不了 `commdlg.h`，不是规则写错了。要修得像 LSP 那样按
+**翻译单元**喂环境（compile database，或"谁包含这个头"）。探针的 `MACRO <名> in <文件> …` 与首错行上的
+`bodies in force:` 就是为这类问题准备的。
 
 ### B42. 函数定义里的 `try`（function-try-block）—— 待修
 
