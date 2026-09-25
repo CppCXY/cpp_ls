@@ -58,6 +58,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use cpp_parser::Dialect;
+
 use crate::cache::{SummaryKey, content_hash, fnv1a64};
 use crate::include::config::CompilerConfig;
 use crate::include::paths::{DiskFiles, FileProvider, normalize_path};
@@ -544,6 +546,16 @@ impl<'a, F: FileProvider> SummaryStore<'a, F> {
             }
             bytes.push(0);
         }
+        bytes.push(b'|');
+
+        // **Which compiler** the configuration is for, because it changes the *reading*: `__int128` is a type to
+        // g++ and a name to cl.exe, so the same text yields two different summaries and a cache that confused them
+        // would serve one target's facts to the other. See `CompilerConfig::dialect`.
+        bytes.push(match self.config.dialect() {
+            Dialect::Gnu => b'g',
+            Dialect::Msvc => b'm',
+        });
+        bytes.push(0);
 
         bytes.push(b'|');
         bytes.extend_from_slice(
@@ -567,6 +579,7 @@ mod tests {
     use super::SummaryStore;
     use crate::include::config::CompilerConfig;
     use crate::include::paths::MemoryFiles;
+    use cpp_parser::Dialect;
     use std::path::Path;
 
     /// A store over a few files in memory, with a cache directory of its own.
@@ -772,6 +785,31 @@ mod tests {
         assert_ne!(
             one.context_hash(Path::new("/p/a.cpp")),
             different.context_hash(Path::new("/p/a.cpp"))
+        );
+    }
+
+    #[test]
+    fn the_key_knows_which_compiler_the_file_is_read_for() {
+        // The dialect is not a detail of the flags: it changes what the *text* means, so two targets are two
+        // summaries of the same file. `unsigned __int128 x;` declares `x` under GNU and something else under MSVC
+        // (see `docs/grammar-gaps.md` B61), and a cache that confused the two would answer with the wrong facts —
+        // the one failure mode a key must not have.
+        let files = MemoryFiles::new();
+        let gnu = SummaryStore::with_provider(
+            "r",
+            CompilerConfig::default().with_dialect(Dialect::Gnu),
+            &files,
+        );
+        let msvc = SummaryStore::with_provider(
+            "r",
+            CompilerConfig::default().with_dialect(Dialect::Msvc),
+            &files,
+        );
+
+        assert_ne!(
+            gnu.context_hash(Path::new("/p/a.cpp")),
+            msvc.context_hash(Path::new("/p/a.cpp")),
+            "the same file read for two compilers is two different summaries"
         );
     }
 

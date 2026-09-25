@@ -98,7 +98,14 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
     /// store a summary under a name that does not describe its own text, which is a wrong answer rather than a
     /// cache miss. The authority is here because the text is here.
     pub fn index(&self, path: &Path, source: &str, key: SummaryKey) -> FileSummary {
-        let tree = CppParser::parse(source, ParserConfig::default());
+        // Parsed **for the configuration's target**: which compiler's reserved spellings mean what is part of the
+        // compilation, not of the text — `__int128` is a type to g++ and a name to cl.exe. See
+        // [`CompilerConfig::dialect`], and note that the same value is part of `context_hash`, so a summary
+        // written for one target is never read as if it were written for the other.
+        let tree = CppParser::parse(
+            source,
+            ParserConfig::default().with_dialect(self.config.dialect()),
+        );
         self.index_tree(path, source, &tree, key)
     }
 
@@ -651,6 +658,38 @@ mod tests {
 
     fn summary(source: &str) -> crate::summary::FileSummary {
         summarize(Path::new("/p/widget.cpp"), source, key())
+    }
+
+    #[test]
+    fn a_summary_is_read_for_the_compiler_it_was_configured_with() {
+        // The dialect has to reach the **parser**, not just the key: `unsigned __int128 x;` declares `x` when the
+        // compiler spells `__int128` as a type (GNU), and something else when it does not (MSVC). A configuration
+        // that stopped at the cache key would hash two targets apart and then read both the same way, which is
+        // the worst of both.
+        let files = MemoryFiles::new();
+        let names = |dialect: cpp_parser::Dialect| {
+            let config = CompilerConfig::default().with_dialect(dialect);
+            let summary = FileIndexer::new(&files, &config).index(
+                Path::new("/p/a.cpp"),
+                "unsigned __int128 x;\n",
+                key(),
+            );
+            summary
+                .declarations
+                .iter()
+                .map(|fact| fact.name.clone())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            names(cpp_parser::Dialect::Gnu),
+            vec!["x".to_string()],
+            "under GNU the declaration names `x`"
+        );
+        assert!(
+            !names(cpp_parser::Dialect::Msvc).contains(&"x".to_string()),
+            "and under MSVC the same text does not declare `x`, because `__int128` is not a type there"
+        );
     }
 
     /// Every region's branches, as `kind condition body-start..body-end`, for a short assertion.

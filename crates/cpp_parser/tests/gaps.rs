@@ -20,7 +20,10 @@
 //! When one of these starts working, the test that pins it fails, and the fix is to move the line from the
 //! second list to the first. That is the whole mechanism, and it is deliberately the cheapest one available.
 
-use cpp_parser::{CppParser, CppSyntaxKind, CppSyntaxTree, CppTokenKind, ParserConfig};
+use cpp_parser::{
+    CppLexer, CppParser, CppSyntaxKind, CppSyntaxTree, CppTokenKind, Dialect, LexerConfig,
+    ParserConfig,
+};
 
 /// The three places a construct can be written, because the same tokens are read differently in each.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -43,6 +46,1272 @@ fn reads(fragment: &str, place: Where) -> Result<(), String> {
 
     let tree = CppParser::parse(&source, ParserConfig::default());
     report(&source, &tree)
+}
+
+/// Is the condition of the first `if`/`while`/`switch` in `fragment` a **declaration**?
+///
+/// The condition sits inside a `ParenExpr` that belongs to the statement, so this is one level in: the statement's
+/// own child, and then whatever holds the condition. Both the `if (init; cond)` form (whose first part is a
+/// declaration *and* an expression follows) and the `if (decl)` form land here, so the answer is about the
+/// condition's shape and not about which form it is.
+fn condition_is_a_declaration(fragment: &str) -> bool {
+    let source = format!("void probe() {{ {fragment} }}");
+    let tree = CppParser::parse(&source, ParserConfig::default());
+
+    tree.get_red_root()
+        .descendants()
+        .filter(|node| {
+            matches!(
+                CppSyntaxKind::from(node.kind()),
+                CppSyntaxKind::IfStat | CppSyntaxKind::WhileStat | CppSyntaxKind::SwitchStat
+            )
+        })
+        .flat_map(|statement| statement.children())
+        .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParenExpr)
+        .flat_map(|paren| paren.children())
+        .any(|held| CppSyntaxKind::from(held.kind()) == CppSyntaxKind::Declaration)
+}
+
+/// **A condition that declares a variable** — `if (Foo p = get())`, `while (const auto n = g())`.
+///
+/// The declaration in a condition is the one a **`for` header** reads: specifiers and declarators, ended by the
+/// `)` that closes the condition rather than by a `;` of its own. Three readings came before it, and the first is
+/// the one worth remembering:
+///
+/// ```text
+/// if (Foo* p = get())        read as `Foo * p = get()` — a BinaryExpr, **no diagnostic at all**
+/// if (Foo p = get())         `expected ), but get identifier` against the `=`
+/// if (const auto n = g())    `expected primary expression` against the `=`
+/// if (int n = g()) { }       the same, and the block after the condition became rubble
+/// ```
+///
+/// The silent one is the reason this test asserts a **shape** and not just "it parses": every file in the census
+/// was lossless and error-free on that reading, so no count could have moved. `docs/grammar-gaps.md` records it as
+/// the second number of maintenance convention 29.
+///
+/// The negative half is what the fix has to keep: a condition that *names* something without declaring it stays an
+/// expression, which is the case `parse_for_init_declaration`'s "did this name anything?" refusal exists for.
+#[test]
+fn a_condition_may_declare_a_variable() {
+    assert_reads(
+        Where::Body,
+        &[
+            "if (int n = g()) { }",
+            "if (const size_t n = g()) { }",
+            "if (Foo p = get()) { }",
+            "if (Foo* p = get()) { }",
+            "if (auto p = get()) { }",
+            "if (const auto& r = f()) { }",
+            "while (auto n = g()) { }",
+            "switch (int n = g()) { }",
+            // The two forms a condition has *besides* a declaration, which must keep reading as they did.
+            "if (v.size()) { }",
+            "if (i++) { }",
+            "if (a && b) { }",
+            "if (f(1, 2)) { }",
+            // …and the C++17 initialiser form, whose declaration is a separate construct again.
+            "if (int n = g(); n > 0) { }",
+        ],
+    );
+
+    for source in [
+        "if (int n = g()) { }",
+        "if (Foo p = get()) { }",
+        "if (Foo* p = get()) { }",
+        "while (const auto n = g()) { }",
+    ] {
+        assert!(
+            condition_is_a_declaration(source),
+            "{source} must read its condition as a declaration"
+        );
+    }
+
+    for source in ["if (v.size()) { }", "if (i++) { }", "if (a && b) { }"] {
+        assert!(
+            !condition_is_a_declaration(source),
+            "{source} declares nothing, and the expression reading is the one it must keep"
+        );
+    }
+}
+
+/// **An allocation's parenthesised group is its initialiser**, and the predicate that used to read it as a
+/// function type's parameter list.
+///
+/// `a_parameter_list_is_the_type` asks whether a `(` after a type is the type's own parameter list (`void (int)`)
+/// or a group the caller owns. Its first version judged the group by its **first token**, so a name there decided
+/// for the whole group:
+///
+/// ```text
+/// new T(int, char)   a function type, spelled with its parameter list — both elements begin with a type
+/// new T(a, *q)       an allocation of `T` initialised with `(a, *q)` — `*q` is not a parameter
+/// ```
+///
+/// The second was read as the first, `*q` had no type, and the file reported `expected a type specifier` against
+/// the `*` (measured in `bits/uses_allocator.h`, `bits/node_handle.h` and `memory_resource.h`). A parameter is a
+/// type and then a declarator, so every element has to begin like a type — which is what the predicate now asks.
+///
+/// The negative half is the shape the predicate exists for: `void (int)` and `new (int(*)(int))()` are still
+/// types, and a parameter list that really is one must stay one.
+///
+/// Two shapes of the same *family* are still not read, and they are **not** this rule's: both were already failing
+/// when the predicate was fixed, which is why they are recorded as gaps rather than quietly left out.
+#[test]
+fn an_allocation_initialiser_is_not_a_parameter_list() {
+    assert_reads(
+        Where::Body,
+        &[
+            "auto p = new T(a, *q);",
+            "auto p = new T(a, b);",
+            "auto p = ::new (buf) T(a, *q);",
+            "auto p = new (buf) T(a, *q, c);",
+            "auto p = new T[4];",
+            "auto p = new (int(*)(int))();",
+            "void g(int, char);",
+            "auto f = [](int, char) { };",
+        ],
+    );
+
+    // The group is the **initialiser**: a `FunctionType` in the allocation would be the old misreading.
+    assert_statement_kind(&[
+        forbidding(
+            shape("auto p = new T(a, *q);", Where::Body, CppSyntaxKind::Declaration),
+            CppSyntaxKind::FunctionType,
+        ),
+        forbidding(
+            shape(
+                "auto p = new (buf) T(a, *q);",
+                Where::Body,
+                CppSyntaxKind::Declaration,
+            ),
+            CppSyntaxKind::FunctionType,
+        ),
+    ]);
+
+    assert_does_not_read_yet(
+        Where::Body,
+        &[
+            (
+                "auto p = new T(*q);",
+                "an allocation whose only argument starts with `*`: `a_parenthesised_abstract_declarator_follows` \
+                 claims the group first — a `*` right after a `(` is a parenthesised declarator, `void (*)(int)` — \
+                 so `(*q)` is read as a declarator and the `q` inside it has nowhere to go",
+            ),
+            (
+                "auto p = new (Widget)(1);",
+                "an allocation of a **parenthesised** type used as an initialiser: the note on \
+                 `parse_a_type_here` says this shape is why the placement/type split exists, and it reads \
+                 cleanly as a *statement* (`new (Widget)(1);`) but not here. Found while writing this test",
+            ),
+        ],
+    );
+}
+
+/// **A member head split by `#if`/`#else`, where the `#else` branch names the type.**
+///
+/// `bits/alloc_traits.h:430-438` writes one member's head in two branches — `requires … static constexpr void` and
+/// `static __enable_if_t<…>` — and it is the shape behind that file's first error (line 454, reported on the
+/// *next* member because the class body was already damaged).
+///
+/// # The reading, which is not the one this test first guessed
+///
+/// The gap was pinned with a diagnosis — "the function's own name is taken as a second word of the type" — and the
+/// tree said something else once it was printed:
+///
+/// ```text
+/// DeclSpecifierSeq   static  void  #else  static      <- both branches merged, and `void` named a type
+///   InitDeclarator   Declarator(NameExpr `C`)          <- `C` became the **declarator**
+/// PreprocessorDirective `#endif`
+/// Declaration        TemplateType(`f`)  `(` `)` `{` `}`  <- the real member, as rubble
+/// ```
+///
+/// `void` is in the *other* branch, and "a type has already been named" was true because of it — so the `#else`
+/// branch's `__enable_if_t<…>` was refused the type position, became the declarator, and the declaration ended at
+/// the `#endif` with no `;`. The fix is that a branch is an alternative: `#else`/`#elif` puts back the three things
+/// the specifier loop started with (no type named *in this branch*, the one-name allowance unspent, and the evidence
+/// window moved past the directive). `#endif` is deliberately not such a boundary — the tail after it needs what
+/// the branches agreed on. `docs/grammar-gaps.md` B53 keeps the wrong first diagnosis next to the right one.
+///
+/// The negative half is the reading that must not change: a branch that names no type leaves the tail's name as the
+/// type (`#else static` / `#endif` / `C f()`), and the second name of a split head without a macro is still the
+/// declarator.
+#[test]
+fn a_split_member_head_may_name_its_type_in_the_else_branch() {
+    assert_reads(
+        Where::Class,
+        &[
+            // The shape the round fixed, shrunk, and then in the file's own spelling (constraint, trailing
+            // `noexcept`, and a name that is a template-id).
+            "template<typename _Tp>\n#if X\n  static void\n#else\n  static C\n#endif\n  f() { }",
+            "template<typename _Tp, typename... _Args>\n#if X\n\trequires C<_Tp, _Args...>\n\tstatic constexpr void\n\
+             #else\n\tstatic __enable_if_t<C<_Tp, _Args...>>\n#endif\n\tconstruct(_Tp* __p)\n\tnoexcept(g())\n\t{ }",
+            // `#elif` opens the other branch just as `#else` does.
+            "template<typename _Tp>\n#if X\n  static void\n#elif Y\n  static C\n#endif\n  f() { }",
+            // A branch that names **no** type leaves the tail's name as the type: the reset must not cost this.
+            "template<typename _Tp>\n#if X\n  static void\n#else\n  static\n#endif\n  C f() { }",
+            // What already read, and must keep reading: a keyword in the `#else` branch, either branch naming its
+            // own type, and no split at all.
+            "template<typename _Tp>\n#if X\n  static void\n#else\n  static int\n#endif\n  f() { }",
+            "template<typename _Tp>\n#if X\n  static C\n#else\n  static D\n#endif\n  f() { }",
+            "template<typename _Tp>\n  static C\n  f() { }",
+            "template<typename _Tp>\n  static C\n  f();",
+            "template<typename _Tp>\n#if X\n  static C\n#else\n  static void\n#endif\n  f() { }",
+            "template<typename _Tp>\n#if X\n  static void\n#else\n  static C\n#endif\n  int f() { }",
+        ],
+    );
+
+    // The assertion the census cannot make: **which name is the declarator**. The wrong reading had `C` there and
+    // `f() { }` as a declaration of its own; the right one has `f` there, the `#else` branch's name inside the type,
+    // the `#endif` inside the type as well (it is one head written in two branches), and one member rather than two.
+    let source = "struct Probe { template<typename _Tp>\n#if X\n  static void\n#else\n  static C\n#endif\n  f() { } };";
+    let tree = CppParser::parse(source, ParserConfig::default());
+    let declarator = tree
+        .get_red_root()
+        .descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::InitDeclarator)
+        .expect("the member has a declarator");
+    assert_eq!(
+        declarator
+            .descendants()
+            .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr)
+            .map(|node| node.text().to_string())
+            .as_deref(),
+        Some("f"),
+        "the member's own name is the declarator, not the name written in the `#else` branch"
+    );
+    assert_eq!(
+        direct_members(source),
+        1,
+        "one head written in two branches is one member"
+    );
+    assert_eq!(
+        declarator
+            .parent()
+            .and_then(|member| member
+                .children()
+                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq))
+            .map(|specifiers| specifiers.text().to_string())
+            .unwrap_or_default()
+            .matches('#')
+            .count(),
+        2,
+        "both directives belong to the type's own node — the head is one sequence, not two"
+    );
+
+    // …and the one variant that is **not** this rule's, pinned rather than left to be rediscovered: the branch ends
+    // with a *second* name (`MY_API C`), which needs the evidence "a name followed by a directive is not the
+    // declarator" — refused on purpose, because a declaration's **initialiser** really may be written per branch
+    // (`static const int n` / `#if X = 1; #else = 2; #endif`), and that shape reads today.
+    assert_does_not_read_yet(
+        Where::Class,
+        &[(
+            "template<typename _Tp>\n#if X\n  static MY_API C\n#else\n  static MY_API D\n#endif\n  f() { }",
+            "a split head whose branches end with a **second** name: `C` is refused the type (the one-name allowance \
+             was spent on `MY_API`) and becomes the declarator, so the declaration ends at the `#endif` without a \
+             `;`. Reading it needs the directive itself as evidence, which the per-branch initialiser above forbids",
+        )],
+    );
+}
+
+/// The GNU spellings of `decltype` are that keyword, so a typedef of one is a declaration.
+///
+/// `typedef __typeof__(x) T;` was read as a *declarator* named `__typeof__` with a parameter list, and the
+/// declaration then reported `expected ;` against the `T`. The lexer maps the three spellings to
+/// `DecltypeKeyword`, which is the whole fix: everything that already knew what `decltype` is — the specifier
+/// sequence, the declaration anchors, `a_decltype_here_is_a_type` — now answers for them too.
+///
+/// Measured: `bits/stl_heap.h`, `bits/stl_uninitialized.h` and `stddef.h` of the standard-library closure, which
+/// are three of the files that went from failing to clean in the round this was written (`docs/std-library.md`).
+#[test]
+fn the_gnu_spellings_of_decltype_are_that_keyword() {
+    assert_reads(
+        Where::File,
+        &[
+            "typedef __typeof__(x) T;",
+            "typedef __decltype(y) U;",
+            "typedef __typeof(x) V;",
+            "typedef decltype(z) W;",
+            "__typeof__(x) v = 1;",
+            "auto w = __typeof__(x)();",
+        ],
+    );
+
+    // The four spellings are one kind of token, and the text is what still tells them apart.
+    for spelling in ["decltype", "__typeof__", "__typeof", "__decltype"] {
+        assert_eq!(
+            CppLexer::new(spelling, LexerConfig::default(), &mut Vec::new())
+                .tokenize()
+                .first()
+                .map(|token| token.kind),
+            Some(CppTokenKind::DecltypeKeyword),
+            "`{spelling}` must lex as the keyword it is"
+        );
+    }
+}
+
+/// **A class head written in more than one piece** — a macro before the name, and a directive before the base
+/// clause.
+///
+/// Two shapes from the standard library's own heads, and both used to end the head too early, so the diagnostic
+/// landed on a line that is not wrong:
+///
+/// ```text
+/// class _GLIBCXX17_DEPRECATED unary_negate : public …   bits/stl_function.h:1021
+///   a bare macro (no argument list) between the class-key and the name: the head was read as a class named
+///   `_GLIBCXX17_DEPRECATED`, and `expected ;` landed on the `:` of the base clause
+///
+/// class move_iterator                                    bits/stl_iterator.h:1435
+/// #ifdef __glibcxx_ranges
+///   : public __detail::__move_iter_cat<_Iterator>
+/// #endif
+/// { … }
+///   a directive between the name and the base clause: the head ended at the name, and `expected ;` landed on
+///   the `:` of the branch
+/// ```
+///
+/// The negative half is the reason both rules carry guards rather than being "read on": `struct S requires C<T>
+/// { }` is not valid C++ and must still be reported (it is pinned in `concepts.rs`), and `class A final : B` is a
+/// class named `A` — `final` is a spelling, not a token, so a second name spelled that way is never the macro.
+#[test]
+fn a_class_head_may_be_written_in_pieces() {
+    assert_reads(
+        Where::File,
+        &[
+            // A bare macro before the name, with each way a head can continue.
+            "class MACRO Name : public Base { };",
+            "class MACRO Name { };",
+            "class MACRO Name;",
+            "struct MACRO Name\n{\n};",
+            "class MACRO Name\n#ifdef X\n  : public Base\n#endif\n{ };",
+            // The parenthesised form that was already read (B46), unchanged.
+            "typedef struct DECLSPEC_ALIGN (8) Header { int i; } Header;",
+            // A directive between the name and the base clause, with and without a branch on the body.
+            "class Name\n#ifdef X\n  : public Base\n#endif\n{ int member; };",
+            "template<typename T>\nclass Name\n#if X\n  : public Base<T>\n#endif\n{ T value; };",
+            // …and the shapes that must keep their reading.
+            "class A final : public B { };",
+            "class A final { };",
+            "class MACRO final : public B { };",
+        ],
+    );
+
+    // The class the head declares is the name, not the macro: a consumer asking for the class by name must find
+    // it, which is the whole point of reading the macro out of the way.
+    for (source, name) in [
+        ("class MACRO Widget { };", "Widget"),
+        ("class Widget\n#ifdef X\n: public B\n#endif\n{ };", "Widget"),
+    ] {
+        assert!(
+            contains_a_class_named(source, name),
+            "{source} must declare a class called `{name}`"
+        );
+    }
+}
+
+/// Is there a class-like definition named `name` in the fragment?
+fn contains_a_class_named(source: &str, name: &str) -> bool {
+    let tree = CppParser::parse(source, ParserConfig::default());
+    let root = tree.get_red_root();
+
+    root.descendants().any(|node| {
+        matches!(
+            CppSyntaxKind::from(node.kind()),
+            CppSyntaxKind::ClassDef | CppSyntaxKind::StructDef | CppSyntaxKind::UnionDef
+        ) && node
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .any(|token| {
+                token.kind() == cpp_parser::CppKind::Token(CppTokenKind::Identifier)
+                    && token.text() == name
+            })
+    })
+}
+
+/// **A functional conversion with no arguments** — `int()`, `bool()`, `typename T::type()`.
+///
+/// The payload of a functional-notation conversion is an argument list, and an **empty** one is the commonest
+/// there is: a default-constructed temporary. `parse_parenthesized_expression` refuses it — correctly, since it
+/// reads an *expression* and `)` is not one — so both arms that read a functional conversion (a keyword type and
+/// a `typename`-qualified one) had no payload and the whole expression failed:
+///
+/// ```text
+/// return int();                                             expected primary expression against the `int`
+/// return typename iterator_traits<_Iter>::iterator_category();   the same against the `typename`
+/// ```
+///
+/// The second is `bits/stl_iterator_base_types.h:242`, which is what the round that fixed this measured.
+///
+/// The negative half is the reading that must not change: a *call* is not a conversion (`f()` is an
+/// `IdentifierExpr`, not a `CastExpr`), and a bare `typename T::type` with no payload is still not an expression.
+#[test]
+fn a_functional_conversion_may_have_no_arguments() {
+    assert_reads(
+        Where::Body,
+        &[
+            "return int();",
+            "return bool();",
+            "return double();",
+            "return typename A::type();",
+            "return typename A<int>::type();",
+            "return typename iterator_traits<_Iter>::iterator_category();",
+            "return int(1);",
+            "return typename A::type{};",
+            "return typename A::type(1);",
+            // …and the shapes that must keep their reading.
+            "return f();",
+            "return a.b();",
+            "typename A::type();",
+        ],
+    );
+
+    // A conversion is a cast; a call is a name.
+    let kinds = |source: &str| {
+        let tree = CppParser::parse(
+            &format!("void probe() {{ {source} }}"),
+            ParserConfig::default(),
+        );
+        let root = tree.get_red_root();
+
+        (
+            root.descendants()
+                .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CastExpr),
+            root.descendants()
+                .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::IdentifierExpr),
+        )
+    };
+
+    assert_eq!(kinds("return int();"), (true, false), "`int()` is a conversion");
+    assert_eq!(
+        kinds("return typename A::type();"),
+        (true, false),
+        "and so is a `typename`-qualified one"
+    );
+    assert_eq!(kinds("return f();"), (false, true), "`f()` is a call");
+}
+
+/// **A template argument that is an expression, and the comma that follows it.**
+///
+/// The list's argument reader tries a type first and falls back to an expression, and the fallback read a **full**
+/// expression — the comma operator included. So the comma that separates two arguments was taken for the operator,
+/// and the list came out one argument long:
+///
+/// ```text
+/// S<3, 4> x;                       reads with **no diagnostic at all**: one argument `(3, 4)`
+/// S<3, long> x;                    `expected primary expression` against `long` — the loud half
+/// X<!C<T>, bool> f;                the argument ended at the comma with an empty right side, and the `bool`, the
+///                                  `>`, the name and the body were rubble (bits/alloc_traits.h:530-534, which is
+///                                  where the *next* first error of that file was after B53)
+/// ```
+///
+/// The **type** reading is what hid it: `array<int, 3>` and `Grid<T, 3>::fill` put the comma after a type the type
+/// reading has already accepted, so the fallback never ran for the spellings anyone would try by hand. The rule
+/// belongs to the family [`Level`] lists in `exprs.rs` — a rule that spells its own separators reads one element —
+/// and `docs/grammar-gaps.md` B54 records that the list said so before the code did.
+///
+/// The negative half is the other direction: a comma **inside parentheses** is still the comma operator, because
+/// the parentheses are what say so, and a type argument is still read by the type reading.
+#[test]
+fn a_template_argument_read_as_an_expression_stops_at_the_comma() {
+    assert_reads(
+        Where::File,
+        &[
+            "S<3, 4> x;",
+            "S<3, long> x;",
+            "S<long, 3> x;",
+            "S<N - 1, M> x;",
+            "S<A::b, 2> x;",
+            "S<f(1), 2> x;",
+            "integer_sequence<int, 0, 1, 2> s;",
+            "array<int, 3> a;",
+            "Grid<T, 3>::fill x;",
+            "template<typename T> using Not = X<!C<T>, int>;",
+            "X<!C<T>, bool> f();",
+            // A comma inside parentheses is the comma operator, and one argument holds it.
+            "S<(a, b)> x;",
+            "S<(a, b), 2> x;",
+        ],
+    );
+
+    // The shape, because the silent half of the defect is a *count*: `S<3, 4>` was one argument holding a
+    // comma-expression, and nothing about the parse said so.
+    let arguments = |source: &str| {
+        CppParser::parse(source, ParserConfig::default())
+            .get_red_root()
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::TemplateArgument)
+            .count()
+    };
+    assert_eq!(arguments("S<3, 4> x;"), 2, "two arguments, not one");
+    assert_eq!(arguments("S<3, long> x;"), 2, "and the same when the second is a type");
+    assert_eq!(
+        arguments("S<(a, b)> x;"),
+        1,
+        "parentheses make a comma an operator again"
+    );
+
+    // …and the second argument is really an argument: it has its own node rather than a comma-expression's right
+    // operand.
+    let tree = CppParser::parse("S<3, 4> x;", ParserConfig::default());
+    assert!(
+        tree.get_red_root()
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::TemplateArgument)
+            .all(|argument| argument
+                .descendants()
+                .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::LiteralExpr)),
+        "each argument holds its own literal"
+    );
+}
+
+/// **A qualifier the conditional decides** — `noexcept(…)` written once per branch after the parameter list.
+///
+/// The declarator's suffix reader has already run when the directive loop in `finish_init_declarator` reaches a
+/// `#`, so a qualifier written *after* the conditional was still waiting when the loop came back. What came out was
+/// well formed, lossless and **silent** — the shape of defect this file exists for:
+///
+/// ```text
+/// void f()                    bits/alloc_traits.h:662
+/// #if __cplusplus <= 201703L
+///   noexcept(noexcept(__a.construct(__p, __args...)))
+/// #else
+///   noexcept(__is_nothrow_new_constructible<_Up, _Args...>)
+/// #endif
+///   { … }
+/// ```
+///
+/// `noexcept` became the *next* declaration's type — a `BuiltinType` over `noexcept(true)`, two tokens that have
+/// nothing to do with each other — the member after it became a `{ }`-initialised variable, and the body's own
+/// directives landed at class scope. The diagnostic only appeared 27 lines later, on a member that was not at
+/// fault. Asking for the qualifiers again after each directive is the fix; the assertion below is the one that
+/// catches the silent half, because the *old* reading had no error at all in the one-branch spelling.
+#[test]
+fn a_conditional_may_decide_a_functions_qualifier() {
+    assert_reads(
+        Where::Class,
+        &[
+            "void f()\n#if A\n  noexcept(true)\n#else\n  noexcept(false)\n#endif\n  { }",
+            "void f()\n#if A\n  noexcept(true)\n#else\n  noexcept(false)\n#endif\n  {\n#if A\n    g();\n#endif\n  }",
+            "void f()\n#if A\n  const\n#else\n  const volatile\n#endif\n  { }",
+            "template<typename _Up, typename... _Args>\n  void f(_Up* __p, _Args&&... __args)\n#if A\n\
+             noexcept(noexcept(g(__p)))\n#else\n  noexcept(h<_Up>()) \n#endif\n  { }",
+            "auto f()\n#if A\n  -> int\n#else\n  -> long\n#endif\n  { return 0; }",
+            // The shapes that already read, and must keep reading: a head in two branches, a macro the
+            // conditional decides, and a plain qualifier with no conditional at all.
+            "#if defined(A)\nvoid g(void)\n#else\nvoid g()\n#endif\n{ }",
+            "void f()\n#if A\n  _GLIBCXX_NOEXCEPT\n#endif\n  { }",
+            "void f() noexcept(true) { }",
+            "void f() const { }",
+        ],
+    );
+
+    // **One member, and the body is a body.** The pre-fix reading of the single-branch spelling had no error, no
+    // `ErrorNode` and no `MissingNode` — it was two declarations, with `{ }` as the second one's initialiser — so
+    // `assert_reads` alone would have called it correct.
+    let source = "struct Probe { void f()\n#if A\n  noexcept(true)\n#else\n  noexcept(false)\n#endif\n  { } };";
+    let tree = CppParser::parse(source, ParserConfig::default());
+    let body = tree
+        .get_red_root()
+        .descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CompoundStat)
+        .expect("the `{ }` is the function's body");
+    assert_eq!(
+        body.parent().map(|parent| CppSyntaxKind::from(parent.kind())),
+        Some(CppSyntaxKind::Declaration),
+        "the body belongs to the declaration rather than being an initialiser"
+    );
+    assert_eq!(
+        direct_members(source),
+        1,
+        "the qualifier and the body are one member, not two"
+    );
+    assert_eq!(
+        body.parent()
+            .map(|member| member
+                .children()
+                .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq)
+                .count()),
+        Some(1),
+        "`noexcept(true)` is not a type: the member has one specifier sequence, the one holding `void`"
+    );
+}
+
+/// **A braced functional conversion as a template argument** — `X<int{}> m;`, and `int{}` as an expression.
+///
+/// C++11's `T{…}` is one construct in two spellings, and *both* halves of it were missing on the side that reads
+/// **types**: the argument list, and the three lookahead scans that decide whether a `<` opens one at all.
+///
+/// ```text
+/// auto a = int{};                  expected primary expression against the keyword — the conversion arm of
+///                                  `parse_primary_expr` only took a `(` payload
+/// g(int{});  return int{};         the same, in the two positions a value is passed
+/// X<int{}> m;                      **read as `X < int{} > m`** — a comparison, no diagnostic, no ErrorNode
+/// X<size_t{}> m;                   the same silent comparison: the type reading stopped at the `{`, and *that
+///                                  stop was accepted as the end of the argument*
+/// struct Q<T, int{}> { };          `Q` bare, arguments rubble — the scan stopped at the `{`
+/// struct X<A, void_t<decltype(h(size_t{}))>> : B { };   the head read as body-less, base clause and body rubble
+/// ```
+///
+/// Three of those are **silent** and one of them is the A0 shape this file exists for: the declaration the user
+/// wrote is simply not in the tree, and every count stays the same. `bits/alloc_traits.h:941` is the fourth line,
+/// which is where the round that fixed this measured it.
+///
+/// The fix is one idea in five places — *a matched brace pair belongs to what encloses it*: the functional
+/// conversion arm takes a brace payload; the argument reader treats a trailing `{` as making the argument a value
+/// rather than a type; and `a_matching_angle_bracket_follows`, `a_bare_template_id_is_here` and
+/// `a_body_follows_the_class_head` each count braces the way they already counted `[` and `(`. The maintenance
+/// convention about "the scans that count angles are three" is why they were all found in one pass rather than
+/// one corpus probe each.
+///
+/// The negative half is the reason each scan stops at an *unmatched* brace: `if (a < b) { }`, `T x{a < b}` and
+/// `struct S : B<C> { }` are not template-ids, and an unmatched `{`/`}` is still the enclosing declaration's own.
+#[test]
+fn a_braced_conversion_is_a_value_not_a_type() {
+    assert_reads(
+        Where::File,
+        &[
+            // The construct, in the positions it is written in.
+            "X<int{}> m;",
+            "X<size_t{}> m;",
+            "X<int{}, long{}> m;",
+            "X<A{1, 2}> m;",
+            "X<Y<int{}>> m;",
+            "using A3 = X<int{}>;",
+            "using A4 = X<int{}, 1>;",
+            "template<typename T> struct Q<T, int{}> { };",
+            "template<typename _Alloc> struct __is_allocator<_Alloc, __void_t<typename _Alloc::value_type, \
+             decltype(std::declval<_Alloc&>().allocate(size_t{}))>> : true_type { };",
+            "auto a = int{};",
+            "int f() { return int{}; }",
+            "void h() { g(int{}); }",
+            "void h() { bool b{true}; g(b); }",
+            // What must keep its reading: comparisons, a braced initialiser that is not an argument, a class head
+            // with a base clause, and the ordinary unbraced spellings.
+            "void h() { if (a < b) { g(); } }",
+            "void h() { bool r = a < b > c; }",
+            "void h() { T x{a < b}; }",
+            "void h() { auto l = [](int y) { return y < z; }; }",
+            "struct S : B<C> { };",
+            "template<typename T> struct Q<T, int> { };",
+            "X<int> m;",
+            "X<int, long> m;",
+            "X<3, 4> m;",
+            "void h() { int x{1}; }",
+        ],
+    );
+
+    // **The silent half, which is the whole reason this test asserts shapes.** `X<int{}> m;` was a well-formed
+    // `BinaryExpr` before the fix — `(X < int{}) > m` as an `ExpressionStat` — so `assert_reads` would have called
+    // it correct, and a declaration read as a comparison is exactly the A0 defect `docs/grammar-gaps.md` opens
+    // with.
+    let tree = CppParser::parse("X<int{}> m;", ParserConfig::default());
+    let root = tree.get_red_root();
+    assert!(
+        root.descendants()
+            .all(|node| CppSyntaxKind::from(node.kind()) != CppSyntaxKind::ExpressionStat),
+        "a declaration is not an expression statement"
+    );
+    let declarator = root
+        .descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::InitDeclarator)
+        .expect("the declaration has a declarator");
+    assert_eq!(
+        declarator
+            .descendants()
+            .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr)
+            .map(|node| node.text().to_string())
+            .as_deref(),
+        Some("m"),
+        "the declarator is the name written after the type"
+    );
+    assert_eq!(
+        root.descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::TemplateArgument)
+            .count(),
+        1,
+        "the braces are inside **one** argument of the type"
+    );
+
+    // The class head: the arguments belong to the name, and there is a body.
+    let source = "template<typename T> struct Q<T, int{}> : B { };";
+    let tree = CppParser::parse(source, ParserConfig::default());
+    assert!(
+        contains(source, CppSyntaxKind::ClassBody),
+        "the head has a body, so the `{{` was not taken for a braced-init-list"
+    );
+    assert_eq!(
+        tree.get_red_root()
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::TemplateArgument)
+            .count(),
+        2,
+        "and the name's argument list holds both arguments"
+    );
+
+    // The expression: `int{}` is a conversion, `int(x)` is still a declaration, and a plain `int{};` statement is
+    // the conversion rather than a declaration of nothing.
+    assert!(
+        contains("void h() { auto a = int{}; }", CppSyntaxKind::CastExpr),
+        "`int{{}}` is a functional conversion like `int()`"
+    );
+    assert!(
+        contains("void h() { int(x); }", CppSyntaxKind::Declaration),
+        "`int(x);` stays the declaration it is — the parenthesis spelling is a declarator's"
+    );
+}
+
+/// **A directive between the requirements of a requires-expression** — the last of the seams.
+///
+/// The body is "one requirement per `;`", and a `#` at the position where a requirement begins had no reading at
+/// all, so the whole requires-expression failed. libstdc++ writes the two alternatives of one requirement in two
+/// branches, and `bits/alloc_traits.h:140` is where this was found:
+///
+/// ```cpp
+/// template<typename _Tp, typename... _Args>
+///   static constexpr bool __can_construct_at
+///     = requires (_Tp* __p, _Args&&... __args) {
+/// #if __cpp_constexpr_dynamic_alloc
+///         std::construct_at(__p, std::forward<_Args>(__args)...);
+/// #else
+///         ::new((void*)__p) _Tp(std::forward<_Args>(__args)...);
+/// #endif
+///       };
+/// ```
+///
+/// **What it cost, and why this is the last of a chain**: the failed member also closed the *class* early (the
+/// known gap pinned at the bottom of this test), so every member after it was read at namespace scope and the
+/// file's only diagnostic landed on the leftover `}` at its very end — line 1053 of 1053. Moving that error back
+/// one construct at a time is what the five fixes before this one did (`docs/roadmap.md` §2.0: 454 → 536 → 689 →
+/// 941 → 1053 → clean).
+///
+/// The shape assertion is the real one: a directive is a node of the requires-expression, the requirements are
+/// still requirements, and the member stays a member.
+#[test]
+fn a_conditional_may_decide_a_requirement() {
+    assert_reads(
+        Where::Class,
+        &[
+            "static constexpr bool ok = requires (T t) {\n#if X\n  t.f();\n#endif\n  };",
+            "static constexpr bool ok = requires (T t) {\n#if X\n  t.f();\n#else\n  t.g();\n#endif\n  };",
+            "static constexpr bool ok = requires (T t) {\n#if X\n  t.f();\n#endif\n#if Y\n  t.h();\n#endif\n  };",
+            "static constexpr bool ok = requires (T t) {\n#if X\n  typename T::value_type;\n#else\n  { t.f() } noexcept -> int;\n#endif\n  };",
+            "static constexpr bool ok = requires (T t) {\n#if X\n  t.f();\n#endif\n  t.g();\n  };",
+            "template<typename T>\n  static constexpr bool ok = requires (T t) {\n#if X\n  t.f();\n#else\n  t.g();\n#endif\n  };",
+            // What must keep reading: the same requires-expression without a conditional, and a directive that
+            // decides the *whole* member rather than a requirement.
+            "static constexpr bool ok = requires (T t) { t.f(); };",
+            "static constexpr bool ok = requires (T t) { typename T::value_type; { t.f() } noexcept -> int; };",
+        ],
+    );
+
+    // The whole member written once per branch — asserted as a **whole file**, because `Where::Class` puts the
+    // closing brace on the same line as the fragment's last line, and `#endif }` is not something any compiler
+    // accepts (see the note below).
+    assert!(
+        reads(
+            "struct Probe {\n#if X\n  static constexpr bool ok = requires (T t) { t.f(); };\n#else\n  \
+             static constexpr bool ok = requires (T t) { t.g(); };\n#endif\n};",
+            Where::File,
+        )
+        .is_ok(),
+        "a member written once per branch reads, with each directive on a line of its own"
+    );
+
+    // **One spelling is deliberately absent from that list**: the whole member written per branch with the
+    // `#endif` **sharing its line** with the class's closing brace —
+    //
+    // ```cpp
+    // struct S {
+    // #if X
+    //   static constexpr bool ok = requires (T t) { t.f(); };
+    // #else
+    //   static constexpr bool ok = requires (T t) { t.g(); };
+    // #endif };            // ← `};` are extra tokens on the directive's line
+    // ```
+    //
+    // It does not parse here, and it does not compile either: a preprocessing directive runs to the end of its
+    // line, so `};` are extra tokens after `#endif` — g++ says `warning: extra tokens at end of '#endif'
+    // directive` and then `error: expected '}' at end of input`, which is the same complaint this parser makes.
+    // Pinned as a comment rather than as a test case because there is nothing to fix: convention 36 is "verify
+    // the fragment with the compiler", and this fragment is wrong.
+
+    // **The shape.** A directive inside the body is a child of the requires-expression, and the requirements on
+    // both sides of it are still requirements — the failure mode this guards against is the body being abandoned
+    // and the tokens becoming rubble, which reads as "fine" to every count in the census.
+    let source = "struct Probe { static constexpr bool ok = requires (T t) {\n#if X\n  t.f();\n#else\n  t.g();\n#endif\n  }; };";
+    let tree = CppParser::parse(source, ParserConfig::default());
+    let requires = tree
+        .get_red_root()
+        .descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::RequiresExpr)
+        .expect("the member holds a requires-expression");
+    let inside = |kind| {
+        requires
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == kind)
+            .count()
+    };
+    assert_eq!(inside(CppSyntaxKind::Requirement), 2, "one requirement per branch");
+    assert_eq!(
+        inside(CppSyntaxKind::PreprocessorDirective),
+        3,
+        "the `#if`, `#else` and `#endif` are the expression's own children"
+    );
+    assert_eq!(
+        direct_members("struct Probe { static constexpr bool ok = requires (T t) {\n#if X\n  t.f();\n#else\n  t.g();\n#endif\n  };\n  int after;\n};"),
+        2,
+        "the member with the conditional in it is a member, and so is the one after it"
+    );
+}
+
+/// **A member that fails with an unbalanced brace keeps the class and its members** — the other half of the
+/// recovery contract.
+///
+/// [`a_member_the_parser_gives_up_on_keeps_the_members_after_it_members`] covers the member that fails on a
+/// *missing* `;`, and closing its markers with their end events was the fix. This is the half that fix could not
+/// reach, because it is about **tokens** rather than about nodes: when the abandoned member had consumed a `{`
+/// that never met its `}`, the class body spent its own `}` on it, ended early, and every member after it was read
+/// at **file scope** — which is how `bits/alloc_traits.h` came to report its only diagnostic 900 lines after the
+/// member that was actually broken (`docs/grammar-gaps.md` B58).
+///
+/// The fix is a **brace debt**: a failed member is charged for the braces it consumed and never closed, and the
+/// body pays that debt by reading the next `}`s as error nodes before it is allowed to end. Both paths a failure
+/// can take are charged — the attempt that stops past the member's first token (the events still hold it) and the
+/// attempt that rolls back, whose tokens the loop then re-reads one at a time as rubble.
+///
+/// What is asserted is the question the defect is about — *is the member after the broken one still a member* —
+/// rather than the shape of the rubble, for the same reason the sibling test gives: how many error nodes a given
+/// piece of rubbish leaves is not a promise worth making.
+#[test]
+fn a_failed_member_with_an_unbalanced_brace_keeps_the_members_after_it_members() {
+    for (source, note) in [
+        (
+            // A requirement split **mid-expression** by a directive: the `;` is in the other branch, which is
+            // invalid code — and the input that leaves the `{` of the requires body unmatched when the member
+            // fails. This is the reproduction B58 was written from.
+            "struct Probe {\n  static constexpr bool ok = requires (T t) {\n#if X\n    t.f()\n#endif\n    ;\n  };\n  int after;\n};",
+            "a requires-expression whose requirement is split by a directive",
+        ),
+        (
+            // The same shape one level down: a function body left open by the failed member.
+            "struct Probe {\n  void f() {\n#if X\n    g()\n#endif\n    ;\n  };\n  int after;\n};",
+            "a function body whose statement is split by a directive",
+        ),
+        (
+            // …and the file-scope version of the same input, which used to cost the whole class.
+            "struct Probe {\n  int x = 1\n  int after;\n};",
+            "a member with no `;` at all — the case the sibling test already pins, kept here so the two halves \
+             are checked by one loop",
+        ),
+    ] {
+        assert!(
+            has_a_member_containing(source, "after"),
+            "the member after a broken one is still a member: {note}\n{source}"
+        );
+    }
+}
+
+/// **A `typedef` may carry an attribute after its declarator** — the shape GCC's intrinsic headers are built from.
+///
+/// The ordinary declaration path has read attributes in this position since the round that added them
+/// (`int x [[maybe_unused]] = 1;`), and the `typedef` rule is a *second* path — it spells its own declarator loop
+/// and never reaches `finish_init_declarator` — so it was missing them. Eight files of the closure had this as
+/// their first error, and it is the construct their whole type zoo is made of:
+///
+/// ```c
+/// typedef int __v4si_u __attribute__ ((__vector_size__ (16), __may_alias__, __aligned__ (1)));
+/// typedef short __v32hi __attribute__ ((__vector_size__ (64)));           // avx512bwintrin.h:361
+/// typedef double __v8df __attribute__ ((__vector_size__ (64)));           // avx512fintrin.h:3817
+/// typedef int v4 [[deprecated]];                                          // the standard spelling, same position
+/// ```
+///
+/// Both spellings go through one rule — `parse_attribute_specifiers` reads `[[…]]`, `__attribute__((…))` and
+/// `__declspec(…)` into the same node — so the fix is one call rather than one per compiler. The negative half
+/// keeps the two positions apart: an attribute *before* the type is a specifier and was already read, and a
+/// `typedef` with a comma-separated list must still declare every name.
+#[test]
+fn a_typedef_may_carry_an_attribute() {
+    assert_reads(
+        Where::File,
+        &[
+            "typedef int v4 __attribute__ ((__vector_size__ (16)));",
+            "typedef int v4 [[deprecated]];",
+            "typedef int v4 __attribute__ ((__vector_size__ (8), __may_alias__));",
+            "typedef int __m64 __attribute__ ((__vector_size__ (8), __may_alias__));",
+            // The spliced spelling the headers actually use, `\` and all.
+            "typedef int __v4si_u __attribute__ ((__vector_size__ (16),\t\\\n\t\t\t\t     __may_alias__, __aligned__ (1)));",
+            // What must keep reading: the attribute in front of the type, a list of declarators, and a typedef
+            // with no attribute at all.
+            "typedef int __attribute__((aligned(8))) v4;",
+            "typedef WCHAR *PWCHAR, *LPWCH;",
+            "typedef int Integer;",
+            "int x [[maybe_unused]] = 1;",
+            "void f(void) __attribute__((noreturn));",
+        ],
+    );
+
+    // The shape: the attribute is the declaration's own node, and the name the typedef introduces is usable as a
+    // type afterwards — which is the property the declaration rule exists for.
+    let source = "typedef int v4 [[deprecated]];";
+    let tree = CppParser::parse(source, ParserConfig::default());
+    let typedef = tree
+        .get_red_root()
+        .descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::TypedefDecl)
+        .expect("the declaration is a typedef");
+    assert_eq!(
+        typedef
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::AttributeList)
+            .count(),
+        1,
+        "the attribute belongs to the typedef rather than being rubble"
+    );
+    assert!(
+        contains(
+            "typedef int v4 [[deprecated]]; v4 x;",
+            CppSyntaxKind::Declaration
+        ),
+        "and the name it declares is a type name afterwards"
+    );
+}
+
+/// **A conditional may decide an attribute** — the position between a template head and the declaration it wraps.
+///
+/// That position already had a rule: an attribute there belongs to neither the head nor the specifier sequence, so
+/// the declaration rule reads it itself (`template <typename T> [[nodiscard]] T p();`). What it did *not* have was
+/// the **directive**, and a conditional in front of the first specifier is not the specifier sequence's to read —
+/// it reads directives only *between* specifiers, because a declaration that begins with one is the caller's
+/// (`docs/grammar-gaps.md` B60):
+///
+/// ```cpp
+/// template<typename _Ex>                                  // bits/nested_exception.h:203
+/// # if ! __cpp_rtti
+///   [[__gnu__::__always_inline__]]
+/// #endif
+///   inline void
+///   rethrow_if_nested(const _Ex& __ex)
+/// ```
+///
+/// The `.tcc` files and libstdc++'s inline definitions write the same two orders, and with the single attribute
+/// pass the whole declaration failed — the file came out as bare tokens with the diagnostic on the attribute. The
+/// fix alternates the two, the same shape as the directive/macro alternation in `finish_init_declarator`.
+///
+/// The negative half is what must not change: an attribute at the start of an ordinary declaration is a
+/// *specifier* (the sequence owns it), and a directive with no template head around it is read by the caller that
+/// asked for the declaration.
+#[test]
+fn a_conditional_may_decide_an_attribute() {
+    assert_reads(
+        Where::File,
+        &[
+            "template<typename T>\n#if X\n[[attr]]\n#endif\ninline void f() { }",
+            "template<typename T>\n[[attr]]\n#if X\n#endif\ninline void f() { }",
+            "template<typename _Ex>\n# if ! __cpp_rtti\n  [[__gnu__::__always_inline__]]\n#endif\n  \
+             inline void\n  rethrow_if_nested(const _Ex& __ex)\n  { }",
+            "template<typename T>\n[[a]]\n#if X\n[[b]]\n#endif\nvoid f() { }",
+            // What must keep reading: the attribute with no conditional, the conditional with no attribute, and
+            // an attribute in front of an ordinary declaration.
+            "template<typename T>\n[[nodiscard]] T p();",
+            "template<typename T>\n#if X\n#endif\ninline void f() { }",
+            "[[nodiscard]] int x;",
+            "int x [[maybe_unused]];",
+        ],
+    );
+
+    // The shape: the attribute and both directives belong to the template declaration, and the declaration is a
+    // declaration — not the bare tokens the failing reading left behind.
+    let source = "template<typename _Ex>\n# if ! __cpp_rtti\n  [[__gnu__::__always_inline__]]\n#endif\n  \
+                  inline void\n  rethrow_if_nested(const _Ex& __ex)\n  { }";
+    let tree = CppParser::parse(source, ParserConfig::default());
+    let declaration = tree
+        .get_red_root()
+        .descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration)
+        .expect("the head and the declaration are one declaration");
+    assert_eq!(
+        declaration
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::AttributeList)
+            .count(),
+        1,
+        "the attribute is inside the declaration it belongs to"
+    );
+    assert!(
+        declaration
+            .descendants()
+            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::TemplateDecl),
+        "and so is the template head"
+    );
+}
+
+/// **A type the target compiler spells** — `__int128`, `_Float16`, `__int64` — and the dialect that decides it.
+///
+/// A handful of reserved spellings have no single answer: `__int128` is a builtin type to GCC and Clang and a
+/// plain name to cl.exe, `__int64` is the other way round, and `_Float16` belongs to GCC. Read as a *name* — the
+/// only reading available before the dialect existed — the failure is silent and shaped like a declaration of
+/// something else (`docs/grammar-gaps.md` B61, measured on `bits/bmi2intrin.h`):
+///
+/// ```text
+/// unsigned __int128 x;      Declaration[ DeclSpecifierSeq[unsigned]  InitDeclarator[__int128]  MacroCall[x] ]
+///                           — a variable named `__int128` whose *suffix* is the macro `x`
+/// _Float16 h = 1;           the declaration fails outright: the name `h` is taken into the type
+/// ```
+///
+/// The fix is a [`Dialect`] on the parser: the spellings are read as `BuiltinType` specifiers when the target
+/// spells them that way, and stay names when it does not. The shape assertion is the one that matters — the
+/// wrong reading had **no diagnostic at all**, so `assert_reads` called it correct.
+///
+/// The negative half is the reason this is a dialect and not a longer spelling list: under MSVC `__int128` must
+/// stay a name, because that is exactly how MinGW's `_mingw.h` uses it (`typedef int __int128 __attribute__
+/// ((__mode__ (TI)));`, in the branch a compiler without `__int128` takes), and `__int64` must stay a name under
+/// GNU, because MinGW's `#define __int64 long long` is what makes it a type there.
+#[test]
+fn a_type_may_be_spelled_by_the_compiler() {
+    // GNU first: the parser's own default, and the dialect its corpus is compiled by.
+    assert_reads(
+        Where::File,
+        &[
+            "unsigned __int128 x;",
+            "__int128 x;",
+            "void f() { auto r = (unsigned __int128) 1; }",
+            "using T = unsigned __int128;",
+            "typedef unsigned __int128 u128;",
+            "struct S { unsigned __int128 big; };",
+            "void f(unsigned __int128 v);",
+            "void f() { _Float16 h = 1; }",
+            "void f() { __bf16 b = 1; }",
+            "void f() { __float128 q = 1; }",
+            // …and the reserved names that are *not* types stay what they were.
+            "void f(int *__restrict p);",
+            "__extension__ inline int g();",
+        ],
+    );
+
+    // **The shape**: a `BuiltinType` specifier whose text is the spelling, and a declarator that is the name
+    // written after it — not a variable named `__int128` with a macro suffix.
+    let tree = CppParser::parse("unsigned __int128 x;", ParserConfig::default());
+    let root = tree.get_red_root();
+    let builtin = root
+        .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::BuiltinType)
+        .map(|node| node.text().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        builtin,
+        vec!["unsigned ".to_string(), "__int128 ".to_string()],
+        "both words are type specifiers"
+    );
+    assert!(
+        root.descendants()
+            .all(|node| CppSyntaxKind::from(node.kind()) != CppSyntaxKind::MacroCall),
+        "and the declarator is not read as a macro suffix"
+    );
+    assert_eq!(
+        root.descendants()
+            .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::InitDeclarator)
+            .and_then(|declarator| declarator
+                .descendants()
+                .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr))
+            .map(|name| name.text().to_string())
+            .as_deref(),
+        Some("x"),
+        "the declared name is the one written last"
+    );
+
+    // **MSVC**: `__int64` and friends are types there, and `__int128` is not — which is how a header that
+    // typedefs it reads.
+    let msvc = |source: &str| {
+        CppParser::parse(
+            source,
+            ParserConfig::default().with_dialect(Dialect::Msvc),
+        )
+    };
+    assert!(
+        msvc("__int64 big;").get_errors().is_empty(),
+        "`__int64` is a type to MSVC"
+    );
+    assert!(
+        msvc("typedef int __int128 __attribute__ ((__mode__ (TI)));")
+            .get_errors()
+            .is_empty(),
+        "and `__int128` is a name there, which is what MinGW's typedef branch needs"
+    );
+    assert!(
+        !msvc("struct S { __int64 big; };").get_errors().is_empty()
+            || msvc("struct S { __int64 big; };")
+                .get_red_root()
+                .descendants()
+                .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::BuiltinType)
+                .any(|node| node.text().to_string().trim() == "__int64"),
+        "`__int64` is read as a type to MSVC, not as a variable's name"
+    );
+    // …and the same source under GNU keeps the other reading: `__int64` is a *name* there, because MinGW's
+    // `#define __int64 long long` is what makes it a type in that configuration.
+    assert!(
+        CppParser::parse("typedef int __int64;", ParserConfig::default())
+            .get_errors()
+            .is_empty(),
+        "under GNU `__int64` is an ordinary name, so a typedef of it declares one"
+    );
+}
+
+/// **A braced body settles whether a parenthesised group was a parameter list.**
+///
+/// `T f(U)` is two readings at once — a function taking an unnamed parameter of type `U`, or a variable `f`
+/// direct-initialised with the expression `U` — and the standard keeps both. What no reading survives is a `{`
+/// after it: a declarator takes **one** initializer, so a body means the group was the parameter list. Without
+/// that evidence the preference for the initializer reading (which exists for `Max(a, b);`, a declaration with no
+/// type at all) took these definitions apart, and the diagnostic landed on the *body*:
+///
+/// ```cpp
+/// _GLIBCXX20_CONSTEXPR
+/// inline _Iter_less_val
+/// __iter_comp_val(_Iter_less_iter)          // bits/predefined_ops.h:79
+/// { return _Iter_less_val(); }              // a declarator takes only one initializer
+///
+/// template<typename _Ex>
+///   __attribute__ ((__always_inline__))
+///   inline exception_ptr
+///   make_exception_ptr(_Ex) _GLIBCXX_USE_NOEXCEPT    // bits/exception_ptr.h:283 — a macro suffix in between
+///   { return exception_ptr(); }
+/// ```
+///
+/// Five files of the closure had this as their first error (`exception_ptr.h`, `predefined_ops.h`, `cmath`,
+/// `helper_functions.h`, `type_traits.h`).
+///
+/// The evidence is asked with the **real readers** — parse the group as a parameter list, let the suffix reader
+/// run (macro suffix, `noexcept`, trailing return type), keep it only if a `{` is what it reaches — rather than
+/// with a scan that would have to know their vocabulary. And only where a definition is legal: **not inside a
+/// body**, where `T x(y) { }` is a declaration followed by a block.
+///
+/// The negative half is that second fact plus the case the preference exists for: the initializer reading must
+/// keep `T x(y);`, `Max(a, b);` and a call.
+#[test]
+fn a_body_settles_whether_the_group_was_a_parameter_list() {
+    assert_reads(
+        Where::File,
+        &[
+            "T f(U) { return X(); }",
+            "inline T f(U) { return X(); }",
+            "T f(U, V) { return X(); }",
+            "T f(U) noexcept { return X(); }",
+            "auto f(U) -> T { return X(); }",
+            "MACRO\ninline T\nf(U)\n{ return X(); }",
+            "_GLIBCXX20_CONSTEXPR\ninline _Iter_less_val\n__iter_comp_val(_Iter_less_iter)\n\
+             { return _Iter_less_val(); }",
+            "template<typename _Ex>\n  __attribute__ ((__always_inline__))\n  inline exception_ptr\n  \
+             make_exception_ptr(_Ex) _GLIBCXX_USE_NOEXCEPT\n  { return exception_ptr(); }",
+            // What must keep its reading, in the place where the *other* reading is the valid one.
+            "T x(y);",
+            "Max(a, b);",
+            "T f(U);",
+            "void g() { T x(y); }",
+            "void g() { T x(y); { h(); } }",
+            "void g() { h(x); }",
+            "struct S { T f(U) { return X(); } };",
+        ],
+    );
+
+    // The shape, both ways round: a definition has a **parameter list** and a body, a variable has an
+    // **initializer** and no parameter list.
+    let parts = |source: &str| {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        let root = tree.get_red_root();
+        let has = |kind| {
+            root.descendants()
+                .any(|node| CppSyntaxKind::from(node.kind()) == kind)
+        };
+        (
+            has(CppSyntaxKind::ParameterList),
+            has(CppSyntaxKind::Initializer),
+            has(CppSyntaxKind::CompoundStat),
+            root.descendants()
+                .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::InitDeclarator)
+                .and_then(|declarator| {
+                    declarator
+                        .descendants()
+                        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr)
+                })
+                .map(|name| name.text().to_string())
+                .unwrap_or_default(),
+        )
+    };
+
+    assert_eq!(
+        parts("T f(U) { return X(); }"),
+        (true, false, true, "f".to_string()),
+        "a group followed by a body is a parameter list, and the declarator is the function's name"
+    );
+    assert_eq!(
+        parts("T x(y);"),
+        (false, true, false, "x".to_string()),
+        "and a group that ends the declaration is an initializer"
+    );
+}
+
+/// **A cast of a cast is still a cast** — `(T)(U) 1`, and the run of groups that makes it look like a call.
+///
+/// `(T)…` is read as a cast only on evidence, because `(f)(x)` is a *call* and the callee must not be lost. The
+/// evidence the cast branch uses is "an operand follows the `)`" (two operands in a row is not an expression in
+/// any grammar) — and the `(` that begins a continuation was deliberately left out of that set, which made a
+/// **run of groups** unreadable: the token after the first `)` is another `(`, so the question was never asked.
+/// GCC's own intrinsic headers write exactly that, four of them:
+///
+/// ```cpp
+/// return (__m512bh) __builtin_ia32_minmaxbf16512_mask ((__v32bf) __A,
+///                                                      (__v32bf)(__m512bh)     // avx10_2-512minmaxintrin.h:40
+///                                                      _mm512_setzero_si512 (),
+///                                                      (__mmask32) -1);
+/// ```
+///
+/// So the scan steps over a **run** of balanced groups and asks its question about the token after the last of
+/// them. That the token being stepped over is the ambiguous one is what makes the scan safe: `(f)(a)` (nothing
+/// after) and `(f)(a)(b)` (a `;` after the second group) keep their readings, and the shapes below pin that.
+#[test]
+fn a_cast_of_a_cast_is_still_a_cast() {
+    assert_reads(
+        Where::Body,
+        &[
+            "(T)(U) 1;",
+            "(T)(U) g();",
+            "(T)(U)(V) 1;",
+            "auto r = (T)(U) 1;",
+            "auto r = (T)(U)(V) g ();",
+            "h((T)(U) g(), 1);",
+            "return (A) __builtin ((B) x, (C)(D)\n  g (), (E) -1);",
+            "(int)(char) 1;",
+            "(int)(char)(long) 1;",
+            // What must keep its reading: a call, a chain of calls, and the operators that make `(` ambiguous.
+            "(f)(a);",
+            "(f)(a)(b);",
+            "(f)(a) + 1;",
+            "(a)[b];",
+            "(a) - b;",
+            "(a) *b;",
+        ],
+    );
+
+    // **The shape**, because both readings parse: a cast of a cast is two `CastExpr`s, a call through
+    // parentheses is a `CallExpr` over a `ParenExpr`, and a chain is two `CallExpr`s.
+    let counts = |source: &str| {
+        let tree = CppParser::parse(&format!("void probe() {{ {source} }}"), ParserConfig::default());
+        let root = tree.get_red_root();
+        let count = |kind| {
+            root.descendants()
+                .filter(|node| CppSyntaxKind::from(node.kind()) == kind)
+                .count()
+        };
+        (count(CppSyntaxKind::CastExpr), count(CppSyntaxKind::CallExpr))
+    };
+
+    assert_eq!(counts("(T)(U) 1;"), (2, 0), "two casts, no call");
+    assert_eq!(counts("(T)(U)(V) 1;"), (3, 0), "…and the run can be longer");
+    assert_eq!(counts("(f)(a);"), (0, 1), "a call through parentheses stays a call");
+    assert_eq!(counts("(f)(a)(b);"), (0, 2), "and a chain of calls stays a chain");
+    assert_eq!(
+        counts("(f)(a) + 1;"),
+        (0, 1),
+        "`+` is ambiguous, so the call reading is the one kept"
+    );
 }
 
 /// The empty string when the parse is clean, or a description of the first thing wrong with it.
@@ -797,6 +2066,16 @@ fn a_template_argument_may_be_a_call_or_a_function_type() {
 /// **with** their end events.
 ///
 /// The assertion is the member written after the body: it has to still be a member of the class.
+///
+/// # The other half: a brace the failed statement never closed
+///
+/// Closing markers with their end events decides what the *tree* looks like; it cannot un-consume a **token**. A
+/// statement that failed after eating a `{` — a braced initialiser, a lambda's body, a nested block — therefore
+/// left the block one brace short, the recovery skipped *to* the next `}`, and that one belonged to the failed
+/// statement: the block ended there and the statements after it were left to the enclosing rule. The fix is a
+/// **brace debt** (kept by `parse_stats`, and by the class body for the member-level case — `docs/grammar-gaps.md`
+/// B58): the failed statement is charged for the braces it consumed and never closed, and the block pays the debt
+/// by reading the next `}`s as error nodes before it may end.
 #[test]
 fn a_statement_the_parser_gives_up_on_keeps_the_block_after_it() {
     let rubble = [
@@ -806,6 +2085,13 @@ fn a_statement_the_parser_gives_up_on_keeps_the_block_after_it() {
         "  int x = 1\n  int y = 2;\n",
         // A call that is not a statement.
         "  g(1, 2) h();\n",
+        // **A brace the failed statement opened and never closed** — a braced initialiser whose initialiser is
+        // written in two branches, so the `;` is in the other one and the statement fails with `{` consumed.
+        "  S s{\n#if X\n    1\n#endif\n    ;\n  };\n",
+        // …and the same one level in: a lambda's body split by a directive.
+        "  auto l = [] {\n#if X\n    g()\n#endif\n    ;\n  };\n",
+        // …and a nested block that never closes.
+        "  {\n#if X\n    g()\n#endif\n    ;\n",
     ];
 
     for text in rubble {
@@ -1058,6 +2344,25 @@ int after;
     assert!(
         !block.text().to_string().contains("int after;"),
         "and the block ends at its own `}}`: {}",
+        block.text()
+    );
+
+    // **A declaration inside the block that fails with a brace left open** must not cost the block either — the
+    // third container that keeps a brace debt (`docs/grammar-gaps.md` B58), and the one the MinGW headers needed:
+    // a braced initialiser whose initialiser is written in two branches fails with the `{` consumed, and without
+    // the debt the block's own `}` paid for it.
+    let source = "extern \"C\" {\n  S s{\n#if X\n    1\n#endif\n    ;\n  };\n  int after;\n}\n";
+    let block = CppParser::parse(source, ParserConfig::default())
+        .get_red_root()
+        .descendants()
+        .find(|node| {
+            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CompoundStat
+                && node.text().to_string().starts_with('{')
+        })
+        .expect("the linkage block is a node");
+    assert!(
+        block.text().to_string().contains("int after;"),
+        "the declaration after a broken one is still inside the linkage block: {}",
         block.text()
     );
 }
@@ -1995,14 +3300,16 @@ fn constructs_the_parser_does_not_read_yet() {
                 "a call with its `;` missing and **no `#define` in the file**: the macro reading needs that \
                  evidence, and a spelling convention is not enough for it; see B41 and `macros.rs`",
             ),
-            (
-                "if (int x = g()) { }",
-                "a **condition with an initialiser** — a declaration inside an `if`/`while`/`switch` head. Valid \
-                 C++ (checked with g++ 15), and the file found it while looking for recovery damage rather than \
-                 for grammar: `int` in condition position comes out as `expected primary expression` and the \
-                 block's braces are then read as rubble. Recorded here so the next round has the shape and the \
-                 reproduction",
-            ),
+            // `if (int x = g()) { }` used to be here — a condition that declares a variable. It was read as
+            // `expected primary expression` against the `int`, and the block after it became rubble. The `for`
+            // header's declaration rule is what fixed it (that rule has no `;` of its own, which is exactly the
+            // shape a condition needs); `a_condition_may_declare_a_variable` now pins the reading, including the
+            // **silent** half of the same defect that this entry could not see:
+            //
+            //   if (Foo* p = get())   was a `BinaryExpr` — `Foo * p = get()` — with no diagnostic at all
+            //
+            // A "does it parse?" list cannot catch that one, which is the second number of maintenance
+            // convention 29 and the reason the shape assertions below exist.
         ],
     );
 

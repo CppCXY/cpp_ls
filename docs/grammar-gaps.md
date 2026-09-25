@@ -918,6 +918,633 @@ typedef struct DECLSPEC_ALIGN (8) _XSAVE_AREA_HEADER { … } XSAVE_AREA_HEADER, 
 
 **护栏**：`gaps.rs::a_class_head_may_carry_a_macro_before_its_name`。
 
+### B47. 条件里声明一个变量（`if (Foo p = get())`）—— 已修复
+
+```cpp
+if (int n = g()) { }
+if (const auto n = g()) { }
+while (const size_t n = len()) { }
+```
+
+**现象**：三种写法、两种症状，其中一种是**静默**的：
+
+```text
+if (Foo* p = get())      读成 `Foo * p = get()` —— BinaryExpr，**一个诊断都没有**，而它不是合法 C++
+if (Foo p = get())       `expected ), but get identifier` 打在 `=` 上
+if (const auto n = g())  `expected primary expression` 打在 `=` 上
+```
+
+**成因**：条件的声明形式走的还是 `parse_declaration`，而那条规则以 `expect_semicolon` 结尾——条件里没有 `;`，
+于是尝试失败、`parse_condition` 回退到**表达式**读法。实测：`bits/ranges_algo.h:3326`、`bits/ranges_algobase.h:140`。
+
+**性质**：缺规则。修法是 `parse_condition_declaration`：与 `for` 头部的声明同形（specifiers + 一个
+init-declarator，没有自己的 `;`），外加两条标准要求——**恰好一个**变量，而且**必须有初始化式**。第二条就是判据
+本身：`if (a && b)` 同样是"名字 + `&&` + 名字"，没有它就会被读成"`b` 声明为 `a&&`"，那是错答案而不是缺答案
+（第一版就是这么写的，`gaps.rs` 的负例把它挡回来了）。
+
+**护栏**：`gaps.rs::a_condition_may_declare_a_variable`——读得出，条件是 `Declaration`，而
+`if (v.size())` / `if (i++)` / `if (a && b)` 仍然**不是**。
+
+### B48. 分配式的括号组是初始化式，不是参数表（`new T(a, *q)`）—— 已修复
+
+```cpp
+::new ((void*)__ptr) _Tp(allocator_arg, *__a._M_a, std::forward<_Args>(__args)...);
+```
+
+**现象**：`expected a type specifier` 打在括号组里那个 `*` 上。三个文件：`bits/uses_allocator.h`、
+`bits/node_handle.h`、`memory_resource.h`。
+
+**成因**：`a_parameter_list_is_the_type` 只看括号组的**第一个** token——`a` 是名字，于是整组被判成参数表，
+`*q` 没有类型就报错。参数是"类型 + 声明符"，所以只有**每个**元素都以类型开头，这组才可能是参数表。
+
+**性质**：缺规则（判据不够精确），改的是判据本身而不是新开分支，所以 `void (int)`、`new (int(*)(int))()`
+这些真参数表的读法一个字没动。
+
+**护栏**：`gaps.rs::an_allocation_initialiser_is_not_a_parameter_list`，里面同时登记了两个**同族但本来就**
+读不出的形状（`new T(*q)`、`new (Widget)(1)` 当初始化式）——写在 `assert_does_not_read_yet` 里，而不是假装支持。
+
+### B49. `__typeof__` / `__decltype` 就是那个关键字 —— 已修复
+
+```cpp
+typedef __typeof__(nullptr) nullptr_t;
+typedef __decltype(__comp) _Cmp;
+```
+
+**现象**：`expected ;` 打在名字上——`__typeof__` 被读成**声明符**（名字 + 参数表），`T2` 于是成了多余的东西。
+
+**成因**：lexer 不认这三个拼写（`__typeof__` / `__typeof` / `__decltype`），它们以**标识符**身份进入语法，
+而"`decltype` 是类型说明符"那一整套规则（说明符序列、声明锚点、`a_decltype_here_is_a_type`）因此都没轮到它们。
+
+**性质**：缺规则，改动一行：`name_to_kind` 把三个拼写映射到 `DecltypeKeyword`。树保留原文（token 文本就是源码
+文本），所以需要区分拼写的消费者读文本即可，而问"这是不是一个类型表达式"的消费者两种拼写都得到对的答案。
+
+**护栏**：`gaps.rs::the_gnu_spellings_of_decltype_are_that_keyword`（四种拼写都读得出，且 lexer 给出同一个 kind）。
+
+### B50. 类头里名字**之前**的裸宏（`class _GLIBCXX17_DEPRECATED unary_negate`）—— 已修复
+
+```cpp
+template<typename _Predicate>
+  class _GLIBCXX17_DEPRECATED unary_negate        // bits/stl_function.h:1021
+  : public unary_function<typename _Predicate::argument_type, bool>
+  { … };
+```
+
+**现象**：`expected ;` 打在**下一行**的 `:` 上——类头被读成"一个叫 `_GLIBCXX17_DEPRECATED` 的类"，
+于是 `unary_negate` 成了多余的东西，基类子句那行看起来才是错的。
+
+**成因**：B46 那条规则只认"宏 + **括号组** + 名字"（`DECLSPEC_ALIGN (8) _NAME`），而弃用标记是**裸的**宏，
+没有括号组。
+
+**性质**：缺规则，判据是"两个名字连排"——类关键字之后语法只允许一个属性、一个名字、`{`、`:`、`;`，
+所以第一个名字必然是宏。两道守卫同时要，缺一条就误读：
+
+```text
+第二个名字后面必须接得上类头（{ / : / ; / 指令）   否则 struct S requires C<T> { } 会被读成"类名 requires"
+final / override / requires 是**拼写**不是 token     否则 class A final : B 会被读成"类名 final"
+```
+
+（后一道是被 `concepts.rs` 的两条测试挡回来的——第一版没有它，`requires` 子句当场被吃掉。）
+
+**护栏**：`gaps.rs::a_class_head_may_be_written_in_pieces`（读得出 + 类名确实是名字 + `class A final` 保持原读法）。
+
+### B51. 类名与基类子句之间的指令（`class move_iterator` / `#ifdef` / `: public …` / `#endif`）—— 已修复
+
+```cpp
+template<typename _Iterator>
+  class move_iterator                              // bits/stl_iterator.h:1435
+#ifdef __glibcxx_ranges
+    : public __detail::__move_iter_cat<_Iterator>
+#endif
+  { … };
+```
+
+**现象**：同样是 `expected ;` 打在 `: public …` 那一行上。
+
+**成因**：类头规则只在**游标处**看 `:`，而名字之后是一个 `#`——于是类头在名字处结束，声明去找 `;`。
+
+**性质**：缺规则，接缝位置（与 §2.1 那九处接缝、B40 的 `try` 同族）：`parse_class_like_head` 里把
+"读指令 → 再看基类子句"做成一个循环，两个顺序都覆盖（基类子句写在分支里，或整个类头分两个分支写）。
+指令按节点读进来，树保持无损，两个分支都还在。
+
+**护栏**：`gaps.rs::a_class_head_may_be_written_in_pieces`（同一组断言里的两条）。
+
+### B52. 函数式转换没有实参（`int()`、`typename T::type()`）—— 已修复
+
+```cpp
+__iterator_category(const _Iter&)
+{ return typename iterator_traits<_Iter>::iterator_category(); }     // bits/stl_iterator_base_types.h:242
+return int();                                                      // 同一个洞的另一半
+```
+
+**现象**：`expected primary expression` 打在 `int` / `typename` 上，整个 `return` 语句跟着走。
+
+**成因**：函数式转换的实参表用的是 `parse_parenthesized_expression`，而它读的是**表达式**——`)` 不是表达式，
+于是"两臂"（关键字类型那一臂与 `typename` 那一臂）都拿不到 payload，整条表达式失败。空实参表恰恰是最常见的
+函数式转换（默认构造的临时量）。
+
+**性质**：缺规则，一条：两臂共用一个 `parse_functional_payload`——空 `()` 也读成一个**没有子节点的 `ParenExpr`**
+（"没有实参的调用"就是它），`{}` 仍走既有的花括号初始化式。负例是另一半：`f()` 是 **call**（`IdentifierExpr`），
+不是 `CastExpr`；裸的 `typename T::type`（没有 payload）仍然不是表达式。
+
+**护栏**：`gaps.rs::a_functional_conversion_may_have_no_arguments`（读得出 + `int()`/`typename A::type()` 是
+`CastExpr` 而 `f()` 是 `IdentifierExpr`）。
+
+### B53. 说明符被 `#if`/`#else` 切开、且 `#else` 那一支以**名字**结尾 —— 已修复
+
+```cpp
+      template<typename _Tp>
+#if X
+      static void                                  // 这一支只有关键字
+#else
+      static C                                     // 这一支以**名字**结尾（真实文件里是 __enable_if_t<…>）
+#endif
+      f() { }                                      // 函数**定义**（带函数体）
+```
+
+**现象**：`expected ;` 打在**下一个成员**的 `template` 行上——`bits/alloc_traits.h:430-438` 的那个成员本身是好的，
+却让 454 行（下一个成员）成了整个文件的首错，中间二十多行看起来都没问题。
+
+**成因（这是实测出来的，和本条第一版写的不是一回事）**：第一版写的是"函数自己的名字被当成类型的一个词"，把树打出来
+之后看到的是**反方向**：
+
+```text
+DeclSpecifierSeq   static  void  #else  static      ← 两支被并进同一个说明符序列，而 `void` 已经"命名了类型"
+  InitDeclarator   Declarator(NameExpr `C`)          ← `C` 成了**声明符名**
+PreprocessorDirective `#endif`
+Declaration        TemplateType(`f`)  `(` `)` `{` `}`  ← 真正的成员，整块成了瓦砾
+```
+
+`void` 在**另一支**里，而"这个序列已经命名过一个类型"这个判断跨过了分支边界——于是 `#else` 那一支的
+`__enable_if_t<…>`（它才是**本支**的类型）被拒绝在类型位置之外，成了声明符；声明在 `#endif` 处没有 `;` 就结束了。
+诊断因此落在下一个成员上（维护约定第 13 条：一个缺陷会遮住另一个，而且**报到别处**）。
+
+**性质**：缺规则（判据的**作用域**不对，不是判据错）。修法是把"这一支知道什么"在分支边界上重置——
+`#else`/`#elif` 之后把三样东西恢复成循环开始时的样子：本支还没命名过类型（`has_type_specifier = false`）、
+"再收一个名字"的许可没花掉（`name_allowed = allow_second_name`）、判据回读事件流的**窗口**挪到指令之后
+（`specifiers_from`，它决定 `a_further_name_may_join` 与 `a_class_definition_was_written` 看得见哪一支）。
+`#endif` **刻意不是**这种边界：它之后声明继续写的是两支**共同**的部分，那正是结尾需要的知识。
+
+**护栏**：`gaps.rs::a_split_member_head_may_name_its_type_in_the_else_branch`——十个读得出的变体（含真实文件那段
+带 `requires` 与尾随 `noexcept` 的拼写、"分支不命名类型、类型留在尾巴上"、"两支各自命名类型"、"`#elif`"），
+外加三条**形状**断言（声明符的名字是 `f`、类体只有一个成员、两个指令都在类型自己的节点里）。同一条里还钉着一个
+**同族但更窄的已知缺漏**：分支以**第二个**名字结尾（`static MY_API C`）仍然读不出——修它需要"名字后面跟着指令
+就不是声明符名"这条证据，而那条证据会撞上"初始化式写在两个分支里"这个今天读得出（`static const int n` +
+`#if X = 1; #else = 2; #endif`）的形状，所以先记着不修。
+
+**量到的**（`docs/std-library.md` 里有整轮的账）：128 个文件的闭包 消息 802 → **796**，`alloc_traits.h` 的首错
+从 454 行推到 **536** 行（本条的成员本身开始读了）；455 个文件的分析闭包 2359 → **2353**。
+
+### B54. 模板实参是表达式时，**它后面的那个逗号**被吃掉了 —— 已修复
+
+```cpp
+  X<!C<T>, bool> f;                        // __enable_if_t<!__has_construct<…>, bool>，alloc_traits.h:530
+  S<3, 4> x;                               // 同一个洞最安静的拼写
+  S<3, long> x;                            // 同一个洞最响的拼写
+```
+
+**现象**：三种表现，按安静程度排：
+
+```text
+S<3, 4> x;              完全无诊断 —— 读成**一个**实参 `(3, 4)`（逗号运算符）
+S<3, long> x;           expected primary expression 打在 `long` 上（类型没有表达式读法）
+X<!C<T>, bool> f;       实参在逗号处结束、右边是空的，`bool`、`>`、名字、函数体全成瓦砾
+```
+
+**成因**：模板实参的读取器先试类型、失败后回落到**表达式**，而它调的是 `parse_expr`——**含逗号运算符**的那一级。
+分隔实参的逗号于是被当成了运算符。`array<int, 3>`、`Grid<T, 3>::fill` 这些拼写之所以看不出问题，是因为逗号落在
+**类型**读法已经接受的类型**后面**，回落根本没跑。
+
+**性质**：缺规则，一条改动（回落改调 `parse_assignment_expr`）。它的位置**早就写在文档里**了：`exprs.rs` 的
+`Level` 表列着"自己拼分隔符的规则读一个元素"，其中一行就是 `types::parse_template_argument (expression fallback)`——
+**文档说这条已经修过，代码却还停在旧读法上**，因为当时验证用的例子（`Grid<T, 3>::fill`）走的是类型读法。
+这是本项目里少见的"文档与代码不一致"的实例，值得记下来：那张表的用法是"改共享入口之前先把使用者列全"，
+所以它写下的每一条都得能被检查——`cargo test` 全绿并不证明任何一条还在生效。
+
+**修完之后把那张表逐行查了一遍**（方法是 grep 每条规则实际调用的读取器）：七行里其余六行都对——
+调用实参用 `parse_argument`、`parse_expression_list` / `parse_initializer_clause` / `parse_capture` /
+位域宽度 / 模板参数默认值六处都用 `parse_assignment_expr`。这次逐行检查的**做法**已经写进 `exprs.rs` 那张表的
+文档里（"Checking the table"），并要求**新增一行之前**先照这个办法查一次，而不是等普查撞出缺陷再回头补。
+
+**护栏**：`gaps.rs::a_template_argument_read_as_an_expression_stops_at_the_comma`——十三个读得出的拼写
+（含 `integer_sequence<int, 0, 1, 2>`、`S<(a, b), 2>`）＋**计数**断言（`S<3, 4>` 是两个实参，`S<(a, b)>` 是一个，
+因为括号让逗号重新成为运算符）＋"每个实参有自己的字面量节点"。计数那一半是必须的：安静的那一种拼写没有任何诊断。
+
+**量到的**：128 个文件的闭包 消息 796 → **721**、455 个文件的分析闭包 2353 → **2278**（两份都是 −75，方向一致，
+因为库文件同时属于两份清单）；`alloc_traits.h` 的首错从 536 行推到 **689** 行。干净数两份都没动——它是
+"把首错往后推"那一类，也正是这一步把 B55 那个形状（689 行之后）露了出来。
+
+### B55. 条件决定的是**限定符**（`noexcept` 写在两个分支里）—— 已修复
+
+```cpp
+      template<typename _Up, typename... _Args>
+	construct(allocator_type& __a, _Up* __p, _Args&&... __args)      // bits/alloc_traits.h:662
+#if __cplusplus <= 201703L
+	noexcept(noexcept(__a.construct(__p, std::forward<_Args>(__args)...)))
+#else
+	noexcept(__is_nothrow_new_constructible<_Up, _Args...>)
+#endif
+	{ … }
+```
+
+**现象**：诊断出现在**二十七行之后**的一个无关成员上（`alloc_traits.h:689` 的 `template<typename _Up>`），
+而 662 行那个成员在只有一个分支的拼写下**完全不报错**。
+
+**成因**：声明符的后缀读取器（`noexcept`、`const`、`-> T`、宏后缀）在**指令循环之前**就跑完了；指令循环
+（`finish_init_declarator` 里"指令与宏交替"的那个 loop）读了 `#if` 之后只再问宏后缀，于是 `noexcept` 留在原处，
+被**下一个声明**读成了它的类型：
+
+```text
+Declaration@11..28   void f()           ← 第一个声明在这里结束，`#if` 是它的孩子
+Declaration@28..80   BuiltinType over `noexcept` `(true)`   ← `noexcept(true)` 成了"类型"（两个 token 毫无关系）
+                     InitDeclarator  { }  ← 后面那个成员成了用 `{ }` 初始化的变量
+```
+
+**性质**：缺规则（同一条缝的第三次：指令落在"参数表与函数体之间"，而**限定符正是写在那里**的）。修法是读完一条
+指令后**再问一次限定符**——和旁边那行"再问一次宏后缀"是同一条理由：条件能决定后缀里的**任何**一部分。
+
+**护栏**：`gaps.rs::a_conditional_may_decide_a_functions_qualifier`——九个读得出的拼写（`noexcept`、`const`、
+`-> T`、单分支、条件头、宏后缀）＋三条**形状**断言（`{ }` 是函数体而不是初始化式；类体只有一个成员；成员只有
+一个 `DeclSpecifierSeq`）。三条断言都是为了那个**静默**的读法：单分支拼写旧读法**没有任何诊断**，
+`assert_reads` 会说它是对的。
+
+**量到的**：`bits/basic_string.h`（`4532` 行那条首错）因此整个文件变干净——两份清单各 **+1 个干净文件**；
+128 个文件的闭包 40 个失败、消息 721 → **710**；455 个文件的分析闭包 112 个失败、2278 → **2267**。
+
+### B56. 花括号函数式转换（`int{}`）与作模板实参的 `T{…}` —— 已修复
+
+```cpp
+  auto a = int{};                          // 表达式位置：函数式转换的**花括号**拼写
+  g(int{});  return int{};                 // 同一个洞，另外两个位置
+  X<int{}> m;                              // 模板实参：**静默**读成比较式 `X < int{} > m`
+  X<size_t{}> m;  X<A{1, 2}> m;            // 名字做类型时同样静默
+  using A = X<int{}>;                      // 别名目标
+  template<typename T> struct Q<T, int{}> { };                    // 偏特化的名字
+  struct X<A, void_t<decltype(h(size_t{}))>> : B { };             // 类头：基类子句与类体成瓦砾
+  bits/alloc_traits.h:941（`__void_t<…, decltype(…allocate(size_t{}))>>`）的首错就是最后两条
+```
+
+**现象**：同一个构造的两种结局，按**能否看见**排：
+
+```text
+auto a = int{};               expected primary expression 打在关键字上（关键字类型没有表达式读法）
+X<int{}> m;                   **零诊断**：整条声明读成 `BinaryExpr((X < int{}) > m)` —— A0 类
+X<size_t{}> m;                同上（名字做类型时，类型读法停在 `{`，而**那个停被当成了实参的结束**）
+using A = X<int{}>;           `X` 成了整个类型，`<…>` 是瓦砾
+struct Q<T, int{}> { };       类名读成裸 `Q`，实参是瓦砾
+struct X<A, void_t<…>> : B { } 类头被判成"没有类体"，基类子句与类体都是瓦砾
+```
+
+**成因**：一个想法**五处**漏了同一件事——"**配对的括号属于包着它的东西**"。前三处是**数角度的扫描**，
+它们的停表里有 `{`/`}`（B30 那条"三处数角度的扫描要共用 `angle_depth_delta`"的教训在括号上又出现了一次），
+于是遇到 `X<int{}>` 就回答"这个 `<` 是比较"；
+第四处是模板实参读取器：类型读法在 `{` 处停下，而"类型读法成功了"被当成"实参读完了"；第五处是
+`parse_primary_expr` 的函数式转换分支，它的守卫只认 `(`，所以 `int{}` 根本没有表达式读法。
+
+**性质**：缺规则（同一判据的第五种用法），改动是五处对称的小改：三处扫描加 `braces` 计数（**不成对的**
+`}` 仍然结束扫描，那是外层自己的括号）；实参读取器在"类型后面跟着 `{`"时改走表达式读法；函数式转换分支的
+守卫接受 `{`。修 `int{}` 那一处时必须同时看住 `int(x);`——它**仍然**是声明（括号里是声明符名），
+这也是原来那道守卫的理由，现在由声明读法自己"没有名字就没有初始化式"的拒绝来保证。
+
+**护栏**：`gaps.rs::a_braced_conversion_is_a_value_not_a_type`——二十三个读得出的拼写（含真实文件的整行、
+三处扫描各自的形状、`int{1}`、`bool{true}`）＋**形状**断言：`X<int{}> m;` 里**没有** `ExpressionStat`、
+声明符名是 `m`、实参是**一个**；类头有 `ClassBody` 且实参是两个；`int{}` 是 `CastExpr` 而 `int(x);` 仍是
+声明。这些断言都是冲着**没有诊断的那一半**去的：修之前 `assert_reads` 会说 `X<int{}> m;` 是对的。
+
+**量到的**：128 个文件的闭包 消息 710 → **702**、455 个文件的分析闭包 2267 → **2259**（各 −8，干净数没动）；
+`alloc_traits.h` 的首错从 941 行推到**文件最后一行**（1053 行的 `#endif`）——而它推出来的正是 B57。
+
+### B57. requires 表达式里的指令（`= requires (T t) { #if … #endif };`）—— 已修复
+
+```cpp
+  template<typename _Tp, typename... _Args>
+    static constexpr bool __can_construct_at                   // bits/alloc_traits.h:140，逐字缩下来的一半
+      = requires (_Tp* __p, _Args&&... __args) {
+#if __cpp_constexpr_dynamic_alloc
+        std::construct_at(__p, std::forward<_Args>(__args)...);
+#else
+        ::new((void*)__p) _Tp(std::forward<_Args>(__args)...);
+#endif
+      };
+```
+
+**现象**：`unexpected token` 打在成员的 `};` 上；在 `bits/alloc_traits.h` 里那条报在**文件最后一行**，
+而树里 `template` / `<` / `>` / `static` … 全是 `ErrorNode`，**类体在成员的 `};` 处提前关闭**——后面的成员
+（包括 `__is_allocator` 那些）都掉到外层作用域，所以整份文件只剩一个诊断，而且它离成因 900 行。
+
+**成因**：require-seq 的读取循环是"一条要求一个 `;`"，而**要求位置上出现 `#` 时没有任何读法**，于是整个
+requires 表达式失败。这一族（"指令落在构造的接缝上"）在 §2.1 里已经修过九处，**没有一处落在 requires 体内**——
+它是这一族的**最后一处**。
+
+**性质**：缺规则，一处接缝：要求位置上读到 `#` 就按节点读进来、再问下一个 token，和
+`parse_braced_initializer` 在元素之间做的是同一件事（`#` 在这个位置上不可能是别的：要求以表达式、`typename`、
+`{`、嵌套 `requires` 开头，或者以指令开头）。
+
+**护栏**：`gaps.rs::a_conditional_may_decide_a_requirement`——九个读得出的拼写（单分支、两分支、两段并列、
+类型要求与复合要求各写一支、`#if` 前后各有一条要求、带模板头、整份成员按分支写一遍）＋**形状**断言：
+`RequiresExpr` 里有**两条** `Requirement` 和**三条**指令节点，而且带条件的那个成员与它后面那个成员
+**都还是成员**（`direct_members == 2`）。形状断言是主要的：读坏时的样子是"体被放弃、token 成瓦砾"，
+普查里**每个数字都不变**。
+
+**一条刻意不修的拼写**（拿 g++ 验过）：整份成员按分支写、而 `#endif` 与类的 `};` **共用一行**——
+`#endif };` 里 `};` 是指令行上的多余 token，g++ 报 `warning: extra tokens at end of '#endif' directive` 加
+`error: expected '}' at end of input`，与本 parser 的抱怨相同。所以那是**写错了的代码**，不是缺规则
+（维护约定第 36 条：片段先拿编译器验一遍）。测试里因此只留一条注释，不留用例。
+
+**量到的**：`bits/alloc_traits.h` **整个文件变干净**——两份清单各 **+1 个干净文件**（128：88 → **89**，
+455：343 → **344**），消息 702 → **701** / 2259 → **2258**。至此那条链走完了：
+B53→B54→B55→B56→B57 把该文件的首错从 454 一路推到文件最后一行，然后推没了。
+
+### B58. 坏掉的成员/语句仍然会把类体、块、链接块一起带走（恢复）—— 已修复
+
+```cpp
+struct Probe {
+  static constexpr bool ok = requires (T t) {
+#if X
+    t.f()                       // 要求被指令切成两半：`;` 在另一个分支里
+#endif
+    ;
+  };
+  int after;                    // ← 修之前读在**文件作用域**，不是类里
+};
+```
+
+**现象**：坏掉的那个成员/语句之后的所有东西都掉到外层——类体（`after` 不再是成员）、函数块（`after();` 不在
+函数里）、链接块（`extern "C" { … }` 后面的声明跑出去）。在 `bits/alloc_traits.h` 里它的表现是"整份文件只有
+一个诊断，而且离成因 900 行"（见 B57）；在 MinGW 的头里它的表现是链接块被撑到文件末尾。
+
+**成因（读法之外的第二个机制）**：把失败成员的 marker **带结束事件**关掉
+（`end_marks_to`，维护约定第 34 条）决定的是**树**长什么样，它**不能把已经吃下去的 token 吐回来**。
+一个失败时已经吃掉 `{` 却没有对应 `}` 的成员/语句（requires 体、函数体、块、花括号初始化式都是这个形状）
+于是让外层容器少一个 `}`，而恢复是"跳到下一个 `}`"——那个 `}` 属于**失败的那个构造**，容器却把它当成了自己的
+结束。B57 的接缝让 `alloc_traits.h` 读通了，这个机制本身没被动过。
+
+**性质**：**恢复问题**，不是缺规则（所以与 B57 分开记、分开量）。修法是**花括号债**（brace debt）：失败之后
+把这个构造**消费掉却没有配对的 `{`** 记成欠账，容器在还清之前不许结束，用来还账的 `}` 读成 `ErrorNode`
+（它是没人认领的 token，正是 error node 的语义）。三个容器各一份：
+
+```text
+类体        parse_class_body_members   成员失败 → 记账
+语句块      parse_stats               语句失败 → 记账（含"跳到 `;`/`}`"那一段里跨过的 `{`）
+链接块      parse_linkage_block       声明失败 → 记账（MinGW 头全靠它）
+```
+
+**两条路径都要记**，这是这一条最容易只修一半的地方：失败可能**停在成员中间**（事件流里还留着，用
+`CppParser::brace_balance_since` 读），也可能**整块回滚**（声明/表达式那次二选一试探会 `rollback`，事件被截断）
+——回滚之后循环会把成员一个 token 一个 token 地当瓦砾再读一遍，那个 `{` 就在这一遍里被记上。
+
+**护栏**：三个容器各一处，都问"后面那个东西还是不是成员/语句"而不是数瓦砾的个数：
+`gaps.rs::a_failed_member_with_an_unbalanced_brace_keeps_the_members_after_it_members`（requires 体、
+函数体、缺 `;` 三种形状）、`a_statement_the_parser_gives_up_on_keeps_the_block_after_it`（新加三种：
+花括号初始化式、lambda 体、没关的嵌套块）、`a_linkage_block_keeps_the_directives_written_inside_it`
+（链接块里那个坏声明）。
+
+**量到的**（这一条是目前单次收益最大的一次）：
+
+```text
+                        128 个文件的闭包              455 个文件的分析闭包
+                        干净  报错  消息              干净  报错  消息
+修之前                   89    39   701               344   111  2258
+类体 + 语句块            92    36   375               349   106  1305
++ 链接块                 92    36   375               364    91   688
+```
+
+128 那份是 **+3 个干净文件、−326 条消息**；455 那份（含 MinGW 头，链接块最密的地方）是
+**+20 个干净文件、−1570 条消息**。三个文件从"报错"直接变干净（`functional_hash.h`、`stl_vector.h`、
+另一个 `alloc_traits.h`），另有四个文件的首错往后跳了一大段（`predefined_ops.h` 65 → 80、
+`stl_iterator.h` 1633 → 3091、`stl_tree.h` 1086 → 2468、`compare` 568 → 672）。这也说明**为什么它值这么多**：
+一个坏成员带走整个类之后，那个类里的每个成员都会各自再报一次错——级联的账在这里。
+
+### B59. `typedef` 声明符**后面**的属性（`typedef int v4 __attribute__ ((…));`）—— 已修复
+
+```c
+typedef int __v4si_u __attribute__ ((__vector_size__ (16), __may_alias__, __aligned__ (1)));
+typedef short __v32hi __attribute__ ((__vector_size__ (64)));      // avx512bwintrin.h:361
+typedef double __v8df __attribute__ ((__vector_size__ (64)));      // avx512fintrin.h:3817
+typedef int v4 [[deprecated]];                                    // 标准拼写，同一个位置
+typedef int __v4si_u __attribute__ ((__vector_size__ (16),\       // 真的文件里带 `\` 折行
+                                     __may_alias__, __aligned__ (1)));
+```
+
+**现象**：`expected ;` 打在**声明符自己的名字**上——属性整块成瓦砾，声明在名字之后就结束了。
+闭包里有 **8 个文件**（全是 GCC 的 `*intrin.h` 类型动物园）的首错是这个形状。
+
+**成因**：普通声明路径早就读这个位置的属性了（`finish_init_declarator` 里那一段，
+`int x [[maybe_unused]] = 1;`），而 `typedef` 是**第二条路径**——它自己拼声明符循环、根本不经过
+`finish_init_declarator`，于是漏了同一件事。两种拼写（`[[…]]` 与 `__attribute__((…))`）共用一条规则，
+所以修法是**一次调用**而不是每个编译器一次。
+
+**性质**：缺规则（同一条判据的第二种用法，维护约定第 14 条那句话的又一例）。位置与普通声明一致：
+声明符之后、初始化式之前。折行（`\`）不是问题——`LineContinuation` 在声明里本来就通（本轮另外验过七种
+折行形状）。
+
+**护栏**：`gaps.rs::a_typedef_may_carry_an_attribute`——九个读得出的拼写（含真实文件那一行与折行版、
+两种拼写、属性在类型**之前**、多声明符的 `typedef`、变量与函数上的属性）＋**形状**断言：
+属性是 `TypedefDecl` 自己的节点，而且它声明的名字之后能当类型用。
+
+### B60. 条件决定的是**属性**（模板头与声明之间，`#if [[attr]] #endif`）—— 已修复
+
+```cpp
+template<typename _Ex>                              // bits/nested_exception.h:203
+# if ! __cpp_rtti
+  [[__gnu__::__always_inline__]]
+#endif
+  inline void
+  rethrow_if_nested(const _Ex& __ex)
+```
+
+**现象**：整条声明失败，**文件只剩一串裸 token**，诊断打在属性那一行（`expected a type specifier`）。
+
+**成因**：模板头与声明之间的属性**已经有规则**（"那个位置既不属于头也不属于说明符序列，所以由声明规则
+自己读"）。缺的是**指令**：说明符序列只在**两个说明符之间**读指令（B53 那条），而这里 `#` 出现在
+**第一个**说明符之前——按设计那是"调用方该读的"，可调用方（声明规则）在这个位置只读了一次属性就把手
+交给了说明符序列。于是 `#endif` 落在序列期待第一个说明符的地方，整条声明失败。
+
+**性质**：缺规则，与 `finish_init_declarator` 里"指令与宏后缀交替"是同一处修法、早一个位置：
+在模板头之后把**属性与指令交替**读到都不在为止（两种顺序都覆盖）。
+
+**护栏**：`gaps.rs::a_conditional_may_decide_an_attribute`——八个读得出的拼写（两种顺序、
+`attr #if attr #endif`、真实文件那一行、无条件的属性、无属性的条件、普通声明开头的属性）＋**形状**断言：
+属性与模板头在**同一条** `Declaration` 里。反面是"普通声明开头的属性仍然是说明符"和"没有模板头时指令仍由
+调用方读"。
+
+**量到的**（B59+B60 一起）：
+
+```text
+                        128 个文件的闭包              455 个文件的分析闭包
+                        干净  报错  消息              干净  报错  消息
+修之前                   92    36   375               364    91   688
+B59 + B60                92    36   374               370    85   609
+```
+
+455 那份 **+6 个干净文件、−79 条消息**（`avx512bw/cd/f/vlbw/vl`、`avxintrin`、`emmintrin`、`mmintrin`、
+`nested_exception.h` 这些从首错变干净或首错后移）。八个 `*intrin.h` 的首错一起消失，是这一轮除 B58 之外
+最集中的一次。
+
+### B61. 编译器自己的类型拼写（`__int128` / `_Float16` / `__int64`）与**方言** —— 已修复
+
+```cpp
+unsigned __int128 x;                       // 修之前：读成"名为 __int128 的变量，后缀是宏 x"——**零诊断**
+void f() { auto r = (unsigned __int128) 1; }   // expected primary expression
+using T = unsigned __int128;               // expected `;`（类型读到 `unsigned` 就结束）
+typedef unsigned __int128 u128;
+void f() { _Float16 h = 1; }               // 声明失败：名字 `h` 被并进类型
+bits/bmi2intrin.h:86 与 bits/ranges_base.h:86 的首错都是它
+```
+
+**成因**：`__int128` 在词法上是标识符，而在**类型 id**（没有声明符收尾的位置）里 `allow_second_name` 是 false，
+所以"限定符 + 保留拼写"被拒在类型之外。更糟的是声明里那一种读法**不报错**：`unsigned __int128 x;` 读成
+`Declaration[DeclSpecifierSeq[unsigned] InitDeclarator[__int128] MacroCall[x]]`——一个叫 `__int128` 的变量，
+后缀是一个叫 `x` 的宏。这正是本文档开篇的 A0 类：树良构、无损、**零诊断**。
+
+**性质**：缺规则，但答案**取决于目标编译器**——所以修法不是加长拼写表，而是先有"方言"这个配置：
+
+```text
+                        GNU（g++ / clang++）      MSVC（cl.exe）
+__int128                内建类型                  根本不是类型
+__int64                 不是类型（MinGW 用           内建类型
+                        `#define __int64 long long`）
+_Float16 / __bf16       内建类型（GCC）            没有这个拼写
+```
+
+`cpp_parser` 因此多了一个 [`Dialect`]（`Gnu` / `Msvc`，默认 `Gnu`），`ParserConfig::with_dialect` 传进去，
+语法层只有**一处**读它（`a_type_the_compiler_spells`）：命中的拼写读成 `BuiltinType` 说明符（拼写留在文本里，
+和 `__forceinline` → `InlineSpec` 是同一个安排）。**走普通说明符规则而不是"编译器关键字跳过"那条路**，
+是因为"产出了一个 `BuiltinType`"正是 `has_type_specifier` 的判据——不然 `_Float16 h = 1;` 里 `h` 会被并进类型。
+
+**方言是配置，不是猜测**：`Session::open` 从工具链自己 `-dM -E` 吐出的预定义宏里读 `__GNUC__` / `_MSC_VER`
+（`Dialect::from_predefined_macros`，`clang-cl` 两个都定义 → 按 MSVC 拼写），放进 `CompilerConfig`；
+**它同时进 `context_hash`**——同一段文字为两个目标读出的就是两份摘要，缓存把两者混起来就是给出错答案。
+
+**量到的**：128 个文件的闭包 374 → **372**；455 个文件的闭包 370 → **371 干净**、85 → **84 报错**、609 → **607**。
+`bits/bmi2intrin.h` 整个文件变干净，`bits/ranges_base.h` 的首错从 86 行（`__int128` 参数）推到 214 行。
+另有**一处静默错树被修掉**，而它一个数都不占：`unsigned __int128 x;` 现在声明的是 `x`。
+
+**两条被量下来的取舍**（都写进测试/文档而不是悄悄放过）：
+
+1. **`_mingw.h:248` 的 `typedef int __int128 __attribute__ ((__mode__ (TI)));`**（`#ifndef __SIZEOF_INT128__`
+   那一支，只有没 `__int128` 的编译器才走）在 GNU 方言下没有声明符名——**它读成一个不声明任何东西的
+   `typedef`，而这是静默的**。想过让它报错（"`typedef` 必须命名东西"），实测**代价 9 个干净文件、246 条消息**
+   （那类形状在真实头文件里到处都是），所以**不报**：那一支在 GNU 目标下是死代码，而按 MSVC 方言读它就完全正确。
+   这一条因此是"方言"这个概念要付的价，记在这里。
+2. **`Dialect::Gnu` 是默认值**：本项目的语料是 GNU 编的，而且歧义不对称——把 `__int128` 读成名字是静默错树，
+   把 `__int64` 读成名字只是保守（让它成为类型的那个 `#define` 是指令，不是这一层的事）。
+
+**护栏**：`gaps.rs::a_type_may_be_spelled_by_the_compiler`——十二个 GNU 读得出的拼写（声明、cast、别名、
+typedef、成员、形参、`_Float16`/`__bf16`/`__float128`，以及**不是**类型的 `__restrict`/`__extension__`）＋
+**形状**断言（两个 `BuiltinType`、**没有** `MacroCall`、声明符名是 `x`）＋ MSVC 侧两面（`__int64` 是类型、
+`__int128` 是名字、`typedef int __int64;` 在 GNU 下仍然读得出）。分析层两处：`store.rs` 的
+`the_key_knows_which_compiler_the_file_is_read_for`（方言进键）与 `index/mod.rs` 的
+`a_summary_is_read_for_the_compiler_it_was_configured_with`（方言真的传到了 parser：同一段文字在两种方言下摘要不同）。
+
+**顺带记一条方法论**：`Dialect` 与 `CppLanguageLevel` 是**两个问题**——`-std=gnu++20` 同时是 C++20 *和*
+GNU 拼写，而 `CppLanguageLevel::GnuCpp` 是一个"级别"，说不出来。级别管特性（raw string、`<=>`），方言管
+"编译器保留的名字是什么意思"。两者混在一起是历史，分开是这一步。
+
+```cpp
+void f() try { } catch (...) { }        // `try` 写在声明符与函数体之间
+S::S() try : m(1) { } catch (...) { }   // 构造函数版本，构造函数初始化列表在 `try` 之前
+void f() try { } catch (X& x) { }       // 处理器可以带参数
+```
+
+**现象**：四个报错，第一个落在 `void` 上（`expected primary expression`），然后是 `{`、`catch`、结尾的 `}`。
+整条定义读不成函数定义。
+
+**成因**：`try` 作为**语句**有规则（所以同样的 token 写在函数体**里**完全正常），但"声明符与函数体之间"
+这个位置没接：`parse_a_definition_per_branch` 读完声明符就等 `{`，`try` 不在它的 follower 里。
+
+**性质**：缺规则，接缝位置——和维护约定第 31 条同族（"向回走的判据要知道什么包着这个构造"）
+以及 B40（`try` 的两个 `#if` 接缝，已修）是同一处构造的第三、第四种写法。
+
+**护栏**：`gaps.rs::constructs_the_parser_does_not_read_yet`（`Where::File`）钉住它现在读不出来，
+能力落地那天这条会失败——那正是有意为之。
+
+### B62. `T f(U) { … }`：**花括号体**说明那个括号组是形参表 —— 已修复
+
+```cpp
+_GLIBCXX20_CONSTEXPR
+inline _Iter_less_val
+__iter_comp_val(_Iter_less_iter)                  // bits/predefined_ops.h:79
+{ return _Iter_less_val(); }                      // 首错：a declarator takes only one initializer
+
+template<typename _Ex>
+  __attribute__ ((__always_inline__))
+  inline exception_ptr
+  make_exception_ptr(_Ex) _GLIBCXX_USE_NOEXCEPT   // bits/exception_ptr.h:283，中间还夹着宏后缀
+  { return exception_ptr(); }
+
+struct S { T f(U) { return X(); } };              // 同一个形状在**类体**里：零诊断、9 个 ErrorNode（静默）
+```
+
+**现象**：两种表现，第二种是静默的：
+
+```text
+文件作用域   `a declarator takes only one initializer` —— 声明符被读成"变量 + 两个初始化式"
+类体里       零诊断、9 个 ErrorNode —— 成员整块成瓦砾
+```
+
+闭包里 **5 个文件**的首错是第一种（`exception_ptr.h`、`predefined_ops.h`、`cmath`、`helper_functions.h`、
+`type_traits.h`）。
+
+**成因**：`T f(U)` 同时是两种读法——**一个取无名形参（类型 `U`）的函数**，或**一个用表达式 `U` 直接初始化的变量
+`f`**——标准里两种都成立。这个 parser 的偏好是"初始化式读法优先"（它为 `Max(a, b);` 这种**没有类型**的声明而存在：
+一串裸名字既是实参也是形参，而只有声明能有那个形状）。偏好没错，**缺的是证据**：声明符只有**一个**初始化式，
+所以后面跟着 `{` 就说明那个括号组是形参表、`{` 是函数体。
+
+**性质**：缺规则（判据缺一条证据），而且**证据要用真正的读取器去问**，不要另写一个扫描：
+
+```text
+试着把括号组读成形参表 → 让后缀读取器跑一轮（宏后缀 / noexcept / 尾随返回类型）→ 只有落在 `{` 上才保留
+否则 rollback，继续走原来的偏好顺序
+```
+
+这样就不必把后缀词汇表抄第二遍（维护约定第 14 条：同一判据的第二处用法就是例外被漏掉的地方）。
+**只在"函数定义合法"的地方问**——这一条本身有个坑：`is_inside_a_body()` 数的是"任何一个花括号引入的作用域"，
+**类体也算**，所以第一版写成 `!is_inside_a_body()` 时 `struct S { T f(U) { … } };` 仍然读坏（它本来就是静默坏的）。
+正确的判据是 `!is_inside_a_body() || is_at_class_member_level()`：命名空间体和 `extern "C"` 块本来就不算 body ✓，
+**块**才算（那里 `T x(y) { }` 是"声明 + 块"，而且 C++ 里不能在函数里定义函数）。
+
+**护栏**：`gaps.rs::a_body_settles_whether_the_group_was_a_parameter_list`——十四个读得出的拼写（文件作用域、
+类体、命名空间、宏后缀、`noexcept`、尾随返回类型、两段真实文件里的整行）＋**形状**断言两侧：
+`T f(U) { … }` 有 `ParameterList` 与 `CompoundStat` 而没有 `Initializer`、声明符名是 `f`；
+`T x(y);` 反过来有 `Initializer` 而没有 `ParameterList`。反面还有块里那三条（`T x(y); { h(); }`、嵌套块、
+lambda 体），它们是"**不**问这条证据"的地方。
+
+**量到的**：128 个文件的闭包 372 → **366**、干净 92 → **93**；455 个文件的分析闭包 607 → **596**、
+干净 371 → **375**（`exception_ptr.h`、`predefined_ops.h`、`cmath`、`helper_functions.h` 四个文件变干净，
+`type_traits.h` 的首错从 165 行推到 231 行）。另外还有一个**数不出来的**修好：类体里的同名形状从
+"零诊断 + 9 个 ErrorNode"变成正常成员。
+
+### B63. 连着两个 C 风格转换：`(T)(U) x` —— 已修复
+
+```c
+return (__m512bh) __builtin_ia32_minmaxbf16512_mask ((__v32bf) __A,
+                                                     (__v32bf)(__m512bh)      // avx10_2-512minmaxintrin.h:40
+                                                     _mm512_setzero_si512 (),
+                                                     (__mmask32) -1);
+return ((PVOID) (LONG_PTR)InterlockedCompareExchange ((LONG volatile *) …));   // winbase.h
+```
+
+**现象**：`expected ), but get identifier` 打在第二个转换后面的那个名字上。4 个 `avx10_2*` 文件的首错都是它，
+`winbase.h` 里同样的形状出现两次（1095 行与 3493 行）。
+
+**成因**：`(T)…` 只在**有证据**时才读成转换——`(f)(x)` 是**调用**，不能把 callee 丢掉。这条证据是"`)` 后面
+跟着一个操作数"（任何文法里两个操作数连排都不成句），而**`(` 被刻意排除**在那张表外（它是"延续"的开头）：
+于是第一个 `)` 后面正是 `(`，问题根本没被问到，`(T)(U) 1` 读成"`(T)` 这个表达式调用 `(U)`"，`1` 无处可去。
+**修法**：扫描时先**跨过一串配平的括号组**，再对最后一组后面的 token 问同一个问题。被跨过的恰恰是那个有歧义的
+token，所以这个扫描是安全的：`(f)(a)`（后面什么都没有）与 `(f)(a)(b)`（最后一组后面是 `;`）保持**调用**读法。
+
+**性质**：缺规则（判据缺一条证据，而证据的形状是"再往外一层"——与 B62 同族：都是"偏好没错、缺证据"）。
+判据表 `<code>starts_an_operand</code>` 里那条"`(` 为什么不在表里"的注释因此多了一句：它不在表里，
+但可以被**成串地跨过**。
+
+**护栏**：`gaps.rs::a_cast_of_a_cast_is_still_a_cast`——十四个读得出的拼写（两层/三层转换、声明初始化式、
+实参位置、两段真实文件里的整行、关键字类型）＋**形状**断言两侧：`(T)(U) 1` 是**两个** `CastExpr` 零个
+`CallExpr`，`(f)(a)` 是一个 `CallExpr` 零个 `CastExpr`，`(f)(a)(b)` 是两个 `CallExpr`，
+`(f)(a) + 1` 仍是调用（`+` 有歧义，保留调用读法是刻意的）。
+
+**量到的**：455 个文件的分析闭包 干净 375 → **379**、报错 80 → **76**、消息 596 → **496**（4 个 `avx10_2*`
+文件一起变干净，`winbase.h` 的首错从 1095 行推到 3493 行）；128 个文件的闭包不受影响（那些头不在它的闭包里）。
+
 ### B42. 函数定义里的 `try`（function-try-block）—— 待修
 
 ```cpp
@@ -938,7 +1565,7 @@ void f() try { } catch (X& x) { }       // 处理器可以带参数
 **护栏**：`gaps.rs::constructs_the_parser_does_not_read_yet`（`Where::File`）钉住它现在读不出来，
 能力落地那天这条会失败——那正是有意为之。
 
-### B43. 条件里的声明（`if (int x = g())`）—— 待修
+### B43. 条件里的声明（`if (int x = g())`）—— 已修复（见 B47）
 
 ```cpp
 if (int x = g()) { }        // C++ 的 condition 可以是 declaration
@@ -953,14 +1580,19 @@ switch (int n = f(); n) { }
 `declaration` 或 `expression` 二选一，而"先试声明、失败再试表达式"这个范式 parser 在别处已经用了很多次
 （维护约定第 32 条讲的就是它的陷阱：失败的试探**不回退游标**）。
 
+**已修复**（第十七轮，见 **B47**）：`parse_condition` 现在调 `parse_condition_declaration`——说明符 + **一个**初始化
+声明符，而且**必须有初始化式**（否则 `if (a && b)` 会被读成"把 `b` 声明成 `a&&`"，这是第一版真正的坑），
+逗号列表一律拒绝。本条留在这里是因为它的**成因分析**是对的（二选一 + 回退），而 B47 是它的落地。
+
 **性质**：缺规则（一条二选一的读法）。**不是**恢复的问题——虽然症状长得像（块被吃掉），
 那个方向查过了：`parse_compound_stat` 对缺 `}` 的处理是对的。
 
-**护栏**：同上，`constructs_the_parser_does_not_read_yet` 钉住。
+**护栏**：`gaps.rs::a_condition_may_declare_a_variable`（读得出 + `condition_is_a_declaration` 的形状断言 +
+"`if (v.size())`/`if (i++)`/`if (a && b)` 仍然不是声明"的反面）。
 
-这两个都是**在修恢复的时候顺手量出来的**：做法是拿 53 段**合法的** C++ 片段过一遍 parser，任何报错都值得
+B42 与 B43 都是**在修恢复的时候顺手量出来的**：做法是拿 53 段**合法的** C++ 片段过一遍 parser，任何报错都值得
 看一眼（见维护约定第 36 条最后一句话）。三条候选里有一条是**我们对了、片段写错了**
-（`sizeof (T) (x);` ——g++ 也拒绝它），"拿编译器验一遍片段"因此写进了那条约定。
+（`sizeof (T) (x);` ——g++ 也拒绝它），"拿编译器验一遍片段"因此写进了那条约定。B43 已经落地，B42 还在队列里。
 
 ### B41. 宏调用**省略分号**，而宏体自带语句 —— 已修复（改动是**建宏表**，不是放宽判据）
 

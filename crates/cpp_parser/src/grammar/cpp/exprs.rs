@@ -333,6 +333,18 @@ pub fn parse_expr_without_pack_expansion(p: &mut CppParser) -> ParseResult {
 /// because an argument may also be a braced-init-list — and that choice belongs to the *call* arm. See
 /// [`parse_argument`] for why the other lists must not make it.
 ///
+/// # Checking the table
+///
+/// Each row claims something a test cannot see — that a *specific* rule calls the reader it names — so the table
+/// has to be checkable by hand, and it was, row by row, when the last row turned out to be wrong: the template
+/// argument's expression fallback still called [`parse_expr`] while this table said it read one element (B54 in
+/// `docs/grammar-gaps.md`; `S<3, 4>` was one argument, with no diagnostic). The check is a grep of the rule for
+/// the reader it calls, and the rows that pass it are: the call arm ([`parse_argument`]), `parse_expression_list`,
+/// `parse_initializer_clause`, [`parse_capture`], the bit-field arm of `finish_init_declarator`, the
+/// default-argument arm of `parse_template_parameter`, and `parse_template_argument` — all
+/// [`parse_assignment_expr`]. A row added from here on is worth checking the same way **before** it is written,
+/// not after a corpus probe finds the defect it describes.
+///
 /// **Every entry after the first four was added because something failed**, which is the argument for writing
 /// this table before changing the reader rather than after it:
 ///
@@ -870,6 +882,8 @@ fn an_operand_is_decisive(p: &CppParser) -> bool {
 /// nested call or a parenthesised subexpression inside does not end it early.
 fn an_operand_follows_the_parentheses(p: &CppParser) -> bool {
     let mut depth = 0isize;
+    // Where the token after the group that closes the cursor's `(` stands, once it is known.
+    let mut after_the_group = None;
 
     for (index, kind) in p.peek_token_kind_at(1..128).iter().enumerate() {
         match kind {
@@ -878,7 +892,8 @@ fn an_operand_follows_the_parentheses(p: &CppParser) -> bool {
                 depth -= 1;
                 if depth < 0 {
                     // This is the `)` that closes the cursor's `(`; the token after it is the question.
-                    return starts_an_operand(p, index + 2);
+                    after_the_group = Some(index + 2);
+                    break;
                 }
             }
             CppTokenKind::Eof | CppTokenKind::None => return false,
@@ -886,7 +901,51 @@ fn an_operand_follows_the_parentheses(p: &CppParser) -> bool {
         }
     }
 
-    false
+    let Some(mut offset) = after_the_group else {
+        return false;
+    };
+
+    // **…but a run of further groups is stepped over first**, because that is how a cast of a cast is written:
+    //
+    // ```cpp
+    // (__v32bf)(__m512bh) _mm512_setzero_si512 ()          // bits/avx10_2-512minmaxintrin.h:40
+    // (T)(U) 1
+    // ```
+    //
+    // The question is asked about the token after the *last* of them, and the answer is the same one: an operand
+    // there means the first parentheses held a type, because `(T)(U) 1` and `(f)(a) 1` are not expressions — two
+    // operands in a row is not a thing, and neither is an operand after a call. A bare `(f)(a)` (nothing after)
+    // still reads as the call it is, and so does `(f)(a)(b)`, because what follows the last group there is `;`.
+    //
+    // The `(` exclusion in `starts_an_operand` is what makes this safe to do by scanning: the token that would
+    // make a *continuation* ambiguous is exactly the one being stepped over, and only a run of them is skipped —
+    // never a single group followed by something that could be a call's argument.
+    while p.peek_token_kind_at(offset..offset + 1).first() == Some(&CppTokenKind::LeftParen) {
+        let mut inner = 0isize;
+        let mut closed = false;
+
+        for (index, kind) in p.peek_token_kind_at(offset..128).iter().enumerate() {
+            match kind {
+                CppTokenKind::LeftParen => inner += 1,
+                CppTokenKind::RightParen => {
+                    inner -= 1;
+                    if inner == 0 {
+                        offset += index + 1;
+                        closed = true;
+                        break;
+                    }
+                }
+                CppTokenKind::Eof | CppTokenKind::None => return false,
+                _ => {}
+            }
+        }
+
+        if !closed {
+            return false;
+        }
+    }
+
+    starts_an_operand(p, offset)
 }
 
 /// Does the significant token `offset` places ahead of the cursor **begin an operand**?
@@ -1498,11 +1557,23 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
         // matched it at all and the expression rule reported `expected primary expression` against the keyword
         // itself.
         //
-        // Only when a `(` follows. A bare `bool` is not an expression, and a keyword type followed by anything
-        // else is a *declaration* — which is the reading the declaration rule owns, and it is tried before this
-        // one: `int(x);` is a declaration of the parenthesised name `x`, and it stays one.
+        // **Two payloads, not one**: the braced spelling is the same construct — C++11's `T{…}`, and the way a
+        // default-constructed value is written in generic code (`size_t{}`, `int{}`, `bool{true}`). Only the
+        // parenthesis form was read here, so `int{}` had **no reading at all** in an expression: `return int{};`,
+        // `g(int{})` and `auto a = int{};` all reported `expected primary expression` against the keyword, while
+        // `size_t{}` — the same construct with a *name* — read. The `typename` arm below has taken both spellings
+        // since it was written; the reader for the payload ([`parse_functional_payload`]) has taken both all along,
+        // which is what makes this a guard rather than a rule.
+        //
+        // **A `{` here cannot be a declaration.** A simple-declaration needs a declarator, and `int{}`/`int{1}` has
+        // none — so the expression reading is the only one the standard offers, and the declaration rule (which
+        // runs first, and refuses an initialiser with no name to initialise) has already declined. `int(x);` is a
+        // different matter and stays the declaration it is: there the parenthesised name is a declarator.
         kind if super::types::is_type_specifier_keyword(kind)
-            && p.peek_next_token() == CppTokenKind::LeftParen =>
+            && matches!(
+                p.peek_next_token(),
+                CppTokenKind::LeftParen | CppTokenKind::LeftBrace
+            ) =>
         {
             let m = p.mark(CppSyntaxKind::CastExpr);
 
@@ -1516,7 +1587,9 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
             p.bump();
             the_type.complete(p);
 
-            if let Err(err) = parse_parenthesized_expression(p) {
+            // The payload, which may be **empty**: `int()`, `bool()` — a default-constructed temporary, and the
+            // same reader the `typename` arm below uses. See [`parse_functional_payload`].
+            if let Err(err) = parse_functional_payload(p) {
                 m.undo(p);
                 return Err(err);
             }
@@ -1559,29 +1632,12 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
             }
             the_type.complete(p);
 
-            // The payload: exactly one of the two functional spellings, and neither is optional — without one
-            // these tokens are not an expression at all, so the arm fails and the caller's other readings get
-            // their turn.
-            match p.current_token() {
-                CppTokenKind::LeftBrace => {
-                    if let Err(err) = super::decls::parse_braced_initializer(p) {
-                        m.undo(p);
-                        return Err(err);
-                    }
-                }
-                CppTokenKind::LeftParen => {
-                    if let Err(err) = parse_parenthesized_expression(p) {
-                        m.undo(p);
-                        return Err(err);
-                    }
-                }
-                _ => {
-                    m.undo(p);
-                    return Err(CppParseError::syntax_error_from(
-                        "expected `{` or `(` after a `typename` type",
-                        p.current_token_range(),
-                    ));
-                }
+            // The payload: a parenthesised argument list — **possibly empty** (`typename T::type()`) — or a
+            // braced one. It is not optional: without one these tokens are not an expression at all, so the arm
+            // fails and the caller's other readings get their turn.
+            if let Err(err) = parse_functional_payload(p) {
+                m.undo(p);
+                return Err(err);
             }
 
             Ok(m.complete(p))
@@ -1805,6 +1861,43 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
 /// bare `...` as an operand — see the `Ellipsis` arm of [`parse_primary_expr`]. The trailing-`...` *expansion*
 /// reading is still available, because the two are told apart by position rather than by a flag: a fold's `...`
 /// is an **operand**, so it arrives at the primary rule, while an expansion's follows a completed expression.
+/// The payload of a **functional-notation conversion**: `(a, b)` — possibly empty — or `{a, b}`.
+///
+/// Empty parentheses are a payload, and that is the whole reason this exists. `int()`, `bool()` and
+/// `typename T::type()` are default-constructed temporaries — the commonest functional conversion there is, and
+/// what `bits/stl_iterator_base_types.h:242` returns:
+///
+/// ```cpp
+/// __iterator_category(const _Iter&)
+/// { return typename iterator_traits<_Iter>::iterator_category(); }
+/// ```
+///
+/// [`parse_parenthesized_expression`] refuses them, correctly: it reads an *expression*, and `)` is not one. The
+/// group is read here as a `ParenExpr` with no children, which is what it is — a call with no arguments — so a
+/// consumer sees the same node for `f()` and for `int()`.
+fn parse_functional_payload(p: &mut CppParser) -> ParseResult {
+    if p.current_token() == CppTokenKind::LeftBrace {
+        return super::decls::parse_braced_initializer(p);
+    }
+
+    let m = p.mark(CppSyntaxKind::ParenExpr);
+    expect_token(p, CppTokenKind::LeftParen)?;
+
+    if p.current_token() != CppTokenKind::RightParen
+        && let Err(err) = parse_expr_up_to(p, Level::Full, true)
+    {
+        m.undo(p);
+        return Err(err);
+    }
+
+    if let Err(err) = expect_token(p, CppTokenKind::RightParen) {
+        m.undo(p);
+        return Err(err);
+    }
+
+    Ok(m.complete(p))
+}
+
 fn parse_parenthesized_expression(p: &mut CppParser) -> ParseResult {
     let m = p.mark(CppSyntaxKind::ParenExpr);
     expect_token(p, CppTokenKind::LeftParen)?;
@@ -1908,6 +2001,38 @@ fn parse_requires_expression(p: &mut CppParser) -> ParseResult {
     // The body: one requirement per `;`. A requirement may hold anything an expression can, so the `;` is what
     // says where each one ends.
     while p.current_token() != CppTokenKind::RightBrace && !p.is_eof() {
+        // A **directive between requirements**, which is the same seam as the nine `docs/grammar-gaps.md` records
+        // for statements and declarations, and the last place it was missing. libstdc++ writes the two
+        // alternatives of one requirement in two branches — `bits/alloc_traits.h:140` is the file this was found
+        // in:
+        //
+        // ```cpp
+        // template<typename _Tp, typename... _Args>
+        //   static constexpr bool __can_construct_at
+        //     = requires (_Tp* __p, _Args&&... __args) {
+        // #if __cpp_constexpr_dynamic_alloc
+        //         std::construct_at(__p, std::forward<_Args>(__args)...);
+        // #else
+        //         ::new((void*)__p) _Tp(std::forward<_Args>(__args)...);
+        // #endif
+        //       };
+        // ```
+        //
+        // A `#` here cannot be anything else: a requirement begins with an expression, a `typename`, a `{`, a
+        // nested `requires` — or a directive. Read it as the node it is and ask again about the token that follows,
+        // exactly as `parse_braced_initializer` does between the elements of a table.
+        //
+        // **What the missing seam cost** is worth keeping: the whole member failed, and the failure then ate the
+        // class's own `}` — so every member after it was read at *namespace* scope and the file's only diagnostic
+        // appeared 900 lines later, on the leftover `}` at the end. One seam, one file.
+        if p.current_token() == CppTokenKind::Hash {
+            if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                p.close_marks_above(base);
+                return Err(err);
+            }
+            continue;
+        }
+
         if let Err(err) = parse_requirement(p) {
             p.close_marks_above(base);
             return Err(err);

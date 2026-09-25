@@ -154,7 +154,15 @@ fn main() {
 
     let mut ranked: Vec<(&String, &usize)> = by_message.iter().collect();
     ranked.sort_by(|one, other| other.1.cmp(one.1));
-    println!("\n--- messages, most common first (a count is not a defect count: these cascade) ---");
+    // **The total is printed, not just the top of the list**: the list is truncated, so "add up what you see" is
+    // not the number — and every number in `docs/` that came from this probe is a total. (Found the hard way:
+    // 15 lines summed to 920 while the file really had 941 messages, because the tail beyond the top 15 is real.)
+    let messages: usize = by_message.values().sum();
+    println!(
+        "\n--- messages: {messages} in total over {} kinds, the 15 most common first \
+         (a count is not a defect count: these cascade) ---",
+        by_message.len()
+    );
     for (message, count) in ranked.iter().take(15) {
         println!("{count:6}  {message}");
     }

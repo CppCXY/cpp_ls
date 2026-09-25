@@ -3,6 +3,7 @@ mod cpp_language_level;
 mod cpp_operator_kind;
 mod cpp_syntax_kind;
 mod cpp_token_kind;
+mod dialect;
 
 pub use cpp_language::{
     CppLanguage, CppSyntaxElement, CppSyntaxElementChildren, CppSyntaxNode, CppSyntaxNodeChildren,
@@ -12,6 +13,7 @@ pub use cpp_language_level::CppLanguageLevel;
 pub use cpp_operator_kind::{CppBinaryOperator, CppUnaryOperator};
 pub use cpp_syntax_kind::CppSyntaxKind;
 pub use cpp_token_kind::CppTokenKind;
+pub use dialect::Dialect;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u16)]

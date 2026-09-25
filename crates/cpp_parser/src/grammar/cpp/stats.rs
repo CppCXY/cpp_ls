@@ -62,8 +62,41 @@ pub(crate) fn parse_compound_stat(p: &mut CppParser) -> ParseResult {
 
 /// Parse statements until a token that cannot start one.
 pub fn parse_stats(p: &mut CppParser) {
-    while !block_follow(p) {
+    // **How many `}` this block owes to statements it gave up on** — the statement-level half of the brace debt
+    // the class body keeps (`grammar/cpp/decls.rs`, and `docs/grammar-gaps.md` B58). A statement that failed after
+    // consuming a `{` — an initialiser, a lambda's body, a nested block — leaves the block one brace short, and the
+    // recovery below skips *to* the next `}`, which belongs to the failed statement: the block ends there and every
+    // statement after it is left to the enclosing rule.
+    //
+    // ```cpp
+    // void f() {
+    //   S s{
+    // #if X
+    //     1
+    // #endif
+    //     ;                 // the `;` is in the other branch: invalid, and the member fails
+    //   };
+    //   after();            // ← this used to be outside `f`
+    // }
+    // ```
+    let mut unclosed_braces = 0isize;
+
+    while !block_follow(p) || unclosed_braces > 0 {
+        if p.is_eof() {
+            break;
+        }
+
+        // A `}` with a debt outstanding closes the statement that was abandoned, not this block.
+        if p.current_token() == CppTokenKind::RightBrace {
+            unclosed_braces -= 1;
+            let error = p.mark(CppSyntaxKind::ErrorNode);
+            p.bump();
+            error.complete(p);
+            continue;
+        }
+
         let level = p.open_marks();
+        let before_events = p.current_event_count();
         match parse_stat(p) {
             Ok(_) => {}
             Err(err) => {
@@ -74,12 +107,20 @@ pub fn parse_stats(p: &mut CppParser) {
                 // of the file rather than just this statement.
                 p.recover_to_level(level);
 
+                // Charge the failed statement for the braces it consumed and never closed — from the events,
+                // because a rule that rolled back (the declaration/expression choice does) has already truncated
+                // them, and what it read is then re-read below as rubble.
+                unclosed_braces += p.brace_balance_since(before_events).max(0);
+
                 // Skip to next semicolon or closing brace for error recovery…
                 let before = p.current_token_index();
                 while !p.is_eof()
                     && p.current_token() != CppTokenKind::Semicolon
                     && p.current_token() != CppTokenKind::RightBrace
                 {
+                    if p.current_token() == CppTokenKind::LeftBrace {
+                        unclosed_braces += 1;
+                    }
                     p.bump();
                 }
                 if p.current_token() == CppTokenKind::Semicolon {
@@ -96,6 +137,15 @@ pub fn parse_stats(p: &mut CppParser) {
                 // the skip, and the block ended at the next `if` with "expected `}`". `std::map`'s member list
                 // stopped at line 511 and `m.find` answered "not declared in this file".
                 if p.current_token_index() == before {
+                    // A `{` that nothing claimed is the one token worth reading before giving up: it opens
+                    // something the statement never finished, so the block owes a `}` for it.
+                    if p.current_token() == CppTokenKind::LeftBrace {
+                        unclosed_braces += 1;
+                        let error = p.mark(CppSyntaxKind::ErrorNode);
+                        p.bump();
+                        error.complete(p);
+                        continue;
+                    }
                     break;
                 }
             }
@@ -715,9 +765,24 @@ fn parse_condition(p: &mut CppParser) -> ParseResult {
         return Ok(m.complete(p));
     }
 
-    // A condition may declare a variable: `if (Foo* p = get())`.
+    // A condition may declare a variable: `if (Foo* p = get())`, `if (const auto n = g())`.
+    //
+    // The declaration here is the one a **condition** reads — specifiers, one declarator, an initialiser, no `;`
+    // of its own — and that is the whole of the fix, not a detail: `parse_declaration` insists on a `;`, so the
+    // attempt failed, the fallback read an *expression*, and the two readings came out as a silent multiplication
+    // and an error respectively:
+    //
+    // ```text
+    // if (Foo* p = get())     read as `Foo * p = get()` — a BinaryExpr nobody reports, and not valid C++ either
+    // if (Foo p = get())      `expected ), but get identifier` against the `=`
+    // if (const auto n = g()) `expected primary expression` against the `=`
+    // ```
+    //
+    // The rule's two refusals are what keep the expression path for the conditions that are expressions: a
+    // condition declares **one** variable and it must be **initialised**, so `if (a && b)` and `if (v.size())`
+    // never reach a declaration. See `parse_condition_declaration`.
     let checkpoint = p.checkpoint();
-    if super::decls::parse_declaration(p).is_err() {
+    if super::decls::parse_condition_declaration(p).is_err() {
         p.rollback(checkpoint);
         parse_expr(p)?;
     }

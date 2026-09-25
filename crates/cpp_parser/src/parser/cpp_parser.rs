@@ -1,6 +1,6 @@
 use crate::{
     grammar::parse_cpp_unit,
-    kind::{CppSyntaxKind, CppTokenKind},
+    kind::{CppSyntaxKind, CppTokenKind, Dialect},
     lexer::{CppLexer, CppTokenData},
     parser_error::CppParseError,
     symbols::{MacroBody, SymbolKind},
@@ -781,6 +781,34 @@ impl<'a> CppParser<'a> {
         self.events.len()
     }
 
+    /// How many `{` tokens were consumed at or after `from_event` without a `}` to match them?
+    ///
+    /// The question a **recovery** has to ask about a construct it gave up on. Closing the markers of a failed
+    /// sub-parse ([`MarkerEventContainer::finish_marks_to`]) keeps the abandonment from swallowing what follows,
+    /// but it cannot un-consume the *tokens*: a member that failed after eating a `{` — a requires-expression's
+    /// body, a function body, a block — leaves a brace behind that the enclosing body then spends its own `}` on.
+    /// The class body ends early, every member after it is read at file scope, and the only diagnostic in the file
+    /// lands on the leftover brace at the end (which is exactly what `bits/alloc_traits.h` did before B57, and
+    /// what `docs/grammar-gaps.md` B58 is about).
+    ///
+    /// Counted from the **events**, not the token stream: a rollback truncates the events, so a token read, thrown
+    /// away and read again counts once — the same reason [`CppParser::events_contain_any`] reads them.
+    pub fn brace_balance_since(&self, from_event: usize) -> isize {
+        let mut balance = 0isize;
+
+        for event in self.events[from_event.min(self.events.len())..].iter() {
+            if let MarkEvent::EatToken { kind, .. } = event {
+                match kind {
+                    CppTokenKind::LeftBrace => balance += 1,
+                    CppTokenKind::RightBrace => balance -= 1,
+                    _ => {}
+                }
+            }
+        }
+
+        balance
+    }
+
     /// Has a node of one of these kinds been opened between `from_event` and the cursor?
     ///
     /// The counterpart to [`CppParser::events_contain_any`], which asks about everything from `from_event`
@@ -816,6 +844,15 @@ impl<'a> CppParser<'a> {
     /// treat it as an operator. `parse_template_argument_list` is the only place that sets this.
     pub fn is_in_template_arguments(&self) -> bool {
         self.template_argument_depth > 0
+    }
+
+    /// Which compiler's own reserved spellings mean what — see [`Dialect`].
+    ///
+    /// Read by the grammar in exactly one place (`a_type_the_compiler_spells`), which is the point: the question
+    /// this answers is not "how is this file written" but "what does the compiler reading it mean by
+    /// `__int128`", and only the caller knows which compiler that is.
+    pub fn dialect(&self) -> Dialect {
+        self.parse_config.dialect
     }
 
     /// Enter a template argument list. Returns the previous depth so the caller can restore it.

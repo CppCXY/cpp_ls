@@ -14,7 +14,7 @@
 
 use crate::{
     grammar::ParseResult,
-    kind::{CppSyntaxKind, CppTokenKind},
+    kind::{CppSyntaxKind, CppTokenKind, Dialect},
     parser::{CompleteMarker, CppParser, Marker, MarkerEventContainer},
     parser_error::CppParseError,
     symbols::SymbolKind,
@@ -360,8 +360,8 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
     // beginning with `explicit` has a specifier and no name.
     p.begin_declaration_type();
     // Where the specifier sequence begins, so the loop can read back what it has produced. See the note on
-    // `a_further_name_may_join` below.
-    let specifiers_from = p.current_event_count();
+    // `a_further_name_may_join` below — and on `#else`, which moves it forward: the evidence is per branch.
+    let mut specifiers_from = p.current_event_count();
     loop {
         // A **compiler keyword** is stepped over *here*, outside [`parse_one_decl_specifier`], and the reason is
         // one the two functions have to agree about: that function decides "did this specifier name a type?" by
@@ -401,9 +401,43 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
         // not this rule's, because a declaration never begins with a directive — the loop that asked for the
         // declaration reads directives itself, and one read here would be one it can no longer see.
         if allow_second_name && specifiers > 0 && p.current_token() == CppTokenKind::Hash {
+            // **Which directive is it?** Ask *before* reading it, because the answer decides how much of what the
+            // sequence knows survives: `#else`/`#elif` opens the **other branch**, and the branches are
+            // alternatives — one spelling of the same declaration each. What the branch just read said about the
+            // type therefore says nothing about this one, and carrying it over is a real misreading:
+            //
+            // ```cpp
+            // template<typename _Tp, typename... _Args>              // bits/alloc_traits.h:430
+            // #if __cpp_concepts && __cpp_constexpr_dynamic_alloc
+            //   requires __can_construct<_Alloc, _Tp, _Args...>
+            //   static constexpr void
+            // #else
+            //   static __enable_if_t<__can_construct<_Alloc, _Tp, _Args...>>
+            // #endif
+            //   construct(_Alloc& __a, _Tp* __p, _Args&&... __args)
+            // ```
+            //
+            // The `#if` branch names `void`, so "a type has been named" was already true when the `#else` branch's
+            // `__enable_if_t<…>` arrived — and a name that is not the first type of its own head was refused the
+            // type position, became the **declarator**, and the declaration then ended at the `#endif` with no `;`
+            // (the error surfaced on the next member). Forget the flags at the branch boundary and the name joins
+            // its own branch's type, which leaves `construct` — the name that comes after the `#endif` — as the
+            // declarator, where it belongs.
+            //
+            // `#endif` is deliberately **not** a boundary of this kind: after it the declaration continues with
+            // whatever the branches agreed on, which is exactly the knowledge the tail needs.
+            let starts_the_other_branch = matches!(p.peek_token_text_at(1), "else" | "elif");
             if let Err(err) = super::stats::parse_preprocessor_directive(p) {
                 p.close_marks_above(base);
                 return Err(err);
+            }
+            if starts_the_other_branch {
+                // The same three things the loop started with, put back: no type named *in this branch*, the
+                // one-name allowance unspent, and the evidence window (what the sequence has produced, read back
+                // by `a_further_name_may_join` below) starting after the directive rather than at the head.
+                has_type_specifier = false;
+                name_allowed = allow_second_name;
+                specifiers_from = p.current_event_count();
             }
 
             // **The other branch's head.** libstdc++ writes two variants of one member with a head each, and the
@@ -641,6 +675,15 @@ fn parse_one_decl_specifier_inner(
         // context that does not go through that loop, and the keyword is read here.
         _ if an_implementation_keyword(p).is_some() => {
             return Ok(parse_an_implementation_keyword(p));
+        }
+
+        // A **type this target's compiler adds to the language**: `__int128`, `_Float16`, `__int64`. Read here
+        // rather than in the skip above, because a `BuiltinType` is what tells the caller a type has been named —
+        // see [`a_type_the_compiler_spells`].
+        _ if a_type_the_compiler_spells(p) => {
+            let m = p.mark(CppSyntaxKind::BuiltinType);
+            p.bump();
+            return Ok(m.complete(p));
         }
         // `enum class E`, `enum struct E` — the scoped-enum form. Checked before the general
         // class-like case because the second keyword is part of *this* specifier, not a new one.
@@ -1646,6 +1689,38 @@ fn parse_class_like_head(p: &mut CppParser) -> ParseResult {
         }
     }
 
+    // …and the same position holds a **bare** macro with no argument list: `class _GLIBCXX17_DEPRECATED
+    // unary_negate : public …` (`bits/stl_function.h:1021`), where the macro is the standard library's
+    // deprecation marker and the name follows it.
+    //
+    // Two names in a row is not a class head in any reading — after the class-key the grammar allows an
+    // attribute, one name, `{`, `:` or `;` — so the first name is the macro. Two guards keep the shapes that
+    // *look* similar out of it, and both were needed:
+    //
+    // * the second name must be followed by something a class head continues with (`{`, `:`, `;`, a directive),
+    //   which is what refuses `struct S requires C<T> { }` — there the second name is followed by another name;
+    // * `final`, `override` and `requires` are **spellings** rather than tokens (C++11 made the first two
+    //   contextual and C++20 the third), so a second name spelled that way is never the class's name here:
+    //   `class A final : B` is a class named `A`.
+    if p.current_token() == CppTokenKind::Identifier {
+        let second = p.peek_token_kind_at(1..2);
+        let after_second = p.peek_token_kind_at(2..3);
+
+        let second_is_a_name = second.first() == Some(&CppTokenKind::Identifier)
+            && !matches!(p.peek_token_text_at(1), "final" | "override" | "requires");
+        let the_head_continues = matches!(
+            after_second.first(),
+            Some(&CppTokenKind::LeftBrace)
+                | Some(&CppTokenKind::Colon)
+                | Some(&CppTokenKind::Semicolon)
+                | Some(&CppTokenKind::Hash)
+        );
+
+        if second_is_a_name && the_head_continues {
+            p.bump(); // the macro's name; the class's own name is read below
+        }
+    }
+
     // An optional name. `enum class` is handled before this is reached.
     // The name is read before it is parsed, because the parser needs it afterwards and re-deriving it from the
     // event stream would be a second implementation of "what did that name say".
@@ -1715,13 +1790,52 @@ fn parse_class_like_head(p: &mut CppParser) -> ParseResult {
 
     // A base clause: `class D : public B, virtual C`. Only for classes, and only if a `{` really
     // follows — otherwise this `:` is something else entirely (a bit-field, a label).
-    if keyword != CppTokenKind::EnumKeyword
-        && p.current_token() == CppTokenKind::Colon
-        && a_brace_follows_the_base_clause(p)
-        && let Err(err) = parse_base_clause(p)
-    {
-        p.close_marks_above(base_marks);
-        return Err(err);
+    //
+    // A **directive between the name and the base clause** is read first, and the two are one loop because the
+    // two orders occur: the head's base clause may be written inside a branch, or the whole head may be written
+    // in two branches that each carry their own `:`:
+    //
+    // ```cpp
+    // class move_iterator                                  // bits/stl_iterator.h:1435
+    // #ifdef __glibcxx_ranges
+    //   : public __detail::__move_iter_cat<_Iterator>
+    // #endif
+    // { … };
+    // ```
+    //
+    // Without this the head ended at the name, the declaration asked for a `;`, and the error landed on the `:`
+    // of the next line — a diagnostic about a line that is not wrong. The directives are read as the nodes they
+    // are, so the tree keeps them and both branches stay visible.
+    loop {
+        let mut read_a_directive = false;
+
+        while p.current_token() == CppTokenKind::Hash {
+            let checkpoint = p.checkpoint();
+
+            if super::stats::parse_preprocessor_directive(p).is_err() {
+                p.rollback(checkpoint);
+                break;
+            }
+
+            read_a_directive = true;
+        }
+
+        if keyword != CppTokenKind::EnumKeyword
+            && p.current_token() == CppTokenKind::Colon
+            && a_brace_follows_the_base_clause(p)
+        {
+            if let Err(err) = parse_base_clause(p) {
+                p.close_marks_above(base_marks);
+                return Err(err);
+            }
+
+            continue;
+        }
+
+        // Nothing else to read: the head is as long as it is.
+        if !read_a_directive {
+            break;
+        }
     }
 
     // The body.
@@ -1779,6 +1893,20 @@ fn a_brace_follows_the_base_clause(p: &CppParser) -> bool {
 /// inside a conditional (`struct S #if X : public B #endif { }`), and there the `{` really is this head's.
 fn a_body_follows_the_class_head(p: &CppParser) -> bool {
     let mut depth = 0isize;
+    // A **braced-init-list inside the arguments** is not the body, and this is the third place the same question
+    // had to be asked — after the two template-id scans above. The head
+    //
+    // ```cpp
+    // template<typename _Alloc>
+    //   struct __is_allocator<_Alloc, __void_t<…, decltype(std::declval<_Alloc&>().allocate(size_t{}))>>
+    //   : true_type { };
+    // ```
+    //
+    // writes a `{` **and a `}`** while the head is still going, and the `}` ended the scan: the class was read as
+    // body-less, so the base clause and the body became rubble and the diagnostic landed at the end of the line
+    // (`bits/alloc_traits.h:941`). Counted the way the angles are — and a `}` that closes nothing still ends the
+    // scan, because that one is the enclosing body's own.
+    let mut braces = 0isize;
     let mut after_a_directive = false;
 
     for kind in p.peek_token_kind_at(0..64) {
@@ -1788,6 +1916,8 @@ fn a_body_follows_the_class_head(p: &CppParser) -> bool {
 
         match kind {
             CppTokenKind::LeftBrace if depth <= 0 => return true,
+            CppTokenKind::LeftBrace => braces += 1,
+            CppTokenKind::RightBrace if braces > 0 => braces -= 1,
             CppTokenKind::Semicolon | CppTokenKind::RightBrace | CppTokenKind::Eof => return false,
             // The `#` of a directive: everything past it is on another line, and may be another branch.
             CppTokenKind::Hash => after_a_directive = true,
@@ -2047,6 +2177,23 @@ fn a_matching_angle_bracket_follows(p: &CppParser) -> bool {
     // **comparison** `A < bool(T) > x` — a declaration read as an expression, with no diagnostic anywhere, which
     // is the A0 shape this file exists to prevent.
     let mut parens = 0isize;
+    // …and neither is a **braced-init-list**, which is the same argument a third time and the one that hid a
+    // *silent* reading rather than a diagnostic. C++11's `T{…}` is a template argument like any other value:
+    //
+    // ```text
+    // X<int{}> m;                     a braced functional conversion as the argument
+    // X<A{1, 2}> m;                   …with a list in it
+    // struct Q<T, int{}> { };         …in a partial specialisation's name
+    // using A = X<int{}>;             …in an alias target
+    // ```
+    //
+    // With `{` in the stop set the scan answered "this `<` is a comparison" for every one of them, so the name
+    // was read as the bare `X` and the angles became rubble — and at file scope that meant `X<int{}> m;` came out
+    // as **`X < int{} > m`**, a well-formed comparison with no diagnostic and no `ErrorNode`, while the same
+    // statement with a *keyword* type inside (`int{}` has an expression reading now that the functional-conversion
+    // arm takes a brace) was the only one that said anything. An unmatched `}` still ends the scan — that is the
+    // enclosing declaration's own brace — so `T x{a < b}` and `struct S : B<C> {` read exactly as before.
+    let mut braces = 0isize;
 
     'scan: {
         for kind in p.peek_token_kind_at(1..128) {
@@ -2056,6 +2203,8 @@ fn a_matching_angle_bracket_follows(p: &CppParser) -> bool {
                 CppTokenKind::RightBracket if brackets > 0 => brackets -= 1,
                 CppTokenKind::LeftParen => parens += 1,
                 CppTokenKind::RightParen if parens > 0 => parens -= 1,
+                CppTokenKind::LeftBrace => braces += 1,
+                CppTokenKind::RightBrace if braces > 0 => braces -= 1,
                 CppTokenKind::Greater | CppTokenKind::RightShift => {
                     // `>>` closes two levels at once; a lone `>` closes one. Both arrive here because
                     // the amount is all that differs.
@@ -2073,7 +2222,6 @@ fn a_matching_angle_bracket_follows(p: &CppParser) -> bool {
                 // contains an unmatched one of these, so reaching one means this `<` was a less-than
                 // after all.
                 CppTokenKind::Semicolon
-                | CppTokenKind::LeftBrace
                 | CppTokenKind::RightBrace
                 | CppTokenKind::RightParen
                 | CppTokenKind::RightBracket
@@ -2117,6 +2265,11 @@ fn a_bare_template_id_is_here(p: &CppParser) -> bool {
     let mut depth = 1isize;
     // See the stop set below: an *unmatched* `)` ends the scan, a matched pair does not.
     let mut parens = 0isize;
+    // …and a matched **brace** pair does not either, for the reason written on the same counter in
+    // [`a_matching_angle_bracket_follows`]: `struct Q<T, int{}> { }` is a partial specialisation whose name is a
+    // template-id, and a scan that stopped at the `{` called it "not a template-id" — so the class-head rule read
+    // the name as the bare `Q` and the arguments became rubble.
+    let mut braces = 0isize;
 
     for (index, kind) in p.peek_token_kind_at(2..128).iter().enumerate() {
         match kind {
@@ -2138,8 +2291,6 @@ fn a_bare_template_id_is_here(p: &CppParser) -> bool {
                 }
             }
             CppTokenKind::Semicolon
-            | CppTokenKind::LeftBrace
-            | CppTokenKind::RightBrace
             | CppTokenKind::RightBracket
             | CppTokenKind::Colon
             | CppTokenKind::Assign
@@ -2150,10 +2301,13 @@ fn a_bare_template_id_is_here(p: &CppParser) -> bool {
             | CppTokenKind::BlockComment => return false,
             // An **unmatched** `)`, exactly as in [`a_matching_angle_bracket_follows`]: a *matched* pair is a
             // function type as a template argument (`F<bool(T)>`), which this scan has to see past for the same
-            // reason the other one does.
+            // reason the other one does. The brace pair is the same shape one counter along — its guarded arm has
+            // to come *before* the stop set, or the stop set's `RightBrace` swallows it.
             CppTokenKind::LeftParen => parens += 1,
             CppTokenKind::RightParen if parens > 0 => parens -= 1,
-            CppTokenKind::RightParen => return false,
+            CppTokenKind::LeftBrace => braces += 1,
+            CppTokenKind::RightBrace if braces > 0 => braces -= 1,
+            CppTokenKind::RightParen | CppTokenKind::RightBrace => return false,
             _ => {}
         }
     }
@@ -2577,23 +2731,72 @@ fn a_parameter_list_is_the_type(p: &CppParser) -> bool {
         return false;
     }
 
-    if p.peek_token_kind_at(1..2).first() == Some(&CppTokenKind::RightParen) {
+    let kinds = p.peek_token_kind_at(0..64);
+
+    if kinds.get(1) == Some(&CppTokenKind::RightParen) {
         return p
             .last_consumed_token_kind()
             .is_some_and(is_type_specifier_keyword);
     }
 
-    matches!(
-        p.peek_token_kind_at(1..2).first(),
-        Some(&kind) if is_type_specifier_keyword(kind)
-            || matches!(
-                kind,
-                CppTokenKind::Identifier
-                    | CppTokenKind::Scope
-                    | CppTokenKind::ConstKeyword
-                    | CppTokenKind::VolatileKeyword
-            )
-    )
+    // **Every** element has to start like a parameter, not just the first one, and that is what tells the two
+    // readings of a parenthesised group apart when the group's first token is a name:
+    //
+    // ```text
+    // new T(int, char)   a function type, spelled with its parameter list
+    // new T(a, *q)       an allocation of `T` initialised with `(a, *q)` — `*q` is not a parameter
+    // ```
+    //
+    // A parameter is a type and then a declarator, so nothing but a type can follow a `(` or a top-level `,`. The
+    // first version of this predicate asked only about the first token, so `a` decided for the whole group: the
+    // group was read as a parameter list, `*q` had no type, and the allocation came out as
+    // `expected a type specifier` against the `*` — measured in `bits/uses_allocator.h`,
+    // `bits/node_handle.h` and `memory_resource.h` of the standard-library closure.
+    let mut depth = 0isize;
+
+    for (offset, kind) in kinds.iter().enumerate() {
+        let starts_an_element =
+            offset == 1 || (depth == 1 && kinds.get(offset - 1) == Some(&CppTokenKind::Comma));
+
+        if starts_an_element && !begins_a_parameter_type(*kind) {
+            return false;
+        }
+
+        match kind {
+            CppTokenKind::LeftParen | CppTokenKind::LeftBracket | CppTokenKind::LeftBrace => depth += 1,
+            CppTokenKind::RightParen => {
+                depth -= 1;
+
+                if depth == 0 {
+                    // The group closed, and every element began like a parameter.
+                    return true;
+                }
+            }
+            CppTokenKind::RightBracket | CppTokenKind::RightBrace => depth -= 1,
+            CppTokenKind::Eof | CppTokenKind::None => return false,
+            _ => {}
+        }
+    }
+
+    // Unterminated within the lookahead: not a group this rule can claim.
+    false
+}
+
+/// Can a **parameter** begin with this token?
+///
+/// A parameter is a type and then a declarator, so this is the set of tokens a type may begin with — the same set
+/// the first element has always been judged by, plus `...` for `void f(...)`, which is a parameter list and
+/// nothing else.
+fn begins_a_parameter_type(kind: CppTokenKind) -> bool {
+    is_type_specifier_keyword(kind)
+        || matches!(
+            kind,
+            CppTokenKind::Identifier
+                | CppTokenKind::Scope
+                | CppTokenKind::ConstKeyword
+                | CppTokenKind::VolatileKeyword
+                | CppTokenKind::Ellipsis
+        )
 }
 
 /// Consume any `const` / `volatile` — or an implementation qualifier — immediately following a pointer,
@@ -3223,14 +3426,52 @@ fn parse_template_argument(p: &mut CppParser) -> ParseResult {
     let stopped_at_a_group_that_is_not_a_parameter_list =
         p.current_token() == CppTokenKind::LeftParen && !a_parameter_list_is_the_type(p);
 
+    // **A brace after the type is not the end of the argument** — it makes the argument a *value*, not a type:
+    //
+    // ```cpp
+    // X<int{}> m;                     a braced functional conversion, argument of a template-id
+    // __void_t<…, decltype(…allocate(size_t{}))>        bits/alloc_traits.h:941, where this was measured
+    // X<A{1, 2}> m;
+    // ```
+    //
+    // C++11's `T{…}` is the same construction the parenthesis form is, and an argument list is one of the places it
+    // is written. The type reading stops at the `{` — a brace cannot continue a type — and *that stop was accepted
+    // as the end of the argument*, because the type reading had succeeded. The list then wanted a `,` or a `>` and
+    // found a brace, and the failure was **silent in the worst way**: the whole statement came back as a comparison
+    // (`X < int{} > m`), well formed, lossless, with no diagnostic and no `ErrorNode`, and the declaration the user
+    // wrote was simply not there. `S<size_t{}> x;` had the same reading; only the *keyword* spelling was loud,
+    // because `int` has no expression reading of its own to fall back on.
+    //
+    // Nothing else can be at this position: a `{` inside an argument list cannot belong to an enclosing construct —
+    // the list has to be closed by a `>` first — and a braced-init-list is not a template argument on its own, so
+    // the expression reading below is the only one that can take these tokens. It handles both spellings: a keyword
+    // type through the functional-conversion arm of `parse_primary_expr`, a name through the ordinary one.
+    let a_brace_makes_it_a_value = p.current_token() == CppTokenKind::LeftBrace;
+
     if p.current_token_index() > start
         && (type_read.is_ok() || !continues_a_type(p.current_token()))
         && !stopped_at_a_group_that_is_not_a_parameter_list
+        && !a_brace_makes_it_a_value
     {
         return Ok(CompleteMarker::empty());
     }
 
     // Nothing usable: read it as an expression instead.
+    //
+    // **Below the comma**, like every other rule that spells its own separators ([`Level`] in `exprs` keeps the
+    // list, and this rule is on it). `parse_expr` took the comma and made the *list* one argument:
+    //
+    // ```text
+    // X<!C<T>, bool> f;        the argument came out as `!C < T , ` with an empty right side, and the `bool`,
+    //                          the `>`, the name and the body were all rubble
+    // S<3, 4> x;               reads with **no diagnostic at all**, as one argument `(3, 4)` — the comma operator
+    //                          was taken for the separator, which no count can see
+    // S<3, long> x;            `expected primary expression` against `long`, because the type has no expression
+    //                          reading: the loud half of the same defect
+    // ```
+    //
+    // The type reading is what hides this: `Grid<T, 3>::fill` and `array<int, 3>` put the comma *after* a type the
+    // type reading already accepted, so the fallback never ran for them and the documented fix looked done.
     //
     // And **nothing more than that**: a `rollback` only truncates the event stream, so the type reading just
     // thrown away cannot be put back — it would have to be read again. An earlier version of this tried to
@@ -3239,7 +3480,7 @@ fn parse_template_argument(p: &mut CppParser) -> ParseResult {
     // markers left open that way came out as an unpaired forward reference, and `bits/tuple` panicked the tree
     // builder with "forward parent must point at a NodeStart, found Trivia". One reading, one rewind.
     p.rollback(checkpoint);
-    super::exprs::parse_expr(p)
+    super::exprs::parse_assignment_expr(p)
 }
 
 /// Can a type-id continue with this token?
@@ -3411,6 +3652,51 @@ fn an_implementation_keyword(p: &CppParser) -> Option<ImplementationKeyword> {
         | "__unaligned" | "__ptr64" | "__ptr32" | "__w64" => ImplementationKeyword::Bare,
         _ => return None,
     })
+}
+
+/// Is the cursor on a **type that this target's compiler adds to the language**?
+///
+/// Read as a `BuiltinType` specifier, with the *spelling* kept in the node's text — the same arrangement
+/// [`ImplementationKeyword::Means`] uses for `__forceinline`, and the reason it goes through the ordinary
+/// specifier rule rather than the compiler-keyword skip above: a rule that produces a `BuiltinType` is what tells
+/// [`parse_one_decl_specifier`] that **a type has been named** (`has_type_specifier`), and without that answer
+/// `_Float16 h = 1;` has its declarator name taken into the type — the declaration then has no declarator, fails,
+/// and the statement falls back to an expression.
+///
+/// All of these are reserved to the implementation (a double underscore, or the `_FloatN` family the standard
+/// names for it), so no `#define` in any header can turn one into something else, and the only question left is
+/// *which* implementation — which is the dialect:
+///
+/// ```text
+/// GNU       __int128, _Float16, _Float32, _Float64, _Float128, __float128, __fp16, __bf16
+/// MSVC      __int8, __int16, __int32, __int64
+/// ```
+///
+/// Read as names — which is what happened before this existed — the failure is silent and shaped like a
+/// declaration of something else: `unsigned __int128 x;` came out as a declaration of a variable named
+/// `__int128` whose **suffix** was the macro `x` (measured on `bits/bmi2intrin.h`, whose first error that was).
+/// `_Float16` and `__bf16` are in the corpus too (`avx512fp16intrin.h`, the `avx10_2` headers).
+fn a_type_the_compiler_spells(p: &CppParser) -> bool {
+    match p.dialect() {
+        Dialect::Gnu => matches!(
+            p.current_token_text(),
+            "__int128"
+                | "_Float16"
+                | "_Float32"
+                | "_Float64"
+                | "_Float128"
+                | "__float128"
+                | "__fp16"
+                | "__bf16"
+        ),
+        // MSVC's own integer types. Under GNU they are *not* types: MinGW's `_mingw.h` `#define`s every one of
+        // them (`#define __int64 long long`), so reading them as types there would be reading a macro as a
+        // keyword — the same mistake in the other direction.
+        Dialect::Msvc => matches!(
+            p.current_token_text(),
+            "__int8" | "__int16" | "__int32" | "__int64"
+        ),
+    }
 }
 
 /// Is an attribute written at the cursor — in any of the three spellings?

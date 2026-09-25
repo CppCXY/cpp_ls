@@ -102,6 +102,18 @@ impl<'a> CppLexer<'a> {
             "consteval" => CppTokenKind::ConstevalKeyword,
             "constinit" => CppTokenKind::ConstinitKeyword,
             "decltype" => CppTokenKind::DecltypeKeyword,
+
+            // The **GNU spellings of constructs that are standard keywords**, mapped to the same kind because a
+            // compiler treats them as the keyword they are: `typedef __typeof__(x) T;` is a declaration whose
+            // specifiers are a type, by the same rule that makes `typedef decltype(x) T;` one. Reading them as
+            // ordinary identifiers instead is what `typedef __typeof__(nullptr) nullptr_t;` did — the name came
+            // out as a *declarator* and the declaration as `expected ;` (measured in `stddef.h`,
+            // `bits/stl_heap.h`, `bits/stl_uninitialized.h` of the standard-library closure).
+            //
+            // The tree keeps the spelling: a token's text is the source text, so a consumer that needs to tell
+            // `__typeof__` from `decltype` reads the token, not the kind — and one that asks "is this a type
+            // expression?" gets the right answer for both.
+            "__typeof__" | "__typeof" | "__decltype" => CppTokenKind::DecltypeKeyword,
             "explicit" => CppTokenKind::ExplicitKeyword,
             "export" => CppTokenKind::ExportKeyword,
             "mutable" => CppTokenKind::MutableKeyword,

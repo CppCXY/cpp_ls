@@ -69,7 +69,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use cpp_parser::{CppParseError, CppParser, CppSyntaxNode, CppSyntaxTree, ParserConfig};
+use cpp_parser::{CppParseError, CppParser, CppSyntaxNode, CppSyntaxTree, Dialect, ParserConfig};
 
 use crate::include::config::{CompileCommand, CompileCommands, CompilerConfig, parse_compile_commands};
 use crate::include::paths::{DiskFiles, FileProvider, OverlayFiles, normalize_path};
@@ -344,6 +344,21 @@ impl<'a> Session<'a, DiskFiles> {
         let config = match &toolchain {
             Some(found) => found.config(&base),
             None => base,
+        };
+
+        // **Which compiler this is**, asked of the compiler rather than guessed from the flags: GCC and Clang
+        // predefine `__GNUC__`, MSVC predefines `_MSC_VER`, and both arrive in the table the same `-dM -E` call
+        // that gave the search paths (see `toolchain::discover`). It matters to the *parser*, which has to know
+        // what `__int128` means to the compiler reading the file — see `CompilerConfig::dialect`.
+        //
+        // No toolchain, no answer: the configuration keeps its default, and a caller that knows the target
+        // (`with_config`) sets it itself.
+        let config = match toolchain
+            .as_ref()
+            .and_then(|found| Dialect::from_predefined_macros(found.macros()))
+        {
+            Some(dialect) => config.with_dialect(dialect),
+            None => config,
         };
 
         Session::assemble(root, files, filter, config, toolchain, database)

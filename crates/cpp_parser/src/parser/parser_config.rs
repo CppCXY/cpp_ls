@@ -1,9 +1,19 @@
 use rowan::NodeCache;
 
-use crate::{kind::CppLanguageLevel, lexer::LexerConfig, symbols::SymbolTable};
+use crate::{
+    kind::{CppLanguageLevel, Dialect},
+    lexer::LexerConfig,
+    symbols::SymbolTable,
+};
 
 pub struct ParserConfig<'cache> {
     pub level: CppLanguageLevel,
+    /// Which compiler's own reserved spellings mean what — see [`Dialect`].
+    ///
+    /// A separate question from `level`, and the reason is written on [`Dialect`]: `-std=gnu++20` is C++20 *and*
+    /// GNU's spellings at once, which a single "level" cannot say. The analysis layer sets this from the
+    /// toolchain's own predefined macros (`__GNUC__` / `_MSC_VER`).
+    pub dialect: Dialect,
     lexer_config: LexerConfig,
     node_cache: Option<&'cache mut NodeCache>,
     symbol_table: Option<&'cache dyn SymbolTable>,
@@ -13,6 +23,7 @@ impl<'cache> ParserConfig<'cache> {
     pub fn new(level: CppLanguageLevel, node_cache: Option<&'cache mut NodeCache>) -> Self {
         Self {
             level,
+            dialect: Dialect::default(),
             lexer_config: LexerConfig::new(level),
             node_cache,
             symbol_table: None,
@@ -21,6 +32,16 @@ impl<'cache> ParserConfig<'cache> {
 
     pub fn lexer_config(&self) -> LexerConfig {
         self.lexer_config
+    }
+
+    /// Parse for a **target compiler**: what its reserved spellings mean. See [`Dialect`].
+    pub fn with_dialect(mut self, dialect: Dialect) -> Self {
+        self.dialect = dialect;
+        self
+    }
+
+    pub fn dialect(&self) -> Dialect {
+        self.dialect
     }
 
     /// Replace the lexer settings. Used by the parser to re-lex a header name, and by callers that
@@ -59,6 +80,7 @@ impl Default for ParserConfig<'_> {
     fn default() -> Self {
         Self {
             level: CppLanguageLevel::default_level(),
+            dialect: Dialect::default(),
             lexer_config: LexerConfig::default(),
             node_cache: None,
             symbol_table: None,

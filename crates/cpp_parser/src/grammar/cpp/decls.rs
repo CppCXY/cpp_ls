@@ -819,9 +819,42 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
     //
     // Only when a head was actually consumed: an attribute at the start of an ordinary declaration is a
     // specifier and the sequence below owns it.
-    if seen_a_template_head && let Err(err) = super::types::parse_attribute_specifiers(p) {
-        p.rollback(checkpoint);
-        return Err(err);
+    //
+    // **…and the same position may hold a directive**, in either order, because a conditional can decide which
+    // attribute a declaration carries — `bits/nested_exception.h:203` is the file this was found in:
+    //
+    // ```cpp
+    // template<typename _Ex>
+    // # if ! __cpp_rtti
+    //   [[__gnu__::__always_inline__]]
+    // #endif
+    //   inline void
+    //   rethrow_if_nested(const _Ex& __ex)
+    // ```
+    //
+    // Reading only *one* attribute pass and then handing over to the specifier sequence left the `#endif` where
+    // the sequence expected its first specifier: the sequence reads a directive only **between** specifiers (see
+    // the note there), so a `#` in front of the first one is not its to take — and the declaration failed whole,
+    // leaving the file as bare tokens with a diagnostic on the attribute. Alternating the two here is the same
+    // fix as the directive/macro alternation in `finish_init_declarator`, one position earlier.
+    if seen_a_template_head {
+        loop {
+            let before = p.current_token_index();
+
+            if p.current_token() == CppTokenKind::Hash {
+                if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                    p.rollback(checkpoint);
+                    return Err(err);
+                }
+            } else if let Err(err) = super::types::parse_attribute_specifiers(p) {
+                p.rollback(checkpoint);
+                return Err(err);
+            }
+
+            if p.current_token_index() == before {
+                break;
+            }
+        }
     }
 
     let specifiers_from = p.current_event_count();
@@ -1295,6 +1328,29 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
                 return Err(err);
             }
             consumed = true;
+
+            // **The conditional can decide which *qualifier* is written, not only which macro.** The suffix
+            // reader has already run by the time this loop is reached, so a qualifier written after the directive
+            // was still waiting when the loop came back — and the reading that came out was well formed, lossless
+            // and silent, which is the shape of defect this file keeps having to fix:
+            //
+            // ```cpp
+            // void f()                                    // bits/alloc_traits.h:662
+            // #if __cplusplus <= 201703L
+            //   noexcept(noexcept(__a.construct(__p, __args...)))
+            // #else
+            //   noexcept(__is_nothrow_new_constructible<_Up, _Args...>)
+            // #endif
+            //   { … }
+            // ```
+            //
+            // `noexcept` was read as *the next declaration's type* (`BuiltinType` over `noexcept(true)`, a node
+            // whose two tokens have nothing to do with each other), the member after it became a `{ }`-initialised
+            // variable, and the body's own directives then landed at class scope — which is where the diagnostic
+            // finally appeared, 27 lines later, on a member that was not the one at fault. Asking for the
+            // qualifiers again after each directive is the whole fix, and it is the same edit as the macro arm
+            // below: what a conditional decides may be any part of the suffix.
+            super::types::eat_function_qualifiers(p);
         }
         consumed |= eat_a_macro_suffix(p);
         if !consumed {
@@ -1717,6 +1773,55 @@ pub fn parse_function_suffix_or_initializer(
     // and then reads `(1)` as that parameter's default argument, which is a declaration of a function nobody
     // wrote.
     let declarator_is_named = p.has_declaration_type_name();
+    // **A braced body settles the question**, and it is asked with the *real* suffix readers rather than with a
+    // scan that would have to know their vocabulary (the rule that a second copy of a judgement is where its
+    // exceptions get missed): parse the group as a parameter list, let the suffix reader have its turn — a macro
+    // suffix, a `noexcept`, a trailing return type — and keep that reading only if a `{` is what it reaches.
+    //
+    // ```cpp
+    // _GLIBCXX20_CONSTEXPR
+    // inline _Iter_less_val
+    // __iter_comp_val(_Iter_less_iter)          // bits/predefined_ops.h:79
+    // { return _Iter_less_val(); }
+    //
+    // template<typename _Ex>
+    //   __attribute__ ((__always_inline__))
+    //   inline exception_ptr
+    //   make_exception_ptr(_Ex) _GLIBCXX_USE_NOEXCEPT    // bits/exception_ptr.h:283
+    //   { return exception_ptr(); }
+    // ```
+    //
+    // Neither can be a variable with **two** initializers — `(U)` and then `{ … }` — which is what the
+    // preference below made of them: a bare name looks like a declarator as much as it looks like a type
+    // ([`the_arguments_look_like_declarators`]), so the definition came out as `a declarator takes only one
+    // initializer` (five files of the closure: `exception_ptr.h`, `predefined_ops.h`, `cmath`,
+    // `helper_functions.h`, `type_traits.h`).
+    //
+    // Only where a function definition is legal to begin with. That is *not* "outside a brace": a class body is
+    // inside one too (`is_inside_a_body` counts every scope a brace introduces), and a member function defined in
+    // its class is the most ordinary definition there is — `struct S { T f(U) { … } };` was the case that showed
+    // the difference. What is excluded is a **block**: there `T x(y) { }` is a declaration followed by a block, and
+    // defining a function is not something this language does.
+    let a_definition_is_legal_here = !p.is_inside_a_body() || p.is_at_class_member_level();
+
+    if a_definition_is_legal_here {
+        let before_the_function_reading = p.checkpoint();
+
+        if parse_parameter_list(p).is_ok() {
+            super::types::eat_function_qualifiers(p);
+
+            if p.current_token() == CppTokenKind::LeftBrace {
+                // Kept — so the flag is set *after* the decision, not inside the speculative part: the flag is
+                // not part of a checkpoint, and a rollback would leave it saying "function" about a declarator
+                // this rule decided was a variable.
+                p.set_last_declarator_is_function(true);
+                return Ok(CompleteMarker::empty());
+            }
+        }
+
+        p.rollback(before_the_function_reading);
+    }
+
     if !a_dynamic_exception_specification_follows(p)
         && (p.is_at_file_scope()
             && !a_type_keyword_precedes_the_declarator_name(p)
@@ -2795,6 +2900,71 @@ pub fn parse_for_init_declaration(p: &mut CppParser) -> ParseResult {
     Ok(m.complete(p))
 }
 
+/// Parse the **declaration form of a condition**: `if (Foo p = get())`, `while (const auto n = g())`.
+///
+/// The same shape a `for` header reads — specifiers and one init-declarator, no `;` of its own — because a
+/// condition's declaration ends at the `)` that closes the condition. Two differences, and each is load-bearing:
+///
+/// ```text
+/// one declarator, not a list     `if (int a = 1, b = 2)` is not a condition, and C++ says so
+/// an initialiser is required     which is the whole of what tells `if (a && b)` (an expression, always) from
+///                                `if (a b = c)` — without it the declaration reading claims the first as a
+///                                declaration of `b` with type `a&&`, a **wrong** answer rather than a missing one
+/// ```
+///
+/// # Why a condition could not go through `parse_declaration`
+///
+/// That rule ends with `expect_semicolon`, and a condition has none: the attempt failed, `parse_condition` fell
+/// back to an *expression*, and the two readings that came out were
+///
+/// ```text
+/// if (Foo* p = get())       `Foo * p = get()` — a BinaryExpr with **no diagnostic at all**
+/// if (const auto n = g())   `expected primary expression` against the `=`
+/// ```
+///
+/// The first is the one worth remembering: every file in the census was lossless and error-free on that reading,
+/// so no count could have moved. See `a_condition_may_declare_a_variable` in `tests/gaps.rs` and the entry in
+/// `docs/grammar-gaps.md`.
+pub fn parse_condition_declaration(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::Declaration);
+
+    if let Err(err) = parse_decl_specifier_seq(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    // Where the declarator begins: the two questions below are asked of the events *it* produced, because the
+    // type's own name is already in the stream behind this bound and would answer for them.
+    let declarator_from = p.current_event_count();
+
+    if let Err(err) = parse_init_declarator(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    let named = a_name_was_parsed(p, declarator_from);
+    let initialised = p.events_contain_any(declarator_from, &[CppSyntaxKind::Initializer]);
+
+    if !named || !initialised {
+        p.close_marks_above(base);
+        return Err(CppParseError::syntax_error_from(
+            "a condition declaration needs one variable with an initializer",
+            p.current_token_range(),
+        ));
+    }
+
+    if p.current_token() == CppTokenKind::Comma {
+        p.close_marks_above(base);
+        return Err(CppParseError::syntax_error_from(
+            "a condition declares one variable, not a list",
+            p.current_token_range(),
+        ));
+    }
+
+    Ok(m.complete(p))
+}
+
 /// Parse `{ ... }` as an initializer, keeping it as one node.
 pub fn parse_braced_initializer(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
@@ -3297,7 +3467,32 @@ fn parse_macro_member(p: &mut CppParser) -> ParseResult {
 }
 
 fn parse_class_body_members(p: &mut CppParser) -> ParseResult {
-    while p.current_token() != CppTokenKind::RightBrace && !p.is_eof() {
+    // **How many `}` this body owes to members it gave up on.** A failed member that consumed a `{` without its
+    // `}` — a requires-expression's body, a function body, a block — leaves the body's own brace counting one
+    // short, and the next `}` (which belongs to the *failed member*) would be taken for the end of the class:
+    // every member after it lands at file scope, and the file's only diagnostic appears on the leftover brace at
+    // the end. That is `bits/alloc_traits.h` before B57 and `docs/grammar-gaps.md` B58.
+    //
+    // The debt is paid **before** the body is allowed to end, and the brace that pays it is read as an error node
+    // — it is a token no rule claimed, which is what an error node is for. Closing the failed member's markers
+    // ([`MarkerEventContainer::end_marks_to`], below) is the other half of the same repair and cannot do this
+    // one: it decides what the *tree* looks like, not which `}` belongs to whom.
+    let mut unclosed_braces = 0isize;
+
+    while p.current_token() != CppTokenKind::RightBrace || unclosed_braces > 0 {
+        if p.is_eof() {
+            break;
+        }
+
+        // A `}` with a debt outstanding closes the member that was abandoned, not this body.
+        if p.current_token() == CppTokenKind::RightBrace {
+            unclosed_braces -= 1;
+            let error = p.mark(CppSyntaxKind::ErrorNode);
+            p.bump();
+            error.complete(p);
+            continue;
+        }
+
         let member_base = p.open_marks();
 
         // A **directive between two members** — the class-scope side of the seam `parse_try_statement` and
@@ -3347,6 +3542,9 @@ fn parse_class_body_members(p: &mut CppParser) -> ParseResult {
         // shape test is what keeps a *declaration* out of it: `#define MY_INT int` used as `MY_INT x;` has a
         // declarator after the name, so it is a declaration and never reaches this rule.
         let before = p.current_token_index();
+        // …and what the *brace balance* looked like before the attempt, so a failure can be charged for the
+        // braces it consumed and never closed. See `unclosed_braces` above.
+        let before_events = p.current_event_count();
         if at_a_macro_member(p) {
             parse_macro_member(p)?;
             continue;
@@ -3385,8 +3583,19 @@ fn parse_class_body_members(p: &mut CppParser) -> ParseResult {
         // otherwise leave an unpaired `NodeStart` that the tree builder balances at the end of the file, so the
         // abandonment swallowed every member written after it. See the note on `end_marks_to`.
         if parse_member(p).is_err() {
+            // Two ways a failed member leaves a brace behind, and both have to be charged:
+            //
+            // * the attempt **stopped somewhere past the member's first token** — then what it consumed is in the
+            //   events, and `brace_balance_since` reads it;
+            // * the attempt **rolled back** (the declaration rule's speculative pass does that), so the cursor is
+            //   back at the member's first token and the loop re-reads the member's tokens one at a time as rubble
+            //   — the `{` among them is wrapped by the arm below, and *that* is where it is counted.
+            unclosed_braces += p.brace_balance_since(before_events).max(0);
             p.end_marks_to(member_base);
             if p.current_token_index() == before {
+                if p.current_token() == CppTokenKind::LeftBrace {
+                    unclosed_braces += 1;
+                }
                 let error = p.mark(CppSyntaxKind::ErrorNode);
                 p.bump();
                 error.complete(p);
@@ -3982,6 +4191,26 @@ pub fn parse_typedef_declaration(p: &mut CppParser) -> ParseResult {
             p.declare_type_name(&name);
         }
 
+        // **Attributes written after the declarator**, which this rule was missing while the ordinary
+        // declaration path had them (see the note in `finish_init_declarator`). GCC's own intrinsic headers are
+        // where it shows, eight of them in the closure, and it is the same construct their whole type zoo is
+        // built from:
+        //
+        // ```c
+        // typedef int __v4si_u __attribute__ ((__vector_size__ (16), __may_alias__, __aligned__ (1)));
+        // typedef short __v32hi __attribute__ ((__vector_size__ (64)));
+        // typedef int v4 [[deprecated]];                       // the standard spelling fails the same way
+        // ```
+        //
+        // Both spellings go through [`super::types::parse_attribute_specifiers`], which is the point of that
+        // rule reading all three spellings into one node: the position is the same, so this is one line rather
+        // than one per compiler. Without it the `;` was never reached — the attribute was rubble and the
+        // declaration reported `expected ;` against its own name.
+        if let Err(err) = super::types::parse_attribute_specifiers(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+
         // **One initializer for the list, not one per declarator**: `typedef int A, B;` has no `=` at all, and
         // `typedef int *p = nullptr;` is the one shape where an `=` may follow a typedef's declarator — which the
         // ordinary declaration rule reads with the same rule, because it is the same grammar.
@@ -4185,7 +4414,27 @@ pub fn parse_linkage_block(p: &mut CppParser) -> ParseResult {
     // which is why this one stays.
     p.enter_block_body();
 
-    while p.current_token() != CppTokenKind::RightBrace && !p.is_eof() {
+    // **The brace debt**, the same one the class body keeps and `parse_stats` keeps for statements — the third
+    // container that reads declarations until a `}`, and the third time this file pays for the same thing. A
+    // declaration that fails after consuming a `{` leaves the block one brace short, and the next `}` (which
+    // closes *that declaration*) would end the linkage block instead. See `parse_class_body_members` for the whole
+    // argument and `docs/grammar-gaps.md` B58 for the measurements.
+    let mut unclosed_braces = 0isize;
+
+    while p.current_token() != CppTokenKind::RightBrace || unclosed_braces > 0 {
+        if p.is_eof() {
+            break;
+        }
+
+        // A `}` with a debt outstanding closes the declaration that was abandoned, not this block.
+        if p.current_token() == CppTokenKind::RightBrace {
+            unclosed_braces -= 1;
+            let error = p.mark(CppSyntaxKind::ErrorNode);
+            p.bump();
+            error.complete(p);
+            continue;
+        }
+
         // **A directive is not a declaration**, and this loop has to say so. Every C header in the world writes
         // its linkage block with the conditional *inside* it:
         //
@@ -4219,6 +4468,7 @@ pub fn parse_linkage_block(p: &mut CppParser) -> ParseResult {
 
         let member_base = p.open_marks();
         let before = p.current_token_index();
+        let before_events = p.current_event_count();
         if parse_declaration(p).is_err() {
             // **With their end events**, for the third time in this file's history (see `end_marks_to` and
             // maintenance convention 34): a declaration that fails *after* consuming tokens — and inside a linkage
@@ -4228,9 +4478,14 @@ pub fn parse_linkage_block(p: &mut CppParser) -> ParseResult {
             // swallows the rest of the file. `winnt.h` came out as sixty nested `TypedefDecl`s all ending at EOF,
             // and with them the whole file's directive structure — which is what made its conditional nesting
             // unusable for the macro layer.
+            unclosed_braces += p.brace_balance_since(before_events).max(0);
             p.end_marks_to(member_base);
-            // Always advance: a declaration that consumed nothing would spin this loop forever.
+            // Always advance: a declaration that consumed nothing would spin this loop forever. A `{` among the
+            // tokens that nothing claimed is charged, because it opens something this declaration never finished.
             if p.current_token_index() == before {
+                if p.current_token() == CppTokenKind::LeftBrace {
+                    unclosed_braces += 1;
+                }
                 let error = p.mark(CppSyntaxKind::ErrorNode);
                 p.bump();
                 error.complete(p);

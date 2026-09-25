@@ -24,6 +24,8 @@
 
 use std::path::{Path, PathBuf};
 
+use cpp_parser::Dialect;
+
 /// An include search directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncludePath {
@@ -111,6 +113,20 @@ pub struct CompilerConfig {
     /// defines them is not the one analysing.
     pub target: Option<Box<str>>,
 
+    /// **Which compiler** the flags above are for, as far as the *parser* has to care.
+    ///
+    /// The language is the same everywhere; a handful of reserved spellings are not. `__int128` is a type to g++
+    /// and a plain name to cl.exe, `__int64` is the other way round, and `_Float16` is GCC's. Reading one of them
+    /// the wrong way is not a diagnostic but a **silent wrong tree** — with `__int128` read as a name,
+    /// `unsigned __int128 x;` comes out as a declaration of a variable called `__int128` with a macro suffix `x`
+    /// (`docs/grammar-gaps.md` B61) — so the parser has to be told which compiler is reading the file.
+    ///
+    /// Set from the toolchain's own predefined macros (`__GNUC__` / `_MSC_VER`, see
+    /// [`Dialect::from_predefined_macros`]) rather than guessed from the flags, and it is part of the summary's
+    /// **context hash**: the same text read for two targets is two different summaries, and a cache that confused
+    /// them would serve one target's facts to the other.
+    pub dialect: Dialect,
+
     /// The directory the compilation was run in.
     ///
     /// A relative `-I` and a relative `#include` are both relative to *this*, not to the file or to the
@@ -142,6 +158,17 @@ impl CompilerConfig {
     pub fn with_standard(mut self, standard: impl Into<Box<str>>) -> Self {
         self.standard = Some(standard.into());
         self
+    }
+
+    /// Parse for a **target compiler**: what its reserved spellings mean. See [`CompilerConfig::dialect`].
+    pub fn with_dialect(mut self, dialect: Dialect) -> Self {
+        self.dialect = dialect;
+        self
+    }
+
+    /// The dialect in force. [`Dialect::default`] until a toolchain says otherwise.
+    pub fn dialect(&self) -> Dialect {
+        self.dialect
     }
 
     pub fn with_working_directory(mut self, directory: impl Into<PathBuf>) -> Self {
