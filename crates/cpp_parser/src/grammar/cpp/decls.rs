@@ -577,7 +577,19 @@ fn parse_a_default_value(p: &mut CppParser, base: usize) -> ParseResult {
     let before = p.current_token_index();
     let parsed_a_type = parse_type_id(p).is_ok() && p.current_token_index() > before;
 
-    if parsed_a_type {
+    // A type that **stops in the middle of a value** is not the answer. `ranges_util.h:267` writes
+    //
+    // ```cpp
+    // template<input_or_output_iterator _It, sentinel_for<_It> _Sent = _It,
+    //          subrange_kind _Kind = sized_sentinel_for<_Sent, _It>
+    //            ? subrange_kind::sized : subrange_kind::unsized>
+    // ```
+    //
+    // and the default is a **conditional expression whose head is a type**: the type reading takes
+    // `sized_sentinel_for<_Sent, _It>` and stops, leaving the `?` to the parameter list, which reports
+    // ``expected `,` or `>` ``. So the type counts only when the list can actually continue after it — a separator,
+    // or the `#` the conditional-default seam reads. Otherwise the same tokens are read as the value they are.
+    if parsed_a_type && ends_a_template_parameter(p) {
         return Ok(CompleteMarker::empty());
     }
 
@@ -592,6 +604,18 @@ fn parse_a_default_value(p: &mut CppParser, base: usize) -> ParseResult {
     }
 
     Ok(CompleteMarker::empty())
+}
+
+/// Can a template parameter **end** at this token — one of the list's own separators, or a directive seam?
+fn ends_a_template_parameter(p: &CppParser) -> bool {
+    matches!(
+        p.current_token(),
+        CppTokenKind::Comma
+            | CppTokenKind::Greater
+            | CppTokenKind::RightShift
+            | CppTokenKind::Hash
+            | CppTokenKind::Eof
+    )
 }
 ///
 /// Returns `Err` without having consumed anything when the input does not look like a declaration,
@@ -1537,10 +1561,119 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
             // `docs/grammar-gaps.md` B77 with the numbers — the enumerator seam beside it, which shares nothing with
             // it, landed.
             let init = p.mark(CppSyntaxKind::Initializer);
+
+            // **A directive between the `=` and the initializer it introduces.** The last seam of a family the
+            // enumerator list, the template parameter list, the parameter list and the braced initialiser all
+            // already have, in the one position that was missing it — and the position is not exotic, because a
+            // *conditional* initializer is written by putting the `#if` after the `=`:
+            //
+            // ```cpp
+            //   _GLIBCXX17_INLINE const _Lock_policy __default_lock_policy =      // ext/concurrence.h:58
+            //   #ifndef __GTHREADS
+            //     _S_single;
+            //   #elif defined _GLIBCXX_HAVE_ATOMIC_LOCK_POLICY
+            //     _S_atomic;
+            //   #else
+            //     _S_mutex;
+            //   #endif
+            //
+            //   const bool __load_outside_loop =                                  // bits/stl_algobase.h:906
+            //   #if __has_builtin(__is_trivially_constructible) \
+            //         && __has_builtin(__is_trivially_assignable)
+            //       __is_trivially_constructible(_Tp, const _Tp&)
+            //       && __is_trivially_assignable(__decltype(*__first), const _Tp&)
+            //   #else
+            //       __is_trivially_copyable(_Tp)
+            //   #endif
+            //       ;
+            // ```
+            //
+            // A `#` where an initializer should begin cannot be anything else — an expression has no `#` — so the
+            // directive is read as the node it is and the initializer rule is asked again about the token that
+            // follows it. This is the same argument as the two seams `docs/grammar-gaps.md` records for B23, and
+            // the same one the suffix loop above spells out for a *function's* head; what was missing is only that
+            // the declaration's own `=` is a seam too.
+            //
+            // It stays **inside** the `Initializer` node: the directives are part of how the initializer is
+            // written, exactly as they are part of how an enumerator's value is written, and a consumer asking for
+            // the initializer's tokens should get all of them.
+            while p.current_token() == CppTokenKind::Hash {
+                if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                    init.undo(p);
+                    return Err(err);
+                }
+            }
+
             if let Err(err) = parse_initializer_clause(p) {
                 init.undo(p);
                 return Err(err);
             }
+
+            // …and the same seam on the **other side** of the initializer, before the `;` — the spelling the
+            // conditional above is closed with when the branches' values are followed by the declaration's own
+            // semicolon:
+            //
+            // ```cpp
+            //   const bool __load_outside_loop =
+            //   #if __has_builtin(__is_trivially_constructible) \
+            //         && __has_builtin(__is_trivially_assignable)
+            //       __is_trivially_constructible(_Tp, const _Tp&)
+            //       && __is_trivially_assignable(__decltype(*__first), const _Tp&)
+            //   #else
+            //       __is_trivially_copyable(_Tp)
+            //   #endif
+            //       ;                        ← the `#endif` stands between the value and this
+            // ```
+            //
+            // Both sides need it for the reason the template argument list needs the seam on both sides of its
+            // comma: the `#` is not a token the initializer rule can read, so whichever of the two loops misses it
+            // reports against a directive instead of against the declaration.
+            //
+            // …and the third thing the same shape needs is the **other branch's value**, because the conditional
+            // above is a *choice between two values* and each of them is written where the value goes:
+            //
+            // ```cpp
+            //       const bool __load_outside_loop =                       // bits/stl_algobase.h:906
+            //       #if __has_builtin(__is_trivially_constructible) \
+            //             && __has_builtin(__is_trivially_assignable)
+            //         __is_trivially_constructible(_Tp, const _Tp&)
+            //         && __is_trivially_assignable(__decltype(*__first), const _Tp&)
+            //       #else
+            //         __is_trivially_copyable(_Tp)                        ← a second value, not a second declaration
+            //       #endif
+            //         ;                                                   ← and the `;` is outside both branches
+            // ```
+            //
+            // `#else`/`#elif` is what says another value follows — after `#endif` the declaration simply continues
+            // — so the loop reads a value for each branch it opens, and the `;` at the end is still the
+            // declaration's own. **That is the part B77 could not do**: routing the value through
+            // `parse_a_definition_per_branch` made the *branch* the owner of the `;`, and three attempts to say
+            // otherwise broke five files each time. Here the branches own nothing but their values, which is what
+            // the file wrote.
+            loop {
+                let mut read_another_branch = false;
+
+                while p.current_token() == CppTokenKind::Hash {
+                    let opens_another_branch =
+                        matches!(p.peek_token_text_at(1), "else" | "elif");
+                    if let Err(err) = super::stats::parse_preprocessor_directive(p) {
+                        init.undo(p);
+                        return Err(err);
+                    }
+                    if opens_another_branch {
+                        if let Err(err) = parse_initializer_clause(p) {
+                            init.undo(p);
+                            return Err(err);
+                        }
+                        read_another_branch = true;
+                    }
+                }
+
+                if !read_another_branch {
+                    break;
+                }
+            }
+
             init.complete(p);
         }
         // **A declarator takes one initializer**, and this arm is the shape where a second one is written.
@@ -1979,9 +2112,35 @@ pub fn parse_function_suffix_or_initializer(
             // `TrailingReturnType`), so afterwards there is nothing left to notice. `M(I) -> M<I>;` was read as a
             // variable named by nothing, initialised with `(I)`, and the error landed on the `M<I>`.
             let a_trailing_return_type_follows = p.current_token() == CppTokenKind::Arrow;
-            super::types::eat_function_qualifiers(p);
 
-            if a_trailing_return_type_follows || p.current_token() == CppTokenKind::LeftBrace {
+            // **…and so do the qualifiers themselves**, which is the same evidence one step further: a
+            // `cv`-qualifier, a ref-qualifier or a `noexcept` after a parenthesis group belongs to a *function
+            // declarator* and to nothing else, so a reader that consumed one has just been told what this is.
+            //
+            // Asked as "did the reader move?" rather than as a list of the tokens it may take, because that list
+            // is exactly [`super::types::eat_function_qualifiers`] and a second copy of it here is where the next
+            // spelling would be forgotten. The shape that needs it is a **pointer-to-member-function parameter**:
+            //
+            // ```cpp
+            //   mem_fun(_Ret (_Tp::*__f)(_Arg) const)        // bits/stl_function.h:1398 — the first error
+            // ```
+            //
+            // There the group `(_Arg)` is followed by `const` and then by the `)` that closes the *parameter*, so
+            // neither `{` nor `->` is what comes next: the first reading was rolled back, the second read `(_Arg)`
+            // as a direct-initialiser (a name is as good a declarator as a type, which is the whole of
+            // [`the_arguments_look_like_declarators`]), and the `const` was left where a `;` should be. Measured
+            // before the fix: `void g(int (C::*p)(int) const);` was clean — an `int` argument cannot be an
+            // initialiser, so that shape reached the parameter-list path — while `void g(R (C::*p)(A) const);` was
+            // rubble, one name away.
+            let qualifiers_after_the_parameter_list = p.current_token_index();
+            super::types::eat_function_qualifiers(p);
+            let qualifiers_follow_the_parameter_list =
+                p.current_token_index() > qualifiers_after_the_parameter_list;
+
+            if a_trailing_return_type_follows
+                || qualifiers_follow_the_parameter_list
+                || p.current_token() == CppTokenKind::LeftBrace
+            {
                 // Kept — so the flag is set *after* the decision, not inside the speculative part: the flag is
                 // not part of a checkpoint, and a rollback would leave it saying "function" about a declarator
                 // this rule decided was a variable.
@@ -3133,6 +3292,32 @@ pub fn parse_condition_declaration(p: &mut CppParser) -> ParseResult {
         ));
     }
 
+    // **What follows has to be the `)` that closes the condition**, and this is the third refusal rather than a
+    // detail of the first two: a condition's declaration has no `;` of its own, so the `)` is what says the
+    // declaration is over — and the tests above are asked of the *declarator's own events*, which a **parameter
+    // list** also produces. `if (NS::fmod(s, T(2)) == 0)` is the shape that separates them, and it is not a
+    // hypothetical one: `tr1/riemann_zeta.tcc:173` writes it.
+    //
+    // ```text
+    // if (NS::fmod(s, T(2)) == 0)
+    //     └────┬────┘ └──┬──┘     the type is `NS::fmod` (a qualified name is a type), the declarator is
+    //          │         │        `(s, T(2))` — a *function* declarator whose parameters named something and
+    //          │         │        initialised something, so both tests passed
+    //          │         └────────── `T(2)` is read as a parameter with a direct-initialiser
+    //          └──────────────────── …and the condition then wanted its `)` where the `==` stands
+    // ```
+    //
+    // With the `)` required, the declaration reading is refused and the *expression* reading — the call the file
+    // wrote — takes the tokens, which is the same order of preference [`parse_condition`] documents for the other
+    // two refusals: a shape that is not a condition declaration is an expression.
+    if p.current_token() != CppTokenKind::RightParen {
+        p.close_marks_above(base);
+        return Err(CppParseError::syntax_error_from(
+            "a condition declaration ends at the `)` that closes the condition",
+            p.current_token_range(),
+        ));
+    }
+
     Ok(m.complete(p))
 }
 
@@ -3341,10 +3526,10 @@ pub fn parse_parameter_list(p: &mut CppParser) -> ParseResult {
         // ```cpp
         //     random_shuffle(_RAIter, _RAIter,
         // #if __cplusplus >= 201103L
-        // 		   _RandomNumberGenerator&&);
+        //            _RandomNumberGenerator&&);
         // #else
         //     random_shuffle(_RAIter, _RAIter,
-        // 		   _RandomNumberGenerator&);
+        //            _RandomNumberGenerator&);
         // #endif
         // ```
         //

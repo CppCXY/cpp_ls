@@ -2446,6 +2446,424 @@ include 链是 `winapifamily.h` / `_mingw_unicode.h` / `prsht.h` / `pshpack1.h` 
 **翻译单元**喂环境（compile database，或"谁包含这个头"）。探针的 `MACRO <名> in <文件> …` 与首错行上的
 `bodies in force:` 就是为这类问题准备的。
 
+### B107–B113. 从 445/10 压到 451/4 的**七条**（两条成对修好四个文件）—— 已修复
+
+这一批的共同点：**每条都是"偏好写好了，缺的是一条证据或一次统一"**，而不是缺一条规则。逐条如下，每条都带**量到的**。
+
+```text
+B107 初始化式/表达式**按分支写**：`#else` 之后跟着另一个值、运算符位置的指令、
+     括号里的 `#endif`。→ bits/stl_algobase.h、tr1/riemann_zeta.tcc **两个文件修好**
+B108 一条 cast 规则，两处副本：一元规则的副本在"没有操作数"时报错，主规则的副本回退成括号表达式
+     → iterator_concepts.h **修好**
+B109 属性站在 declarator-id 与**形参表**之间（`operator== [[nodiscard]] (…)`）→ tuple **修好**
+B110 说明符位置上的函数式宏，**组后面跟的是名字**：那个名字要么本身是说明符宏，要么不是声明符
+     → stl_function.h 的第一道门
+B111 形参表**之后**的限定符也是"这是函数声明符"的证据 → stl_function.h **修好**
+B112 无参宏 + 块，以及体内一个**裸的**无参宏语句（`SCOPE_BEGIN { … } SCOPE_END`）
+     → debug/safe_iterator.h **修好**
+B113 数尖括号的扫描里的**三目 `:`**（`sub<A, B, (c) ? x : y>`）→ ranges_util.h 的第一道门
+```
+
+**B107（按分支写的值与项）**：`bits/stl_algobase.h:906` 把初始化式写在两条分支里（`#else` 之后是**另一个值**，`;` 在
+两支之外），`tr1/riemann_zeta.tcc:179` 把乘积的**项**写在两条分支里（两支各写同一个 `*`，`#endif` 之后表达式还继续），
+`bits/stl_algobase.h:1237` 则是在**括号里**连着两个 `#if` 块各贡献一个操作数。三处都是同一件事：**指令站在表达式里**。
+做法：① `finish_init_declarator` 的 `Assign` 分支在初始化式**之后**按 `#else`/`#elif` 再读一个值（B100 那两个接缝的
+延伸，`;` 仍然归声明）；② 表达式爬升算符循环在**算符位置**读指令——但**只在这条指令后面真的跟着算符时**才收，
+否则回滚，因为 `#else` 开的是**包着这个表达式的那层构造**的另一个实例（B107① 要的正是它）；③ 指令后面不是算符时，
+`#else`/`#elif` 交还给外层，其余（`#endif`、下一个 `#if`）由表达式自己收下，因为后面等着的 `)`/`,`/`;` 正是调用者要的。
+**量到**：带 seeds 445 → **447**（stl_algobase.h、riemann_zeta.tcc 干净）、消息 35 → 28。
+
+**B108（一条 cast 规则）**：`(V<T>(x))`——类型读法把 `V<T>(x)` 当成**函数类型**、`)` 也对上，然后**没有操作数**。
+表达式语法里这条规则有**两处副本**（一元规则与主规则），而它们对这件事的答案相反：主规则回退成括号表达式，
+一元规则的副本直接报"缺操作数"。于是同一批 token 谁先看见谁说了算：`(V<T>(x))` 成瓦砾、`(W<T>(x))`（名字不认识，
+守卫说"不是类型"）却干净。删掉一元那份，保留有回退的那份。**量到**：446 → **448**（iterator_concepts.h 干净）。
+
+**B109（属性在 id 与形参表之间）**：`bool operator== [[nodiscard]] (int, int);`——声明符的后缀循环见到 `[[` 就
+**停**（那个位置本来是留给 `finish_init_declarator` 的属性读法的），于是形参表没人读。做法：后缀循环里，`[[` 之后
+**若跟着 `(`** 就由声明符自己读（属性和形参表都留在 `Declarator` 里，`ParameterList` 的父节点才对）；否则照旧交给
+`finish_init_declarator`。判据是一个只问"属性串后面是不是 `(`"的扫描。**量到**：448 → **449**（tuple 干净）。
+
+**B110/B111（stl_function.h 的两道门）**：`_GLIBCXX17_DEPRECATED_SUGGEST("std::not_fn")` 之后跟的是**名字**
+`_GLIBCXX14_CONSTEXPR`——B102 那条臂的后继判据只收"说明符"，于是这条形状归了 `a_macro_call_begins_the_declaration`
+（它读完调用就结束序列）。B110 把后继放宽成"**名字，且这个名字后面不是 `(`**"（后面是 `(` 说明它是声明符，归原来那条）；
+B111 修的是同一个文件的下一个形状 `mem_fun(_Ret (_Tp::*__f)(_Arg) const)`——形参表**之后**的 `const` 是"这是函数声明符"
+的证据，而那条偏好只认 `{` 和 `->`，于是回退到初始化式读法、`const` 留在原地。做法：问"限定符读取器**动过游标**吗"
+（不另写一份 token 列表）。**量到**：449 → **450**（stl_function.h 干净）。
+
+**B112（宏 + 块，以及体内裸的无参宏）**：`debug/safe_iterator.h:75-79` 把两个作用域宏定义成 `[&]() -> void` 与 `();`
+（另一支是**空**），用法是 `if (…) SCOPE_BEGIN { … } SCOPE_END else …`。名字后面跟 `{` 本来是 C++11 的
+**列表初始化**（`Point{1, 2};`），于是块里的每条语句都进了 `InitListExpr`。做法：① 语句规则里加"**有证据的无参宏 +
+块**"——`MacroCall(NameExpr, CompoundStat)`，证据是两张表知道这个名字（同 `at_a_macro_call_statement` 的问法）；
+② 这条读者继续收**跟在块后面的**收尾宏（`SCOPE_END`），否则 `if` 的分支在 `else` 之前就结束了；
+③ 体内**裸的**无参宏语句（`} SCOPE_END`）由 `a_macro_invocation_starts_at` 的新分支认领：证据（表说它是宏、可无 `;`）
++ 后继（`ends_a_statement`，其中已有 `else`/`catch`/`}`）。**量到**：450 → **451**，消息 21 → **9**。
+
+**B113（三目里的 `:`）**：`bits/ranges_util.h:436` 的推导指引把**条件表达式**当模板实参
+（`-> subrange<…, (sized_range<_Rng> || …) ? sized : unsized>`），而"这个 `<` 是不是实参表"的扫描把 `Colon` 当停止符
+（那是给基类子句用的）⇒ 扫描说"不是模板 id" ⇒ 指引在自己的名字上停住，首错打在返回类型的 `<` 上。做法：扫描里数
+**未配对的三目 `?`**，有它就放行那个 `:`；没有 `?` 的 `:` 仍然停。**量到**：451 → 451（消息 9 → **8**，ranges_util.h 的首错
+从 438 推到 **484**——下一个形状是变量模板的偏特化 `bool __detail::__is_subrange<subrange<_Iter, _Sent, _Kind>> = true;`）。
+
+**剩下的 4 个**（带 seeds 451/4、消息 8）——**三个是同一族**：
+
+```text
+ranges_util.h:484   变量模板的偏特化，名字里那个实参是**模板形参自己**（`<sub<I, S, k>>`，`k` 是 `K k` 声明的）
+                    —— 判据已缩到一行：head 里的非类型形参名出现在名字的实参表里（s1/s3 失败、s2/s4/s5/s6 干净）
+algorithmfwd.h:704  形参表的**尾巴**按分支写：`…, _RandomNumberGenerator&&);` / `#else … &);` —— 分支里带着 `;`
+                    （B77 的归属问题）
+stl_iterator.h:3094 别名模板实参表的**尾巴**按分支写：两支各写 `<实参> >;` —— 同上
+type_traits:2274    三目的 `:` 支每支写一遍，每支带自己的 `;` —— 同上
+```
+
+后三个是**同一件事**：一个构造的分支里带着末尾的 `;`，也就是"**谁拥有分支末尾那个 `;`**"——B77 记着三种试法各自的
+代价（`;` 是分支的还是声明的，三个读者不同意），而 B100/B103/B105/B107 之后**接缝这一侧已经补齐**，剩下的正是归属。
+
+### B106. `*` 与名字之间的**属性**（`void * __attribute__((…)) f (void) { }`）—— 已修复
+
+```cpp
+extern __inline void * __attribute__((__gnu_inline__, __always_inline__, __artificial__))
+__slwpcb (void) { … }                       // lwpintrin.h:43 —— 整个 `*intrin.h` 家族都这么写
+void * __attribute__((x)) f;                // 同一个形状，没有函数体
+```
+
+**现象**：带函数体时首错是 ``a declarator takes only one initializer``（`{`，45:0）；**不带**函数体时**完全没有报错**——
+这才是要紧的那一半：
+
+```text
+void * __attribute__((x)) f;
+  Declaration(DeclSpecifierSeq(void), InitDeclarator(Declarator(* __attribute__ (x)), MacroCall(f)))
+                                        └─ 声明符的名字叫 `__attribute__`，`(x)` 是它的初始化式，`f` 成了一个宏
+```
+
+**成因**：`eat_cv_qualifiers`（`*`/`&`/`&&` 之后的那个位置）读了 `const`/`volatile`、实现关键字、**已知空体宏**，
+唯独没读**属性**。而它自己的文档里写着这就是"说明符位置那条规则，晚一个 token"——属性正是写在那里的东西之一。
+于是属性被当成声明符的名字，真正的名字留在后面成了"替声明站位的宏"（B72 那一类 A0 静默错树）。
+
+**做法**：`eat_cv_qualifiers` 里加一条属性臂（`at_an_attribute` → `parse_attribute_specifier`，失败则回滚，与
+`eat_a_macro_suffix` 同一处理）。
+
+**量到的**（带 seeds）：干净 444 → **445**、报错 11 → **10**，逐文件对照**只有 `lwpintrin.h` 消失**、无一反向；
+`lwpintrin.h` 现在**整份文件一个错都没有**。断言：`gaps.rs::an_attribute_may_stand_between_the_star_and_the_name`
+（正例要求恰好一个 `AttributeList` + 一个 `ParameterList` ⇒ 它是函数；**静默那一半**要求零个 `Initializer`、零个
+`MacroCall`；反例是同一个位置的 `const`——它是限定符，不能被数成属性）。
+
+### B105. 条件里的声明**必须在条件的 `)` 上结束**（`if (NS::fmod(s, T(2)) == 0)`）—— 已修复
+
+```cpp
+if (_GLIBCXX_MATH_NS::fmod(__s,_Tp(2)) == _Tp(0))       // tr1/riemann_zeta.tcc:173
+```
+
+**现象**：``expected ), but get ==``，打在那个 `==` 上。
+
+**成因**：条件的**声明读法成功了**，而且是通过它自己的两道判据"合法"地成功的：
+
+```text
+if (NS::fmod(s, T(2)) == 0)
+    └────┬────┘ └──┬──┘    `NS::fmod` 是限定名 ⇒ 是类型；`(s, T(2))` 是函数声明符
+         │         └────── `T(2)` 被读成形参 `T` + 直接初始化式 `(2)` ⇒ "有初始化式" ✓
+         └──────────────── 形参里的 `s`、`T` 是 NameExpr ⇒ "解析出了名字" ✓
+```
+
+两条判据问的都是**声明符自己的事件**，而形参表也产生这些事件。于是条件读成了一个函数声明，接着条件要它的 `)`，
+撞上 `==`。
+
+**做法**：加第三条拒绝——声明之后**必须**是条件的 `)`。条件的声明没有自己的 `;`，所以 `)` 就是"声明结束"的唯一标志；
+不是它就不是条件声明，按 [`parse_condition`] 的既定偏好退回**表达式**（调用）。
+
+**量到的**（带 seeds）：干净 444 → 444、报错 11 → 11、消息 39 → **36**；`riemann_zeta.tcc` 的首错 173 → **182**
+（下一个形状是"表达式按 `#if` 分支写"——`__zeta *= A * B` / `#if X * C #else * D #endif / E`，又是 B77 那一族）。
+**不算修好**，与 B99/B104 同一类：读法正确、断言有、队列前移。断言：
+`gaps.rs::a_condition_declaration_ends_at_the_paren_that_closes_the_condition`——正例是那条调用（要求树里**零个**
+`Initializer`，因为误读产出的正是一个"带直接初始化式的形参"），反例是三种**真的是**声明条件
+（`if (Foo* p = get())`、`if (const auto n = g())`、`if (Foo p = get())`），每一种都必须仍然声明出它的变量。
+
+### B104. 模板实参那一族的**三处读法**（都读对了，但一个文件都没修好）—— 读法已修，计数未动
+
+```cpp
+C<(__i >= sizeof...(_Types))>                        // tuple:2439     —— 括号里的 `>=`
+struct S : public C<_Tp(-1) < _Tp(0)> { };           // type_traits:987 —— 实参里的 `<`
+return c ? a
+# if X
+         : b;                                        // type_traits:2269 —— 三目两支之间的指令
+# else
+         : c;
+# endif
+```
+
+**三处改动**（都在"实参表/类型扫描"这一层，都是**读法**的修正）：
+
+① **失败的读法不是答案**（`parse_template_argument`）。原来那条早退是
+`type_read.is_ok() || !continues_a_type(当前 token)`：**失败**的 type 读法（`(__i` 读到 `>=` 放弃）也被当成"实参读完了"，
+而它消费掉的 token 还留在事件流里。于是 `>=` 落到实参表循环里被 split 成 `>` + `=`，`>` 收尾，声明没了头（首错
+``expected a declarator name`` 打在 `=` 上）。改成**只有成功的 type 读法**才能早退；`continues_a_type`（只有这一个调用者）
+随之删掉——"停在能结束类型的地方"这件事由 `current_token_index() > start` 那半句负责，不需要第二次判断。
+
+② **`>=` / `>>=` 不是收尾符**（`get_operator_precedence`）。实参表里原来的拒绝集是 `>`/`>>`/`>=`/`>>=`；g++ 的读法是
+`>` 与 `>>` 才收尾，`>=` 一律当运算符（`C<sizeof(int) >= 4>`、`C<(1) >= 2>` 都接受，`C<1 > 2>` 才是"第一个 `>` 收尾"）。
+拒绝集收窄到 `>`/`>>` 之后，`__enable_if_t<(__i >= sizeof(...))>` 的括号里那个 `>=` 才读得成运算符；而"类型实参后面直接跟
+`>=`"（`C<D<int>= 3>`）仍然是 `split_closing_angle` 的活（g++ 对它报的是 "`>=` should be `> =`"，我们读得更宽容）。
+
+③ **数尖括号的三处扫描合成一处，并且 `<` 要看前一个 token**（`angle_depth_delta`）。三个扫描（
+`a_matching_angle_bracket_follows`、`a_bare_template_id_is_here`、`a_body_follows_the_class_head`，外加两个小的）各自
+数自己的尖括号，而**同一个 `angle_depth_delta` 现在多收一个参数**：前一个 token 能不能结束一个模板名
+（标识符 / `>` / `>>`）。因为组里的 `<` 是**小于号**：
+
+```text
+::std::vector<int>    `<` 前面是名字   → 开一层
+C<1 < 2>              …前面是字面量    → 小于号
+C<sizeof(T) < 3>      …前面是 `)`      → 小于号
+C<(T(0) < T(0))>      …在组里          → 小于号
+```
+
+把组里的 `<` 数成开层，后果是**扫描自己在结尾差一层**，于是"找不到匹配的 `>`" ⇒ 那个 `<` 被当成小于号 ⇒
+基类子句整段不成模板 id、类头"没有 body"、实参表整个不成立——三处扫描在 `type_traits:987` 那一行上**同时**错。
+g++ 对上面三行的读法正是"后三行是实参、第一行是内层列表"。
+
+**量到的**（带 seeds，455 那份）：干净 **444 → 444**、报错 11 → 11、消息 41 → **39**。也就是说**一个文件都没修好**，
+但两个文件的首错各往前走了，而且都撞在**同一个刻意不读的形状**上：
+
+```text
+tuple       2438（expected a declarator name，B104① 修掉）→ 2532 `operator== [[nodiscard]] (参数表)`
+type_traits  987（expected `;`，B104③ 修掉）→ 2271 `# if` 打在 `:` 上（B104 的三目接缝）→ 2274
+```
+
+`type_traits` 停在 2274 是**分支写法**：三目的 `:` 那一支**每个 `#if` 分支写一遍**，每支带自己的 `;` ——
+这就是 B77 记着"三种试法各自的代价"的那个形状（一个定义写在两个分支里）。所以这一条**不算修好**，
+只算"读法正确、断言有、队列往前挪了两格"，与 B99 同一类。
+
+**边界与断言**：`gaps.rs::a_template_argument_may_be_a_comparison_in_parentheses`（tuple 的括号比较 + 四个基类实参
+逐字形 + `BaseSpecifier` 计数）、`gaps.rs::a_conditional_may_be_written_with_a_directive_before_its_colon`
+（三目接缝正例 + "`?` 之前的指令不是这条接缝的"反例）。
+
+### B103. 枚举量名字与 `=` 之间的**宏**（`omp_proc_bind_master __GOMP_DEPRECATED_5_1 = …`）—— 已修复
+
+```c
+  omp_proc_bind_master __GOMP_DEPRECATED_5_1          // omp.h:74 —— 宏定义在本文件的两条分支里
+    = omp_proc_bind_primary,
+```
+
+**现象**：``expected primary expression`` 打在下一行的 `=` 上（75:4）。
+
+**成因**：枚举量的名字与 `=` 之间那个位置**只读了 `[[…]]`**（属性），没读宏。宏被当成名字之后，枚举量在那里就结束了，
+循环要 `,` 或 `}` 却撞上 `=`，整个 `typedef enum … } omp_proc_bind_t;` 从那一行起成瓦砾。
+
+**做法**：那条属性读法旁边加 `while eat_a_macro_suffix(p) {}`——同一个读者（"名字 + 可选实参组"），同一个理由：
+枚举量名字之后合法的 token 只有 `[[`、`=`、`,`、指令、`}`，**名字一个都不是**，所以没有第二种读法要争。
+
+**量到的**（带 seeds）：干净 443 → **444**、报错 12 → **11**，逐文件对照**只有 `omp.h` 消失**、无一反向。
+断言：`gaps.rs::an_enumerator_may_carry_a_macro_before_its_value`（正例 + 两个枚举量 + 一个 `MacroCall`；
+反例是**同一个位置的 `[[…]]` 拼法**——它必须继续工作，而且不能被数成宏）。
+
+### B102. 声明说明符位置上的**函数式属性宏**（`_GLIBCXX11_DEPRECATED_SUGGEST("std::bind")`）—— 已修复
+
+```cpp
+template<typename _Operation, typename _Tp>          // backward/binders.h:133
+  _GLIBCXX11_DEPRECATED_SUGGEST("std::bind")
+  inline binder1st<_Operation>
+  bind1st(const _Operation& __fn, const _Tp& __x)
+  { … }
+```
+
+**现象**：首错 ``expected `;` ``，打在那段字符串字面量上（134:33）。
+
+**成因**：`_GLIBCXX11_DEPRECATED_SUGGEST` 是**函数式**宏，体是 `_GLIBCXX_DEPRECATED_SUGGEST(ALT)` →
+`__attribute__((__deprecated__(ALT)))`。B91 那条"体全是说明符"的规则读不到它——**函数式宏的体里有自己的形参**，不是说明符表；
+`at_an_attribute` 也不认它（体在别的文件里）。于是说明符序列在这个名字上停住，声明从它的 `(` 开始散架。
+
+**这一条量了三个版本**，两个失败的版本正是判据的来源：
+
+```text
+要求 evidence（is_function_like）     语料一条没动 —— binders.h 根本没有 evidence 可要求
+只看形状（不加任何表判据）            两个文件**反向**：objbase.h:95、ole2.h:58（都是 WINOLEAPI_(…) 那一族）
+要求"两张表都说不出这个体" + 后继     干净 442 → 443、报错 13 → 12，只有 binders.h 消失、无一反向 ← 留下的这一版
+```
+
+第一行的原因是探针自己打出来的，值得抄在这里：`backward/binders.h` **一个 `#include` 都没有**（"internal header,
+included by other library headers"），单独读它（普查就是这么读的）时**每张表都是空的**：
+
+```text
+MACRO _GLIBCXX11_DEPRECATED_SUGGEST in binders.h   evidence false | positional body None
+                                                   | in-force body None | context 0 seeds
+```
+
+第二行的原因是**两条证据通道是分开的**：`WINOLEAPI_` 的 `#define` 在 `_mingw.h` 的**条件分支**里，所以它到使用点时
+是"**生效的体**"而不是"定义"——只问 `macro_evidence` 仍然会把它算成"没人知道"，于是抢走了
+`a_macro_call_begins_the_declaration` 那条规则的形状。两张表都问，这条规则就只剩下**别人读不了**的名字。
+
+**做法**：`parse_decl_specifier_seq_with` 里加一条臂（紧挨着 B91 那条），条件是
+① `specifiers == 0`（序列开头）② 名字后面是括号组 ③ 不是属性拼法 ④ `macro_evidence` 与 `macro_body_kinds_at`
+**都**说不出这个体 ⑤ 组**后面跟着一个"说明符"**（不是名字）。参数按**原始 token** 收
+（`parse_balanced_token_group`）：`("std::bind")` 是什么语法，只有另一个文件里的 `#define` 知道。
+
+**第 ⑤ 条是这一版的骨头，也是被量出来的**：组后面跟**名字**的形状（`MACRO(args) Name (…)`）归下面的
+`a_macro_call_begins_the_declaration` 所有——它读完调用就**结束序列**（"宏展开成什么不可知，后面那个名字既可能是声明符
+也可能是类型里的又一个词"）。这一版先写成"名字或说明符都收"，结果 `WINOLEAPI_(void) CoFreeLibrary (HINSTANCE hInst);`
+（今天能读的形状）变成**调用表达式** + ``expected `;` after expression``——序列把 `CoFreeLibrary` 并进了宏所代表的类型。
+所以名字那一半被**明确排除**，两半各归各的规则，`gaps.rs` 里既有正例（invocation + `inline` + 类型 + 名字）
+也有反例（`CHECK(1);` 在函数体里必须**仍然是调用**：没有这条判据时它会读成"没有声明符的声明"——无声、无损、且用户写的调用
+在树里根本不存在）。
+
+**边界**：这只在**声明说明符序列的开头**、且**两张表都沉默**时成立。表里有东西时（`WINOLEAPI_`）走的仍是原来的规则；
+类体里"整个成员就是一个调用"的形状由 `at_a_macro_member` 先claim。
+
+### B101. 括号声明符里的**宏**：`(*MACRO NAME)` 与 `(MACRO *NAME)` —— 已修复
+
+```cpp
+typedef void (*_GLIBCXX11_DEPRECATED unexpected_handler) ();                              // exception:87
+typedef HRESULT (STDAPICALLTYPE *LPFNGETCLASSOBJECT) (REFCLSID, REFIID, LPVOID *);        // combaseapi.h:358
+```
+
+**现象**：前者 ``expected ), but get identifier``（87:17），后者 ``expected `;` ``（358:16）。两个宏的体都**在生效**
+（`_GLIBCXX11_DEPRECATED` 是 `__attribute__((__deprecated__))`、`STDAPICALLTYPE` 是 `__stdcall`）。
+
+**成因**：`(MACRO NAME)` 这条路**早就有了**（`winperf.h` 的 `(WINAPI PM_OPEN_PROC)`），缺的是**宏相对声明符自己的运算符
+的另外两个位置**：`STDAPICALLTYPE` 站在 `*` **前面**，`_GLIBCXX11_DEPRECATED` 站在 `*` 与名字**之间**。判据
+`a_parenthesised_declarator_with_a_name_follows` 两处都不认 ⇒ 整个括号组被当成参数列表/函数类型读，声明在自己的括号里散架。
+
+**做法**：① 判据加两条（`(* MACRO NAME)`、`(MACRO * NAME)`），都要求**那个宏**写得像宏
+（`written_like_a_macro`，不是要求名字）；② 读取器 `parse_parenthesised_declarator` 里补上"**运算符之前的宏**"这一半：
+`parse_abstract_declarator` 之后、名字之前，若当前是"像宏的名字 + `*`/`&`/`&&`"，先读成一个 `MacroCall`，再继续读抽象声明符。
+**这一半正是 B98 撤回时缺的那一半**（那时判据与读取器都写了，错误从 col 16 推到 col 51 却没修好——因为宏在 `*` 前面那一半没人读）。
+
+**量到的**（带 seeds）：干净 440 → **442**、报错 15 → **13**，逐文件对照**只有 `exception` 与 `combaseapi.h` 两个消失**、
+无一反向。**不带 seeds 的这一条与 B102 一起量**（两次改动之间没有单独量过，别把它当成 B101 一个人的数）：
+439 → **442**、报错 16 → **13**，逐文件对照消失的三个正是 `exception`、`combaseapi.h`、`binders.h`（B102 的）、无一反向。
+
+### B100. 声明初始化式的**两侧接缝**，与 `__attribute` 少一个下划线的拼法 —— 已修复
+
+```cpp
+// ext/concurrence.h:58 —— 一个变量的值写在三条分支里，`#ifndef` 站在 `=` 与值之间
+_GLIBCXX17_INLINE const _Lock_policy __default_lock_policy =
+#ifndef __GTHREADS
+  _S_single;
+
+// bits/stl_algobase.h:906 —— 值写完之后，`#endif` 站在值与声明自己的 `;` 之间
+const bool __load_outside_loop =
+#if __has_builtin(__is_trivially_constructible) \
+      && __has_builtin(__is_trivially_assignable)
+    __is_trivially_constructible(_Tp, const _Tp&)
+    && __is_trivially_assignable(__decltype(*__first), const _Tp&)
+#else
+    __is_trivially_copyable(_Tp)
+#endif
+    ;
+
+// parallel/compatibility.h:48 —— GNU 的属性拼法**少一个下划线**也是拼法，不是名字
+extern "C"
+__attribute((dllimport)) void __attribute__((stdcall)) Sleep (unsigned long);
+```
+
+**现象**：前两个文件的首错都是 `expected primary expression`，**打在指令那一行**（907:0、59:0）；第三个文件是
+`expected \`;\``，打在它自己的 `extern "C"` 上。
+
+**成因**：两件事，互不相干。
+
+① **接缝**：`=` 之后、值之前（以及值之后、`;` 之前）这个位置没有读指令的接缝。枚举量、模板形参表、形参表、花括号初始化
+式都各自有这一条（B23 的九种形状），唯独声明自己的 `=` 漏了。表达式规则没有 `#` 的读法，于是 `Initializer` 规则直接报
+"expected primary expression"——**报错的位置是指令，不是声明**，这也是探针把这四个文件归成"指令位置"一族的原因
+（另外两个 `omp.h:75`、`lwpintrin.h:45` 是别的成因，见下面的清单）。
+
+② **拼法**：`at_an_attribute` 只认 `__attribute__` 与 `__declspec`。libstdc++ 自己的 `parallel/compatibility.h`
+写的是 `__attribute`（**一个**尾下划线），`g++ -std=c++17` 接受这一行 —— 也就是说这是**编译器的扩展拼法**，与
+`__attribute__` 同义，判据正是 `at_an_attribute` 文档里那两条（名字归实现保留 + 扩展属于编译器而不是文件）。
+
+**做法**：① `finish_init_declarator` 的 `Assign` 分支里，`parse_initializer_clause` **前后各加一个指令环**，两个环都在
+`Initializer` 节点**里面**（指令是"这个初始化式怎么写"的一部分，与枚举量的值同理）；② `at_an_attribute` 的拼法表加
+`__attribute`。
+
+**量到的**（455 那份，带 seeds）：干净 438 → **440**、报错 17 → **15**；**不带 seeds**：干净 437 → **439**、
+报错 18 → **16**（"不带 seeds" 的基线是**临时把这两条规则关掉**重新量的，不是拿旧运行凑的——push1–4 都是带 seeds 的）。
+两种模式**逐文件对照**只有 `concurrence.h` 与 `compatibility.h` 两个消失、无一反向：
+
+```text
+ 59:0   expected primary expression  | #ifndef __GTHREADS                    :: concurrence.h      → 干净
+ 49:11  expected `;`                  | __attribute((dllimport)) void …       :: compatibility.h    → 干净
+907:0   expected primary expression  | #if __has_builtin(…) \                :: stl_algobase.h     → 首错推到 912:5
+```
+
+`stl_algobase.h` **没修好**，但首错**往后走**了（两种模式都是 907:0 → 912:5）：接缝读进去以后，撞上的是另一个已知
+形状——`#else` 分支里的值是**同一个声明符的第二个初始化式**，也就是 B77 特意不读的"一个定义写在两个分支里"
+（那一节记着三种试法各自的代价）。这一条不动。
+
+**边界**：接缝只在 `=` 之后与 `InitDeclarator` 的 `Assign` 分支内，声明符之后**不**读指令——
+`gaps.rs::a_directive_may_stand_on_either_side_of_a_declarations_initializer` 用 `int x\n#if 1\n…` 钉住
+"指令不会凭空造出一个初始化式"，另用 `\` 续行的 `#if` 钉住两个环都真的读到了指令。
+
+### B98. 指针限定符位置上的**空体宏**（`(void *POINTER_32) p`）—— 已修复
+
+```cpp
+#define POINTER_32                                        // basetsd.h:16 —— 64 位目标上是**空体**
+static __inline void *POINTER_32 PtrToPtr32 (const void *p) { return ((void *POINTER_32) (ULONG_PTR) p); }
+```
+
+**现象**：`basetsd.h:90` 的首错是 `expected primary expression`，打在那个 cast 上。
+
+**成因**：空体宏在**文件自己的** `#define` 里没有被记录（B90 把那一半撤回过），于是规则问不出"这个名字展开成什么"，
+cast 的 type-id 在 `*` 之后撞上一个名字就断了。
+
+**做法**：① 文件自己的空体 `#define` 记进 `macro_bodies_empty`，**与有形状的体分开存**（空体顶不掉有形状的体——
+`bits/c++config.h` 在两条分支里分别把同一个名字定义成 `namespace __8 {` 和空，两支都要读）；② `macro_body_kinds_at`
+对它们回答 `Some([])`——"什么都没有"，与 `None` 的"没人说过"是两回事；③ 消费者只有一处，而且是**窄**的：
+`eat_cv_qualifiers`，也就是 `*` 后面的限定符位置（`* const`、`* __ptr32`）——那里一个空体宏只能是什么都没有。
+
+**量到的**（带 seeds）：455 那份 干净 437 → **438**、报错 18 → **17**，逐文件对照**只有 `basetsd.h` 变化**、
+无一反向；不带 seeds 的 435/20/86 不动。**边界没动**：空体宏在声明的说明符序列里仍然不被接受（B91 量过：535 → 424 那一版）。
+
+**B98 附带：试过、量过、撤回的那半（`(STDAPICALLTYPE *NAME)`）。** `combaseapi.h:358` 写
+`typedef HRESULT (STDAPICALLTYPE *LPFNGETCLASSOBJECT) (REFCLSID, REFIID, LPVOID *);`，而探针显示 `STDAPICALLTYPE`
+的体**在生效**（`WINAPI` → `__stdcall`）。判据（`(MACRO * NAME)` 归括号声明符）与读取器都写了，错误从 col 16
+推到 col 51（`expected a name` 打在后面的 `(REFCLSID…`）——**没修好**，语料一条没动，因此**撤回**：不留没量到的重量。
+**下一刀的确切位置**：读掉宏之后的**名字登记**——`(MACRO * NAME)` 里的名字要像既有的 `(MACRO NAME)` 那条路一样被
+登记成声明符的名字（后者是干净的，前者不是，差别就在这里）。
+
+**剩下的 17 个，按族看**（这是"压到 10 个"的下一步清单，每条都带**已经量过的**切入点）：
+
+```text
+模板实参那一族（3 个文件，**三个互不相同的成因**，别当成一条）
+  A. ranges_util.h:267  默认实参里的三目：`parse_a_default_value` **先试 type-id**，`sized_sentinel_for<_Sent>`
+                        读成类型就返回了，`? :` 留给参数表 ⇒ 撞上"expected , or >"。
+                        **已修（B99）**：type-id 只在"表还能继续"时才算答案（`,`/`>`/`>>`/`#`），否则同一批 token 按
+                        表达式读；`gaps.rs::a_template_parameter_may_default_to_a_conditional_expression` 钉住正例与
+                        "type-id 仍然赢"的反例。**语料读数没动**——那个文件的 267:6 是**带环境才出现**的首错（用
+                        cpp_dump 直接读该文件时首错在 437 行），成因与这三条复现不同，要等实参表读取器的"为什么拒绝"
+                        打印才能继续
+  B. tuple:2438         **已修（B104①②）**：`__enable_if_t<(__i >= sizeof...(_Types))>` 的两道门——失败的 type 读法
+                        被当成完整实参（`(__i` 停在 `>=`），以及实参表里 `>=` 被拒成运算符。两道都改掉后复现干净；
+                        首错推到 **2532**（`operator== [[nodiscard]] (参数表)`，B77 那一族的下一层）
+  C. type_traits:987    **已修（B104③）**，而且成因比上面写的更准：三处数尖括号的扫描都把 `(_Tp(-1) < _Tp(0))` 里的
+                        `<` 数成开了一层 ⇒ 扫描在结尾差一层 ⇒ "找不到匹配的 `>`" ⇒ 这个 `<` 被当成小于号，
+                        基类子句整段不成模板 id（类头的 `a_body_follows_the_class_head` 同时在"有没有 body"上错）。
+                        复现矩阵（`template<typename T> struct S : public C<…> { };`）：修好后
+                        `C<T(0)>`、`C<T(0) == T(0)>`、`C<1 < 2>`、`C<T(0) < 3>`、`C<sizeof(T) < 3>`、
+                        `C<(T(0) < T(0))>`、`C<(sizeof(T) < 3)>` **全部干净**。首错由此推到 **2271**（三目两支之间的
+                        指令，B104 的三目接缝）、再推到 **2274**（`:` 支每支写一遍 ⇒ B77 那一族）
+指令位置（4 个）           ~~stl_algobase.h:907~~、~~concurrence.h:59~~、~~omp.h:75~~、~~lwpintrin.h:45~~ **四条全部结清**：
+                        `concurrence.h` 由 B100 的 `=` 两侧接缝修掉、`omp.h` 由 B103 的枚举量宏修掉、
+                        `lwpintrin.h` 由 B106 的"`*` 与名字之间的属性"修掉；`stl_algobase.h` 的首错从 907:0
+                        推到 **912:5**，停在刻意不读的形状上（`#else` 分支的值 = 同一个声明符的第二个初始化式）
+属性宏 + extern "C"        compatibility.h:49 —— **B100 已修，成因不是三轮探针缩到的那一处**：那一行里的
+                        `__attribute` 只有**一个**尾下划线，`at_an_attribute` 不认这个拼法 ⇒ 它被读成宏形说明符，
+                        后面的声明跟着丢。`g++ -std=c++17` 接受同一行，拼法属于编译器而不属于文件；加进拼法表后该文件干净
+单条                       ~~binders.h~~（B102）、~~exception~~、~~combaseapi.h~~（B101）、~~omp.h~~（B103）、
+                           ~~lwpintrin.h~~（B106）已修；剩下 iterator_concepts.h、stl_function.h、stl_iterator.h、
+                           safe_iterator.h、algorithmfwd.h、riemann_zeta.tcc、tuple、type_traits、
+                           stl_algobase.h（B77 那个刻意不读的形状）
+```
+
+**这一族按"值多少文件"的下一刀**（带 seeds 现在 **445/10**，目标已达成；下面是继续往下压的队列）：
+
+```text
+1. B77 那一族现在一个人挡着**五个**文件：tuple:2532、type_traits:2274、riemann_zeta.tcc:182、algorithmfwd.h:704、
+   stl_algobase.h:912 —— 全都是"一个构造写在 `#if` 的两支里"（语句 / 表达式 / 初始化式 / 形参加那个 `)`）。
+   它是现在**唯一**的成族形状，也就是下一刀该打的地方：三种试法的代价记在 B77 那一节
+   （`;` 是分支的还是声明的，三个读者不同意），而 B100/B103/B105 之后"接缝"这一侧已经补齐，
+   剩下的正是**归属**问题——谁拥有分支末尾那个 `;`
+2. 单条四条：iterator_concepts.h:909、stl_function.h:1042、stl_iterator.h:3094、safe_iterator.h:284，
+   都还没缩到一行。其中 stl_function.h 与 B102 是同一族（说明符位置的函数式属性宏），差别只在
+   组后面跟的是**名字**（`_GLIBCXX14_CONSTEXPR`）——那一半现在归 `a_macro_call_begins_the_declaration`，
+   它读完调用就结束序列；要修就得让那条规则在"声明符没读成"时把序列交还回来
+```
+
 ### B42. 函数定义里的 `try`（function-try-block）—— 待修
 
 ```cpp

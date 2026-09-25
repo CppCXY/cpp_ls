@@ -229,6 +229,12 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
 
         _ if at_a_macro_call_statement(p) => parse_macro_call(p),
 
+        // **A macro invocation with no argument list and a block after it** — the same "the body supplies the
+        // block" shape one spelling along, and the one `debug/safe_iterator.h:283` writes. Claimed here, before the
+        // declaration/expression question, because the postfix rule reads the `{` as list-initialisation of the
+        // name (`BEGIN{…}`, which is C++11's `T{…}`) and then every statement in the block is inside a braced list.
+        _ if at_a_macro_statement_with_a_block(p) => parse_a_macro_statement_with_a_block(p),
+
         // A label: `foo:` at the start of a statement.
         CppTokenKind::Identifier
             if p.peek_token_kind_at(1..2).as_slice() == [CppTokenKind::Colon] =>
@@ -432,6 +438,49 @@ fn at_a_macro_call_statement(p: &CppParser) -> bool {
             .is_some_and(MacroEvidence::may_be_a_statement_without_a_semicolon)
 }
 
+/// Does a macro invocation with **no argument list** stand here, with a block that is its body?
+///
+/// The one shape of "a macro whose body supplies a block" that had no rule, and it is written all over the debug
+/// headers — `debug/safe_iterator.h:283` is where the census found it:
+///
+/// ```cpp
+/// #if __cplusplus >= 202002L && __cpp_constexpr < 202110L
+/// # define _GLIBCXX20_CONSTEXPR_NON_LITERAL_SCOPE_BEGIN [&]() -> void
+/// # define _GLIBCXX20_CONSTEXPR_NON_LITERAL_SCOPE_END ();
+/// #else
+/// # define _GLIBCXX20_CONSTEXPR_NON_LITERAL_SCOPE_BEGIN
+/// # define _GLIBCXX20_CONSTEXPR_NON_LITERAL_SCOPE_END
+/// #endif
+///
+///     if (this->_M_sequence && this->_M_sequence == __x._M_sequence)
+///       _GLIBCXX20_CONSTEXPR_NON_LITERAL_SCOPE_BEGIN {
+///         __gnu_cxx::__scoped_lock __l(this->_M_get_mutex());
+///         …
+///       } _GLIBCXX20_CONSTEXPR_NON_LITERAL_SCOPE_END
+///     else
+/// ```
+///
+/// **Evidence is what makes it safe**, and it is the same evidence the sibling rule above asks for: the tables have
+/// to know the name — this file's own `#define` (the shape above), or a body the include closure carried in. A name
+/// followed by a `{` is otherwise *list-initialisation* (`Point{1, 2};` is an expression statement, and the brace
+/// after a name is read as `InitListExpr` by the postfix rule), and a `{` after a macro invocation is the body the
+/// macro's own definition supplies — which is exactly what the tables can tell apart and the tokens cannot.
+///
+/// The block belongs to the invocation, the same node shape [`parse_macro_call`] produces for
+/// `IF_EXIST(a) { … }`: `MacroCall(NameExpr, CompoundStat)`, with no `ArgumentList` because the file wrote none.
+fn at_a_macro_statement_with_a_block(p: &CppParser) -> bool {
+    if p.current_token() != CppTokenKind::Identifier
+        || p.peek_next_token() != CppTokenKind::LeftBrace
+    {
+        return false;
+    }
+
+    let name = p.current_token_text();
+    p.macro_evidence(name).is_some()
+        || p.macro_body_kinds_at(name, p.current_token_range().start_offset)
+            .is_some()
+}
+
 /// Is there a **macro invocation from an included header** at the token `index`?
 ///
 /// The form [`at_a_macro_call_statement`] cannot claim, because no table knows the name. Three boundaries, each
@@ -571,7 +620,14 @@ fn parse_a_declaration_head_macro(p: &mut CppParser) -> ParseResult {
 /// is a **brace** — `namespace __8 {`, `}` — is the whole of what the file wrote: no group, no block, no `;`,
 /// and the group-reading rule refuses a bare name outright (B87).
 fn parse_a_macro_invocation_statement(p: &mut CppParser, start: usize) -> ParseResult {
-    if body_shapes_the_braces(p, start) {
+    // **No group, no [`parse_macro_call`]**: that reader's first act is to read the argument list, and the two
+    // shapes without one — a body that shapes the braces, and a bare invocation — are read by the rule that reads
+    // a name and *optionally* a group. Asking which shape this is, at the one place that knows the name has
+    // already been claimed, is cheaper than a flag inside the reader and keeps each reader's precondition true.
+    let after_the_name = super::decls::next_significant_index(p, start);
+    if body_shapes_the_braces(p, start)
+        || p.token_kind_at(after_the_name) != CppTokenKind::LeftParen
+    {
         return parse_a_macro_that_stands_for_a_declaration(p);
     }
 
@@ -609,12 +665,43 @@ pub(super) fn a_macro_invocation_starts_at(p: &CppParser, index: usize) -> bool 
         return true;
     }
 
+    if p.token_kind_at(index) != CppTokenKind::Identifier {
+        return false;
+    }
+
     let name = p.token_text_at(index);
-    p.token_kind_at(index) == CppTokenKind::Identifier
-        && p.token_kind_at(super::decls::next_significant_index(p, index)) == CppTokenKind::LeftParen
-        && p.macro_evidence(name).is_none()
-        && super::types::written_in_the_implementations_namespace(name)
-        && kind_after_the_balanced_group(p, index).is_some_and(ends_a_statement)
+    let after = super::decls::next_significant_index(p, index);
+
+    // The form with a group: a name the tables do **not** know, reserved to the implementation, whose group ends
+    // where a statement ends.
+    if p.token_kind_at(after) == CppTokenKind::LeftParen {
+        return p.macro_evidence(name).is_none()
+            && super::types::written_in_the_implementations_namespace(name)
+            && kind_after_the_balanced_group(p, index).is_some_and(ends_a_statement);
+    }
+
+    // …and the form with **no group at all**, which is a macro that stands for a whole statement and writes none of
+    // it. `debug/safe_iterator.h:75-79` defines its two scope macros that way — `[&]() -> void` in one branch (with
+    // `();` for the other end) and **nothing at all** in the other — and the closing one is a bare name inside a
+    // body:
+    //
+    // ```cpp
+    //       _GLIBCXX20_CONSTEXPR_NON_LITERAL_SCOPE_BEGIN {
+    //         __gnu_cxx::__scoped_lock __l(this->_M_get_mutex());
+    //         …
+    //       } _GLIBCXX20_CONSTEXPR_NON_LITERAL_SCOPE_END
+    //     else
+    // ```
+    //
+    // Two things make it safe, and both are required. **Evidence**: the tables have to say this name is a macro
+    // and that it may stand without a `;` — the same question [`at_a_macro_call_statement`] asks, and the same
+    // reason, since a bare name inside a body is otherwise a *variable* and a missing `;` the ordinary mistake.
+    // **A follower that ends a statement** ([`ends_a_statement`], which already answers for `}`, `else`, `catch`
+    // and the next statement's keyword): a bare name followed by an operator or a declarator belongs to the
+    // expression or the declaration it is part of, and this rule is reached only after that reading has failed
+    // anyway — see the `Err` arm of `parse_declaration_or_expression_statement`.
+    p.macro_evidence(name).is_some_and(MacroEvidence::may_be_a_statement_without_a_semicolon)
+        && ends_a_statement(p.token_kind_at(after))
 }
 
 /// The kind of the first significant token **after** the balanced group that follows the token at `index`.
@@ -797,6 +884,63 @@ pub(super) fn parse_a_macro_that_stands_for_a_declaration(p: &mut CppParser) -> 
 
     if p.current_token() == CppTokenKind::LeftParen {
         super::decls::parse_balanced_token_group(p, CppSyntaxKind::ArgumentList)?;
+    }
+
+    Ok(m.complete(p))
+}
+
+/// Read a macro invocation that has **no argument list** and a block after it.
+///
+/// The reader of [`at_a_macro_statement_with_a_block`], and the same node that rule's doc describes:
+/// `MacroCall(NameExpr, CompoundStat)`. A second function rather than a flag on [`parse_macro_call`], because that
+/// one's first act is to read the argument list — the whole difference between the two shapes — and a reader that
+/// has to ask whether it has arguments before it can read the name is a reader whose callers disagree about which
+/// shape they are looking at.
+fn parse_a_macro_statement_with_a_block(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::MacroCall);
+
+    let name = p.mark(CppSyntaxKind::NameExpr);
+    p.bump();
+    name.complete(p);
+
+    if let Err(err) = parse_compound_stat(p) {
+        p.close_marks_above(base);
+        return Err(err);
+    }
+
+    // **The macro that closes what this one opened.** `_GLIBCXX20_CONSTEXPR_NON_LITERAL_SCOPE_END` is `();` in the
+    // header's first branch and nothing at all in the other, and either way it belongs to the same construct: the
+    // two invocations bracket the block. It is read as a child of this node rather than as a sibling statement,
+    // and that is not decoration — a sibling would end the `if`'s branch before its `else`:
+    //
+    // ```cpp
+    //     if (…) SCOPE_BEGIN { … } SCOPE_END else { … }      // one statement once the macros are expanded
+    // ```
+    //
+    // Evidence and a follower, both required, as everywhere else this rule reads a name: the tables must say the
+    // name is a macro that may stand without a `;`, and what follows it must end a statement (or be the `;` this
+    // node then keeps, the way [`parse_macro_call`] keeps one).
+    loop {
+        if p.current_token() != CppTokenKind::Identifier
+            || !p
+                .macro_evidence(p.current_token_text())
+                .is_some_and(MacroEvidence::may_be_a_statement_without_a_semicolon)
+            || !(ends_a_statement(p.peek_next_token())
+                || p.peek_next_token() == CppTokenKind::Semicolon)
+        {
+            break;
+        }
+
+        let closing = p.mark(CppSyntaxKind::MacroCall);
+        let closing_name = p.mark(CppSyntaxKind::NameExpr);
+        p.bump();
+        closing_name.complete(p);
+        closing.complete(p);
+
+        if p.current_token() == CppTokenKind::Semicolon {
+            p.bump();
+        }
     }
 
     Ok(m.complete(p))

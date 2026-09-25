@@ -285,6 +285,9 @@ pub struct CppParser<'a> {
     /// "does it start with a comma" — and the kinds answer all three. The text stays where it is (the directive's
     /// tokens are in the tree), so nothing here re-spells a body. See `docs/index-design.md`, the expansion section.
     macro_bodies: std::cell::RefCell<std::collections::HashMap<Box<str>, Vec<CppTokenKind>>>,
+    /// The names this file `#define`d with an **empty** body — see `record_macro_body` for why they are kept apart
+    /// from the shaped bodies.
+    macro_bodies_empty: std::cell::RefCell<std::collections::HashSet<Box<str>>>,
     macro_questions: std::cell::Cell<usize>,
     macro_question_names: std::cell::RefCell<std::collections::HashSet<Box<str>>>,
     /// The names the **open template heads** declared as parameters that are types.
@@ -452,6 +455,7 @@ impl<'a> CppParser<'a> {
             template_parameters: Vec::new(),
             macro_names: crate::parser::MacroNames::new(),
             macro_bodies: std::cell::RefCell::new(std::collections::HashMap::new()),
+        macro_bodies_empty: std::cell::RefCell::new(std::collections::HashSet::new()),
             macro_questions: std::cell::Cell::new(0),
             macro_question_names: std::cell::RefCell::new(std::collections::HashSet::new()),
             declaration_type_name: None,
@@ -1111,6 +1115,13 @@ impl<'a> CppParser<'a> {
     /// must not take the shaped one's place: the empty branch says nothing about the tokens a use site wrote.
     pub fn record_macro_body(&self, name: &str, kinds: Vec<CppTokenKind>) {
         if kinds.is_empty() {
+            // An empty body is recorded **as empty** rather than dropped: `#define POINTER_32` says the name
+            // expands to nothing at all, and that is a fact a rule may act on — `basetsd.h` uses it where a pointer
+            // qualifier goes. It is kept **apart** from the shaped bodies so it cannot take a shaped one's place:
+            // `bits/c++config.h` defines `_GLIBCXX_BEGIN_NAMESPACE_VERSION` as `namespace __8 {` in one branch and
+            // as nothing in the other, and every branch is read. What an empty body *means* is each rule's
+            // business — `types.rs` accepts one only where nothing else can stand.
+            self.macro_bodies_empty.borrow_mut().insert(name.into());
             return;
         }
 
@@ -1138,6 +1149,12 @@ impl<'a> CppParser<'a> {
     pub fn macro_body_kinds_at(&self, name: &str, at: usize) -> Option<Vec<CppTokenKind>> {
         if let Some(kinds) = self.macro_body_kinds(name) {
             return Some(kinds);
+        }
+
+        // `#define NAME` with nothing after it: this file said the name expands to nothing, and an **empty list**
+        // is that answer — distinct from `None`, which means nobody has said.
+        if self.macro_bodies_empty.borrow().contains(name) {
+            return Some(Vec::new());
         }
 
         let environment = self.parse_config.macros_from_includes()?;

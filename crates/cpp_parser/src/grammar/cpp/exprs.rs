@@ -15,6 +15,17 @@ use super::{at_requires, expect_token};
 /// than". `Vec<1 > 2>` is not a thing, but `Vec<A<B>>` and `Vec<1, 2>` are, and the closing angle
 /// must reach the template-argument reader rather than being eaten as an operator. See
 /// [`crate::parser::CppParser::is_in_template_arguments`].
+///
+/// **The refusal is for the two spellings that are a closer, and only those**: `>` and `>>`. `>=` and `>>=`
+/// contain a `>` but are not one, and g++ reads them as operators even where a list is open —
+/// `C<sizeof(int) >= 4>` and `C<(1) >= 2>` are both accepted, while `C<1 > 2>` is the "the first `>` closes"
+/// error. Refusing them here is what kept `enable_if_t<(__i >= sizeof...(_Types))>` from reading: the parenthesis
+/// does not protect the token from this rule, and the argument's own `>` was three tokens further along.
+///
+/// Nothing is lost by allowing them: the list still closes, because the argument that ends at a `>=` at the *top*
+/// level of the list is a **type**, and a type argument is read by the type reading, which stops before it and
+/// leaves the `>=` to [`crate::grammar::cpp::types::split_closing_angle`] — the reading `C<D<int>= 3>` needs, and
+/// the one g++ reports as "'`>=` should be '`> =`' to terminate a template argument list".
 fn get_operator_precedence(p: &CppParser, token: CppTokenKind) -> Option<u8> {
     // A C++ **alternative operator spelling** arrives as an `Identifier`, because the lexer has no keyword for
     // it — so it is recognised by its text and then treated as the operator it stands for. Doing it here, at the
@@ -23,13 +34,7 @@ fn get_operator_precedence(p: &CppParser, token: CppTokenKind) -> Option<u8> {
     let token = the_alternative_operator(p, token).unwrap_or(token);
 
     if p.is_in_template_arguments()
-        && matches!(
-            token,
-            CppTokenKind::Greater
-                | CppTokenKind::RightShift
-                | CppTokenKind::GreaterEqual
-                | CppTokenKind::RightShiftAssign
-        )
+        && matches!(token, CppTokenKind::Greater | CppTokenKind::RightShift)
     {
         return None;
     }
@@ -473,6 +478,32 @@ fn parse_ternary_expr(p: &mut CppParser) -> ParseResult {
         p.bump(); // consume '?'
 
         parse_expr(p)?; // true expression
+
+        // **A directive between the two branches**, which is the seam every other list rule already has, in the
+        // one position a *conditional* is conditioned in — and the standard library writes it that way, because
+        // the two spellings of the `: 1 << …` branch are what the conditional is choosing:
+        //
+        // ```cpp
+        //     return __len > (_Max_align::value / 2)          // type_traits:2269
+        //          ? _Max_align::value
+        // # if _GLIBCXX_USE_BUILTIN_TRAIT(__builtin_clzg)
+        //          : 1 << (__SIZE_WIDTH__ - __builtin_clzg(__len - 1u));
+        // # else
+        //          : 1 << (__LLONG_WIDTH__ - __builtin_clzll(__len - 1ull));
+        // # endif
+        // ```
+        //
+        // A `#` where the `:` should be cannot be anything else — the conditional has both of its branches or it
+        // is not one — so the directive is read as the node it is and the `:` is asked for again. Without it the
+        // file reported ``expected :, but get #`` against the `# if` itself.
+        //
+        // Only **between** the branches, and not before the `?`: there the directive belongs to whatever
+        // construct is being conditioned (`_GLIBCXX_NOEXCEPT_IF(…)` and the template-parameter seam are read by
+        // their own rules), and a directive read here would be one they can no longer see.
+        while p.current_token() == CppTokenKind::Hash {
+            super::stats::parse_preprocessor_directive(p)?;
+        }
+
         expect_token(p, CppTokenKind::Colon)?;
         parse_ternary_expr(p)?; // false expression
 
@@ -510,7 +541,81 @@ fn parse_binary_expr_with_precedence(p: &mut CppParser, min_prec: u8) -> ParseRe
         return Ok(m.complete(p));
     }
 
-    while let Some(prec) = get_operator_precedence(p, p.current_token()) {
+    // **A directive where the next operator goes**, which is how a *term* of an expression is written once per
+    // branch — the shape `tr1/riemann_zeta.tcc:179` has:
+    //
+    // ```cpp
+    //   __zeta *= std::pow(_Tp(2) * __numeric_constants<_Tp>::__pi(), __s)
+    //          * std::sin(__numeric_constants<_Tp>::__pi_2() * __s)
+    // #if _GLIBCXX_USE_C99_MATH_TR1
+    //          * std::exp(_GLIBCXX_MATH_NS::lgamma(_Tp(1) - __s))
+    // #else
+    //          * std::exp(__log_gamma(_Tp(1) - __s))
+    // #endif
+    //          / __numeric_constants<_Tp>::__pi();
+    // ```
+    //
+    // Both branches write the **same operator** with a different operand, and the expression continues after the
+    // `#endif`, so the directive is read as the node it is and the loop looks for the operator again. A `#` in
+    // this position cannot be anything else: an expression has no `#`, and the loop is where an operator — or the
+    // end of the expression — is what the tokens say next.
+    //
+    // **What this reads and what it does not.** The tokens of *both* branches end up in one chain
+    // (`… * exp(A) * exp(B) / …`), which is not what either branch says — the branches are alternatives, and this
+    // reading has no way to say so, because an expression is one tree and the two operands are two. It is
+    // lossless, it is silent, and it attaches every token to the construct that owns it; the alternative is a
+    // file that does not parse at all, which is what this file did (the first error was ``expected `;` after
+    // expression`` against the `#if`). The same trade is documented for B70's macro arguments.
+    loop {
+        // Read the directives **only when they are this expression's**. Two things can follow them, and each is a
+        // different owner:
+        //
+        // * an **operator** — then they are the seam above: the next term of the chain is written once per branch
+        //   (`tr1/riemann_zeta.tcc:179`), and the chain continues;
+        // * **nothing an operator** — then the expression is over, and whether the directives belong to it depends
+        //   on which directive they are. An `#else`/`#elif` opens **another instance of the construct that
+        //   surrounds this expression**, and that construct's own seam is what reads it (`bits/stl_algobase.h:906`
+        //   is a declaration whose initializer is written per branch, and it can only see the `#else` if the
+        //   expression leaves it alone). Anything else — an `#endif`, an `#if` of the next conditional — closes
+        //   what is around the expression, and the closer that follows it (`)`, `,`, `;`) is what the *caller*
+        //   expects to see next, so the expression takes the directives and stops:
+        //
+        // ```cpp
+        //   const bool __simple = ((__is_integer<_V>::__value      // bits/stl_algobase.h:1237
+        // #if _GLIBCXX_USE_BUILTIN_TRAIT(__is_pointer)
+        //                 || __is_pointer(_V)
+        // #endif
+        // #if __glibcxx_byte && …
+        //                 || is_same_v<_V, byte>
+        // #endif
+        //                  ) && __memcmpable<_II1, _II2>::__value);
+        // ```
+        //
+        // — where the `#endif`s stand *inside* the parentheses, between the last operand and the `)`.
+        if p.current_token() == CppTokenKind::Hash {
+            let checkpoint = p.checkpoint();
+            let mut opens_another_branch = false;
+
+            while p.current_token() == CppTokenKind::Hash {
+                if matches!(p.peek_token_text_at(1), "else" | "elif") {
+                    opens_another_branch = true;
+                }
+                super::stats::parse_preprocessor_directive(p)?;
+            }
+
+            let an_operator_follows = get_operator_precedence(p, p.current_token())
+                .is_some_and(|prec| prec >= min_prec);
+            if !an_operator_follows {
+                if opens_another_branch {
+                    p.rollback(checkpoint);
+                }
+                break;
+            }
+        }
+
+        let Some(prec) = get_operator_precedence(p, p.current_token()) else {
+            break;
+        };
         if prec < min_prec {
             break;
         }
@@ -678,48 +783,22 @@ fn parse_unary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
             expect_token(p, CppTokenKind::RightParen)?;
             Ok(m.complete(p))
         }
-        // A C-style cast, or a parenthesised expression. `(int)x` and `(x)` are the same first three tokens,
-        // and the type reading has to be tried first because it is the one that can be refused: `(x + 1)`
-        // parses as neither a type nor an abstract declarator, so the rollback is what makes it an expression.
-        CppTokenKind::LeftParen if is_a_type_in_parentheses(p) => {
-            let before_the_cast = p.checkpoint();
-            let base = p.open_marks();
-            let m = p.mark(CppSyntaxKind::CastExpr);
-            p.bump(); // `(`
-
-            // **The cast reading is a preference, and here is where it is dropped.** The guard above answers
-            // "the name inside these parentheses is a type", which is evidence for `(Widget)x` — and it is also
-            // true of a **functional conversion used as a value inside a grouped expression**, which is what a
-            // template-parameter name looks like everywhere in libstdc++'s math implementations:
-            //
-            // ```cpp
-            // __gam1 = (__gammi - __gampl) / (_Tp(2) * __mu);     // tr1/bessel_function.tcc:114
-            // __fact *= __k / (_Tp(2) * __numeric_constants<_Tp>::__pi());   // tr1/gamma.tcc:117
-            // static const _CASable _CASable_mask = ((_CASable(1) << (_CASable_bits / 2)) - 1);
-            // ```
-            //
-            // There the type-id is `_Tp` and then a `(` follows, so requiring the `)` fails and the whole
-            // statement came out as rubble with `expected ), but get (`. Seven files had that as their first
-            // error, and the reading that is right for all of them is the one the guard's own comment promises:
-            // when the cast does not hold up, the group is a parenthesised **expression**. A rewind is what makes
-            // that promise good — the type reading and its failure both disappear, diagnostics included
-            // ([`CppParser::rollback`]), and the expression rule gets the tokens it should have had.
-            let the_type_and_its_closing = super::types::parse_type_id(p)
-                .and_then(|_| expect_token(p, CppTokenKind::RightParen));
-
-            if let Err(_the_cast_reading_did_not_hold) = the_type_and_its_closing {
-                p.rollback(before_the_cast);
-                return parse_parenthesized_expression(p);
-            }
-
-            // The operand of a cast is a unary expression, which is what keeps `(int)a + b` a sum of a cast
-            // and `b` rather than a cast of `a + b`.
-            if let Err(err) = parse_unary_expr(p, fold_operand) {
-                p.close_marks_above(base);
-                return Err(err);
-            }
-            Ok(m.complete(p))
-        }
+        // A C-style cast **is not read here**. The same arm exists one rule down
+        // ([`parse_primary_expr`]'s `LeftParen if is_a_type_in_parentheses`), because a `(` that is not a cast is
+        // a *parenthesised expression* — and this rule's `_` arm reaches that one. There used to be a second copy
+        // here, and the two copies disagreed about the one thing that matters:
+        //
+        // ```cpp
+        // bool b = (V<T>(x));      the type reading takes `V<T>(x)` for a *function type*, the `)` matches, and
+        //                          then no operand follows
+        // ```
+        //
+        // The copy below rolled back and read the group as the expression it is. The copy here reported a missing
+        // operand instead — a hard error, from a *preference* the rule had already decided could be wrong — so the
+        // same tokens parsed or failed depending on which of the two saw them first: `(V<T>(x))` was rubble,
+        // `(W<T>(x))` (an unknown name, where the guard says "not a type") was fine. That is maintenance
+        // convention #14 exactly — the second copy is where the exception gets forgotten — and the fix is to keep
+        // the one that has it.
         // `new`, with everything that can follow it: placement arguments, a type, array bounds and an
         // initializer — and then the postfix suffixes, because `new Widget(1)->run()` is one expression.
         //

@@ -2807,6 +2807,15 @@ fn contains(source: &str, kind: CppSyntaxKind) -> bool {
         .any(|node| CppSyntaxKind::from(node.kind()) == kind)
 }
 
+/// How many nodes of this kind the parsed fragment has — for the assertions where the *count* is the claim.
+fn count_of(source: &str, kind: CppSyntaxKind) -> usize {
+    CppParser::parse(source, ParserConfig::default())
+        .get_red_root()
+        .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == kind)
+        .count()
+}
+
 /// A macro **from a header** can stand where a declaration goes, and only where nothing else can.
 ///
 /// The shape that made this necessary is `namespace std _GLIBCXX_VISIBILITY(default) {`, which opens **every**
@@ -5400,6 +5409,711 @@ fn a_macro_whose_own_body_opens_a_namespace_is_its_own_statement() {
             .count(),
         0,
         "a macro that names a namespace rather than opening one is not a head"
+    );
+}
+
+#[test]
+fn a_template_parameter_may_default_to_a_conditional_expression() {
+    // `bits/ranges_util.h:265-267`:
+    //
+    // ```cpp
+    // template<input_or_output_iterator _It, sentinel_for<_It> _Sent = _It,
+    //          subrange_kind _Kind = sized_sentinel_for<_Sent, _It>
+    //            ? subrange_kind::sized : subrange_kind::unsized>
+    // ```
+    //
+    // The default is a **conditional expression whose head is a type**. The type reading takes
+    // `sized_sentinel_for<_Sent, _It>` and stops, and the `?` was then left to the parameter list, which reported
+    // ``expected `,` or `>` `` against it. A type is only the answer when the list can continue after it.
+    let source = "enum class subrange_kind { sized, unsized };\n\
+                  template<typename A, typename B> struct sized_sentinel_for { };\n\
+                  template<typename _It, typename _Sent = _It,\n\
+                           subrange_kind _Kind = sized_sentinel_for<_Sent, _It>\n\
+                             ? subrange_kind::sized : subrange_kind::unsized>\n\
+                  struct subrange { };\n";
+    assert_eq!(
+        reads(source, Where::File),
+        Ok(()),
+        "a conditional default reads as a value, not as a type that stops at the `?`"
+    );
+
+    // The type reading still wins where it **is** the whole default: `std::vector<int>` is a type-id and also a
+    // perfectly good expression, and reading it as one would lose the argument list.
+    let source = "template<typename T> struct V { };\n\
+                  template<typename T, V<T> Arg = V<T>()> struct W { };\n";
+    assert!(
+        reads(source, Where::File).is_ok(),
+        "a type-id default keeps its reading"
+    );
+}
+
+#[test]
+fn a_directive_may_stand_on_either_side_of_a_declarations_initializer() {
+    // `ext/concurrence.h:58` writes one variable's value **once per branch**:
+    //
+    // ```cpp
+    //   _GLIBCXX17_INLINE const _Lock_policy __default_lock_policy =
+    //   #ifndef __GTHREADS
+    //     _S_single;
+    //   #elif defined _GLIBCXX_HAVE_ATOMIC_LOCK_POLICY
+    //     _S_atomic;
+    //   #else
+    //     _S_mutex;
+    //   #endif
+    // ```
+    //
+    // The `#` therefore stands where the *initializer* should begin, which no expression rule can read: the
+    // declaration failed and the file reported `expected primary expression` against its own `#ifndef`. The seam
+    // is the one the enumerator list, the template parameter list and the parameter list already have (B23), in
+    // the one position that was missing it.
+    let source = "const int x =\n#ifndef Y\n  1;\n#else\n  2;\n#endif\n";
+    assert_eq!(
+        reads(source, Where::File),
+        Ok(()),
+        "a directive between the `=` and the value is a seam, not an initializer"
+    );
+    assert!(
+        contains(source, CppSyntaxKind::Initializer),
+        "and the value after the directive is still that declarator's initializer"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::PreprocessorDirective),
+        3,
+        "all three directives stay nodes rather than becoming rubble"
+    );
+
+    // **The other side of the same seam** — `bits/stl_algobase.h:906` — because a conditional whose branches are
+    // values leaves the `#endif` between the value and the declaration's own `;`:
+    //
+    // ```cpp
+    //   const bool __load_outside_loop =
+    //   #if __has_builtin(__is_trivially_constructible) \
+    //         && __has_builtin(__is_trivially_assignable)
+    //       __is_trivially_constructible(_Tp, const _Tp&)
+    //       && __is_trivially_assignable(__decltype(*__first), const _Tp&)
+    //   #else
+    //       __is_trivially_copyable(_Tp)
+    //   #endif
+    //       ;
+    // ```
+    //
+    // The `\`-continued condition is part of the control: it is the same directive, and a seam that only reached
+    // the end of a line would report against the second `__has_builtin`.
+    let source = "template<typename _Tp> void f() {\n\
+                    bool b =\n\
+                  #if __has_builtin(__is_trivially_constructible) \\\n\
+                        && __has_builtin(__is_trivially_assignable)\n\
+                      1\n\
+                  #endif\n\
+                      ;\n\
+                    (void)b;\n\
+                  }\n";
+    assert_eq!(
+        reads(source, Where::File),
+        Ok(()),
+        "a directive between the value and the `;` is the same seam"
+    );
+
+    // **The seam is not a licence to swallow a directive anywhere.** A declaration with no initializer still has
+    // no initializer: `int x` followed by `#if` and a value is `int x;`-shaped only if the file says so, and the
+    // reading here is the one the grammar had before — the value is not adopted as `x`'s initializer.
+    assert!(
+        !contains("int x\n#if 1\n  1\n#endif\n;\n", CppSyntaxKind::Initializer),
+        "a directive after a declarator does not create an initializer"
+    );
+}
+
+#[test]
+fn the_attribute_spelling_with_one_trailing_underscore_is_an_attribute() {
+    // `parallel/compatibility.h:48-49` — libstdc++'s own header, which writes the GNU spelling **short**:
+    //
+    // ```cpp
+    // extern "C"
+    // __attribute((dllimport)) void __attribute__((stdcall)) Sleep (unsigned long);
+    // ```
+    //
+    // `g++ -std=c++17` accepts that line, so `__attribute` is the compiler's extension and not this parser's
+    // guess. Read as a name it is a macro-shaped specifier, and the declaration it stands in front of was lost:
+    // the file reported ``expected `;` `` against its own `extern "C"`.
+    let source = "extern \"C\"\n__attribute((dllimport)) void __attribute__((stdcall)) Sleep (unsigned long);\n";
+    assert_eq!(
+        reads(source, Where::File),
+        Ok(()),
+        "both attribute spellings read, so the declaration they modify is read"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::AttributeList),
+        2,
+        "each of the two is one attribute list, whichever spelling it uses"
+    );
+
+    // The spelling is the whole test, so the control is the *shape*: a name followed by a `(` where a declarator
+    // has already ended is not an attribute, and `int __attribute = 1;` is a variable named by that name.
+    assert_eq!(
+        count_of("int __attribute = 1;\n", CppSyntaxKind::AttributeList),
+        0,
+        "`__attribute` with no parenthesis after it is a name, not an attribute"
+    );
+    assert_eq!(
+        reads("int __attribute = 1;\n", Where::File),
+        Ok(()),
+        "…and the declaration it names still reads"
+    );
+}
+
+#[test]
+fn an_enumerator_may_carry_a_macro_before_its_value() {
+    // `omp.h:74` writes an enumerator whose attribute is a macro, between the name and the `=`:
+    //
+    // ```c
+    //   omp_proc_bind_master __GOMP_DEPRECATED_5_1
+    //     = omp_proc_bind_primary,
+    // ```
+    //
+    // The `[[…]]` spelling of the same position was already read; the macro is the same seam one spelling along,
+    // and read as a name the enumerator ended at it — the loop then wanted a `,` or a `}` where the `=` stood, and
+    // the whole `typedef enum … } omp_proc_bind_t;` came out as rubble from there on.
+    let source = "#define DEP __attribute__((__deprecated__))\n\
+                  typedef enum E {\n\
+                    A DEP\n\
+                      = 1,\n\
+                    B = 2\n\
+                  } E;\n";
+    assert_eq!(
+        reads(source, Where::File),
+        Ok(()),
+        "a macro between an enumerator's name and its `=` is a seam, not the end of the enumerator"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::EnumeratorDecl),
+        2,
+        "and both enumerators are still enumerators"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::MacroCall),
+        1,
+        "the macro is read as the invocation it is"
+    );
+
+    // The control is the **same seam with the compiler's own spelling**, which has to keep working: the attribute
+    // is not a macro and is not counted as one.
+    let source = "enum E { A [[deprecated]] = 1, B = 2 };\n";
+    assert_eq!(reads(source, Where::File), Ok(()), "`[[…]]` still reads");
+    assert_eq!(
+        count_of(source, CppSyntaxKind::MacroCall),
+        0,
+        "an attribute is not a macro invocation"
+    );
+}
+
+#[test]
+fn a_template_argument_may_be_a_comparison_in_parentheses() {
+    // `tuple:2439` — `__enable_if_t<(__i >= sizeof...(_Types))>` — where the *type* reading of the argument
+    // consumed `(__i`, gave up at `>=`, and was then accepted as a complete argument: the `>=` was split into `>`
+    // and `=`, the `>` closed the list, and the declaration had no head left. A failed reading is not an answer.
+    let source = "template<bool B, typename T = void> struct C { };\n\
+                  using size_t = unsigned long long;\n\
+                  template<size_t __i, typename... _Types>\n\
+                    C<(__i >= sizeof...(_Types))>\n\
+                    f(const C<true>&);\n";
+    assert_eq!(
+        reads(source, Where::File),
+        Ok(()),
+        "the argument is the parenthesised comparison, not the two tokens the failed reading stopped between"
+    );
+
+    // `type_traits:987` — `struct __is_signed_helper<_Tp, true> : public __bool_constant<_Tp(-1) < _Tp(0)>` — is
+    // the other half of the same rule: three scans count angle brackets, and all three counted the `<` **inside
+    // the group** as opening a level, so the list's own `>` was one level short of the end and the answer was
+    // "this `<` is a less-than". g++ reads all three of these as arguments.
+    let source = "template<bool B> struct C { };\n\
+                  template<typename T> struct S : public C<T(0) < T(0)> { };\n";
+    assert_eq!(reads(source, Where::File), Ok(()), "a comparison in a base clause reads");
+    assert_eq!(
+        count_of(source, CppSyntaxKind::BaseSpecifier),
+        1,
+        "and the base clause is a base clause"
+    );
+
+    // The spelled-out forms, which are the ones a reader can check at a glance — the first three are arguments
+    // (g++ accepts them), the fourth is an inner list and must keep meaning one.
+    for argument in [
+        "1 < 2",
+        "sizeof(int) < 3",
+        "(T(0) < T(0))",
+        "::std::vector<int>",
+    ] {
+        let source = format!(
+            "template<bool B> struct C {{ }};\n\
+             template<typename T> struct S : public C<{argument}> {{ }};\n"
+        );
+        assert_eq!(
+            reads(&source, Where::File),
+            Ok(()),
+            "`{argument}` is one argument"
+        );
+    }
+}
+
+#[test]
+fn a_condition_declaration_ends_at_the_paren_that_closes_the_condition() {
+    // `tr1/riemann_zeta.tcc:173` — `if (_GLIBCXX_MATH_NS::fmod(__s,_Tp(2)) == _Tp(0))` — where the condition's
+    // declaration reading *succeeded* and took the call with it: `NS::fmod` is a qualified name and therefore a
+    // type, `(s, T(2))` is then a function declarator, and both of the rule's own tests passed on it — a name was
+    // parsed (the parameters' own names) and something was initialised (`T(2)` is a parameter with a
+    // direct-initialiser). The condition then wanted its `)` where the `==` stood.
+    //
+    // A condition's declaration has no `;` of its own, so the `)` is what says it is over, and requiring it is
+    // the third refusal — a shape that is not a condition declaration is an expression.
+    let source = "namespace NS { template<typename T> T fmod(T a, T b); }\n\
+                  template<typename T> T f(T s) {\n\
+                    if (NS::fmod(s,T(2)) == T(0))\n\
+                      return T(0);\n\
+                    return T(1);\n\
+                  }\n";
+    assert_eq!(
+        reads(source, Where::File),
+        Ok(()),
+        "the call the file wrote is read as a call"
+    );
+    assert!(
+        contains(source, CppSyntaxKind::CallExpr),
+        "and the call is in the tree"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::Initializer),
+        0,
+        "the condition has no initializer — the misreading was a *parameter* with a direct-initialiser, and that \
+         is the node it produced"
+    );
+
+    // The control is every condition that **is** a declaration: one variable, initialised, and the `)` right
+    // after it. Each of these has to keep the declaration reading — the rule exists for them.
+    for condition in [
+        "Foo* p = get()",
+        "const auto n = g()",
+        "Foo p = get()",
+    ] {
+        let source = format!(
+            "struct Foo {{ }};\n\
+             Foo* get();\n\
+             void h() {{ if ({condition}) {{ }} }}\n"
+        );
+        assert_eq!(
+            reads(&source, Where::File),
+            Ok(()),
+            "`if ({condition})` still reads"
+        );
+        assert_eq!(
+            count_of(&source, CppSyntaxKind::Initializer),
+            1,
+            "`if ({condition})` declares its variable, and that is the one initializer in the file"
+        );
+    }
+}
+
+#[test]
+fn an_attribute_may_stand_between_the_star_and_the_name() {
+    // `lwpintrin.h:43` and the whole `*intrin.h` family:
+    //
+    // ```cpp
+    // extern __inline void * __attribute__((__gnu_inline__, __always_inline__, __artificial__))
+    // __slwpcb (void) { … }
+    // ```
+    //
+    // The position is the one `eat_cv_qualifiers` owns — "the same rule as the specifier position, one token
+    // later" — and an attribute is one of the things written there. Left out, this was a **silent wrong tree**
+    // rather than a diagnostic: the declarator was *named* `__attribute__` and initialised with `((…))`, and the
+    // name the file wrote stood after it as a macro. With a body the second initializer made it loud.
+    let source = "extern void * __attribute__((__always_inline__)) __slwpcb (void) { }\n";
+    assert_eq!(reads(source, Where::File), Ok(()), "the declaration reads");
+    assert_eq!(
+        count_of(source, CppSyntaxKind::AttributeList),
+        1,
+        "the attribute is an attribute list, in its own node"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::ParameterList),
+        1,
+        "and `(void)` is the declarator's parameter list, which is what makes this a function"
+    );
+
+    // The same shape **without** a body is where the silent half was: a declarator named `__attribute__`
+    // initialised with `(x)` and `f` left over. Zero initializers is the claim.
+    let source = "void * __attribute__((x)) f;\n";
+    assert_eq!(reads(source, Where::File), Ok(()), "`f` reads");
+    assert_eq!(
+        count_of(source, CppSyntaxKind::Initializer),
+        0,
+        "nothing here is an initializer — the attribute belongs to the pointer"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::MacroCall),
+        0,
+        "and the name is the declarator's, not a macro standing after one"
+    );
+
+    // The control is the qualifier that already stood there: `* const` is not an attribute, and must not be read
+    // as one.
+    let source = "void * const f (void) { }\n";
+    assert_eq!(reads(source, Where::File), Ok(()), "`* const` still reads");
+    assert_eq!(
+        count_of(source, CppSyntaxKind::AttributeList),
+        0,
+        "`const` is a qualifier, not an attribute"
+    );
+}
+
+#[test]
+fn a_conditional_may_be_written_with_a_directive_before_its_colon() {
+    // `type_traits:2269-2275` — the conditional's `:` branch is written **once per branch**, with the directive
+    // between the `?` branch and the `:`. A `#` where the `:` should be is not a `:`, so the directive is read as
+    // its own node and the `:` is asked for again; before this the file reported ``expected :, but get #`` against
+    // the `# if` itself.
+    let source = "int f(int n) {\n\
+                    return n > 2\n\
+                      ? 3\n\
+                  #if 1\n\
+                      : 4\n\
+                  #endif\n\
+                      ;\n\
+                  }\n";
+    assert_eq!(
+        reads(source, Where::File),
+        Ok(()),
+        "a directive between the two branches of a conditional is a seam"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::TernaryExpr),
+        1,
+        "the conditional is still one conditional"
+    );
+
+    // **A directive before the `?` also reads**, by a *different* seam than the one above: the expression's own.
+    // The operator loop meets the `#if`, sees that no *operator* follows it (a `?` is not one — the conditional is
+    // read a level up), and takes the directives with it before stopping. That is the same reading that makes a
+    // *term* of an expression repeatable per branch, and it was measured on the same corpus.
+    assert_eq!(
+        reads(
+            "int f(int n) {\n  return n\n#if 1\n    ? 1\n#endif\n    : 2;\n}\n",
+            Where::File
+        ),
+        Ok(()),
+        "a directive before the `?` is read by the expression's own seam"
+    );
+
+    // …and the expression's seam **leaves an `#else` alone**, because that one opens another instance of the
+    // construct *around* the expression: `bits/stl_algobase.h:906` is a declaration whose initializer is written
+    // once per branch, and the initializer's own seam can only see the `#else` if the expression gave it back.
+    // Both values being in the tree is the claim.
+    let source = "int x =\n#if 1\n  1\n#else\n  2\n#endif\n  ;\n";
+    assert_eq!(reads(source, Where::File), Ok(()), "a value per branch reads");
+    assert_eq!(
+        count_of(source, CppSyntaxKind::LiteralExpr),
+        2,
+        "both branches' values are in the initializer — the expression handed the `#else` back"
+    );
+}
+
+#[test]
+fn a_macro_invocation_at_the_head_of_a_declaration_is_a_specifier() {
+    // `backward/binders.h:133-137` — an attribute macro written **with its argument list**, before the type:
+    //
+    // ```cpp
+    //   template<typename _Operation, typename _Tp>
+    //     _GLIBCXX11_DEPRECATED_SUGGEST("std::bind")
+    //     inline binder1st<_Operation>
+    //     bind1st(const _Operation& __fn, const _Tp& __x)
+    // ```
+    //
+    // The macro is not in any table the parser is usually handed — `binders.h` contains no `#include` at all, so
+    // read on its own every table is empty — and the *body* test beside this rule cannot claim it either: a
+    // function-like macro's body holds its own parameter (`__attribute__((__deprecated__(ALT)))`), not a specifier
+    // list. What is left is the position: nothing but a specifier may stand at the head of a declaration.
+    let source = "template<typename T> struct B { };\n\
+                  template<typename T>\n\
+                    DEP_SUGGEST(\"std::bind\")\n\
+                    inline B<T>\n\
+                  f(const T& x)\n\
+                  { return B<T>(); }\n";
+    assert_eq!(
+        reads(source, Where::File),
+        Ok(()),
+        "an attribute macro with an argument list reads as a specifier, not as a name with a stray group"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::MacroCall),
+        1,
+        "and the invocation is one node, with its arguments kept as tokens"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::ArgumentList),
+        1,
+        "the group after the name is the macro's argument list"
+    );
+
+    // **The control is the follower.** `CHECK(1);` in a body is a *call*: the group closes and the declaration is
+    // already over, so the specifier arm must not claim it — claiming it would give a declaration with no
+    // declarator, which is well formed, lossless and silent, and would put the call the user wrote nowhere in the
+    // tree. The declaration reading is still tried first (a `;` after a group is a plain function declaration in
+    // C++), and it fails here because `1` is not a parameter — so the statement is the call it looks like.
+    let source = "int main() { CHECK(1); return 0; }\n";
+    assert_eq!(reads(source, Where::File), Ok(()), "`CHECK(1);` still reads");
+    assert_eq!(
+        count_of(source, CppSyntaxKind::MacroCall),
+        0,
+        "a call whose group ends the statement is not a macro invocation standing for a specifier"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::CallExpr),
+        1,
+        "it is the call the expression rules own"
+    );
+}
+
+#[test]
+fn a_term_of_an_expression_may_be_written_once_per_branch() {
+    // `tr1/riemann_zeta.tcc:179` — the terms of a product repeat per branch, each branch writing the **same
+    // operator** with a different operand, and the expression continues after the `#endif`:
+    //
+    // ```cpp
+    //   __zeta *= std::pow(…) * std::sin(…)
+    // #if _GLIBCXX_USE_C99_MATH_TR1
+    //          * std::exp(_GLIBCXX_MATH_NS::lgamma(_Tp(1) - __s))
+    // #else
+    //          * std::exp(__log_gamma(_Tp(1) - __s))
+    // #endif
+    //          / __numeric_constants<_Tp>::__pi();
+    // ```
+    //
+    // A `#` in operator position cannot be anything else, so the directive is read as its own node and the loop
+    // looks for the operator again. The tokens of both branches end up in one chain — the branches are
+    // alternatives and one expression cannot say so — which is the documented trade (B104/B108).
+    let source = "double f(double x) {\n\
+                    double z = 1;\n\
+                    z *= pow(x)\n\
+                  #if 1\n\
+                       * exp(x)\n\
+                  #else\n\
+                       * exp(-x)\n\
+                  #endif\n\
+                       / pi();\n\
+                    return z;\n\
+                  }\n";
+    assert_eq!(
+        reads(source, Where::File),
+        Ok(()),
+        "a directive where the next operator goes is a seam"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::BinaryExpr),
+        4,
+        "the chain is folded as one expression: `*=`, and the `*`, `*`, `/` of its right side"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::PreprocessorDirective),
+        3,
+        "and all three directives are in the tree rather than swallowed"
+    );
+
+    // **…and a `#endif` inside the parentheses** is the same seam at the end of the expression rather than in the
+    // middle of it: `bits/stl_algobase.h:1237` writes two independent conditionals, each contributing an operand.
+    let source = "bool f(bool a, bool b) {\n\
+                    return ((a\n\
+                  #if 1\n\
+                          || b\n\
+                  #endif\n\
+                  #if 1\n\
+                          || true\n\
+                  #endif\n\
+                         ) && a);\n\
+                  }\n";
+    assert_eq!(
+        reads(source, Where::File),
+        Ok(()),
+        "the closers are read before the `)` the caller expects"
+    );
+}
+
+#[test]
+fn a_failed_cast_is_a_parenthesised_expression() {
+    // The rule exists twice in the expression grammar — the unary rule and the primary one — and they disagreed
+    // about the one thing that matters. `(V<T>(x))` is a *functional conversion inside a grouped expression*: the
+    // type reading takes `V<T>(x)` for a function type, the `)` matches, and then **no operand follows**. The
+    // primary rule rewinds and reads the group as the expression it is; the copy in the unary rule reported a
+    // missing operand instead, so the same tokens parsed or failed depending on which copy saw them first.
+    // `tr1/bessel_function.tcc` and the whole `_Tp(2)` family are that shape.
+    let source = "template<typename T> struct V { };\n\
+                  template<typename T> T g(T);\n\
+                  template<typename T> bool f(T x) { bool b = (V<T>(g(x))); return b; }\n";
+    assert_eq!(
+        reads(source, Where::File),
+        Ok(()),
+        "a cast with no operand is a parenthesised expression"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::ParenExpr),
+        1,
+        "and it is read as one"
+    );
+
+    // The control is the cast that **does** hold up, which has to keep its reading.
+    let source = "template<typename T> bool f(T x) { bool b = (bool)(x); return b; }\n";
+    assert_eq!(reads(source, Where::File), Ok(()), "a real cast reads");
+    assert_eq!(
+        count_of(source, CppSyntaxKind::CastExpr),
+        1,
+        "and it is a cast"
+    );
+}
+
+#[test]
+fn an_attribute_may_stand_between_a_declarator_ids_operators() {
+    // `bits/stl_function.h:1398` and `tuple:2532` — an attribute between the declarator's id and its
+    // **parameters**, which is where the standard puts it and where the file's own header writes it:
+    //
+    // ```cpp
+    // bool operator== [[nodiscard]] (const tuple<_Tps...>& __t, const tuple<_Ups...>& __u) { … }
+    // ```
+    //
+    // Read as "an attribute, then a `(`" only: the parameter list that follows is still this declarator's suffix,
+    // so it stays inside the `Declarator` where every consumer looks for it.
+    let source = "bool operator== [[nodiscard]] (int a, int b) { return a == b; }\n";
+    assert_eq!(reads(source, Where::File), Ok(()), "the shape reads");
+    assert_eq!(
+        count_of(source, CppSyntaxKind::AttributeList),
+        1,
+        "the attribute is an attribute"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::ParameterList),
+        1,
+        "and the `(int, int)` is the declarator's parameter list"
+    );
+
+    // The **other** position is the control: an attribute after the parameters belongs to the declaration, and
+    // the parameter list is already there.
+    let source = "int x [[maybe_unused]] = 1;\n";
+    assert_eq!(reads(source, Where::File), Ok(()), "the other position reads");
+    assert_eq!(
+        count_of(source, CppSyntaxKind::AttributeList),
+        1,
+        "still one attribute"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::ParameterList),
+        0,
+        "and no parameter list was invented for a variable"
+    );
+}
+
+#[test]
+fn a_macro_with_a_block_may_be_a_whole_statement() {
+    // `debug/safe_iterator.h:74-79` defines the two macros that bracket a scope, `[&]() -> void` in one branch and
+    // **nothing at all** in the other, and uses them around a block inside an `if`:
+    //
+    // ```cpp
+    // 	if (…) SCOPE_BEGIN { __gnu_cxx::__scoped_lock __l(this->_M_get_mutex()); … } SCOPE_END
+    // 	else
+    // ```
+    //
+    // A name followed by a `{` is otherwise C++11's list-initialisation (`Point{1, 2};`), which is what the
+    // postfix rule read — and then every statement in the block was inside a braced list. Evidence is what tells
+    // them apart, and the tables have to say the name is a macro.
+    let source = "#define SCOPE_BEGIN\n\
+                  #define SCOPE_END\n\
+                  int g();\n\
+                  void f(int a) {\n\
+                    if (a)\n\
+                      SCOPE_BEGIN {\n\
+                        int x = g();\n\
+                      } SCOPE_END\n\
+                    else\n\
+                      { }\n\
+                  }\n";
+    assert_eq!(
+        reads(source, Where::File),
+        Ok(()),
+        "the block belongs to the invocation, and the `else` still finds its `if`"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::MacroCall),
+        2,
+        "both invocations are invocations"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::CompoundStat),
+        3,
+        "the function body, the block the opening macro stands in front of, and the `else` branch"
+    );
+
+    // …and the **closing** macro on its own, inside a body, with no `;` of its own: a bare name reads as a macro
+    // statement only with evidence and only where a statement can end.
+    let source = "#define END\nvoid f() { END }\n";
+    assert_eq!(reads(source, Where::File), Ok(()), "a bare invocation reads");
+    assert_eq!(
+        count_of(source, CppSyntaxKind::MacroCall),
+        1,
+        "as one invocation"
+    );
+
+    // The control: a name nobody described is **not** a macro, so `Vec{1, 2};` keeps the reading C++ gives it.
+    let source = "struct Vec { };\nvoid f() { Vec{1, 2}; }\n";
+    assert_eq!(
+        reads(source, Where::File),
+        Ok(()),
+        "a declared type's braced value reads"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::MacroCall),
+        0,
+        "and it is not an invocation"
+    );
+    assert_eq!(
+        count_of(source, CppSyntaxKind::InitListExpr),
+        1,
+        "it is the braced list it looks like"
+    );
+}
+
+#[test]
+fn a_conditional_inside_template_arguments_keeps_its_colon() {
+    // `bits/ranges_util.h:436` — a deduction guide whose return type has a **conditional expression** as a
+    // template argument:
+    //
+    // ```cpp
+    //   template<borrowed_range _Rng>
+    //     subrange(_Rng&&)
+    //       -> subrange<iterator_t<_Rng>, sentinel_t<_Rng>,
+    // 		  (sized_range<_Rng> || sized_sentinel_for<…>)
+    // 		  ? subrange_kind::sized : subrange_kind::unsized>;
+    // ```
+    //
+    // The scan that decides "is this `<` a template argument list" stops at a `:`, because a `:` cannot stand
+    // inside one — except as the middle of a conditional. So it ended the scan, the `<` was read as a less-than,
+    // and the deduction guide stopped at its own name: ``expected `;` `` against the `<` of the return type.
+    // Counting the `?` is the fix, and the count is what keeps the stop set's `:` for every other shape.
+    let source = "enum class K { sized, unsized };\n\
+                  template<typename A, typename B, K k> struct sub { };\n\
+                  template<typename T> struct it { };\n\
+                  using A = it<int>;\n\
+                  using B = it<long>;\n\
+                  auto f() -> sub<A, B, (true) ? K::sized : K::unsized>;\n";
+    assert_eq!(
+        reads(source, Where::File),
+        Ok(()),
+        "a conditional is an argument like any other value"
+    );
+
+    // The control is the `:` the stop set is *for*: a base clause still ends the scan, so `struct S : B<C> { }`
+    // reads as a base clause rather than as something else.
+    let source = "template<bool B> struct C { };\n\
+                  struct S : C<true> { };\n";
+    assert_eq!(reads(source, Where::File), Ok(()), "a base clause reads");
+    assert_eq!(
+        count_of(source, CppSyntaxKind::BaseSpecifier),
+        1,
+        "and it is a base specifier"
     );
 }
 

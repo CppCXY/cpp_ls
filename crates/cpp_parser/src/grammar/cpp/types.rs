@@ -484,6 +484,148 @@ fn is_a_type_specifier_kind(kind: CppTokenKind) -> bool {
     )
 }
 
+/// Does a **specifier** follow the group of a macro invocation at the head of a declaration?
+///
+/// The follower test of the function-like specifier arm in [`parse_decl_specifier_seq_with`], and it is what
+/// splits that shape from the one [`a_macro_call_begins_the_declaration`] owns — two shapes that begin with the
+/// same tokens and continue differently:
+///
+/// ```text
+/// MACRO(args) inline More          …a specifier follows  → the invocation is a *specifier*, and the sequence
+///                                                          has more of itself to read    (this test)
+/// MACRO(args) CoFreeLibrary (…)    …a name follows       → the invocation is the declaration's **head** and the
+///                                                          declarator is what follows    (the arm below)
+/// ```
+///
+/// The second is read by the arm a few lines down in the loop, which reads the invocation and **ends the
+/// sequence** there — "what the macro expands to is not knowable, so a name read after it could be either the
+/// declarator or another word of the type". Claiming it here instead was measured: the sequence then joined
+/// `CoFreeLibrary` into the type the invocation stands for, and `WINOLEAPI_(void) CoFreeLibrary (HINSTANCE hInst);`
+/// — a shape that reads today — came out as a call expression with ``expected `;` after expression``. So the name
+/// follower is deliberately **not** in the set below; a name is a shape with an owner.
+///
+/// The other half of the question is `FOO(x);`: the group closes and the declaration is already over, so this is a
+/// **call** — the reading the expression rules own. Without this test the specifier arm claimed it, the sequence
+/// had no declarator, and the statement came out as a declaration of nothing: no error, no `ErrorNode`, no
+/// `MissingNode`, and the call the user wrote nowhere in the tree.
+///
+/// The set is the specifier set the loop itself uses rather than a third list: [`is_a_specifier_kind`] and
+/// [`storage_or_function_specifier`] are asked, which is what makes `inline` — the token `binders.h` writes after
+/// its `_GLIBCXX11_DEPRECATED_SUGGEST("std::bind")` — the answer here.
+fn a_specifier_follows_the_group(p: &CppParser) -> bool {
+    let mut depth = 0isize;
+
+    for (position, kind) in p.peek_token_kind_at(1..64).into_iter().enumerate() {
+        // Offsets are relative to the cursor, which is on the macro's **name**: `1` is the `(` that opens its
+        // argument list.
+        let offset = position + 1;
+
+        match kind {
+            CppTokenKind::LeftParen => depth += 1,
+            CppTokenKind::RightParen => {
+                depth -= 1;
+                if depth == 0 {
+                    let after = offset + 1;
+                    return match p.peek_token_kind_at(after..after + 1).first().copied() {
+                        Some(kind)
+                            if is_a_specifier_kind(kind)
+                                || storage_or_function_specifier(kind).is_some() =>
+                        {
+                            true
+                        }
+                        // **A name that is a specifier macro** — or a name that simply *continues* the sequence.
+                        //
+                        // `bits/stl_function.h:1040` writes the same shape one word longer, and that word is a
+                        // macro the same way the head is:
+                        //
+                        // ```cpp
+                        //     _GLIBCXX17_DEPRECATED_SUGGEST("std::not_fn")
+                        //     _GLIBCXX14_CONSTEXPR                      // ← `constexpr`, in c++config.h
+                        //     inline unary_negate<_Predicate>
+                        //     not1(const _Predicate& __pred)
+                        // ```
+                        //
+                        // The first half of the question is the one [`a_macro_that_is_a_specifier`] already
+                        // answers — "is the whole body a declaration-specifier list?" — asked of a *lookahead*
+                        // name instead of the token under the cursor. It is not enough on its own, and the file
+                        // above is why: read on its own `stl_function.h` has **no environment at all** (the probe
+                        // says `context 0 seeds`, the same emptiness `binders.h` has), so `_GLIBCXX14_CONSTEXPR`
+                        // has no body to consult.
+                        //
+                        // So the shape answers where the tables cannot, and the shape is the token **after** the
+                        // name: a follower that is itself followed by `(` is the *declarator* — the shape
+                        // [`a_macro_call_begins_the_declaration`] owns (`WINOLEAPI_(void) CoFreeLibrary (…)`) —
+                        // while anything else there means the sequence has not reached its declarator yet.
+                        Some(CppTokenKind::Identifier) => {
+                            a_specifier_macro_at(p, after)
+                                || p.peek_token_kind_at(after + 1..after + 2).first().copied()
+                                    != Some(CppTokenKind::LeftParen)
+                        }
+                        _ => false,
+                    };
+                }
+            }
+            // A `;` before the group closes means the shape does not complete before the declaration ends.
+            CppTokenKind::Semicolon | CppTokenKind::Eof | CppTokenKind::None => return false,
+            _ => {}
+        }
+    }
+
+    false
+}
+
+/// Is the name `offset` tokens past the cursor a macro whose **whole body** is a declaration-specifier list?
+///
+/// The lookahead form of [`a_macro_that_is_a_specifier`]'s body test, sharing its predicate
+/// ([`is_a_specifier_kind`]) so the two cannot drift: that one is asked about the token under the cursor, this one
+/// about a token ahead of it — see [`a_specifier_follows_the_group`], which is the only caller.
+fn a_specifier_macro_at(p: &CppParser, offset: usize) -> bool {
+    let name = p.peek_token_text_at(offset);
+    let at = p.peek_token_range_at(offset).start_offset;
+
+    p.macro_body_kinds_at(name, at).is_some_and(|kinds| {
+        !kinds.is_empty() && kinds.iter().all(|kind| is_a_specifier_kind(*kind))
+    })
+}
+
+/// Does a **parameter list** follow the run of `[[…]]` attributes at the cursor?
+///
+/// The follower test of the declarator's suffix loop, which reads an attribute standing between a declarator's
+/// name and its parameters — `bool operator== [[nodiscard]] (const tuple<_Tps...>&, …)` — and leaves every other
+/// attribute to the rule that owns that position. A `(` after the run can only be this declarator's parameter
+/// list, so the test is a scan rather than a preference: skip the attribute run (counting brackets, because an
+/// attribute's argument may contain `[`), and look at what stands after it.
+fn a_parameter_list_follows_the_attributes(p: &CppParser) -> bool {
+    let mut depth = 0isize;
+    let mut offset = 0usize;
+
+    while offset < 64 {
+        let Some(kind) = p.peek_token_kind_at(offset..offset + 1).first().copied() else {
+            return false;
+        };
+
+        match kind {
+            CppTokenKind::LeftBracket => depth += 1,
+            CppTokenKind::RightBracket => {
+                depth -= 1;
+                if depth == 0 {
+                    // The run ended just now, and what stands after it is the answer.
+                    return matches!(
+                        p.peek_token_kind_at(offset + 1..offset + 2).first(),
+                        Some(CppTokenKind::LeftParen)
+                    );
+                }
+            }
+            CppTokenKind::None | CppTokenKind::Eof => return false,
+            _ => {}
+        }
+
+        offset += 1;
+    }
+
+    false
+}
+
 pub fn parse_decl_specifier_seq(p: &mut CppParser) -> ParseResult {
     parse_decl_specifier_seq_with(p, true)
 }
@@ -575,6 +717,91 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
             has_specifier = true;
             has_type_specifier |= names_a_type;
             continue;
+        }
+
+        // …and its **function-like** half, which is the same position one spelling along — an attribute macro
+        // written *with* its argument list, before the type:
+        //
+        // ```cpp
+        //   template<typename _Operation, typename _Tp>                        // backward/binders.h:133
+        //     _GLIBCXX11_DEPRECATED_SUGGEST("std::bind")
+        //     inline binder1st<_Operation>
+        //     bind1st(const _Operation& __fn, const _Tp& __x)
+        // ```
+        //
+        // The evidence for it is **absence** — no table describes the name and no table can say what it expands to
+        // here — and that is the finding from the file it was written for: a header that only *uses* such a macro
+        // has no environment at all. `backward/binders.h` contains no `#include`, so read on its own (which is how
+        // the census reads it) every table is empty and `_GLIBCXX11_DEPRECATED_SUGGEST` is a name nobody has
+        // described:
+        //
+        // ```text
+        // MACRO _GLIBCXX11_DEPRECATED_SUGGEST in binders.h   evidence false | positional body None
+        //                                                    | in-force body None | context 0 seeds
+        // ```
+        //
+        // Three versions of this arm were measured, and the two that failed are what fixes the gate:
+        //
+        // ```text
+        // require evidence (is_function_like)      moved NOTHING — binders.h has none to require
+        // shape alone                              moved two files BACKWARDS: objbase.h:95 and ole2.h:58, both
+        //                                          `WINOLEAPI_(HINSTANCE) CoLoadLibrary (…)`
+        // require evidence at all (either channel) +2/-2 …which is this version
+        // ```
+        //
+        // The two channels are separate and both have to be asked: `WINOLEAPI_` has no *definition* in the closure
+        // (it is `#define`d inside a conditional branch of `_mingw.h`, so it reaches a use site as a **body in
+        // force** and not as a definition), so a gate that asked only [`CppParser::macro_evidence`] still claimed
+        // it and took the shape away from [`a_macro_call_begins_the_declaration`], which is the rule that owns it.
+        // Asking both leaves this arm with exactly the names **nobody can read any other way** — evidence first,
+        // the same order [`crate::parser::MacroNames`] documents.
+        //
+        // What completes the shape is a **follower** — a *specifier* after the group, which is what separates this
+        // shape from the one [`a_macro_call_begins_the_declaration`] owns (a *name* after the group). See
+        // [`a_specifier_follows_the_group`] for both the reason and the measurement that put the name case on the
+        // other side of the line.
+        //
+        // Why the **head of the sequence** and the **group** are enough: no declaration begins with a call — a
+        // declaration's first tokens are specifiers — so a name and a balanced group there is a shape nothing else
+        // wants. A member that is only an invocation is claimed before any of this by
+        // [`super::decls::at_a_macro_member`], and the compiler's own attribute spellings are refused here (see
+        // [`at_an_attribute`], which has a reader that knows what they are), so what is left is the shape this arm
+        // is for. The `specifiers == 0` half is what keeps it from firing *inside* a sequence that has already
+        // named a type, where a name-plus-group is a declarator's parameter list.
+        //
+        // The arguments are kept as **raw tokens** ([`super::decls::parse_balanced_token_group`], the reader the
+        // other macro arms use): what stands there is the macro's own text, and `("std::bind")` is not a grammar
+        // this file can read — a `#define` in another file is what knows whether it is a string, a type or an
+        // expression.
+        if specifiers == 0
+            && allow_second_name
+            && p.current_token() == CppTokenKind::Identifier
+            && p.peek_next_token() == CppTokenKind::LeftParen
+            && !at_an_attribute(p)
+            && p.macro_evidence(p.current_token_text()).is_none()
+            && p.macro_body_kinds_at(
+                p.current_token_text(),
+                p.current_token_range().start_offset,
+            )
+            .is_none()
+            && a_specifier_follows_the_group(p)
+        {
+            let checkpoint = p.checkpoint();
+            let call = p.mark(CppSyntaxKind::MacroCall);
+            let name = p.mark(CppSyntaxKind::NameExpr);
+            p.bump();
+            name.complete(p);
+
+            if super::decls::parse_balanced_token_group(p, CppSyntaxKind::ArgumentList).is_err() {
+                // An unterminated group is not this shape: give the name back and let the loop report whatever it
+                // reported before, the same way [`super::decls::eat_a_macro_suffix`] does.
+                p.rollback(checkpoint);
+            } else {
+                call.complete(p);
+                specifiers += 1;
+                has_specifier = true;
+                continue;
+            }
         }
 
         // A **directive between two specifiers**, which is the same seam as the ones `parse_try_statement`,
@@ -1304,9 +1531,26 @@ fn parse_one_decl_specifier_inner(
 /// class definition failed with `expected ;` against its own name — while the same base clause with a
 /// single-level argument list parsed fine. That is maintenance convention #14 in `docs/grammar-gaps.md`: the
 /// second use of a predicate is where the exception gets forgotten, so it is extracted the second time.
-fn angle_depth_delta(kind: CppTokenKind) -> isize {
+///
+/// **The `previous` argument is the second thing the copies drifted on**, and it is why the rule takes one now. A
+/// `<` opens a level only when the token in front of it can *end a template-name* — a name, or the `>` of an inner
+/// list — because that is how the language writes one:
+///
+/// ```text
+/// ::std::vector<int>       the `<` after a name       → an inner list
+/// C<1 < 2>                 …after a literal           → the less-than operator
+/// C<sizeof(T) < 3>         …after a `)`               → the same
+/// C<(T(0) < T(0))>         …inside a group            → the same
+/// ```
+///
+/// Counting every `<` is what hid the list's **own** `>` from all three scans: the depth was one too deep at the
+/// end, so the scan reported "no matching `>`" and the construct was not a template-id (a base clause, a
+/// declarator's name) or not a body — for `struct S : public __bool_constant<_Tp(-1) < _Tp(0)> { }`, which is
+/// `type_traits:987`, all three at once. g++ reads the three comparison spellings as arguments and the first as a
+/// nested template-id, which is exactly what this test produces.
+fn angle_depth_delta(previous: CppTokenKind, kind: CppTokenKind) -> isize {
     match kind {
-        CppTokenKind::Less => 1,
+        CppTokenKind::Less if can_end_a_template_name(previous) => 1,
         CppTokenKind::Greater => -1,
         // One token, two lists closed.
         CppTokenKind::RightShift => -2,
@@ -1314,11 +1558,25 @@ fn angle_depth_delta(kind: CppTokenKind) -> isize {
     }
 }
 
+/// Could this token be the last one written of a **template-name** — the thing a `<` binds to?
+///
+/// See [`angle_depth_delta`], which is the only caller that needs the question asked of the token *before* the
+/// one it is looking at.
+fn can_end_a_template_name(kind: CppTokenKind) -> bool {
+    matches!(
+        kind,
+        CppTokenKind::Identifier | CppTokenKind::Greater | CppTokenKind::RightShift
+    )
+}
+
 /// qualified type.
 fn continues_a_qualified_name(p: &CppParser) -> bool {
     // Scan forward over a name and its template arguments, then check for `::`.
     let mut depth = 0isize;
     let mut offset = 1usize;
+    // The token before the one being looked at — see [`angle_depth_delta`]. The scan starts just past the name,
+    // which can end a template-name, so a `<` right there opens a list.
+    let mut previous = CppTokenKind::Identifier;
 
     loop {
         let Some(kind) = p.peek_token_kind_at(offset..offset + 1).first().copied() else {
@@ -1354,9 +1612,10 @@ fn continues_a_qualified_name(p: &CppParser) -> bool {
             | CppTokenKind::Assign
             | CppTokenKind::Eof
             | CppTokenKind::None => return false,
-            kind => depth += angle_depth_delta(kind),
+            kind => depth += angle_depth_delta(previous, kind),
         }
 
+        previous = kind;
         offset += 1;
     }
 }
@@ -1609,8 +1868,12 @@ pub(super) fn a_declarator_still_follows_the_name(p: &CppParser) -> bool {
     if p.token_kind_at(after) == CppTokenKind::Less {
         let mut depth = 0isize;
         let mut index = after;
+        // The `<` at `after` is preceded by the name the walk above stepped over — see [`angle_depth_delta`].
+        let mut previous = CppTokenKind::Identifier;
         while index < p.token_count() {
-            depth += angle_depth_delta(p.token_kind_at(index));
+            let kind = p.token_kind_at(index);
+            depth += angle_depth_delta(previous, kind);
+            previous = kind;
             index += 1;
             if depth <= 0 {
                 break;
@@ -1761,6 +2024,10 @@ fn a_parenthesis_follows_the_name(p: &CppParser) -> bool {
     // one. Those operators are part of the type's own syntax, which is exactly what the name is being tested
     // for.
     let mut depth = 0isize;
+    // The token before the one being looked at — see [`angle_depth_delta`]. The scan starts just past the name,
+    // so the first token's predecessor is that very name, which *can* end a template-name: `<` right after it
+    // opens a list, which is what `A<int>(x)` needs.
+    let mut previous = CppTokenKind::Identifier;
 
     for kind in p.peek_token_kind_at(1..64) {
         match kind {
@@ -1783,8 +2050,10 @@ fn a_parenthesis_follows_the_name(p: &CppParser) -> bool {
             | CppTokenKind::Ellipsis
             | CppTokenKind::Eof
             | CppTokenKind::None => return false,
-            kind => depth += angle_depth_delta(kind),
+            kind => depth += angle_depth_delta(previous, kind),
         }
+
+        previous = kind;
     }
 
     false
@@ -2238,6 +2507,9 @@ fn a_body_follows_the_class_head(p: &CppParser) -> bool {
     // scan, because that one is the enclosing body's own.
     let mut braces = 0isize;
     let mut after_a_directive = false;
+    // The token before the one being looked at, for the `<` question [`angle_depth_delta`] answers. The scan
+    // starts at the head's own `:`, which cannot end a template-name, so that is what it starts as.
+    let mut previous = CppTokenKind::Colon;
 
     for kind in p.peek_token_kind_at(0..64) {
         if after_a_directive && is_class_like_keyword(kind) {
@@ -2251,8 +2523,10 @@ fn a_body_follows_the_class_head(p: &CppParser) -> bool {
             CppTokenKind::Semicolon | CppTokenKind::RightBrace | CppTokenKind::Eof => return false,
             // The `#` of a directive: everything past it is on another line, and may be another branch.
             CppTokenKind::Hash => after_a_directive = true,
-            kind => depth += angle_depth_delta(kind),
+            kind => depth += angle_depth_delta(previous, kind),
         }
+
+        previous = kind;
     }
     false
 }
@@ -2359,6 +2633,24 @@ fn parse_enumerator_body(p: &mut CppParser) -> ParseResult {
             p.close_marks_above(base);
             return Err(err);
         }
+
+        // **A macro in the same position** (`omp.h:74`), which is the same seam one spelling along — the
+        // attribute the compiler is told about by name rather than written out:
+        //
+        // ```c
+        //   omp_proc_bind_master __GOMP_DEPRECATED_5_1
+        //     = omp_proc_bind_primary,
+        // ```
+        //
+        // `__GOMP_DEPRECATED_5_1` is `__attribute__((__deprecated__))` — defined in that file, in two branches —
+        // and read as a name the enumerator ended at it: the loop then wanted a `,` or a `}` where the `=` stood,
+        // and the whole `typedef enum … } omp_proc_bind_t;` came out as rubble from there on.
+        //
+        // Only a **name** is taken, and only here: after an enumerator's own name the valid tokens are `[[`, `=`,
+        // `,`, a directive and `}` — a name is none of them, so there is no other reading for it to compete with.
+        // That is the same argument [`super::decls::eat_a_macro_suffix`] documents for the declarator's suffixes,
+        // and it is the reader used here rather than a second copy of "a macro invocation".
+        while super::decls::eat_a_macro_suffix(p) {}
 
         if p.current_token() == CppTokenKind::Assign {
             p.bump();
@@ -2596,11 +2888,51 @@ fn a_matching_angle_bracket_follows(p: &CppParser) -> bool {
     // arm takes a brace) was the only one that said anything. An unmatched `}` still ends the scan — that is the
     // enclosing declaration's own brace — so `T x{a < b}` and `struct S : B<C> {` read exactly as before.
     let mut braces = 0isize;
+    // Is a `<` inside the list an **opener**, or is it the less-than operator?
+    //
+    // The token in front of it decides, and it is the same evidence a reader uses: a template's name is written
+    // before its `<`. After a name (or after the `>` of an inner list) a `<` opens one; after anything else it is
+    // a comparison, and counting it as an opener is what made the list's **own** `>` invisible — the scan ran one
+    // level deep at the end and reported "no matching `>`", so the `<` was read as a less-than and the construct
+    // it belonged to was not a template-id at all:
+    //
+    // ```text
+    // C<1 < 2>                 the `<` after a literal     → a comparison, so `C<1 < 2>` closes at its own `>`
+    // C<sizeof(T) < 3>         …after a `)`                 → the same
+    // C<(T(0) < T(0))>         …inside a group              → the same
+    // ::std::vector<int>       …after a name                → an inner list, counted
+    // ```
+    //
+    // Measured against g++: it accepts all three of the comparison spellings as arguments of `C<…>` and reads the
+    // fourth as a nested template-id, which is exactly what this test produces. The bias is unchanged for the
+    // ambiguous case the scan has always had — `a < b > c` written without spaces still reads as a template-id —
+    // because there the `<` *is* preceded by a name.
+    let mut previous = CppTokenKind::Less;
+    // How many **ternaries** are open, so that their `:` is not mistaken for the colon that ends the scan.
+    //
+    // `Colon` is in the stop set below because a `:` cannot appear inside a template argument list — except as the
+    // middle of a conditional expression, which is an argument like any other value:
+    //
+    // ```cpp
+    //   template<borrowed_range _Rng>                       // bits/ranges_util.h:436
+    //     subrange(_Rng&&)
+    //       -> subrange<iterator_t<_Rng>, sentinel_t<_Rng>,
+    //           (sized_range<_Rng> || sized_sentinel_for<…>)
+    //           ? subrange_kind::sized : subrange_kind::unsized>;
+    // ```
+    //
+    // The `:` there ended the scan, so the `<` was reported as "not a template-id", the deduction guide stopped at
+    // its own name, and the file reported ``expected `;` `` against the `<` of the return type. Counting the `?` is
+    // the same kind of shallow shape the scan already uses for brackets and braces, and it is exact where it
+    // matters: a `:` with no `?` in front of it still ends the scan.
+    let mut open_questions = 0isize;
 
     'scan: {
         for kind in p.peek_token_kind_at(1..128) {
             match kind {
-                CppTokenKind::Less => depth += 1,
+                CppTokenKind::Less if can_end_a_template_name(previous) => depth += 1,
+                CppTokenKind::Question => open_questions += 1,
+                CppTokenKind::Colon if open_questions > 0 => open_questions -= 1,
                 CppTokenKind::LeftBracket => brackets += 1,
                 CppTokenKind::RightBracket if brackets > 0 => brackets -= 1,
                 CppTokenKind::LeftParen => parens += 1,
@@ -2636,6 +2968,8 @@ fn a_matching_angle_bracket_follows(p: &CppParser) -> bool {
                 | CppTokenKind::BlockComment => break 'scan false,
                 _ => {}
             }
+
+            previous = kind;
         }
         false
     }
@@ -2672,10 +3006,16 @@ fn a_bare_template_id_is_here(p: &CppParser) -> bool {
     // template-id, and a scan that stopped at the `{` called it "not a template-id" — so the class-head rule read
     // the name as the bare `Q` and the arguments became rubble.
     let mut braces = 0isize;
+    // The token before the one being looked at — see the note on the same variable in
+    // [`a_matching_angle_bracket_follows`]. The scan starts inside the list, so its first token's predecessor
+    // is the list's own `<`, which ends no template-name.
+    let mut previous = CppTokenKind::Less;
 
     for (index, kind) in p.peek_token_kind_at(2..128).iter().enumerate() {
         match kind {
-            CppTokenKind::Less => depth += 1,
+            // The `<` question, asked of the token before it — see [`angle_depth_delta`]. The scan starts inside
+            // the list, so the first token's predecessor is the list's own `<`, which ends no template-name.
+            CppTokenKind::Less if can_end_a_template_name(previous) => depth += 1,
             CppTokenKind::Greater | CppTokenKind::RightShift => {
                 // `>>` closes two levels at once, so it can be the matching `>` of either the inner or the
                 // outer list; both arrive here because the amount is all that differs.
@@ -2712,6 +3052,8 @@ fn a_bare_template_id_is_here(p: &CppParser) -> bool {
             CppTokenKind::RightParen | CppTokenKind::RightBrace => return false,
             _ => {}
         }
+
+        previous = *kind;
     }
 
     false
@@ -3259,6 +3601,51 @@ fn eat_cv_qualifiers(p: &mut CppParser) {
             continue;
         }
 
+        // **An attribute** in the same position, which is the third thing written there and the one this rule was
+        // missing:
+        //
+        // ```cpp
+        // extern __inline void * __attribute__((__gnu_inline__, __always_inline__, __artificial__))
+        // __slwpcb (void) { … }                      // lwpintrin.h:43 — the whole family of `*intrin.h` files
+        // ```
+        //
+        // The doc above already says this is "the same rule as the specifier position, one token later", and an
+        // attribute is one of the things written in the specifier position — so it belongs here for the reason
+        // `__cdecl` does: the attribute belongs to the return type, and nothing else can stand between the `*` and
+        // the declarator's name (the name cannot be `__attribute__`).
+        //
+        // What it cost to leave out is not a diagnostic but a **silent wrong tree**: `void * __attribute__((x)) f;`
+        // came out as a declarator *named* `__attribute__` and initialised with `(x)`, with `f` standing after it
+        // as a macro — lossless, well-formed, no `ErrorNode` — and the same shape with a body reported
+        // ``a declarator takes only one initializer`` at the `{`, because the declarator already had one.
+        if at_an_attribute(p) {
+            let checkpoint = p.checkpoint();
+            if parse_attribute_specifier(p).is_err() {
+                // An unterminated `[[` is not this shape: give the tokens back and let the declarator report
+                // whatever it reported before — the same shape [`super::decls::eat_a_macro_suffix`] uses.
+                p.rollback(checkpoint);
+                return;
+            }
+            continue;
+        }
+
+        // **A macro that expands to nothing** stands here too, and `basetsd.h` is where it is written:
+        // `#define POINTER_32` is empty on a 64-bit target, and the file uses it exactly where a pointer qualifier
+        // goes — `void *POINTER_32 PtrToPtr32 (const void *p)` and the cast `(void *POINTER_32) p`. Nothing is what
+        // it stands for, so skipping it is not a guess; a name nobody has a body for is not claimed at all, and the
+        // body has to be **known** empty rather than merely unknown.
+        if p.current_token() == CppTokenKind::Identifier
+            && p.macro_body_kinds_at(p.current_token_text(), p.current_token_range().start_offset)
+                .is_some_and(|kinds| kinds.is_empty())
+        {
+            let macro_call = p.mark(CppSyntaxKind::MacroCall);
+            let name = p.mark(CppSyntaxKind::NameExpr);
+            p.bump();
+            name.complete(p);
+            macro_call.complete(p);
+            continue;
+        }
+
         return;
     }
 }
@@ -3360,6 +3747,50 @@ fn a_parenthesised_declarator_with_a_name_follows(p: &CppParser) -> bool {
             CppTokenKind::RightParen
         ]
     ) && p.peek_token_kind_at(4..5) == [CppTokenKind::LeftParen]
+        && written_like_a_macro(p.peek_token_text_at(1))
+    {
+        return true;
+    }
+
+    // …and the same macro **around the declarator's own operator**, which is the other two positions a calling
+    // convention and an attribute are written in — the two halves of one shape, and the reason each is here:
+    //
+    // ```cpp
+    // typedef HRESULT (STDAPICALLTYPE *LPFNGETCLASSOBJECT) (REFCLSID, REFIID, LPVOID *);   // combaseapi.h:358
+    // typedef void (*_GLIBCXX11_DEPRECATED unexpected_handler) ();                         // exception:87
+    // ```
+    //
+    // `STDAPICALLTYPE` is `__stdcall` and `_GLIBCXX11_DEPRECATED` is `__attribute__((__deprecated__))`, and both
+    // are *between* the parentheses that exist to bind the `*` to the declarator's name — so neither can be part
+    // of any other reading: a parameter list has no `NAME NAME` in it either (`(* a b)` is not a parameter), and
+    // the group's tokens are the declarator's own. `written_like_a_macro` is asked of the **macro**, not of the
+    // name, so `(x y)` and `(* x y)` keep the readings they had.
+    //
+    // The first of the two was written once before and reverted: the predicate and the reader were added and the
+    // error moved from column 16 to column 51 without the file reading (B98, `docs/grammar-gaps.md`). What was
+    // missing is the **reader's** other half — a macro *before* the operator — which is what
+    // [`parse_parenthesised_declarator`] now consumes.
+    if matches!(
+        p.peek_token_kind_at(1..4).as_slice(),
+        [
+            CppTokenKind::Star | CppTokenKind::Ampersand | CppTokenKind::LogicalAnd,
+            CppTokenKind::Identifier,
+            CppTokenKind::Identifier
+        ]
+    ) && p.peek_token_kind_at(4..5) == [CppTokenKind::RightParen]
+        && written_like_a_macro(p.peek_token_text_at(2))
+    {
+        return true;
+    }
+
+    if matches!(
+        p.peek_token_kind_at(1..4).as_slice(),
+        [
+            CppTokenKind::Identifier,
+            CppTokenKind::Star | CppTokenKind::Ampersand | CppTokenKind::LogicalAnd,
+            CppTokenKind::Identifier
+        ]
+    ) && p.peek_token_kind_at(4..5) == [CppTokenKind::RightParen]
         && written_like_a_macro(p.peek_token_text_at(1))
     {
         return true;
@@ -3599,8 +4030,30 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
                 // declarator was refused, and the statement was re-read as an expression. The check is the same
                 // one [`parse_attribute_specifiers`] uses, and it can be made here without lookahead beyond the
                 // next token because no array declarator is spelled `[[`.
+                //
+                // **Two positions, and which one this is decides who reads it.** An attribute after the
+                // declarator-id and before the *parameters* belongs to the declarator — the standard writes the
+                // sequence there, and the parameter list that follows is still this declarator's suffix:
+                //
+                // ```cpp
+                // bool operator== [[nodiscard]] (const tuple<_Tps...>& __t, const tuple<_Ups...>& __u)
+                //                         └── the declaration's own name is complete, the parameters are not
+                // ```
+                //
+                // — so it is read here and the loop continues, which is what puts the `ParameterList` inside the
+                // `Declarator` where every consumer looks for it. An attribute *after* the parameters
+                // (`void f() [[noreturn]];`, `int x [[maybe_unused]] = 1;`) is the other position, and it stays
+                // with [`super::decls::finish_init_declarator`], which owns it. The follower is what tells them
+                // apart, and it is a shape rather than a preference: a `(` after the attribute run can only be
+                // this declarator's parameter list.
                 CppTokenKind::LeftBracket if p.peek_next_token() == CppTokenKind::LeftBracket => {
-                    break;
+                    if !a_parameter_list_follows_the_attributes(p) {
+                        break;
+                    }
+                    if let Err(err) = parse_attribute_specifiers(p) {
+                        p.close_marks_above(base);
+                        return Err(err);
+                    }
                 }
                 CppTokenKind::LeftBracket => {
                     let array = p.mark(CppSyntaxKind::ArrayType);
@@ -3646,6 +4099,33 @@ fn parse_parenthesised_declarator(p: &mut CppParser) -> ParseResult {
     // there: `(*f)` is a pointer and `(*f(int))` a pointer to a *function*, whose parameter list is read by
     // the outer declarator's suffix loop.
     parse_abstract_declarator(p, false)?;
+
+    // A macro **before the declarator's own operator**, which is where a COM header writes the calling
+    // convention:
+    //
+    // ```cpp
+    // typedef HRESULT (STDAPICALLTYPE *LPFNGETCLASSOBJECT) (REFCLSID, REFIID, LPVOID *);   // combaseapi.h:358
+    // ```
+    //
+    // The `*` has not been read yet at this point — the abstract declarator above found nothing, because the
+    // first token is a name — so this is the position the macro occupies: it stands *before* the pointer rather
+    // than after it, and after it the ordinary abstract-declarator reading continues. Claiming it here is what
+    // lets the `*` and the name after it be read by the rules that already own them; without it `STDAPICALLTYPE`
+    // was taken for the name, the `*` had no owner, and the declaration fell apart inside its own parentheses.
+    if p.current_token() == CppTokenKind::Identifier
+        && matches!(
+            p.peek_next_token(),
+            CppTokenKind::Star | CppTokenKind::Ampersand | CppTokenKind::LogicalAnd
+        )
+        && written_like_a_macro(p.current_token_text())
+    {
+        let m = p.mark(CppSyntaxKind::MacroCall);
+        let name = p.mark(CppSyntaxKind::NameExpr);
+        p.bump();
+        name.complete(p);
+        m.complete(p);
+        parse_abstract_declarator(p, false)?;
+    }
 
     // A **macro before the name** inside the parentheses — the call convention a COM header writes:
     //
@@ -3866,10 +4346,10 @@ fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
         //
         // ```cpp
         //     using __is_signed_integer = __is_one_of<__remove_cv_t<_Tp>,
-        // 	  signed char, signed short, signed int, signed long,
-        // 	  signed long long
+        //       signed char, signed short, signed int, signed long,
+        //       signed long long
         // #if defined(__GLIBCXX_TYPE_INT_N_0)
-        // 	  , signed __GLIBCXX_TYPE_INT_N_0
+        //       , signed __GLIBCXX_TYPE_INT_N_0
         // #endif
         // ```
         //
@@ -3993,8 +4473,27 @@ fn parse_template_argument(p: &mut CppParser) -> ParseResult {
     // type through the functional-conversion arm of `parse_primary_expr`, a name through the ordinary one.
     let a_brace_makes_it_a_value = p.current_token() == CppTokenKind::LeftBrace;
 
+    // **Only a type reading that succeeded can end the argument**, and the difference is not pedantry: a *failed*
+    // reading stopped wherever it gave up, which can be in the middle of a group it opened, and the tokens it
+    // consumed on the way are still in the events. Accepting that as the argument is how
+    //
+    // ```cpp
+    //   __enable_if_t<(__i >= sizeof...(_Types))>          // tuple:2439
+    //   __get_helper(const tuple<_Types...>&) = delete;
+    // ```
+    //
+    // came out as ``expected a declarator name`` at the `=`: the type reading on `(` consumed `(__i`, gave up at
+    // `>=`, and the argument was declared *complete* there — so the loop below split the `>=` into `>` and `=`, the
+    // `>` closed the list, and the rest of the declaration had no head. The expression fallback below is what
+    // should have run, and it does now.
+    //
+    // What used to stand here was `type_read.is_ok() || !continues_a_type(p.current_token())`, whose second half
+    // tried to rescue a failed reading that "stopped somewhere a type can end". There is no such thing: the token
+    // kinds that end a type are the *delimiters*, and an argument that ends at a delimiter ends there whether or not
+    // the reading before it succeeded — the `current_token_index() > start` test above is what says it consumed
+    // anything at all. `continues_a_type` had no other caller and is gone with it.
     if p.current_token_index() > start
-        && (type_read.is_ok() || !continues_a_type(p.current_token()))
+        && type_read.is_ok()
         && !stopped_at_a_group_that_is_not_a_parameter_list
         && !a_brace_makes_it_a_value
     {
@@ -4026,27 +4525,6 @@ fn parse_template_argument(p: &mut CppParser) -> ParseResult {
     // builder with "forward parent must point at a NodeStart, found Trivia". One reading, one rewind.
     p.rollback(checkpoint);
     super::exprs::parse_assignment_expr(p)
-}
-
-/// Can a type-id continue with this token?
-///
-/// Used to decide whether a type reading that stopped early stopped *correctly*. `*` and `&` can
-/// continue a declarator, so a stop there is premature; a literal or a `,` cannot, so a stop there is
-/// the end of the type.
-fn continues_a_type(kind: CppTokenKind) -> bool {
-    matches!(
-        kind,
-        CppTokenKind::Star
-            | CppTokenKind::Ampersand
-            | CppTokenKind::LogicalAnd
-            | CppTokenKind::LeftBracket
-            | CppTokenKind::LeftParen
-            | CppTokenKind::Scope
-            | CppTokenKind::Less
-            | CppTokenKind::Identifier
-            | CppTokenKind::ConstKeyword
-            | CppTokenKind::VolatileKeyword
-    )
 }
 
 /// Consume the qualifiers and specifiers that may follow a function declarator's parameter list.
@@ -4252,6 +4730,19 @@ fn a_type_the_compiler_spells(p: &CppParser) -> bool {
 /// in `bits/c++config.h` and in `bits/move.h` (`__attribute__((__always_inline__))` between a template head and
 /// the declaration it wraps).
 ///
+/// GNU accepts the spelling with **one** trailing underscore as well, and the difference is not cosmetic: GCC's
+/// own headers write it that way when they must stay readable by a compiler that does not know the extension —
+///
+/// ```cpp
+/// extern "C"                                                          // libstdc++-v3/include/parallel/compatibility.h:48
+/// __attribute((dllimport)) void __attribute__((stdcall)) Sleep (unsigned long);
+/// ```
+///
+/// — so `__attribute` is a spelling, not a name, and reading it as one costs the declaration it stands in front
+/// of. That was measured: the file above reported `expected ;` against its own `extern "C"`, and with the
+/// spelling added the declaration reads. `g++ -std=c++17` accepts the same line, which is the evidence that this
+/// is the compiler's extension rather than this parser's guess.
+///
 /// A **spelling** test rather than a table one, and that is not the convention-without-evidence that
 /// `docs/grammar-gaps.md` entry 16 warns about. Two things make it evidence: the standard reserves these names to
 /// the implementation, so a program that `#define`s `__attribute__` is not a program this has to read; and the
@@ -4261,8 +4752,10 @@ pub fn at_an_attribute(p: &CppParser) -> bool {
     match p.current_token() {
         CppTokenKind::LeftBracket => p.peek_next_token() == CppTokenKind::LeftBracket,
         CppTokenKind::Identifier => {
-            matches!(p.current_token_text(), "__attribute__" | "__declspec")
-                && p.peek_next_token() == CppTokenKind::LeftParen
+            matches!(
+                p.current_token_text(),
+                "__attribute__" | "__attribute" | "__declspec"
+            ) && p.peek_next_token() == CppTokenKind::LeftParen
         }
         _ => false,
     }
