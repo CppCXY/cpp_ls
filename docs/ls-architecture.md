@@ -351,8 +351,8 @@ cl /nologo /Zc:preprocessor /PD /c  58 个预定义宏；**/PD 少了 /Zc:prepro
 而默认工具链现在在这台机器上是 MSVC。所以普查命令要**钉住工具链**（`$env:CXX = <mingw g++>`），
 两份读数才可比；不钉的那一遍是**另一个测量**（用 MSVC 的 STL 读同一个清单），不要混着报。
 
-**同一个道理，一条开着的回归（根因已查明）**：`std_query` 钉住 mingw 是 **9/9**（279 个文件的闭包），
-不钉是 **0/9**——MSVC 的闭包只索引到 107 个文件，而原因是**宏展开出的 namespace**：
+**同一个道理，一条已经关掉的回归（第 16–17 轮）**：`std_query` 钉住 mingw 是 **9/9**（457 个文件的闭包），
+不钉也已经是 **9/9**（MSVC 的 STL，109 个文件）——当初不钉是 **0/9**，原因是**宏展开出的 namespace**：
 
 ```text
 MSVC 的 <vector>： `_STD_BEGIN` 出现 1 次，字面 `namespace std` 出现 0 次
@@ -360,10 +360,15 @@ yvals_core.h：     #define _STD_BEGIN namespace std {
 ```
 
 我们的每文件事实是从 CST 上收的，`namespace std` 不是一个节点，于是 `std::vector` 这个事实不存在。
-**不是"MSVC 不能用"，也不是工具链发现错了**——是作用域构建还看不穿"展开后是 namespace 的宏"，
-属于 `grammar-gaps.md` 的宏族（设计级）那一档。登记在 [`roadmap.md`](roadmap.md) §4.2 ①。
-（顺带记一个**不是**缺陷的：`xmm_func.h` 那条未解析 include 在 `#ifdef __ICL` 里，而 `configured = false`
-让条件答 Unknown、Unknown 按"可能编译"跟进——代价是那一个文件不进缓存，设计如此。）
+**不是"MSVC 不能用"，也不是工具链发现错了**——是作用域构建看不穿"展开后是 namespace 的宏"。
+十六轮把它修完了（宏体按位置喂给 parser 与作用域构建，B120–B128），十七轮补上最后一段：
+**驱动层（`Session`）也要看得见**——`SummaryStore::get` 原来从不喂宏体，`Session` 的环境也不完整，
+所以同一个索引经探针问是 9/9、经编辑器那条路问是 0/9（B131）。全过程登记在
+[`roadmap.md`](roadmap.md) §4.2 ①。
+（顺带记一个**不是**缺陷的：`xmm_func.h` 那条未解析 include 在 `#ifdef __ICL` 里。写这段时环境是
+`configured = false`，条件答 Unknown ⇒ 按"可能编译"跟进，代价是那一个文件不进缓存。**现在环境完整了，
+同一个文件仍然不进缓存**（`open_project` 的 MSVC 那遍还是 `1 not stored`），所以挡住它的**不是**完整性这
+一格——是哪一格没有复测，别照抄这句解释。）
 
 ### 还剩什么（**不是待办清单，是缺口**）
 

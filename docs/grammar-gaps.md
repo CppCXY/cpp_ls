@@ -4325,6 +4325,79 @@ let named = resolve_aliases(index, scopes, root, path, class);   // 只为走查
 let mut level = bases_of(index, scopes, root, path, &named) ...  // owner 也用 named
 ```
 
+## B131：三条链，把"编辑器那条路"从 0/9 抬到 9/9——宏体要**走到**索引里，不只是查询里能用
+
+目标（B120–B128）做完时，`std_query` 两个方向都 9/9，但那是**探针**：它用 `SummaryStore::index_includes_from`
+一次性建索引。真正会被用户用到的是 `Session`（驱动层，LSP 走的就是它），而它在 MSVC 的 STL 上是 **0/9**。
+这一轮把三件独立的事都修了，每一件都单独量过。
+
+### ① 环境的"完整性"要说真话：`Session` 把 `configured` 接上编译数据库
+
+`session.rs` 里原来是 `let configured = false;`，注释写着原因：声明环境完整之后，闭包能判定 486 个条件 include
+里的 440 个（`condition_reach`），但当时有两个名字**丢掉**了答案（`__attribute__`、`STDMETHODCALLTYPE`
+从几千个"maybe"变成"不是宏用法"）——因为走查每个头文件只进一次，而第一次是从**条件 include** 进去的
+（`minwindef.h` 先包含 `winnt.h`，`windef.h` 那次确定的包含被跳过）。把诚实的怀疑变成错的答案，是这一层唯一
+不能做的事，所以那个标志一直是 `false`。
+
+现在它是 `database.is_some()`（读完项目自己的 `compile_commands.json` 才敢说"没定义的确实没定义"）。
+
+### ② 走查问**图**，不问**路线**：确定路径不再被先到者挡掉
+
+`macro_candidates` 的 `path_conditional` 原来只反映**这次 DFS 走过来的那条路**；`visited` 又保证一个文件只进一次。
+于是"第一个到达的路径是条件的、而同一 TU 里存在一条无条件的路径"这种情况，后者永远用不上——
+`winnt.h` 的宏就只能停在"定义了、值未知"。
+
+修法：一次走查开始前问一次图——`certainly_in_the_translation_unit(from)`，沿**无条件 include**（`FactGuard::Unconditional`）
+做一次 BFS，得到的集合就是"无论宏是什么，这些文件都在 TU 里"。走查进每个文件时
+`path_conditional && !certain.contains(path)`：**在集合里就一律按确定处理**，与路线无关。
+
+**不能用 `visible_files` 来算这个集合**（它答得更好：被判为成立的条件 include 也算无条件）——第一版就是那么写的，
+**立刻栈溢出**：`macros_at` → `visible_files` →（条件求值）→ `macros_at` → ……，而记忆化帮不上忙，因为答案要算完才
+记下来。所以取的是那个答案里**不需要求值任何东西**的部分；一个"条件成立"的 include 仍旧通过它自己那条路保持
+确定（`visibility == Active` 本来就不会让路线变条件）。
+
+### ③ 宏体要进**索引**：`Session` 需要 store 的第二遍
+
+前两件做完，驱动层还是 0/9——因为 `SummaryStore::get`（Session 一个文件一个文件读的那条路）**从来不喂宏体**：
+只有 `index_includes_from` 里有那一遍（B95 起就在）。而"先读文件、再读它包含的文件"这个顺序是**结构性的**：
+`<vector>` 的 `std` 作用域写在它**包含的** `yvals_core.h` 的 `_STD_BEGIN` 里，第一遍读它时证据必然还没有。
+
+修法是让那条第二遍对**任何**调用者可用：`SummaryStore::re_read_where_a_body_decides(files)`，`Session::advance`
+在**队列排空时**（`is_idle()`）把它跑一遍，候选是**自上次这一遍以来被解析过的**文件（跨 `advance` 调用累积——
+闭包是分块读的，64 个一批，第一批里解析的文件和最后一批里的一样是候选；只取"恰好排空队列的那一批"就是 `<xstring>`、
+`<vector>` 永远停在文件作用域的原因）。**从磁盘缓存读回来的摘要不重读**：它带着写入它的那次运行的读法，
+文本没变则读法不变——所以热路径一分钱不花（实测：110 个文件里 109 个来自缓存，暖启动 60 ms）。
+
+**顺带挖出的一个真 bug**：那一遍里给走查用的文本表原来按**摘要自己的路径拼写**做键，而走查是拿
+`include.resolved` 去问的（规范化过：`c:/users/…` 对 `C:\Users\…`）。于是 `open.h` 命中摘要、却在文本表里
+查不到，宏体的文本是空串——**走查拿到了宏名字、没拿到体**，作用域静默不开。探针路径碰巧两种拼写一致，
+所以一直没露；`Session` 一接上就露了。改成两边都用 `normalize_path` 之后，`session.rs` 的新测试
+（`a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session`）才第一次通过。
+
+### 落地的读数（全是本轮实测，release）
+
+```text
+驱动层 open_project（编辑器那条路，光标进、成员表出）
+  不钉 CXX（MSVC 的 STL，110 个文件）  0/9 → **9/9**，声明 6923 → 12743 条
+                                       m.find -> xtree std::_Tree::find（与 std_query 一字不差）
+    形状：冷索引 110 个文件里 143 次解析（含第二遍 33 个）；暖启动 60 ms，109/110 来自磁盘缓存
+  钉 CXX（libstdc++，458 个文件）      9/9 不变，50616 条声明，`m.find -> stl_map.h std::map::find`
+    暖启动 34 ms，455/458 来自缓存
+条件判定 condition_reach（Session + 编译数据库）
+  189 → **440** of 486 判定（taken 331 / skipped 109 / unknown 46）——与文档里记的 440 一致
+找引用 find_references（Session）
+  `__MSABI_LONG`  1168 uncertain → **1168 uses**（怀疑变成确定）
+  `WINAPI`         66 uses / 2658 uncertain → **435 uses / 2187 uncertain**
+  `STDMETHODCALLTYPE` 4078 uncertain **不变**（它那条路要 `__has_include`，那 46 个条件今天还答不了——
+                      诚实的 `Unknown` 保住了，这正是当初不敢打开 `configured` 的那条底线）
+门禁 tests **1185** / clippy 0 / doc 0 / cpp_dump 0 error
+```
+
+**顺带清掉**：`examples/find_references.rs` 里一段提交进来的 `// TEMPORARY DEBUG`（那个 `ZZ` 块，是排查同一
+条链时留下的）——探针要保持是探针。**没有抬版本号**：`READING_FINGERPRINT` 由 `build.rs` 对整个
+`cpp_code_analysis/src` + `cpp_parser/src` 取指纹，改读法的源码一变，旧缓存条目全部够不着，这正是它存在的原因
+（`cache.rs` 写着 `FORMAT_VERSION` 只负责"源码里留不下痕迹"的那些改动）。
+
 ## 维护约定
 1. **修好一条**：把本文档的条目改成"已修复"（保留成因与修复过程，下一个人会需要），并写进 `crates/cpp_parser/tests/gaps.rs` 的已支持清单。`gaps.rs` 的机制是"构造一旦开始工作，钉住它的测试就会失败"，那是防漏报的护栏。
 2. **发现新缺漏**：先加进本文档（带四要素：例子、现象、成因、性质），需要护栏时再加进 `gaps.rs`。本文档是队列，`gaps.rs` 是回归。

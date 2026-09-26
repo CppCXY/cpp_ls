@@ -85,6 +85,7 @@ use crate::index::project::{
 };
 use crate::index::references::{MacroReferences, ReferenceBudget, macro_references};
 use crate::index::store::{StoreStats, SummaryStore};
+use crate::index::worklist::StepOutcome;
 use crate::index::watch::{ChangeBatch, FileEvent, Response, WatchFilter};
 use crate::index::worklist::{Priority, Step, outcome_of};
 use crate::index::{
@@ -275,6 +276,14 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// What the project scan found, so that a configuration change can re-seed from it.
     project: Vec<PathBuf>,
     queue: Work,
+    /// The files this session has **parsed** since the last body pass — the candidates for
+    /// [`SummaryStore::re_read_where_a_body_decides`], which may only run once the closure is in hand.
+    ///
+    /// Accumulated across `advance` calls rather than taken from one: a closure is read in chunks (64 files at a
+    /// time), and a file parsed in the first chunk is exactly as much a candidate as one parsed in the last. Taking
+    /// only the chunk that happened to drain the queue is what left MSVC's `<xstring>` and `<vector>` — both read in
+    /// the first chunk, both scoped by a macro body defined in a later one — reading at file scope for ever.
+    parsed_since_the_last_pass: Vec<PathBuf>,
 }
 
 impl Session<DiskFiles> {
@@ -456,15 +465,22 @@ impl<F: FileProvider + Clone> Session<F> {
                 .unwrap_or(MAX_PROJECT_FILES),
         );
 
-        // **Not** `database.is_some()`, and the measurement is why: with the environment declared complete, the
-        // standard-library closure decides 440 of its 486 conditional includes instead of 85 (`condition_reach`),
-        // and two paths *lose* answers they used to give — `__attribute__` and `STDMETHODCALLTYPE` went from
-        // 767/4 078 "maybe" to "not a use", because the walk visits a header once and the first visit was through
-        // a *conditional* include (`minwindef.h` includes `winnt.h` before `windef.h` does, and the second, certain
-        // visit is skipped). See `docs/roadmap.md` §3.5c: until a certain path can improve on an uncertain first
-        // visit, a claim this strong would turn honest doubt into a wrong answer, which is the one thing this layer
-        // must not do.
-        let configured = false;
+        // **The project's own `compile_commands.json` is what makes the environment complete** (B131): it is the
+        // project saying how its files are compiled — the `-D`s, the `-std=`, the include paths — so with one in
+        // hand, a name nothing defines really is undefined rather than unknown, and conditions become decidable.
+        //
+        // This was `false` unconditionally before, and the reason was measured: with the environment declared
+        // complete, the closure decides 440 of its 486 conditional includes instead of 85 (`condition_reach`), but
+        // two names *lost* answers they used to give — `__attribute__` and `STDMETHODCALLTYPE` went from thousands
+        // of "maybe" to "not a use" — because the walk visits a header once and the first visit was through a
+        // *conditional* include (`minwindef.h` includes `winnt.h` before `windef.h` does, and the second, certain
+        // visit was skipped). Declaring the environment complete turned honest doubt into a wrong answer, which is
+        // the one thing this layer must not do.
+        //
+        // `ProjectIndex::macro_candidates` now asks the graph rather than the route ("is this file certainly part
+        // of the translation unit", B131), so a certain path can no longer be skipped in favour of a conditional
+        // one. What that did to the two names above is measured in `docs/roadmap.md` §3.5c and §7.
+        let configured = database.is_some();
         let mut store = SummaryStore::with_provider(root.clone(), config.clone(), files.clone())
             .with_macros(crate::index::environment::compilation_environment(
                 &config,
@@ -488,6 +504,7 @@ impl<F: FileProvider + Clone> Session<F> {
             filter,
             project,
             queue: Work::default(),
+            parsed_since_the_last_pass: Vec::new(),
         };
 
         // The scan is the queue's **seed**, not a list to consult later: opening a project is the caller saying
@@ -758,6 +775,28 @@ impl<F: FileProvider + Clone> Session<F> {
                 depth,
                 outcome: outcome_of(before, after),
             });
+        }
+
+        // **The second pass, at the moment the closure is in hand** (B131). `SummaryStore::get` reads one file with
+        // the evidence the index has at that moment, and for MSVC's STL that is no evidence at all: `<vector>`'s
+        // `std` scope is written in `yvals_core.h`'s `_STD_BEGIN` — a file `<vector>` *includes*, and a file is read
+        // before its includes. So the files this session parsed are read again, once, now that everything they
+        // include is in the index. `SummaryStore::index_includes_from` does the same thing for its own walk; this is
+        // that pass on the closure this caller built one step at a time.
+        //
+        // **Only a file that was parsed can have a reading that changed under it**: a summary that came from the
+        // disk cache was stored with whatever reading the run that wrote it had, and a file whose text did not
+        // change reads the same way. So the warm path — everything reused — pays nothing, and an editing drain pays
+        // for the one file the edit produced.
+        self.parsed_since_the_last_pass.extend(
+            done.iter()
+                .filter(|step| matches!(step.outcome, StepOutcome::Built | StepOutcome::Unstored))
+                .map(|step| step.path.clone()),
+        );
+
+        if self.is_idle() && !self.parsed_since_the_last_pass.is_empty() {
+            let parsed = std::mem::take(&mut self.parsed_since_the_last_pass);
+            self.store.re_read_where_a_body_decides(&parsed);
         }
 
         done
@@ -1830,6 +1869,53 @@ mod tests {
             session.pending(),
             2,
             "and the list is the queue's seed, so the work is ready before the first query"
+        );
+    }
+
+    #[test]
+    fn a_class_scoped_by_another_files_macro_body_is_scoped_through_the_session() {
+        // The store's second pass, on the closure a **session** builds one file at a time (B131). MSVC's STL is
+        // written this way: `<vector>` opens `std` with `_STD_BEGIN`, whose replacement list is in `yvals_core.h`,
+        // and it *includes* that file — while a file is read before the files it includes, because its own
+        // `#include`s are a product of parsing it. So the first reading of every such file puts its declarations at
+        // file scope. Measured on the whole STL through the driver: **0/9** without this pass, **9/9** with it,
+        // against 9/9 for the same index built by `SummaryStore::index_includes_from` (which always had one).
+        //
+        // No compiler and no compile database take part: the body is written in a file of the project, which is
+        // what makes this test the same on every machine.
+        let project = Project::new("body-pass");
+        project.write(
+            "open.h",
+            "#pragma once\n#define _STD_BEGIN namespace std {\n#define _STD_END }\n",
+        );
+        let widget = project.write(
+            "widget.h",
+            "#include \"open.h\"\n_STD_BEGIN\nstruct Widget { int size; };\n_STD_END\n",
+        );
+        let main = project.write("main.cpp", "#include \"widget.h\"\n");
+
+        let mut session = Session::with_config(
+            &project.root,
+            SessionFiles::new(OpenDocuments::new(), DiskFiles),
+            WatchFilter::new(&project.root),
+            CompilerConfig::default(),
+        );
+        session.index_everything();
+
+        let found = session.index().definition("std::Widget", &main);
+        let Known::Yes(found) = found else {
+            panic!("`Widget` is declared behind a macro body written in `open.h`: {found:?}");
+        };
+        assert_eq!(found.file, widget);
+        assert_eq!(found.fact.scope.as_deref(), Some("std"));
+
+        // And the reading is recorded as **evidence** rather than as a conclusion: the summary says which body
+        // opened the scope, which is what lets a consumer re-read it when the macro changes. See
+        // `docs/index-design.md` §"宏体推导出的事实：记证据，不进键".
+        let summary = session.index().summary(&widget).expect("indexed");
+        assert!(
+            !summary.macro_readings.is_empty(),
+            "the scope came from a body, and the summary has to say so"
         );
     }
 

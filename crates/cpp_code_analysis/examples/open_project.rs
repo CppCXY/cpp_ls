@@ -32,6 +32,7 @@ use std::time::Instant;
 
 use cpp_code_analysis::{
     DiskFiles, FileEvent, FileView, Known, OpenDocuments, Session, SessionFiles, WatchFilter,
+    discover,
 };
 
 /// What the file on disk says. The buffer the editor opens adds one function — an edit nobody has saved.
@@ -99,7 +100,19 @@ fn main() {
     let widget = root.join("widget.h");
     std::fs::write(&main, MAIN_ON_DISK).expect("the fixture writes");
     std::fs::write(&widget, "struct Widget { int on_disk; };\n").expect("the fixture writes");
-    write_compile_database(&root);
+
+    // The toolchain is discovered **before** the database is written, because the database names it: see
+    // `write_compile_database`. The same four inputs `Session::open` discovers with, so the probe and the session
+    // cannot disagree about which compiler the project is built with.
+    let found = discover(
+        &DiskFiles,
+        &cpp_code_analysis::DiskCommands,
+        None,
+        &main,
+        &cpp_code_analysis::Environment::current(),
+        &cpp_code_analysis::include::msvc::WindowsLayout::current(),
+    );
+    write_compile_database(&root, found.as_ref().and_then(|t| t.compiler.as_deref()));
 
     let documents = OpenDocuments::new();
     let files = SessionFiles::new(documents.clone(), DiskFiles);
@@ -163,7 +176,8 @@ fn main() {
         if let Known::Yes(found) = session.member_completions(&view, cursor)
             && let Some(member) = found
                 .members
-                .own()
+                .members
+                .iter()
                 .find(|member| member.fact.name == "size")
         {
             first_answer = Some((read, member.file.clone()));
@@ -302,9 +316,15 @@ fn main() {
 
         match session.member_completions(&view, offset) {
             Known::Yes(found) => {
+                // **Every** member the query offers, not only the ones written in the class itself: what a
+                // completion after `m.` must list includes the inherited ones, and on MSVC's STL that is the
+                // difference between 7 and 9 here — `std::map` declares none of `find`/`begin`, `std::_Tree` does
+                // (the base walk, `docs/grammar-gaps.md` B128). Filtering on `own()` is what a reader of this probe
+                // sees as "the type has no such member" while the type does.
                 let hit = found
                     .members
-                    .own()
+                    .members
+                    .iter()
                     .find(|member| member.fact.name == query.rsplit('.').next().unwrap_or(query));
                 match hit {
                     Some(member) => {
@@ -346,13 +366,22 @@ fn main() {
 /// Two things are being shown: the flags are the project's own (`-DFROM_THE_DATABASE`, `-std=c++20`), and an entry
 /// naming a file this checkout does not have is not queued — a checked-in database writes the absolute paths of the
 /// machine that produced it.
-fn write_compile_database(root: &Path) {
+///
+/// The **compiler** in the entry is the one this machine's `toolchain::discover` finds, not a literal `g++`: the
+/// database is the project's claim about how its files are built, and the point of this probe is to make that claim
+/// and then see what the driver does with it. Written as a literal it would pin the probe to whichever compiler
+/// happens to be on `PATH` by that name, and the case this probe most needs to cover — MSVC's STL, whose `std` is
+/// opened by a *macro body* rather than a written `namespace std` — would be unreachable here (B131).
+fn write_compile_database(root: &Path, compiler: Option<&Path>) {
     let spelled = root.to_string_lossy().replace('\\', "/");
+    let program = compiler
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|| "c++".to_string());
     let json = format!(
         "[\n  {{\"directory\": \"{spelled}\", \"file\": \"{spelled}/main.cpp\", \
-         \"arguments\": [\"g++\", \"-DFROM_THE_DATABASE\", \"-std=c++20\", \"-c\", \"{spelled}/main.cpp\"]}},\n  \
+         \"arguments\": [\"{program}\", \"-DFROM_THE_DATABASE\", \"-std=c++20\", \"-c\", \"{spelled}/main.cpp\"]}},\n  \
          {{\"directory\": \"{spelled}\", \"file\": \"{spelled}/elsewhere.cpp\", \
-         \"arguments\": [\"g++\", \"-c\", \"{spelled}/elsewhere.cpp\"]}}\n]\n"
+         \"arguments\": [\"{program}\", \"-c\", \"{spelled}/elsewhere.cpp\"]}}\n]\n"
     );
 
     std::fs::write(root.join("compile_commands.json"), json).expect("the database writes");

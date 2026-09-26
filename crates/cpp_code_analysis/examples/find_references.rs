@@ -96,60 +96,6 @@ fn main() {
         session.index().len()
     );
 
-    // TEMPORARY DEBUG: why is a path to a definition cut?
-    {
-        let index = session.index();
-        let start = index
-            .summaries()
-            .map(|summary| summary.path.clone())
-            .find(|path| files.read(path).is_some_and(|text| text.contains("STDMETHODCALLTYPE")))
-            .expect("a file that uses the name");
-        println!("ZZ starting at {start:?}");
-        for name in ["winnt.h", "windef.h", "windows.h", "shellapi.h", "winbase.h", "objbase.h", "combaseapi.h"] {
-            if let Some(path) = index.summaries().map(|summary| summary.path.clone()).find(|p| p.file_name().is_some_and(|f| f.to_string_lossy().eq_ignore_ascii_case(name))) {
-                let environment = index.macro_environment("STDMETHODCALLTYPE", &path);
-                println!("ZZ from {name}: empty={} at0={:?}", environment.is_empty(), environment.at(0));
-                if name == "windows.h" { for include in &index.summary(&path).expect("indexed").includes { if include.spelling.contains("windef") || include.spelling.contains("winbase") { println!("ZZ   windows.h -> {} resolved={:?}", include.spelling, include.resolved); } } }
-                if name == "windows.h" || name == "windef.h" {
-                    let state = index.macros_at(&path, 3000);
-                    println!("ZZ   {name} state@3000: defined={} uncertain={} incomplete={} names={}", state.is_defined("STDMETHODCALLTYPE"), state.is_uncertain("STDMETHODCALLTYPE"), state.is_incomplete(), state.defined_names().len());
-                }
-                let summary = index.summary(&path).expect("indexed");
-                for include in &summary.includes {
-                    println!("ZZ   {name} include {} at {} resolved={} verdict={:?}", include.spelling, include.range.start_offset,
-                        include.resolved.is_some(),
-                        cpp_code_analysis::index::visibility_at(index, &path, include.guard, include.range.start_offset));
-                }
-            }
-        }
-        let mut queue = vec![(start.clone(), 0usize)];
-        let mut seen = std::collections::HashSet::new();
-        while let Some((path, depth)) = queue.pop() {
-            if depth > 6 || !seen.insert(path.clone()) { continue; }
-            let Some(summary) = session.index().summary(&path) else { continue };
-            for include in &summary.includes {
-                let verdict = cpp_code_analysis::index::visibility_at(index, &path, include.guard, include.range.start_offset);
-                if verdict != cpp_code_analysis::Visibility::Active {
-                    println!("ZZ {:?} {} -> {} at {} = {:?}", path.file_name().unwrap_or_default(), include.spelling,
-                        include.resolved.as_ref().map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string()).unwrap_or_default(),
-                        include.range.start_offset, verdict);
-                }
-                if let Some(target) = &include.resolved { queue.push((target.clone(), depth + 1)); }
-            }
-            let environment = index.macro_environment("STDMETHODCALLTYPE", &path);
-            let answer = environment.at(0);
-            let described = match answer {
-                cpp_code_analysis::Known::Yes(_) => "yes".to_string(),
-                cpp_code_analysis::Known::No => "no".to_string(),
-                cpp_code_analysis::Known::Unknown(reason) => reason.describe(),
-            };
-            println!("ZZ {:?} depth={depth} empty={} answer={described}", path.file_name().unwrap_or_default(), environment.is_empty());
-            if path.file_name().is_some_and(|name| name.to_string_lossy().contains("winnt")) {
-                println!("ZZ reached winnt.h at depth {depth}");
-            }
-        }
-    }
-
     // The texts, read once: every rung below is a question about them, and re-reading per name would measure the
     // filesystem instead of the query.
     let started = Instant::now();

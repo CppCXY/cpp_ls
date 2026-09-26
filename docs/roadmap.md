@@ -31,7 +31,7 @@
 `%TEMP%\stdprobe\files.txt` 的 128 个文件（`<vector>/<string>/<map>/<algorithm>` 的闭包）——
 **`干净 128 / 报错 0`**，消息总数 **0**（带 seeds）；`%TEMP%\cppls-indexed.txt` 的 455 个文件（分析闭包）——
 **`干净 455 / 报错 0 / 消息 0`（带 seeds）**，不带 seeds 的那一遍是 `干净 454 / 报错 1`（剩下的那个文件见下）。
-Rust 侧 `cargo test --workspace` = **1184 个测试 / 38 个套件全绿**（含 `cpp_ls` 的 28 个单测与 2 个端到端测试）。
+Rust 侧 `cargo test --workspace` = **1185 个测试 / 38 个套件全绿**（含 `cpp_ls` 的 28 个单测与 2 个端到端测试）。
 
 **两份读数**：上面这两份的"干净 455/0"是**带 include 证据**（`--seeds --closure`，也就是**带索引的产品形态**）的读数；
 **不带证据**的那一遍 455 个文件是 `干净 454 / 报错 1 / 消息 12`，唯一失败的是 `commdlg.h:577` 的
@@ -43,7 +43,7 @@ Rust 侧 `cargo test --workspace` = **1184 个测试 / 38 个套件全绿**（�
 **门禁三条 + 一条**（改完必须全绿，`index-design.md` §门禁有同样的表）：
 
 ```bash
-cargo test --workspace                     # 1184 个测试，38 个套件
+cargo test --workspace                     # 1185 个测试，38 个套件
 cargo clippy --workspace --all-targets     # 零警告
 cargo doc --no-deps -p cpp_code_analysis   # 零警告（cpp_parser 有历史链接问题，不管）
 cargo run -q -p cpp_parser --bin cpp_dump -- crates/cpp_parser/tests/real_world.cpp   # 必须 0 error
@@ -1529,20 +1529,49 @@ parser 的边际收益是"每轮 1–3 个文件"，连续磨十几轮会失去�
         门禁 tests 1184 / clippy 0 / doc 0 / cpp_dump 0；四份普查 128 → 128/0/0、455 → 454/1 + 12 条
    ```
 
+   **第 17 轮：编辑器那条路也 9/9（B131）——三件事，都单独量过**
+
+   ```text
+   ① Session 的 configured 变成真话：`database.is_some()`（读到项目自己的 compile_commands.json 才敢说
+     "没定义的确实没定义"）。condition_reach 实测 189 → **440 of 486** 判定（331 取到 / 109 跳过 / 46 未知）
+   ② 走查不再问"这次从哪条路进来"，而是问图：certainly_in_the_translation_unit（沿无条件 include 一次 BFS）。
+     当初打开这个强声明会丢的两条答案——实测**没丢，反而更多**：
+       __MSABI_LONG  1168 uncertain → **1168 uses**      WINAPI  66 uses/2658 uncertain → **435/2187**
+       STDMETHODCALLTYPE 4078 uncertain **一格没动**（它要 __has_include，那 46 个条件今天仍答不了）
+     第一版用 visible_files 算这个集合 ⇒ **栈溢出**（macros_at → visible_files → 条件求值 → macros_at），
+     所以只取"不需要求值任何东西"的那部分，理由写在函数文档里
+   ③ 宏体要进**索引**，不只是查询里能用：`SummaryStore::get`（Session 一个文件一个文件读的那条路）从来不喂宏体，
+     只有 index_includes_from 里有那一遍。现在 `re_read_where_a_body_decides` 对任何调用者可用，
+     `Session::advance` 在队列排空时跑它，候选是"自上次以来被解析过"的文件（跨调用累积；缓存命中的不重读）
+     顺带挖出真 bug：那一遍的文本表按**摘要自己的路径拼写**做键，而走查拿 include.resolved（规范化过）去问
+     ⇒ open.h 命中摘要却查不到文本 ⇒ 宏体是空串、作用域静默不开。两边都用 normalize_path 之后才通
+
+   量到（release）：驱动层 open_project **0/9 → 9/9**（MSVC 的 STL，110 个文件，声明 6923 → **12743** 条，
+     `m.find -> xtree std::_Tree::find`，与 std_query 一字不差）；暖启动 61 ms（109/110 来自缓存）。
+     钉 CXX 的 libstdc++ 侧 9/9 不变（458 个文件、50616 条声明、暖启动 36 ms）。
+     std_query 两个方向仍 9/9；普查 128 → 128/0/0、455 → 454/1+12、MSVC（带 seeds）79/316 全部不变；
+     门禁 tests **1185** / clippy 0 / doc 0 / cpp_dump 0
+     （`open_project` 的探针现在用**本机 discover 到的**编译器写编译数据库，所以两个方向都能测：
+     不钉 = MSVC 的 STL，钉住 = libstdc++；它自己还只查 own() 成员，改成查全部成员才看得见继承来的 find）
+
    **还差的（按值排）**：
 
    ```text
-   ① B125 的求值器（上面那条）：std::string 的 5 条全卡在这里
-   ② <xstring>:1868 `_EXPORT_STD _NODISCARD constexpr string_view operator"" sv(…)` 的 ``expected `;` ``
-   ③ std::vector 的"两次声明"：**已定量**（B129）——`<vector>` 里 19311 是主模板、94905 是
+   ① <xstring>:1868 `_EXPORT_STD _NODISCARD constexpr string_view operator"" sv(…)` 的 ``expected `;` ``
+     —— 那个文件 98 个错，是 MSVC 侧最大的一格；它正是 std_query 里 `s.*` 三条事实的来源
+   ② std::vector 的"两次声明"（B129）：`<vector>` 里 19311 是主模板、94905 是
      `class vector<bool, _Alloc>;`（偏特化的前置声明），模板实参被 `base_type_name` 剥掉后两者
-     限定名都是 `std::vector`，事实里没有字段能分辨 ⇒ `definition` 报 Ambiguous（报得过头，不是报错）。
+     限定名都是 `std::vector`，而事实里没有字段能分辨 ⇒ `definition` 报 Ambiguous（报得过头，不是报错）。
      查询不受影响（成员走 `type_of` → `member_fact`）。要修得给事实加"写出来的模板形参"，
      那是新字段、要抬 FORMAT_VERSION —— 单独一轮的事
+   ③ 视图那条路（`FileView::parse` 仍是 `NoMacroBodies`）：用户在**自己缓冲区里**写
+     `#define FOO namespace x {` 还不认——它要的是"这个文件的 include 闭包"，视图手里只有一段文本。
+     索引那条路已经通了（B131 ③），差的是视图与环境的接线
+   ④ 别名的成员表少了目标的基类（B130）：一行 + 一条断言
    ```
 
-   **另外两件与本轮无关但撞上的**：环境必须完整才有宏体（`_STL_COMPILER_PREPROCESSOR` 那条链）；
-   `Session` 仍是 `configured = false`，所以编辑器那条路读不到宏体。
+   **另外两件撞上的**（一件已解决）：环境必须完整才有宏体（`_STL_COMPILER_PREPROCESSOR` 那条链）——
+   **已解决**，`Session` 现在按编译数据库声明完整性；`Session` 仍是 `configured = false` —— **同上，已经是历史**。
 
    **第 2 轮记下的那一半（作用域），现在已经并进上面的数**：
 
@@ -1654,7 +1683,11 @@ cargo run -p cpp_parser --bin cpp_dump -- <file> --tree --body NAME=TEXT [--macr
 
 1. **parser 语法长尾**（§2）：两个语料上 **79% / 63% 的失败文件首错行上一个宏都没有**——剩下的份额大多在语法，
    不在宏。队列仍是"按首错归类"：`template<typename _Tp>`、`__asm__ volatile ("tilerelease" ::)` 这些。
-2. **让确定路径改写带疑的 `visited`**（§3.5c）：它挡住"输入完整吗"这一格，也挡着 `winnt.h` 家族的四个宏。
+2. ~~**让确定路径改写带疑的 `visited`**（§3.5c）~~ —— **第 17 轮做完（B131）**：走查不再问"我这次从哪条路进来"，
+   而是问图（沿无条件 include 的一次 BFS），于是 `Session` 敢声明环境完整（`configured = database.is_some()`）。
+   同一个闭包：条件判定 188 → **440** of 486；当初丢掉的答案不仅没丢，还更多了
+   （`__MSABI_LONG` 1168 uncertain → 1168 uses，`WINAPI` 66 → 435 uses，`STDMETHODCALLTYPE` 一格没动）。
+   剩下的是那 46 个 `__has_include` —— 那是**文件问题**，解析器答得了，见 §3.5c 末尾。
 3. **有界的展开**：只对"形态 Unknown 的函数式宏当语句/声明片段"这一族（17% / 36% 的失败文件），而且**按位置**——
    parser 在具体调用点问"这次调用的展开是什么"，不是一张无位置的表（§2.0 已经把那条路量死了：+0 个文件变干净、
    −37 个变脏）。

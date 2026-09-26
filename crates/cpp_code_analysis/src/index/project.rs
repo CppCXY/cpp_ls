@@ -2434,12 +2434,14 @@ impl ProjectIndex {
     /// use [`ProjectIndex::macro_definition`] and one that asks about many should hold this.
     pub fn macro_environment(&self, name: &str, visible_from: &Path) -> MacroEnvironment {
         let mut candidates = Vec::new();
+        let certain = self.certainly_in_the_translation_unit(visible_from);
 
         self.macro_candidates(
             visible_from,
             &mut Vec::new(),
             false,
             &mut HashSet::new(),
+            &certain,
             Collecting::Name(name, &mut candidates),
             &mut self.macros.clone(),
             None,
@@ -2467,18 +2469,68 @@ impl ProjectIndex {
     /// [`ProjectIndex::macro_environment`] builds while it walks.
     pub fn macros_at(&self, path: &Path, offset: usize) -> Marked {
         let mut state = self.macros.clone();
+        let certain = self.certainly_in_the_translation_unit(path);
 
         self.macro_candidates(
             path,
             &mut Vec::new(),
             false,
             &mut HashSet::new(),
+            &certain,
             Collecting::Nothing,
             &mut state,
             Some(offset),
         );
 
         state
+    }
+
+    /// The files this query reaches through **unguarded includes only** — no `#if` anywhere on the way.
+    ///
+    /// This is the answer to "is this file part of the translation unit whatever the macros are", and it is asked
+    /// once per walk instead of being inferred from the route the walk happened to take (B131): `visited` enters a
+    /// file once, so the first route to reach it decides how everything it defines is filed, and that first route
+    /// can be a conditional include while an unguarded one exists elsewhere in the same translation unit.
+    ///
+    /// # Why not ask `visible_files`
+    ///
+    /// It answers the same question and answers it *better* — its `Unconditional` also counts an `#include` whose
+    /// condition was evaluated and found taken. It cannot be used here: that walk evaluates conditions, evaluating
+    /// one calls [`ProjectIndex::macros_at`], and `macros_at` is what builds this set. Written that way it was a
+    /// stack overflow on the first run (`macros_at` → `visible_files` → `visibility_at` → `macros_at` → …, with the
+    /// memo unable to break the cycle because an answer is only recorded once it has been computed). So what is
+    /// taken from that idea is the part that needs **nothing evaluated**, and a guarded include that *is* taken
+    /// still counts for the walk through its own route: `visibility == Active` already keeps a route certain, see
+    /// `macro_candidates`.
+    fn certainly_in_the_translation_unit(&self, from: &Path) -> HashSet<String> {
+        let from = normalize(from);
+
+        // The file itself, always: a question asked in a file is about what that file says.
+        let mut certain = HashSet::from([from.clone()]);
+        let mut pending = vec![from];
+
+        while let Some(current) = pending.pop() {
+            let Some(summary) = self.summaries.get(&current) else {
+                continue;
+            };
+
+            for include in &summary.includes {
+                if include.guard != FactGuard::Unconditional {
+                    continue;
+                }
+
+                let Some(resolved) = &include.resolved else {
+                    continue;
+                };
+
+                let next = normalize(resolved);
+                if certain.insert(next.clone()) {
+                    pending.push(next);
+                }
+            }
+        }
+
+        certain
     }
 
     /// Every fact about `name` in this file and everything it includes, with where each one sits.
@@ -2507,14 +2559,17 @@ impl ProjectIndex {
     /// decided wrongly rather than undecided:
     ///
     /// ```text
-    /// the whole path is unconditional, and the fact's region is taken   → the name, with its value
-    /// the fact settles the name whatever the branch                     → definedness alone, never the value
-    /// anything else (the region is unknown, or the path is conditional) → nothing
+    /// the file is certainly in the translation unit, and the fact's region is taken → the name, with its value
+    /// the fact settles the name whatever the branch                                  → definedness alone, never the value
+    /// anything else (the region is unknown, or the file may not be included)         → nothing
     /// ```
     ///
     /// The second line is [`MacroFact::settles_the_name`] doing the same job it does for references: `#ifndef NAME /
     /// #define NAME` says the name *is* a macro afterwards whichever branch ran, and it does **not** say which body
     /// it has — so the name is defined and its value stays unknown.
+    ///
+    /// The first line used to read "the whole **path** is unconditional", where the path meant the route this walk
+    /// took — see `certain` and B131.
     #[allow(clippy::too_many_arguments)]
     fn macro_candidates(
         &self,
@@ -2522,6 +2577,7 @@ impl ProjectIndex {
         chain: &mut Vec<usize>,
         path_conditional: bool,
         visited: &mut HashSet<String>,
+        certain: &HashSet<String>,
         mut collecting: Collecting<'_>,
         state: &mut Marked,
         upto: Option<usize>,
@@ -2530,6 +2586,14 @@ impl ProjectIndex {
         if !visited.insert(path.clone()) {
             return;
         }
+
+        // **A file this query reaches unconditionally is certainly part of the translation unit**, whatever route
+        // this particular walk took to get here (B131). The flag above is about *this* path — `visited` means a file
+        // is entered once, so the first route to reach it decided everything below — and the first route can be a
+        // conditional include while an unconditional one exists elsewhere in the same translation unit. Asking the
+        // graph instead of the route is what lets the certain path be used: `windef.h` includes `winnt.h`
+        // unconditionally, so `winnt.h`'s macros are in force, whatever `minwindef.h` did earlier.
+        let path_conditional = path_conditional && !certain.contains(&path);
 
         let Some(summary) = self.summaries.get(&path) else {
             // A file the walk cannot read is a hole in what this state knows: it may define anything, so from here
@@ -2604,6 +2668,7 @@ impl ProjectIndex {
                 chain,
                 path_conditional || visibility == Visibility::Unknown,
                 visited,
+                certain,
                 collecting.reborrow(),
                 state,
                 // An included file is pasted *at* the include, so all of it is read before the caller's next line.

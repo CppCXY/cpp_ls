@@ -476,14 +476,47 @@ impl<F: FileProvider> SummaryStore<F> {
     /// complete. The same rule as a failed `#include`, for the same reason — see [`SummaryStore::get`] — and it is
     /// counted rather than silent.
     ///
+    /// The second pass of [`SummaryStore::index_includes_from`], for a caller that indexes **file by file**.
+    ///
+    /// [`SummaryStore::get`] reads one file with whatever evidence the index has at that moment, and for a file
+    /// whose scopes come out of a macro body the evidence is usually not there yet: MSVC's `<vector>` writes
+    /// `_STD_BEGIN` and `namespace std {` is in `yvals_core.h`, which `<vector>` *includes* — and a file is read
+    /// before the files it includes, because its own `#include`s are a product of parsing it. A caller that walks a
+    /// closure one file at a time ([`crate::Session`]) therefore has to ask for this pass once the closure is in
+    /// hand, or every reading it holds is the one from before the evidence arrived.
+    ///
+    /// Measured: without this, the driver answers **0/9** on MSVC's STL where the same index built by
+    /// [`SummaryStore::index_includes_from`] answers 9/9 — `std::basic_string` is spelled `basic_string` at file
+    /// scope when `_STD_BEGIN`'s body is not read, so the name the query asks about is not in the file.
+    ///
+    /// `files` are the ones this caller has just **parsed** — a summary read from the disk cache carries whatever
+    /// reading it was stored with, and a file whose text did not change cannot have a different one. Returns how
+    /// many were re-read.
+    pub fn re_read_where_a_body_decides(&mut self, files: &[PathBuf]) -> usize {
+        self.re_read_what_a_body_changes(files, false)
+    }
+
     /// Returns how many files were re-read.
     fn re_read_what_a_body_changes(&mut self, indexed: &[PathBuf], truncated: bool) -> usize {
-        // Every indexed file's text, read once: the closure walk slices each macro's body out of it, and a
-        // candidate is re-parsed from it. One read per file per pass, rather than one per candidate include.
-        let mut sources: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
-        for path in indexed {
-            if let Some(text) = self.files.read(path) {
-                sources.insert(path.clone(), text);
+        // Every indexed file's text, read once: the walk slices each macro's body out of it, and a candidate is
+        // re-parsed from it. One read per file per pass, rather than one per candidate include.
+        //
+        // **Every** indexed file, not only the candidates — and that is not laziness, it is what the two consumers
+        // of this map need. Which names are bodied is a fact about the files that *define* macros, which need not
+        // be the files being re-read; and the walk that builds one candidate's evidence reaches whatever that
+        // candidate includes, handing out `&str` for each (see `summary::macros_from_the_closure_with_bodies`).
+        // Restricting the map to the candidates is what left the driver at **0/9** on MSVC's STL while the same
+        // index built by [`SummaryStore::index_includes_from`] answered 9/9 (B131).
+        //
+        // Keyed by the **normalized** spelling, which is the spelling the walk asks with: a resolved `#include` is
+        // normalized (`c:/users/…`) while a summary filed by a session is keyed by the path the caller spelled
+        // (`C:\Users\…`). The index looks its own paths up through the same normalization, so a map keyed by the raw
+        // spelling answers `None` for a file that is right there — measured as `open.h` arriving with an empty text
+        // and every macro body in it silently unscoped, which is exactly the bug this pass exists to prevent.
+        let mut sources: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for summary in self.index.summaries() {
+            if let Some(text) = self.files.read(&summary.path) {
+                sources.insert(normalize_path(&summary.path, cfg!(windows)), text);
             }
         }
 
@@ -494,7 +527,7 @@ impl<F: FileProvider> SummaryStore<F> {
         // hole — see `cpp_parser::BodyShape`.
         let mut bodied: Vec<String> = Vec::new();
         for summary in self.index.summaries() {
-            let Some(source) = sources.get(&summary.path) else {
+            let Some(source) = sources.get(&normalize_path(&summary.path, cfg!(windows))) else {
                 continue;
             };
             for fact in &summary.macros {
@@ -522,7 +555,7 @@ impl<F: FileProvider> SummaryStore<F> {
         let mut re_read = 0usize;
 
         for path in indexed {
-            let Some(source) = sources.get(path) else {
+            let Some(source) = sources.get(&normalize_path(path, cfg!(windows))) else {
                 continue;
             };
             if !mentions_one_of(source, &bodied) {
@@ -543,7 +576,10 @@ impl<F: FileProvider> SummaryStore<F> {
                     |wanted| {
                         Some((
                             index.summary(wanted)?,
-                            sources.get(wanted).map(String::as_str).unwrap_or(""),
+                            sources
+                                .get(&normalize_path(wanted, cfg!(windows)))
+                                .map(String::as_str)
+                                .unwrap_or(""),
                         ))
                     },
                     index.macros(),

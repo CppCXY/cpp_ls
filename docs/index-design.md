@@ -239,8 +239,13 @@ cpp_code_analysis
                           对应的复核。所以今天的诚实说法是"证据记下来了、可查"，而不是"一定会被查"
 ✘ 失效范围                 还没做：记了体证据的文件确实依赖那个头，`invalidate()` 的范围要按上面的名单放宽；
                           watcher 也还没接。名单是有界的（109 里的 33）
-✘ 编辑器那条路              `FileView::parse` 传 `NoMacroBodies`（视图只有缓冲区，没有 include 闭包）；
-                          session 的 seed 也仍是 `configured = false`（见 roadmap §4.2 ①）
+✔ 谁喂环境（第二条路，B131） `SummaryStore::re_read_where_a_body_decides`：同一个第二遍，现在对**任何**
+                          调用者可用。`Session::advance` 在队列排空时跑它，候选是"自上次这一遍以来**被解析过**"
+                          的文件（跨调用累积；从磁盘缓存读回来的不重读——它带着写入时那次运行的读法）。
+                          不这么做，编辑器那条路在 MSVC 的 STL 上是 **0/9**，而探针那条路是 9/9
+✘ 编辑器那条路              `FileView::parse` 传 `NoMacroBodies`（视图只有缓冲区，没有 include 闭包）——
+                          这一条仍在：缓冲区里自己写的 `#define FOO namespace x {` 还是不认。
+                          session 的 seed 已经不再是 `configured = false`（B131，见上面那两节）
 ```
 
 **这一轮的实测**（`std_query` 不钉 CXX，即 MSVC 的 STL）：
@@ -437,15 +442,39 @@ Unanswered               这张表**说不出** —— 既不是 0，也不是 f
 
 **量到的**（同一台机器、同一个 459 文件闭包）：**486 个条件 include 里 188 个被判定**（127 取到、61 不取、298 Unknown）——比上一节多 103 个，而且**一个否定结论都没用上**：每一格都只依赖"某个文件确实定义了它"或"编译器确实预定义了它"。
 
-**"输入完整吗"这一格还没有打开**，而这一轮量清了打开它意味着什么：
+**规则落地之后的读数**（B131）：`Session` 现在声明环境完整（`configured = database.is_some()`），188 → **440**
+判定（331/109/46），而当初丢掉的答案**没有丢**，反而更多了（`find_references` 在同一个闭包上实测）：
+
+```text
+__MSABI_LONG         1168 uncertain  → 1168 uses      （怀疑变成确定：这就是"确定路径能改写带疑访问"的直接后果）
+WINAPI               66 uses / 2658 uncertain → 435 uses / 2187 uncertain
+STDMETHODCALLTYPE    4078 uncertain  → 4078 uncertain （一格没动，且这是诚实的：它那条路要 __has_include，
+                                                        那 46 个条件今天仍答不了）
+```
+
+**"输入完整吗"这一格：已经打开（B131）**，而打开它需要先做另一件事：
 
 ```text
 把环境声明成"这就是这次编译的全部定义"（读到 compile_commands.json 时才敢这么说）
-  同一个闭包：486 里 **440 个**被判定（332 取到、108 不取、46 Unknown——剩下的几乎全是 __has_include）
-  代价：__attribute__ 767 条、STDMETHODCALLTYPE 4 078 条"可能"变成"不是引用"
+  同一个闭包：486 里 **440 个**被判定（331 取到、109 不取、46 Unknown——剩下的几乎全是 __has_include）
 ```
 
-那两条不是判定变强，是**路径被切断了**，原因定位到一行：`minwindef.h` 在 **2594** 处包含 `winnt.h`（条件 Unknown），`windef.h` 在 **366** 处也包含它（条件 Active），而 walk 里**一个文件只走一次**——第一次是带疑的那条，第二次（确定的）被 `visited` 挡掉，于是 `winnt.h` 的宏全部"不确定"，定义不再是候选。这与"一次查询走一遍 include 图"那一节记过的 `visible_files` 旧 bug 是同一类（先被条件路径找到的文件不会再被无条件路径改善），当时的修法是"更好的答案赢"；这里要做的是同一件事：**`visited` 要记住"是怎么进来的"，确定路径要能改写带疑的那次访问**。在它能改写之前，这个强声明会把诚实的疑问变成错答案，所以 `Session` 现在**不**声明它（`configured = false`，理由写在那一行旁边）。
+当初不能打开，是因为两条链**丢答案**：`__attribute__` 767 条、`STDMETHODCALLTYPE` 4 078 条"可能"被变成
+"不是引用"。根因定位到一行：`minwindef.h` 在 **2594** 处包含 `winnt.h`（条件 Unknown），`windef.h` 在 **366**
+处也包含它（条件 Active），而 walk 里**一个文件只走一次**——第一次是带疑的那条，第二次（确定的）被 `visited`
+挡掉，于是 `winnt.h` 的宏全部"不确定"，定义不再是候选。这与"一次查询走一遍 include 图"那一节记过的
+`visible_files` 旧 bug 是同一类（先被条件路径找到的文件不会再被无条件路径改善），修法也是同一件事：
+
+```text
+不再问"我这次是从哪条路进来的"，而是问**图**：
+  certainly_in_the_translation_unit(from) —— 沿无条件 include 做一次 BFS
+  走查进每个文件时：在集合里 ⇒ 一律按"确定在 TU 里"处理，与路线无关
+```
+
+**不能用 `visible_files` 来算这个集合**（它答得更全：被判定为成立的条件 include 也算无条件）——第一版就是
+那么写的，**立刻栈溢出**：`macros_at` → `visible_files` → 条件求值 → `macros_at` → ……，而记忆化帮不上忙
+（答案要算完才记下来）。所以取的是那个答案里**不需要求值任何东西**的部分；"条件成立"的 include 仍旧通过
+自己的那条路保持确定。
 
 **风险写在明处**：判定用的是**配置**。`Session::open` 从编译数据库取 `-std=`/`-D`，没有数据库时用编译器的默认（本机 g++ 15 = C++17）。用 `-std=c++20` 构建却没有数据库的项目会被按 C++17 读，`>= 202002L` 的块会被判成"不取"而跳过——**配置的错，以"少了声明"的形式出现**，所以这一句同时写在 `std-library.md` 第十五轮和 `Session` 的配置来源旁边。
 
@@ -1186,7 +1215,7 @@ loc          没有限定符：从游标所在的作用域往外，每一层能�
 ### 门禁：三件事必须全绿
 
 ```bash
-cargo test --workspace                              # 1184 个测试，38 个套件
+cargo test --workspace                              # 1185 个测试，38 个套件
 cargo clippy --workspace --all-targets              # 零警告
 cargo doc --no-deps -p cpp_code_analysis            # 零警告（cpp_parser 还有 32 条历史链接问题，不管）
 cargo run -q -p cpp_code_analysis --example std_query   # 9/9，钉不钉工具链都是（两份 STL 各测一遍）
