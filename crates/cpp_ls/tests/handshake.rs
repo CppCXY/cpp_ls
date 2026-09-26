@@ -206,6 +206,64 @@ fn a_client_can_open_a_file_and_get_diagnostics_a_definition_and_a_hover() {
     );
 }
 
+/// The project's own `.cppls.toml` is read by the engine and honoured by the **server**.
+///
+/// The engine's tests prove the file is parsed; what they cannot prove is that a setting in it reaches the layer
+/// that acts on it — the one file is parsed once, in the engine, and the server reads the same struct
+/// (`Session::project_config`). Hover is the setting with an observable answer: with `hover.enable = false` the
+/// same request that answers with a declaration in the test above answers `null`, and nothing else changes.
+#[test]
+fn a_project_configuration_reaches_the_servers_behaviour() {
+    let project = Project::new("configured");
+    project.write("widget.h", WIDGET_H);
+    project.write("main.cpp", MAIN_CPP);
+    project.write(".cppls.toml", "[hover]\nenable = false\n");
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": MAIN_CPP }
+        }),
+    );
+
+    // The same position the test above gets a declaration from — `Widget w;` on line 3.
+    let hover = server.request(
+        2,
+        "textDocument/hover",
+        json!({
+            "textDocument": { "uri": main_uri },
+            "position": { "line": 3, "character": 6 },
+        }),
+    );
+
+    assert_eq!(
+        hover["result"],
+        Value::Null,
+        "the project turned the popup off, and the server read the project's file to find that out: {hover}"
+    );
+
+    let shutdown = server.request(3, "shutdown", Value::Null);
+    assert_eq!(shutdown["result"], Value::Null);
+    server.notify("exit", Value::Null);
+    assert!(server.wait_for_exit());
+}
+
 /// A project directory removed when the test ends, including when it fails.
 struct Project {
     root: PathBuf,

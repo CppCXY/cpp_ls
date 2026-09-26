@@ -37,10 +37,17 @@ const WATCH_FILES_REGISTRATION_ID: &str = "cpp_ls_watched_files";
 /// Braces are part of the LSP glob dialect (`GlobPattern::String` is matched with the client's own implementation,
 /// which follows the protocol's grammar), and this is the same extension list the analysis scans a project for —
 /// one list, so that "what the client tells us about" and "what the scan picks up" cannot drift apart.
+///
+/// The last three are the files that **configure** the analysis rather than being part of it
+/// (`cpp_code_analysis::CONFIGURATION_FILE_NAMES`): a change to one of them is not an edit to index, it is a reason
+/// to work the project out again, and a client that never mentions them would leave a workspace analysing a
+/// compilation that no longer exists.
 const WATCHED_GLOBS: &[&str] = &[
     "**/*.{c,cc,cpp,cxx,c++,h,hh,hpp,hxx,h++,ipp,inl,tpp,tcc}",
     "**/*.{cppm,ixx}",
+    "**/.cppls.toml",
     "**/compile_commands.json",
+    "**/CMakeCache.txt",
 ];
 
 pub async fn register_files_watch(context: ServerContextSnapshot) {

@@ -70,6 +70,13 @@ pub async fn on_hover(
 /// `None` is the answer for punctuation, for whitespace, and for a name the analysis cannot place: a client shows
 /// nothing, and "there is nothing to say here" is true, where an empty popup would not be.
 pub fn hover(session: &Session<DiskFiles>, view: &FileView, offset: usize) -> Option<Hover> {
+    // A project can turn the popup off (`hover.enable = false` in `.cppls.toml`), which is a preference about the
+    // editor rather than about the analysis — so it is checked here, at the edge, and the queries below do not know
+    // it exists.
+    if session.project_config().config.hover.enable == Some(false) {
+        return None;
+    }
+
     // The macro question first: it is about the text, and it is answered without the scope tree.
     if let Known::Yes(found) = session.macro_definition(view, offset) {
         return Some(markdown(macro_markdown(session, &found)));
@@ -200,8 +207,12 @@ fn declaration_text(
     file: &std::path::Path,
     fact: &DeclFact,
 ) -> String {
-    match session.text(file) {
-        Some(text) => slice_lines(&text, fact.range.start_offset, fact.range.end_offset()),
+    // From the VFS, which holds the file and its lines: a hover that names a declaration in a header nobody has
+    // opened reads that header **once per session**, not once per hover.
+    match session.files().file(file) {
+        Some(declaring) => {
+            slice_lines(&declaring.text, fact.range.start_offset, fact.range.end_offset())
+        }
         // The file cannot be read (deleted since it was indexed, or a buffer that was closed unsaved): the fact is
         // still true, and what it says is shown without the text.
         None => format!("{} {}", kind_words(fact), fact.qualified_name()),
@@ -215,11 +226,12 @@ fn definition_line(
     name_offset: usize,
     body_range: Option<cpp_parser::SourceRange>,
 ) -> RenderedText {
-    let Some(text) = session.text(file) else {
+    let Some(defining) = session.files().file(file) else {
         return RenderedText {
             text: format!("<the macro is defined in an unreadable file: {}>", file.display()),
         };
     };
+    let text: &str = &defining.text;
 
     // The name's range is the name; the body's range (when there is one) is everything after the parameters, and
     // it is stored precisely so that a consumer does not have to search for the end of the directive.
@@ -267,8 +279,10 @@ fn where_clause(session: &Session<DiskFiles>, file: &std::path::Path, offset: us
         .unwrap_or_else(|| file.display().to_string());
 
     match session
-        .text(file)
-        .and_then(|text| cpp_parser::LineIndex::parse(&text).position_of(offset, &text))
+        .files()
+        .file(file)
+        .as_ref()
+        .and_then(|declaring| declaring.position_at(offset))
     {
         Some((line, column)) => format!("`{name}:{}:{}`", line + 1, column + 1),
         None => format!("`{name}`"),
@@ -344,3 +358,5 @@ mod tests {
         assert_eq!(code_block(""), "");
     }
 }
+
+

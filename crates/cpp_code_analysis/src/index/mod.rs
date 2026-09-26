@@ -61,7 +61,7 @@ pub use worklist::{Priority, Step, StepOutcome, Worklist, outcome_of};
 
 use crate::cache::{SummaryKey, content_hash};
 use crate::include::config::CompilerConfig;
-use crate::include::paths::{FileProvider, PathInterner};
+use crate::file::paths::{FileProvider, PathInterner};
 use crate::include::IncludeResolver;
 use crate::preprocess::directive::{Directive, SpannedDirective};
 use crate::preprocess::preprocess;
@@ -610,8 +610,11 @@ fn include_fact<F: FileProvider>(
 /// The write is a `.tmp` file followed by a rename, so a crash mid-write leaves the old summary rather than half
 /// of a new one — and a half-written summary is worse than none, because a *wrong* entry answers queries that a
 /// missing one would have sent to a rebuild.
-pub fn write_summary(summary: &FileSummary, project_root: &Path) -> std::io::Result<PathBuf> {
-    let path = summary.key.path_under(project_root);
+///
+/// `cache_directory` is the directory the summaries live in (`<root>/.cppls` unless a project renamed it); the key
+/// names the file inside it, and nothing else about the project's layout is involved.
+pub fn write_summary(summary: &FileSummary, cache_directory: &Path) -> std::io::Result<PathBuf> {
+    let path = summary.key.path_under(cache_directory);
     let bytes = crate::summary_codec::encode(summary);
 
     if let Some(directory) = path.parent() {
@@ -660,7 +663,7 @@ mod tests {
     use super::{FileIndexer, include_fact, macro_body_shape, summarize, write_summary};
     use crate::cache::SummaryKey;
     use crate::include::config::CompilerConfig;
-    use crate::include::paths::{FileProvider, MemoryFiles, PathInterner};
+    use crate::file::paths::{FileProvider, MemoryFiles, PathInterner};
     use crate::include::IncludeResolver;
     use crate::preprocess::directive::{Directive, IncludeForm};
     use crate::preprocess::macros::MacroTable;
@@ -1406,3 +1409,4 @@ mod tests {
         assert_eq!(files.read(Path::new("/p/other.h")), None);
     }
 }
+

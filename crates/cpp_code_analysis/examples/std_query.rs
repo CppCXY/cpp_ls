@@ -79,13 +79,20 @@ fn main() {
     std::fs::write(&probe, PROBE).expect("the probe writes");
 
     let files = DiskFiles;
-    let toolchain = discover(&files, &DiskCommands, None, &probe, &Environment::current());
+    let toolchain = discover(
+        &files,
+        &DiskCommands,
+        None,
+        &probe,
+        &Environment::current(),
+        &cpp_code_analysis::include::msvc::WindowsLayout::current(),
+    );
 
     let config = match &toolchain {
         Some(toolchain) => {
             println!(
                 "toolchain: {} ({})\n  {} system include directories",
-                toolchain.compiler.display(),
+                toolchain.compiler_name(),
                 toolchain.version.as_deref().unwrap_or("version not reported"),
                 toolchain.system_include_paths.len()
             );
@@ -286,3 +293,4 @@ fn short(path: &Path) -> String {
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| path.display().to_string())
 }
+

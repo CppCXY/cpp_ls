@@ -32,6 +32,14 @@ pub struct CmdArgs {
     #[cfg_attr(feature = "cli", structopt(long, default_value = ""))]
     pub resources_path: NoneableString,
 
+    /// Path to a project configuration file, instead of `.cppls.toml` in the workspace root.
+    ///
+    /// For the project whose configuration lives somewhere else — a shared file, a generated one, a checkout being
+    /// tried with different flags. A path that does not exist is reported rather than ignored: an instruction is
+    /// not a convention (see `cpp_code_analysis::project::load_config`).
+    #[cfg_attr(feature = "cli", structopt(long, default_value = "none"))]
+    pub config: NoneableString,
+
     /// Whether to load the standard library.
     #[cfg_attr(feature = "cli", structopt(long, default_value = "true"))]
     pub load_stdlib: CmdBool,

@@ -62,7 +62,7 @@ use cpp_parser::Dialect;
 
 use crate::cache::{SummaryKey, content_hash, fnv1a64};
 use crate::include::config::CompilerConfig;
-use crate::include::paths::{DiskFiles, FileProvider, normalize_path};
+use crate::file::paths::{DiskFiles, FileProvider, normalize_path};
 use crate::index::project::ProjectIndex;
 use crate::index::{FileIndexer, read_summary, write_summary};
 use crate::summary::{FileSummary, IncludeFact};
@@ -80,6 +80,8 @@ pub struct SummaryStore<F: FileProvider = DiskFiles> {
     /// The project root. The cache lives under it, because `docs/index-design.md` puts it there on purpose: it
     /// travels with a checkout, so CI gets the same warm cache a developer has.
     root: PathBuf,
+    /// Where the summaries are written: `<root>/.cppls`, or the directory `index.cache_dir` names.
+    cache: PathBuf,
     config: CompilerConfig,
     files: F,
     index: ProjectIndex,
@@ -230,13 +232,33 @@ impl<F: FileProvider> SummaryStore<F> {
         config: CompilerConfig,
         files: F,
     ) -> SummaryStore<F> {
+        let root = root.into();
+
         SummaryStore {
-            root: root.into(),
+            cache: root.join(crate::CACHE_DIRECTORY),
+            root,
             config,
             files,
             index: ProjectIndex::new(),
             stats: StoreStats::default(),
         }
+    }
+
+    /// Put the cache under a directory with another **name** (`index.cache_dir` in `.cppls.toml`).
+    ///
+    /// A name, not a path: the cache is the project's, it travels with the checkout, and a caller that wants it
+    /// somewhere else entirely is asking for a different feature. An empty name is ignored, because "the cache
+    /// directory is the empty string" is not a directory.
+    pub fn with_cache_directory(mut self, name: &str) -> Self {
+        if !name.is_empty() {
+            self.cache = self.root.join(name);
+        }
+        self
+    }
+
+    /// Where the summaries are written, which is what a caller reporting on the cache wants to print.
+    pub fn cache_directory(&self) -> &Path {
+        &self.cache
     }
 
     pub fn stats(&self) -> StoreStats {
@@ -286,7 +308,7 @@ impl<F: FileProvider> SummaryStore<F> {
         let source = self.files.read(path)?;
         let key = SummaryKey::new(content_hash(&source), self.context_hash(path));
 
-        if let Ok(stored) = read_summary(&key.path_under(&self.root))
+        if let Ok(stored) = read_summary(&key.path_under(&self.cache))
             && stored.key == key
             && self.resolution_still_holds(path, &stored)
         {
@@ -307,7 +329,7 @@ impl<F: FileProvider> SummaryStore<F> {
         } else {
             // A failed write is not a failed lookup: the answer is in hand and in the index. Reporting it would
             // turn a read-only checkout — a perfectly ordinary way to work — into a broken editor.
-            let _ = write_summary(&summary, &self.root);
+            let _ = write_summary(&summary, &self.cache);
         }
 
         self.index.insert(summary);
@@ -446,7 +468,7 @@ impl<F: FileProvider> SummaryStore<F> {
 
         let directory = path.parent().unwrap_or(Path::new("."));
         let resolver = crate::include::IncludeResolver::new(&self.files, &self.config);
-        let mut interner = crate::include::paths::PathInterner::new(cfg!(windows));
+        let mut interner = crate::file::paths::PathInterner::new(cfg!(windows));
 
         summary.includes.iter().all(|fact| {
             let now = resolver.resolve(&fact.as_include(), directory, None, &mut interner);
@@ -579,7 +601,7 @@ fn has_unresolved_includes(summary: &FileSummary) -> bool {
 mod tests {
     use super::SummaryStore;
     use crate::include::config::CompilerConfig;
-    use crate::include::paths::MemoryFiles;
+    use crate::file::paths::MemoryFiles;
     use cpp_parser::Dialect;
     use std::path::Path;
 
@@ -723,15 +745,17 @@ mod tests {
             crate::cache::content_hash("struct Two { int b; };\n")
         );
         assert_ne!(
-            one.key.path_under(&root),
-            two.key.path_under(&root),
+            one.key.path_under(store.cache_directory()),
+            two.key.path_under(store.cache_directory()),
             "two files, two entries"
         );
 
         // And both are really on disk, each holding the facts of the file that wrote it — which is what a
         // collision would have made impossible to notice from the outside.
-        let stored_one = super::read_summary(&one.key.path_under(&root)).expect("written");
-        let stored_two = super::read_summary(&two.key.path_under(&root)).expect("written");
+        let stored_one =
+            super::read_summary(&one.key.path_under(store.cache_directory())).expect("written");
+        let stored_two =
+            super::read_summary(&two.key.path_under(store.cache_directory())).expect("written");
         assert_eq!(stored_one.path, std::path::Path::new("/p/one.h"));
         assert_eq!(stored_two.path, std::path::Path::new("/p/two.h"));
         assert!(
@@ -1622,3 +1646,4 @@ mod tests {
         );
     }
 }
+

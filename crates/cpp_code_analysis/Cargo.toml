@@ -10,3 +10,9 @@ cpp_parser.workspace = true
 # project considers its own source is a convention no analysis can guess, so a caller says it — and a caller with a
 # configuration file has a glob in its hand, not a directory.
 glob.workspace = true
+
+# The project's own configuration file. `serde` is already in the graph (`cpp_parser` derives a `Serialize` for
+# `CppSyntaxId`), and `toml` is the parser for it — a file a user hand-writes gets a real parser rather than a
+# subset that silently ignores what it cannot read.
+serde.workspace = true
+toml.workspace = true

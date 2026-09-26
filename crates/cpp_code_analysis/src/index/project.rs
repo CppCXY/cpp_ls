@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 
 use crate::guard::Visibility;
 use crate::include::graph::Marked;
-use crate::include::paths::normalize_path;
+use crate::file::paths::normalize_path;
 use crate::summary::{DeclFact, FactGuard, FileSummary, MacroFact};
 use crate::symbol::{Known, UnknownReason};
 
@@ -5711,5 +5711,6 @@ mod tests {
         );
     }
 }
+
 
 

@@ -28,6 +28,11 @@ pub struct WorkspaceState {
     /// The editor's open buffers, by URI, as the client sent them.
     pub open_files: HashMap<Uri, String>,
     pub client_config: ClientConfig,
+    /// A configuration file a caller named (`--config`), for a workspace whose `.cppls.toml` is elsewhere.
+    ///
+    /// Kept here rather than passed along at `initialized`, because a **reload** re-opens the session and has no
+    /// command line of its own: the file the user pointed at is part of what the workspace is, so it is state.
+    config_file: Option<PathBuf>,
     /// The client's `exclude` list, parsed once — see [`WorkspaceState::set_client_config`].
     excludes: Vec<PathPattern>,
 }
@@ -38,6 +43,7 @@ impl WorkspaceState {
             roots: Vec::new(),
             open_files: HashMap::new(),
             client_config: ClientConfig::default(),
+            config_file: None,
             excludes: Vec::new(),
         };
         state.set_client_config(client_config);
@@ -51,6 +57,16 @@ impl WorkspaceState {
 
     pub fn set_roots(&mut self, roots: Vec<PathBuf>) {
         self.roots = roots;
+    }
+
+    /// Remember a configuration file a caller named, for the reloads that follow.
+    pub fn set_config_file(&mut self, config_file: Option<PathBuf>) {
+        self.config_file = config_file;
+    }
+
+    /// The configuration file a caller named, if any. `None` is the conventional `.cppls.toml` in the root.
+    pub fn config_file(&self) -> Option<&Path> {
+        self.config_file.as_deref()
     }
 
     /// Take the client's configuration, parsing the exclusions it names.

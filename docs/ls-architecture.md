@@ -166,7 +166,6 @@ session.macro_definition / macro_references / member_completions / name_completi
 `Unknown` → `Missing`（并把 reason 记进日志，而不是编一个空答案给客户端）。
 
 ### provider 的归属：**引擎改成拥有它**（这一节记的是结论，不是选项）
-
 上一版 `Session` 是 `Session<'a, F>`，字段 `files: &'a SessionFiles<F>`，`SummaryStore` 也一样借用
 （`store: SummaryStore<'a, SessionFiles<F>>`）。于是"一个活到进程结束的服务器同时持有 provider 与借用它的
 session"就是自引用结构，当时的候选方案是 `Box::leak`。
@@ -200,6 +199,30 @@ state.open(root, filter).await;                // Session::open(root, files.clon
 真正的 `Session::open` 在 `initialized`（此时才知道 workspace folder）。所以字段是
 `RwLock<Option<Session<DiskFiles>>>`：没有 session 时所有查询回答 `Missing`——这正是它该说的话
 （"没人说过"，不是"没有"）。`initialize` 与 `initialized` 之间到达的请求就落在这里，日志里会留一行。
+
+### 文件层：VFS 与 `FileView`（`cpp_code_analysis::file`）
+
+```text
+file/paths.rs   provider 链（DiskFiles / MemoryFiles / OverlayFiles / OpenDocuments）、FileId、路径规范化
+file/vfs.rs     **持有的文件**：文本 + 那一段文本的 LineIndex，两者一起建立、一起替换
+file/view.rs    FileView = VfsFile（file id + text + line_index + open）+ 解析（tree/root）+ scopes
+file/mod.rs     FileAnalysis / FileTokens（单文件事实与 token 流）
+```
+
+三条规矩：
+
+1. **文本与行索引同生同死**：`Vfs::insert` 同时写文本和它算出来的 `LineIndex`，没有第二条路径能改其中一半。
+   一个落后一次编辑的行索引比没有行索引更糟——编辑之后的每个位置都会**静默**映射到错的偏移。
+2. **`FileView` 是 VFS 的引用**：`Arc<str>` + `Arc<LineIndex>` 共享，所以一个 view 活得过创建它的那次调用
+   （handler 可以先解析位置、再问好几个问题），而且 `offset_at`/`position_at` 是索引里的二分查找——
+   这正是之前错的地方：`FileView::offset_at` 每调用一次就 `LineIndex::parse` 一遍（**一次全文件扫描**），
+   而文件的"行"只在文本变化时才变，那是 VFS 知道的事。
+3. **别的文件也从 VFS 拿**：hover/definition 要读"声明所在的那个头文件"，它走 `session.files().file(path)` ——
+   一次读入、被持有，之后的 hover 直接命中；不再 `session.text()` + 现搭一个 `LineIndex`。
+
+顺带在这一层修掉一个真 bug：`LineIndex::get_offset` 原来把列号**对整个文本**做 clamp，于是
+`get_offset(0, 99)` 在一个三行文件上会返回**后面某一行里**的偏移——一个不在调用者所问文件位置上的位置
+（现在 clamp 到该行的行尾，这也正是协议对超长 character 的规定）。
 
 ---
 
@@ -262,6 +285,65 @@ shutdown/exit     主循环退出 → ServerContext::close()（取消所有诊�
    用户一打字，那个文件就从索引里消失了，`definition`/`hover` 对它永远答 `null`。修法是索引泵（§1）。
 2. **`exit` 之后不退出**：`run_ls` 结尾 `threads.join()`，而 IO 读线程阻塞在 stdin 上——
    客户端说了 `exit` 却不关管道时，服务器反而挂住。
+
+### 5.1 工作区发现与配置（`cpp_code_analysis::project` + `include::{msvc, system_headers}`）
+
+"这个工程是什么、怎么编译"原来散在三处（会话读数据库、服务器读客户端设置、没人读工程自己的文件），
+现在是一层：**四个来源，每个都比前一个弱，每个答案都带来源标签**。
+
+```text
+.cppls.toml              人说的（唯一能覆盖其它一切的来源）
+compile_commands.json    工程自己的构建（根目录 + 有界扫 build 目录，深度 ≤3、≤2000 个目录、排序保证可复现）
+CMakeCache.txt           CMake 配置时留下的（编译器、CMAKE_CXX_FLAGS、标准、构建类型；只取 CMAKE_BUILD_TYPE 那一组）
+工具链                   问编译器自己（GNU 系 -dM -E -v；MSVC 见下）
+系统头目录               兜底：没有任何编译器能问时的约定目录，**标为猜测**
+```
+
+**`.cppls.toml` 的三条已定决策**（用户拍的）：
+
+| 决策 | 内容 |
+|---|---|
+| `[compile].args` **赢** | 写了 `args` 就完全忽略数据库的 flags；`extra_args`/`remove_args` 在任何情况下都作用在"赢了的那份"上，一趟过：先删后加（所以"删掉数据库的 `-std=c++17`、加上 `-std=c++20`"结果是 c++20） |
+| 一个文件管到 LSP 层 | `[diagnostics] on_change_ms`、`[hover] enable` 与引擎的键在**同一个文件、同一次解析**里：引擎解析并校验，LSP 只读同一个结构体（`Session::project_config()`），未知键报问题——不允许两个 crate 各读一半 |
+| 逐节解析 | 一个坏键**不能**带走整份配置：每节单独解码，失败的节报问题并保持默认，其它节照常生效；未知的**节名**也报（那是最安静的一种错字） |
+
+**工具链顺序**（`toolchain::discover`）：数据库 → `CXX`/`CC` → **平台默认（Windows 上 MSVC）** → `PATH` →
+系统候选目录。`ToolchainSource` 记录哪一步答的（`CompileDatabase` / `Environment` / `PlatformDefault` /
+`Path` / `SystemHeaders`），`Toolchain::note` 记下"宏环境是未知的"这类话——**猜可以，把猜说成事实不行**。
+
+**MSVC：实测过，不是照文档猜**（证据在 [`msvc-notes.md`](msvc-notes.md)，子代理在本机跑的）：
+
+```text
+vswhere -latest -format json        24 ms，一次调用拿到安装目录 + 版本
+VC\Tools\MSVC\14.35.32215           toolset 从磁盘枚举（四个 Host×target，本机无 ARM64）
+INCLUDE 自己拼                       8 个目录，顺序与 vcvars64 一致（不存在的目录不写进去）
+cl /nologo /Zc:preprocessor /PD /c  58 个预定义宏；**/PD 少了 /Zc:preprocessor 会在退出码 0 下什么都不打**
+退出码 1/2/4/0                      "拿不到环境"/"命令行被拒或无头文件"/"资源加载失败"/"成功"——**空输出不等于空结果**
+```
+
+**不跑 `vcvars64.bat`**：它 1.3 s，而自己拼 `INCLUDE` + 绝对路径调 `cl` 只要 ~50 ms（实测 26×）。
+所有 `cl` 诊断都是本地化的（本机只有中文资源，`VSLANG=1033` 无效），所以**只认退出码和 `D####`/`C####` 码，不认文本**。
+
+本机跑 `examples/discover.rs` 的结果：MSVC 14.35.32215 + Windows SDK 10.0.22621.0、8 条 include、
+58 个宏、方言 `Msvc`、来源 `PlatformDefault`。
+
+**一条纪律**：上面这个默认值会改变**普查的口径**——455/128 两份清单是 mingw 的 libstdc++ 闭包，
+而默认工具链现在在这台机器上是 MSVC。所以普查命令要**钉住工具链**（`$env:CXX = <mingw g++>`），
+两份读数才可比；不钉的那一遍是**另一个测量**（用 MSVC 的 STL 读同一个清单），不要混着报。
+
+**同一个道理，一条开着的回归（根因已查明）**：`std_query` 钉住 mingw 是 **9/9**（279 个文件的闭包），
+不钉是 **0/9**——MSVC 的闭包只索引到 107 个文件，而原因是**宏展开出的 namespace**：
+
+```text
+MSVC 的 <vector>： `_STD_BEGIN` 出现 1 次，字面 `namespace std` 出现 0 次
+yvals_core.h：     #define _STD_BEGIN namespace std {
+```
+
+我们的每文件事实是从 CST 上收的，`namespace std` 不是一个节点，于是 `std::vector` 这个事实不存在。
+**不是"MSVC 不能用"，也不是工具链发现错了**——是作用域构建还看不穿"展开后是 namespace 的宏"，
+属于 `grammar-gaps.md` 的宏族（设计级）那一档。登记在 [`roadmap.md`](roadmap.md) §4.2 ①。
+（顺带记一个**不是**缺陷的：`xmm_func.h` 那条未解析 include 在 `#ifdef __ICL` 里，而 `configured = false`
+让条件答 Unknown、Unknown 按"可能编译"跟进——代价是那一个文件不进缓存，设计如此。）
 
 ### 还剩什么（**不是待办清单，是缺口**）
 

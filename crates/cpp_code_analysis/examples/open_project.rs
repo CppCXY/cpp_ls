@@ -113,7 +113,7 @@ fn main() {
     match session.toolchain() {
         Some(toolchain) => println!(
             "  toolchain: {} ({}) — {} system include directories",
-            toolchain.compiler.display(),
+            toolchain.compiler_name(),
             toolchain.version.as_deref().unwrap_or("version not reported"),
             toolchain.system_include_paths.len()
         ),
@@ -392,3 +392,4 @@ fn names(paths: &[PathBuf]) -> String {
         .collect::<Vec<_>>()
         .join(", ")
 }
+

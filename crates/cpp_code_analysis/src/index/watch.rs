@@ -73,7 +73,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::include::config::CompilerConfig;
-use crate::include::paths::{FileProvider, join_normalized, normalize_path};
+use crate::file::paths::{FileProvider, join_normalized, normalize_path};
 use crate::index::store::SummaryStore;
 use crate::index::ProjectIndex;
 use crate::preprocess::directive::IncludeForm;
@@ -211,6 +211,20 @@ impl WatchFilter {
         self
     }
 
+    /// The cache directory's **name**, when the project renamed it (`index.cache_dir` in `.cppls.toml`).
+    ///
+    /// A name rather than a path: the cache lives under the project root or it is not the project's cache, and the
+    /// rule that keeps a watcher from re-indexing the index's own writes has to be the same one the store writes
+    /// under. `docs/index-design.md` gives the reason the cache is inside the checkout at all.
+    pub fn with_cache_directory(mut self, name: &str) -> Self {
+        if !name.is_empty() {
+            self.cache = self
+                .root
+                .join(name);
+        }
+        self
+    }
+
     /// Is this event one the index should not even look at?
     pub fn is_ignored(&self, path: &Path) -> bool {
         let path = normalize(path);
@@ -251,7 +265,32 @@ impl WatchFilter {
 
     /// Is this path the compile database?
     pub fn is_configuration(&self, path: &Path) -> bool {
-        normalize(path) == normalize(&self.configuration)
+        self.is_configuration_file(path)
+    }
+
+    /// Is this path one of the files that **configure** the analysis?
+    ///
+    /// Three questions have one answer here, which is why the rule is a method rather than a comparison at each
+    /// call site: an event about a configuration file is not an edit to index, it is a reason to *reconfigure*; a
+    /// project's configuration lives in files whose names are conventions; and the same name anywhere in the tree
+    /// means the same thing — a build directory's `compile_commands.json` configures the build as much as the
+    /// root's does, and a vendored subproject's `CMakeCache.txt` describes a compilation this analysis may well be
+    /// reading.
+    ///
+    /// The explicit path is kept as well, because a caller can point the database somewhere no convention
+    /// predicts (`compile.database` in `.cppls.toml`).
+    pub fn is_configuration_file(&self, path: &Path) -> bool {
+        if normalize(path) == normalize(&self.configuration) {
+            return true;
+        }
+
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                crate::project::CONFIGURATION_FILE_NAMES
+                    .iter()
+                    .any(|known| known.eq_ignore_ascii_case(name))
+            })
     }
 }
 
@@ -713,7 +752,7 @@ fn normalize(path: &Path) -> String {
 mod tests {
     use super::{ChangeBatch, EventKind, FileEvent, PathPattern, WatchFilter};
     use crate::include::config::CompilerConfig;
-    use crate::include::paths::{DiskFiles, MemoryFiles};
+    use crate::file::paths::{DiskFiles, MemoryFiles};
     use crate::index::store::SummaryStore;
     use std::path::{Path, PathBuf};
 
@@ -1523,3 +1562,4 @@ mod tests {
         );
     }
 }
+

@@ -183,15 +183,18 @@ impl SummaryKey {
         format!("{:016x}", fnv1a64(&bytes))
     }
 
-    /// Where the summary for this key lives, under `project_root`.
+    /// Where the summary for this key lives, under a project's cache directory.
     ///
-    /// Two levels deep — `<root>/.cppls/summaries/<first two hex digits>/<key>.bin` — because a flat directory with
+    /// Two levels deep — `<cache>/summaries/<first two hex digits>/<key>.bin` — because a flat directory with
     /// tens of thousands of entries is slow to list and unpleasant to debug; the prefix directory is the usual
     /// sharding, and it is derived from the key so nothing has to be looked up.
-    pub fn path_under(self, project_root: &Path) -> PathBuf {
+    ///
+    /// The cache **directory** rather than the project root, because the directory is configurable
+    /// (`index.cache_dir` in `.cppls.toml`) and the two callers that must agree about it — the store writing and
+    /// the watcher deciding what to ignore — would otherwise each join their own idea of the name to the root.
+    pub fn path_under(self, cache_directory: &Path) -> PathBuf {
         let stem = self.file_stem();
-        project_root
-            .join(CACHE_DIRECTORY)
+        cache_directory
             .join("summaries")
             .join(&stem[..2])
             .join(format!("{stem}.bin"))
@@ -292,8 +295,8 @@ mod tests {
         assert_ne!(content_hash("int x;\n"), content_hash("int y;\n"));
 
         let key = SummaryKey::new(content_hash("int x;\n"), 7);
-        let from_one_root = key.path_under(Path::new("/one/project"));
-        let from_another = key.path_under(Path::new("D:/elsewhere/checkout"));
+        let from_one_root = key.path_under(Path::new("/one/project/.cppls"));
+        let from_another = key.path_under(Path::new("D:/elsewhere/checkout/.cppls"));
         assert_eq!(
             from_one_root.file_name(),
             from_another.file_name(),
@@ -304,7 +307,7 @@ mod tests {
     #[test]
     fn the_layout_is_sharded_and_inside_the_project() {
         let key = SummaryKey::new(0, 0);
-        let path = key.path_under(Path::new("/p"));
+        let path = key.path_under(&Path::new("/p").join(CACHE_DIRECTORY));
         let text = path.to_string_lossy().replace('\\', "/");
 
         assert!(

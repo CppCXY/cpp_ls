@@ -39,7 +39,7 @@ use std::path::PathBuf;
 
 use cpp_parser::{CppLexer, CppTokenKind, LexerConfig, SourceRange};
 
-use crate::include::paths::{FileProvider, normalize_path};
+use crate::file::paths::{FileProvider, normalize_path};
 use crate::index::ProjectIndex;
 use crate::summary::MacroKind;
 use crate::symbol::{Known, UnknownReason};
@@ -425,7 +425,7 @@ mod tests {
     use crate::cache::SummaryKey;
     use crate::include::config::CompilerConfig;
     use crate::include::graph::Marked;
-    use crate::include::paths::{FileProvider, MemoryFiles};
+    use crate::file::paths::{FileProvider, MemoryFiles};
     use crate::index::{FileIndexer, ProjectIndex};
     use crate::symbol::{Known, UnknownReason};
     use std::path::Path;
@@ -1011,3 +1011,4 @@ mod tests {
         }
     }
 }
+

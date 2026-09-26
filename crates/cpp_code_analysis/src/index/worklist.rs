@@ -50,7 +50,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use crate::include::paths::{FileProvider, normalize_path};
+use crate::file::paths::{FileProvider, normalize_path};
 use crate::index::store::{StoreStats, SummaryStore};
 
 /// The order to work a project in, growing as it goes. See the module documentation.
@@ -259,7 +259,7 @@ impl<F: FileProvider> SummaryStore<F> {
 mod tests {
     use super::{Priority, StepOutcome, Worklist};
     use crate::include::config::CompilerConfig;
-    use crate::include::paths::MemoryFiles;
+    use crate::file::paths::MemoryFiles;
     use crate::index::store::SummaryStore;
     use std::path::{Path, PathBuf};
 
@@ -564,3 +564,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+

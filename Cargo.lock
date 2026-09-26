@@ -219,6 +219,8 @@ version = "0.1.0"
 dependencies = [
  "cpp_parser",
  "glob",
+ "serde",
+ "toml",
 ]
 
 [[package]]

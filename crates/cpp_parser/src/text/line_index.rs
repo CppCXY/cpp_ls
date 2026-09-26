@@ -124,28 +124,47 @@ impl LineIndex {
         self.get_line_col(TextSize::from(u32::try_from(offset).ok()?), source_text)
     }
 
-    // get offset by line and col
+    /// The offset of a **line and column**, both counted from zero.
+    ///
+    /// The mapping a client's positions come in through, and the one that has to be strict about where a line ends:
+    /// `col` is a column *of that line*, so a column past the line's end is clamped to the line's end (which is
+    /// what the protocol says to do with an over-long character value) — it is **not** allowed to walk into the next
+    /// line. The version this replaced clamped against the whole *text* instead, so `get_offset(0, 99)` on a
+    /// three-line file answered with an offset inside a later line: a position that is not in the file the caller
+    /// asked about, and one whose characters belong to a different line's syntax.
+    ///
+    /// `None` for a line the text does not have.
     pub fn get_offset(&self, line: usize, col: usize, source_text: &str) -> Option<TextSize> {
         let start_offset = self.get_line_offset(line)?;
         if col == 0 {
             return Some(start_offset);
         }
 
+        // The line's own extent: up to the next line's start, or to the end of the text.
+        let line_end = self
+            .get_line_offset(line + 1)
+            .map_or(source_text.len(), usize::from)
+            .min(source_text.len());
+        let line_text = source_text.get(usize::from(start_offset)..line_end)?;
+        let body = line_text.strip_suffix('\n').unwrap_or(line_text);
+        let body = body.strip_suffix('\r').unwrap_or(body);
+
         if self.is_line_only_ascii(line.try_into().unwrap()) {
-            let col = col.min(source_text.len());
+            let col = col.min(body.len());
             Some(start_offset + TextSize::from(col as u32))
         } else {
             let mut offset = 0;
             let mut col = col;
-            for c in source_text[usize::from(start_offset)..].chars() {
+            for character in body.chars() {
                 if col == 0 {
                     break;
                 }
 
-                offset += c.len_utf8();
+                offset += character.len_utf8();
                 col -= 1;
             }
             Some(start_offset + TextSize::from(offset as u32))
         }
     }
 }
+

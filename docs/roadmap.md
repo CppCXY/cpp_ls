@@ -31,7 +31,7 @@
 `%TEMP%\stdprobe\files.txt` 的 128 个文件（`<vector>/<string>/<map>/<algorithm>` 的闭包）——
 **`干净 128 / 报错 0`**，消息总数 **0**（带 seeds）；`%TEMP%\cppls-indexed.txt` 的 455 个文件（分析闭包）——
 **`干净 455 / 报错 0 / 消息 0`（带 seeds）**，不带 seeds 的那一遍是 `干净 454 / 报错 1`（剩下的那个文件见下）。
-Rust 侧 `cargo test --workspace` = **1124 个测试 / 38 个套件全绿**（含 `cpp_ls` 的 28 个单测与 1 个端到端测试）。
+Rust 侧 `cargo test --workspace` = **1178 个测试 / 38 个套件全绿**（含 `cpp_ls` 的 28 个单测与 2 个端到端测试）。
 
 **两份读数**：上面这两份的"干净 455/0"是**带 include 证据**（`--seeds --closure`，也就是**带索引的产品形态**）的读数；
 **不带证据**的那一遍 455 个文件是 `干净 454 / 报错 1 / 消息 12`，唯一失败的是 `commdlg.h:577` 的
@@ -43,12 +43,17 @@ Rust 侧 `cargo test --workspace` = **1124 个测试 / 38 个套件全绿**（�
 **门禁三条 + 一条**（改完必须全绿，`index-design.md` §门禁有同样的表）：
 
 ```bash
-cargo test --workspace                     # 1124 个测试，38 个套件
+cargo test --workspace                     # 1178 个测试，38 个套件
 cargo clippy --workspace --all-targets     # 零警告
 cargo doc --no-deps -p cpp_code_analysis   # 零警告（cpp_parser 有历史链接问题，不管）
 cargo run -q -p cpp_parser --bin cpp_dump -- crates/cpp_parser/tests/real_world.cpp   # 必须 0 error
-cargo run -q -p cpp_code_analysis --example std_query                                 # 必须 9/9
+cargo run -q -p cpp_code_analysis --example std_query                                 # 必须 9/9（**钉住工具链**，见下）
 ```
+
+> **门禁里的两条命令要钉住工具链**（`$env:CXX = <mingw g++>`）：两份普查清单是 mingw 的 libstdc++ 闭包，
+> 而 `toolchain::discover` 现在在 Windows 上默认选 MSVC（§4.2）。不钉住的话 `std_query` 是 **0/9**——
+> 那是**另一个测量**（拿 MSVC 的 STL 读同一个探针），不是这一条命令坏了；它的**根因已经查明**（§4.2 ①）：
+> MSVC 的 STL 用 `_STD_BEGIN`（`#define _STD_BEGIN namespace std {`）包住一切，而我们的作用域构建看不穿这个宏。
 
 `rustfmt` **不是**门禁：这个仓库是手写格式（约 110 列），`cargo fmt` 会重排几千行。
 
@@ -1361,6 +1366,31 @@ parser 的边际收益是"每轮 1–3 个文件"，连续磨十几轮会失去�
 真进程、真 stdio），因为单元测试证明不了"客户端能拿到"；而"引擎答不出来时回 `null` 并记一行日志"是硬约束
 （`Known` 三态存在的理由），不许编空答案。
 
+### 4.2 工作区发现与配置这条线（**第一遍已落地**）
+
+`cpp_code_analysis::project` + `include::{msvc, system_headers}`：`.cppls.toml`（逐节解析、未知键报问题）、
+`compile_commands.json`（根 + 有界扫 build 目录）、`CMakeCache.txt`、工具链顺序（数据库 → `CXX`/`CC` →
+平台默认（Windows: MSVC）→ `PATH` → 系统头目录兜底）、每条答案带 `ToolchainSource` 标签。
+测量工具是 `cargo run -q -p cpp_code_analysis --example discover -- <project root>`；MSVC 的实测证据在
+[`msvc-notes.md`](msvc-notes.md)。架构与决策记在 [`ls-architecture.md`](ls-architecture.md) §5.1。
+
+**开着的事**（按值排）：
+
+```text
+① MSVC 的 STL：闭包只到 107 个文件、std_query 0/9（libstdc++ 是 279 个文件、9/9）
+   **根因已查明（2026-09-26）**：MSVC 的 <vector> 里**一个** `_STD_BEGIN`、**零个**字面 `namespace std`
+   （`#define _STD_BEGIN namespace std {`，在 yvals_core.h）。我们的每文件事实是从 CST 上收的，
+   宏展开出的 namespace 不是一个节点，于是 `std::vector` 这个事实**根本不存在** —— 不是"没读到"，
+   是"读到了但认不出"。修法属于 §3 的"宏族（设计级）"那一档：作用域构建要能看穿**展开后是 namespace/class 的宏**
+   （不是无位置地表，而是按位置的展开）。这一条现在是 MSVC 能不能用的唯一门槛。
+② `xmmintrin.h` 那一个未解析的 include（`xmm_func.h`）**不是缺陷**：它在 `#ifdef __ICL && #ifdef _MM_FUNCTIONALITY`
+   里面，而 `configured = false`（§3.5c：环境声明为完整会把 440/486 变成 85，所以刻意不声明）让条件答 Unknown，
+   Unknown 就按"可能编译"跟进。代价是那一个文件不进缓存（设计如此）。
+③ CMakePresets.json / CMakeUserPresets.json 的 binaryDir 与 cacheVariables（第二轮）
+④ 非 UTF-8 文件（`DiskFiles` 只按 UTF-8 读）
+⑤ 多根工作区（现在只分析第一个根）
+```
+
 ---
 
 ## 5. 坑清单（维护约定里对新读者最要紧的那些）
@@ -1432,6 +1462,8 @@ parser 的边际收益是"每轮 1–3 个文件"，连续磨十几轮会失去�
    所以它不再是"最后做"，而是与上面四项**交替**的一条线——队列在 §4.1。
 6. **B119（该报错却没报）**：接客户端时暴露的第一条 parser 侧问题，`grammar-gaps.md` 里有成因与做法；
    它改的是**诊断口径**（`CppParseError` 是普查的口径），所以要单独一轮、两份读数一起记。
+
+
 
 
 

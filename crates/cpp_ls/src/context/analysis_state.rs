@@ -102,18 +102,26 @@ impl AnalysisState {
     /// Make the analysis be about `root`, replacing whatever session was open.
     ///
     /// Replacing rather than refusing, because this is the same call for the two moments a workspace appears: the
-    /// first `initialized`, and a reload (the workspace folder changed, `compile_commands.json` was rewritten). In
-    /// both cases the honest answer is "analyse *this* root now" — and a reload is cheap, because the summaries the
-    /// previous session wrote are on disk under the root and the new session re-reads them instead of parsing
-    /// (`Session::open`, `SummaryStore`).
+    /// first `initialized`, and a reload (the workspace folder changed, `.cppls.toml` or `compile_commands.json` was
+    /// rewritten). In both cases the honest answer is "analyse *this* root now" — and a reload is cheap, because
+    /// the summaries the previous session wrote are on disk under the root and the new session re-reads them
+    /// instead of parsing (`Session::open`, `SummaryStore`).
+    ///
+    /// `config_file` is a configuration file a caller named (`--config`); `None` means the conventional
+    /// `.cppls.toml` in the root, and a project without one is the ordinary case rather than a problem.
     ///
     /// The buffers survive either way: they live in the provider chain, which this state owns and every session
     /// reads through. What does *not* survive is the index, so the caller re-marks the open documents
     /// (`Session::did_open`) — see `handlers::initialized`.
-    pub async fn open(&self, root: PathBuf, filter: WatchFilter) {
+    pub async fn open(&self, root: PathBuf, filter: WatchFilter, config_file: Option<PathBuf>) {
         let files = self.files.clone();
         self.update(move |slot| {
-            *slot = Some(Session::open(root, files, filter));
+            *slot = Some(Session::open_with_config_file(
+                root,
+                files,
+                filter,
+                config_file.as_deref(),
+            ));
         })
         .await;
     }

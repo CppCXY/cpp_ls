@@ -21,7 +21,7 @@
 //! start — a client should never send one, and rounding down keeps the answer inside the line rather than
 //! inventing a position between two halves of one character.
 
-use cpp_code_analysis::FileView;
+use cpp_code_analysis::{FileView, VfsFile};
 use cpp_parser::LineIndex;
 use lsp_types::Position;
 
@@ -37,24 +37,26 @@ pub fn offset_at_position(view: &FileView, position: Position) -> Option<usize> 
     view.offset_at(line, column)
 }
 
-/// A client's position for a byte offset, using a line index the caller built once.
+/// A client's position for a byte offset, using the line index the view already holds.
 ///
-/// The index is the caller's because a caller mapping a *list* of offsets — every diagnostic in a file, a
-/// declaration's two ends — should build it once ([`LineIndex::parse`]); a single-position caller builds one and
-/// passes it.
-pub fn position_at_offset(view: &FileView, index: &LineIndex, offset: usize) -> Option<Position> {
-    position_in(&view.source, index, offset)
+/// No index parameter, and no `LineIndex::parse`: the file's lines are the VFS's business and a view carries the
+/// index of the text it was parsed from (`file::vfs`), so mapping a position — or a hundred of them, which is what
+/// a diagnostic pass does — is a binary search rather than a scan of the file.
+pub fn position_at_offset(view: &FileView, offset: usize) -> Option<Position> {
+    position_in(&view.source, &view.line_index, offset)
 }
 
-/// [`position_at_offset`] for text that has no [`FileView`] behind it.
-///
-/// A file the analysis reads by path — the file a declaration lives in, which nobody is editing and which therefore
-/// does not need a parse — is the ordinary case: `Session::text` gives the text, a line index gives the lines, and
-/// this gives the position.
+/// [`position_at_offset`] for a file that has no [`FileView`] behind it — one nobody is editing, which the caller
+/// has from the VFS without parsing it.
 pub fn position_in(text: &str, index: &LineIndex, offset: usize) -> Option<Position> {
     let (line, column) = index.position_of(offset, text)?;
     let body = line_body(text, line)?;
     Some(Position::new(line as u32, utf16_column(body, column)))
+}
+
+/// The same, for a file the VFS is holding: its text and its index, which are the two halves a position needs.
+pub fn position_in_file(file: &VfsFile, offset: usize) -> Option<Position> {
+    position_in(&file.text, &file.line_index, offset)
 }
 
 /// One line's text without its terminator: what a column is measured against.
@@ -174,8 +176,7 @@ mod tests {
         let view = session.view("/p/a.cpp").expect("the file reads");
 
         let at = view.source.find("y = 2").expect("the statement is in the text");
-        let index = LineIndex::parse(&view.source);
-        let position = position_at_offset(&view, &index, at).expect("the offset maps");
+        let position = position_at_offset(&view, at).expect("the offset maps");
 
         assert_eq!(
             position,
@@ -186,7 +187,10 @@ mod tests {
 
         // A position on the emoji's own line: column 4 is the character *after* two UTF-16 units of it.
         let emoji = view.source.find('😀').expect("the emoji is in the text");
-        assert_eq!(position_at_offset(&view, &index, emoji), Some(Position::new(1, 3)));
+        assert_eq!(position_at_offset(&view, emoji), Some(Position::new(1, 3)));
         assert_eq!(offset_at_position(&view, Position::new(1, 5)), Some(emoji + 4));
     }
 }
+
+
+

@@ -585,11 +585,20 @@ mod tests {
     }
 }
 
-// Where files come from, and who includes whom: compiler settings (`config`), the provider that reads files
-// (`paths`), the resolver (this module), the graph those resolutions form (`graph`), and the one place that asks
-// the toolchain where its own headers are (`toolchain`) — which is what makes `#include <vector>` resolve at all,
-// and therefore what makes a project's own files cacheable.
+// Where files come from, and who includes whom: compiler settings (`config`), the resolver (this module), the graph
+// those resolutions form (`graph`), and the one place that asks the toolchain where its own headers are
+// (`toolchain`) — which is what makes `#include <vector>` resolve at all, and therefore what makes a project's own
+// files cacheable. `msvc` and `system_headers` are the two halves of the answer on a machine where no compiler can
+// be asked: Microsoft's layout (measured in `docs/msvc-notes.md`), and the conventional directories of an operating
+// system.
+//
+// **`paths` is not here any more**: reading a file is the *file* layer's business (`crate::file::paths`), and this
+// module keeps a re-export so that every path written before the move still resolves. The distinction is the one
+// that matters for a language server: an include search *asks* for a file, and the file layer is what *holds* one.
 pub mod config;
 pub mod graph;
-pub mod paths;
+pub mod msvc;
+pub mod system_headers;
 pub mod toolchain;
+
+pub use crate::file::paths;

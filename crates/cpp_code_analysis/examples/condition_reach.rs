@@ -615,8 +615,22 @@ fn compiler_builtins(session: &Session<DiskFiles>) -> HashSet<String> {
         return HashSet::new();
     };
 
+    // The toolchain's own table, whichever way it was obtained: a GNU-like compiler prints it with `-dM`, and MSVC
+    // — which has no such mode — was already asked for it during discovery (`docs/msvc-notes.md`).
+    if !toolchain.builtin_macros.is_empty() {
+        return toolchain
+            .builtin_macros
+            .iter()
+            .map(|define| define.name.to_string())
+            .collect();
+    }
+
+    let Some(compiler) = toolchain.compiler.as_deref() else {
+        return HashSet::new();
+    };
+
     let Some(output) =
-        cpp_code_analysis::DiskCommands.run(&toolchain.compiler, &["-dM", "-E", "-x", "c++", "-"])
+        cpp_code_analysis::DiskCommands.run(compiler, &["-dM", "-E", "-x", "c++", "-"], &[])
     else {
         return HashSet::new();
     };
@@ -692,4 +706,5 @@ fn tested_name(condition: &str) -> Option<String> {
     (!name.is_empty() && !name.contains(|character: char| !character.is_alphanumeric() && character != '_'))
         .then(|| name.to_string())
 }
+
 

@@ -1,0 +1,12 @@
+# This checkout's own configuration.
+#
+# `cpp_ls` is a Rust workspace whose *subject* is C++: the crates carry C++ fixtures, and the parser and analysis
+# tests read real headers. So the one thing the analysis must not do here is mistake Rust's build tree for project
+# source — `target/debug/build/**` is full of generated `.cpp` files that belong to a build script, not to anybody's
+# program.
+#
+# Two lines, and they are the whole reason the file exists. The engine does not guess this: `target` is Rust's
+# convention, not C++'s, and a server that skipped every directory called `build` would silently drop a real
+# project's sources. The project says it, and the project is right.
+[workspace]
+exclude = ["target/**"]

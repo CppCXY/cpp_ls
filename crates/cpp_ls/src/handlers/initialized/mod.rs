@@ -81,6 +81,9 @@ pub async fn initialized_handler(
         let mut workspace_manager = context.workspace_manager().lock().await;
         workspace_manager.set_roots(roots.clone());
         workspace_manager.set_client_config(client_config);
+        // The `--config` a caller named is kept, because a reload re-opens the session and has no `CmdArgs` of its
+        // own: the file the user pointed at is part of what the workspace *is*.
+        workspace_manager.set_config_file(cmd_args.config.0.clone().map(PathBuf::from));
     }
 
     start_analysis(context.clone()).await;
@@ -112,11 +115,12 @@ pub async fn start_analysis(context: ServerContextSnapshot) {
 /// `None` when the client has named no folder: there is nothing to open over, and every query answers "no analysis"
 /// until it does — which is the honest state rather than an empty project.
 async fn open_session(context: &ServerContextSnapshot) -> Option<PathBuf> {
-    let (root, filter) = {
+    let (root, filter, config_file) = {
         let workspace_manager = context.workspace_manager().lock().await;
         (
             workspace_manager.root()?.to_path_buf(),
             workspace_manager.watch_filter()?,
+            workspace_manager.config_file().map(PathBuf::from),
         )
     };
 
@@ -127,7 +131,12 @@ async fn open_session(context: &ServerContextSnapshot) -> Option<PathBuf> {
 
     // The compiler is run here (`Session::open` asks it for its search paths), so this is the one slow call in the
     // handshake, and it happens on the blocking pool rather than on the runtime's own thread.
-    context.analysis().open(root.clone(), filter).await;
+    context
+        .analysis()
+        .open(root.clone(), filter, config_file)
+        .await;
+
+    report_project_configuration(context);
 
     // The open buffers are read **after** the session exists, and the order is the point: a client that restarted
     // with unsaved files would otherwise have the analysis answer about the disk, and a change that arrived while
@@ -154,6 +163,84 @@ async fn open_session(context: &ServerContextSnapshot) -> Option<PathBuf> {
 
     log::info!("analysing {}", root.display());
     Some(root)
+}
+
+/// Tell the user what working the project out produced, when there is something to tell.
+///
+/// A project with no configuration file and nothing unusual to report is silent, because that is the ordinary
+/// case. Everything else is logged in full — the configuration file's problems and the discovery's (a database
+/// found in a build directory, a CMake project that never exported one) — and an **error** is also shown to the
+/// client: it means part of what the project said is not in effect, and a user who cannot see that would be
+/// debugging an analysis that is quietly not theirs. Warnings stay in the log, because they are things this server
+/// decided to do differently and the answer it produced is still a complete one.
+fn report_project_configuration(context: &ServerContextSnapshot) {
+    let report = context
+        .analysis()
+        .with_snapshot(|session| session.project_config().clone());
+    let discovery = context
+        .analysis()
+        .with_snapshot(|session| session.discovery().clone());
+
+    let Some(report) = report else {
+        return;
+    };
+
+    if report.problems.is_empty() {
+        if let Some(path) = &report.path {
+            log::info!("project configuration: {} (nothing to report)", path.display());
+        }
+    } else {
+        let path = report
+            .path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "(no configuration file)".to_string());
+        log::warn!(
+            "project configuration {} has {} problem(s):",
+            path,
+            report.problems.len()
+        );
+        for problem in &report.problems {
+            log::warn!("  [{:?}] {}", problem.severity, problem.message);
+        }
+    }
+
+    // The discovery's own problems: what the build system said, or did not.
+    if let Some(discovery) = &discovery {
+        for problem in &discovery.problems {
+            log::warn!("[{:?}] {}", problem.severity, problem.message);
+        }
+
+        if let Some(database) = &discovery.database {
+            log::info!(
+                "compile database: {} ({}, {} entries)",
+                database.path.display(),
+                database.origin.words(),
+                database.commands.len()
+            );
+        }
+        if let Some(cmake) = &discovery.cmake {
+            log::info!("CMake cache: {}", cmake.path.display());
+        }
+    }
+
+    let errors: Vec<String> = report
+        .errors()
+        .map(|problem| problem.message.clone())
+        .collect();
+
+    if !errors.is_empty() {
+        let path = report
+            .path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "the project configuration".to_string());
+
+        context.client().show_message(lsp_types::ShowMessageParams {
+            typ: lsp_types::MessageType::WARNING,
+            message: format!("{path} could not be read in full:\n{}", errors.join("\n")),
+        });
+    }
 }
 
 /// Read the project — now, and again after every edit that queues work.

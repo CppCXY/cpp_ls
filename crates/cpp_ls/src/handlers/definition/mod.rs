@@ -33,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::RegisterCapabilities;
 use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
-use crate::util::{offset_at_position, path_to_uri, position_in, uri_to_file_path};
+use crate::util::{offset_at_position, path_to_uri, position_in_file, uri_to_file_path};
 
 pub async fn on_goto_definition_handler(
     context: ServerContextSnapshot,
@@ -66,14 +66,14 @@ fn name_range(
     file: &std::path::Path,
     fact: &cpp_code_analysis::DeclFact,
 ) -> Option<Range> {
-    // The declaring file's text, read the way the analysis reads it: a buffer when the file is open, the disk
-    // otherwise. No parse — a name's line and column do not need a tree.
-    let text = session.text(file)?;
-    let index = cpp_parser::LineIndex::parse(&text);
+    // The declaring file, from the VFS: its text and **its line index**, which is the pair the entry was made with.
+    // No parse — a name's line and column do not need a tree — and no second read of a header this session is
+    // already holding.
+    let declaring = session.files().file(file)?;
 
     Some(Range::new(
-        position_in(&text, &index, fact.name_range.start_offset)?,
-        position_in(&text, &index, fact.name_range.end_offset())?,
+        position_in_file(&declaring, fact.name_range.start_offset)?,
+        position_in_file(&declaring, fact.name_range.end_offset())?,
     ))
 }
 
@@ -84,3 +84,4 @@ impl RegisterCapabilities for DefinitionCapabilities {
         server_capabilities.definition_provider = Some(OneOf::Left(true));
     }
 }
+

@@ -25,7 +25,24 @@ fn toolchain_here() -> Option<cpp_code_analysis::Toolchain> {
         None,
         Path::new("probe.cpp"),
         &Environment::current(),
+        &cpp_code_analysis::include::msvc::WindowsLayout::current(),
     );
+
+    if let Some(toolchain) = &found {
+        println!(
+            "toolchain: {} ({:?}, {})",
+            toolchain
+                .compiler
+                .as_ref()
+                .map(|compiler| compiler.display().to_string())
+                .unwrap_or_else(|| "no compiler".to_string()),
+            toolchain.source,
+            toolchain.version.as_deref().unwrap_or("no version"),
+        );
+        if let Some(note) = &toolchain.note {
+            println!("note: {note}");
+        }
+    }
 
     if found.is_none() {
         println!(
@@ -85,11 +102,31 @@ fn a_real_compiler_answers_with_the_macros_it_predefines() {
         return;
     };
 
+    // **Not a count.** GCC's `-dM` prints ~470 names and MSVC's `/PD` prints 58 — the fact sheet in
+    // `docs/msvc-notes.md` measured the second one — so a count assertion would be an assertion about *which
+    // compiler this machine has*. What every C++ compiler's table must contain is the names it identifies itself
+    // by and the language level, because those are what `#ifdef _WIN32` and `#if __cplusplus >= …` ask.
+    let has = |name: &str| {
+        toolchain
+            .builtin_macros
+            .iter()
+            .any(|define| define.name.as_ref() == name)
+    };
     assert!(
-        toolchain.builtin_macros.len() > 100,
-        "a C++ compiler predefines hundreds of macros; {} is not a macro table: {:?}",
+        has("__cplusplus"),
+        "no compiler leaves `__cplusplus` undefined: {} macros, {:?}",
         toolchain.builtin_macros.len(),
         &toolchain.builtin_macros[..toolchain.builtin_macros.len().min(5)]
+    );
+    assert!(
+        has("__GNUC__") || has("_MSC_VER"),
+        "and every one of them says which family it belongs to — which is how the dialect is decided: {:?}",
+        toolchain.dialect
+    );
+    assert_eq!(
+        toolchain.dialect.is_some(),
+        has("__GNUC__") || has("_MSC_VER"),
+        "the dialect comes from the same table"
     );
 
     let value_of = |name: &str| {
@@ -103,32 +140,29 @@ fn a_real_compiler_answers_with_the_macros_it_predefines() {
     // `__cplusplus` is the one every C++ file's conditions are written against, and it has a **value**: a condition
     // like `#if __cplusplus >= 201703L` needs the number, not just the name. Read with the evaluator's own integer
     // reader, because that is what will compare it — `201703L` carries a suffix, and `str::parse` rejects it.
+    //
+    // **The floor is C++11, not C++17**, and MSVC is why: this asks with no `-std=`/`/std:` at all — no compile
+    // database was read — so the answer is the compiler's *default* language level, which for MSVC 19.35 is C++14
+    // (`201402L`). That is the honest answer to the question asked; a project's standard travels with the request
+    // (`search_paths` documents why), and `docs/msvc-notes.md` measured the four combinations.
     let standard = value_of("__cplusplus");
     assert!(
         standard
             .flatten()
             .and_then(cpp_code_analysis::condition::parse_integer)
-            .is_some_and(|value| value >= 201703),
+            .is_some_and(|value| value >= 201103),
         "`__cplusplus` must come back with a number as its value, got {standard:?}"
     );
 
-    // A name with no value is a fact too (`defined(NAME)` is what most conditions ask).
+    // A name is never empty, and never carries a parameter list: `-dM` prints `#define f(x) …` glued together, and
+    // a name with parentheses in it is not one any condition tests. (Whether a table has *valueless* macros at all
+    // is the compiler's business — GCC prints several, MSVC's table has none — so that shape is pinned by the unit
+    // test over a recorded `-dM` rather than here.)
     assert!(
-        toolchain
-            .macros()
-            .iter()
-            .any(|(_, value)| value.is_none()),
-        "some predefined macros have no value at all"
-    );
-
-    // And no name may carry a function-like parameter list: `-dM` prints `#define f(x) …` glued together, and a name
-    // with parentheses in it is not one any condition tests.
-    assert!(
-        toolchain
-            .builtin_macros
-            .iter()
-            .all(|define| !define.name.contains('(')),
-        "a function-like macro's parameters must not end up in its name"
+        toolchain.builtin_macros.iter().all(|define| {
+            !define.name.is_empty() && !define.name.contains('(') && !define.name.contains(' ')
+        }),
+        "every macro has a name, and it is only a name"
     );
 }
 

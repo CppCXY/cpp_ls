@@ -263,76 +263,119 @@ impl CompileCommand {
     /// the target, and the `-o`/`-c`/input/output plumbing that is skipped. A flag this does not know is
     /// ignored rather than guessed at, because a wrong `-D` is worse than a missing one.
     pub fn to_config(&self) -> CompilerConfig {
-        let mut config = CompilerConfig {
-            working_directory: self.directory.clone(),
-            ..CompilerConfig::default()
+        config_from_arguments(&self.arguments, self.directory.clone())
+    }
+}
+
+/// Read a compiler configuration out of a list of arguments.
+///
+/// The one implementation of "what does this flag mean", used by both sources of flags a project has: the
+/// `compile_commands.json` entries the build system wrote, and the `[compile].args` a person wrote in
+/// `.cppls.toml`. Two readers of the same flag vocabulary would be free to disagree about `-DFOO=` or `-m64`, and
+/// the disagreement would show up as a project that analyses differently depending on which source won.
+pub fn config_from_arguments(
+    arguments: &[String],
+    working_directory: Option<PathBuf>,
+) -> CompilerConfig {
+    let mut config = CompilerConfig {
+        working_directory,
+        ..CompilerConfig::default()
+    };
+
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = arguments[index].as_str();
+        index += 1;
+
+        // The two spellings of every option: joined (`-Ifoo`) and separate (`-I foo`).
+        let take_value = |index: &mut usize| -> Option<&str> {
+            let value = arguments.get(*index).map(String::as_str);
+            if value.is_some() {
+                *index += 1;
+            }
+            value
         };
 
-        let mut index = 0;
-        while index < self.arguments.len() {
-            let argument = self.arguments[index].as_str();
-            index += 1;
-
-            // The two spellings of every option: joined (`-Ifoo`) and separate (`-I foo`).
-            let take_value = |index: &mut usize| -> Option<&str> {
-                let value = self.arguments.get(*index).map(String::as_str);
-                if value.is_some() {
-                    *index += 1;
-                }
-                value
+        if let Some(rest) = argument.strip_prefix("-isystem") {
+            let directory = if rest.is_empty() {
+                take_value(&mut index)
+            } else {
+                Some(rest)
             };
-
-            if let Some(rest) = argument.strip_prefix("-isystem") {
-                let directory = if rest.is_empty() {
-                    take_value(&mut index)
-                } else {
-                    Some(rest)
-                };
-                if let Some(directory) = directory {
-                    config.include_paths.push(IncludePath::system(directory));
-                }
-            } else if let Some(rest) = argument.strip_prefix("-I") {
-                let directory = if rest.is_empty() {
-                    take_value(&mut index)
-                } else {
-                    Some(rest)
-                };
-                if let Some(directory) = directory {
-                    config.include_paths.push(IncludePath::user(directory));
-                }
-            } else if let Some(rest) = argument.strip_prefix("-D") {
-                let definition = if rest.is_empty() {
-                    take_value(&mut index)
-                } else {
-                    Some(rest)
-                };
-                if let Some(definition) = definition {
-                    config.defines.push(parse_define_argument(definition));
-                }
-            } else if let Some(rest) = argument.strip_prefix("-U") {
-                let name = if rest.is_empty() {
-                    take_value(&mut index)
-                } else {
-                    Some(rest)
-                };
-                if let Some(name) = name {
-                    config.undefines.push(name.into());
-                }
-            } else if let Some(rest) = argument.strip_prefix("-std=") {
-                config.standard = Some(rest.into());
-            } else if let Some(rest) = argument.strip_prefix("--target=") {
-                config.target = Some(rest.into());
-            } else if argument == "--target" {
-                if let Some(target) = take_value(&mut index) {
-                    config.target = Some(target.into());
-                }
-            } else if argument == "-m32" || argument == "-m64" {
-                config.target = Some(argument.into());
+            if let Some(directory) = directory {
+                config.include_paths.push(IncludePath::system(directory));
             }
+        } else if let Some(rest) = argument.strip_prefix("-I") {
+            let directory = if rest.is_empty() {
+                take_value(&mut index)
+            } else {
+                Some(rest)
+            };
+            if let Some(directory) = directory {
+                config.include_paths.push(IncludePath::user(directory));
+            }
+        } else if let Some(rest) = argument.strip_prefix("-D") {
+            let definition = if rest.is_empty() {
+                take_value(&mut index)
+            } else {
+                Some(rest)
+            };
+            if let Some(definition) = definition {
+                config.defines.push(parse_define_argument(definition));
+            }
+        } else if let Some(rest) = argument.strip_prefix("-U") {
+            let name = if rest.is_empty() {
+                take_value(&mut index)
+            } else {
+                Some(rest)
+            };
+            if let Some(name) = name {
+                config.undefines.push(name.into());
+            }
+        } else if let Some(rest) = argument.strip_prefix("-std=") {
+            config.standard = Some(rest.into());
+        } else if let Some(rest) = argument.strip_prefix("--target=") {
+            config.target = Some(rest.into());
+        } else if argument == "--target" {
+            if let Some(target) = take_value(&mut index) {
+                config.target = Some(target.into());
+            }
+        } else if argument == "-m32" || argument == "-m64" {
+            config.target = Some(argument.into());
         }
-
-        config
     }
+
+    config
+}
+
+/// Apply a project's `[compile]` section to a list of flags and read the result.
+///
+/// The order is the whole meaning of the three keys, and it is one pass:
+///
+/// ```text
+/// 1. remove_args drops flags from the list that won       (`-Werror`, a stale `-std=c++17`)
+/// 2. extra_args appends the project's own                 (`-DFEATURE=1`)
+/// 3. the result is read once, left to right               so a later `-std=` wins over an earlier one
+/// ```
+///
+/// Removing **before** appending is what makes "drop the database's `-std=c++17`, add `-std=c++20`" work: the
+/// other order would leave the added flag first and have the removed one overwrite it. Matching is by the whole
+/// spelling — `-std=c++17` — because that is what a person reads in the database and copies into the file; it is
+/// not a pattern language.
+pub fn project_config_from_flags(
+    flags: &[String],
+    working_directory: Option<PathBuf>,
+    section: &crate::project::CompileSection,
+) -> CompilerConfig {
+    let mut arguments: Vec<String> = flags
+        .iter()
+        .filter(|argument| !section.remove_args.iter().any(|drop| drop == *argument))
+        .cloned()
+        .collect();
+
+    arguments.extend(section.extra_args.iter().cloned());
+
+    config_from_arguments(&arguments, working_directory)
 }
 
 /// Read `-DFOO` or `-DFOO=bar`.

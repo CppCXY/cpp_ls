@@ -17,7 +17,6 @@ mod document_diagnostic;
 use std::path::Path;
 
 use cpp_code_analysis::{DiskFiles, Session};
-use cpp_parser::LineIndex;
 use lsp_types::{
     ClientCapabilities, Diagnostic, DiagnosticOptions, DiagnosticServerCapabilities,
     DiagnosticSeverity, ServerCapabilities, Uri,
@@ -35,16 +34,17 @@ use crate::util::{path_to_uri, position_at_offset};
 pub fn diagnose_file(session: &Session<DiskFiles>, path: &Path) -> Option<(Uri, Vec<Diagnostic>)> {
     let view = session.view(path)?;
     let uri = path_to_uri(path)?;
-    let index = LineIndex::parse(&view.source);
 
     let diagnostics = view
         .errors()
         .iter()
         .map(|error| {
             let (start, end) = error.offsets();
+            // The view's own line index — the one the VFS built for this text — so a file with a hundred errors is
+            // a hundred binary searches rather than a hundred scans of the file.
             let range = match (
-                position_at_offset(&view, &index, start),
-                position_at_offset(&view, &index, end),
+                position_at_offset(&view, start),
+                position_at_offset(&view, end),
             ) {
                 (Some(start), Some(end)) => lsp_types::Range::new(start, end),
                 // An offset the text does not contain: point at the top of the file rather than dropping the
@@ -83,3 +83,5 @@ impl RegisterCapabilities for DiagnosticCapabilities {
             }))
     }
 }
+
+

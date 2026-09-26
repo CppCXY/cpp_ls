@@ -35,9 +35,17 @@
 use cpp_parser::{CppParser, CppSyntaxKind, ParserConfig, source_range};
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| {
-        "C:/Users/zc/Desktop/mingw64/x86_64-w64-mingw32/include/winnt.h".to_string()
-    });
+    // The file is an **argument**, always: this probe is run on the header that is misbehaving right now, and a
+    // default path would be a path on one machine — which is a probe that cannot be run anywhere else, and a
+    // checked-in file that names somebody's desktop.
+    let Some(path) = std::env::args().nth(1) else {
+        eprintln!("usage: where_directives_go <file> [offset]");
+        eprintln!();
+        eprintln!("  A system header is the usual subject, and where it is depends on the machine:");
+        eprintln!("    where_directives_go $(g++ -print-file-name=include)/../include/winnt.h");
+        std::process::exit(2);
+    };
+
     let source = std::fs::read_to_string(&path).expect("readable");
     let tree = CppParser::parse(&source, ParserConfig::default());
 

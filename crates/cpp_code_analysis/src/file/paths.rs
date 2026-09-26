@@ -34,6 +34,11 @@ impl FileId {
     pub fn index(self) -> usize {
         self.0 as usize
     }
+
+    /// Mint an id from a number. For the layer that owns the numbering ([`crate::Vfs`]) and nothing else.
+    pub fn new(number: u32) -> FileId {
+        FileId(number)
+    }
 }
 
 /// Reads files. The only thing in this layer that touches a filesystem.
@@ -59,6 +64,16 @@ pub trait FileProvider {
     /// one of them whichever way it is hard-coded.
     fn is_case_insensitive(&self) -> bool {
         cfg!(windows)
+    }
+
+    /// Is this path one the **editor has open**, rather than one on disk?
+    ///
+    /// A question only an overlay can answer, which is why the default says `false`: a provider that is not an
+    /// overlay reads the disk, and the disk is never a buffer. [`crate::OpenDocuments`] and
+    /// [`OverlayFiles`] answer it for real, and the VFS records the answer with each entry —
+    /// a view has to be able to say whether the analysis saw what the user sees.
+    fn is_open_buffer(&self, _path: &Path) -> bool {
+        false
     }
 }
 
@@ -225,6 +240,11 @@ impl<F: FileProvider, G: FileProvider> FileProvider for OverlayFiles<F, G> {
 
     fn is_case_insensitive(&self) -> bool {
         self.overlay.is_case_insensitive() || self.fallback.is_case_insensitive()
+    }
+
+    /// The overlay's answer, and only the overlay's: the fallback is the filesystem, which has no buffers.
+    fn is_open_buffer(&self, path: &Path) -> bool {
+        self.overlay.is_open_buffer(path)
     }
 }
 
@@ -507,3 +527,4 @@ mod tests {
         assert_eq!(overlay.read(Path::new("b.h")).as_deref(), Some("from disk"));
     }
 }
+

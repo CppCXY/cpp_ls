@@ -74,12 +74,13 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use cpp_parser::{CppParseError, CppParser, CppSyntaxNode, CppSyntaxTree, Dialect, ParserConfig};
-
-use crate::include::config::{CompileCommand, CompileCommands, CompilerConfig, parse_compile_commands};
-use crate::include::paths::{DiskFiles, FileProvider, OverlayFiles, normalize_path};
+use crate::include::config::{
+    CompileCommands, CompilerConfig, project_config_from_flags,
+};
+use crate::file::paths::{DiskFiles, FileProvider, OverlayFiles, normalize_path};
 use crate::include::graph::Marked;
 use crate::include::toolchain::{self, DiskCommands, Environment, Toolchain};
+use crate::file::view::FileView;
 use crate::index::project::{
     MemberCompletions, MemberList, NameCompletions, ProjectDefinition, ProjectIndex, ProjectMacro,
 };
@@ -90,11 +91,9 @@ use crate::index::worklist::{Priority, Step, outcome_of};
 use crate::index::{
     definition_across_files, macro_across_files, member_completions_at, members_of, name_completions_at,
 };
-use crate::sema::scopes::build_scopes;
-use crate::symbol::{Known, ScopeTree, UnknownReason};
-
-/// The name a compile database is conventionally found under, relative to the project root.
-const COMPILE_DATABASE: &str = "compile_commands.json";
+use crate::project::{ConfigReport, ProjectDiscovery};
+use crate::file::vfs::Vfs;
+use crate::symbol::{Known, UnknownReason};
 
 /// How many files a project scan will list before it stops.
 ///
@@ -236,70 +235,9 @@ impl FileProvider for OpenDocuments {
     fn exists(&self, path: &Path) -> bool {
         self.is_open(path)
     }
-}
 
-/// One file, analysed from the text the cursor is in: the buffer if it is open, the disk otherwise.
-///
-/// The other half of a session's answer. A query about a *cursor* needs the file's scopes and its tree, and neither
-/// is in the index — a summary holds facts about declarations, not the syntax a position has to be resolved
-/// against. So the layer above asks for a view of the file the user is looking at, and asks the session about the
-/// index from there.
-///
-/// The text is the **buffer** when there is one, which is what makes a query about an unsaved edit answer about
-/// the edit. `open` says which of the two it was, because a consumer that shows the file's own diagnostics needs
-/// to know whether the analysis saw what the user sees.
-#[derive(Debug, Clone)]
-pub struct FileView {
-    pub path: PathBuf,
-    /// The text analysed: the buffer when open, the file otherwise.
-    pub source: String,
-    /// The parse of [`FileView::source`], kept because a caller may want the diagnostics or the token list.
-    pub tree: CppSyntaxTree,
-    /// The tree's root. Exactly `tree.get_red_root()`, kept because every query wants it and re-deriving a red root
-    /// per query would allocate one per query.
-    pub root: CppSyntaxNode,
-    /// The file's scopes, built from the same tree.
-    pub scopes: ScopeTree,
-    /// Did the text come from an open buffer rather than from the file?
-    pub open: bool,
-}
-
-impl FileView {
-    /// The parse diagnostics, as the parser reported them.
-    ///
-    /// A tolerant parser reports rather than fails, so this is empty for most files and non-empty for a file being
-    /// typed at — which is not the same thing as a file that does not compile.
-    pub fn errors(&self) -> &[CppParseError] {
-        self.tree.get_errors()
-    }
-
-    /// A byte offset from a **line and column**, both counted from zero.
-    ///
-    /// The mapping a client's positions need, and the one place LSP's own rule is *not* implemented: the columns
-    /// this counts are characters, while the protocol counts UTF-16 code units, and the two differ on a line with
-    /// an emoji or any character outside the basic plane. That conversion is the protocol layer's — doing it here
-    /// would put a rule about a wire format in the crate that has no wire format.
-    ///
-    /// The line index is built per call, which is a scan of the source: one call per request is what this is for,
-    /// and a caller mapping thousands of positions should build one itself (`cpp_parser::LineIndex::parse`).
-    pub fn offset_at(&self, line: usize, column: usize) -> Option<usize> {
-        cpp_parser::LineIndex::parse(&self.source)
-            .get_offset(line, column, &self.source)
-            .map(usize::from)
-    }
-
-    /// A byte offset back to a **line and column**, both counted from zero — the inverse of
-    /// [`FileView::offset_at`], and the direction a diagnostic needs: the parser reports offsets and a client wants
-    /// a position.
-    ///
-    /// The line index is built per call for the same reason it is in `offset_at`: one call per request is what this
-    /// is for. A caller with a list of ranges to map (every diagnostic in a file) should build one itself —
-    /// `cpp_parser::LineIndex::parse` and `position_of` are the same two steps this does.
-    ///
-    /// A position past the end of the text answers `None` rather than clamping: an offset that is not in the file
-    /// is a caller's mistake, and a range built from a clamped one would point at the wrong code.
-    pub fn position_at(&self, offset: usize) -> Option<(usize, usize)> {
-        cpp_parser::LineIndex::parse(&self.source).position_of(offset, &self.source)
+    fn is_open_buffer(&self, path: &Path) -> bool {
+        self.is_open(path)
     }
 }
 
@@ -314,13 +252,22 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// What `discover` found, or `None` when no compiler answered. Kept for a human reading a log line, and for
     /// `docs/std-library.md`'s measurements.
     toolchain: Option<Toolchain>,
-    /// The compile database the configuration came from, when there was one. Kept because it is the project's own
-    /// answer to "how is this built", which a caller diagnosing a wrong analysis wants to see.
-    database: Option<CompileCommands>,
+    /// **What this analysis thinks the project is**: the configuration file, the compile database and where it was
+    /// found, CMake's cache, and every problem. Kept whole rather than reduced to the parts the analysis uses,
+    /// because the first question anybody asks about a wrong answer is "what did it think this project was" — and
+    /// the sections a language server reads ([`crate::DiagnosticsSection`], [`crate::HoverSection`]) live in the
+    /// same struct, since one file is parsed once, in one place.
+    discovery: ProjectDiscovery,
     /// The providers. Owned; the store holds a second handle to the same chain.
     files: SessionFiles<F>,
     /// The buffer half of `files`, as a handle this session can write through.
     documents: OpenDocuments,
+    /// **The files this session is holding** — their text and their line indexes, kept in step with each other.
+    ///
+    /// The text source for everything a *cursor* query needs, and the reason a view costs a pointer rather than a
+    /// scan: see [`crate::file::vfs`]. It reads through the same provider chain the store does, so a buffer and a
+    /// file are the same question to both.
+    vfs: Vfs<SessionFiles<F>>,
     store: SummaryStore<SessionFiles<F>>,
     /// Which paths the client's events and the project scan are about. Kept because both questions — "is this
     /// event interesting" and "is this file part of the project" — have one answer, and the cache directory is the
@@ -334,12 +281,13 @@ pub struct Session<F: FileProvider = DiskFiles> {
 impl Session<DiskFiles> {
     /// Open a project the way a language server does: ask the machine what it compiles with.
     ///
-    /// The three steps, in the order their results depend on each other:
+    /// The four steps, in the order their results depend on each other:
     ///
     /// ```text
-    /// 1. compile_commands.json, if the project has one — the flags and the file list
-    /// 2. discover(files, …)             — which compiler, and where its own headers are
-    /// 3. the scan                       — the sources the project owns
+    /// 0. .cppls.toml, if the project has one  — exclusions, source extensions, and how it says it is built
+    /// 1. compile_commands.json                — the flags and the file list
+    /// 2. discover(files, …)                   — which compiler, and where its own headers are
+    /// 3. the scan                             — the sources the project owns
     /// ```
     ///
     /// **The compiler is run**, once, with `-E -v -x c++ -` to print its search list. That is a process and
@@ -355,17 +303,71 @@ impl Session<DiskFiles> {
         files: SessionFiles<DiskFiles>,
         filter: WatchFilter,
     ) -> Session<DiskFiles> {
-        let root = root.into();
-        let database = read_compile_database(&files, &root);
-        let base = base_config(database.as_ref());
-        let for_file = first_compiled_file(database.as_ref()).unwrap_or_else(|| root.clone());
+        Session::open_with_config_file(root.into(), files, filter, None)
+    }
 
-        let toolchain = toolchain::discover(
+    /// [`Session::open`] for a caller that knows where the configuration file is (`--config`).
+    ///
+    /// A named file that is not there is reported rather than ignored — an instruction is not a convention — and
+    /// everything else proceeds as if no configuration had been given.
+    pub fn open_with_config_file(
+        root: PathBuf,
+        files: SessionFiles<DiskFiles>,
+        filter: WatchFilter,
+        config_file: Option<&Path>,
+    ) -> Session<DiskFiles> {
+        // **What the project is** — its own file, its build system, CMake's cache — worked out before anything is
+        // asked of a compiler, because the first half decides *which* compiler gets asked (`named_compilers`) and
+        // what flags it is asked about.
+        let discovery = crate::project::discover(&files, &root, config_file);
+        let project_config = discovery.config.clone();
+        let filter = apply_project_config(filter, &project_config);
+
+        let for_file = discovery
+            .database
+            .as_ref()
+            .and_then(|database| database.commands.commands.first())
+            .map(|command| command.file.clone())
+            .unwrap_or_else(|| root.clone());
+
+        // **Which flags won, and then what the project does to them.** `[compile].args` is the compilation when a
+        // person wrote it, the database's first entry when the project's build says so, and CMake's cache when
+        // there is no database at all. Either way the result goes through one pass — `remove_args` drops,
+        // `extra_args` appends — so that the three keys have one implementation and one order, whichever list they
+        // start from.
+        let base = project_config_from_flags(
+            &discovery.flags(),
+            discovery.working_directory(),
+            &project_config.config.compile,
+        );
+
+        // CMake states the language standard as a **number**, not as a flag (`CMAKE_CXX_STANDARD=20`), so it is
+        // applied here rather than parsed out of the argument list — and only when nothing above it stated one: a
+        // database's `-std=` or a project's own `args` are closer to the truth than the configuration a build tree
+        // was generated with.
+        let base = match (base.standard.clone(), discovery.standard()) {
+            (None, Some(standard)) => base.with_standard(standard),
+            _ => base,
+        };
+
+        // The compilers the *project* named, in their order (`discovery.named_compilers`): a project that says
+        // `clang++` gets clang's headers, and a project whose CMake cache names a compiler gets that one — before
+        // `CXX`, before the platform's own, and before anything on `PATH`.
+        let environment = Environment::current();
+        let layout = crate::include::msvc::WindowsLayout::current();
+        let named = discovery.named_compilers();
+
+        let toolchain = toolchain::discover_with(
             &files,
             &DiskCommands,
-            database.as_ref(),
+            &named,
+            discovery
+                .database
+                .as_ref()
+                .map(|database| &database.commands),
             &for_file,
-            &Environment::current(),
+            &environment,
+            &layout,
         );
 
         let config = match &toolchain {
@@ -374,21 +376,25 @@ impl Session<DiskFiles> {
         };
 
         // **Which compiler this is**, asked of the compiler rather than guessed from the flags: GCC and Clang
-        // predefine `__GNUC__`, MSVC predefines `_MSC_VER`, and both arrive in the table the same `-dM -E` call
-        // that gave the search paths (see `toolchain::discover`). It matters to the *parser*, which has to know
-        // what `__int128` means to the compiler reading the file — see `CompilerConfig::dialect`.
+        // predefine `__GNUC__`, MSVC predefines `_MSC_VER`, and they arrive in the table the same call that gave
+        // the search paths (see `toolchain::discover`). It matters to the *parser*, which has to know what
+        // `__int128` means to the compiler reading the file — see `CompilerConfig::dialect`.
         //
         // No toolchain, no answer: the configuration keeps its default, and a caller that knows the target
         // (`with_config`) sets it itself.
-        let config = match toolchain
-            .as_ref()
-            .and_then(|found| Dialect::from_predefined_macros(found.macros()))
-        {
+        let config = match toolchain.as_ref().and_then(|found| found.dialect) {
             Some(dialect) => config.with_dialect(dialect),
             None => config,
         };
 
-        Session::assemble(root, files, filter, config, toolchain, database)
+        Session::assemble(
+            root,
+            files,
+            filter,
+            config,
+            toolchain,
+            discovery,
+        )
     }
 }
 
@@ -397,13 +403,34 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// The path for a caller that knows how the project is built — a test, a build-system integration — and the
     /// only one that works over a provider that is not the disk.
+    ///
+    /// The project's **own** file is still read, because the two answer different questions and only one of them
+    /// was given away here: `config` is what the compiler was told (the caller's, and it wins over `[compile]`),
+    /// while `.cppls.toml` also says which files are the project's source and where its cache goes
+    /// (`workspace.exclude`, `workspace.source_extensions`, `index.cache_dir`). A session that ignored those
+    /// would analyse a different project from the one [`Session::open`] analyses.
     pub fn with_config(
         root: impl Into<PathBuf>,
         files: SessionFiles<F>,
         filter: WatchFilter,
         config: CompilerConfig,
     ) -> Session<F> {
-        Session::assemble(root.into(), files, filter, config, None, None)
+        let root = root.into();
+        // The project's own file is read here too, and by the same code: a session the caller configured still
+        // analyses *this* project (`workspace.exclude`, `index.cache_dir`), and the build-system half is skipped
+        // because the caller has said what the compilation is.
+        let config_report = crate::project::load_config(&files, &root, None);
+        let filter = apply_project_config(filter, &config_report);
+
+        let discovery = ProjectDiscovery {
+            root: root.clone(),
+            config: config_report,
+            database: None,
+            cmake: None,
+            problems: Vec::new(),
+        };
+
+        Session::assemble(root, files, filter, config, None, discovery)
     }
 
     fn assemble(
@@ -412,10 +439,23 @@ impl<F: FileProvider + Clone> Session<F> {
         filter: WatchFilter,
         config: CompilerConfig,
         toolchain: Option<Toolchain>,
-        database: Option<CompileCommands>,
+        discovery: ProjectDiscovery,
     ) -> Session<F> {
+        let project_config = discovery.config.clone();
+        let database = discovery.database.as_ref().map(|database| &database.commands);
         let documents = files.overlay.clone();
-        let project = project_files(&files, &filter, &root, database.as_ref());
+        let project = project_files(
+            &files,
+            &filter,
+            &root,
+            database,
+            &project_config.config.workspace.source_extensions,
+            project_config
+                .config
+                .index
+                .max_files
+                .unwrap_or(MAX_PROJECT_FILES),
+        );
 
         // **Not** `database.is_some()`, and the measurement is why: with the environment declared complete, the
         // standard-library closure decides 440 of its 486 conditional includes instead of 85 (`condition_reach`),
@@ -426,15 +466,19 @@ impl<F: FileProvider + Clone> Session<F> {
         // visit, a claim this strong would turn honest doubt into a wrong answer, which is the one thing this layer
         // must not do.
         let configured = false;
-        let store = SummaryStore::with_provider(root.clone(), config.clone(), files.clone()).with_macros(
-            compilation_environment(&config, toolchain.as_ref(), configured),
-        );
+        let mut store = SummaryStore::with_provider(root.clone(), config.clone(), files.clone())
+            .with_macros(compilation_environment(&config, toolchain.as_ref(), configured));
+
+        if let Some(cache_dir) = &project_config.config.index.cache_dir {
+            store = store.with_cache_directory(cache_dir);
+        }
 
         let mut session = Session {
             root,
             config,
             toolchain,
-            database,
+            discovery,
+            vfs: Vfs::new(files.clone()),
             files,
             documents,
             store,
@@ -462,12 +506,33 @@ impl<F: FileProvider + Clone> Session<F> {
         &self.config
     }
 
+    /// What the project's own configuration file said, and everything wrong with it.
+    ///
+    /// A report with no path is a project without a `.cppls.toml`, which is the ordinary case and not a problem.
+    /// The sections a language server reads live here too — see [`Session::discovery`].
+    pub fn project_config(&self) -> &ConfigReport {
+        &self.discovery.config
+    }
+
+    /// **What this analysis thinks the project is** — its configuration file, its build system, CMake's cache, and
+    /// everything that could not be worked out.
+    ///
+    /// The first question anybody asks about a wrong answer, and the reason the discovery is kept rather than
+    /// consumed: "it read the wrong compilation" is diagnosable from here and from nowhere else. It is what
+    /// `cpp_code_analysis`'s `discover` example prints, and what a server should log at startup.
+    pub fn discovery(&self) -> &ProjectDiscovery {
+        &self.discovery
+    }
+
     pub fn toolchain(&self) -> Option<&Toolchain> {
         self.toolchain.as_ref()
     }
 
     pub fn compile_database(&self) -> Option<&CompileCommands> {
-        self.database.as_ref()
+        self.discovery
+            .database
+            .as_ref()
+            .map(|database| &database.commands)
     }
 
     pub fn documents(&self) -> &OpenDocuments {
@@ -562,6 +627,10 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn did_close(&mut self, path: impl AsRef<Path>) {
         let path = path.as_ref();
         self.documents.close(path);
+        // The text the analysis was holding was the *buffer's*, and the disk may never have seen it. Dropping the
+        // entry is what makes the next question read the file again — a closed buffer is not a text this session
+        // knows any more, and a view built on it would answer about an edit nobody saved.
+        self.vfs.forget(path);
         self.store.forget(path);
         self.queue.again(path.to_path_buf(), Priority::Rest, 0);
     }
@@ -617,8 +686,14 @@ impl<F: FileProvider + Clone> Session<F> {
     }
 
     /// The two events that replace a path's text, which differ in the protocol and not here.
+    ///
+    /// The VFS is told **in the same breath** as the overlay, and that order matters: the schema is that a file's
+    /// text and its line index are never out of step, so the entry takes the new text (and builds its index) before
+    /// anything can ask a question about the file — and the summary is dropped with it, because the old one
+    /// describes text that no longer exists.
     fn buffer_changed(&mut self, path: &Path, text: &str) {
         self.documents.open(path, text);
+        self.vfs.insert(path, text, true);
         self.store.forget(path);
         self.queue.again(path.to_path_buf(), Priority::Open, 0);
     }
@@ -722,23 +797,12 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// `None` when there is neither — a path that is not open and cannot be read. Everything below takes a view,
     /// so one parse per request serves every question about that request's file.
+    ///
+    /// The view is **of the session's VFS**: the text and its line index come from the file the VFS is holding, and
+    /// the view shares both rather than copying either. What is done here is the parse and the scopes, which are
+    /// the two things a position needs and a summary cannot hold.
     pub fn view(&self, path: impl AsRef<Path>) -> Option<FileView> {
-        let path = path.as_ref();
-        let open = self.documents.is_open(path);
-        let source = self.text(path)?;
-
-        let tree = CppParser::parse(&source, ParserConfig::default());
-        let root = tree.get_red_root();
-        let scopes = build_scopes(&root);
-
-        Some(FileView {
-            path: path.to_path_buf(),
-            source,
-            tree,
-            root,
-            scopes,
-            open,
-        })
+        Some(FileView::parse(&self.vfs.file(path)?))
     }
 
     /// The text the analysis reads for a path — the buffer when it is open, the file otherwise.
@@ -746,12 +810,20 @@ impl<F: FileProvider + Clone> Session<F> {
     /// [`Session::view`] without the parse, for a consumer that wants the text rather than the tree: a hover that
     /// shows a declaration the cursor is not in, a search over a file the index already holds. `None` when there is
     /// neither a buffer nor a readable file.
+    ///
+    /// Read through the VFS, so the file is held afterwards and a second question about it — its lines, its text —
+    /// costs nothing.
     pub fn text(&self, path: impl AsRef<Path>) -> Option<String> {
-        let path = path.as_ref();
-        match self.documents.text(path) {
-            Some(text) => Some(text),
-            None => self.files.read(path),
-        }
+        Some(self.vfs.file(path)?.text.to_string())
+    }
+
+    /// The files the session is holding: their text and their line indexes.
+    ///
+    /// Exposed because "which text is this analysis working from" is a question a caller diagnosing a wrong answer
+    /// asks, and because it is the one place that knows how much of a project has been read *as text* rather than
+    /// as facts.
+    pub fn files(&self) -> &Vfs<SessionFiles<F>> {
+        &self.vfs
     }
 
     /// Which declaration the name at `offset` means, using this file's scopes and then the index.
@@ -975,28 +1047,28 @@ fn queue_key(path: &Path) -> String {
     normalize_path(path, cfg!(windows))
 }
 
-/// The compile database under a project root, when there is one to read.
+/// The compile database, from where the project says it is or from the conventional place.
+/// Fold a project's configuration into the filter a session reads through.
 ///
-/// A database that parses to nothing usable is treated as absent rather than as an empty project: its whole
-/// purpose is to say how files are compiled, and a project with a malformed one is better analysed the way a
-/// project with none is — the toolchain's own search paths — than with no include paths at all.
-fn read_compile_database(files: &impl FileProvider, root: &Path) -> Option<CompileCommands> {
-    let json = files.read(&root.join(COMPILE_DATABASE))?;
-    let database = parse_compile_commands(&json);
+/// The exclusions are applied **on top of** whatever the caller passed, because the two lists are different
+/// claims that are both true at once: the caller's is the editor's ("these files are not what I am working on"),
+/// the project's is the file's ("these files are not source"). The cache directory goes in here too, so that the
+/// rule keeping a watcher from re-indexing the cache's own writes follows the configuration rather than the
+/// default — one place, and the store reads the same name from the same report.
+fn apply_project_config(filter: WatchFilter, report: &ConfigReport) -> WatchFilter {
+    let mut filter = filter;
 
-    (!database.is_empty()).then_some(database)
-}
+    for pattern in &report.config.workspace.exclude {
+        if let Ok(pattern) = crate::PathPattern::new(pattern) {
+            filter = filter.ignore_pattern(pattern);
+        }
+    }
 
-/// The project's flags, from the first entry of its compile database.
-///
-/// See the module documentation: one configuration for the project is an approximation, and this is where it is
-/// chosen. The **first** entry rather than a merge, because merging two targets' `-D`s would describe a compilation
-/// that no file is part of.
-fn base_config(database: Option<&CompileCommands>) -> CompilerConfig {
-    database
-        .and_then(|database| database.commands.first())
-        .map(CompileCommand::to_config)
-        .unwrap_or_default()
+    if let Some(cache_dir) = &report.config.index.cache_dir {
+        filter = filter.with_cache_directory(cache_dir);
+    }
+
+    filter
 }
 
 /// The macros a compilation starts with: what the compiler predefines, then what the command line says.
@@ -1055,16 +1127,6 @@ fn compilation_environment(
     }
 }
 
-/// The file the toolchain should be discovered for: one the database actually compiles.///
-/// [`crate::discover`] asks the database for *this* file's compiler, so naming a file no entry mentions makes it
-/// fall through to `$CXX` and `PATH` — which on a machine with two toolchains is the wrong compiler for the
-/// project's own headers.
-fn first_compiled_file(database: Option<&CompileCommands>) -> Option<PathBuf> {
-    database
-        .and_then(|database| database.commands.first())
-        .map(|command| command.file.clone())
-}
-
 /// The sources a project owns: the compile database's files, or a scan of the root.
 ///
 /// The database when it names files that are actually here — a checked-in `compile_commands.json` is written on
@@ -1085,6 +1147,8 @@ fn project_files(
     filter: &WatchFilter,
     root: &Path,
     database: Option<&CompileCommands>,
+    extra_extensions: &[String],
+    max_files: usize,
 ) -> Vec<PathBuf> {
     let mut found = Vec::new();
 
@@ -1103,7 +1167,7 @@ fn project_files(
     }
 
     if found.is_empty() {
-        scan(root, filter, &mut found);
+        scan(root, filter, &mut found, extra_extensions, max_files);
     }
 
     // Sorted and deduplicated: the walk's order is the filesystem's, and an index whose contents depend on which
@@ -1115,14 +1179,21 @@ fn project_files(
 
 /// Every source under `root`, bounded and with symlinked directories left alone.
 ///
-/// The bound is [`MAX_PROJECT_FILES`]. Symlinks are not followed **as directories**: a link back up the tree is an
-/// infinite walk, and the cheap rule that rules it out — the entry's own type, which does not resolve the link — is
-/// also the one that keeps a project from indexing the same files through two paths.
-fn scan(root: &Path, filter: &WatchFilter, found: &mut Vec<PathBuf>) {
+/// The bound is the caller's (`index.max_files`, or [`MAX_PROJECT_FILES`]). Symlinks are not followed **as
+/// directories**: a link back up the tree is an infinite walk, and the cheap rule that rules it out — the entry's
+/// own type, which does not resolve the link — is also the one that keeps a project from indexing the same files
+/// through two paths.
+fn scan(
+    root: &Path,
+    filter: &WatchFilter,
+    found: &mut Vec<PathBuf>,
+    extensions: &[String],
+    max_files: usize,
+) {
     let mut pending = vec![root.to_path_buf()];
 
     while let Some(directory) = pending.pop() {
-        if found.len() >= MAX_PROJECT_FILES {
+        if found.len() >= max_files {
             return;
         }
 
@@ -1131,7 +1202,7 @@ fn scan(root: &Path, filter: &WatchFilter, found: &mut Vec<PathBuf>) {
         };
 
         for entry in entries.flatten() {
-            if found.len() >= MAX_PROJECT_FILES {
+            if found.len() >= max_files {
                 return;
             }
 
@@ -1150,7 +1221,7 @@ fn scan(root: &Path, filter: &WatchFilter, found: &mut Vec<PathBuf>) {
 
             if kind.is_dir() {
                 pending.push(path);
-            } else if kind.is_file() && is_a_source_file(&path) {
+            } else if kind.is_file() && is_a_source_file(&path, extensions) {
                 found.push(path);
             }
         }
@@ -1159,12 +1230,19 @@ fn scan(root: &Path, filter: &WatchFilter, found: &mut Vec<PathBuf>) {
 
 /// Does this path's name say it is a source? See [`SOURCE_EXTENSIONS`] for why a scan may ask this and an include
 /// may not.
-fn is_a_source_file(path: &Path) -> bool {
+///
+/// `extra` is the project's own list (`workspace.source_extensions` in `.cppls.toml`), **added** to the engine's:
+/// a project that writes `.cuh` is saying "and also these", and a project that wanted to *replace* the list would
+/// be one analysing C++ without `.cpp`.
+fn is_a_source_file(path: &Path, extra: &[String]) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
             let lower = extension.to_ascii_lowercase();
             SOURCE_EXTENSIONS.contains(&lower.as_str())
+                || extra
+                    .iter()
+                    .any(|listed| listed.trim_start_matches('.').eq_ignore_ascii_case(&lower))
         })
 }
 
@@ -1172,7 +1250,7 @@ fn is_a_source_file(path: &Path) -> bool {
 mod tests {
     use super::{OpenDocuments, Session, SessionFiles};
     use crate::include::config::CompilerConfig;
-    use crate::include::paths::{DiskFiles, FileProvider, MemoryFiles};
+    use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
     use crate::index::watch::{FileEvent, WatchFilter};
     use crate::index::{Priority, StepOutcome};
     use crate::symbol::{Known, UnknownReason};
@@ -1788,6 +1866,351 @@ mod tests {
         );
     }
 
+    // -------------------------------------------------------------------------------------------
+    // The project's own configuration file
+    // -------------------------------------------------------------------------------------------
+
+    #[test]
+    fn a_project_configuration_narrows_the_scan_and_widens_the_source_list() {
+        // The two things `[workspace]` is for: a tree the analysis should not read, and an extension the engine
+        // does not know about. Both are read from the project's own file, on disk, by a session the caller
+        // configured — which is the path a test can take without running a compiler.
+        let project = Project::new("config-scan");
+        project.write("main.cpp", "int main() { return 0; }\n");
+        project.write("vendor/third_party.cpp", "int vendored;\n");
+        project.write("kernels/vector.cuh", "struct FromCuda { int x; };\n");
+        project.write(
+            ".cppls.toml",
+            "[workspace]\nexclude = [\"vendor/**\"]\nsource_extensions = [\"cuh\"]\n",
+        );
+
+        let documents = OpenDocuments::new();
+        let providers = SessionFiles::new(documents, DiskFiles);
+        let session = Session::with_config(
+            &project.root,
+            providers,
+            WatchFilter::new(&project.root),
+            CompilerConfig::default(),
+        );
+
+        assert_eq!(
+            project.relative(session.project_files()),
+            ["kernels/vector.cuh", "main.cpp"],
+            "the excluded tree is not scanned, and the project's own extension is"
+        );
+        assert!(
+            session.project_config().found(),
+            "the file was read: {:?}",
+            session.project_config()
+        );
+        assert!(session.project_config().problems.is_empty());
+    }
+
+    #[test]
+    fn the_projects_flags_win_over_the_databases_and_extra_args_add_to_the_winner() {
+        // The decision `CompileSection::args` records, pinned: `args` wins outright, `extra_args` adds to whatever
+        // won, and `remove_args` drops a flag from it. One test because the three keys are one pass over one list —
+        // splitting them would let the order they are documented in stop being the order they happen in.
+        let project = Project::new("config-flags");
+        project.write("main.cpp", "int main() { return 0; }\n");
+        let root = project.root.to_string_lossy().replace('\\', "/");
+
+        project.write(
+            "compile_commands.json",
+            &format!(
+                "[\n  {{\"directory\": \"{root}\", \"file\": \"{root}/main.cpp\", \
+                 \"arguments\": [\"g++\", \"-DFROM_THE_DATABASE\", \"-std=c++17\", \"-Werror\", \
+                 \"-c\", \"{root}/main.cpp\"]}}\n]\n"
+            ),
+        );
+        project.write(
+            ".cppls.toml",
+            "[compile]\nargs = [\"-DFROM_THE_CONFIG\", \"-std=c++20\"]\nextra_args = [\"-DEXTRA\"]\n",
+        );
+
+        let documents = OpenDocuments::new();
+        let providers = SessionFiles::new(documents, DiskFiles);
+        let session = Session::open(&project.root, providers, WatchFilter::new(&project.root));
+
+        let defines: Vec<&str> = session
+            .config()
+            .defines
+            .iter()
+            .map(|define| define.name.as_ref())
+            .collect();
+        assert_eq!(
+            defines,
+            ["FROM_THE_CONFIG", "EXTRA"],
+            "the file's flags are the compilation, and `extra_args` joins them"
+        );
+        assert_eq!(
+            session.config().standard.as_deref(),
+            Some("c++20"),
+            "the database's `-std=c++17` is not in effect"
+        );
+    }
+
+    #[test]
+    fn removing_and_adding_a_flag_is_one_pass_in_that_order() {
+        // `remove_args` drops from the list that won, and `extra_args` appends to it — removing *first* is what
+        // makes "drop the database's `-std=c++17`, add `-std=c++20`" mean c++20 rather than c++17.
+        let project = Project::new("config-remove");
+        project.write("main.cpp", "int main() { return 0; }\n");
+        let root = project.root.to_string_lossy().replace('\\', "/");
+
+        project.write(
+            "compile_commands.json",
+            &format!(
+                "[\n  {{\"directory\": \"{root}\", \"file\": \"{root}/main.cpp\", \
+                 \"arguments\": [\"g++\", \"-std=c++17\", \"-DKEEP\", \"-Werror\", \"-c\", \"{root}/main.cpp\"]}}\n]\n"
+            ),
+        );
+        project.write(
+            ".cppls.toml",
+            "[compile]\nremove_args = [\"-Werror\", \"-std=c++17\"]\nextra_args = [\"-std=c++20\"]\n",
+        );
+
+        let documents = OpenDocuments::new();
+        let providers = SessionFiles::new(documents, DiskFiles);
+        let session = Session::open(&project.root, providers, WatchFilter::new(&project.root));
+
+        assert_eq!(session.config().standard.as_deref(), Some("c++20"));
+        let defines: Vec<&str> = session
+            .config()
+            .defines
+            .iter()
+            .map(|define| define.name.as_ref())
+            .collect();
+        assert_eq!(defines, ["KEEP"], "a flag nobody removed still applies");
+    }
+
+    #[test]
+    fn the_database_can_be_somewhere_no_convention_predicts() {
+        let project = Project::new("config-database");
+        project.write("main.cpp", "int main() { return 0; }\n");
+        let root = project.root.to_string_lossy().replace('\\', "/");
+        project.write(
+            "out/compile_commands.json",
+            &format!(
+                "[\n  {{\"directory\": \"{root}\", \"file\": \"{root}/main.cpp\", \
+                 \"arguments\": [\"g++\", \"-DFROM_ELSEWHERE\", \"-c\", \"{root}/main.cpp\"]}}\n]\n"
+            ),
+        );
+        project.write(
+            ".cppls.toml",
+            "[compile]\ndatabase = \"out/compile_commands.json\"\n",
+        );
+
+        let documents = OpenDocuments::new();
+        let providers = SessionFiles::new(documents, DiskFiles);
+        let session = Session::open(&project.root, providers, WatchFilter::new(&project.root));
+
+        assert_eq!(
+            session.compile_database().map(crate::CompileCommands::len),
+            Some(1)
+        );
+        let defines: Vec<&str> = session
+            .config()
+            .defines
+            .iter()
+            .map(|define| define.name.as_ref())
+            .collect();
+        assert_eq!(defines, ["FROM_ELSEWHERE"]);
+        assert_eq!(project.relative(session.project_files()), ["main.cpp"]);
+    }
+
+    #[test]
+    fn the_cache_goes_where_the_project_says_and_the_filter_follows_it() {
+        // The cache directory is one name with three readers — the store that writes under it, the filter that
+        // ignores its events, and the report a user reads — and this is the property that keeps them one answer.
+        let project = Project::new("config-cache");
+        project.write("main.cpp", "int main() { return 0; }\n");
+        project.write(".cppls.toml", "[index]\ncache_dir = \".cppls-cache\"\n");
+
+        let documents = OpenDocuments::new();
+        let providers = SessionFiles::new(documents, DiskFiles);
+        let mut session = Session::with_config(
+            &project.root,
+            providers,
+            WatchFilter::new(&project.root),
+            CompilerConfig::default(),
+        );
+
+        session.index_everything();
+        assert_eq!(session.stats().rebuilt, 1, "the file was read");
+
+        let summaries = project.root.join(".cppls-cache").join("summaries");
+        assert!(
+            summaries.is_dir(),
+            "the summaries are under the configured directory, not the default: {}",
+            summaries.display()
+        );
+        assert!(
+            !project.root.join(crate::CACHE_DIRECTORY).exists(),
+            "and the default directory was not created at all"
+        );
+    }
+
+    #[test]
+    fn the_sections_a_language_server_reads_come_from_the_same_parse() {
+        // One file, one parser: the server's keys are read from the session's report rather than by a second
+        // TOML reader in the other crate, which is what keeps the two from disagreeing about what it says.
+        let project = Project::new("config-server-keys");
+        project.write("main.cpp", "int main() { return 0; }\n");
+        project.write(
+            ".cppls.toml",
+            "[diagnostics]\non_change_ms = 250\n\n[hover]\nenable = false\n",
+        );
+
+        let documents = OpenDocuments::new();
+        let providers = SessionFiles::new(documents, DiskFiles);
+        let session = Session::with_config(
+            &project.root,
+            providers,
+            WatchFilter::new(&project.root),
+            CompilerConfig::default(),
+        );
+
+        let config = &session.project_config().config;
+        assert_eq!(config.diagnostics.on_change_ms, Some(250));
+        assert_eq!(config.hover.enable, Some(false));
+    }
+
+    #[test]
+    fn a_configuration_file_with_a_typo_still_analyses_the_project() {
+        // The failure mode the section-by-section parse exists for: one bad key must not cost the project its
+        // exclusions, and the problem must be visible to whoever asks the session what it thought.
+        let project = Project::new("config-typo");
+        project.write("main.cpp", "int main() { return 0; }\n");
+        project.write("vendor/third_party.cpp", "int vendored;\n");
+        project.write(
+            ".cppls.toml",
+            "[workspace]\nexclude = [\"vendor/**\"]\n\n[index]\ncache_dir = 5\n",
+        );
+
+        let documents = OpenDocuments::new();
+        let providers = SessionFiles::new(documents, DiskFiles);
+        let session = Session::with_config(
+            &project.root,
+            providers,
+            WatchFilter::new(&project.root),
+            CompilerConfig::default(),
+        );
+
+        assert_eq!(
+            project.relative(session.project_files()),
+            ["main.cpp"],
+            "the exclusions are in effect"
+        );
+        assert_eq!(session.project_config().problems.len(), 1);
+        assert!(session.project_config().problems[0].message.contains("[index]"));
+        assert_eq!(session.project_config().errors().count(), 1);
+    }
+
+    #[test]
+    fn a_database_in_a_build_directory_is_found_and_its_flags_reach_the_session() {
+        // The whole point of the build-system half: a CMake project that exports its database into `build/` — which
+        // is where CMake puts it — must be analysed with *those* flags and *that* file list, without anybody
+        // naming the path. This is the test that fails if the discovery is written but not wired into the session.
+        let project = Project::new("build-directory-database");
+        project.write("main.cpp", "int main() { return 0; }\n");
+        let root = project.root.to_string_lossy().replace('\\', "/");
+
+        project.write(
+            "build/compile_commands.json",
+            &format!(
+                "[\n  {{\"directory\": \"{root}\", \"file\": \"{root}/main.cpp\", \
+                 \"arguments\": [\"g++\", \"-DFROM_THE_BUILD_DIRECTORY\", \"-std=c++20\", \
+                 \"-c\", \"{root}/main.cpp\"]}}\n]\n"
+            ),
+        );
+
+        let documents = OpenDocuments::new();
+        let providers = SessionFiles::new(documents, DiskFiles);
+        let session = Session::open(&project.root, providers, WatchFilter::new(&project.root));
+
+        assert_eq!(
+            session.compile_database().map(crate::CompileCommands::len),
+            Some(1),
+            "the database in the build directory was read"
+        );
+        assert_eq!(
+            session
+                .discovery()
+                .database
+                .as_ref()
+                .map(|found| found.origin),
+            Some(crate::DatabaseOrigin::BuildDirectory),
+            "and the report says where it was found"
+        );
+        let defines: Vec<&str> = session
+            .config()
+            .defines
+            .iter()
+            .map(|define| define.name.as_ref())
+            .collect();
+        assert_eq!(defines, ["FROM_THE_BUILD_DIRECTORY"]);
+        assert_eq!(session.config().standard.as_deref(), Some("c++20"));
+        assert!(
+            session
+                .discovery()
+                .problems
+                .iter()
+                .any(|problem| problem.message.contains("build directory")),
+            "and a user reading the report is told: {:?}",
+            session.discovery().problems
+        );
+    }
+
+    #[test]
+    fn a_cmake_project_without_a_database_is_analysed_with_what_cmake_knows() {
+        // `CMAKE_EXPORT_COMPILE_COMMANDS=OFF` is the shape that produces this: no database at all, and CMake's
+        // cache as the only statement about the compilation. It is a *worse* answer than a database — whatever a
+        // target adds is missing — and it is much better than nothing, which is why it is worth the code and why
+        // the problem list says how to do better.
+        let project = Project::new("cmake-without-database");
+        project.write("main.cpp", "int main() { return 0; }\n");
+        project.write(
+            "CMakeCache.txt",
+            &format!(
+                "CMAKE_HOME_DIRECTORY:INTERNAL={}\n\
+                 CMAKE_CXX_COMPILER:FILEPATH=g++\n\
+                 CMAKE_CXX_FLAGS:STRING=-DFROM_CMAKE_CACHE\n\
+                 CMAKE_CXX_STANDARD:STRING=20\n\
+                 CMAKE_EXPORT_COMPILE_COMMANDS:BOOL=OFF\n",
+                project.root.to_string_lossy().replace('\\', "/")
+            ),
+        );
+
+        let documents = OpenDocuments::new();
+        let providers = SessionFiles::new(documents, DiskFiles);
+        let session = Session::open(&project.root, providers, WatchFilter::new(&project.root));
+
+        assert!(session.compile_database().is_none());
+        assert!(session.discovery().cmake.is_some(), "the cache was read");
+        let defines: Vec<&str> = session
+            .config()
+            .defines
+            .iter()
+            .map(|define| define.name.as_ref())
+            .collect();
+        assert_eq!(
+            defines,
+            ["FROM_CMAKE_CACHE"],
+            "the project-wide flags came from CMake"
+        );
+        assert_eq!(session.config().standard.as_deref(), Some("c++20"));
+        assert!(
+            session
+                .discovery()
+                .problems
+                .iter()
+                .any(|problem| problem.message.contains("CMAKE_EXPORT_COMPILE_COMMANDS=OFF")),
+            "and the one command that would make this better is spelled out: {:?}",
+            session.discovery().problems
+        );
+    }
+
     #[test]
     fn a_compile_database_names_the_files_that_are_here_and_the_flags_they_are_built_with() {
         // The two things a database is read for: which files are compiled — the list is better than a scan, because
@@ -1881,3 +2304,8 @@ mod tests {
         );
     }
 }
+
+
+
+
+

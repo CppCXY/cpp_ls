@@ -190,13 +190,24 @@ async fn apply_buffer(context: &ServerContextSnapshot, path: PathBuf, text: Stri
 }
 
 /// Schedule a file's diagnostics, unless the client pulls them instead.
+///
+/// The delay is the project's when it says one (`diagnostics.on_change_ms` in `.cppls.toml`) and this server's
+/// otherwise: how long a given project's files take to typing-stop is a property of the project and of the machine
+/// it is edited on, which is why it is configurable at all — and why the default is a compromise rather than a
+/// measurement.
 async fn schedule_diagnostics(context: &ServerContextSnapshot, path: PathBuf) {
     if context.lsp_features().supports_pull_diagnostic() {
         return;
     }
 
+    let interval = context
+        .analysis()
+        .with_snapshot(|session| session.project_config().config.diagnostics.on_change_ms)
+        .flatten()
+        .unwrap_or(DEFAULT_DIAGNOSTIC_INTERVAL);
+
     context
         .file_diagnostic()
-        .add_diagnostic_task(path, DEFAULT_DIAGNOSTIC_INTERVAL)
+        .add_diagnostic_task(path, interval)
         .await;
 }

@@ -51,8 +51,10 @@
 
 use std::path::{Path, PathBuf};
 
+use cpp_parser::Dialect;
+
 use crate::include::config::{CommandLineMacro, CompileCommands, CompilerConfig, IncludePath};
-use crate::include::paths::{FileProvider, normalize_path};
+use crate::file::paths::{FileProvider, normalize_path};
 
 /// What a program wrote to its two streams.
 ///
@@ -62,6 +64,15 @@ use crate::include::paths::{FileProvider, normalize_path};
 pub struct Output {
     pub stdout: String,
     pub stderr: String,
+    /// The exit status, or `None` when the process was killed by a signal.
+    ///
+    /// Load-bearing for one compiler: `cl` has no `-v`, so the only signal that distinguishes "could not be asked"
+    /// from "asked and the answer is empty" is the status. Measured: `1` is the environment not obtained, `2` is
+    /// the command line rejected or headers missing, `4` is a resource failure, `0` is success
+    /// (`docs/msvc-notes.md`, *Failure modes*). A caller that read only the text would treat a silent exit 1 as
+    /// "this compiler predefines nothing".
+    pub status: Option<i32>,
+    pub succeeded: bool,
 }
 
 impl Output {
@@ -80,11 +91,23 @@ impl Output {
 /// installed — or with a different one. A test suite that needs `g++` on `PATH` is a test suite that fails on a
 /// machine that has only `clang++`.
 pub trait CommandRunner {
-    /// Run `program` with `arguments` and an **empty** standard input, or `None` if it could not be run.
+    /// Run `program` with `arguments`, an **empty standard input**, and these extra environment variables.
     ///
-    /// `None` covers every reason the answer is unavailable — not found, not executable, no permission — because
-    /// they all lead to the same decision: this compiler cannot be asked, so try the next one.
-    fn run(&self, program: &Path, arguments: &[&str]) -> Option<Output>;
+    /// `None` covers every reason the answer is unavailable — not found, not executable, no permission, a
+    /// non-zero exit that means the program refused to run — because they all lead to the same decision: this
+    /// compiler cannot be asked, so try the next one. A caller that needs to tell those apart reads the exit
+    /// status itself, which is why [`Output`] carries it.
+    ///
+    /// The environment is a parameter rather than the process's own because one toolchain needs it: `cl` finds its
+    /// headers through `INCLUDE` and has no `-E -v` to ask, so the analysis **sets `INCLUDE` itself** and runs the
+    /// compiler with it (`docs/msvc-notes.md` measures that this works, and that going through `vcvars64.bat`
+    /// instead costs ~1.3 s against ~50 ms).
+    fn run(
+        &self,
+        program: &Path,
+        arguments: &[&str],
+        environment: &[(std::ffi::OsString, std::ffi::OsString)],
+    ) -> Option<Output>;
 }
 
 /// The real thing.
@@ -92,20 +115,35 @@ pub trait CommandRunner {
 pub struct DiskCommands;
 
 impl CommandRunner for DiskCommands {
-    fn run(&self, program: &Path, arguments: &[&str]) -> Option<Output> {
-        let output = std::process::Command::new(program)
+    fn run(
+        &self,
+        program: &Path,
+        arguments: &[&str],
+        environment: &[(std::ffi::OsString, std::ffi::OsString)],
+    ) -> Option<Output> {
+        let mut command = std::process::Command::new(program);
+        command
             .args(arguments)
             // An empty translation unit, spelled `-` rather than `NUL` or `/dev/null`: the compiler reads its
-            // input from standard input, which needs no file to exist and no platform to be known.
-            .stdin(std::process::Stdio::null())
-            .output()
-            .ok()?;
+            // input from standard input, which needs no file to exist and no platform to be known. (`cl` does not
+            // accept stdin at all — it is given a real file — but the flag is what a GNU-like compiler expects.)
+            .stdin(std::process::Stdio::null());
+
+        for (name, value) in environment {
+            command.env(name, value);
+        }
+
+        let output = command.output().ok()?;
 
         Some(Output {
             // Lossy rather than an error: compiler output is ASCII except for the paths in it, and a path with a
-            // byte that is not UTF-8 is still a path worth trying.
+            // byte that is not UTF-8 is still a path worth trying. (It is also *localized*: every `cl` diagnostic
+            // on the machine this was written on is Chinese, so no caller may match on message text — match on the
+            // exit status and on the `D####`/`C####` codes, as `docs/msvc-notes.md` records.)
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            status: output.status.code(),
+            succeeded: output.status.success(),
         })
     }
 }
@@ -284,7 +322,7 @@ pub fn search_paths(
     }
     arguments.push("-");
 
-    let output = runner.run(compiler, &arguments)?;
+    let output = runner.run(compiler, &arguments, &[])?;
     let combined = output.combined();
 
     let system_include_paths = parse_search_list(&combined);
@@ -293,11 +331,22 @@ pub fn search_paths(
         return None;
     }
 
+    let builtin_macros = parse_builtin_macros(&combined);
+    let dialect = Dialect::from_predefined_macros(
+        builtin_macros
+            .iter()
+            .map(|define| (define.name.as_ref(), define.value.as_deref())),
+    );
+
     Some(Toolchain {
-        compiler: compiler.to_path_buf(),
+        compiler: Some(compiler.to_path_buf()),
         version: parse_version(&combined),
         system_include_paths,
-        builtin_macros: parse_builtin_macros(&combined),
+        builtin_macros,
+        dialect,
+        // Overwritten by the caller that knows which step of the order found this compiler.
+        source: ToolchainSource::Path,
+        note: None,
     })
 }
 
@@ -334,30 +383,274 @@ pub fn parse_builtin_macros(output: &str) -> Vec<CommandLineMacro> {
 
 /// Find a compiler and ask it. The one call a caller needs.
 ///
-/// The **standard** comes from the compile database's entry for `for_file`, when there is one: it decides the value
-/// of `__cplusplus` in the predefined table, and with it every `#if __cplusplus >= …` in every header. Asking the
-/// compiler for its default instead would answer a question nobody asked, with a number that looks right.
+/// # The order, and what each step is worth
+///
+/// ```text
+/// 1. compile_commands.json's compiler for this file   the project saying which compiler builds it
+/// 2. `CXX`, then `CC`                                 the person saying which compiler
+/// 3. the platform's own: MSVC on Windows              the machine's convention — see `docs/msvc-notes.md`
+/// 4. `g++`, `clang++`, `c++`, … on `PATH`             the machine's default
+/// 5. the system's header directories                  nothing could be asked: headers without macros
+/// ```
+///
+/// Each step is a weaker claim than the one before it, and the answer says which one it came from
+/// ([`Toolchain::source`]) — because "the analysis used MinGW's headers for an MSVC project" is a question that
+/// gets asked, and the answer has to be in the report rather than reconstructed from a log.
+///
+/// **Windows prefers MSVC** unless the project or the person said otherwise: a Windows project's standard library
+/// is the one that ships with the toolchain the build uses, and a `g++` on `PATH` (MinGW, say) has a *different*
+/// libstdc++ and a different Windows SDK — analysing an MSVC project against it answers about declarations the
+/// build never sees.
+///
+/// `None` when nothing at all could be found: no compiler, and not even a conventional header directory. That is a
+/// state the analysis reports (every include stays unresolved) rather than papering over.
 pub fn discover(
     files: &impl FileProvider,
     runner: &impl CommandRunner,
     commands: Option<&CompileCommands>,
     for_file: &Path,
     environment: &Environment,
+    layout: &crate::include::msvc::WindowsLayout,
 ) -> Option<Toolchain> {
-    let compiler = find_compiler(files, commands, for_file, environment)?;
-    let standard = commands
-        .and_then(|commands| commands.command_for(for_file))
-        .and_then(|command| command.to_config().standard);
+    // The database's own compiler is the one candidate this entry point can work out for itself, and it is the
+    // first one: the project saying which compiler builds *this* file. A caller that also knows what `.cppls.toml`
+    // and `CMakeCache.txt` say uses [`discover_with`], which takes the whole ordered list — including this one,
+    // because it is the caller that knows where it ranks (`.cppls.toml` above it, CMake below).
+    let from_database = database_compiler(commands, for_file)
+        .map(|compiler| (compiler, ToolchainSource::CompileDatabase));
 
-    search_paths(runner, &compiler, standard.as_deref())
+    discover_with(
+        files,
+        runner,
+        from_database.as_slice(),
+        commands,
+        for_file,
+        environment,
+        layout,
+    )
+}
+
+/// The compiler a compile database names for a file, as a candidate.
+///
+/// `commands.command_for(for_file)` rather than the first entry: a database is per-file, and asking about a file
+/// no entry mentions is how a machine with two toolchains gets the wrong compiler for the project's own headers —
+/// which is what the tier *below* (`CXX`, then the platform) is for.
+fn database_compiler(commands: Option<&CompileCommands>, for_file: &Path) -> Option<PathBuf> {
+    commands
+        .and_then(|commands| commands.command_for(for_file))
+        .and_then(|command| command.arguments.first())
+        .map(PathBuf::from)
+}
+
+/// [`discover`] with compilers the *project* named, tried before the environment's.
+///
+/// The three sources that rank above `CXX` are all "the project said so", and they are passed in rather than looked
+/// up here because each is read by a different layer: `.cppls.toml` and `compile_commands.json` by
+/// [`crate::project`], `CMakeCache.txt` by [`crate::project::build`]. What this function owns is the **order**,
+/// which is the one thing that has to be in one place:
+///
+/// ```text
+/// 1. the names passed in, in the order given      .cppls.toml > compile database > CMakeCache
+/// 2. `CXX`, then `CC`                             the person's
+/// 3. the platform's own: MSVC on Windows          the machine's convention
+/// 4. `g++`, `clang++`, … on `PATH`                the machine's default
+/// 5. the system's header directories              nothing to ask
+/// ```
+///
+/// A candidate that cannot be found or does not answer is skipped, not fatal: a project that names a compiler the
+/// machine does not have is better analysed with the machine's own — and [`Toolchain::source`] says which one
+/// answered, so the report shows that the project's choice was not available.
+pub fn discover_with(
+    files: &impl FileProvider,
+    runner: &impl CommandRunner,
+    named: &[(PathBuf, ToolchainSource)],
+    commands: Option<&CompileCommands>,
+    for_file: &Path,
+    environment: &Environment,
+    layout: &crate::include::msvc::WindowsLayout,
+) -> Option<Toolchain> {
+    let standard = standard_for(commands, for_file);
+
+    // 1. The project's own answers.
+    for (name, source) in named {
+        if let Some(toolchain) = ask(
+            files,
+            runner,
+            name,
+            environment,
+            layout,
+            standard.as_deref(),
+        ) {
+            return Some(toolchain.claiming(*source));
+        }
+    }
+
+    // 2. The environment's.
+    for variable in [environment.cxx.as_ref(), environment.cc.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(toolchain) = ask(
+            files,
+            runner,
+            variable,
+            environment,
+            layout,
+            standard.as_deref(),
+        ) {
+            return Some(toolchain.claiming(ToolchainSource::Environment));
+        }
+    }
+
+    // 3. The platform's own toolchain.
+    if let Some(toolchain) = ask_msvc(runner, layout, standard.as_deref(), None) {
+        return Some(toolchain.claiming(ToolchainSource::PlatformDefault));
+    }
+
+    // 4. Whatever is installed.
+    for name in COMPILER_NAMES {
+        if let Some(toolchain) = ask(
+            files,
+            runner,
+            Path::new(name),
+            environment,
+            layout,
+            standard.as_deref(),
+        ) {
+            return Some(toolchain.claiming(ToolchainSource::Path));
+        }
+    }
+
+    // 5. Nothing to ask: the headers a convention promises, and no macro table at all.
+    system_headers_fallback(runner, layout)
+}
+
+/// The standard the file is built with, from the database's entry for it.
+///
+/// It decides the value of `__cplusplus` in a compiler's predefined table, and with it every
+/// `#if __cplusplus >= …` in every header. Asking a compiler for its default instead would answer a question
+/// nobody asked, with a number that looks right.
+fn standard_for(commands: Option<&CompileCommands>, for_file: &Path) -> Option<String> {
+    commands
+        .and_then(|commands| commands.command_for(for_file))
+        .and_then(|command| command.to_config().standard)
+        .map(|standard| standard.to_string())
+}
+
+/// Ask one compiler by name, whichever kind it is.
+fn ask(
+    files: &impl FileProvider,
+    runner: &impl CommandRunner,
+    name: &Path,
+    environment: &Environment,
+    layout: &crate::include::msvc::WindowsLayout,
+    standard: Option<&str>,
+) -> Option<Toolchain> {
+    let found = locate(files, name, environment)?;
+
+    if is_msvc(&found) {
+        return ask_msvc(runner, layout, standard, Some(found));
+    }
+
+    search_paths(runner, &found, standard)
+}
+
+/// Is this Microsoft's compiler?
+///
+/// By name, because the two kinds are asked in completely different ways and a compiler's name is the only thing
+/// an analysis can know before running it: `cl` has no `-E -v`, and its search list comes from `INCLUDE`. A
+/// program called `cl` that is not Microsoft's would fail the macro dump and be reported as a compiler that could
+/// not be asked — which is the honest outcome, and not a silent wrong answer.
+fn is_msvc(program: &Path) -> bool {
+    program
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("cl"))
+}
+
+/// Ask Microsoft's compiler: build its search list, then dump its macros.
+///
+/// The macro dump can fail on its own (`/PD` needs `/Zc:preprocessor`; the machine may have no resources for the
+/// language it is running in), and that is **not** the same as having no toolchain: the include directories are
+/// still the right ones, and a project whose headers resolve is a project half the queries work for. So a failure
+/// is reported in [`Toolchain::note`] and the toolchain is returned anyway — with no macros, which leaves every
+/// condition naming one of them `Unknown` rather than wrong.
+fn ask_msvc(
+    runner: &impl CommandRunner,
+    layout: &crate::include::msvc::WindowsLayout,
+    standard: Option<&str>,
+    named: Option<PathBuf>,
+) -> Option<Toolchain> {
+    if !cfg!(windows) {
+        return None;
+    }
+
+    let mut msvc = crate::include::msvc::discover(runner, layout)?;
+    if let Some(named) = named {
+        msvc.toolset.cl = named;
+    }
+
+    let macros = crate::include::msvc::predefined_macros(runner, &msvc, standard);
+
+    let (builtin_macros, version, note) = match macros {
+        Some(macros) => {
+            let version = crate::include::msvc::version_line(&msvc, &macros);
+            (macros, Some(version), None)
+        }
+        None => (
+            Vec::new(),
+            Some(format!("MSVC {}", msvc.toolset.version)),
+            Some(
+                "the compiler could not be asked for its predefined macros, so conditions that name one \
+                 (``_MSC_VER``, ``_WIN32``, ``__cplusplus``) are Unknown"
+                    .to_string(),
+            ),
+        ),
+    };
+
+    Some(Toolchain {
+        compiler: Some(msvc.toolset.cl.clone()),
+        version,
+        system_include_paths: msvc.include_paths(),
+        builtin_macros,
+        // Knowing the compiler is `cl` is knowing the dialect, whether or not it answered: MSVC's reading of
+        // `__int128`, of attributes and of the preprocessor's own syntax is what the parser needs to know.
+        dialect: Some(Dialect::Msvc),
+        source: ToolchainSource::PlatformDefault,
+        note,
+    })
+}
+
+/// The last resort: header directories a convention promises, with no compiler and no macros.
+fn system_headers_fallback(
+    runner: &impl CommandRunner,
+    layout: &crate::include::msvc::WindowsLayout,
+) -> Option<Toolchain> {
+    let found = crate::include::system_headers::discover(runner, layout)?;
+
+    Some(Toolchain {
+        compiler: None,
+        version: None,
+        system_include_paths: found.directories,
+        builtin_macros: Vec::new(),
+        dialect: None,
+        source: ToolchainSource::SystemHeaders,
+        note: Some(format!(
+            "no compiler could be asked; using the system's own header directories ({}), so compiler macros \
+             are Unknown",
+            found.based_on
+        )),
+    })
 }
 
 /// A compiler that answered, and what it said.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Toolchain {
-    /// The compiler that was asked, as it was found.
-    pub compiler: PathBuf,
-    /// Its version line, when it printed one: `gcc version 15.1.0 (…)`, `clang version 18.1.8`.
+    /// The compiler that was asked, as it was found. `None` in the last-resort case, where no compiler could be
+    /// asked at all and only the system's conventional header directories are known.
+    pub compiler: Option<PathBuf>,
+    /// Its version line, when it printed one: `gcc version 15.1.0 (…)`, `clang version 18.1.8`,
+    /// `MSVC 14.35.32215 (_MSC_FULL_VER 193532215)`.
     ///
     /// Kept for a human, not for a decision: when the analysis of a project is wrong because it was read against
     /// the wrong toolchain, the first question is which toolchain it was read against.
@@ -371,10 +664,80 @@ pub struct Toolchain {
     /// 480 more. A condition like `#ifdef _WIN32` or `#if __cplusplus >= 201703L` is a question about these, and
     /// there is nowhere else to get the answer. See [`parse_builtin_macros`], and
     /// [`Toolchain::macros`] for how they are handed to a condition evaluator.
+    ///
+    /// **Empty is not "none of them are defined"**: it means the compiler could not be asked, which
+    /// [`Toolchain::note`] says out loud and which makes every condition naming one of these `Unknown`.
     pub builtin_macros: Vec<CommandLineMacro>,
+    /// The dialect the parser should read the project's files in, when the toolchain settles it.
+    ///
+    /// From the macro table when there is one (`_MSC_VER`, `__GNUC__`), and from the compiler's *name* when there
+    /// is not and the name is unambiguous — a `cl` that could not be asked is still MSVC.
+    pub dialect: Option<Dialect>,
+    /// How this toolchain was found, which is the first thing to check when an analysis is wrong.
+    pub source: ToolchainSource,
+    /// Something a user should know about this answer, when there is something: that the macros are unknown, that
+    /// the headers came from a convention rather than from a compiler.
+    pub note: Option<String>,
+}
+
+/// How a toolchain was found, strongest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolchainSource {
+    /// `compile.compiler` in `.cppls.toml`: a person naming the compiler.
+    Configuration,
+    /// The compile database's own command for the file.
+    CompileDatabase,
+    /// `CMAKE_CXX_COMPILER` in the project's `CMakeCache.txt`.
+    BuildCache,
+    /// `CXX` or `CC`.
+    Environment,
+    /// The platform's own toolchain: MSVC on Windows.
+    PlatformDefault,
+    /// A name found on `PATH`.
+    Path,
+    /// Nothing could be asked: the system's conventional header directories.
+    SystemHeaders,
+}
+
+impl ToolchainSource {
+    /// A phrase for a report, so that a log line can say how the answer was reached.
+    pub fn words(self) -> &'static str {
+        match self {
+            ToolchainSource::Configuration => "named by .cppls.toml",
+            ToolchainSource::CompileDatabase => "named by the compile database",
+            ToolchainSource::BuildCache => "named by CMake's cache",
+            ToolchainSource::Environment => "named by CXX/CC",
+            ToolchainSource::PlatformDefault => "the platform's own toolchain",
+            ToolchainSource::Path => "found on PATH",
+            ToolchainSource::SystemHeaders => "the system's conventional header directories",
+        }
+    }
+
+    /// Is this answer a *guess* — headers without the compiler's own word on them?
+    pub fn is_a_guess(self) -> bool {
+        matches!(self, ToolchainSource::SystemHeaders)
+    }
 }
 
 impl Toolchain {
+    /// The same toolchain, with its source recorded.
+    fn claiming(mut self, source: ToolchainSource) -> Self {
+        self.source = source;
+        self
+    }
+
+    /// The compiler, as a report spells it — including the case where there is none.
+    ///
+    /// A method because five callers print it and each of them would otherwise write its own `match` on the
+    /// `Option` — and because "no compiler" is a *result* here rather than a missing value: the headers may still
+    /// be real (see [`ToolchainSource::SystemHeaders`]).
+    pub fn compiler_name(&self) -> String {
+        match &self.compiler {
+            Some(compiler) => compiler.display().to_string(),
+            None => "no compiler — the system's conventional header directories only".to_string(),
+        }
+    }
+
     /// The predefined macros, as the map a condition is evaluated against.
     ///
     /// A name with no value (`#define __linux`) maps to `None`, which is what `defined(NAME)` asks about; a name
@@ -511,24 +874,32 @@ mod tests {
 
     /// GCC 15.1.0 (MinGW-w64), trimmed to three entries — the shape is verbatim, including the `..` segments
     /// and the `#include "..."` block that precedes it.
+    ///
+    /// **The paths are not**: they are anonymised to `C:\tools\mingw64`, because what this test is about is the
+    /// *shape* a compiler prints — `COLLECT_GCC`, the `#include "..."` block that must not be read, the `bin/../lib`
+    /// that has to be folded, the `ignoring duplicate directory` line in between — and a fixture that spells out the
+    /// directory of the machine it was recorded on is a fixture nobody else can run and nobody can tell from a
+    /// machine-specific assertion. (See `docs/msvc-notes.md` for why a recorded shape is worth having at all: the
+    /// alternative is a parser written against what a compiler is *documented* to print.)
     const GCC: &str = "\
 Using built-in specs.
-COLLECT_GCC=C:\\Users\\zc\\Desktop\\mingw\\mingw64\\bin\\g++.exe
+COLLECT_GCC=C:\\tools\\mingw64\\bin\\g++.exe
 Target: x86_64-w64-mingw32
 gcc version 15.1.0 (x86_64-win32-seh-rev0, Built by MinGW-Builds project) 
 COLLECT_GCC_OPTIONS='-E' '-v' '-shared-libgcc' '-mtune=core2' '-march=nocona'
-ignoring duplicate directory \"C:/Users/zc/Desktop/mingw/mingw64/lib/gcc/../../lib/gcc/x86_64-w64-mingw32/15.1.0/include/c++\"
+ignoring duplicate directory \"C:/tools/mingw64/lib/gcc/../../lib/gcc/x86_64-w64-mingw32/15.1.0/include/c++\"
 #include \"...\" search starts here:
 #include <...> search starts here:
- C:/Users/zc/Desktop/mingw/mingw64/bin/../lib/gcc/x86_64-w64-mingw32/15.1.0/include/c++
- C:/Users/zc/Desktop/mingw/mingw64/bin/../lib/gcc/x86_64-w64-mingw32/15.1.0/include/c++/x86_64-w64-mingw32
- C:/Users/zc/Desktop/mingw/mingw64/bin/../lib/gcc/x86_64-w64-mingw32/15.1.0/include/c++/backward
+ C:/tools/mingw64/bin/../lib/gcc/x86_64-w64-mingw32/15.1.0/include/c++
+ C:/tools/mingw64/bin/../lib/gcc/x86_64-w64-mingw32/15.1.0/include/c++/x86_64-w64-mingw32
+ C:/tools/mingw64/bin/../lib/gcc/x86_64-w64-mingw32/15.1.0/include/c++/backward
 End of search list.
 ";
 
     /// Clang 18 on Windows, trimmed to two entries. Note the backslashes and the absence of `..` — the two
     /// compilers print the same *structure* and different *spellings*, which is exactly why the parser keys on
-    /// the structure.
+    /// the structure. No `..` to fold, and a directory with a space in it, which is the other shape that breaks a
+    /// parser keyed on whitespace.
     const CLANG: &str = "\
 clang version 18.1.8
 Target: x86_64-pc-windows-msvc
@@ -551,7 +922,7 @@ End of search list.
         // Normalized, which folds the `..` GCC prints and the separators Clang prints.
         assert_eq!(
             gcc[0],
-            std::path::Path::new("C:/Users/zc/Desktop/mingw/mingw64/lib/gcc/x86_64-w64-mingw32/15.1.0/include/c++"),
+            std::path::Path::new("C:/tools/mingw64/lib/gcc/x86_64-w64-mingw32/15.1.0/include/c++"),
             "the `bin/../lib` in the compiler's own output is folded"
         );
         assert_eq!(
@@ -628,6 +999,8 @@ End of search list.
         let output = Output {
             stdout: "from stdout".to_string(),
             stderr: "from stderr".to_string(),
+            status: Some(0),
+            succeeded: true,
         };
         let combined = output.combined();
         assert!(combined.contains("from stdout") && combined.contains("from stderr"));
@@ -655,11 +1028,11 @@ End of search list.
     // -------------------------------------------------------------------------------------------
 
     use super::{
-        COMPILER_NAMES, CommandRunner, CompilerConfig, IncludePath, Path, Toolchain, discover,
-        find_compiler, parse_builtin_macros, search_paths,
+        COMPILER_NAMES, CommandRunner, CompilerConfig, IncludePath, Path, Toolchain,
+        ToolchainSource, discover, find_compiler, parse_builtin_macros, search_paths,
     };
     use crate::include::config::{CompileCommand, CompileCommands};
-    use crate::include::paths::{MemoryFiles, normalize_path};
+    use crate::file::paths::{MemoryFiles, normalize_path};
 
     /// The environment a test names explicitly, with no extensions so that a `PATH` entry is a whole file name.
     fn environment() -> Environment {
@@ -678,10 +1051,20 @@ End of search list.
     }
 
     impl CommandRunner for Answers {
-        fn run(&self, program: &Path, arguments: &[&str]) -> Option<Output> {
+        fn run(
+            &self,
+            program: &Path,
+            arguments: &[&str],
+            environment: &[(std::ffi::OsString, std::ffi::OsString)],
+        ) -> Option<Output> {
             if program.file_name()?.to_str()? != self.program {
                 return None;
             }
+
+            assert!(
+                environment.is_empty(),
+                "a GNU-like compiler is asked with an empty environment: {environment:?}"
+            );
 
             // The arguments are asserted rather than ignored: `-x c++` is what makes `gcc` list the C++
             // directories, `-dM` is what makes it print its predefined macros, and a discovery that dropped
@@ -706,6 +1089,8 @@ End of search list.
             Some(Output {
                 stdout: String::new(),
                 stderr: self.output.to_string(),
+                status: Some(0),
+                succeeded: true,
             })
         }
     }
@@ -858,7 +1243,7 @@ End of search list.
         let toolchain =
             search_paths(&runner, Path::new("/usr/bin/g++"), None).expect("the fixture answers");
 
-        assert_eq!(toolchain.compiler, Path::new("/usr/bin/g++"));
+        assert_eq!(toolchain.compiler.as_deref(), Some(Path::new("/usr/bin/g++")));
         assert_eq!(toolchain.system_include_paths.len(), 3);
         assert!(toolchain
             .version
@@ -932,7 +1317,7 @@ End of search list.
         // The fixture's `run` asserts the arguments, so reaching this line at all means `-std=c++20` was passed.
         let toolchain = search_paths(&runner, Path::new("/usr/bin/g++"), Some("c++20"))
             .expect("the fixture answers");
-        assert_eq!(toolchain.compiler, Path::new("/usr/bin/g++"));
+        assert_eq!(toolchain.compiler.as_deref(), Some(Path::new("/usr/bin/g++")));
     }
 
     #[test]
@@ -949,11 +1334,101 @@ End of search list.
             None,
             Path::new("/p/main.cpp"),
             &environment(),
+            &crate::include::msvc::WindowsLayout::default(),
         )
         .expect("the compiler is on the path and answers");
 
-        assert_eq!(toolchain.compiler, Path::new("/usr/bin/g++"));
+        assert_eq!(toolchain.compiler.as_deref(), Some(Path::new("/usr/bin/g++")));
+        assert_eq!(toolchain.source, ToolchainSource::Path);
+        assert!(toolchain.note.is_none());
         assert_eq!(toolchain.system_include_paths.len(), 3);
+    }
+
+    #[test]
+    fn a_compiler_the_database_names_is_asked_before_the_environment_is() {
+        // The order, pinned: the project's own statement about which compiler builds the file comes before the
+        // machine's, because a project with two toolchains in it is what the database exists to describe.
+        let files = MemoryFiles::new()
+            .with_file("/toolchains/bin/g++", "")
+            .with_file("/usr/bin/g++", "");
+        let runner = Answers {
+            program: "g++",
+            output: GCC,
+        };
+
+        let mut environment = environment();
+        environment.path = vec![Path::new("/toolchains/bin").into()];
+
+        let commands = command_line("/toolchains/bin/g++");
+        let toolchain = discover(
+            &files,
+            &runner,
+            Some(&commands),
+            Path::new("/p/main.cpp"),
+            &environment,
+            &crate::include::msvc::WindowsLayout::default(),
+        )
+        .expect("the database's compiler answers");
+
+        assert_eq!(
+            toolchain.compiler.as_deref(),
+            Some(Path::new("/toolchains/bin/g++"))
+        );
+        assert_eq!(
+            toolchain.source,
+            ToolchainSource::CompileDatabase,
+            "and the report says which step answered"
+        );
+    }
+
+    #[test]
+    fn a_machine_with_no_compiler_still_has_the_systems_headers_and_no_macros() {
+        // The last resort, and the two halves of what it means: `#include <vector>` resolves — so a project is
+        // half-usable — and the macro table is empty, so every condition naming `__cplusplus` or `_WIN32` is
+        // `Unknown`. The note says so, because a caller that read emptiness as "not defined" would answer wrongly.
+        let files = MemoryFiles::new();
+        let runner = Answers {
+            program: "nothing",
+            output: "",
+        };
+        let mut environment = environment();
+        environment.path = Vec::new();
+        environment.cxx = None;
+        environment.cc = None;
+
+        let found = discover(
+            &files,
+            &runner,
+            None,
+            Path::new("/p/main.cpp"),
+            &environment,
+            &crate::include::msvc::WindowsLayout::default(),
+        );
+
+        // A machine with no standard library installed anywhere conventional has no guess at all — which is the
+        // honest answer rather than a directory that does not exist — so this test asserts about the answer when
+        // there is one.
+        if let Some(toolchain) = found {
+            assert_eq!(toolchain.source, ToolchainSource::SystemHeaders);
+            assert!(toolchain.source.is_a_guess());
+            assert_eq!(toolchain.compiler, None);
+            assert!(toolchain.builtin_macros.is_empty());
+            assert!(
+                toolchain
+                    .note
+                    .as_deref()
+                    .is_some_and(|note| note.contains("Unknown")),
+                "the note says what is missing: {:?}",
+                toolchain.note
+            );
+            assert!(
+                !toolchain.system_include_paths.is_empty(),
+                "and every directory is one that exists"
+            );
+            for directory in &toolchain.system_include_paths {
+                assert!(directory.is_dir(), "{}", directory.display());
+            }
+        }
     }
 
     #[test]
@@ -961,10 +1436,13 @@ End of search list.
         // A search stops at the first directory that has the file, so position *is* precedence: `-I` finds a
         // header before the compiler's own directories do, which is how a project overrides one.
         let toolchain = Toolchain {
-            compiler: "/usr/bin/g++".into(),
+            compiler: Some("/usr/bin/g++".into()),
             version: None,
             system_include_paths: vec!["/gcc/include/c++".into(), "/gcc/include".into()],
             builtin_macros: Vec::new(),
+            dialect: None,
+            source: ToolchainSource::Path,
+            note: None,
         };
 
         let base = CompilerConfig::new().with_include_path("project/inc");
@@ -986,10 +1464,13 @@ End of search list.
         // prepared would say the same thing in more words — and a caller that prepares it per query would grow it
         // without bound. (GCC reaches the same conclusion out loud: `ignoring duplicate directory …`.)
         let toolchain = Toolchain {
-            compiler: "/usr/bin/g++".into(),
+            compiler: Some("/usr/bin/g++".into()),
             version: None,
             system_include_paths: vec!["/gcc/include".into(), "/gcc/include".into()],
             builtin_macros: Vec::new(),
+            dialect: None,
+            source: ToolchainSource::Path,
+            note: None,
         };
 
         let once = toolchain.config(&CompilerConfig::new());
@@ -1006,3 +1487,5 @@ End of search list.
         );
     }
 }
+
+

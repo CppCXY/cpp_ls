@@ -115,6 +115,7 @@ fn main() {
                     None,
                     first,
                     &cpp_code_analysis::Environment::current(),
+                    &cpp_code_analysis::include::msvc::WindowsLayout::current(),
                 )
             })
         {
@@ -533,3 +534,4 @@ over the files | busiest file {busiest_questions}",
         println!("{detail}");
     }
 }
+

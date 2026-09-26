@@ -43,12 +43,13 @@ pub mod file;
 pub mod include;
 pub mod index;
 pub mod preprocess;
+pub mod project;
 pub mod sema;
 pub mod session;
 pub mod summary;
 pub mod summary_codec;
 
-// The four folders above are the *organisation*; the modules inside them keep their own names, and they are
+// The folders above are the *organisation*; the modules inside them keep their own names, and they are
 // re-exported here so that every path written before the reorganisation still resolves — `crate::directive::…`
 // inside this crate, `cpp_code_analysis::directive::…` outside it. Moving a file is a change to the filesystem,
 // and this is what keeps it from being a change to the API.
@@ -56,12 +57,13 @@ pub mod summary_codec;
 // * `file`     — one file analysed, and the token of the expanded stream
 // * `preprocess` — directives, macros, conditions, guards, expansion (the entry point is this module itself)
 // * `include`  — include paths and compiler settings, the file provider, the resolver, the graph
+// * `project`  — what the project says about itself: `.cppls.toml`, the build system, the toolchain
 // * `sema`     — names, scopes, the index's declaration facts, and C++20 modules
 pub use cache::{
     CACHE_DIRECTORY, FORMAT_VERSION, READING_FINGERPRINT, SummaryKey, content_hash, fnv1a64,
 };
 pub use file::token;
-pub use include::{config, graph, paths, toolchain};
+pub use include::{config, graph, msvc, paths, system_headers, toolchain};
 pub use preprocess::{condition, directive, expand, guards, macros};
 pub use sema::declarations::{build_facts, by_name, declared_type_of, scope_of};
 pub use sema::{module_info, modules, parser_symbols, scopes, symbol};
@@ -81,7 +83,8 @@ pub use condition::{
 };
 pub use config::{
     CommandLineMacro, CompileCommand, CompileCommands, CompilerConfig, IncludePath,
-    parse_compile_commands, predefined_macros_of, split_command_line,
+    config_from_arguments, parse_compile_commands, predefined_macros_of, project_config_from_flags,
+    split_command_line,
 };
 pub use directive::{
     Define, Directive, DirectiveKind, Include, IncludeForm, SpannedDirective,
@@ -100,8 +103,8 @@ pub use guard::{Branch, Guard, GuardStack, Region, Visibility};
 pub use guards::{FileGuard, GuardAnalysis, analyse_guards, detect_guard};
 pub use include::{FoundIn, IncludeResolver, Resolution, Resolved, Unresolved};
 pub use toolchain::{
-    CommandRunner, DiskCommands, Environment, Output, Toolchain, discover, find_compiler,
-    parse_search_list, parse_version, search_paths,
+    CommandRunner, DiskCommands, Environment, Output, Toolchain, ToolchainSource, discover,
+    discover_with, find_compiler, parse_search_list, parse_version, search_paths,
 };
 // The index layer is flattened like the rest, even though it is the newest: a consumer that wants navigation
 // needs `SummaryStore` and `definition_across_files`, and reaching them through two module hops says nothing a
@@ -128,13 +131,25 @@ pub use paths::{
     normalize_path, parent_normalized,
 };
 pub use preprocess::{FilePreprocessing, PositionalMacros, preprocess};
+pub use project::{
+    CONFIGURATION_FILE_NAMES, CmakeCache, CompileSection, ConfigProblem, ConfigReport, Database,
+    DatabaseOrigin, DiagnosticsSection, DiscoveryProblem, HoverSection, IndexSection,
+    PROJECT_CONFIG_FILE, ProjectConfig, ProjectDiscovery, Severity, WorkspaceSection, find_cmake_cache,
+    find_database, load_config, parse_cmake_cache, parse_config,
+};
 pub use scopes::{build_scopes, declared_module_names};
 // The driver sits above the folders rather than in one of them: it is the join of all four — the toolchain, the
 // include configuration, the summaries and the queries — and putting it inside any one of them would make that
 // folder the owner of the others.
-pub use session::{FileView, OpenDocuments, Session, SessionFiles};
+pub use session::{OpenDocuments, Session, SessionFiles};
+// The *file* layer's two public faces: a view is one file parsed (what a cursor query is answered against), and a
+// VFS is the set of files being held (their text, and the line index of that text). They live in `file` rather
+// than next to the session because they are about files, not about a project.
+pub use file::view::FileView;
+pub use file::vfs::{Vfs, VfsFile};
 pub use symbol::{
     Binding, BindingKind, BindingOrigin, DeclName, HeaderName, Known, MaybeName, Name, NameKind,
     QualifiedName, Scope, ScopeId, ScopeKind, ScopeTree, UnknownReason,
 };
 pub use token::Token;
+
