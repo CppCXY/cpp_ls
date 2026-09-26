@@ -162,6 +162,12 @@ fn an_allocation_initialiser_is_not_a_parameter_list() {
         &[
             "auto p = new T(a, *q);",
             "auto p = new T(a, b);",
+            // **A group whose only argument starts with an operator.** `(*q)` looks exactly like a
+            // parenthesised declarator (`void (*)(int)`), which is what claimed it before the allocation's
+            // type-id learned to stop at a `(`: the allocator's type ends at the type, and the `(` after it is
+            // the **initialiser**. The same reading fixes `new T(::x)`, whose argument is a leading `::`.
+            "auto p = new T(*q);",
+            "auto p = new T(::x);",
             "auto p = ::new (buf) T(a, *q);",
             "auto p = new (buf) T(a, *q, c);",
             "auto p = new T[4];",
@@ -185,17 +191,18 @@ fn an_allocation_initialiser_is_not_a_parameter_list() {
             ),
             CppSyntaxKind::FunctionType,
         ),
+        // The shape that used to be claimed as a parenthesised declarator: the group is the initialiser here
+        // too, and `q` inside it is an operand rather than a declarator that has nowhere to put it.
+        forbidding(
+            shape("auto p = new T(*q);", Where::Body, CppSyntaxKind::Declaration),
+            CppSyntaxKind::FunctionType,
+        ),
     ]);
 
     assert_does_not_read_yet(
         Where::Body,
         &[
-            (
-                "auto p = new T(*q);",
-                "an allocation whose only argument starts with `*`: `a_parenthesised_abstract_declarator_follows` \
-                 claims the group first — a `*` right after a `(` is a parenthesised declarator, `void (*)(int)` — \
-                 so `(*q)` is read as a declarator and the `q` inside it has nowhere to go",
-            ),
+
             (
                 "auto p = new (Widget)(1);",
                 "an allocation of a **parenthesised** type used as an initialiser: the note on \
@@ -7136,6 +7143,39 @@ fn an_abstract_declarator_may_carry_a_calling_convention_before_its_operator() {
             "typedef void (*)(void);\n",
             "typedef void (__cdecl * p)(void);\n",
             "typedef DWORD (WINAPI PM_OPEN_PROC)(LPWSTR);\n",
+        ],
+    );
+}
+
+/// **A template argument that is an expression whose left operand reads as a type.**
+///
+/// `F<g<D> == 1>`, `F<g<D>::value == 1>`, and `tuple`'s own
+/// `_Tuple_conditional_explicit_v0<tuple_size_v<_Dest> == sizeof...(_Srcs), _Dest, _Srcs...>`: the type reading
+/// succeeds on `g<D>` and stops at the `==`, and taking that stop as the end of the argument left the operator to
+/// the list — which wants a `,` or a `>` — so the whole template-id came back as a **comparison** and the
+/// statement failed at the operator with ``expected primary expression``.
+///
+/// What decides it is the token **after** the type: an operator that cannot appear inside a type at all means the
+/// argument is an expression (`continues_an_expression`). Two halves are asserted, because the first version of
+/// that list held `>` and `<` as well and **every** type argument was refused — 128 clean files and 0 messages
+/// became 74 and 865 on the libstdc++ corpus.
+#[test]
+fn a_template_argument_may_be_an_expression_whose_left_operand_is_a_type() {
+    assert_reads(
+        Where::File,
+        &[
+            "template <class D> constexpr bool v = F<g<D> == 1>;\n",
+            "template <class D> constexpr bool v = F<g<D>::value == 1>;\n",
+            "template <class D, class... S> constexpr bool v = F<g<D> == sizeof...(S), D, S...>;\n",
+            // The operators that **decorate** a type are not evidence of an expression, and neither are the
+            // delimiters: `S<T*>`, `S<T&>`, `S<T&&>` and `S<int>` are types, and `S<A<B>>` is a type argument
+            // whose nested list ends in the same `>` the outer one does.
+            "template <class T> using p = S<T*>;\n",
+            "template <class T> using r = S<T&&>;\n",
+            "S<int> x;\n",
+            "S<A<B>> y;\n",
+            // …and a comparison written where no template-id is involved is still a comparison.
+            "bool b = n < 0 || n > 100000;\n",
         ],
     );
 }

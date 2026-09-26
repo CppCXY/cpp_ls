@@ -221,7 +221,7 @@ pub fn parse_type_id(p: &mut CppParser) -> ParseResult {
 /// that can be checked against a smaller set: the name has to be one the file declares to be a type, because a
 /// parameter list whose parameter is an unknown name is a guess, while a placement argument is a fact.
 pub fn parse_type_id_with(p: &mut CppParser, a_name_may_be_a_type: bool) -> ParseResult {
-    parse_type_id_here(p, a_name_may_be_a_type, true)
+    parse_type_id_here(p, a_name_may_be_a_type, true, true)
 }
 
 /// [`parse_type_id`] for a `new`, where the **array bounds are not the type's**.
@@ -235,7 +235,13 @@ pub fn parse_type_id_with(p: &mut CppParser, a_name_may_be_a_type: bool) -> Pars
 /// `a_name_may_be_a_type` is `false` for the same call, and for its own reason: the parentheses before the type may
 /// be a **placement list**. See [`parse_type_id_with`].
 pub fn parse_type_id_for_an_allocation(p: &mut CppParser) -> ParseResult {
-    parse_type_id_here(p, false, false)
+    // The third `false` is the whole reason this entry exists: after the allocated type, a `(` is the
+    // **initializer** (`new T(::x)`, `new Widget(1, 2)`) and never a parameter list belonging to the type.
+    // Reading it as one is what made `new T(::x)` report ``expected ), but get ::`` — the `(::x)` was taken for
+    // the parameter list of a function type returning `T`, and `::x` read as a parameter. The same shape with a
+    // parenthesised *type* (`new (Widget)(1)`) is claimed earlier, by the branch that reads a type beginning with
+    // a parenthesis, so nothing that belongs to the type is lost here.
+    parse_type_id_here(p, false, false, false)
 }
 
 /// Open the `TypeId` node and read the type in it, with the caller's answers to the two questions that decide how
@@ -244,11 +250,17 @@ fn parse_type_id_here(
     p: &mut CppParser,
     a_name_may_be_a_type: bool,
     read_array_suffixes: bool,
+    read_a_parameter_list_as_the_type: bool,
 ) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::TypeId);
 
-    if let Err(err) = parse_type_id_inner(p, a_name_may_be_a_type, read_array_suffixes) {
+    if let Err(err) = parse_type_id_inner(
+        p,
+        a_name_may_be_a_type,
+        read_array_suffixes,
+        read_a_parameter_list_as_the_type,
+    ) {
         p.close_marks_above(base);
         return Err(err);
     }
@@ -276,6 +288,7 @@ fn parse_type_id_inner(
     p: &mut CppParser,
     a_name_may_be_a_type: bool,
     read_array_suffixes: bool,
+    read_a_parameter_list_as_the_type: bool,
 ) -> ParseResult {
     if p.current_token() == CppTokenKind::LeftParen
         && starts_a_function_type(p, a_name_may_be_a_type)
@@ -318,7 +331,7 @@ fn parse_type_id_inner(
     //
     // No name may appear — this is a type-id, not a declarator — which is what makes `(int)` after it a
     // function type rather than somebody's parameter list. See [`parse_abstract_declarator`].
-    parse_abstract_declarator(p, false)?;
+    parse_abstract_declarator_with(p, false, read_a_parameter_list_as_the_type)?;
 
     // An **array suffix**: the `[4]` of `int[4]`, the `[2][3]` of `int[2][3]`, the `[4]` of `int*[4]`.
     //
@@ -3473,6 +3486,22 @@ fn is_overloadable_operator(kind: CppTokenKind) -> bool {
 /// The recursive call passes `false`, because an inner declarator's parentheses wrap a declarator and never a
 /// parameter list: `(*f)`, `(* const)`, `(**)`.
 pub fn parse_abstract_declarator(p: &mut CppParser, name_possible: bool) -> ParseResult {
+    parse_abstract_declarator_with(p, name_possible, true)
+}
+
+/// [`parse_abstract_declarator`], plus the one decision the `new` path has to answer differently.
+///
+/// `read_a_parameter_list_as_the_type` is whether a `(` that follows a complete type may still belong to **the
+/// type** — either as a function type spelled with its parameter list (`void (int)`) or as a parenthesised
+/// abstract declarator (`int (*)(int)`). In an allocation's type-id the answer is **no**: after the type it has
+/// read, a `(` is the **initializer** (`new T(::x)`, `new Widget(1, 2)`), and reading it as part of the type
+/// swallowed the initializer and the `;` after it. A type that begins with a parenthesis (`new (Widget)(1)`) is
+/// claimed before this function runs, so the gate costs the allocation path nothing.
+pub fn parse_abstract_declarator_with(
+    p: &mut CppParser,
+    name_possible: bool,
+    read_a_parameter_list_as_the_type: bool,
+) -> ParseResult {
     let mut container: Option<Marker> = None;
 
     /// Open the `Declarator` node on first use, so an abstract declarator that is not there leaves
@@ -3636,7 +3665,14 @@ pub fn parse_abstract_declarator(p: &mut CppParser, name_possible: bool) -> Pars
     //
     // Both readings are the same four tokens, so the decision cannot come from them; it comes from who is
     // asking, which is what `name_possible` carries.
-    if p.current_token() == CppTokenKind::LeftParen {
+    // **Both arms of this block are the type only where the caller says a `(` may still belong to it.** An
+    // allocation's type-id answers no: after the type it has read, a `(` is the **initializer**, and reading it
+    // here is what made `new T(::x)` report ``expected ), but get ::`` — the `(::x)` came out as a parenthesised
+    // abstract declarator (the first arm), the type-id swallowed the initializer *and* the `;` that followed it,
+    // and `::x` was reported as an unexpected `::`. A type that genuinely *begins* with a parenthesis
+    // (`new (Widget)(1)`) is claimed before this function runs, by the branch that reads a type beginning with
+    // one, so nothing that belongs to a type is lost by the gate.
+    if p.current_token() == CppTokenKind::LeftParen && read_a_parameter_list_as_the_type {
         if a_parenthesised_abstract_declarator_follows(p) {
             let _ = container!();
 
@@ -4808,10 +4844,25 @@ fn parse_template_argument(p: &mut CppParser) -> ParseResult {
     // kinds that end a type are the *delimiters*, and an argument that ends at a delimiter ends there whether or not
     // the reading before it succeeded — the `current_token_index() > start` test above is what says it consumed
     // anything at all. `continues_a_type` had no other caller and is gone with it.
+    // **…and nothing may follow that a type cannot hold.** `g<D> == 1` is an *expression* whose left operand
+    // happens to read as a type: the type reading succeeds, stops at the `==`, and taking that stop as the end of
+    // the argument leaves the `==` to the list — which then wants a `,` or a `>` and reports the whole thing as a
+    // comparison, so `F<g<D> == 1>`, `F<g<D>::value == 1>` and `tuple`'s
+    // `_Tuple_conditional_explicit_v0<tuple_size_v<_Dest> == sizeof...(_Srcs), …>` all failed at the operator
+    // with ``expected primary expression``.
+    //
+    // The operators listed by [`continues_an_expression`] cannot appear inside a type at all, so the argument is
+    // an expression and the reading below takes it. Nothing is given up: a type reading that was *wrong* is
+    // rewound by the branch below and the list fails, while an expression reading taken one token too eagerly
+    // would take `S<int*>` apart — which is why the operators that decorate a type (`*`, `&`, `&&`) are not on
+    // the list.
+    let continues_as_an_expression = continues_an_expression(p.current_token());
+
     if p.current_token_index() > start
         && type_read.is_ok()
         && !stopped_at_a_group_that_is_not_a_parameter_list
         && !a_brace_makes_it_a_value
+        && !continues_as_an_expression
     {
         return Ok(CompleteMarker::empty());
     }
@@ -4841,6 +4892,35 @@ fn parse_template_argument(p: &mut CppParser) -> ParseResult {
     // builder with "forward parent must point at a NodeStart, found Trivia". One reading, one rewind.
     p.rollback(checkpoint);
     super::exprs::parse_assignment_expr(p)
+}
+
+/// Can this token continue an **expression** where a type has just ended?
+///
+/// The operators that cannot appear inside a type in any position: equality, arithmetic, bitwise, the conditional
+/// `?` and `||`.
+///
+/// **The delimiters are deliberately absent**, and the first version of this list is why the note exists: a bare
+/// `>` ends the argument (the list owns it) and a `<` opens a nested list, so listing them made the rule refuse
+/// *every* type argument — the 128-file libstdc++ corpus went from **128 clean files and 0 messages to 74 and
+/// 865**, most of them ``expected a template argument``. `*`, `&` and `&&` are absent for the other reason: they
+/// decorate a type as readily as they multiply one (`S<int*>`, `S<int&>`, `S<int&&>`), so an argument that stops at
+/// one of them stays with the type reading. `>=`/`<=` are absent because a closing `>` followed by `=` is split by
+/// [`split_closing_angle`] before this question is asked.
+fn continues_an_expression(kind: CppTokenKind) -> bool {
+    matches!(
+        kind,
+        CppTokenKind::Equal
+            | CppTokenKind::NotEqual
+            | CppTokenKind::LessEqual
+            | CppTokenKind::Plus
+            | CppTokenKind::Minus
+            | CppTokenKind::Slash
+            | CppTokenKind::Percent
+            | CppTokenKind::Pipe
+            | CppTokenKind::Caret
+            | CppTokenKind::LogicalOr
+            | CppTokenKind::Question
+    )
 }
 
 /// Consume the qualifiers and specifiers that may follow a function declarator's parameter list.

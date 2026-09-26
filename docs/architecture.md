@@ -335,15 +335,92 @@ typedef void (__cdecl *)(void);    失败 "expected ;" 落在那个 `(`
 (顺带记下上一次的失败:我先前把分支加在 `parse_abstract_declarator` 的循环里,**三份普查一个数都没动**,
 因为它压根没被执行到——于是撤了。修对了地方才看得见读数,这条经验比补丁本身有用。)
 
+**placement new 的实参以 `::` 开头 —— 缩到了"只在 `new` 里"**:
+
 ```text
-void f() { ::new (p) T(1); }                  干净
-void g() { new (p) T(::std::addressof(x)); }  失败 "expected ), but get ::"
+void g() { T(::x); }             干净      ← 语句里的构造/调用,没问题
+void g() { auto q = T(::x); }    干净
+void g() { T t(::x); }           干净
+void g() { new (p) T(x); }       干净      ← 不带 `::` 的 placement new,没问题
+void g() { new (p) T(::x); }     失败 "expected ), but get ::" 落在 `::`
+void g() { new T(::x); }         失败      ← 连 placement 都不需要
 ```
 
-placement new 的**实参**以 `::` 开头时读不动(`new (p) T(::x)`),而 `new` 本身带 `::` 没问题。
+所以与 placement 无关(`new T(::x)` 一样失败),而是 **`new` 的类型那一侧把 `(::x)` 当成了参数表**:`new` 的类型由一个
+type-id 读(`parse_type_id_for_an_allocation`),它的抽象声明符会把类型后面跟着的 `(` 读成**函数类型的参数表**
+(`T(::x)` = 返回 `T` 的函数),`::x` 在那里读不动,错误就冒出来了——而**紧接着** `parse_new_initializer` 的存在
+正说明那个 `(` 本该是**初始化器**。
 
-`tuple` 那条用我的最小拼法(`F<sizeof(D) == sizeof...(S), D, S...>`)是**干净**的,所以它的形状比我原先写的
-更窄——下次要拿它真正的上下文(`tuple_size_v<_Dest> == sizeof...(_Srcs)` 出现在**偏特化的实参**里)去缩。
+**已修**。做法正是当时写的那个:给 type-id 加一个开关
+(`parse_abstract_declarator_with(p, name_possible, read_a_parameter_list_as_the_type)`),分配的入口
+(`parse_type_id_for_an_allocation`)传 `false`,于是**类型读完就停**——那后面的 `(` 是初始化器。
+
+一处细节值得记下来:`(` 那一块有**两个**分支,而两个都属于"类型"。第二个("参数表就是类型",即 `void (int)`)是
+我第一版只关掉的那个,**y1 一样失败**;把整块都关掉之后 `new T(*q)`、`new T(::x)` 才通。以列位置为线索逐层缩小
+(`cpp_dump --tree` 里 type-id 把 `( :: x ) ;` 整个吞进了一个 `Declarator`)才看清是第一个分支
+(`a_parenthesised_abstract_declarator_follows`)认领了 `(*q)`——而**这个原因早就写在测试里**:
+
+> `an allocation initialiser is not a parameter list`: "`a_parenthesised_abstract_declarator_follows` claims the
+> group first — a `*` right after a `(` is a parenthesised declarator, `void (*)(int)` — so `(*q)` is read as a
+> declarator and the `q` inside it has nowhere to go"
+
+那条测试还带**自检**:构造被读通之后它会说 "these constructs parse now, so move them into the list of what is
+read"。这次它就是这么报的——于是把它移进"读得通"的清单,并补了一条形状断言(`new T(*q)` 里那个组是初始化器,
+不是 `FunctionType`)。
+
+**实测**:
+
+| | 默认(开关关) | `--in-force-bodies` |
+|---|---|---|
+| 255 文件 | 243 干净 / 97 条 / 3 族 | **242** / **78** / 6 |
+| 109 文件 | 101 / 72 / 2 | **100** / **64** / 5 |
+
+默认路径**一个数没动**(这个形状在裸文本与默认熟读里没出现);开关打开后**两边各多一个干净文件、各少五条消息**,
+而开关模式的差距从"241 对 242"缩到"242 对 243"。
+
+### 最后一条:未知名字后面的 `<` 是模板实参还是小于号
+
+缩到头之后,这条与 `tuple` 本身无关,而是**名字 + `<` 的两种读法**:
+
+```text
+F<g<D> == 1>            失败 "expected primary expression" 落在 `==`
+F<g<D>::value == 1>     失败
+F<sizeof(D) == 1>       干净      ← 只有因为它作为比较链恰好合法
+F<(g<D>::value == 1)>   干净      ← 括号把读法定死了
+template <class D, class... S>
+  constexpr bool v = F<tuple_size_v<D> == sizeof...(S), D, S...>;   失败   ← tuple:33 的真实形状
+```
+
+原因不是实参规则(`parse_template_argument` 先试类型、再退回表达式,两者都没问题),而是**更外层的决定**:
+`F` 是一个未知的名字,于是 `<` 按 C++ 的规矩读作**小于号**,整串成了比较链
+`((F < g) < D) > (== 1)`——而 `==` 没有左操作数,于是报 "expected primary expression"。
+`sizeof(D)` 那一条"干净"是**巧合**:比较链 `F < sizeof(D) == 1 >` 恰好是合法表达式。
+
+**已修**。规则落在**实参**这一层而不是名字那一层:`parse_template_argument` 先试类型、失败才退回表达式,而
+`g<D> == 1` 的类型读**成功**了(停在 `==`),于是那个停点被当成了实参的结尾。加的是
+`continues_an_expression(kind)`:类型读完之后如果跟的是一个**根本不可能出现在类型里**的运算符,这个实参就是
+表达式,交给下面那条路。
+
+**这个谓词的第一个版本把 `>` 和 `<` 也列了进去,代价立刻显现**:裸读 libstdc++ 128 文件语料从
+**128 干净 / 0 条**变成 **74 干净 / 865 条**(其中 430 条 `expected a template argument`)——因为 `>` 是**列表的
+结束符**、`<` 开的是嵌套列表,列进去等于拒绝了**每一个**类型实参。`*`/`&`/`&&` 同样不能列:它们修饰类型和做乘法
+一样自然(`S<int*>`、`S<int&>`、`S<int&&>`),`>=` 也不能——收尾的 `>` 后面跟 `=` 由 `split_closing_angle` 先切开。
+
+**实测**(每一档都无退步):
+
+| 语料 | 修前 | 修后 |
+|---|---|---|
+| 裸 255 | 217 干净 / 251 条 | 217 / **244** |
+| 裸 109 | 84 / 206 | 84 / **199** |
+| 裸 128 | 128 / 0 | 128 / 0 |
+| 熟 255(默认) | 243 / 97 | 243 / 97 |
+| 熟 109(默认) | 101 / 72 | 101 / 72 |
+| 开关 255 | 242 / 78 | 242 / **73** |
+| 开关 109 | 100 / 64 | 100 / **59** |
+
+**影响面**(先说清楚,免得高估):`tuple` 在**默认**熟读里本来就是干净的(失败的是开关打开后的那一档),
+所以这条修好之后受益最大的是 `--in-force-bodies` 那一档;但它在**裸读**上也减掉了 14 条消息(两个语料各 7 条),
+这是它与前两条不同的地方。
 ### B135 的另一半:模板声明里的括号函数名(已修)
 
 `template <class _Ty> constexpr _Ty (max)(_Ty a);` 读不动,原因与 B135 当初那个一样,但门槛在另一边:
