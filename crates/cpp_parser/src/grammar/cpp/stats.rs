@@ -849,7 +849,7 @@ fn index_after_a_run_of_annotation_invocations(p: &CppParser, index: usize) -> O
 ///
 /// `None` when there is no such group (an unbalanced one, or a `;` before it closes — the call already ended, so
 /// the question does not arise).
-fn index_after_the_balanced_group(p: &CppParser, index: usize) -> Option<usize> {
+pub(super) fn index_after_the_balanced_group(p: &CppParser, index: usize) -> Option<usize> {
     let mut index = super::decls::next_significant_index(p, index);
     let mut depth = 0isize;
     while index < p.token_count() {

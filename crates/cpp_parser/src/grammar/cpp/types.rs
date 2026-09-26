@@ -851,7 +851,50 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
         // are specifiers; `CoFreeLibrary (…)` is followed by `;`, so that one is the declarator). Measured together:
         // the MSVC closure 276 → **255** messages with no file lost, `stdio.h`'s first error 400 → 609, the two
         // libstdc++ readings and every parser test unchanged.
-        if !has_type_specifier
+        // **A name the tables know to be a macro is not a type** (B136). The loop reads an unknown identifier as a
+        // type name — that is how `Wat x;` works — and a macro with an **empty body** read there is
+        // indistinguishable from the tokens alone: MSVC's `_NODISCARD` is `#define _NODISCARD` (in force as an
+        // empty body), so with it in front of the annotation the arm refused itself ("a type has been named") and
+        // the declaration took `_Post_equal_to_` for the *declarator's* name, reporting ``expected a parameter list
+        // or an initializer`` at its group:
+        //
+        // ```cpp
+        // _EXPORT_STD template <class _Ty>
+        // _NODISCARD _Post_equal_to_(_Left < _Right ? _Right : _Left) constexpr const _Ty& // utility:40
+        //     (max) (const _Ty& _Left, const _Ty& _Right) noexcept(…)
+        // ```
+        //
+        // **Both halves are needed, and each keeps a neighbour out** (B136). The specifier in front must be a
+        // *macro* — the loop reads an unknown identifier as a type name, so an empty-bodied `_NODISCARD` counts as
+        // one and the annotation behind it gets refused — **and** a *type keyword* must follow the group.
+        //
+        // ```text
+        // template <class T> _NODISCARD _Post_equal_to_(x) int f(T x)   macro in front, `int` after  → a specifier
+        // int main(argc, argv)  int argc;  char *argv[];  { … }         `int` in front (not a macro)  → K&R, unchanged
+        // _Check_return_wat_ _Success_(…) _ACRTIMP errno_t fopen_s(…)   macro in front, a name after → the run
+        // ```
+        //
+        // The middle row is why the type keyword alone is not enough: a K&R definition's parameter declarations
+        // begin with a type keyword too, and taking the group for a macro's arguments lost
+        // `OldStyleParameterList` — `modern_constructs_produce_the_right_nodes` caught it. The first row is the
+        // other way round: the macro's own evidence is what says `_NODISCARD` is not the type it was read as.
+        let a_macro_stands_in_front = super::decls::previous_significant_index(p, p.current_token_index())
+            .is_some_and(|at| {
+                // Absolute accessors: the token is *behind* the cursor, and every `peek_*` offset is relative to it.
+                p.token_kind_at(at) == CppTokenKind::Identifier && {
+                    let name = p.token_text_at(at);
+                    let offset = p.token_range_at(at).map(|range| range.start_offset);
+                    p.macro_evidence(name).is_some()
+                        || offset.is_some_and(|offset| p.macro_body_kinds_at(name, offset).is_some())
+                }
+            });
+        let a_type_keyword_follows_the_group =
+            super::stats::index_after_the_balanced_group(p, p.current_token_index())
+                .is_some_and(|at| is_type_specifier_keyword(p.token_kind_at(at)));
+        let a_macro_was_read_as_the_type_and_the_type_follows =
+            a_macro_stands_in_front && a_type_keyword_follows_the_group;
+
+        if (!has_type_specifier || a_macro_was_read_as_the_type_and_the_type_follows)
             && allow_second_name
             && p.current_token() == CppTokenKind::Identifier
             && p.peek_next_token() == CppTokenKind::LeftParen

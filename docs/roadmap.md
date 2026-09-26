@@ -31,7 +31,7 @@
 `%TEMP%\stdprobe\files.txt` 的 128 个文件（`<vector>/<string>/<map>/<algorithm>` 的闭包）——
 **`干净 128 / 报错 0`**，消息总数 **0**（带 seeds）；`%TEMP%\cppls-indexed.txt` 的 455 个文件（分析闭包）——
 **`干净 455 / 报错 0 / 消息 0`（带 seeds）**，不带 seeds 的那一遍是 `干净 454 / 报错 1`（剩下的那个文件见下）。
-Rust 侧 `cargo test --workspace` = **1188 个测试 / 38 个套件全绿**（含 `cpp_ls` 的 28 个单测与 2 个端到端测试）。
+Rust 侧 `cargo test --workspace` = **1190 个测试 / 38 个套件全绿**（含 `cpp_ls` 的 28 个单测与 2 个端到端测试）。
 
 **两份读数**：上面这两份的"干净 455/0"是**带 include 证据**（`--seeds --closure`，也就是**带索引的产品形态**）的读数；
 **不带证据**的那一遍 455 个文件是 `干净 454 / 报错 1 / 消息 12`，唯一失败的是 `commdlg.h:577` 的
@@ -43,7 +43,7 @@ Rust 侧 `cargo test --workspace` = **1188 个测试 / 38 个套件全绿**（�
 **门禁三条 + 一条**（改完必须全绿，`index-design.md` §门禁有同样的表）：
 
 ```bash
-cargo test --workspace                     # 1188 个测试，38 个套件
+cargo test --workspace                     # 1190 个测试，38 个套件
 cargo clippy --workspace --all-targets     # 零警告
 cargo doc --no-deps -p cpp_code_analysis   # 零警告（cpp_parser 有历史链接问题，不管）
 cargo run -q -p cpp_parser --bin cpp_dump -- crates/cpp_parser/tests/real_world.cpp   # 必须 0 error
@@ -1567,7 +1567,7 @@ parser 的边际收益是"每轮 1–3 个文件"，连续磨十几轮会失去�
         std_query 的 unclean 标记 5 → **3**（事实**条数**不变：错误恢复本来就把这些声明收进来了，
         变的是它们现在 `clean`——而"诚实"那条线读的就是这个标志）
         128 → 128/0/0、455 → 454/1+12 不变；std_query 与驱动层两个方向都 9/9（声明数均不变）
-        门禁 tests 1188 / clippy 0 / doc 0 / cpp_dump 0
+        门禁 tests 1190 / clippy 0 / doc 0 / cpp_dump 0
         形状断言：gaps.rs `a_literal_operator_may_be_spelled_with_a_space_before_its_suffix`
    下一族（约 12 个文件，最大的一族）：**SAL 注解宏站在声明最前面**（`_Success_(return == 0)`、
      `_Check_return_ _Ret_notnull_`、`_When_(…)`），都是 `expected ';' after expression`
@@ -1586,7 +1586,7 @@ parser 的边际收益是"每轮 1–3 个文件"，连续磨十几轮会失去�
    修复：只加在"声明读法失败"那一支里的一条**形状**规则（保留名成串 + 至少一个带 group + 结束在声明开始处），
      一条语句读一个调用 ⇒ 两个 MacroCall + 声明；成功路径一个字没动
    读数：MSVC（带 seeds）干净 80 → **82**、消息 306 → **276**；open_project 的 MSVC 那遍声明 12743 → **12818**；
-     128 → 128/0/0、455 → 454/1+12 不变；std_query 与驱动层四个读数全 9/9；门禁 tests 1188 / clippy 0 / doc 0 / cpp_dump 0
+     128 → 128/0/0、455 → 454/1+12 不变；std_query 与驱动层四个读数全 9/9；门禁 tests 1190 / clippy 0 / doc 0 / cpp_dump 0
      形状断言：gaps.rs `a_run_of_annotations_may_stand_in_front_of_the_declaration_it_annotates`
    下一族：`expected primary expression` 打在 `_ACRTIMP void __cdecl setbuf(`、`_DCRTIMP int __cdecl …`、
      `__inline wchar_t _CONST_RETURN* __CRTDECL wmemchr(` 这一串 DLL 导入/调用约定前缀上（孤立时是干净的）
@@ -1606,28 +1606,63 @@ parser 的边际收益是"每轮 1–3 个文件"，连续磨十几轮会失去�
        （判据仍是老的那条：它自己的分组后面是不是说明符）——`WINOLEAPI_(…) CoFreeLibrary (…)` 的读数因此不变
    读数：MSVC（带 seeds）消息 276 → **255**（−21），干净仍 82；`stdio.h` 首错 400 → **609**；
      open_project 的 MSVC 那遍声明 12818 → **12961**；128 → 128/0/0、455 → 454/1+12 不变；
-     std_query 与驱动层四个读数全 9/9；门禁 tests 1188 / clippy 0 / doc 0 / cpp_dump 0
+     std_query 与驱动层四个读数全 9/9；门禁 tests 1190 / clippy 0 / doc 0 / cpp_dump 0
      形状断言：gaps.rs `annotations_may_stand_in_runs_before_the_type_they_annotate`（含一条**守卫**：镜像形状
        今天仍失败，它开始工作的那天断言会失败）
    剩下的一半：**裸注解在前、带分组的注解在后**（`int f(Wat Wobble(2) char const* _Format);`，
      真实出处 ucrt/stdio.h:612 的 `_In_z_ _Printf_format_string_params_(2) char const* _Format`）
    ```
 
+   **第 22 轮：`const _Ty&(max) (…)`——"真展开也修不掉"的那 42 条里最肥的一条（B135）**
+
+   ```text
+   构造：MSVC 的 <utility> 把 max/min 的名字括起来（`const _Ty&(max) (…)`），不让函数式宏抢走调用
+   症状：`31:37 expected ';'`（第 37 列就是参数表的 `(`）；整条声明掉进表达式读法
+   定位：`int (f)(void)` ✔ / `int (&f)(void)` ✔，而 `int &(f)(void)`、`const Wat&(max) (…)` ✘
+   两层原因：① 读括号声明符的分支只认"游标就是 `(` 且说明符序列没读到名字"——`int &` 的运算符留给声明符、
+     `const Wat&` 的被吃进类型，两种都没进那条分支；② 于是改成问**整个形状** `ptr-operator* ( declarator ) (`，
+     最后那个 `(` 正是把 `a * (b);` 挡在外面的那一位
+   读数：MSVC 消息 255 → **253**（`utility` 首错 31 → 40，换了构造）；128 → 128/0/0、455 → 454/1+12 不变；
+     std_query 与驱动层四个读数全 9/9；门禁 tests 1190 / clippy 0 / doc 0 / cpp_dump 0
+     形状断言：gaps.rs `a_function_may_be_spelled_with_its_name_in_parentheses_behind_an_operator`
+   下一个：`utility:40` 的 `_NODISCARD _Post_equal_to_(_Left < _Right ? _Right : _Left)`
+     （`expected a parameter list or an initializer`）
+   ```
+
+   **第 23 轮：`utility:40` 修好了（B136）——MSVC 干净 82 → 84、消息 253 → 208**
+
+   ```text
+   构造：`_EXPORT_STD template <class _Ty>` 后面一行 `_NODISCARD _Post_equal_to_(…) constexpr const _Ty&(max) (…)`
+   复现：cut 到 1..20 + 39..41 仍报 22:26；**去掉模板那一行就干净** ⇒ 触发条件是"模板声明 + 注解串"
+        cpp_dump 要用 `--body _EXPORT_STD=`（生效中的空体）才复现，`--macro`（定义通道）得到的是另一个错
+   诊断：`_NODISCARD` 是空体宏，却被说明符循环读成**类型** ⇒ 注解 arm 拒绝自己 ⇒ 声明把 `_Post_equal_to_`
+        当成声明符的名字、把它的分组当成参数表 ⇒ 在 `constexpr` 处报 expected a parameter list or an initializer
+   第一次尝试（只放宽"前面是宏就不算类型"）：253 → 249，但**注解串的读法塌成一个 Declaration**
+        （B133 的形状断言当场失败）⇒ 撤回
+   落地的修法（B136）：打开条件 = "前面那个说明符是**宏**" **且** "分组后面是**类型关键字**"。
+        前者让注解成为说明符；后者把 K&R 参数表挡在外面（`int main(argc, argv)` 后面也是类型关键字——
+        只加这一条时 OldStyleParameterList 当场丢，`modern_constructs_produce_the_right_nodes` 抓住）
+   读数：MSVC 干净 82 → **84**、消息 253 → **208**（−45）；`utility`/`tuple`/`type_traits`/`xutility`/`xmemory`
+        从首错清单里消失；128 → 128/0/0、455 → 454/1+12 不变；四个端到端读数全 9/9；
+        门禁 tests 1190 / clippy 0 / doc 0 / cpp_dump 0
+        形状断言：gaps.rs `an_annotation_may_follow_a_specifier_the_loop_mistook_for_a_type`
+   顺带：B134 剩下的那半（裸注解 + 带分组的注解）被这次改动一并修好——它原来是"开始工作那天会失败"的守卫
+   下一手：`utility:40` 的**后半段**——`constexpr const _Ty& (max) (…)`（B135 的形状）在模板声明里仍报错
+        （列 70）：B135 的读法要在模板那条路上再过一遍
+   ```
+
    **还差的（按值排）**：
 
    ```text
-   ① B134 剩下的一半（上一段）：裸注解 + 带分组的注解，已在 `gaps.rs` 里留了守卫
-   ② `expected primary expression` 那一族（同一批文件、更靠后的行）：`_ACRTIMP int __cdecl __stdio_common_vfprintf(`、
-     `_DCRTIMP int __cdecl __conio_common_vcwprintf(`、`__declspec(noinline) __inline unsigned __int64*`、
-     `__inline wchar_t _CONST_RETURN* __CRTDECL wmemchr(`，以及函数体里的 `void const* const _Pvc = _Pv;`
-     与 `return wcstok(_String, _Delimiter, 0);`
-   ② `enable_if_t<(_Align > __STDCPP_DEFAULT_NEW_ALIGNMENT__)>`（模板实参里的 `>` 比较）、
-     `using _Prhand = void(__cdecl*)(const exception&);`（函数指针类型里的调用约定）、
-     `struct _Maximum<…> : _Max…`（基类子句里的包展开）
-   ③ std::vector 的"两次声明"（B129）：要新字段 + 抬 FORMAT_VERSION
-   ④ 视图那条路（`FileView::parse` 仍是 `NoMacroBodies`）：缓冲区里自己写的宏体还不认
-   ⑥ 别名的成员表少了目标的基类（B130）：一行 + 一条断言
+   ① 真展开也修不掉的那一份（不可约）：`__pragma(...)`、类头里的 attribute
+     （`struct [[msvc::known_semantics]] X`）、placement `::new (p) T(args...)`、
+     偏特化里的包展开（`_Maximum<_First, _Second, _Rest...>`、`_Tuple_cat2<…, index_sequence<_Kx...>, …>`）、
+     `expected a template argument` ×4、少数变量模板，以及模板声明里的 `&(max)`（上一段）
+   ② B134 剩下那一半：裸注解 + 带分组的注解（gaps.rs 里有守卫）
+   ③ 语料补齐：`winioctl.h`（18 条）、`winnt.h` 没进过 msvc_files.txt，缺口清单还不完整
+   ④ std::vector 的"两次声明"（B129）、视图那条路（`FileView::parse` 仍是 `NoMacroBodies`）、别名基类（B130）
    ```
+
 
    **另外两件撞上的**（一件已解决）：环境必须完整才有宏体（`_STL_COMPILER_PREPROCESSOR` 那条链）——
    **已解决**，`Session` 现在按编译数据库声明完整性；`Session` 仍是 `configured = false` —— **同上，已经是历史**。
@@ -1737,6 +1772,44 @@ cargo run -p cpp_parser --bin cpp_dump -- <file> --tree --body NAME=TEXT [--macr
 和 `#if X` 不再把前者读成 `0`。量到的：459 文件的闭包里 **486 个条件 include 里 188 个被判定**（127 取到、61 跳过、
 298 未知，而且**一个否定结论都没用上**）；`#if 0` 后面的 include 不再跟进，`_GLIBCXX_USE_CXX11_ABI` 这类 feature 宏
 也能算了。方向鉴定仍在 [`parser-assessment.md`](parser-assessment.md) §7。
+
+**第 21 轮：把"真展开"量了一遍——结论是否定的，而理由很具体**
+
+问题（第 20 轮末尾提出的）：残余失败质量里 ~80% 是"宏没展开"而不是"语法不会读"，那要不要改成"先真展开、
+再建树、再映射回外观"？三轮测量，全在 `examples/macro_expansion.rs`（新探针，不碰现有路径）：
+
+```text
+① 天花板（拿真编译器做基准）：cl /E 展开同一批头文件，同一个 parser 读
+   闭包原始文本 + 证据     82 干净 / **255** 消息（109 个文件）
+   真展开后（4.6 MB）      0 干净 /  **62** 消息（一个 TU；按 #line 溯源，错只落在 9 个文件里）
+   ⇒ 26 个失败文件里 **18 个**在真展开后一条错都没有（纯展开型）；**7 个**有真语法缺口
+     （utility 13、tuple 7、type_traits 7、xutility 7、xmemory 6、cstdint 1、new 1——外加从没进过语料的
+     winioctl.h 18、winnt.h 2）
+
+② 我们自己的文本级有界展开（按名替换参数、2 步、跳过 #/##、不碰指令行）
+   朴素版（同名取最后一条定义）      75 干净 / **1177** 消息 —— 比不展开更差（25 个文件变坏）
+   加"可信任"过滤（只展开**无条件、唯一、且全闭包没人 #undef** 的定义）
+                                     77 干净 /  **840** 消息 —— 6 个改善、4 个变坏
+                                     （stdio.h 44→0、corecrt_stdio_config.h 2→0、corecrt_wconio.h 16→0；
+                                      代价是 stat.h 0→12、corecrt_wio.h 4→8）
+
+③ 步数加深（同样过滤，--steps 4）：  54 干净 / **1968** 消息，0 个改善、35 个变坏
+```
+
+**结论**：**文本级预展开不可能是对的**，而且越展开越错——"这条宏在这个位置上是什么"取决于**位置与条件**，
+文本预展开恰恰没有位置。真展开的收益是真的（255 → 62），但它要求**逐位置的状态**，那是 parser 内部才有的
+东西（`macros_at` 那条按翻译顺序走的 walk），不是一次文本替换能补上的。
+
+**决定**：**不做文本级展开器**。本轮预设的判据是"≥15 个文件转干净、能删 ≥3 条规则"，实测 6 改善 / 4 变坏，
+判据不达标 ⇒ 不投。真要投只能投"**parser 内部的、按位置的展开**"，它必须与证据层共用同一套状态；代价是一个
+子系统，收益是**天花板**而不是**功能**，所以排在 LSP 功能之后。顺序因此是：
+
+1. **先把便宜的做完**：B134 剩下那一半（裸注解 + 带分组的注解），以及**真展开也修不掉的那 42 条**——
+   `__pragma(...)`、类头里的 attribute（`struct [[msvc::known_semantics]] X`）、括号声明符名
+   （`const _Ty&(max) (…)`）、placement `::new (p) T(args...)`、偏特化里的包展开、少数变量模板。
+   这 7 个 STL 文件是**两条路都绕不过**的。
+2. **顺手把语料补齐**：`winioctl.h`（18 条）是从没进过清单的 SDK 头，加进 `msvc_files.txt` 才看得见完整缺口。
+3. **按位置的展开**留到 LSP 功能之后：它是唯一能吃掉那 ~210 条消息的形态，但不该和能力行抢时间。
 
 **接着做的顺序**（§2.0 那次测量把顺序改了）：
 

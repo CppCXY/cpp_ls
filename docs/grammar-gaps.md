@@ -4390,7 +4390,7 @@ let mut level = bases_of(index, scopes, root, path, &named) ...  // owner 也用
   `WINAPI`         66 uses / 2658 uncertain → **435 uses / 2187 uncertain**
   `STDMETHODCALLTYPE` 4078 uncertain **不变**（它那条路要 `__has_include`，那 46 个条件今天还答不了——
                       诚实的 `Unknown` 保住了，这正是当初不敢打开 `configured` 的那条底线）
-门禁 tests **1188** / clippy 0 / doc 0 / cpp_dump 0 error
+门禁 tests **1190** / clippy 0 / doc 0 / cpp_dump 0 error
 ```
 
 **顺带清掉**：`examples/find_references.rs` 里一段提交进来的 `// TEMPORARY DEBUG`（那个 `ZZ` 块，是排查同一
@@ -4460,10 +4460,152 @@ std_query 的 unclean 标记 5 → **3**（`<xstring>` 里那两条字面量运�
 128 / 455（libstdc++）  128 → 128/0/0；455 → 454/1、12 条消息（不变）
 端到端                   std_query 两个方向 9/9；驱动层 open_project 两个方向 9/9（110 文件/12743 声明、
                         458 文件/50616 声明，均不变）
-门禁                    tests **1188** / clippy 0 / doc 0 / cpp_dump 0 error
+门禁                    tests **1190** / clippy 0 / doc 0 / cpp_dump 0 error
 ```
 
 **下一个族**（B133 已修掉一半，见下一条）。
+
+## B136：`utility:40` —— 空体宏（`_NODISCARD`）被当成"类型"，而**模板声明**那条路整段读不出来
+
+**已修复**（复现、诊断、两次尝试：第一次被读数否掉，第二次成了）。`<utility>` 这一段有三件事叠在一起：
+
+```cpp
+39: _EXPORT_STD template <class _Ty>
+40: _NODISCARD _Post_equal_to_(_Left < _Right ? _Right : _Left) constexpr const _Ty& //
+41:     (max) (const _Ty& _Left, const _Ty& _Right) noexcept(noexcept(_Left < _Right)) { … }
+```
+
+**报表**：`utility:40:26 expected a parameter list or an initializer`（第 26 列 = `_Post_equal_to_` 的分组）。
+
+**定位**（三次缩小，每一步都用**当前**首错验证过复现）：
+
+```text
+cut 1..45 ⇒ 40:26；cut 1..20 + 39..45 ⇒ 24:26；cut 1..20 + 39..41 ⇒ 22:26（都复现）
+cut 1..20 + 40..45（**去掉** `_EXPORT_STD template <class _Ty>` 那一行）⇒ **干净**
+⇒ 触发条件是"模板声明 + 后面那串注解"，不是注解本身
+
+cpp_dump 复现（**通道要对**）：`--body _EXPORT_STD=`（生效中的空体）+ 真源文 ⇒ 1:26，
+与普查一字不差；只给 `--macro`（定义通道）会得到另一个错（0:12）——两个通道在这条形状上不等价
+```
+
+**诊断**（两层）：
+
+```text
+① 说明符循环把没人认识的标识符读成**类型名**（`Wat x;` 就是这么工作的），而 `_NODISCARD` 是
+   `#define _NODISCARD`（生效中的**空体**）——于是"已经点明类型"成立，B134 那条注解 arm 拒绝自己，
+   声明就把 `_Post_equal_to_` 当成了**声明符的名字**、把它的分组当成参数表 ⇒ 在 `constexpr` 处报
+   `expected a parameter list or an initializer`
+② 在**模板声明**里更早失败：整段声明**一个节点都没产生**（树里只有裸 token，错误落在 `constexpr` 上）。
+   模板声明的说明符走的是 `parse_decl_specifier_seq_stopping_at_one_name`（`allow_second_name = false`），
+   所以就算 ① 解决了，这条路仍要单独过一遍
+```
+
+**两次尝试，第一次被读数否掉（记下来，省一次重复）**：第一次只放宽一道门——"前一个说明符若是**宏**（按两张表问）
+就不算类型"。它把 MSVC 从 253 降到 **249** 消息，但代价是 `_Check_return_wat_ / _Success_(…) / 声明` 这种**注解串**
+从"每个注解各自是一个 `MacroCall`"塌成"**一个 Declaration**"（B133 的形状断言当场失败）⇒ 撤回。
+
+**落地的修法：两道门都要，缺一条就会踩到邻居**：
+
+```text
+打开条件 = "游标前面那个说明符是**宏**（两张表任一认得）" **且** "分组后面跟的是**类型关键字**"
+  _NODISCARD _Post_equal_to_(x) int f(…)      前面是宏 ✔ + 后面是 int ✔   ⇒ 注解是**说明符**，读通
+  _Check_return_wat_ _Success_(…) _ACRTIMP …  前面是宏 ✔ + 后面是标识符 ✘ ⇒ 仍是"一串调用"（B133 的读法保住）
+  int main(argc, argv)  int argc;  …          前面是 int（不是宏）✘        ⇒ K&R 参数表照旧
+```
+
+第三行是**第二次尝试先踩到的坑**：只看"分组后面是类型关键字"会把 K&R 定义的参数声明当成声明的类型，
+`OldStyleParameterList` 没了——`modern_constructs_produce_the_right_nodes` 当场抓住（这正是那条断言存在的意义）。
+实现上还踩了一个小坑：`peek_token_*_at` 的偏移是**相对游标**的，而这里的问法是"游标**前面**那个 token"，
+必须用绝对访问器（`token_text_at`/`token_range_at`）——第一版用错了，读数一动不动。
+
+**形状断言**：`crates/cpp_parser/tests/gaps.rs`
+`an_annotation_may_follow_a_specifier_the_loop_mistook_for_a_type`——两个通道都给的闭包（定义 + 生效中的空体，
+真实环境就是这个组合）、模板里与文件作用域各一条正例，外加 B133 的注解串读法作为**否定**（它必须保住）。
+
+**落地的读数**：
+
+```text
+MSVC 闭包（带 seeds）   干净 82 → **84**；消息 253 → **208**（−45）
+                        `utility`/`tuple`/`type_traits`/`xutility`/`xmemory` **从首错清单里消失**
+128 / 455（libstdc++）  128 → 128/0/0；455 → 454/1、12 条消息（不变）
+端到端                  std_query 与驱动层四个读数全 9/9
+门禁                    tests **1190** / clippy 0 / doc 0 / cpp_dump 0 error
+```
+
+**B134 剩下那一半仍然开着**——我一度以为这次顺带修好了它，那道守卫当场纠正了我：只按"分组后面是类型关键字"
+放宽时 `int f(Wat Wobble(2) char const* _Format);` 确实读通了，但那种放宽把 K&R 参数表也吃了进去；两道门都要
+之后，`Wat` 没有证据 ⇒ 守卫（`a bare annotation before a grouped one…`）**仍然按"还是错的"通过**。所以那一族要的
+不是放宽门，而是"游标前面那个说明符**没有**证据时怎么判"——那是另一条规则。
+
+**下一个**：`utility:40` 的**后半段**——注解现在读对了，但 `constexpr const _Ty& (max) (…)`（B135 的形状）在
+**模板声明**里仍报 `expected a parameter list or an initializer`（列 70）。缩过一轮，结果是"**四个条件同时要**"：
+
+```text
+template <class T> _NODISCARD _Post_equal_to_(x) constexpr const _Ty& (max) (…)   ✘ 列 70
+template <class T>            _Post_equal_to_(x) constexpr const _Ty& (max) (…)   ✔（去掉 _NODISCARD）
+template <class T> _NODISCARD                 constexpr const _Ty& (max) (…)      ✔（去掉注解）
+template <class T> _NODISCARD _Post_equal_to_(x) constexpr int      (max) (…)     ✔（返回类型换成 int）
+                  _NODISCARD _Post_equal_to_(x) constexpr const _Ty& (max) (…)   ✔（去掉 template）
+```
+
+也就是"模板 + 宏说明符 + 注解 + **引用返回类型**"四者同时出现才失败：说明符循环把 `const _Ty&` 的 `&` 吃进类型，
+游标落在 `(` 上——正是 B135 那一支要处理的形状。又补了两格，把"是不是因为类型没人认识"排除掉：
+
+```text
+template <class T> _NODISCARD _Post_equal_to_(x) constexpr const T& (max) (const T& _Left)    ✘（T 是**已声明**的模板参数）
+template <class T> _NODISCARD _Post_equal_to_(x) constexpr T& (max) (T& _Left)                ✘（去掉 const）
+template <class T> _NODISCARD _Post_equal_to_(x) constexpr const T& max (const T& _Left)      ✔（名字不括起来）
+```
+
+⇒ 触发的是**注解被读成说明符之后**，同一个说明符序列里的"引用 + 括号名"读不出来；B135 的分支在
+`parse_init_declarator`（decls.rs:1260 那段），而模板声明那条路（decls.rs:1016 之后：`parse_decl_specifier_seq` +
+`parse_init_declarator`）**看起来是同一套**，所以差别在更细的状态上（`set_a_template_id_may_be_the_name(true)`
+或说明符循环里 `has_type_specifier`/`name_allowed` 的记账）——这一步没有读完就停了。
+
+**这一轮到此为止**：再往下要么抽公共入口、要么改说明符循环的记账，都是会同时影响多条路径的读法改动，
+必须重新量三份普查 + 全部门禁——那是一次独立的工作，不该在"顺手"里做。
+
+## B135：函数名带括号、而指针/引用运算符在**括号前面**——`const _Ty&(max) (…)`
+
+**已修复。** 这是"真展开也修不掉"的那 42 条里最肥的一条（`cl /E` 之后仍有 13 条），也是 `<utility>` 的首错：
+
+```cpp
+// MSVC 的 <utility>:31 —— max/min 把名字括起来，好让函数式宏抢不走这次调用
+template <class _Ty, class _Pr>
+_NODISCARD constexpr const _Ty&(max) (const _Ty& _Left, const _Ty& _Right, _Pr _Pred) noexcept(…)
+```
+
+**报表**：`31:37 expected ';'`（第 37 列 = 参数表的那个 `(`），`type_traits`/`tuple`/`xutility` 里同一族。
+
+**定位**（照老规矩先缩形状）：
+
+```text
+int (f)(void);          ✔ 干净    int &(f)(void);   ✘      const Wat&(max) (…);  ✘
+int (&f)(void);         ✔ 干净    int *(f)(void);   ✘      template <…> const _Ty&(max) …  ✘
+int *p(void);           ✔ 干净    int &&(f)(void);  ✘
+⇒ "`(` 在游标上"那一条能读，但**运算符在前面**时不读：整条声明掉进表达式读法，在参数表处报 `;`
+```
+
+**成因（两层，缺一层都不动）**：
+
+```text
+① 读括号声明符的那条分支只认"游标就是 `(`"，而且只在说明符序列没读到**名字**时——`int &` 是关键字类型，
+   运算符留给声明符；`const Wat&` 是名字，运算符被说明符序列吃进类型里 ⇒ 两种情况都没进那条分支
+② 于是问**整个形状**：`ptr-operator* ( declarator ) (`。最后那个 `(` 是把 `a * (b);` 挡在外面的东西——
+   乘积的 `)` 后面不会有参数表——所以形状测试不是"更宽的启发"，而是把两条读法分开的那一位
+```
+
+**形状断言**：`crates/cpp_parser/tests/gaps.rs`
+`a_function_may_be_spelled_with_its_name_in_parentheses_behind_an_operator`——五种拼法必须干净，
+`const Wat&(max) (…)` 必须是一个 `Declaration`，外加三个对照（`Max(a);` 仍是调用、`a * (b);` 仍是表达式、
+`int *p(void)`/`int (*pf)(void)` 读数不变）。
+
+**落地的读数**：MSVC 闭包消息 255 → **253**（`utility` 的首错 31 → **40**，换了构造）；128 → 128/0/0、
+455 → 454/1+12 不变；门禁全绿（见 roadmap）。**注意这条的价值不在条数**：它属于"真展开也修不掉"的那 42 条，
+而第 21 轮的实验证明了那 42 条是**两条路都绕不过**的部分。
+
+**下一个**（`utility:40`）：`_NODISCARD _Post_equal_to_(_Left < _Right ? _Right : _Left)` —— 报
+`expected a parameter list or an initializer`。
 
 ## B134：注解跑在**参数类型前面**是一串；而"一个分组宏后面跟一个名字"这个判据要**接着问**
 
@@ -4591,7 +4733,7 @@ MSVC 闭包（带 seeds）   干净 80 → **82**；消息 306 → **276**（−
 驱动层                  open_project 的 MSVC 那遍声明 12743 → **12818**（新读干净的文件的声明进来了），9/9 不变
 128 / 455（libstdc++）  128 → 128/0/0；455 → 454/1、12 条消息（不变）
 端到端                  std_query 与驱动层各两个方向，全 9/9
-门禁                    tests **1188** / clippy 0 / doc 0 / cpp_dump 0 error
+门禁                    tests **1190** / clippy 0 / doc 0 / cpp_dump 0 error
 ```
 
 **下一族**（剩下 27 个失败文件里最大的）：`expected primary expression` 打在一串 **DLL 导入 / 调用约定**前缀上——

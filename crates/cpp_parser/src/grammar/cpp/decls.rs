@@ -1308,9 +1308,30 @@ pub fn parse_init_declarator(p: &mut CppParser) -> ParseResult {
     // the whole statement rather than from the parentheses alone: the loop runs because the declarator has a
     // name — `Widget w(…)` — or because the arguments look like declarators at file scope, and never for the
     // single-name shape a call has.
-    if p.current_token() == CppTokenKind::LeftParen && !p.has_declaration_type_name() {
+    // **The operators may come first** (B135). `int &(f)(void)` and `const _Ty&(max) (…)` are the same
+    // declarations as `int (&f)(void)` and `const _Ty&(max)`: the standard's `ptr-declarator` is `ptr-operator
+    // ptr-declarator`, and a parenthesized declarator is one of the things that second `ptr-declarator` can be.
+    // MSVC's `<utility>` writes `max` and `min` that way, and the branch below only looked for the `(` **at the
+    // cursor** with no type name read — so with a `&` in front the declaration fell through to the expression
+    // reading and reported ``expected `;` `` at the parameter list.
+    //
+    // Whether the operators are still ahead of the cursor or the specifier sequence has already taken them into
+    // the type differs with the spelling (`int &` is left to the declarator, `const Wat&` is absorbed), so the
+    // question is asked of the **whole shape** instead: operators, `(`, a declarator, `)`, and then a **parameter
+    // list**. The last part is what keeps `a * (b);` an expression — a product has no `(` after its `)`.
+    let at_a_functions_parenthesized_declarator = at_an_operator_led_parenthesized_declarator(p);
+
+    if at_a_functions_parenthesized_declarator
+        || (p.current_token() == CppTokenKind::LeftParen && !p.has_declaration_type_name())
+    {
         let checkpoint = p.checkpoint();
         let paren = p.mark(CppSyntaxKind::Declarator);
+        // The operators are the declarator's own, and they are read here so that what follows them is the `(` the
+        // rest of this branch already knows how to read. When the specifier sequence took them into the type there
+        // are none left to read, and the loop does nothing.
+        while at_a_pointer_operator(p.current_token()) {
+            p.bump();
+        }
         p.bump();
         // A parenthesized declarator has to *hold* a declarator, and an empty one is not enough. `int (x)`
         // holds a name and `int (*p)(int)` a pointer; the `(` of `g()` holds neither, because the specifier
@@ -1911,6 +1932,88 @@ fn starts_an_old_style_parameter_list(p: &mut CppParser) -> bool {
         || starts_declaration(p)
         || (p.current_token() == CppTokenKind::Identifier
             && p.is_a_known_type_name(p.current_token_text()))
+}
+
+/// Is this token a pointer or reference **declarator** operator — the things a `ptr-declarator` may begin with?
+///
+/// `&&` is in the list because a reference-to-reference is what a deduced `T&&` declarator is written as, and the
+/// lexer makes one token of it; nothing here decides what the type means, only that a declarator may start there.
+fn at_a_pointer_operator(kind: CppTokenKind) -> bool {
+    matches!(
+        kind,
+        CppTokenKind::Star | CppTokenKind::Ampersand | CppTokenKind::LogicalAnd
+    )
+}
+
+/// Does `ptr-operator* ( declarator ) (` stand at the cursor — a **function** whose name is parenthesized and whose
+/// type ends in a pointer or reference operator?
+///
+/// The shape is the whole test, and each half of it is what keeps a neighbour out:
+///
+/// ```text
+/// const _Ty&(max) (const _Ty& _Left, …)   this rule — MSVC's <utility> spells max/min this way
+/// int (&f)(void);                         the `(`-at-the-cursor rule, which already read it
+/// a * (b);                                an expression: a product has no `(` after its `)`
+/// int *p(void);                           a name, not a `(`: the ordinary declarator path
+/// ```
+///
+/// The operators may already be behind the cursor — the specifier sequence absorbs `*`/`&` after a *name*
+/// (`const _Ty&`) and leaves them when the type is a keyword (`int &`), which is a difference of the spelling
+/// rather than of the declaration — so both are accepted, and the caller's loop consumes whichever are left.
+fn at_an_operator_led_parenthesized_declarator(p: &CppParser) -> bool {
+    let mut index = p.current_token_index();
+
+    if !at_a_pointer_operator(p.token_kind_at(index)) {
+        // The type took them: the operator is the token before the `(`, and without one this is not the shape.
+        let before = previous_significant_index(p, index);
+        if !before.is_some_and(|at| at_a_pointer_operator(p.token_kind_at(at))) {
+            return false;
+        }
+    }
+
+    while at_a_pointer_operator(p.token_kind_at(index)) {
+        index = next_significant_index(p, index);
+    }
+
+    if p.token_kind_at(index) != CppTokenKind::LeftParen {
+        return false;
+    }
+    index = next_significant_index(p, index);
+
+    // The declarator inside the parentheses: a name, behind whatever decorates it.
+    while at_a_pointer_operator(p.token_kind_at(index))
+        || matches!(
+            p.token_kind_at(index),
+            CppTokenKind::ConstKeyword | CppTokenKind::VolatileKeyword
+        )
+    {
+        index = next_significant_index(p, index);
+    }
+    if p.token_kind_at(index) != CppTokenKind::Identifier {
+        return false;
+    }
+    index = next_significant_index(p, index);
+
+    if p.token_kind_at(index) != CppTokenKind::RightParen {
+        return false;
+    }
+    index = next_significant_index(p, index);
+
+    // …and the parameter list, which is what makes it a function rather than a product.
+    p.token_kind_at(index) == CppTokenKind::LeftParen
+}
+
+/// The index of the last significant token before `index`.
+pub(super) fn previous_significant_index(p: &CppParser, index: usize) -> Option<usize> {
+    let mut at = index;
+    while at > 0 {
+        at -= 1;
+        if !is_declaration_trivia(p.token_kind_at(at)) {
+            return Some(at);
+        }
+    }
+
+    None
 }
 
 /// Continue a declarator after a parenthesized name has been consumed.

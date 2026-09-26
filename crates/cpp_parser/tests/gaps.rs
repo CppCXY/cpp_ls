@@ -6732,6 +6732,117 @@ fn annotations_may_stand_in_runs_before_the_type_they_annotate() {
 }
 
 #[test]
+fn a_function_may_be_spelled_with_its_name_in_parentheses_behind_an_operator() {
+    // MSVC's `<utility>` writes `max` and `min` with the name in parentheses — the spelling exists to keep a
+    // function-like macro from claiming the call — and with a reference return type the operators come *before*
+    // the parenthesis:
+    //
+    // ```cpp
+    // template <class _Ty, class _Pr>
+    // _NODISCARD constexpr const _Ty&(max) (const _Ty& _Left, const _Ty& _Right, _Pr _Pred) noexcept(…)
+    // ```
+    //
+    // The rule that reads a parenthesized declarator looked for the `(` **at the cursor** and only when the
+    // specifier sequence had read no name; with `const _Ty&` in front, neither held, so the declaration fell
+    // through to the expression reading and reported ``expected `;` `` at the parameter list (B135). Those are
+    // exactly the errors that survive *real* expansion (`cl /E`) — no expander can fix them.
+    for source in [
+        "const Wat&(max) (const Wat& _Left);\n",
+        "int &(f)(void);\n",
+        "int *(f)(void);\n",
+        "int &&(f)(void);\n",
+        "template <class _Ty> const _Ty&(max) (const _Ty& _Left, const _Ty& _Right) { return _Left; }\n",
+    ] {
+        assert_eq!(reads(source, Where::File), Ok(()), "{source:?}");
+    }
+
+    // …and it is a **declarator**, not a call: the whole shape is `op* ( decl ) (`.
+    assert_eq!(
+        shape_body_of_the_file_reads("const Wat&(max) (const Wat& _Left);\n", None),
+        vec!["Declaration:const"],
+        "the operators, the parenthesized name and the parameter list are one declaration"
+    );
+
+    // The controls, each of which the whole-shape test has to keep out. `a * (b);` is the one that decided the
+    // shape: a product has no `(` after its `)`, so it stays an expression even inside a body.
+    assert_eq!(reads("Max(a);\n", Where::Body), Ok(()), "a call is still a call");
+    assert_eq!(
+        count_of("void g() { a * (b); }\n", CppSyntaxKind::ExpressionStat),
+        1,
+        "and a product is still an expression"
+    );
+    assert_eq!(reads("int *p(void);\n", Where::File), Ok(()));
+    assert_eq!(reads("int (*pf)(void);\n", Where::File), Ok(()));
+}
+
+#[test]
+fn an_annotation_may_follow_a_specifier_the_loop_mistook_for_a_type() {
+    // MSVC's `<utility>:39-41` — a template declaration whose first specifier is an **empty-bodied macro** and
+    // whose second is an annotation:
+    //
+    // ```cpp
+    // _EXPORT_STD template <class _Ty>
+    // _NODISCARD _Post_equal_to_(_Left < _Right ? _Right : _Left) constexpr const _Ty& // (max) (…)
+    // ```
+    //
+    // `_NODISCARD` is `#define _NODISCARD` — in force as an empty body — and the specifier loop reads an unknown
+    // identifier as a **type name** (that is how `Wat x;` works), so "a type has been named" held and the
+    // annotation arm refused itself: the declaration took `_Post_equal_to_` for its declarator's name and reported
+    // ``expected a parameter list or an initializer`` at the group (B136).
+    //
+    // What separates this from a run of annotations is the token **after the group**: a *type keyword* says a
+    // declaration's type is coming, so the invocation is a specifier; an identifier says the run is the statement.
+    // Both channels, as the real environment has them: `_NODISCARD` is `#define`d in `yvals_core.h` (a
+    // *definition* the file that uses it never sees) and reaches the use site as a body in force, and the
+    // annotation is described the same way. Asking only one channel is what the predicate would get wrong.
+    let closure = MacroEnvironment::from_included_macros([IncludedMacro::defined_with_body(
+        0,
+        "_NODISCARD",
+        false,
+        MacroBody::Unknown,
+        Some(""),
+    )])
+    .with_bodies_in_force([
+        (
+            Box::from("_Post_equal_to_"),
+            Box::from("_SAL2_Source_(_Post_equal_to_, (expr), _Post_equal_to_impl_(expr))"),
+        ),
+    ]);
+
+    let config = || ParserConfig::default().with_macros_from_includes(&closure);
+    let source = "template <class T> _NODISCARD _Post_equal_to_(x) int f(T x) { return x; }\n";
+    let tree = CppParser::parse(source, config());
+    assert_eq!(tree.to_source_text(), source, "losslessness");
+    assert_eq!(
+        tree.get_errors(),
+        [],
+        "a type keyword after the group makes the invocation a specifier"
+    );
+
+    // The same shape at file scope, and the neighbour that already worked.
+    for source in [
+        "_NODISCARD _Post_equal_to_(x) int f(int x) { return x; }\n",
+        "template <class T> _Post_equal_to_(x) int f(T x) { return x; }\n",
+    ] {
+        let tree = CppParser::parse(source, config());
+        assert_eq!(tree.get_errors(), [], "{source:?}");
+    }
+
+    // **The negative is B133's shape**, and it is why the gate opens for a *type keyword* and not for any
+    // specifier: `_Success_(…)` followed by an identifier is a run of invocations, one node each. Relaxing the
+    // gate on "the specifier in front is a macro" was measured at 253 → 249 messages and collapsed this reading
+    // into a single `Declaration` — the assertion next door caught it, and the relaxation was reverted.
+    assert_eq!(
+        shape_body_of_the_file_reads(
+            "_Check_return_wat_\n_Success_(return == 0)\n_ACRTIMP errno_t __cdecl fopen_s(FILE** _Stream);\n",
+            Some(&closure)
+        ),
+        vec!["MacroCall:_Check_return_wat_", "Declaration:_Success_"],
+        "an identifier after the group keeps the run-of-invocations reading"
+    );
+}
+
+#[test]
 fn a_requires_expression_may_be_a_template_argument() {
     // `type_traits:3946` — a class head whose base clause carries a requires-expression as an argument, and the
     // `;` *inside* its body is what the scans had to learn about.
