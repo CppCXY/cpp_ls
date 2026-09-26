@@ -14,6 +14,7 @@
 | 条目 | 是什么 | 值多少 |
 |---|---|---|
 | **B119** | `return 1 }`：语句末尾少一个 `;` 时**树是对的、报错是空的**（`parse_return_statement` 发的是零宽 `MissingNode`，而它**有意**不记 `CppParseError`）——语言服务器的诊断就是 `view.errors()`，所以用户少打一个分号时一个波浪线都没有 | 每条语句都要，且这是打字过程中最常见的中间状态 |
+| **B122** | **`_TRY_IO_BEGIN` 这类"体是另一个宏的名字"的宏**没有解析链：`iosfwd:27` 说 `#define _TRY_IO_BEGIN _TRY_BEGIN`，而 `_TRY_BEGIN` 才是 `try {`（`yvals.h`）。于是语句位置的一次调用读不出来，`<xstring>` 在 524 行报 ``expected `;` after expression``，恢复时吃掉一个 `{`，**整个类体再也配不上**：`basic_string`（2444 行开始）本该在 5047 行 `};` 结束，实际吞到 5416 行——`std::string` 那五个别名（5300-5306）和 `erase`/`erase_if` 全落进 `std::basic_string` 里 | MSVC 的 `std::string` 全靠它（8 条查询里 5 条）；两步修法见下 |
 | **B42** | 函数定义里的 `try`（function-try-block）：`void f() try { } catch (…) { }` | 语料里 0 个文件 |
 | **B65** | 声明按分支各写一遍，每个分支自带尾巴和分号（第二支是**片段**） | 1 个文件（`parallel/algorithmfwd.h:700`） |
 | **B72**（剩） | `STDMETHOD(QueryInterface) (…) PURE;`：声明符的名字在**宏自己的实参**里 | 1 个文件（`commdlg.h:577`） |
@@ -3769,6 +3770,380 @@ bits/alloc_traits.h 的首错            80 → 453 行；bits/iterator_concepts
    `bits/stl_pair.h:407`、`bits/basic_string.h:4531`、`bits/stl_vector.h:1865`。
 2. 队列里**还没碰**的：§2.2（GNU 类型拼写：`__typeof__` / `__int128`）、§2.5（模板参数表里的宏）。
 3. 剩下 29 个"超过五个错"的文件——那些是级联，按第 11 条先归类。
+
+## B120：**体是花括号的宏**——位置化的体证据，和"排列顺序就是修复本身"
+
+MSVC 写命名空间的方式与 libstdc++ 不同，而差别正好落在这一条上：
+
+```cpp
+// yvals_core.h:1773（无条件）
+#define _STD_BEGIN namespace std {
+#define _STD_END   }
+
+// <vector>:24（整个文件没有一处字面 `namespace std`）
+_STD_BEGIN
+_EXPORT_STD template <class _Ty, class _Alloc = allocator<_Ty>>
+class vector { … };
+_STD_END
+```
+
+**例子**（最小、且两条通道各一份）：`_STD_BEGIN struct vector { int size; }; _STD_END`。
+
+**现象**：读成下面这样，而且**零报错**（A0 类——树是错的，但没有一条判据会响）：
+
+```text
+Syntax(Declaration)
+  Syntax(DeclSpecifierSeq)
+    Syntax(TemplateType) > NameExpr("_STD_BEGIN")   ← 宏被读成一个**类型名**
+    Syntax(StructDef)                                ← `struct vector` 成了它的说明符的载荷
+```
+
+**成因**：两条，各自独立。
+
+1. **证据只问了文件自己**。`body_shapes_the_braces` 原来只问 `macro_body_kinds`（这个文件自己的
+   `#define`），而 MSVC 的体在**被包含的** `yvals_core.h` 里——问不到，于是这条规则根本不响。
+   按位置问（`macro_body_kinds_at`）之后还要注意**它走哪条通道**：实测 `<vector>` 里 `_STD_BEGIN` 是
+   `evidence false | positional body None | in-force body Some("namespace std {")`——体在
+   **"条件成立的那一支"**（`yvals_core.h` 的 `#define` 落在条件区里），不是位置化的定义通道。
+2. **排列顺序**。规则排在"把名字读成声明头/类型"的那些规则**后面**时，那些规则会先到并且**成功**：
+   `_STD_BEGIN struct vector {…};` 是一条说明符为 `_STD_BEGIN`、以 `;` 收尾的完整声明，
+   `_STD_BEGIN vector<int> x = {};` 是两个说明符连写。两条都无损、都可能没有报错——**所以这一条的修复
+   有一半是"把它挪到前面"**，而那不叫取巧：体是这里最强的证据，它**说出了** token 没说的事。
+
+**性质**：缺信息里的"缺规则"——信息早就在（B86 起 `MacroFact::body_range` 就带着体、B84 起
+`MacroEnvironment::body_text_of` 能按位置给），缺的是拿它去读的那一步。
+
+**修法**：`body_shapes_the_braces` 改成按位置问体，并把这条规则**排到 `parse_stat` 的第一条宏规则**。
+接受两种体：以 `namespace` 开头的（`namespace std {`、`namespace __8 {`）和**恰好是** `}` 的；
+拒绝空体（`#define POINTER_32`）、拒绝命名空间**名**（`#define _GLIBCXX_MATH_NS __8`）、
+拒绝 `extern "C" {`（那是连接块的头，构造不是命名空间，它今天由形状规则读，读法不变）。
+
+**量到的**：
+
+```text
+MSVC include 树里以花括号结尾的宏体    4 个（_STD_BEGIN、_STDEXT_BEGIN、_EXTERN_C、_TRY_BEGIN）
+体单独一个 `}` 的                    6 个（_STD_END、_STDEXT_END、_END_EXTERN_C、_END_LOCK()、_END_LOCINFO()、_CATCH_END）
+写 _STD_BEGIN 的文件                 134 个 / 144 次调用，每个文件 begin/end 都配平（0 个不配平）
+<p vector>、<string>、<map> 闭包里 _STD_BEGIN 的调用点   39 处（38 处独占一行），后面第一个 token 全是能起声明的
+                                     （_EXPORT_STD 17、template 10、#if 5、#pragma 3、using/enum/#ifdef 各 1）
+⇒ 语料**量不出**这条规则：38 处里每一处，形状规则都碰巧读对了
+```
+
+所以判据只能是形状断言，而它按**四条通道**各写一遍（`gaps.rs` 的
+`a_macro_whose_body_is_a_brace_is_read_as_that_construct`）：文件自己的 `#define`、生效中的体（MSVC 的形状）、
+定义+体（`macro_evidence` 会答"这是宏"的那条）、以及**后面跟不出声明**的 `_STD_BEGIN vector<int> x = {};`
+——只有第四条的答案是关于这条规则的，前三条形状规则也能读对。外加两条否定：没有证据时**一个字都不认**，
+以及 B87 的形状读法**没有被动到**。
+
+顺带修的一处 API：`MacroEnvironment::is_empty` 原来只看定义通道，于是一个**只**带生效中宏体的环境会被
+判成"空的"——正是这一轮要用的那条通道（`cpp_dump` 的 `--body` 就是被这个坑先绊了一下）。
+
+**改动前后的实测**（探针先修了自己的一个不确定性问题，见 `roadmap.md` §4.2：`-I` 顺序原来取自 `HashSet`，
+同一个二进制三次跑出的 seeds 差 10%；修完两次跑逐字节相同）：
+
+```text
+455 个文件（钉 CXX=mingw）        报错 454/1、消息 12 条 —— 前后完全一样
+    带 --seeds --closure          1590444 seeds / 433 个文件 / 10143073 条条件事实 / 1854806 个体在生效
+                                  —— 逐字节一样（只有计时不同）
+128 个文件                        128 干净、0 消息 —— 前后一样
+MSVC 闭包（`std_query` 的 [where] 那份事实报告）  <vector> 165 条 / <map> 333 条 / <xstring> 129 条 —— 逐字节一样
+macro questions（不带 seeds）      38264 → 38260（128 那份 9293 → 9289）
+```
+
+最后一行是**唯一动过的计数**，而它动的不是读法：新规则排在那几条"看形状/问宏"的规则**前面**，
+于是有 4 处不再去问那个问题了——同一个节点、同一个位置，只是少绕一圈（老路要先把声明读一遍、
+回滚、再从 Ok/Err 两条臂里认出来）。这正是 A0 类缺陷的麻烦之处：**改对了，报错计数一动不动**，
+所以判据只能是形状断言加上这份逐字节的事实报告。
+
+**还没做的一半（作用域）**：`std` 这个作用域还没开出来，所以 `std::vector` 仍然查不到。名字
+（`std`）**不在文件的 token 里**，所以它不会进树，而是走事实那条线：`build_scopes` 在 `_STD_BEGIN` 的调用点上
+按体开出作用域、在 `_STD_END` 上关掉，名字落进 `DeclFact.scope`，证据记进摘要——键的问题已定，
+见 [`index-design.md`](index-design.md) §"宏体推导出的事实：记证据，不进键"。**树保持扁平**是刻意的：
+一旦树的形状依赖环境，"编辑器那棵树"（`FileView::parse`，没有环境）与"索引那棵树"就会不一致，
+而两张不一致的树比一张少说了话的树糟得多。
+
+## B121：**体是限定名前缀的宏**（`_STD` = `::std::`）—— 已修复
+
+MSVC 的 STL 里到处是 `_STD vector<int> v;`、`_STD addressof(*_Ptr)`，而 `yvals_core.h` 说
+`#define _STD ::std::`。文件里写的是**两个名字**，展开后是**一个限定名**：`::std:: addressof(*_Ptr)`。
+
+MSVC 的 STL 里到处是 `_STD vector<int> v;`、`_STD addressof(*_Ptr)`，而 `yvals_core.h` 说
+`#define _STD ::std::`。文件里写的是**两个名字**，展开后是**一个限定名**：`::std:: addressof(*_Ptr)`。
+
+**最小复现**（已钉住）：
+
+```cpp
+template <class _Ptrty>
+constexpr auto _Unfancy_maybe_null(_Ptrty _Ptr) noexcept {
+    return _Ptr ? _STD addressof(*_Ptr) : nullptr;
+}
+int after;
+```
+
+```text
+_Ptr ? _STD addressof(*_Ptr) : nullptr        → Error: expected `:`, but get identifier
+                                                （`_STD` 被当成类型、`addressof(*_Ptr)` 当声明符 = 又一次
+                                                 most vexing parse），`Declaration@0..147` 把 `int after;` 一起吞了
+_Ptr ? ::std::addressof(*_Ptr) : nullptr      → 干净（声明规则看到 `::` 就不认，于是读成调用）
+```
+
+**成因**：`a_macro_that_is_a_specifier` 只接受"整条体都是说明符"的体（`__declspec(dllexport)`、`const`…），
+而 `::std::` 的词类是 `Scope Identifier Scope` —— 一个**嵌套名限定符**，不是说明符。于是体明明拿到了，
+也没有规则用它，parser 落回"名字后面跟名字"的声明读法。体不喂也一样，所以这条**与证据无关，是缺规则**。
+
+**在语料里的后果（为什么它值一整条）**：`<vector>` 第 419 行的这个函数体从此吞掉**文件的其余部分**：
+
+```text
+Syntax(Declaration)@15422..153477
+  Syntax(CompoundStat)@15504..153477        ← 文件总长就是 153477，`}` 再也没配上
+    …
+      Syntax(Declaration)@19258..153477     ← 类 `vector` 的定义（第 493 行）就在里面
+```
+
+类读出来了、成员也读出来了（`std::vector` 作用域里 15 条），但它的**名字**事实落在一个 Function 作用域里
+（限定名会跳过透明的 function 作用域，所以成员还带着 `std::`，名字没有）——`std::vector` 因此查不到。
+
+**修法（已落地）**：体**以 `::` 结尾**的宏是嵌套名限定符，它后面的名字属于同一个限定名，而不是声明符。
+判据只有一份（`types::a_macro_qualifies_the_name`，问的是体的**最后一个** token 是不是 `Scope`），
+两个文法各用它一处：
+
+```text
+parse_name（类型位置）           `_STD reverse_iterator<iterator>` 读成一个限定名
+parse_primary_expr 的名字段循环（表达式位置）  `_STD addressof(*_Ptr)` 读成一个限定名再跟调用
+```
+
+宏调用自身仍是诚实的 `MacroCall(NameExpr)` 节点（树里没有假 token），循环**接着读它限定的那个名字**——
+两者之间的 `::` 在替换列表里，本文件根本没有这个 token 可消费、也没有可期待。与 B120 同一族：
+**体说什么，读法就跟着说什么**；区别是 B120 管"开一个构造"，这条管"补一段限定名"。
+
+**同一条规则在索引里能生效，还需要一件事**：索引那次 parse 过去**不喂环境**，所以规则永远不触发。
+现在 `FileIndexer::with_macro_bodies` 把同一个 `MacroEnvironment` 同时给 parse（`ParserConfig::
+with_macros_from_includes`）和作用域遍历（`MacroBodies`），第二遍的触发名集合也从"结构性体"扩到
+`BodyShape::a_reading_uses_this()`（体以 `::` 结尾的算在内）。
+
+**量到的（不钉 CXX，MSVC 14.35 的 STL 闭包 109 个文件、`examples/std_query.rs`）**：
+
+```text
+std_query                 0/9 → 1/9（`v.push_back -> vector std::vector::push_back`），钉住 CXX 仍 9/9
+<xstring> 的事实数         129 → 1181      <p vector> 165 → 650      <p map> 333（本来没被吞）
+std::basic_string 的成员表 0 → 155
+钉住的四份普查             455/128（带/不带 seeds）逐字节不变
+```
+
+**这一轮顺带修掉的两个事实层缺陷**（都是被 B121 的修复照出来的，值得单独记）：
+
+1. **析构函数/运算符的事实原来存空名字**：`fact_for` 用的是 `binding.name.identifier_text()`，而析构函数
+   的名字是 `NameKind::Destructor` —— 于是 `DeclFact::qualified_name()` 退化成*它的作用域*，
+   每个析构函数都替自己的类作答：`definition("std::vector")` 同时找到类和 `~vector`，答 `Ambiguous`。
+   现在存 `Name::text()`（`~vector`、`operator=`），并且 `project::matches` 额外拒绝**无名**事实
+   （"没有名字的事实不声明任何名字"）。
+2. **`_EXPORT_STD` 的真实体是空的**（`export` 要 `_HAS_CXX23 && _BUILD_STD_MODULE`），而且它在条件区里
+   ⇒ 走"生效中的体"通道。这不是细节：无条件定义的同名宏会进**定义**通道，`macro_evidence` 于是有答案、
+   `at_a_macro_that_stands_for_a_declaration` 让位，同一行会被读成别的东西。fixture 按实测写成
+   "条件里定义成空"（`tests/scopes.rs`）。
+
+## B122：**体是另一个宏的名字**（`_TRY_IO_BEGIN` → `_TRY_BEGIN` → `try {`），以及它连锁弄坏一个类体
+
+**例子**（`<xstring>` 第 523 行，`basic_string` 之前的一个自由函数里）：
+
+```cpp
+    } else { // state okay, insert characters
+        _TRY_IO_BEGIN
+        if ((_Ostr.flags() & _Ostr_t::adjustfield) != _Ostr_t::left) {
+```
+
+**现象**：`expected ';' after expression`（524 行，光标停在 `if` 上），然后恢复吃掉一个 `{` —— 于是**整个文件的括号收支错位一格**，
+`basic_string`（2444 行）本该在 5047 行的 `};` 收尾，实际一路吞到 5416 行：
+
+```text
+[where] xstring 的 std::basic_string 作用域（155 条事实）最后几条：
+   5074  swap      5300  string     5301  wstring    5303  u8string
+   5308  hash      5410  erase      5416  erase_if
+应该结束在 5047 行（源文件里 `};` 那一行）
+```
+
+这五个别名（`using string = basic_string<char, …>;` 等）本该在 `std` 里，落进 `std::basic_string` 之后，
+`definition("std::string")` 就是"未声明"——8 条 `std_query` 里有 5 条卡在这里。
+
+**成因（两层，都要修）**：
+
+```text
+① 体是另一个宏的名字：`iosfwd:27` `#define _TRY_IO_BEGIN _TRY_BEGIN`（`_HAS_EXCEPTIONS` 那一支），
+   而 `yvals.h` 里 `#define _TRY_BEGIN try {`。现在 shape_of_a_body 与 parser 的 kinds 判据都只读**一层**：
+   看到 `[Identifier]` 就答 Other。缺的是**跟着名字再问一次**（有界跳数 + 去过重防环），
+   两条通道都要（证据通道有文本 ✔；文件自己 `#define` 的那条只有 kinds，得另想办法或显式承认不支持）
+② 语句位置的块开启者：解析链之后 `_TRY_IO_BEGIN` 的体是 `try {`，首 token 是 `TryKeyword`，
+   而 B120 那条规则只收 `namespace` 开头的体（当时量到"语料只写两种"，现在量到第三种）。
+   一条语句位置的宏调用（体以 `{` 结尾、首 token 是语句关键字）应当整体读成一条语句，
+   后面的 `if` 才是它自己的语句——括号收支因此不再错位（`{` 与 `}` 都在宏体里，文件里一个都没有）
+```
+
+**性质**：两层都是"缺规则"，不是缺信息——链与体都在闭包里，`std_probe --macro _TRY_IO_BEGIN` 能看见它。
+
+**顺带说明为什么它值一整条**：一个 524 行的读法错误，代价不是 524 行的诊断，而是**类体到文件尾全错作用域**；
+这正是维护约定第 8 条（一个缺陷遮住另一个缺陷）的又一例：`std::string` 找不到的成因在两千行之外的一个 `try` 上。
+
+## B122：**体是另一个宏的名字**（`_TRY_IO_BEGIN` → `_TRY_BEGIN` → `try {`）—— 两层都已修，下一处已定位
+
+**第 5 轮落地**：
+
+```text
+(a) 体是另一个宏的名字时**跟着再问一次**：`MacroEnvironment::body_text_resolved`，有界（8 跳）且防环。
+    链接的判据是**词法**而不是拼写：`#define _TRY_IO_BEGIN _TRY_BEGIN // begin try block` 带尾注释，
+    第一版按文本 trim 判"是不是一个标识符"就漏了它——体是 C++ token，要问词法器。
+(b) **语句位置的块开启者**：体以 `{` 结尾、首 token 是块头关键字（`try`/`catch`/`do`/`switch`/`if`/`else`/
+    `for`/`while`/`extern`/`namespace`/`class`/`struct`/`union`/`enum`）时，调用整体读成一条语句。
+    `body_shapes_the_braces`（kinds 通道）与 `shape_of_a_body`（文本通道）**判据对齐**：
+    两边都要求"以 `{` 结尾"，所以 `namespace std`（没有花括号）两边都不认——
+    这是这一轮踩到的坑：只改一边会让同一份文件被 parser 和作用域遍历读出两种结构。
+(c) 作用域遍历给这类开启者压一个**没有作用域的帧**（`OpenedByBody::OpensABrace`），
+    这样关它的那个 `}` 体宏弹掉的是这一帧，而不是还开着的命名空间
+```
+
+**量到的**：
+
+```text
+std_query 不钉 CXX      1/9 → 2/9；std::basic_string 的成员表 155 → 173（构造函数也带上了类名）
+<xstring> 的首错         524 行（_TRY_IO_BEGIN）→ 592 行 —— 这一类修好了
+钉住的读数              128/0/0、455=454/1+12、带 seeds 全干净、std_query 钉 CXX 9/9，四份普查逐字节不变
+形状断言                gaps.rs 里那条现在同时钉"以 { 结尾才算开启者"；symbols.rs 新增
+                        a_body_that_is_another_macros_name_is_followed（含尾注释、多 token、环、未知名四个边界）
+```
+
+**下一处（已定位，还没修）**：`<xstring>:592`
+
+```cpp
+constexpr bool _Traits_equal(_In_reads_(_Left_size) const _Traits_ptr_ _Left, ...)
+```
+
+``expected `)`, but get const`` —— SAL 注解宏（`_In_reads_(n)` = `_SAL2_Source_(…)` 那一族）站在参数声明里，
+后面还跟着 `const`。这与 B122 无关，是参数列表里"宏 + 限定符"的形状。
+
+## B124：**被描述过的宏站在说明符位置**（SAL 注解），以及"证据门"错在哪 —— 已修复
+
+`<xstring>:592`：
+
+```cpp
+constexpr bool _Traits_equal(_In_reads_(_Left_size) const _Traits_ptr_ _Left, _In_reads_(_Right_size) const _Traits_ptr_ _Right)
+```
+
+``expected `)`, but get const``。`_In_reads_` 是 SAL 注解宏，**在闭包里是有定义的**（`<sal.h>`），
+而 `types.rs` 那条"宏站在说明符位置"的规则（B91 的那条）当时要求**谁都不认识这个名字**：
+
+```text
+require evidence ... moved NOTHING        （binders.h 的 `_GLIBCXX11_DEPRECATED_SUGGEST` 根本没有证据）
+shape alone          → 两个文件倒退        （`WINOLEAPI_(HINSTANCE) CoLoadLibrary (…)`）
+现在的代码：macro_evidence().is_none() && macro_body_kinds_at().is_none() && a_specifier_follows_the_group()
+```
+
+**出错的是那道门的问法**：它问的是"这个名字有没有证据"，而真正分开两种读法的是**组后面跟什么**——
+`WINOLEAPI_(HINSTANCE) CoLoadLibrary (…)` 的组后面是**名字**（那条规则归 `a_macro_call_begins_the_declaration`），
+而 `_In_reads_(n) const int *left` 的组后面是**说明符**（`const`）。`a_specifier_follows_the_group` 早就在那儿，
+门却仍然按证据关着，于是被描述过的注解宏被让给了"把它读成类型"的那条路。
+
+**修法**：去掉两道证据门，只留 `a_specifier_follows_the_group` 与 `!at_an_attribute`。两文件倒退那条线因此
+留在原地（名字在后），而被描述过的注解宏得以通过。
+
+**量到的**：
+
+```text
+MSVC 闭包（109 个文件）   干净 73 → **79**（失败 36 → 30）
+<xstring> 的首错          592 → **1868**（`_EXPORT_STD _NODISCARD constexpr string_view operator"" sv(…)`）
+std::string               从"未声明"变成"**在没能求值的条件后面**"——别名的事实已经落在 std 里了
+                          （`<xstring>` 的 std 作用域 48 → 68 条；basic_string 成员表 173 → **202**）
+钉住的读数                128/0/0、455=454/1+12、带 seeds 全干净、std_query 钉 CXX 9/9 —— 四份普查逐字节不变
+```
+
+**这条同时说明下一个靶子换了层**：`std::string` 现在不是解析问题，而是**条件求值**问题——
+`#ifdef __cpp_lib_char8_t` 那一支没能定下来（`__cpp_lib_char8_t` 由 `yvals_core.h` 按 `_HAS_CXX20` 定义），
+查询于是答 `ConditionalCompilation` 而不是给出别名。
+
+## B125：**带条件的 `#include` 一律被当成 Conditional**（条件根本没问）—— 已定位，修法试过并被测量否掉
+
+`project.rs` 的 `visible_files`（查询用的可见性走查）：
+
+```rust
+let step = match include.guard {
+    FactGuard::Unconditional => so_far,
+    FactGuard::Region(_)     => IncludeVisibility::Conditional,   // ← 没问条件，只要在 #if 里就算
+};
+```
+
+**后果**：每个标准头都用特性测试包住自己的 include（`<string>`：`#if _STL_COMPILER_PREPROCESSOR / #include <xstring>`），
+于是**整库的每一条事实都是 Conditional**，每条查询都答 `ConditionalCompilation`——哪怕那个条件在查询自己持有的环境里
+是**成立**的（`_STL_COMPILER_PREPROCESSOR` 在那儿就是 `1`）。这就是第 6 轮之后 `std::string` 卡住的地方：
+别名的事实已经在 `std` 里，只是"在没能求值的条件后面"。
+
+**试过的修法（已写、已量、已撤回）**：把这一步换成问 `index::environment::visibility_at`——
+`Active` 保留边、`Inactive` 丢掉边、`Unknown` 才答 Conditional（三值正是那套词汇本身的形状）。结果**更差**：
+
+```text
+std::basic_string   从"有候选、可见性 Conditional" 变成"一个候选都没有"（NotDeclaredHere）
+                    ⇒ 走查对承载整个类的那条边说了 Inactive
+```
+
+所以修法不是"在这里调求值器"，而是"让求值器把这个问题的答案弄对"——`visibility_at`/`macros_at` 那条路
+对 `#if _STL_COMPILER_PREPROCESSOR` 给出 `Inactive`，那本身就是一个要单独量、单独修的缺陷。
+撤回后读数回到 2/9，四份普查与门禁一字未动。
+
+**第 8 轮量到的（决定性的三个数）**：给 `<string>` 的每条 include 直接问一次求值器——
+
+```text
+[vis] yvals_core.h   guard Region(0) -> Active      ← 文件自己的 include guard（#ifndef _STRING_）✔
+[vis] xstring        guard Region(1) -> Inactive    ← `#if _STL_COMPILER_PREPROCESSOR`，**它成立**
+[vis] cctype         guard Region(1) -> Inactive    ← 同一条区域
+```
+
+Region(0) 对、Region(1) 错，而 Region(1) 的条件是 `#if _STL_COMPILER_PREPROCESSOR` —— 那个名字由
+**yvals_core.h**（`<string>` 第 9 行就包含它）定义成 `1`。所以求值器把"被包含文件定义的名字"读成了
+**未定义**：seed 是**完整**的（"除了我列出的，其它都没定义"），而 `macros_at` 造出来的 state 并没有把
+闭包里那些 `#define` 收进去 ⇒ `#if X` 取 0 ⇒ `Inactive`。**这是一个答错，不是一个答不出**——
+它把一个成立的条件判成"没编译"，而"没编译"会让可见性走查把整条边丢掉（上一轮那次撤回就是这么变差的）。
+
+**第 9 轮：又量到一个更细的数，并修掉其中一条**
+
+```text
+[state] at 182 <yvals_core.h>: _STL_COMPILER_PREPROCESSOR defined=Some(false) _HAS_CXX20 defined=Some(false) uncertain=false
+[state] at 239 <xstring>:      _STL_COMPILER_PREPROCESSOR defined=Some(false) _HAS_CXX20 defined=Some(false) uncertain=false
+```
+
+`macros_at(<string>, 239)` —— 也就是"读完第 9 行的 `#include <yvals_core.h>` 之后"——把
+`_STL_COMPILER_PREPROCESSOR` 报成**确定地未定义**（`uncertain = false`）。这是**答错**的形态：
+`<yvals_core.h>` 第 15-17 行在 `#else` 支里就是 `#define _STL_COMPILER_PREPROCESSOR 1`。
+
+**这一轮排除了两个嫌疑**（都是读代码 + 上面这个数一起定的）：
+
+```text
+✔ 递归是对的：include 那一支把被包含文件按"粘贴在这里"处理（upto = None），不是用外层的偏移去截
+✔ 事实确实会被应用到 state：take_fact 那一支走 apply_fact(state, fact, …)
+✘ 所以丢失发生在**那一条 #define 自身**的 reach/应用上（`#ifndef _STL_COMPILER_PREPROCESSOR` → 内层
+   `#if defined(RC_INVOKED) || …` 的 `#else` 那一支），下一轮的仪器：把 yvals_core.h 那条 fact 的
+   `reach` 打出来
+```
+
+**修掉的一条**：`include_visibility` 现在把"文件**自己的** include guard 区域"当成 `Active`——
+`SummaryGuards::own_guard` 本来就是为这件事存的（"storing the index is what lets a *walk* extend the same
+rule to the facts nested inside it"），而这个走查一直没照它办：`#ifndef _STRING_ / #define _STRING_`
+之后再 `#include`，名字已被上一行定义，按条件求值就是"没编译"，于是**整个文件的 include 全被跳过**。
+这条修完不动读数（上面那个丢失在别处），但它去掉的是一整类"答错"。
+
+**读数**：不钉 CXX 仍 2/9；钉住 9/9；四份普查与门禁与上一轮逐字节相同。
+
+**第 10 轮：那条 `#define` 根本没被走查看到**
+
+在 `macro_candidates` 的 fact 分支里打印 `_STL_COMPILER_PREPROCESSOR` 的 `guard`/`at`/`reach`——
+**一行都没打出来**。也就是说：走查（`macros_at(<string>, 239)`）**从来没有走到 yvals_core.h 的那条 fact**。
+配合第 9 轮那两个数（state 答"确定未定义"、`uncertain = false`），嫌疑收窄到两处之一：
+
+```text
+(a) yvals_core.h 的 summary 里没有这条 fact（索引那一步就没记下来），或
+(b) 走查没进 yvals_core.h —— 但那样 `self.summaries.get(&path)` 会落空、`mark_incomplete()` 会被调用，
+    而 `uncertain` 就会是 true（实测是 false），所以 (a) 更可能
+```
+
+**下一轮的仪器（一句话）**：把 yvals_core.h 的 summary 里所有 `_STL_*` fact 名打出来，看这条在不在；
+再顺着看它在 `#ifndef _STL_COMPILER_PREPROCESSOR` 里的 `guard` 是否被 `own_guard` 之外的东西影响。
+（第 10 轮是这一轮目标的最后一轮，验收 9/9 未达成：**不钉 CXX 仍是 2/9**，钉住 CXX 9/9、四份普查与门禁全绿。）
 
 ## 维护约定
 

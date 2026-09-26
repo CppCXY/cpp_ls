@@ -66,11 +66,20 @@ impl FileView {
     ///
     /// The one constructor, and it takes a [`VfsFile`] rather than text so that a view cannot be made from text
     /// that has no index — the two arrive together or not at all.
+    ///
+    /// # The scopes are built with **no macro evidence**, and that is an answer rather than a gap
+    ///
+    /// A view is a buffer and its index entry; `_STD_BEGIN`'s replacement list is in a header, and nothing here has
+    /// read the include graph. So this file's scopes claim exactly what this file's tokens say — which is the same
+    /// reading [`crate::build_scopes`] produced before the evidence parameter existed. Declarations reached
+    /// *through* a query come from their own files' summaries, where the reading was made with the closure in hand,
+    /// so `std::vector` still resolves from a buffer that never mentions `std`.
     pub fn parse(file: &VfsFile) -> FileView {
         let source = file.text.clone();
         let tree = cpp_parser::CppParser::parse(&source, cpp_parser::ParserConfig::default());
         let root = tree.get_red_root();
-        let scopes = crate::sema::scopes::build_scopes(&root);
+        let scopes =
+            crate::sema::scopes::build_scopes(&root, &crate::sema::scopes::NoMacroBodies);
 
         FileView {
             file: file.id,
@@ -131,7 +140,7 @@ mod tests {
 
     #[test]
     fn a_view_maps_positions_through_the_index_the_vfs_built() {
-        let vfs = Vfs::new(MemoryFiles::new().with_file("/p/a.cpp", "int a;\nint b;\nint c;\n"));
+        let mut vfs = Vfs::new(MemoryFiles::new().with_file("/p/a.cpp", "int a;\nint b;\nint c;\n"));
         let file = vfs.file("/p/a.cpp").expect("the file reads");
 
         let view = FileView::parse(&file);
@@ -153,7 +162,7 @@ mod tests {
     fn a_view_of_an_edited_buffer_maps_positions_in_the_edited_text() {
         // The property a language server depends on: the text a view maps positions in is the text the user is
         // typing, and its line index is the *same* generation of that text.
-        let vfs = Vfs::new(MemoryFiles::new().with_file("/p/a.cpp", "int a;\n"));
+        let mut vfs = Vfs::new(MemoryFiles::new().with_file("/p/a.cpp", "int a;\n"));
         let before = FileView::parse(&vfs.file("/p/a.cpp").expect("the file reads"));
         assert_eq!(
             before.offset_at(1, 0),
@@ -175,3 +184,4 @@ mod tests {
         );
     }
 }
+

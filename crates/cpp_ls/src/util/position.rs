@@ -167,12 +167,13 @@ mod tests {
         let files = MemoryFiles::new().with_file("/p/a.cpp", "int x = 1;\n// 😀 emoji\nint y = 2;\n");
         let documents = OpenDocuments::new();
         let providers = SessionFiles::new(documents, files);
-        let session = Session::with_config(
+        let mut session = Session::with_config(
             "/p",
             providers,
             WatchFilter::new("/p"),
             CompilerConfig::default(),
         );
+        session.load("/p/a.cpp");
         let view = session.view("/p/a.cpp").expect("the file reads");
 
         let at = view.source.find("y = 2").expect("the statement is in the text");
@@ -191,6 +192,7 @@ mod tests {
         assert_eq!(offset_at_position(&view, Position::new(1, 5)), Some(emoji + 4));
     }
 }
+
 
 
 

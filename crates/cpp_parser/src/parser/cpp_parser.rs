@@ -1201,15 +1201,16 @@ impl<'a> CppParser<'a> {
 
         let environment = self.parse_config.macros_from_includes()?;
 
-        if let Some(text) = environment.body_text_of(name, at) {
+        // What the includes say, **following a body that is another macro's name**: `_TRY_IO_BEGIN` is
+        // `_TRY_BEGIN`, and `_TRY_BEGIN` is `try {` (B122). One hop is what a rule that reads a body needs, and the
+        // chain is the difference between "nothing structural" and the block opener a statement needed.
+        if let Some(text) = environment.body_text_resolved(name, at) {
             return Some(kinds_of_a_body_text(text, &self.parse_config));
         }
 
-        // The second channel: a macro whose definition is conditional **but whose branch is in force**. Asked only
-        // for a body — never to answer "is this a macro" — see [`MacroEnvironment::body_text_in_force`].
-        environment
-            .body_text_in_force(name)
-            .map(|text| kinds_of_a_body_text(text, &self.parse_config))
+        // The second channel is inside `body_text_resolved`, which consults the in-force bodies per hop; reaching
+        // here means neither channel has anything to say about `name`.
+        None
     }
 
     /// The source range of the token at `index`, or `None` when there is none.

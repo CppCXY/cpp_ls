@@ -216,6 +216,22 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
             super::decls::parse_declaration(p)
         }
 
+        // **A macro whose body is a brace, asked first** (B120): `#define _STD_BEGIN namespace std {`,
+        // `#define _STD_END }`, and libstdc++'s `_GLIBCXX_BEGIN_NAMESPACE_VERSION`. The body is the strongest
+        // evidence there is about what stands here — stronger than any shape test below, because it *says* what
+        // the tokens do not — so it is asked before the rules that read the invocation as a declaration head, a
+        // call, or a block-carrying statement.
+        //
+        // **Why the order is the fix and not a preference**: asked later, the other rules get there first and
+        // their readings *succeed*, which is what makes this defect silent. `_STD_BEGIN struct vector { … };`
+        // reads as a declaration whose specifier is `_STD_BEGIN` (the whole class becomes its payload, and the
+        // `;` it ends on makes the declaration look complete), and `_STD_BEGIN vector<int> x = {};` reads as two
+        // specifiers in a row. Both are lossless, both are error-free, and both lose the declaration that was
+        // written inside them; see `tests/gaps.rs`, where the two shapes are pinned one after the other.
+        CppTokenKind::Identifier if body_shapes_the_braces(p, p.current_token_index()) => {
+            parse_a_macro_that_stands_for_a_declaration(p)
+        }
+
         // A **macro invocation used as a statement**: `BOOL_OPTION(tab_width)`, `IF_EXIST(k) { … }`.
         //
         // Claimed here, before the declaration/expression question is even asked, and only for a name this file
@@ -634,30 +650,99 @@ fn parse_a_macro_invocation_statement(p: &mut CppParser, start: usize) -> ParseR
     parse_macro_call(p)
 }
 
-/// Does the macro written at `index` have a body — in this file — that opens a namespace or closes a brace?
+/// Does the macro written at `index` have a body — from this file **or from what it includes** — that opens a
+/// namespace or closes a brace?
 ///
-/// `bits/c++config.h` writes `inline _GLIBCXX_BEGIN_NAMESPACE_VERSION` and, twenty lines later,
-/// `_GLIBCXX_END_NAMESPACE_VERSION`, and the two macros are `namespace __8 {` and `}` **in that same file**:
-/// nothing among the file's own tokens says a namespace opened or a brace closed, so the declarations that
-/// followed were read as the continuation of a declaration that never ends — ``expected `;` `` at the `inline`,
-/// and then at every `#if` boundary down the file. The question is asked of the macro's own `#define` body,
-/// which the directive rule records as token kinds ([`CppParser::record_macro_body`]) — no include, no index,
-/// no expansion pass, and the answer is about *this* file's text.
+/// The shape it exists for is `bits/c++config.h`'s pair: `inline _GLIBCXX_BEGIN_NAMESPACE_VERSION` and, twenty
+/// lines later, `_GLIBCXX_END_NAMESPACE_VERSION`, whose bodies are `namespace __8 {` and `}`. Nothing among the
+/// file's own tokens says a namespace opened or a brace closed, so the declarations that followed were read as
+/// the continuation of a declaration that never ends — ``expected `;` `` at the `inline`, and then at every `#if`
+/// boundary down the file. The answer is in the body, which the directive rule records as token kinds
+/// ([`CppParser::record_macro_body`]) — no expansion pass, and no interpretation of the body beyond its first
+/// and last token.
 ///
-/// The two shapes are the whole of it. A body that opens a namespace is a namespace definition whose head the
-/// file wrote as an invocation, and a body that is `}` closes the innermost brace — so the invocation is the
-/// whole of the statement, and what the macro stands for is decided by the body rather than guessed by shape.
-/// `namespace` must be the **first** token: `_GLIBCXX_MATH_NS` is `__8` (a namespace *name*, not a head) and
-/// belongs to the declarator rules, not this one.
+/// The two shapes are the whole of it, and each is what the *construct* is rather than what the name looks like:
+/// a body that opens a namespace is a namespace definition whose head the file wrote as an invocation, and a body
+/// that is `}` closes the innermost brace. `namespace` must be the **first** token: `_GLIBCXX_MATH_NS` is `__8`
+/// (a namespace *name*, not a head) and belongs to the declarator rules, not this one.
+///
+/// # Why the body is asked for **by position**, and not only in this file (B120)
+///
+/// MSVC writes the same construct the other way round: `<vector>` has no `namespace std` anywhere in it, only
+/// `_STD_BEGIN` on a line of its own, and the body — `namespace std {` — is in `yvals_core.h`, an **included**
+/// header. The file's own `#define` table has never seen it, so asking only that table answers "no body" and the
+/// invocation is read as the head of a declaration: the whole file becomes one `Declaration` whose specifier is
+/// `_STD_BEGIN` and whose payload is the class it was supposed to introduce. The failure is silent — a tree
+/// like that is still lossless and can still be error-free — which is what `docs/grammar-gaps.md` calls the A0
+/// class, and why the shape assertion in `tests/gaps.rs` is the thing that pins this rule rather than a count.
+///
+/// [`CppParser::macro_body_kinds_at`] is the positional channel built for exactly this: this file's own
+/// `#define` first (freshest, and it *is* the text being read), then what the includes contribute **at this
+/// offset**. Two bodies are accepted and no more, because two are what the corpus writes: one that *starts*
+/// with `namespace` (`namespace std {`, `namespace __8 {`) and one that is **exactly** `}`. `#define _STD_BEGIN`
+/// with an empty body is refused, and so is a body like `__8` (`_GLIBCXX_MATH_NS`, a namespace *name* rather
+/// than a head) — that is what keeps the rule from claiming a declaration's specifier.
+///
+/// A body that opens a namespace with a specifier in front of it — `inline namespace _V2 {`, which
+/// `_GLIBCXX_BEGIN_INLINE_ABI_NAMESPACE` has — is **not** claimed here, and that is a measurement rather than a
+/// preference: the two spellings it accepts are the two the measured corpora write (`_STD_BEGIN`, `_STDEXT_BEGIN`,
+/// `_STD_END`, `_STDEXT_END`, `_END_EXTERN_C`, `_CATCH_END`, and libstdc++'s namespace-version pair), and
+/// widening the first-token test to "a keyword that can open a block" would claim shapes nobody has measured.
+/// The `inline` spelling keeps the reading it has today, through the shape rules — and if it ever stops working,
+/// the same widening is the fix.
+///
+/// Measured over the closure of `<vector>`, `<string>` and `<map>` on MSVC 14.35: **39** `_STD_BEGIN` sites — 38
+/// of them alone on a line, which is the form the follower count was taken over — and every one of them is
+/// followed by a token that begins a declaration (`_EXPORT_STD` 17, `template` 10, `#if` 5, `#pragma` 3,
+/// `using`/`enum`/`#ifdef` one each). So the reading this rule produces is the one those files need, and the
+/// flat reading it replaces was right there only by the accident of what followed. Where the follower does *not*
+/// begin a declaration the accident does not hold, and only this rule can read the file at all; `tests/gaps.rs`
+/// pins both, because the difference between a rule and a coincidence is the whole value of the rule.
 fn body_shapes_the_braces(p: &CppParser, index: usize) -> bool {
     if p.token_kind_at(index) != CppTokenKind::Identifier {
         return false;
     }
 
-    p.macro_body_kinds(p.token_text_at(index)).is_some_and(|kinds| {
-        kinds.first() == Some(&CppTokenKind::NamespaceKeyword)
-            || kinds.as_slice() == [CppTokenKind::RightBrace]
-    })
+    let Some(offset) = p.token_range_at(index).map(|range| range.start_offset) else {
+        return false;
+    };
+
+    p.macro_body_kinds_at(p.token_text_at(index), offset)
+        .is_some_and(|kinds| {
+            // A **`}`** is the closer of a construct an earlier invocation opened.
+            kinds.as_slice() == [CppTokenKind::RightBrace]
+                // …and a body that **ends at a `{`** opens one: a namespace head (`namespace std {`) or a
+                // statement-level block (`try {`, which `<xstring>` reaches through `_TRY_IO_BEGIN` → `_TRY_BEGIN`).
+                // The `{` is required, so a body that only *starts* like a head — `namespace std`, a namespace
+                // *name* used where a specifier goes — is not an opener here either. The analysis layer's
+                // [`cpp_parser::shape_of_a_body`] asks the same two questions, and `tests/gaps.rs` pins both
+                // readings from either side: two copies of a vocabulary that disagree is how a file gets read one
+                // way by the parser and another way by the walk that reads its scopes.
+                || (kinds.last() == Some(&CppTokenKind::LeftBrace)
+                    && kinds.first().is_some_and(|first| heads_a_block(*first)))
+        })
+}
+
+/// Can this token kind stand at the head of a braced block — the parser's half of the vocabulary
+/// [`cpp_parser::shape_of_a_body`] classifies, with the reasoning for each entry written down there.
+fn heads_a_block(kind: CppTokenKind) -> bool {
+    matches!(
+        kind,
+        CppTokenKind::TryKeyword
+            | CppTokenKind::CatchKeyword
+            | CppTokenKind::DoKeyword
+            | CppTokenKind::SwitchKeyword
+            | CppTokenKind::IfKeyword
+            | CppTokenKind::ElseKeyword
+            | CppTokenKind::ForKeyword
+            | CppTokenKind::WhileKeyword
+            | CppTokenKind::ExternKeyword
+            | CppTokenKind::NamespaceKeyword
+            | CppTokenKind::ClassKeyword
+            | CppTokenKind::StructKeyword
+            | CppTokenKind::UnionKeyword
+            | CppTokenKind::EnumKeyword
+    )
 }
 
 pub(super) fn a_macro_invocation_starts_at(p: &CppParser, index: usize) -> bool {

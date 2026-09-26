@@ -81,7 +81,13 @@ fn main() {
     // subtleties), and the seed count is what says how far it got.
     let files = cpp_code_analysis::DiskFiles;
     let mut config = cpp_code_analysis::CompilerConfig::default();
-    let mut directories: HashSet<PathBuf> = HashSet::new();
+    // **Sorted, and that is not tidiness**: the order of the search path decides which file an `#include` that
+    // several directories can satisfy resolves to, and every number this probe prints is downstream of the
+    // include facts. A `HashSet` here made the search order a matter of the run's hash seed: measured on one
+    // binary and one 455-file list, three runs gave 1 460 025 / 1 589 438 / 1 606 474 seeds and 427 / 432 / 433
+    // files with context — a 10% swing that is indistinguishable from a change to a *reading*, which is the one
+    // thing this probe exists to measure. Error counts were stable throughout, which is why it went unnoticed.
+    let mut directories: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
     for path in &paths {
         if let Some(parent) = path.parent() {
             directories.insert(parent.to_path_buf());
@@ -180,8 +186,19 @@ standard {}",
     // **Who includes each file**, and where — the translation unit's half of the environment. Read off the include
     // facts of the indexed files, first includer wins: a header may be reached from several places, and any one of
     // them is a real translation unit it belongs to (the compile database would name the intended one).
+    //
+    // **"First" is by path order, not by iteration order**, and that is a measurement fix rather than tidiness:
+    // `summaries` is a `HashMap`, so "the first includer met" changed from run to run, and with it the *context*
+    // half of every header's environment. Measured on one binary, three runs of the same 455-file census:
+    // 1 375 119 / 1 454 838 / 1 481 724 seeds — an 8% swing that looks exactly like a change to the reading, and
+    // is not. The error counts were stable throughout (455 clean), which is why the noise went unnoticed until a
+    // number was compared across builds. A probe whose numbers move on their own cannot measure anything.
     let mut includers: HashMap<PathBuf, (PathBuf, usize)> = HashMap::new();
-    for (path, summary) in &summaries {
+    let mut indexed_paths: Vec<&PathBuf> = summaries.keys().collect();
+    indexed_paths.sort();
+
+    for path in indexed_paths {
+        let summary = &summaries[path];
         for include in &summary.includes {
             let Some(resolved) = include.resolved.as_ref() else {
                 continue;

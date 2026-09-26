@@ -231,11 +231,23 @@ impl MacroEnvironment {
         }
     }
 
+    /// Does this environment know **nothing at all** — neither a definition nor a body?
+    ///
+    /// Both channels count, and that is not a detail: an environment built only from
+    /// [`MacroEnvironment::with_bodies_in_force`] answers `body_text_in_force` for every name it carries, so a
+    /// caller that used this to decide whether to hand the environment to the parser would drop exactly the
+    /// evidence whose whole purpose is to be readable without being a definition. That is not hypothetical — the
+    /// in-force channel is the one MSVC's `_STD_BEGIN` arrives through (its `#define` is inside a conditional
+    /// region of `yvals_core.h`, so it is a body and not a definition), and a `debug` tool that skipped the
+    /// attach showed the invocation read as a declaration head, which is the defect the body was fetched to fix.
     pub fn is_empty(&self) -> bool {
-        self.by_name.is_empty()
+        self.by_name.is_empty() && self.bodies_in_force.is_empty()
     }
 
-    /// How many names the includes contribute.
+    /// How many names the includes contribute **as definitions**.
+    ///
+    /// Bodies in force are counted apart on purpose: they are what a rule may *read*, and [`MacroEnvironment::len`]
+    /// is the number the seeding measurements report.
     pub fn len(&self) -> usize {
         self.by_name.len()
     }
@@ -296,6 +308,332 @@ impl MacroEnvironment {
     pub fn knows(&self, name: &str) -> bool {
         self.by_name.contains_key(name)
     }
+
+    /// What `name`'s replacement list says **at `at`** — the positional answer first, and the in-force one when
+    /// position cannot answer.
+    ///
+    /// The order is [`MacroEnvironment::body_text_of`]'s and then [`MacroEnvironment::body_text_in_force`]'s, which
+    /// is the order every reader of a *body* uses: a definition the include order puts in force here is better
+    /// evidence than a branch some condition settled, and the second is only consulted when the first is silent.
+    /// `None` means **nobody says** — never "the body is empty", which is a body of zero tokens and a different
+    /// answer.
+    pub fn body_text_at_or_in_force(&self, name: &str, at: usize) -> Option<&str> {
+        self.body_text_of(name, at)
+            .or_else(|| self.body_text_in_force(name))
+    }
+
+    /// What `name` stands for at `at`, **following a body that is another macro's name**.
+    ///
+    /// A replacement list whose whole body is one identifier is an *alias*, and the standard library is full of
+    /// them: `iosfwd:27` says `#define _TRY_IO_BEGIN _TRY_BEGIN`, and `yvals.h` is where `_TRY_BEGIN` turns out to
+    /// be `try {`. A reader that stops at the first hop sees `[Identifier]` and answers "nothing structural", which
+    /// is how one `try` inside `<xstring>` cost the class body of `basic_string` and every `std::string` lookup
+    /// with it (`docs/grammar-gaps.md` B122).
+    ///
+    /// Bounded and cycle-safe, because a header is not a proof: the chain is followed at most
+    /// [`BODY_CHAIN_LIMIT`] hops, and a name that has already been asked about ends the walk with `None` — "nobody
+    /// says", which is the answer that leaves the reading where it was.
+    ///
+    /// A body that is a name **and something else** (`NAME (args)`) is not a link in a chain: only a body that is
+    /// exactly one identifier is, because anything longer is a replacement list in its own right.
+    pub fn body_text_resolved<'s>(&'s self, name: &'s str, at: usize) -> Option<&'s str> {
+        let mut current = name;
+        let mut seen: Vec<&str> = Vec::new();
+
+        loop {
+            if seen.contains(&current) || seen.len() >= BODY_CHAIN_LIMIT {
+                return None;
+            }
+
+            let text = self.body_text_at_or_in_force(current, at)?;
+
+            match a_sole_name_in(text) {
+                Some(next) => {
+                    seen.push(current);
+                    current = next;
+                }
+                None => return Some(text),
+            }
+        }
+    }
+}
+
+/// How many `#define A B` hops [`MacroEnvironment::body_text_resolved`] follows before giving up.
+///
+/// Eight is far past anything a header writes (the measured chains are one and two hops: `_TRY_IO_BEGIN` →
+/// `_TRY_BEGIN` → `try {`) and small enough that a pathological header cannot turn one parse question into a
+/// walk of the whole macro table.
+pub const BODY_CHAIN_LIMIT: usize = 8;
+
+/// The single identifier a replacement list consists of, when that is the whole of it.
+///
+/// **Lexed, not matched on the string**, and the first version of this got that wrong in a way worth recording:
+/// it trimmed whitespace and asked whether the rest looked like an identifier, which is false for
+/// `_TRY_BEGIN // begin try block` — and `iosfwd` writes exactly that. A body is C++ tokens, so the answer comes
+/// from the lexer that reads every other body: exactly one **significant** token, and it is a name. A trailing
+/// comment is not part of the body's meaning, which is the same rule `kinds_of_a_body_text` applies.
+///
+/// A body that is a name **and something else** (`NAME (args)`) is not a link in a chain: only a body that is
+/// exactly one identifier is, because anything longer is a replacement list in its own right.
+fn a_sole_name_in(text: &str) -> Option<&str> {
+    use crate::{CppLexer, LexerConfig};
+
+    let mut errors = Vec::new();
+    let mut lexer = CppLexer::new(text, LexerConfig::default(), &mut errors);
+
+    let mut significant = lexer.tokenize().into_iter().filter(|token| {
+        !matches!(
+            token.kind,
+            crate::CppTokenKind::Whitespace
+                | crate::CppTokenKind::Newline
+                | crate::CppTokenKind::LineContinuation
+                | crate::CppTokenKind::LineComment
+                | crate::CppTokenKind::BlockComment
+        )
+    });
+
+    let first = significant.next()?;
+    if first.kind != crate::CppTokenKind::Identifier {
+        return None;
+    }
+    if significant.next().is_some() {
+        return None;
+    }
+
+    text.get(first.range.start_offset..first.range.end_offset())
+}
+
+/// Does this token kind **head a braced block** — a construct whose body is a `{ … }` this file may not write?
+///
+/// The list is the keywords that can stand in front of a brace: a namespace or a class-like definition, a linkage
+/// block, and the statements that own a body. It is a *closed* grammatical set, like `can_begin_a_declaration`
+/// (`docs/grammar-gaps.md` convention 16): every entry says "a `{` may follow me", which is a different claim from
+/// "this token may begin a statement".
+///
+/// **Measured before it was written**: the corpus writes `namespace X {` (`_STD_BEGIN`) and `try {` (`_TRY_BEGIN`,
+/// reached through `_TRY_IO_BEGIN`), the second one only once the alias chain of B122 was followed. The statement
+/// keywords are here because they are the same shape one construct along — `_CATCH_ALL` is `catch (…) {`, and
+/// `do {`, `else {`, `if (…) {` are each written as a macro somewhere — and because a list that had to be extended
+/// every time a header spelled one would be extended by whoever hit it next.
+fn heads_a_braced_block(kind: Option<crate::CppTokenKind>) -> bool {
+    use crate::CppTokenKind;
+
+    matches!(
+        kind,
+        Some(
+            CppTokenKind::NamespaceKeyword
+                | CppTokenKind::ClassKeyword
+                | CppTokenKind::StructKeyword
+                | CppTokenKind::UnionKeyword
+                | CppTokenKind::EnumKeyword
+                | CppTokenKind::ExternKeyword
+                | CppTokenKind::TryKeyword
+                | CppTokenKind::CatchKeyword
+                | CppTokenKind::DoKeyword
+                | CppTokenKind::SwitchKeyword
+                | CppTokenKind::IfKeyword
+                | CppTokenKind::ElseKeyword
+                | CppTokenKind::ForKeyword
+                | CppTokenKind::WhileKeyword
+        )
+    )
+}
+
+/// What a macro's replacement list **stands for**, when it stands for one of the shapes a *construct* can be read
+/// from — see [`shape_of_a_body`].
+///
+/// The vocabulary is deliberately two shapes wide, and it is the same two the parser's own rule accepts
+/// (`crates/cpp_parser/src/grammar/cpp/stats.rs`, `body_shapes_the_braces`): a namespace definition whose head the
+/// file wrote as an invocation, and the closing brace of one. Everything else — an empty body, a namespace *name*
+/// (`__8`), a linkage block's head, a statement — is [`BodyShape::Other`], and a consumer must read that as "this
+/// body says nothing about the structure", never as "there is no construct here".
+///
+/// Why the two are separate functions rather than one: the parser's rule reads the **token kinds** of the body
+/// (for a `#define` in the file being parsed, kinds are what the directive rule records — the text is the file's
+/// own, and re-lexing it would be a second reader free to disagree), while a consumer that has to *name* the
+/// namespace needs the **spellings**, which only the text has. The safe direction is built in: a body this
+/// classifier refuses opens nothing, so the worst a disagreement can do is leave a file read flat — the reading it
+/// has today — and never invent a scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BodyShape {
+    /// `namespace std {` — the segments of the name, outermost first, as the body spells them.
+    ///
+    /// Empty for `namespace {`, which is a namespace with no name: it opens a scope all the same, and a consumer
+    /// must not read "no segments" as "no namespace".
+    OpensANamespace(Vec<String>),
+
+    /// `}` — the closing brace of a construct an earlier invocation opened.
+    ClosesABlock,
+
+    /// `try {` — a replacement list that **opens a braced block** without naming anything.
+    ///
+    /// A statement-level opener: `iosfwd`'s `_TRY_IO_BEGIN` (through `_TRY_BEGIN`) is `try {`, and `<xstring>`
+    /// writes `_TRY_IO_BEGIN` / `if (…) { … }` / `_CATCH_IO_END` as one statement. Reading the invocation as
+    /// anything else put the `if` where the expression rule expected a `;`, and the recovery ate a brace — the
+    /// class body of `basic_string` never closed and every `std::string` lookup went with it (B122).
+    ///
+    /// Nothing is *named*, so a consumer opens no scope for it; what it does is keep a brace's worth of balance,
+    /// which is what a statement-level reader needs.
+    OpensABlock,
+
+    /// `::std::` — a **nested-name-specifier**: the `::` a qualified name starts with, which this file does not
+    /// write. The name after the invocation continues the same qualified name.
+    ///
+    /// MSVC's STL spells `std::` nowhere: `<vector>` writes `_STD addressof(*_Ptr)` and `yvals_core.h` says
+    /// `#define _STD ::std::`. Two names in a row are not an expression in any reading, so without this the
+    /// invocation ends the expression and the token after it is a syntax error — which is how one `return`
+    /// statement inside a ternary swallowed the remaining 3 800 lines of `<vector>` (`docs/grammar-gaps.md`
+    /// B121).
+    QualifiesAName,
+
+    /// Anything else, the empty body included.
+    Other,
+}
+
+impl BodyShape {
+    /// The segments of the namespace this body opens — `None` when it opens something else.
+    ///
+    /// A separate question from "is this an empty list": `namespace {` and `struct S {` are both *not* a named
+    /// namespace, and only the first of them opens a scope a consumer may use.
+    pub fn namespace_segments(&self) -> Option<&[String]> {
+        match self {
+            BodyShape::OpensANamespace(segments) => Some(segments),
+            _ => None,
+        }
+    }
+
+    /// Does this body put a **brace** in the file's token stream, without the file writing one?
+    ///
+    /// True for both openers: a namespace head and a statement-level `try {` each supply a `{` that a reader
+    /// counting braces (and a reader keeping a stack of what an invocation opened) has to account for.
+    pub fn opens_a_brace(&self) -> bool {
+        matches!(self, BodyShape::OpensANamespace(_) | BodyShape::OpensABlock)
+    }
+
+    /// Is this the closing brace of a construct an earlier invocation opened?
+    pub fn closes_a_block(&self) -> bool {
+        matches!(self, BodyShape::ClosesABlock)
+    }
+
+    /// Does this body say that a construct opens or closes here — a **scope**, of either kind?
+    pub fn is_structural(&self) -> bool {
+        matches!(
+            self,
+            BodyShape::OpensANamespace(_) | BodyShape::ClosesABlock
+        )
+    }
+
+    /// Does this body open **something braced**, whether or not it names it?
+    ///
+    /// The question a reader asks when it needs the brace's worth of balance and not a scope: a statement-level
+    /// opener whose closer is another macro.
+    pub fn opens_a_block(&self) -> bool {
+        matches!(self, BodyShape::OpensABlock)
+    }
+
+    /// Does this body **continue a name** rather than stand for a construct of its own?
+    ///
+    /// One shape answers yes: a replacement list that ends at a `::`. A reader that has it can read the name
+    /// written after the invocation as part of the same qualified name; a reader that does not must treat the
+    /// invocation as the whole of what the file wrote there.
+    pub fn qualifies_a_name(&self) -> bool {
+        matches!(self, BodyShape::QualifiesAName)
+    }
+
+    /// Does a **reading** change if this body is known — either of the two questions above?
+    ///
+    /// The question a caller asks when it decides whether fetching the environment is worth anything for a file:
+    /// [`crate::SummaryStore`](crate::SummaryStore)'s second pass asks it of every name the closure defines, and a
+    /// body that answers `false` (`__declspec(dllexport)`, a statement, a type) is one no rule consults.
+    pub fn a_reading_uses_this(&self) -> bool {
+        !matches!(self, BodyShape::Other)
+    }
+}
+
+/// What the replacement list `text` stands for: the two shapes of [`BodyShape`], and nothing else.
+///
+/// Lexed rather than pattern-matched on the string, because a body is C++ tokens and not text: `namespace\`
+/// `std /* the standard library */ {` is the same body as `namespace std {`, and a `str::starts_with` would miss
+/// it while a `str::contains` would accept `// namespace std {` in a comment. The lexer that reads the file reads
+/// the body — the same call [`CppParser::record_macro_body`] makes on the other channel.
+///
+/// Accepted shapes, exactly:
+///
+/// ```text
+/// namespace std {              → OpensANamespace(["std"])
+/// namespace a :: b {           → OpensANamespace(["a", "b"])
+/// namespace {                  → OpensANamespace([])          an unnamed namespace is still a scope
+/// }                            → ClosesABlock
+/// :: std ::                    → QualifiesAName               `_STD`, whose `::` the file does not write
+/// namespace std                → Other    a name, not a head — it stands for a specifier, not a construct
+/// __8                          → Other
+/// inline namespace _V2 {       → Other    measured: not claimed, see BodyShape's note
+/// (anything else, "" included) → Other
+/// ```
+pub fn shape_of_a_body(text: &str) -> BodyShape {
+    use crate::{CppLexer, CppTokenKind, LexerConfig};
+
+    let mut errors = Vec::new();
+    let mut lexer = CppLexer::new(text, LexerConfig::default(), &mut errors);
+    let tokens: Vec<_> = lexer
+        .tokenize()
+        .into_iter()
+        .filter(|token| {
+            !matches!(
+                token.kind,
+                CppTokenKind::Whitespace
+                    | CppTokenKind::Newline
+                    | CppTokenKind::LineContinuation
+                    | CppTokenKind::LineComment
+                    | CppTokenKind::BlockComment
+            )
+        })
+        .collect();
+
+    let kinds: Vec<CppTokenKind> = tokens.iter().map(|token| token.kind).collect();
+    if kinds.as_slice() == [CppTokenKind::RightBrace] {
+        return BodyShape::ClosesABlock;
+    }
+
+    // A body that **ends at a `::`** is a nested-name-specifier — `::std::`, `_STDEXT::` — and it is asked
+    // *before* the namespace test because the two are distinguished by their last token rather than their first:
+    // `namespace std {` ends at `{`, and `::std::` ends at `::`. A one-token body of just `::` is accepted too:
+    // there is no other reading of it.
+    if kinds.last() == Some(&CppTokenKind::Scope) {
+        return BodyShape::QualifiesAName;
+    }
+
+    // Everything below **requires the body to end at a `{`**: a replacement list that does not is a name, a
+    // specifier, or an expression, and it opens nothing. `namespace std` (no brace) is the near miss that says so.
+    if kinds.last() != Some(&CppTokenKind::LeftBrace) {
+        return BodyShape::Other;
+    }
+
+    // `namespace` first and `{` last, with nothing between them but the name's own tokens. The middle test is what
+    // keeps `namespace std = other;` (an alias) and `namespace std;` out: both end somewhere else.
+    if kinds.first() != Some(&CppTokenKind::NamespaceKeyword) {
+        // …and a body that ends at a `{` without naming a namespace **opens a block**: `try {`, `do {`,
+        // `switch (x) {`, `extern "C" {`. Nothing is named, and a statement-level reader needs exactly that much —
+        // the brace's balance (B122).
+        return if heads_a_braced_block(kinds.first().copied()) {
+            BodyShape::OpensABlock
+        } else {
+            BodyShape::Other
+        };
+    }
+
+    let mut segments = Vec::new();
+    for token in &tokens[1..tokens.len() - 1] {
+        match token.kind {
+            CppTokenKind::Identifier => {
+                segments.push(text[token.range.start_offset..token.range.end_offset()].to_string())
+            }
+            CppTokenKind::Scope => {}
+            _ => return BodyShape::Other,
+        }
+    }
+
+    BodyShape::OpensANamespace(segments)
 }
 
 /// A table backed by a map — the reference implementation, for tests and for a caller whose index is simple
@@ -450,8 +788,119 @@ pub enum MacroBody {
 #[cfg(test)]
 mod tests {
     use super::{
-        IncludedMacro, MacroBody, MacroEnvironment, NoSymbols, SymbolKind, SymbolMap, SymbolTable,
+        BodyShape, IncludedMacro, MacroBody, MacroEnvironment, NoSymbols, SymbolKind, SymbolMap,
+        SymbolTable, shape_of_a_body,
     };
+
+    /// **Only two bodies are structural**, and everything next to them is not — this is the vocabulary the
+    /// scope-building step reads a namespace's name out of, so the near misses matter as much as the hits.
+    ///
+    /// The two hits are what the corpora write: `_STD_BEGIN`/`_STDEXT_BEGIN` (MSVC) and libstdc++'s
+    /// `_GLIBCXX_BEGIN_NAMESPACE_VERSION`, whose bodies are `namespace std {`, `namespace stdext {` and
+    /// `namespace __8 {`. The misses are each one token away from a hit, and each would be a wrong scope if it
+    /// were accepted: `namespace std` is the *name* half of a head (used where a specifier goes), `__8` is a
+    /// namespace name, `inline namespace _V2 {` is a head the parser's own rule does not claim either, and an
+    /// alias is a declaration rather than an opening brace.
+    #[test]
+    fn only_two_body_shapes_are_structural() {
+        let segments = |text: &str| shape_of_a_body(text).namespace_segments().map(<[String]>::to_vec);
+
+        // The hits. Whitespace, comments and a `\`-splice are not part of the answer: this is lexed, not matched.
+        assert_eq!(segments("namespace std {"), Some(vec!["std".to_string()]));
+        assert_eq!(segments("namespace {"), Some(Vec::new()), "unnamed, and still a scope");
+        assert_eq!(
+            segments("namespace a :: b {"),
+            Some(vec!["a".to_string(), "b".to_string()]),
+            "a nested name is one declaration that opens one scope per segment"
+        );
+        assert_eq!(
+            segments("namespace std /* the library */ {"),
+            Some(vec!["std".to_string()]),
+            "a comment is not part of the body"
+        );
+        assert_eq!(
+            segments("namespace\\\n std {"),
+            Some(vec!["std".to_string()]),
+            "and neither is a line continuation"
+        );
+        assert!(shape_of_a_body("}").closes_a_block());
+        assert!(shape_of_a_body(" } ").closes_a_block(), "trivia is dropped first");
+
+        // The misses.
+        for other in [
+            "",
+            "std",
+            "__8",
+            "namespace std",
+            "namespace std = other;",
+            "inline namespace _V2 {",
+            "};",
+            "{",
+            "((a) > (b) ? (a) : (b))",
+        ] {
+            assert_eq!(
+                shape_of_a_body(other),
+                BodyShape::Other,
+                "{other:?} is not one of the shapes a construct is read from"
+            );
+        }
+
+        // **A statement-level opener is a third shape** (B122): it names nothing, and it braces something. Read
+        // from the same list of block heads, so the two vocabularies (`symbols.rs` here and the parser's
+        // `body_shapes_the_braces`) cannot disagree about which bodies are openers.
+        for opener in ["try {", "do {", "switch (x) {", "if (a) {", "extern \"C\" {"] {
+            assert_eq!(
+                shape_of_a_body(opener),
+                BodyShape::OpensABlock,
+                "{opener:?} opens a brace and names nothing"
+            );
+            assert!(shape_of_a_body(opener).opens_a_brace());
+            assert!(!shape_of_a_body(opener).is_structural(), "…and opens no scope");
+            assert!(shape_of_a_body(opener).namespace_segments().is_none());
+        }
+
+        // And the questions are not the same question: an unnamed namespace opens a *scope* and has no segment.
+        assert_eq!(shape_of_a_body("namespace {").namespace_segments(), Some(&[][..]));
+        assert!(shape_of_a_body("namespace {").is_structural());
+        assert!(shape_of_a_body("namespace {").opens_a_brace());
+        assert!(!shape_of_a_body("namespace std").is_structural());
+        assert!(shape_of_a_body("namespace std").namespace_segments().is_none());
+    }
+
+    /// **A body that is another macro's name is followed** (B122), because one hop is what a header writes and one
+    /// hop is the difference between "nothing structural" and `try {`.
+    ///
+    /// Both spellings the corpus has: a plain alias (`_TRY_IO_BEGIN` → `_TRY_BEGIN`) and one with a trailing
+    /// comment (`iosfwd` writes `#define _TRY_IO_BEGIN _TRY_BEGIN // begin try block`), which the first version of
+    /// this missed because it tested the *text* instead of lexing it.
+    ///
+    /// The negatives are the boundaries: a body that is a name **and something else** is not a link, a cycle ends
+    /// the walk, and a chain longer than the limit gives up rather than looping.
+    #[test]
+    fn a_body_that_is_another_macros_name_is_followed() {
+        let environment = MacroEnvironment::from_included_macros([]).with_bodies_in_force([
+            (Box::from("_TRY_IO_BEGIN"), Box::from("_TRY_BEGIN // begin try block")),
+            (Box::from("_TRY_BEGIN"), Box::from("try {")),
+            (Box::from("_A"), Box::from("_B")),
+            (Box::from("_B"), Box::from("_A")),
+            (Box::from("_CALL"), Box::from("_CATCH_ALL _CATCH_END")),
+        ]);
+
+        assert_eq!(environment.body_text_resolved("_TRY_IO_BEGIN", 0), Some("try {"));
+        assert_eq!(environment.body_text_resolved("_TRY_BEGIN", 0), Some("try {"));
+
+        // A body with more than the name is a replacement list in its own right, not an alias.
+        assert_eq!(
+            environment.body_text_resolved("_CALL", 0),
+            Some("_CATCH_ALL _CATCH_END")
+        );
+
+        // A cycle — `#define _A _B` and `#define _B _A` — answers "nobody says" instead of looping.
+        assert_eq!(environment.body_text_resolved("_A", 0), None);
+
+        // And a name nobody defines is still "nobody says".
+        assert_eq!(environment.body_text_resolved("_UNKNOWN", 0), None);
+    }
 
     /// **The evidence is positional**, which is the whole reason this exists: the same name is a macro in one
     /// region of a file and not in another, and a flat table cannot say so — feeding one cost 46 files in

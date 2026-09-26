@@ -181,6 +181,50 @@ pub struct DeclFact {
     pub guard: FactGuard,
 }
 
+/// A place where a file's **structure** was read from a macro's replacement list rather than from its own tokens.
+///
+/// The one kind of fact in a summary whose evidence is not in the file it describes. MSVC's `<vector>` writes
+/// `_STD_BEGIN` on a line of its own and `namespace std {` nowhere at all — the braces that scope its 165
+/// declarations are in `yvals_core.h` — so "everything here is in `std`" is a reading of *another file's* text.
+///
+/// # Why this is stored rather than recomputed
+///
+/// The cache key is the text and the compilation context (`cache.rs`), and it deliberately does not name the macro
+/// environment, because a key that had to be computed after the parse would make the disk cache save writes instead
+/// of parses. So a summary *can* be read under an environment that has since changed — and the answer to that is not
+/// to pretend it cannot happen but to make it **checkable**: the body that licensed the reading is kept verbatim, so
+/// a consumer that can ask the include graph again (`ProjectIndex::macro_environment`, and
+/// [`crate::macros_from_the_closure_with_bodies`] for a whole closure) can compare the two and rebuild instead of
+/// trusting. A consumer that cannot ask still knows where the answer came from, which is strictly more than a bare
+/// `scope: "std"` gives it.
+///
+/// # What it is not
+///
+/// Not a claim that the name is *declared* here: no binding is created for a scope opened by a body
+/// ([`crate::build_scopes`]), so a rename of `std` cannot reach the `_STD_BEGIN` invocation. This records the
+/// reading, and the reading is all it records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacroScopeReading {
+    /// Where the invocation is written in this file.
+    pub range: cpp_parser::SourceRange,
+    /// The macro's name, as this file spells it.
+    pub name: String,
+    /// The replacement list it was read as, verbatim — the evidence itself.
+    pub body: String,
+    /// The namespace it opened, outermost segment first; empty for `namespace {`.
+    ///
+    /// `None` for an invocation whose body is `}` — the closing half of a reading, which is why the two cases are
+    /// distinguished by the option rather than by an empty list.
+    pub opens: Option<Vec<String>>,
+}
+
+impl MacroScopeReading {
+    /// Does this invocation open a scope — as opposed to closing one?
+    pub fn opens_a_scope(&self) -> bool {
+        self.opens.is_some()
+    }
+}
+
 impl DeclFact {
     /// The declaration's full name, qualified by the scope it was written in.
     ///
@@ -1343,6 +1387,12 @@ pub struct FileSummary {
     pub macros: Vec<MacroFact>,
     pub includes: Vec<IncludeFact>,
     pub guards: SummaryGuards,
+    /// Where a **scope** in this file came out of a macro's replacement list — see [`MacroScopeReading`].
+    ///
+    /// Empty for the overwhelming majority of files, and empty is the ordinary answer rather than a failure: a file
+    /// that writes its own braces has nothing to record here. It is stored because it is the one part of a summary
+    /// whose evidence is in *another* file, and a consumer that can ask that file again must be able to.
+    pub macro_readings: Vec<MacroScopeReading>,
 }
 
 impl FileSummary {
@@ -1355,6 +1405,7 @@ impl FileSummary {
             macros: Vec::new(),
             includes: Vec::new(),
             guards: SummaryGuards::default(),
+            macro_readings: Vec::new(),
         }
     }
 

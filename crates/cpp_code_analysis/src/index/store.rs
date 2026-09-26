@@ -179,6 +179,14 @@ pub struct IncludeIndex {
     /// has, and this says where it stopped. Both are needed — "there is nothing more" and "there may be more" are
     /// the two answers a consumer has to be able to tell apart.
     pub not_indexed: Vec<NotIndexed>,
+    /// How many files were read a **second** time because their scopes depend on a macro body the first pass could
+    /// not see — see `SummaryStore::re_read_what_a_body_changes`, which is private because the caller's question
+    /// is `index_includes_from`.
+    ///
+    /// Reported rather than folded into `stats.rebuilt`, because it is the number that says whether this pass is
+    /// cheap (33 files in MSVC's STL closure) or has run away (every file, which would mean the filter stopped
+    /// filtering). The parses are counted in `stats.rebuilt` as well: they were spent.
+    pub re_read: usize,
     /// What this call cost: parses the disk saved, parses that were spent, summaries deliberately not written.
     pub stats: StoreStats,
 }
@@ -429,8 +437,141 @@ impl<F: FileProvider> SummaryStore<F> {
             }
         }
 
+        // **The second pass**, and the reason it is here rather than inside the loop: a file whose scopes come out
+        // of a macro body needs the files it includes to be indexed first, and the walk above cannot have that.
+        // See [`SummaryStore::re_read_what_a_body_changes`] for the filter and for what is deliberately not stored.
+        let truncated = !outcome.not_indexed.is_empty();
+        let indexed = outcome.indexed.clone();
+        outcome.re_read = self.re_read_what_a_body_changes(&indexed, truncated);
+
         outcome.stats = self.stats.since(before);
         outcome
+    }
+
+    /// Re-read the files whose **reading depends on a macro body** the walk could not see the first time.
+    ///
+    /// # Why a second pass exists at all
+    ///
+    /// A file's scopes can depend on the replacement list of a macro it invokes, and that list is usually in a file
+    /// the file *includes*: MSVC's `<vector>` writes `_STD_BEGIN` and `namespace std {` is in `yvals_core.h`, so
+    /// every one of the 165 declarations that header contributes is scoped by another file's text. Building that
+    /// environment needs the included file's summary, and the walk above reads a file **before** the files it
+    /// includes — it cannot be otherwise, because a file's own `#include`s are a product of parsing it. So the
+    /// first pass reads each file with whatever evidence the index had (usually none), and this pass re-reads the
+    /// ones whose answer could have changed now that the whole closure is in hand.
+    ///
+    /// # Which files those are, and why that is a *sound* filter rather than a guess
+    ///
+    /// The candidate set is: a file whose text mentions a name the closure defines with a **structural** body
+    /// (`namespace X {` or `}`, see [`cpp_parser::shape_of_a_body`]). The filter can only ever *add* work — a file
+    /// that does not mention such a name cannot have a reading that depends on one, because the reading is asked at
+    /// an invocation of that name — so a mention inside a comment or a string costs one re-parse and never a wrong
+    /// summary. Measured on MSVC's STL: 33 of the 109 files in the closure of `<vector>`, `<string>` and `<map>`.
+    ///
+    /// # What is *not* written to disk
+    ///
+    /// A reading is only as good as the closure behind it, so a summary read under a **truncated** one is kept in
+    /// memory and not stored: the walk's budget and depth limits are the caller's, they are not part of the key, and
+    /// an entry written under a partial closure would be served to the next run as if the evidence had been
+    /// complete. The same rule as a failed `#include`, for the same reason — see [`SummaryStore::get`] — and it is
+    /// counted rather than silent.
+    ///
+    /// Returns how many files were re-read.
+    fn re_read_what_a_body_changes(&mut self, indexed: &[PathBuf], truncated: bool) -> usize {
+        // Every indexed file's text, read once: the closure walk slices each macro's body out of it, and a
+        // candidate is re-parsed from it. One read per file per pass, rather than one per candidate include.
+        let mut sources: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
+        for path in indexed {
+            if let Some(text) = self.files.read(path) {
+                sources.insert(path.clone(), text);
+            }
+        }
+
+        // The names whose body a **reading** uses, from the **macro facts** of the indexed closure — not from its
+        // text, and not from the environment: this is the question "could any file's reading have changed", and
+        // the answer has to be knowable without building an environment per file. `a_reading_uses_this` is the
+        // vocabulary's own answer, so a shape added to the reader becomes a name added here rather than a silent
+        // hole — see `cpp_parser::BodyShape`.
+        let mut bodied: Vec<String> = Vec::new();
+        for summary in self.index.summaries() {
+            let Some(source) = sources.get(&summary.path) else {
+                continue;
+            };
+            for fact in &summary.macros {
+                let used = fact.kind.is_definition()
+                    && fact.body_range.is_some_and(|range| {
+                        source
+                            .get(range.start_offset..range.start_offset + range.length)
+                            .is_some_and(|body| {
+                                cpp_parser::shape_of_a_body(body).a_reading_uses_this()
+                            })
+                    });
+                if used && !bodied.contains(&fact.name) {
+                    bodied.push(fact.name.clone());
+                }
+            }
+        }
+
+        if bodied.is_empty() {
+            return 0;
+        }
+
+        // One cache of parsed `#define`s for the whole pass: a definition does not depend on which file is being
+        // read, so the feed costs one parse per definition rather than one per definition per file (B95).
+        let mut definitions = crate::summary::MacroDefinitions::default();
+        let mut re_read = 0usize;
+
+        for path in indexed {
+            let Some(source) = sources.get(path) else {
+                continue;
+            };
+            if !mentions_one_of(source, &bodied) {
+                continue;
+            }
+
+            // The environment, built from the closure **as the walk found it** — the same call a query-time
+            // consumer makes, so the reading and its check cannot disagree about what the evidence was.
+            let environment = {
+                let index = &self.index;
+                let sources = &sources;
+                let Some(summary) = index.summary(path) else {
+                    continue;
+                };
+
+                let evidence = crate::summary::macros_from_the_closure_with_bodies(
+                    summary,
+                    |wanted| {
+                        Some((
+                            index.summary(wanted)?,
+                            sources.get(wanted).map(String::as_str).unwrap_or(""),
+                        ))
+                    },
+                    index.macros(),
+                    &mut definitions,
+                );
+
+                cpp_parser::MacroEnvironment::from_included_macros(evidence.macros)
+                    .with_bodies_in_force(evidence.conditional_bodies)
+            };
+
+            let key = SummaryKey::new(content_hash(source), self.context_hash(path));
+            let rebuilt = FileIndexer::new(&self.files, &self.config)
+                .with_macro_bodies(&environment)
+                .index(path, source, key);
+
+            self.stats.rebuilt += 1;
+            re_read += 1;
+
+            if truncated || has_unresolved_includes(&rebuilt) {
+                self.stats.unstored += 1;
+            } else {
+                let _ = write_summary(&rebuilt, &self.cache);
+            }
+
+            self.index.insert(rebuilt);
+        }
+
+        re_read
     }
 
     /// Forget everything the store holds about `path`, because the file is gone.    ///
@@ -587,6 +728,18 @@ impl<F: FileProvider> SummaryStore<F> {
 
         fnv1a64(&bytes)
     }
+}
+
+/// Does this text mention any of `names` as a whole word?
+///
+/// The filter [`SummaryStore::re_read_what_a_body_changes`] uses, and it is deliberately a **text** scan rather
+/// than a parse: a parse is the thing the filter exists to avoid, and the question it answers ("could this file's
+/// reading change?") only ever needs a sound over-approximation. A name inside a comment or a string literal counts
+/// as a mention, which costs one re-parse of a file whose summary comes out identical; a name that is *not* in the
+/// text cannot be invoked, so no file that could change is skipped.
+fn mentions_one_of(text: &str, names: &[String]) -> bool {
+    text.split(|character: char| !(character.is_alphanumeric() || character == '_'))
+        .any(|word| names.iter().any(|name| name == word))
 }
 
 /// Does this summary write an `#include` whose target was never found?

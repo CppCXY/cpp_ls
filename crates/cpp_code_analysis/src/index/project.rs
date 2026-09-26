@@ -2160,6 +2160,23 @@ impl ProjectIndex {
                 };
                 let next = normalize(resolved);
 
+                // **A guarded `#include` is `Conditional` here without its condition being asked** (B125), and that
+                // is a measured defect with a measured *attempt* recorded against it.
+                //
+                // Every standard header wraps its includes in a feature test — `<string>` writes
+                // `#if _STL_COMPILER_PREPROCESSOR / #include <xstring>` — so every fact in the library comes out
+                // `Conditional` and every query answers `ConditionalCompilation`, even when the condition holds in
+                // the very environment the query is holding (`_STL_COMPILER_PREPROCESSOR` is `1` there).
+                //
+                // The obvious repair — ask [`crate::index::environment::visibility_at`], keep the edge on `Active`,
+                // drop it on `Inactive`, stay `Conditional` when it cannot decide — was written and measured, and it
+                // made the answer **worse**: `std::basic_string` lost all of its candidates. The measurement that
+                // explains it is in `docs/grammar-gaps.md` B125: the evaluator answers `Inactive` for
+                // `#if _STL_COMPILER_PREPROCESSOR` — a condition that **holds** — because the state it evaluates
+                // against does not carry what the included headers define, while the seed claims completeness. So the
+                // repair is not "call the evaluator here"; it is "feed the closure's macros into the evaluator"
+                // (`docs/index-design.md`, the conditional-evaluation section). Until that lands, this line stays:
+                // `Conditional` is a **missing** answer, and dropping the edge would be a wrong one.
                 let step = match include.guard {
                     FactGuard::Unconditional => so_far,
                     FactGuard::Region(_) => IncludeVisibility::Conditional,
@@ -2517,6 +2534,21 @@ impl ProjectIndex {
         let FactGuard::Region(region) = guard else {
             return Visibility::Active;
         };
+
+        // **The file's own include guard is not a condition** (B125). `#ifndef _STRING_ / #define _STRING_`
+        // followed by the file's includes is how every header is written, and by the time the walk reaches an
+        // include the name has been defined *by the line above it* — so evaluating that region says "not taken"
+        // and the walk skips **every include of the file**. The visible consequence was MSVC's whole library:
+        // `_STL_COMPILER_PREPROCESSOR`, defined by `<yvals_core.h>`, came out `defined = Some(false)` in the state
+        // at `<string>`'s own `#include <xstring>`, so `#if _STL_COMPILER_PREPROCESSOR` — a condition that holds —
+        // was answered `Inactive`, and every fact behind it read as `Conditional`.
+        //
+        // The index already treats the facts guarded by exactly this region as unconditional
+        // (`deguard_the_files_own_guard`), and `SummaryGuards::own_guard` exists so that a **walk** can apply the
+        // same rule — which is what this is. Entering the file at all is what the guard means.
+        if summary.guards.own_guard == Some(region) {
+            return Visibility::Active;
+        }
 
         let mut unknown = false;
 
@@ -3008,6 +3040,14 @@ fn matches(fact: &DeclFact, name: &str) -> bool {
         return false;
     }
 
+    // **A fact with no name declares no name.** `DeclFact::qualified_name` of a nameless fact *is* its scope, so
+    // without this every nameless declaration answers for the class that encloses it — which is how a destructor
+    // made `std::vector` ambiguous. Nothing is lost: a nameless fact is still reachable by position, which is
+    // what it exists for (`fact_for` records the spelling for the rest).
+    if fact.name.is_empty() {
+        return false;
+    }
+
     if let Some(global) = name.strip_prefix("::") {
         return fact.scope.is_none() && fact.name == global;
     }
@@ -3350,7 +3390,7 @@ mod tests {
         let (index, tree) = analysed(&[("/p/widget.h", "int count;\n")], "/p/main.cpp", source);
 
         let root = tree.get_red_root();
-        let scopes = crate::build_scopes(&root);
+        let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
         let found = super::definition_across_files(
             &index,
             &scopes,
@@ -3396,7 +3436,7 @@ mod tests {
         assert_eq!(helper.scope, None, "…which is why the scope cannot say so");
 
         let root = tree.get_red_root();
-        let scopes = crate::build_scopes(&root);
+        let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
         let found = super::definition_across_files(
             &index,
             &scopes,
@@ -3426,7 +3466,7 @@ mod tests {
         );
 
         let root = tree.get_red_root();
-        let scopes = crate::build_scopes(&root);
+        let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
         let found = super::definition_across_files(
             &index,
             &scopes,
@@ -3458,7 +3498,7 @@ mod tests {
         );
 
         let root = tree.get_red_root();
-        let scopes = crate::build_scopes(&root);
+        let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
         let found = super::member_across_files(
             &index,
             &scopes,
@@ -3487,7 +3527,7 @@ mod tests {
         );
 
         let root = tree.get_red_root();
-        let scopes = crate::build_scopes(&root);
+        let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
         let found = super::definition_across_files(
             &index,
             &scopes,
@@ -3516,7 +3556,7 @@ mod tests {
         );
 
         let root = tree.get_red_root();
-        let scopes = crate::build_scopes(&root);
+        let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
         let found = super::definition_across_files(
             &index,
             &scopes,
@@ -3545,7 +3585,7 @@ mod tests {
         );
 
         let root = tree.get_red_root();
-        let scopes = crate::build_scopes(&root);
+        let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
         let found = super::definition_across_files(
             &index,
             &scopes,
@@ -3575,7 +3615,7 @@ mod tests {
         );
 
         let root = tree.get_red_root();
-        let scopes = crate::build_scopes(&root);
+        let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
         let found = super::definition_across_files(
             &index,
             &scopes,
@@ -3609,7 +3649,7 @@ mod tests {
     ) -> Known<super::ProjectDefinition> {
         let (index, tree) = analysed(files, from, source);
         let root = tree.get_red_root();
-        let scopes = crate::build_scopes(&root);
+        let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
 
         super::member_across_files(&index, &scopes, &root, Path::new(from), at(source, needle))
     }
@@ -3852,7 +3892,7 @@ mod tests {
         );
 
         let root = tree.get_red_root();
-        let scopes = crate::build_scopes(&root);
+        let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
         let found = super::member_across_files(
             &index,
             &scopes,
@@ -4233,7 +4273,7 @@ mod tests {
         );
 
         let root = tree.get_red_root();
-        let scopes = crate::build_scopes(&root);
+        let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
         let found = super::member_across_files(
             &index,
             &scopes,
@@ -4298,7 +4338,7 @@ mod tests {
         let (index, tree) = analysed(&[("/p/widget.h", "int count = 7;\n")], "/p/main.cpp", source);
 
         let root = tree.get_red_root();
-        let scopes = crate::build_scopes(&root);
+        let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
         let found = super::definition_across_files(
             &index,
             &scopes,
@@ -4330,7 +4370,7 @@ mod tests {
     ) -> Known<super::MemberList> {
         let (index, tree) = analysed(files, from, source);
         let root = tree.get_red_root();
-        let scopes = crate::build_scopes(&root);
+        let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
 
         super::members_of(&index, &scopes, &root, Path::new(from), class)
     }
@@ -4652,7 +4692,7 @@ mod tests {
             source,
         );
         let root = tree.get_red_root();
-        let scopes = crate::build_scopes(&root);
+        let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
 
         let found = super::members_of(&index, &scopes, &root, Path::new("/p/main.cpp"), "Derived");
         let Known::Yes(list) = found else {
@@ -4738,7 +4778,7 @@ mod tests {
 
         let tree = cpp_parser::CppParser::parse(main, cpp_parser::ParserConfig::default());
         let root = tree.get_red_root();
-        let scopes = crate::build_scopes(&root);
+        let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
 
         let listed = |index: &ProjectIndex| {
             match super::members_of(index, &scopes, &root, Path::new("/p/main.cpp"), "A") {
@@ -4808,7 +4848,7 @@ mod tests {
     ) -> Known<super::MemberCompletions> {
         let (index, tree) = analysed_while_typing(files, from, source);
         let root = tree.get_red_root();
-        let scopes = crate::build_scopes(&root);
+        let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
 
         super::member_completions_at(
             &index,
@@ -4940,7 +4980,7 @@ mod tests {
             source,
         );
         let root = tree.get_red_root();
-        let scopes = crate::build_scopes(&root);
+        let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
 
         let found = super::member_completions_at(
             &index,
@@ -5050,7 +5090,7 @@ mod tests {
         let source = "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget w;\n  w.size;\n}\n";
         let (index, tree) = analysed_while_typing(&[], "/p/a.cpp", source);
         let root = tree.get_red_root();
-        let scopes = crate::build_scopes(&root);
+        let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
 
         let found = super::member_completions_at(
             &index,
@@ -5074,7 +5114,7 @@ mod tests {
         let source = "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget w;\n  w.size;\n}\n";
         let (index, tree) = analysed_while_typing(&[], "/p/a.cpp", source);
         let root = tree.get_red_root();
-        let scopes = crate::build_scopes(&root);
+        let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
 
         // Two characters into `size`.
         let cursor = at(source, "w.size") + 2 + 2;
@@ -5120,7 +5160,7 @@ mod tests {
         let source = "struct Widget {\n  int size;\n};\nvoid f() {\n  Widget w;\n  w.\n}\n";
         let (index, tree) = analysed_while_typing(&[], "/p/a.cpp", source);
         let root = tree.get_red_root();
-        let scopes = crate::build_scopes(&root);
+        let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
 
         let found = super::member_across_files(
             &index,
@@ -5154,7 +5194,7 @@ mod tests {
     ) -> Known<super::NameCompletions> {
         let (index, tree) = analysed_while_typing(files, from, source);
         let root = tree.get_red_root();
-        let scopes = crate::build_scopes(&root);
+        let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
 
         super::name_completions_at(
             &index,

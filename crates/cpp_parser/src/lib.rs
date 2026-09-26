@@ -16,7 +16,8 @@ pub use lexer::{
 pub use parser::{Checkpoint, CppParser, EventStreamAudit, MacroEvidence, MarkEvent, ParserConfig};
 pub use parser_error::{CppParseError, CppParseErrorKind};
 pub use symbols::{
-    IncludedMacro, MacroBody, MacroEnvironment, NoSymbols, SymbolKind, SymbolMap, SymbolTable,
+    BodyShape, IncludedMacro, MacroBody, MacroEnvironment, NoSymbols, SymbolKind, SymbolMap,
+    SymbolTable, shape_of_a_body,
 };
 pub use syntax::*;
 pub use text::{LineIndex, Reader, SourceRange};

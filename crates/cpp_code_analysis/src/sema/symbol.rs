@@ -48,6 +48,7 @@ use std::collections::HashSet;
 use cpp_parser::SourceRange;
 
 use crate::paths::FileId;
+use crate::summary::MacroScopeReading;
 
 /// A question's answer, with "no answer" as a first-class value.
 ///
@@ -759,11 +760,23 @@ pub struct ScopeTree {
     scopes: Vec<Scope>,
     /// The file scope, when one was created. Every non-empty file has exactly one.
     root: Option<ScopeId>,
+    /// The places where a scope in this table was read from a **macro's replacement list** rather than from the
+    /// file's own braces — see [`MacroScopeReading`].
+    ///
+    /// Kept on the table because the walk that produced the scopes is the only thing that knows, and because the
+    /// step that stores a summary takes the table apart anyway. Sorted by position, which is the order the walk
+    /// meets them in, so two walks of the same text produce the same list.
+    pub macro_readings: Vec<MacroScopeReading>,
 }
 
 impl ScopeTree {
     pub fn new() -> Self {
         ScopeTree::default()
+    }
+
+    /// The scopes this file read out of macro bodies, in the order the walk met them.
+    pub fn macro_readings(&self) -> &[MacroScopeReading] {
+        &self.macro_readings
     }
 
     /// The file scope, if the table has one.

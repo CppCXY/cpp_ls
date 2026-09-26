@@ -773,17 +773,28 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
         // other macro arms use): what stands there is the macro's own text, and `("std::bind")` is not a grammar
         // this file can read — a `#define` in another file is what knows whether it is a string, a type or an
         // expression.
+        // **What the evidence gate is, after the MSVC measurement (B124).** The arm used to require that **nobody**
+        // describes the name (`macro_evidence` and `macro_body_kinds_at` both `None`), and the reason is still
+        // right: a name some rule can *read* belongs to that rule. But a described name is not the same as a name
+        // some rule can read — the SAL annotations are the counterexample the measurement found. `<xstring>:592`
+        // writes
+        //
+        // ```cpp
+        // constexpr bool _Traits_equal(_In_reads_(_Left_size) const _Traits_ptr_ _Left, …)
+        // ```
+        //
+        // and `_In_reads_` **is** described (it is `#define`d in `<sal.h>`, inside the closure), so this arm stood
+        // aside, the specifier loop read `_In_reads_` as a *type*, the `(n)` as a declarator, and `const` came out
+        // as ``expected `)`, but get const``. What separates the two worlds is not whether a body is known but
+        // whether the **group is followed by a specifier**: `WINOLEAPI_(HINSTANCE) CoLoadLibrary (…)` has a *name*
+        // after its group and stays with [`a_macro_call_begins_the_declaration`], which is the reading the
+        // two-files-backwards measurement was about. Asking the follower instead of the evidence keeps that line
+        // where it is and lets a described annotation macro through.
         if specifiers == 0
             && allow_second_name
             && p.current_token() == CppTokenKind::Identifier
             && p.peek_next_token() == CppTokenKind::LeftParen
             && !at_an_attribute(p)
-            && p.macro_evidence(p.current_token_text()).is_none()
-            && p.macro_body_kinds_at(
-                p.current_token_text(),
-                p.current_token_range().start_offset,
-            )
-            .is_none()
             && a_specifier_follows_the_group(p)
         {
             let checkpoint = p.checkpoint();
@@ -2711,6 +2722,43 @@ fn parse_enumerator_body(p: &mut CppParser) -> ParseResult {
 /// Exposed for the qualifier loop, which walks a name's segments and has to hand the rest of one back to this
 /// rule: `using ns::f;` reads the first segment itself — to decide whether an `=` follows — and then asks for
 /// everything after it.
+/// Does the macro written at the cursor supply the **`::` a qualified name starts with**? (B121)
+///
+/// The question is asked of the replacement list's **last** token, and it has to be asked of the body rather than
+/// of the name, because no spelling answers it: `_STD` is three letters that could stand for anything, and
+/// `#define _STD ::std::` is a fact about a header. A body that ends at a `::` is a nested-name-specifier, so the
+/// name after the invocation continues the same qualified name — which is what makes `_STD addressof(*p)` one
+/// expression and `_STD reverse_iterator<iterator>` one type, instead of two names in a row.
+///
+/// **One predicate, two grammars**: the segment loops of [`parse_name`] here and of `parse_primary_expr` in
+/// `exprs.rs` ask the same question, and the second copy is where the exception gets forgotten (maintenance
+/// convention 14). A buffer parsed with no include closure gets `None` — nobody says — and keeps today's reading:
+/// the invocation is a name of its own, and the name after it is the syntax error it looks like.
+pub(super) fn a_macro_qualifies_the_name(p: &CppParser) -> bool {
+    if p.current_token() != CppTokenKind::Identifier {
+        return false;
+    }
+
+    let offset = p.current_token_range().start_offset;
+    p.macro_body_kinds_at(p.current_token_text(), offset)
+        .is_some_and(|kinds| kinds.last() == Some(&CppTokenKind::Scope))
+}
+
+/// Can the token at the cursor continue a qualified name as its next **segment**?
+///
+/// The four ways a segment is spelled, matching the arms of the segment loops that call this. Asked only after a
+/// macro supplied the `::`, so that a qualifier with nothing to qualify ends the name there rather than reporting
+/// a name that is missing because of a `::` the file never wrote.
+pub(super) fn at_a_name_segment(p: &CppParser) -> bool {
+    matches!(
+        p.current_token(),
+        CppTokenKind::Identifier
+            | CppTokenKind::Tilde
+            | CppTokenKind::OperatorKeyword
+            | CppTokenKind::TemplateKeyword
+    )
+}
+
 pub fn parse_name(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::NameExpr);
@@ -2767,6 +2815,24 @@ pub fn parse_name(p: &mut CppParser) -> ParseResult {
         }
 
         match p.current_token() {
+            // **A qualifier the file wrote as a macro** (B121): `_STD reverse_iterator<iterator>` with
+            // `#define _STD ::std::`. Read as what it is — a `MacroCall` — and then the loop comes back around to
+            // read the segment it qualifies. Without this the specifier sequence took `_STD` for the type and the
+            // name after it for something else: `using reverse_iterator = _STD reverse_iterator<iterator>;` came
+            // out as a type plus a nested `Declaration` (a recovery), which in MSVC's `<vector>` is an
+            // empty-named fact filed in `std::vector` — enough to make `std::vector` itself ambiguous.
+            CppTokenKind::Identifier if a_macro_qualifies_the_name(p) => {
+                let call = p.mark(CppSyntaxKind::MacroCall);
+                let name = p.mark(CppSyntaxKind::NameExpr);
+                p.bump();
+                name.complete(p);
+                call.complete(p);
+
+                if !at_a_name_segment(p) {
+                    break;
+                }
+                continue;
+            }
             CppTokenKind::Identifier => p.bump(),
             // `operator+`, `operator()`, `operator new`, `operator""_x`...
             CppTokenKind::OperatorKeyword => {

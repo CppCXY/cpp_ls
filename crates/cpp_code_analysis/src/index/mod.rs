@@ -78,11 +78,37 @@ use crate::summary_codec::DecodeError;
 pub struct FileIndexer<'a, F: FileProvider> {
     files: &'a F,
     config: &'a CompilerConfig,
+    /// What the file's **includes** say about the macros it invokes — see [`crate::sema::scopes::MacroBodies`].
+    ///
+    /// Optional because most callers have no include closure: a buffer on its own, a test, a probe over a list of
+    /// files. `None` is "nobody says", which produces exactly the summary this type produced before the field
+    /// existed — the reading a file's own tokens support and nothing more.
+    ///
+    /// **Two consumers, one value**, and that is why the type is the parser's `MacroEnvironment` rather than a
+    /// trait object: the *parse* reads it through `ParserConfig::with_macros_from_includes` (which is what lets a
+    /// rule take `_STD addressof(*p)` as one qualified name when `_STD` is `::std::`, B121), and the *scope walk*
+    /// reads it through [`crate::sema::scopes::MacroBodies`] (which is what opens `std` from `_STD_BEGIN`'s
+    /// `namespace std {`). A second value for either would be a second answer to the same question.
+    bodies: Option<&'a cpp_parser::MacroEnvironment>,
 }
 
 impl<'a, F: FileProvider> FileIndexer<'a, F> {
     pub fn new(files: &'a F, config: &'a CompilerConfig) -> Self {
-        FileIndexer { files, config }
+        FileIndexer {
+            files,
+            config,
+            bodies: None,
+        }
+    }
+
+    /// Index with what the file's includes say about the macros it invokes.
+    ///
+    /// The one piece of evidence a summary can contain that is **not** in the file it describes: `_STD_BEGIN`'s
+    /// `namespace std {` is in `yvals_core.h`, and every declaration in MSVC's `<vector>` is scoped by it. See
+    /// [`crate::summary::MacroScopeReading`], which is where the reading and the body behind it are kept.
+    pub fn with_macro_bodies(mut self, bodies: &'a cpp_parser::MacroEnvironment) -> Self {
+        self.bodies = Some(bodies);
+        self
     }
 
     /// Build the summary of the file at `path`, whose text is `source`.
@@ -102,10 +128,18 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // compilation, not of the text — `__int128` is a type to g++ and a name to cl.exe. See
         // [`CompilerConfig::dialect`], and note that the same value is part of `context_hash`, so a summary
         // written for one target is never read as if it were written for the other.
-        let tree = CppParser::parse(
-            source,
-            ParserConfig::default().with_dialect(self.config.dialect()),
-        );
+        //
+        // …and **with the include closure's macro bodies when the caller has them**: a rule that takes
+        // `_STD addressof(*p)` for one qualified name needs to know that `_STD` is `::std::`, and that body is in
+        // a header (B121). Without them the parse is the shape-only reading, which is what a buffer on its own
+        // gets and all it can get.
+        let mut config =
+            ParserConfig::default().with_dialect(self.config.dialect());
+        if let Some(bodies) = self.bodies {
+            config = config.with_macros_from_includes(bodies);
+        }
+
+        let tree = CppParser::parse(source, config);
         self.index_tree(path, source, &tree, key)
     }
 
@@ -126,8 +160,13 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
 
         let root = tree.get_red_root();
         let preprocessing = preprocess(&root);
-        let scopes = build_scopes(&root);
-
+        // The same evidence object for both readers — see the field's note. The cast is the point: the scope walk
+        // asks the trait, the parse asked the concrete type, and there is one value behind both.
+        let evidence: &dyn crate::sema::scopes::MacroBodies = match self.bodies {
+            Some(bodies) => bodies,
+            None => &crate::sema::scopes::NoMacroBodies,
+        };
+        let scopes = build_scopes(&root, evidence);
         // The diagnostics, as ranges, for the one field a fact takes from them rather than from the tree — see
         // [`DeclFact::clean`]. Collected once for the whole file: the parser reports a handful per file, and
         // asking per declaration would be a scan of the list per fact.
@@ -223,6 +262,10 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             macros,
             includes,
             guards,
+            // Where a scope came out of a macro's replacement list rather than out of this file's braces. Taken
+            // from the walk rather than recomputed: the walk is the only thing that asked, and asking again here
+            // would be a second reader of the same evidence, free to disagree with the scopes it is describing.
+            macro_readings: scopes.macro_readings,
         }
     }
 }

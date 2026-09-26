@@ -593,15 +593,16 @@ fn fact_for(
     local: bool,
     declarations: &Declarations<'_>,
 ) -> Option<DeclFact> {
-    // A binding with no identifier is a destructor, an operator, or a conversion function: real declarations,
-    // but ones whose *name* is not a name a lookup can be keyed on. They are stored with an empty name and the
-    // kind `Other` rather than dropped, because "there is a declaration here" is still the answer a
-    // go-to-definition needs — the same decision `DeclKind::Other` documents.
-    let name = binding
-        .name
-        .identifier_text()
-        .unwrap_or_default()
-        .to_string();
+    // A binding whose name has no identifier is a destructor, an operator, or a conversion function. Its
+    // **spelling** is still a name a lookup can be keyed on — `std::vector::~vector`, `std::vector::operator=` —
+    // and `Name::text` is what produces it, so that is what is stored.
+    //
+    // It used to be stored **empty** ("a declaration is here" and nothing more), and the measurement that changed
+    // it is why: `DeclFact::qualified_name` of a nameless fact *is* its scope, so every destructor answered for
+    // its own class. `definition("std::vector")` then found the class **and** its destructor and reported
+    // `Ambiguous`, which is how MSVC's STL answered "not declared" for every member query (`docs/roadmap.md`
+    // §4.2 ①). The declaration stays findable by position, which was the point of keeping it at all.
+    let name = binding.name.text();
 
     Some(DeclFact {
         kind: DeclKind::from_binding_kind(binding.kind),
@@ -1480,7 +1481,7 @@ mod tests {
         assert_eq!(tree.get_errors(), [], "the input must parse cleanly");
 
         let root = tree.get_red_root();
-        build_facts(&build_scopes(&root), &preprocess(&root), &root, &[])
+        build_facts(&build_scopes(&root, &crate::NoMacroBodies), &preprocess(&root), &root, &[])
     }
 
     /// The facts of a file that **does not** parse cleanly, with the diagnostics that say so.
@@ -1502,7 +1503,7 @@ mod tests {
             .collect();
 
         (
-            build_facts(&build_scopes(&root), &preprocess(&root), &root, &errors).0,
+            build_facts(&build_scopes(&root, &crate::NoMacroBodies), &preprocess(&root), &root, &errors).0,
             errors,
         )
     }

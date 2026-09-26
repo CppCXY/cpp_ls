@@ -31,7 +31,7 @@
 `%TEMP%\stdprobe\files.txt` 的 128 个文件（`<vector>/<string>/<map>/<algorithm>` 的闭包）——
 **`干净 128 / 报错 0`**，消息总数 **0**（带 seeds）；`%TEMP%\cppls-indexed.txt` 的 455 个文件（分析闭包）——
 **`干净 455 / 报错 0 / 消息 0`（带 seeds）**，不带 seeds 的那一遍是 `干净 454 / 报错 1`（剩下的那个文件见下）。
-Rust 侧 `cargo test --workspace` = **1178 个测试 / 38 个套件全绿**（含 `cpp_ls` 的 28 个单测与 2 个端到端测试）。
+Rust 侧 `cargo test --workspace` = **1179 个测试 / 38 个套件全绿**（含 `cpp_ls` 的 28 个单测与 2 个端到端测试）。
 
 **两份读数**：上面这两份的"干净 455/0"是**带 include 证据**（`--seeds --closure`，也就是**带索引的产品形态**）的读数；
 **不带证据**的那一遍 455 个文件是 `干净 454 / 报错 1 / 消息 12`，唯一失败的是 `commdlg.h:577` 的
@@ -43,7 +43,7 @@ Rust 侧 `cargo test --workspace` = **1178 个测试 / 38 个套件全绿**（�
 **门禁三条 + 一条**（改完必须全绿，`index-design.md` §门禁有同样的表）：
 
 ```bash
-cargo test --workspace                     # 1178 个测试，38 个套件
+cargo test --workspace                     # 1179 个测试，38 个套件
 cargo clippy --workspace --all-targets     # 零警告
 cargo doc --no-deps -p cpp_code_analysis   # 零警告（cpp_parser 有历史链接问题，不管）
 cargo run -q -p cpp_parser --bin cpp_dump -- crates/cpp_parser/tests/real_world.cpp   # 必须 0 error
@@ -1377,12 +1377,146 @@ parser 的边际收益是"每轮 1–3 个文件"，连续磨十几轮会失去�
 **开着的事**（按值排）：
 
 ```text
-① MSVC 的 STL：闭包只到 107 个文件、std_query 0/9（libstdc++ 是 279 个文件、9/9）
-   **根因已查明（2026-09-26）**：MSVC 的 <vector> 里**一个** `_STD_BEGIN`、**零个**字面 `namespace std`
-   （`#define _STD_BEGIN namespace std {`，在 yvals_core.h）。我们的每文件事实是从 CST 上收的，
-   宏展开出的 namespace 不是一个节点，于是 `std::vector` 这个事实**根本不存在** —— 不是"没读到"，
-   是"读到了但认不出"。修法属于 §3 的"宏族（设计级）"那一档：作用域构建要能看穿**展开后是 namespace/class 的宏**
-   （不是无位置地表，而是按位置的展开）。这一条现在是 MSVC 能不能用的唯一门槛。
+① MSVC 的 STL：闭包只到 109 个文件、std_query 0/9（libstdc++ 是 279 个文件、9/9）
+   **根因（2026-09-26 重测，比原来那句更窄也更准）**：STL 本身**读得对**——`<vector>` 165 条事实、
+   `vector` 这个类 15 个成员、`<map>` 333 条都读出来了，全部落在 `<file scope>`。缺的只有**作用域**：
+   MSVC 的 `<vector>` 里一处字面 `namespace std` 都没有，只有第 24 行一行 `_STD_BEGIN`，
+   而它的体 `namespace std {` 在 `yvals_core.h:1773`。所以 `vector` 有、`std::vector` 没有。
+
+   量的三件（都是这一轮的新数）：
+   · 定义处：`yvals_core.h:1773-1787` 无条件地定义 `_STD_BEGIN`=`namespace std {`、`_STD_END`=`}`
+     （另有 `_STDEXT_BEGIN`/`_STDEXT_END`、`_EXTERN_C`/`_END_EXTERN_C`）；整个 MSVC include 树里
+     **以花括号结尾的宏体只有四个**（`_STD_BEGIN`/`_STDEXT_BEGIN`/`_EXTERN_C`/`_TRY_BEGIN`），
+     体是单独 `}` 的有六个；134 个文件写 `_STD_BEGIN`、144 次调用，**每个文件 begin/end 都配平**
+   · 调用处：闭包里 `_STD_BEGIN` 共 39 处（38 处独占一行，那份清单就是按行首量的），后面跟的第一个
+     token 全是能起声明的（`_EXPORT_STD` 17、`template` 10、`#if` 5、`#pragma` 3、`using`/`enum`/`#ifdef` 各 1）
+     ⇒ 今天那条**形状**规则碰巧把每一处都读对了，"宏观复现"里的 A0 树在 STL 闭包里一次都没出现
+   · 证据处：`std_probe --seeds --closure --macro _STD_BEGIN` 在 `<vector>`/`<map>`/`<string>` 里
+     都是 `evidence false | positional body None | in-force body Some("namespace std {")`
+     ⇒ 体走的是**"条件成立的那一支"**通道（`yvals_core.h` 的 `#define` 落在条件区里），
+     而不是位置化的定义通道。这条很重要：它决定了喂给 parser 的是什么形状的证据
+
+   **已落地的 parser 半边（B120）**：体是花括号的宏在声明位置**整体**读成一条语句，证据按位置问
+   （`macro_body_kinds_at`），并且**排在所有"把名字读成声明头/类型"的规则前面**——顺序就是修复本身，
+   因为那些规则是会**成功**的（`_STD_BEGIN struct vector {…};` 读成一条说明符是 `_STD_BEGIN` 的声明）。
+   四种通道各有一条形状断言（`crates/cpp_parser/tests/gaps.rs`，文件自己的 `#define`、生效中的体、
+   定义+体、以及后面跟不出声明的形状），外加两条否定断言。
+
+   **第 3 轮：B121 修好之后（0/9 → 1/9，事实数翻了几倍）**
+
+   ```text
+   ✔ `_STD`（体以 `::` 结尾的宏）读成"嵌套名限定符"，两处各一条规则
+     `parse_name`（类型位置）与 `parse_primary_expr` 的名字段循环（表达式位置），判据只有一份
+     （`types::a_macro_qualifies_the_name`）；`_STD addressof(*_P)` 与 `_STD reverse_iterator<iterator>`
+     各自读成一个限定名，而不再"两个名字连写"
+   ✔ 索引那次 parse 现在也**喂环境**（`FileIndexer::with_macro_bodies` 同时给 parse 与作用域遍历）——
+     否则规则在索引里永远不会触发
+   ✔ 第二遍的触发名集合从"结构性体"扩到 `a_reading_uses_this()`（体以 `::` 结尾的也算）
+   ✔ 顺带修掉两个事实层的缺陷：
+     · 析构函数/运算符的事实原来存**空名字**，而 `qualified_name()` 对空名字来说就是它的作用域 ⇒
+       每个析构函数都替自己的类作答 ⇒ `std::vector` 变成"声明了不止一次"。现在存 `Name::text()`
+       （`~vector`、`operator=`），并且 `matches()` 任何情况下都不让无名事实替名字作答
+     · `_EXPORT_STD` 的真实体是**空**（`export` 要 `_HAS_CXX23 && _BUILD_STD_MODULE`），
+       而它在条件区里 ⇒ 走"生效中的体"通道；无条件定义的同名宏会走定义通道，读法不同（fixture 里钉住了）
+
+   量到的（不钉 CXX，MSVC 14.35 的 STL 闭包 109 个文件）：
+     std_query          0/9 → **1/9**（`v.push_back -> vector std::vector::push_back`），钉住 CXX 仍 9/9
+     <xstring> 的事实   129 → **1181**；<p vector> 165 → **650**；<p map> 333（不变）
+     std::basic_string 的成员表  0 → **155**（`assign`/`append`/`insert`/`erase`/`replace`/`~basic_string`…）
+     两遍的开销         109 个文件重读 33 个，冷索引 3.35 s → 6.1 s
+     钉住的读数         455/128 四份普查逐字节不变
+   ```
+
+   **第 5 轮：B122 的两层都修了，0/9 → 1/9 → 2/9**
+
+   ```text
+   ✔ (a) 体是另一个宏的名字时跟着再问一次（有界 8 跳、防环、**按词法**判"整条体就是一个名字"——
+     `#define _TRY_IO_BEGIN _TRY_BEGIN // begin try block` 的尾注释让第一版按文本判的写法漏掉了它）
+   ✔ (b) 语句位置的块开启者（体以 `{` 结尾、首 token 是块头关键字）整体读成一条语句；
+     两条通道的判据**对齐**（都要求以 `{` 结尾）——只改一边会让 parser 与作用域遍历读出两种结构
+   ✔ (c) 作用域遍历给这类开启者压一个"没有作用域的帧"，关它的 `}` 体宏于是弹这一帧而不是还在开的命名空间
+   量到：不钉 CXX 1/9 → **2/9**；`std::basic_string` 成员表 155 → 173；<xstring> 首错 524 → **592**
+   钉住：128/0/0、455=454/1+12、带 seeds 全干净、std_query 钉 CXX 9/9，四份普查逐字节不变
+
+   下一处（已定位）：<xstring>:592 `constexpr bool _Traits_equal(_In_reads_(_Left_size) const _Traits_ptr_ …)`
+   —— SAL 注解宏站在参数声明里，后面跟 `const`；这是参数列表的形状，与 B122 无关
+   ```
+
+   **第 6 轮：B124（被描述过的宏站在说明符位置）—— MSVC 闭包 73 → 79 个文件读干净**
+
+   ```text
+   ✔ types.rs 那条"宏站在说明符位置"的规则（B91）原来要求**谁都不认识这个名字**；真正分开两种读法的是
+     **组后面跟什么**：`WINOLEAPI_(HINSTANCE) CoLoadLibrary (…)` 后面是**名字**（归另一条规则），
+     `_In_reads_(n) const int *left` 后面是**说明符**。去掉两道证据门、只留 a_specifier_follows_the_group
+   量到：MSVC 闭包干净 73 → **79**；<xstring> 首错 592 → 1868；std::basic_string 成员表 173 → **202**
+         std::string 从"未声明"变成"在没能求值的条件后面"（别名的事实已经落在 std 里）
+   钉住：128/0/0、455=454/1+12、带 seeds 全干净、std_query 钉 CXX 9/9 —— 四份普查逐字节不变
+   ```
+
+   **第 7 轮：靶子换层了——`std::string` 现在卡在"带条件的 include 一律算 Conditional"（B125）**
+
+   ```text
+   定位：project.rs 的 visible_files 里 `FactGuard::Region(_) => IncludeVisibility::Conditional` ——
+        条件根本没问。每个标准头都用特性测试包住 include（`#if _STL_COMPILER_PREPROCESSOR / #include <xstring>`），
+        于是整库事实都是 Conditional，查询一律答 ConditionalCompilation，哪怕条件是成立的
+   试过：把这一步换成问 visibility_at（Active 留边 / Inactive 丢边 / Unknown 才 Conditional）——
+        写成、量了、**撤回**：std::basic_string 从"有候选"变成"一个都没有"（走查对承载整个类的那条边说了
+        Inactive）。所以修法是"让求值器把答案弄对"，不是"在这里调求值器"
+   下一步：量 visibility_at(<string>, 那条 include 的 guard, 偏移) 为什么给 Inactive
+        （macros_at 的 state 里 _STL_COMPILER_PREPROCESSOR 是什么），再决定修 state 还是把这层换成"按翻译顺序喂闭包"
+   读数：不钉 CXX 仍 2/9；四份普查与全部门禁与第 6 轮逐字节相同
+   ```
+
+   **第 8 轮：把 B125 的"为什么"量出来了——求值器把一个成立的条件判成"没编译"**
+
+   ```text
+   给 <string> 的每条 include 直接问一次 visibility_at：
+     [vis] yvals_core.h  guard Region(0) -> Active     ← 文件自己的 include guard ✔
+     [vis] xstring       guard Region(1) -> Inactive   ← `#if _STL_COMPILER_PREPROCESSOR`，**它成立**
+     [vis] cctype        guard Region(1) -> Inactive   ← 同一条区域
+   ⇒ 求值器把"被包含文件定义的名字"读成**未定义**：seed 是完整的（"除我列出的都没定义"），
+     而 macros_at 造的 state 没把闭包里的 #define 收进去 ⇒ `#if X` 取 0 ⇒ Inactive
+   ⇒ 这是**答错**不是答不出：上一轮那次撤回（std::basic_string 丢光候选）就是这么来的
+   第 9 轮：再量到 state 在 <string> 第 9 行 include 之后把 _STL_COMPILER_PREPROCESSOR 报成**确定未定义**
+         （uncertain=false）；排除了递归（粘贴语义对）与 apply_fact（确实应用）两个嫌疑，
+         下一步是把 yvals_core.h 那条 #define 的 reach 打出来；顺带修掉 include_visibility 不看 own_guard
+         的那条（自己的 include guard 不是条件——原来会让整个文件的 include 被跳过）。
+         在它落地前不要把 visibility_at 接进 visible_files（先答错再丢边，比"一律 Conditional"更糟）
+   读数：不钉 CXX 仍 2/9；四份普查与门禁与第 7 轮逐字节相同
+   ```
+
+   **还差的（按值排）**：
+
+   ```text
+   ① B125 的求值器（上面那条）：std::string 的 5 条全卡在这里
+   ② <xstring>:1868 `_EXPORT_STD _NODISCARD constexpr string_view operator"" sv(…)` 的 ``expected `;` ``
+   ③ std::vector::size / std::map::find：类与成员表都在，卡在查询那一步的限定名匹配
+   ④ std::vector 的"两次声明"是诚实的（主模板 + 偏特化），要选主模板得让事实记住写出来的名字
+   ```
+
+   **另外两件与本轮无关但撞上的**：环境必须完整才有宏体（`_STL_COMPILER_PREPROCESSOR` 那条链）；
+   `Session` 仍是 `configured = false`，所以编辑器那条路读不到宏体。
+
+   **第 2 轮记下的那一半（作用域），现在已经并进上面的数**：
+
+   ```text
+   ✔ 作用域真的开出来了：build_scopes 在 _STD_BEGIN 的调用点上按体开出 std，在 _STD_END 上关掉。
+     读法与它的体一起记进摘要（`MacroScopeReading`，`CODEC_VERSION` 14），
+     并且**不为名字建 binding**——否则"重命名 std"会去改 `_STD_BEGIN`。
+   ✔ 环境必须是"完整的"才有力气：`_STD_BEGIN` 的定义在 `yvals_core.h` 里被
+     `#if _STL_COMPILER_PREPROCESSOR` 包着，而那个名字又被 `#if defined(RC_INVOKED) || defined(Q_MOC_RUN)
+     || defined(__midl)` 决定。环境不完整 ⇒ 这些名字答 Unknown ⇒ 分支不算生效 ⇒ **整个 STL 一条宏体都没有**。
+     实测：`std_probe --seeds --closure` 有工具链时 `in-force body Some("namespace std {")`，
+     加 `--no-toolchain` 就是 `None`。`std_query` 现在按工具链建**完整** seed
+     （`index::environment::compilation_environment` 统一了 session 与两个探针的三份拷贝）；
+     **session 仍是 `configured = false`**（那条取舍有它自己的实测，见 §3.5c），
+     所以编辑器那条路暂时读不到宏体——这是下一件要量的事，不是顺手能翻的开关。
+   ```
+
+   树**保持扁平**（不新造 `NamespaceDecl`）是刻意的：名字不在文件的 token 里，而树的形状一旦依赖环境，
+   编辑器那棵树（`FileView::parse`，没有环境）与索引那棵树就会不一致。名字从证据来，落进事实
+   （`DeclFact.scope = "std"`），证据记进摘要——键的问题已定，见
+   [`index-design.md`](index-design.md) §"宏体推导出的事实：记证据，不进键"。
 ② `xmmintrin.h` 那一个未解析的 include（`xmm_func.h`）**不是缺陷**：它在 `#ifdef __ICL && #ifdef _MM_FUNCTIONALITY`
    里面，而 `configured = false`（§3.5c：环境声明为完整会把 440/486 变成 85，所以刻意不声明）让条件答 Unknown，
    Unknown 就按"可能编译"跟进。代价是那一个文件不进缓存（设计如此）。
@@ -1390,6 +1524,27 @@ parser 的边际收益是"每轮 1–3 个文件"，连续磨十几轮会失去�
 ④ 非 UTF-8 文件（`DiskFiles` 只按 UTF-8 读）
 ⑤ 多根工作区（现在只分析第一个根）
 ```
+
+**量 MSVC 那条线用的两件工具**（libstdc++ 那份清单是 `g++ -M` 打的，MSVC 没有等价开关——`cl /showIncludes`
+输出的是本地化文本，按文本判读正是这个项目拒绝做的猜测）：
+
+```text
+cargo run --release -p cpp_code_analysis --example std_closure -- <entry.cpp> --list msvc_files.txt
+    工具链发现 + 走一遍闭包 + 打印没打开的文件与没解析的 include，最后把清单写出来
+cargo run --release -p cpp_code_analysis --example std_probe -- msvc_files.txt --seeds --closure \
+      --macro _STD_BEGIN,_STD_END
+    每份文件读成什么样、证据到了哪条通道，逐文件（`--macro` 那几行就是"证据有没有到"的判据）
+cargo run -p cpp_parser --bin cpp_dump -- <file> --tree --body NAME=TEXT [--macro NAME=TEXT]
+    两条证据通道分开喂，看同一个文件在"有人告诉它这个宏是什么"之后读成什么形状
+```
+
+**探针自己的一个缺陷，这一轮撞上并修了**：带 `--seeds` 的普查**跑两次数字不一样**——同一个二进制、同一份
+455 文件清单，三次跑出 `1460025 / 1589438 / 1606474` 个 seeds、`427 / 432 / 433` 个"有上下文"的文件。
+原因是探针把清单里各文件的目录收进一个 `HashSet` 再当成 `-I` 顺序，而**搜索顺序决定 `#include` 解析到哪个文件**，
+于是每个下游数字都随进程的哈希种子漂，幅度 ~10%。**这正好是最坏的一类**：它和一个"读法变了"的信号长得一模一样
+（这一轮就是差点被它骗过去）。改成 `BTreeSet` 之后两次跑逐字节相同（`1590444 / 433`，连 `10143073` 条条件事实都一样）。
+错误计数**一直**是稳的（455 全干净），所以它只在有人拿数字跨构建对比时才现形——教训记在这里：**探针的数字必须自己先可信**，
+而"两次跑一样"是它可信的最低判据。
 
 ---
 
@@ -1462,6 +1617,7 @@ parser 的边际收益是"每轮 1–3 个文件"，连续磨十几轮会失去�
    所以它不再是"最后做"，而是与上面四项**交替**的一条线——队列在 §4.1。
 6. **B119（该报错却没报）**：接客户端时暴露的第一条 parser 侧问题，`grammar-gaps.md` 里有成因与做法；
    它改的是**诊断口径**（`CppParseError` 是普查的口径），所以要单独一轮、两份读数一起记。
+
 
 
 

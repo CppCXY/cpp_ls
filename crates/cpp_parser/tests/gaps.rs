@@ -21,8 +21,8 @@
 //! second list to the first. That is the whole mechanism, and it is deliberately the cheapest one available.
 
 use cpp_parser::{
-    CppLexer, CppParser, CppSyntaxKind, CppSyntaxTree, CppTokenKind, Dialect, LexerConfig,
-    ParserConfig,
+    CppLexer, CppParser, CppSyntaxKind, CppSyntaxTree, CppTokenKind, Dialect, IncludedMacro,
+    LexerConfig, MacroBody, MacroEnvironment, ParserConfig,
 };
 
 /// The three places a construct can be written, because the same tokens are read differently in each.
@@ -2936,6 +2936,278 @@ fn a_macro_from_a_header_can_stand_where_a_declaration_goes() {
         !contains("void f() { FOO(x) }\n", CppSyntaxKind::MacroCall),
         "and a call inside a body is a call, however it is spelled"
     );
+}
+
+/// **A macro whose body is a brace is read as that construct, whatever follows it** (B120) — and the body may
+/// live in an *included* header, which is the whole of MSVC's spelling of `namespace std`.
+///
+/// The defect this pins was silent, and silence is why it needs a *shape* assertion rather than a diagnostic
+/// count: ``_STD_BEGIN struct vector { int size; };`` parses **cleanly** whichever way it is read, so a census of
+/// errors cannot tell the two readings apart (`docs/grammar-gaps.md`, the A0 class). What tells them apart is
+/// where the `StructDef` ended up — inside the invocation's specifier sequence, or beside it as the declaration
+/// it is — and that is what the four cases below assert, one per channel the evidence can come through:
+///
+/// ```text
+/// 1. this file's own `#define`                    ← `bits/c++config.h`, `_GLIBCXX_BEGIN_NAMESPACE_VERSION`
+/// 2. a body in force, from an included header     ← MSVC's `_STD_BEGIN`, measured in the closure of <vector>
+/// 3. a definition *and* a body, from the caller   ← the flat table `macro_evidence` answers from
+/// 4. a follower that cannot begin a declaration   ← where no shape rule can rescue the reading
+/// ```
+///
+/// Case 4 is the one that separates the rule from the coincidence: in 1–3 the token after the invocation
+/// begins a declaration (`struct`, `template`), so the *shape* rules read it as a whole statement by accident.
+/// `_STD_BEGIN vector<int> x = {};` has no such accident — an identifier follows — and only a rule that asks the
+/// body can read it. All **38** `_STD_BEGIN` sites in the closure of `<vector>`, `<string>` and `<map>` happen
+/// to be followed by a declaration-starting token, so the corpus cannot tell the two apart either; this test is
+/// the only place the difference is measured.
+///
+/// The last assertion is the negative half, and the one that keeps the rule from being a spelling: with **no**
+/// evidence about the name, nothing is claimed — `_STD_BEGIN` stays the ordinary name it is, and the declaration
+/// reading is the one a file with no table gets.
+#[test]
+fn a_macro_whose_body_is_a_brace_is_read_as_that_construct() {
+    // The body as the two channels carry it: `namespace std {` and the closer `}`.
+    let in_force = || {
+        MacroEnvironment::from_included_macros([]).with_bodies_in_force([
+            (Box::from("_STD_BEGIN"), Box::from("namespace std {")),
+            (Box::from("_STD_END"), Box::from("}")),
+        ])
+    };
+    let described = || {
+        MacroEnvironment::from_included_macros([
+            IncludedMacro::defined_with_body(
+                0,
+                "_STD_BEGIN",
+                false,
+                MacroBody::Unknown,
+                Some("namespace std {"),
+            ),
+            IncludedMacro::defined_with_body(0, "_STD_END", false, MacroBody::Unknown, Some("}")),
+        ])
+    };
+
+    let body_of_the_file = "#define _STD_BEGIN namespace std {\n#define _STD_END }\n";
+    let class_behind_it = "_STD_BEGIN\nstruct vector { int size; };\n_STD_END\n";
+    // Case 4's follower: `vector<int> x = {};` — an identifier, so nothing follows that begins a declaration.
+    let identifier_behind_it = "_STD_BEGIN\nvector<int> x = {};\n_STD_END\n";
+
+    // (1) The file's own `#define`. No environment at all: the body is in the text being parsed.
+    let own = shape_body_of_the_file_reads(&format!("{body_of_the_file}{class_behind_it}"), None);
+    assert_eq!(
+        own,
+        vec![
+            "PreprocessorDirective:#",
+            "PreprocessorDirective:#",
+            "MacroCall:_STD_BEGIN",
+            "Declaration:struct",
+            "MacroCall:_STD_END",
+        ],
+        "an invocation whose body opens a namespace is the whole statement, and the class is a declaration \
+         beside it rather than the payload of the invocation"
+    );
+
+    // (2) The body in force, from a header — the shape MSVC's `<vector>` has.
+    let from_a_header = shape_body_of_the_file_reads(class_behind_it, Some(&in_force()));
+    assert_eq!(
+        from_a_header,
+        vec!["MacroCall:_STD_BEGIN", "Declaration:struct", "MacroCall:_STD_END"],
+        "and it does not matter that the `#define` is in another file"
+    );
+
+    // (3) A definition *and* a body: the name is a macro by the caller's table, which is the evidence the older
+    // rules used to read as "this is a declaration's head" — and `name(args) template<…>` is a macro statement,
+    // so the declaration behind it must survive.
+    let described_and_shaped = shape_body_of_the_file_reads(class_behind_it, Some(&described()));
+    assert_eq!(
+        described_and_shaped,
+        vec!["MacroCall:_STD_BEGIN", "Declaration:struct", "MacroCall:_STD_END"],
+        "a name the tables know as a macro is still read from its body"
+    );
+
+    // (4) A follower no shape rule can place: `vector<int> x = {};` is a declaration whose first token is an
+    // identifier, which is also how a *specifier* continues — so the invocation is claimed by the body alone.
+    let no_shape_to_lean_on = shape_body_of_the_file_reads(identifier_behind_it, Some(&in_force()));
+    assert_eq!(
+        no_shape_to_lean_on,
+        vec!["MacroCall:_STD_BEGIN", "Declaration:vector", "MacroCall:_STD_END"],
+        "with no declaration-starting token after it, the body is the only thing that can read this"
+    );
+
+    // …and the negative half, in the two parts that matter.
+    //
+    // **No evidence, no claim** — asked of the follower no shape rule can place, because that is the only place
+    // where the answer is about *this* rule. With `struct` behind the invocation the *shape* rules claim it
+    // anyway (`at_a_macro_that_stands_for_a_declaration`: an unknown name followed by a token that begins a
+    // declaration is a macro statement, B87) — which is exactly why the corpus cannot measure this rule: every
+    // one of the 38 `_STD_BEGIN` sites has such a follower, so both readings agree there.
+    let without_evidence_or_a_shape = shape_body_of_the_file_reads(identifier_behind_it, None);
+    assert_eq!(
+        without_evidence_or_a_shape.first().map(String::as_str),
+        Some("Declaration:_STD_BEGIN"),
+        "a name nothing has described is not a licence to open a namespace: {without_evidence_or_a_shape:?}"
+    );
+    assert!(
+        !without_evidence_or_a_shape.contains(&"MacroCall:_STD_BEGIN".to_string()),
+        "and the invocation is not claimed by this rule: {without_evidence_or_a_shape:?}"
+    );
+
+    // …and B87's *shape* half is untouched, which is what keeps the two rules from being one: the follower that
+    // makes the shape rule fire still does, environment or not.
+    assert_eq!(
+        shape_body_of_the_file_reads(class_behind_it, None),
+        vec!["MacroCall:_STD_BEGIN", "Declaration:struct", "MacroCall:_STD_END"],
+        "a declaration-starting follower is enough on its own, and that reading must not change"
+    );
+
+    // The bodies the rule refuses keep their readings — asked, like the negative above, of the follower no shape
+    // rule can place: an empty body (`#define POINTER_32`) and a namespace *name* (`#define _GLIBCXX_MATH_NS __8`).
+    // Neither ends at a `{`, so neither opens anything.
+    for body in ["", "__8", "namespace std"] {
+        let environment = MacroEnvironment::from_included_macros([])
+            .with_bodies_in_force([(Box::from("_STD_BEGIN"), Box::from(body))]);
+        let shape = shape_body_of_the_file_reads(identifier_behind_it, Some(&environment));
+        assert_eq!(
+            shape.first().map(String::as_str),
+            Some("Declaration:_STD_BEGIN"),
+            "a body of {body:?} does not open a namespace: {shape:?}"
+        );
+    }
+
+    // **`extern "C" {` is an opener, and that answer changed** (B122): this test used to pin it as *refused*,
+    // because the rule's vocabulary was "a namespace head" and nothing else. The statement-level openers —
+    // `try {`, `do {`, `extern "C" {` — are the same evidence about a different construct: the file writes an
+    // invocation where a `{` belongs, and the invocation is a whole statement with the brace inside its body. So
+    // the reading is the honest one for this shape, and the list of shapes has a third entry rather than a
+    // special case.
+    let linkage = MacroEnvironment::from_included_macros([])
+        .with_bodies_in_force([(Box::from("_STD_BEGIN"), Box::from("extern \"C\" {"))]);
+    assert_eq!(
+        shape_body_of_the_file_reads(identifier_behind_it, Some(&linkage)),
+        vec!["MacroCall:_STD_BEGIN", "Declaration:vector", "MacroCall:_STD_END"],
+        "a linkage block's head is a whole statement, so the declaration after it is read as one"
+    );
+}
+
+/// The top level of a parse, as `Kind:first-token` — the shape a reading is judged by.
+///
+/// Losslessness and a clean parse are asserted here rather than at each call site, so that a shape assertion
+/// cannot be satisfied by a tree that lost text or reported something on the way.
+fn shape_body_of_the_file_reads(source: &str, environment: Option<&MacroEnvironment>) -> Vec<String> {
+    let config = match environment {
+        Some(environment) => ParserConfig::default().with_macros_from_includes(environment),
+        None => ParserConfig::default(),
+    };
+
+    let tree = CppParser::parse(source, config);
+    assert_eq!(tree.to_source_text(), source, "losslessness");
+    assert_eq!(tree.get_errors(), [], "and no diagnostics: {source:?}");
+
+    tree.get_red_root()
+        .children()
+        .map(|node| {
+            format!(
+                "{:?}:{}",
+                CppSyntaxKind::from(node.kind()),
+                node.first_token()
+                    .map(|token| token.text().trim().to_string())
+                    .unwrap_or_default()
+            )
+        })
+        .collect()
+}
+
+/// **A macro whose body ends at a `::` supplies a qualified name's qualifier** (B121) — `_STD`, which MSVC's
+/// `yvals_core.h` defines as `::std::`.
+///
+/// The shape is two names in a row (`_STD addressof(*p)`), which is not an expression in any reading, so the rule
+/// has to come from the replacement list: a body that **ends** at a `::` is a nested-name-specifier, and the name
+/// after the invocation continues the same qualified name. Both grammars need it — the expression one for
+/// `_STD addressof(x)`, the type one for `_STD reverse_iterator<iterator>` — and both are asserted here, because
+/// a rule that works in one position says nothing about the other (the same reason the nine seams of a
+/// declaration are pinned one at a time).
+///
+/// The negative is the part that keeps this from being a spelling: with **no** evidence the name is an ordinary
+/// name, two names in a row stay the syntax error they look like, and no scope is opened anywhere.
+#[test]
+fn a_macro_whose_body_ends_at_a_scope_qualifies_the_name() {
+    let expression = "void f(int *p) {\n    g(p ? _STD addressof(*p) : nullptr);\n}\n";
+    let declared = "struct S {\n    using iterator = int;\n    using reverse = _STD reverse_iterator<iterator>;\n};\n";
+
+    // (1) With the body: the ternary's middle operand is one qualified call, and the invocation is a `MacroCall`
+    // — nothing dressed up as a name the file did not write.
+    let tree = CppParser::parse(
+        expression,
+        ParserConfig::default().with_macros_from_includes(&qualifier_body()),
+    );
+    assert_eq!(tree.get_errors(), [], "one qualified name: no diagnostics");
+    assert_eq!(tree.to_source_text(), expression, "losslessness");
+    assert!(
+        tree.get_red_root().descendants().any(|node| {
+            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CallExpr
+                && node.children().any(|child| {
+                    CppSyntaxKind::from(child.kind()) == CppSyntaxKind::IdentifierExpr
+                        && child.children().any(|held| {
+                            CppSyntaxKind::from(held.kind()) == CppSyntaxKind::MacroCall
+                        })
+                })
+        }),
+        "the invocation is part of the callee's qualified name: {:?}",
+        tree.get_errors()
+    );
+
+    // (2) The type position, where the same two names have to become one type name rather than a type plus a
+    // recovery declaration — which is what made MSVC's `<vector>` file an empty-named fact in `std::vector`.
+    let tree = CppParser::parse(
+        declared,
+        ParserConfig::default().with_macros_from_includes(&qualifier_body()),
+    );
+    assert_eq!(tree.get_errors(), [], "one qualified type name");
+    assert!(
+        !tree
+            .get_red_root()
+            .descendants()
+            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ErrorNode),
+        "and no recovery node: {:?}",
+        tree.get_errors()
+    );
+
+    // (3) The negative: **no evidence, no claim**. The *shape* is what says so, and an error count would not:
+    // inside an argument list the same tokens come out as a recovered `ArgumentList` with no diagnostic at all —
+    // which is exactly why maintenance convention 13 says a successful parse is not evidence.
+    let without = CppParser::parse(expression, ParserConfig::default());
+    assert!(
+        !has_a_qualified_call(&without),
+        "with nobody saying what `_STD` stands for, two names in a row are not one qualified name: {:?}",
+        without.get_errors()
+    );
+    assert!(
+        !without
+            .get_red_root()
+            .descendants()
+            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::MacroCall),
+        "…and nothing claims the name is a macro"
+    );
+}
+
+/// Is there a call whose callee is a qualified name built from a macro invocation? — the shape the case above
+/// asserts, written once so the positive and the negative cannot drift apart.
+fn has_a_qualified_call(tree: &CppSyntaxTree) -> bool {
+    tree.get_red_root().descendants().any(|node| {
+        CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CallExpr
+            && node.children().any(|child| {
+                CppSyntaxKind::from(child.kind()) == CppSyntaxKind::IdentifierExpr
+                    && child
+                        .children()
+                        .any(|held| CppSyntaxKind::from(held.kind()) == CppSyntaxKind::MacroCall)
+            })
+    })
+}
+
+/// An environment whose only content is `_STD`'s body, on the **in-force** channel — the one MSVC's conditional
+/// definition arrives through.
+fn qualifier_body() -> cpp_parser::MacroEnvironment {
+    cpp_parser::MacroEnvironment::from_included_macros([])
+        .with_bodies_in_force([(Box::from("_STD"), Box::from("::std::"))])
 }
 
 /// The compiler's own attribute spellings are attributes, in every position the standard spelling works in.

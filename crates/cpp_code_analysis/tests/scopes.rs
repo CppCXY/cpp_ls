@@ -26,7 +26,7 @@ fn scopes(source: &str) -> ScopeTree {
         tree.get_errors()
     );
 
-    build_scopes(&tree.get_red_root())
+    build_scopes(&tree.get_red_root(), &cpp_code_analysis::NoMacroBodies)
 }
 
 /// The scope tree as one line: `KIND{name, name}(children)`.
@@ -1117,6 +1117,181 @@ fn a_use_is_not_a_binding() {
 }
 
 // ============================================================================
+// A scope a macro body opened
+// ============================================================================
+
+/// **A scope the file's braces do not write is opened from the macro's replacement list** — the reading MSVC's
+/// STL needs and the one the tree cannot carry.
+///
+/// `<vector>` has no `namespace std` in it at all: the header writes `_STD_BEGIN` on a line of its own and the
+/// brace that scopes 165 declarations is in `yvals_core.h`. The macro's *name* is in the file, its *meaning* is in
+/// another one, and this is the seam: [`cpp_code_analysis::MacroBodies`].
+///
+/// Three assertions, and they are the three a consumer needs:
+///
+/// * the declarations are **scoped** — `vector`'s fact says `std`, which is what makes `std::vector` a name;
+/// * the reading is **recorded with its evidence**, so a consumer that can ask the include graph again can check
+///   the answer instead of trusting it (`MacroScopeReading`);
+/// * the name is **not bound** — no binding points at the invocation, so "rename `std`" cannot rewrite the macro.
+#[test]
+fn a_scope_a_macro_body_opens_holds_the_declarations_behind_it() {
+    use cpp_code_analysis::{CompilerConfig, Known, MemoryFiles, SummaryStore};
+
+    let files = MemoryFiles::new()
+        .with_file(
+            "/p/ns.h",
+            "#pragma once\n#define _STD_BEGIN namespace std {\n#define _STD_END }\n",
+        )
+        .with_file(
+            "/p/main.cpp",
+            "#include \"ns.h\"\n_STD_BEGIN\nstruct vector { int size; };\n_STD_END\n",
+        );
+
+    let root = std::env::temp_dir().join("cppls-macro-scope-tests");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("the test directory");
+
+    let mut store = SummaryStore::with_provider(&root, CompilerConfig::default(), files);
+    let indexed = store.index_includes_from(std::path::Path::new("/p/main.cpp"), Default::default());
+
+    assert_eq!(
+        indexed.re_read, 2,
+        "both files mention a name the closure gives a body to — `main.cpp` invokes it and `ns.h` writes the \
+         `#define` — which is exactly what the filter's soundness costs: one re-parse of the file that defined \
+         it, whose summary comes out identical. What matters is that the file which does *not* mention it is not \
+         re-read, and that nothing that could change is skipped: {:?}",
+        indexed.indexed
+    );
+
+    let summary = store
+        .index()
+        .summary(std::path::Path::new("/p/main.cpp"))
+        .expect("main.cpp is indexed");
+
+    // (1) The declaration is scoped by a name the file never spells.
+    let vector = summary
+        .declarations
+        .iter()
+        .find(|fact| fact.name == "vector")
+        .expect("the class was read");
+    assert_eq!(
+        vector.scope.as_deref(),
+        Some("std"),
+        "the body's `namespace std {{` is what puts it there: {:?}",
+        summary
+            .declarations
+            .iter()
+            .map(|fact| fact.qualified_name())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(vector.qualified_name(), "std::vector");
+
+    // (2) The evidence is kept, both halves of it: the invocation that opened the scope and the one that closed
+    // it, each with the replacement list it was read from.
+    let readings: Vec<(&str, Option<Vec<String>>)> = summary
+        .macro_readings
+        .iter()
+        .map(|reading| (reading.name.as_str(), reading.opens.clone()))
+        .collect();
+    assert_eq!(
+        readings,
+        vec![
+            ("_STD_BEGIN", Some(vec!["std".to_string()])),
+            ("_STD_END", None),
+        ],
+        "both invocations are recorded, and the closer is told apart by having no scope"
+    );
+    // The body is kept **verbatim** — the slice `MacroFact::body_range` covers, whitespace and all — because it is
+    // evidence to be compared with what the header says now, not a value to be normalised. The shape is read from
+    // it by the lexer, which drops trivia; the record keeps it.
+    assert_eq!(summary.macro_readings[0].body.trim(), "namespace std {");
+    assert_eq!(summary.macro_readings[1].body.trim(), "}");
+
+    // (3) A scope without a binding: the name is not declared *here*, so nothing may claim the invocation is
+    // where `std` was written. The scope exists (that is what makes `std::vector` a qualified name) and there is
+    // no fact for `std` — which is what keeps a rename from rewriting `_STD_BEGIN`.
+    assert!(
+        summary
+            .declarations
+            .iter()
+            .all(|fact| fact.name != "std"),
+        "no fact is invented for a name the file does not write: {:?}",
+        summary
+            .declarations
+            .iter()
+            .map(|fact| fact.qualified_name())
+            .collect::<Vec<_>>()
+    );
+
+    // …and the query a consumer asks: the qualified name resolves to the class, in this file.
+    match store
+        .index()
+        .definition("std::vector", std::path::Path::new("/p/main.cpp"))
+    {
+        Known::Yes(found) => {
+            assert_eq!(found.fact.name, "vector");
+            assert_eq!(found.fact.qualified_name(), "std::vector");
+        }
+        other => panic!("`std::vector` must resolve through the scope a body opened: {other:?}"),
+    }
+
+    // **The shape MSVC actually writes**: an export macro in front of the declaration, so the class is not the
+    // statement's first token. It is the same scoping question one token further in, and the one `<vector>` has
+    // seventeen of (`_EXPORT_STD template <…> class vector { … }`).
+    //
+    // Two details are copied from `yvals_core.h` rather than invented, and both were measured:
+    //
+    // * `_EXPORT_STD` is defined as **nothing** in this configuration (`export` needs
+    //   `_HAS_CXX23 && _BUILD_STD_MODULE`, and with that in force the declaration really is a module export);
+    // * it is defined **inside a conditional**, which is what puts its body on the *in-force* channel instead of
+    //   the definition channel. That distinction is not decoration: a name the tables describe as a *macro*
+    //   changes which rule reads the line (`at_a_macro_that_stands_for_a_declaration` stands aside for a name it
+    //   can describe), and MSVC's own definition is conditional for exactly this kind of reason.
+    let files = MemoryFiles::new()
+        .with_file(
+            "/q/ns.h",
+            "#pragma once\n#define _STD_BEGIN namespace std {\n#define _STD_END }\n\
+             #if defined(_BUILD_STD_MODULE)\n#define _EXPORT_STD export\n#else\n#define _EXPORT_STD\n#endif\n",
+        )
+        .with_file(
+            "/q/main.cpp",
+            "#include \"ns.h\"\n_STD_BEGIN\n_EXPORT_STD template <class _Ty, class _Alloc = allocator<_Ty>>\nclass vector { // varying size array of values\npublic:\n    using value_type = _Ty;\n};\n_STD_END\n",
+        );
+
+    let mut store = SummaryStore::with_provider(&root, CompilerConfig::default(), files);
+    store.index_includes_from(std::path::Path::new("/q/main.cpp"), Default::default());
+
+    let summary = store
+        .index()
+        .summary(std::path::Path::new("/q/main.cpp"))
+        .expect("main.cpp is indexed");
+    let vector = summary
+        .declarations
+        .iter()
+        .find(|fact| fact.name == "vector")
+        .unwrap_or_else(|| {
+            panic!(
+                "the class was read: {:?}",
+                summary
+                    .declarations
+                    .iter()
+                    .map(|fact| (fact.qualified_name(), fact.kind))
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        vector.scope.as_deref(),
+        Some("std"),
+        "a macro in front of the declaration does not change whose scope it is in: {:?}",
+        summary
+            .declarations
+            .iter()
+            .map(|fact| fact.qualified_name())
+            .collect::<Vec<_>>()
+    );
+}
+
+// ============================================================================
 // Malformed input
 // ============================================================================
 
@@ -1130,7 +1305,7 @@ fn a_recovered_parse_still_declares_what_it_can() {
         "int before;\nstruct { ; \nint after;\n",
         ParserConfig::default(),
     );
-    let table = build_scopes(&tree.get_red_root());
+    let table = build_scopes(&tree.get_red_root(), &cpp_code_analysis::NoMacroBodies);
 
     // The parse is recovered, not clean — and the point is that the table is still built.
     assert_eq!(
@@ -1228,7 +1403,7 @@ fn building_scopes_never_panics() {
             "losslessness must hold even here: {source:?}"
         );
 
-        let table = build_scopes(&tree.get_red_root());
+        let table = build_scopes(&tree.get_red_root(), &cpp_code_analysis::NoMacroBodies);
 
         // Touch the queries, so the closure is part of what is tested rather than elided.
         if let Some(root) = table.root() {

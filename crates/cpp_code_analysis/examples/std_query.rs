@@ -104,15 +104,38 @@ fn main() {
         }
     };
 
-    let started = std::time::Instant::now();
-    let mut store = SummaryStore::open(&root, config);
+    let started = std::time::Instant::now();    // **The compilation's own macros, and the claim that goes with them.** `_STD_BEGIN`'s `#define` is written
+    // under `#if _STL_COMPILER_PREPROCESSOR` in `yvals_core.h`, and *that* name is decided three lines above it by
+    // `#if defined(RC_INVOKED) || defined(Q_MOC_RUN) || defined(__midl)`. An environment that does not know those
+    // names answers `Unknown`, the branch is not put in force, and **not one** replacement list in MSVC's STL
+    // reaches the parser — measured: `in-force body None` for `_STD_BEGIN` in `<vector>`, `<map>` and `<string>`,
+    // against `Some("namespace std {")` with the compiler's answer. So the seed is built the way `Session` builds
+    // its own; see `index::environment::compilation_environment`.
+    let configured = toolchain.is_some();
+    let seed = cpp_code_analysis::index::environment::compilation_environment(
+        &config,
+        toolchain.as_ref(),
+        configured,
+    );
+    println!(
+        "seed: {}",
+        if configured {
+            "the compiler's predefined names, and every other name is not defined"
+        } else {
+            "no compiler answered, so a name nobody defines is Unknown"
+        }
+    );
+
+    let mut store = SummaryStore::open(&root, config).with_macros(seed);
     let indexed = store.index_includes_from(&probe, IncludeBudget::default());
     let built = started.elapsed();
 
     println!(
-        "\nindexed {} files in {built:?} ({} parsed, {} from disk, {} not stored, {} unresolved includes)",
+        "\nindexed {} files in {built:?} ({} parsed — {} of them the second pass over a macro body — {} from \
+disk, {} not stored, {} unresolved includes)",
         indexed.indexed.len(),
         indexed.stats.rebuilt,
+        indexed.re_read,
         indexed.stats.reused,
         indexed.stats.unstored,
         indexed.unresolved.len()
@@ -126,7 +149,7 @@ fn main() {
         "the probe must parse cleanly, or the queries below are asking about a tree nobody meant: {errors:?}"
     );
     let root_node = tree.get_red_root();
-    let scopes = cpp_code_analysis::build_scopes(&root_node);
+    let scopes = cpp_code_analysis::build_scopes(&root_node, &cpp_code_analysis::NoMacroBodies);
 
     let mut resolved = 0usize;
 
@@ -145,6 +168,26 @@ fn main() {
             ),
             Known::Unknown(reason) => println!("  [have] {name} -> unknown: {}", reason.describe()),
             Known::No => println!("  [have] {name} -> no"),
+        }
+
+        // **Every** file that declares it, and the visibility of each — because `Unknown` has several causes that
+        // read the same from the answer alone: nothing declares the name, two things do, or one does and is
+        // reachable only through a conditional include. The list is the cheapest way to tell them apart, and
+        // "two files declare `std::vector`" is a fact about the closure worth seeing rather than guessing at.
+        let candidates = store.index().files_declaring(name, &probe);
+        if candidates.len() != 1 {
+            for found in &candidates {
+                println!(
+                    "         candidate: {} name={:?} qualified={:?} ({:?}, scope {:?}, offset {}, {:?})",
+                    short(&found.file),
+                    found.fact.name,
+                    found.fact.qualified_name(),
+                    found.fact.kind,
+                    found.fact.scope,
+                    found.fact.range.start_offset,
+                    found.visibility
+                );
+            }
         }
     }
 
@@ -198,7 +241,28 @@ fn main() {
     // order the file writes them, so the first line where the two lists disagree is the construct that stopped
     // the reading, whether or not anything about that construct is malformed.
     for summary in store.index().summaries() {
-        if !["basic_string", "cow_string", "stl_vector", "stl_map", "vector.tcc", "stl_tree"]
+        // Which headers to open up, by the **file the facts are in**, and the list has one entry per library
+        // spelling of the same three classes: `basic_string`/`stl_vector`/`stl_tree` are libstdc++'s files,
+        // `xstring`/`vector`/`map` are MSVC's. Both belong here, because the probe has to answer the same
+        // question on whichever toolchain is installed — a filter that only names one library's files prints
+        // nothing at all on the other, and "no output" reads exactly like "no defect".
+        const THE_FILES_THE_QUERIES_LIVE_IN: &[&str] = &[
+            "basic_string",
+            "cow_string",
+            "stl_vector",
+            "stl_map",
+            "vector.tcc",
+            "stl_tree",
+            "xstring",
+            "vector",
+            "map",
+            // `string` itself, which is a *different* file from `xstring` in MSVC's library and the one that
+            // holds the `using string = basic_string<…>` alias — the name every `std::string` query starts from.
+            "include/string",
+            "include/map",
+        ];
+
+        if !THE_FILES_THE_QUERIES_LIVE_IN
             .iter()
             .any(|name| summary.path.to_string_lossy().contains(name))
         {
@@ -239,6 +303,10 @@ fn main() {
                     || scope.contains("vector")
                     || scope.contains("map")
                     || scope == "<file scope>"
+                    // …and `std` itself, which is the scope a **macro body** opened when the toolchain writes its
+                    // namespaces that way: MSVC's headers spell `std` nowhere, so whether this row exists is the
+                    // difference between "the reading landed" and "the evidence never arrived".
+                    || scope == "std"
             }) {
                 let mut ordered: Vec<&&cpp_code_analysis::DeclFact> = facts.iter().collect();
                 ordered.sort_by_key(|fact| fact.range.start_offset);

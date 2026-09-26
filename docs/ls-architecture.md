@@ -213,12 +213,32 @@ file/mod.rs     FileAnalysis / FileTokens（单文件事实与 token 流）
 
 1. **文本与行索引同生同死**：`Vfs::insert` 同时写文本和它算出来的 `LineIndex`，没有第二条路径能改其中一半。
    一个落后一次编辑的行索引比没有行索引更糟——编辑之后的每个位置都会**静默**映射到错的偏移。
-2. **`FileView` 是 VFS 的引用**：`Arc<str>` + `Arc<LineIndex>` 共享，所以一个 view 活得过创建它的那次调用
-   （handler 可以先解析位置、再问好几个问题），而且 `offset_at`/`position_at` 是索引里的二分查找——
-   这正是之前错的地方：`FileView::offset_at` 每调用一次就 `LineIndex::parse` 一遍（**一次全文件扫描**），
-   而文件的"行"只在文本变化时才变，那是 VFS 知道的事。
-3. **别的文件也从 VFS 拿**：hover/definition 要读"声明所在的那个头文件"，它走 `session.files().file(path)` ——
-   一次读入、被持有，之后的 hover 直接命中；不再 `session.text()` + 现搭一个 `LineIndex`。
+2. **`FileId` 是永久稳定的密集下标**：表是 `Vec<Option<VfsFile>>`，`files[id.index()]` 是数组访问；id 用
+   `files.len()` 铸造、**永不复用也永不重排**。关闭文件 = `close` 往那个槽写 `None`（id 保留，其余 id 不受影响），
+   所以"关闭"是可回答的状态：`None` 是"不再持有"，与"空文件"是两回事。洞的代价是每个读过的文件一个 `Option`。
+3. **VFS 里没有锁**：会话那一把锁才是同步点。改表的方法取 `&mut self`（`load`/`insert`/`close`），只看的方法取
+   `&self`（`held`/`get`）。给 VFS 加 `RwLock` 会让**单线程调用方**（批处理、测试、直接持有 `Session` 的程序）
+   为一个它没有的问题付费，而且会暗示"两个线程可以一边改文件表一边被查询读"——那恰恰是必须禁止的
+   （文本和行索引要一起换代）。`FileView` 仍是 VFS 条目的引用（`Arc<str>` + `Arc<LineIndex>` 共享），
+   所以 `offset_at`/`position_at` 是索引里的二分查找——这正是之前错的地方：原来每调用一次就
+   `LineIndex::parse` 一遍（**一次全文件扫描**），而"行"只在文本变化时才变。
+
+### 谁把文件放进表里：**写者预加载**，查询只读
+
+因为改表要 `&mut Session`，**查询**（跑在 `AnalysisState` 读锁下、与其他查询并行）只能看已经持有的文件。
+填表是写者的事，现在有三个写者，覆盖了全部情形：
+
+```text
+didOpen / didChange      客户端的缓冲区（本来就是写锁路径）
+advance（索引泵）         分析读过的每个文件——"分析读过的文件都被持有"是不变量
+AnalysisState::prepare   请求到达前把"这个请求要问的文件"读进来：写锁只持有读一个文件那么久，
+                         snapshot_query 仍然是读锁下的并行查询
+```
+
+`prepare` 是这条设计的补丁而不是绕路：definition/hover/pull 诊断三个 handler 在查询前各调一次
+（客户端打开的文件其实已经被 `didOpen` 持有，这一步给"从没打开过的文件"兜底）。
+**替代方案**是让查询自己加载——那需要 `&mut Session`，等于把所有请求串行化在一把写锁后面，
+`prepare` 存在的唯一理由就是避开那个代价（用户 2026-09-26 拍板走这条）。
 
 顺带在这一层修掉一个真 bug：`LineIndex::get_offset` 原来把列号**对整个文本**做 clamp，于是
 `get_offset(0, 99)` 在一个三行文件上会返回**后面某一行里**的偏移——一个不在调用者所问文件位置上的位置

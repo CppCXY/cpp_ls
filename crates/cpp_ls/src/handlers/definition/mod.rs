@@ -43,6 +43,12 @@ pub async fn on_goto_definition_handler(
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
 
+    // The file is read in first, under the write lock, so that the query below can be a read: a file the client has
+    // open is already held by `didOpen`, and this covers the request that arrives about one that is not.
+    if let Some(path) = uri_to_file_path(&uri) {
+        context.analysis().prepare(&path).await;
+    }
+
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
         let view = session.view(&path)?;
@@ -69,11 +75,11 @@ fn name_range(
     // The declaring file, from the VFS: its text and **its line index**, which is the pair the entry was made with.
     // No parse — a name's line and column do not need a tree — and no second read of a header this session is
     // already holding.
-    let declaring = session.files().file(file)?;
+    let declaring = session.files().held(file)?;
 
     Some(Range::new(
-        position_in_file(&declaring, fact.name_range.start_offset)?,
-        position_in_file(&declaring, fact.name_range.end_offset())?,
+        position_in_file(declaring, fact.name_range.start_offset)?,
+        position_in_file(declaring, fact.name_range.end_offset())?,
     ))
 }
 
@@ -84,4 +90,6 @@ impl RegisterCapabilities for DefinitionCapabilities {
         server_capabilities.definition_provider = Some(OneOf::Left(true));
     }
 }
+
+
 

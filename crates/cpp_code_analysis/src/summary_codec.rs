@@ -31,7 +31,7 @@ use crate::cache::SummaryKey;
 use crate::preprocess::directive::IncludeForm;
 use crate::summary::{
     ConditionalRegion, DeclFact, DeclKind, FactGuard, FileSummary, GuardBranch, IncludeFact,
-    MacroFact, MacroKind, SummaryGuards,
+    MacroFact, MacroKind, MacroScopeReading, SummaryGuards,
 };
 
 /// The eight bytes a summary file starts with.
@@ -130,7 +130,17 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// nested inside it, which is where a real header puts everything — `#ifndef GUARD / #define GUARD` and then a file
 /// full of `#if __cplusplus` blocks. Without it those blocks are evaluated against a state in which the guard has
 /// already defined its own name, and a `#ifndef GUARD` read second is false. Only [`CODEC_VERSION`] moves.
-pub const CODEC_VERSION: u32 = 13;
+///
+/// # Version 13
+///
+/// A summary gained `macro_readings` — the bump to version 14: the places where a **scope** came out of a macro's
+/// replacement list rather than out of the file's own braces, each with the body it was read from. This is the one
+/// field in a summary whose evidence is in another file (`_STD_BEGIN`'s `namespace std {` is in `yvals_core.h`,
+/// and it scopes every declaration in MSVC's `<vector>`), so it is also the one field a consumer may need to
+/// *check* rather than trust — see [`crate::summary::MacroScopeReading`]. Only [`CODEC_VERSION`] moves: the key is
+/// still the text and the compilation context, so an entry written before this field existed is unreachable rather
+/// than wrong, and `cache.rs`'s rule about the macro environment stands.
+pub const CODEC_VERSION: u32 = 14;
 
 /// Write a summary as bytes.
 ///
@@ -222,6 +232,27 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
     }
 
     put_u32(&mut out, summary.guards.own_guard.unwrap_or(u32::MAX));
+
+    // The readings come last, and they are the only section whose absence a reader could not detect from the
+    // others: a file with no macro-opened scope writes one zero. That is the same shape a reader written before
+    // version 14 would produce for a summary that has them, which is why the version is what keeps the two apart
+    // rather than the count.
+    put_u32(&mut out, summary.macro_readings.len() as u32);
+    for reading in &summary.macro_readings {
+        put_range(&mut out, reading.range);
+        put_str(&mut out, &reading.name);
+        put_str(&mut out, &reading.body);
+        match &reading.opens {
+            Some(segments) => {
+                put_u8(&mut out, 1);
+                put_u32(&mut out, segments.len() as u32);
+                for segment in segments {
+                    put_str(&mut out, segment);
+                }
+            }
+            None => put_u8(&mut out, 0),
+        }
+    }
 
     out
 }
@@ -349,6 +380,31 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
         region => Some(region),
     };
 
+    let mut macro_readings = Vec::new();
+    for _ in 0..reader.count()? {
+        let range = reader.range()?;
+        let name = reader.string()?;
+        let body = reader.string()?;
+        let opens = match reader.u8()? {
+            0 => None,
+            1 => {
+                let mut segments = Vec::new();
+                for _ in 0..reader.count()? {
+                    segments.push(reader.string()?);
+                }
+                Some(segments)
+            }
+            _ => return Err(DecodeError::BadDiscriminant),
+        };
+
+        macro_readings.push(MacroScopeReading {
+            range,
+            name,
+            body,
+            opens,
+        });
+    }
+
     // Trailing bytes mean the file was written by something this decoder does not agree with — a newer producer,
     // or two records where one was expected. Ignoring them would be accepting a file whose *content* is not what
     // its own encoding says, which is the one thing a cache must not do.
@@ -363,6 +419,7 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
         macros,
         includes,
         guards,
+        macro_readings,
     })
 }
 
@@ -719,7 +776,7 @@ mod tests {
     use crate::preprocess::directive::IncludeForm;
     use crate::summary::{
         ConditionalRegion, DeclFact, DeclKind, FactGuard, FileSummary, GuardBranch, IncludeFact,
-        MacroFact, SummaryGuards,
+        MacroFact, MacroScopeReading, SummaryGuards,
     };
     use cpp_parser::{MacroBody, SourceRange};
 
@@ -849,6 +906,22 @@ mod tests {
                 // A file whose first conditional is its guard, so that the field is not the default here either.
                 own_guard: Some(0),
             },
+            // Both halves of a reading: one that opens a scope (so `opens` is not the default) and one that closes
+            // it, because the option is what tells a closer apart from a namespace with no name.
+            macro_readings: vec![
+                MacroScopeReading {
+                    range: range(400, 10),
+                    name: "_STD_BEGIN".to_string(),
+                    body: "namespace std {".to_string(),
+                    opens: Some(vec!["std".to_string()]),
+                },
+                MacroScopeReading {
+                    range: range(500, 8),
+                    name: "_STD_END".to_string(),
+                    body: "}".to_string(),
+                    opens: None,
+                },
+            ],
         }
     }
 

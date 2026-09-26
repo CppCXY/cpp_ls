@@ -26,6 +26,11 @@ pub async fn on_pull_document_diagnostic(
     let uri = params.text_document.uri;
     let cache_key = format!("diagnostic:{}", uri.as_str());
 
+    // Read in first, under the write lock, so the pass below can be a read (`AnalysisState::prepare` records why).
+    if let Some(path) = uri_to_file_path(&uri) {
+        context.analysis().prepare(&path).await;
+    }
+
     analysis_query(
         context.analysis(),
         context.request_manager(),

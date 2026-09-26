@@ -57,6 +57,28 @@ impl AnalysisState {
         }
     }
 
+    /// Read a file in and hold it, so that the read-only queries can see it.
+    ///
+    /// # Why a request needs this, and why it is not part of the query
+    ///
+    /// The VFS holds a file's text and its line index, and it has **no lock of its own**: changing what is held
+    /// takes `&mut Session`, so a *query* — which runs under this state's read lock, in parallel with other queries
+    /// — can only look at what is held. Filling the table is the writer's job, and two writers already do it: the
+    /// notification path (`didOpen`/`didChange` hold the client's buffers, `didClose` closes them) and the indexer
+    /// (every file it reads, it holds).
+    ///
+    /// This method is the remaining gap: a request can be about a file nothing has read yet — a client asking for
+    /// diagnostics of a file it never opened. So the handler asks for the file **before** the query; the write lock
+    /// is held for as long as one file takes to read, and the query itself stays a read, in parallel with every
+    /// other request. (A query that loaded what it needed would take `&mut Session` and serialize all of them, which
+    /// is the trade this exists to avoid.)
+    pub async fn prepare(&self, path: &std::path::Path) -> bool {
+        let path = path.to_path_buf();
+        self.update_session(move |session| session.load(&path).is_some())
+            .await
+            .unwrap_or(false)
+    }
+
     /// Tell the indexing pump that the queue has work in it.
     ///
     /// Called after a notification has changed what the analysis should read. The engine has no threads and no
@@ -260,6 +282,9 @@ mod tests {
 
         let buffer = "int from_the_handle;\n";
         state.files().overlay.open("/p/main.cpp", buffer);
+        // The buffer is in the provider chain, but a *session* holds a file only once something has read it — which
+        // is what the notification path does for a file the client has open (`AnalysisState::prepare`).
+        assert!(state.prepare(std::path::Path::new("/p/main.cpp")).await);
 
         let text = state
             .with_snapshot(|session| session.view("/p/main.cpp").map(|view| view.source.clone()))
@@ -277,6 +302,9 @@ mod tests {
         state.files().overlay.open("/p/main.cpp", "int first;\n");
 
         opened(&state, &root).await;
+        // The **session** was replaced, so its file table is a new one: the buffer survives in the provider chain
+        // (which outlives every session) and is read into the new table by the same step that reads any file.
+        assert!(state.prepare(std::path::Path::new("/p/main.cpp")).await);
 
         let text = state
             .with_snapshot(|session| session.view("/p/main.cpp").map(|view| view.source.clone()))
@@ -319,3 +347,4 @@ mod tests {
         assert_eq!(write.await.unwrap(), 2);
     }
 }
+

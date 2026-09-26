@@ -78,7 +78,6 @@ use crate::include::config::{
     CompileCommands, CompilerConfig, project_config_from_flags,
 };
 use crate::file::paths::{DiskFiles, FileProvider, OverlayFiles, normalize_path};
-use crate::include::graph::Marked;
 use crate::include::toolchain::{self, DiskCommands, Environment, Toolchain};
 use crate::file::view::FileView;
 use crate::index::project::{
@@ -467,7 +466,11 @@ impl<F: FileProvider + Clone> Session<F> {
         // must not do.
         let configured = false;
         let mut store = SummaryStore::with_provider(root.clone(), config.clone(), files.clone())
-            .with_macros(compilation_environment(&config, toolchain.as_ref(), configured));
+            .with_macros(crate::index::environment::compilation_environment(
+                &config,
+                toolchain.as_ref(),
+                configured,
+            ));
 
         if let Some(cache_dir) = &project_config.config.index.cache_dir {
             store = store.with_cache_directory(cache_dir);
@@ -630,7 +633,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // The text the analysis was holding was the *buffer's*, and the disk may never have seen it. Dropping the
         // entry is what makes the next question read the file again — a closed buffer is not a text this session
         // knows any more, and a view built on it would answer about an edit nobody saved.
-        self.vfs.forget(path);
+        self.vfs.close(path);
         self.store.forget(path);
         self.queue.again(path.to_path_buf(), Priority::Rest, 0);
     }
@@ -724,6 +727,10 @@ impl<F: FileProvider + Clone> Session<F> {
 
             // Only the resolved includes are wanted, and they are cloned out before the queue is touched: `get`
             // borrows the store, and the queue is a field of the same struct.
+            // The file is loaded into the VFS *before* it is read, so that everything the analysis reads it is
+            // also holding: a hover that shows a declaration from a header nobody opened asks the VFS for it, and
+            // a file that was indexed is a file whose text and line index are already here.
+            self.vfs.load(&path);
             let before = self.store.stats();
             let includes: Vec<PathBuf> = self
                 .store
@@ -802,7 +809,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// the view shares both rather than copying either. What is done here is the parse and the scopes, which are
     /// the two things a position needs and a summary cannot hold.
     pub fn view(&self, path: impl AsRef<Path>) -> Option<FileView> {
-        Some(FileView::parse(&self.vfs.file(path)?))
+        Some(FileView::parse(self.vfs.held(path)?))
     }
 
     /// The text the analysis reads for a path — the buffer when it is open, the file otherwise.
@@ -814,7 +821,15 @@ impl<F: FileProvider + Clone> Session<F> {
     /// Read through the VFS, so the file is held afterwards and a second question about it — its lines, its text —
     /// costs nothing.
     pub fn text(&self, path: impl AsRef<Path>) -> Option<String> {
-        Some(self.vfs.file(path)?.text.to_string())
+        Some(self.vfs.held(path)?.text.to_string())
+    }
+
+    /// Read a file in and hold it, answering with the id the VFS gave it.
+    ///
+    /// The **writer** path's way to hold a file: a notification, an indexing step, a caller that knows it is about
+    /// to ask several questions about one file. After this, [Session::view] and [Session::text] answer for it.
+    pub fn load(&mut self, path: impl AsRef<Path>) -> Option<crate::FileId> {
+        self.vfs.load(path)
     }
 
     /// The files the session is holding: their text and their line indexes.
@@ -1069,62 +1084,6 @@ fn apply_project_config(filter: WatchFilter, report: &ConfigReport) -> WatchFilt
     }
 
     filter
-}
-
-/// The macros a compilation starts with: what the compiler predefines, then what the command line says.
-///
-/// The order is the compiler's own: a `-D` of a name the compiler also predefines is the one the translation unit
-/// sees, so the built-ins go in first and the command line last. A `-U` — which is how a project removes a
-/// compiler's built-in — is applied after both.
-///
-/// # `configured`: whether this environment is the whole of what the compilation defines
-///
-/// The flag is the difference between `Unknown` and "not defined" for every condition naming something no file
-/// defines, and it is passed in rather than assumed because it is a statement about the caller's **inputs**:
-/// [`Session::open`] sets it when it read the project's own `compile_commands.json`, which is the project saying
-/// how its files are compiled — the `-D`s, the `-std=`, the include paths. Without one, the environment is what
-/// the compiler predefines and nothing else, and a project built with flags nobody wrote down would be read as if
-/// those names were undefined — which is why the unconfigured case stays
-/// [`Marked::incomplete`](crate::Marked::incomplete) and answers `Unknown`.
-///
-/// What the flag is *not* is a promise about the files: a walk that runs into an `#include` that did not resolve,
-/// or one nobody indexed, takes the claim back with [`Marked::mark_incomplete`] — see
-/// [`crate::index::environment`], which is where the two meet.
-fn compilation_environment(
-    config: &CompilerConfig,
-    toolchain: Option<&Toolchain>,
-    configured: bool,
-) -> Marked {
-    let mut marked = Marked::default();
-
-    if let Some(toolchain) = toolchain {
-        for (name, value) in toolchain.macros() {
-            marked.define_on_the_command_line(name, value);
-        }
-    }
-
-    // **What the configuration itself decides** — the standard it was compiled with, the target it was compiled
-    // for. A toolchain's `-dM` output answers for the *compiler's own default invocation*, which is a different
-    // question from the one the project asked: `-std=c++11` in the compile database means `__cplusplus` is
-    // `201103L` however the compiler would have been run by hand. Applied over the toolchain and under the
-    // project's own `-D`s, which are the last word.
-    for definition in crate::predefined_macros_of(config) {
-        marked.define_on_the_command_line(&definition.name, definition.value.as_deref());
-    }
-
-    for definition in &config.defines {
-        marked.define_on_the_command_line(&definition.name, definition.value.as_deref());
-    }
-
-    for name in &config.undefines {
-        marked.undefine(name);
-    }
-
-    if configured {
-        marked
-    } else {
-        marked.incomplete()
-    }
 }
 
 /// The sources a project owns: the compile database's files, or a scan of the root.
@@ -1687,6 +1646,10 @@ mod tests {
 
         session.add_project_files([PathBuf::from("/p/main.cpp")]);
 
+        // The file is loaded but **not indexed**: a view is of the text the session holds, while the *index* is what
+        // this test is about — reading it would take the queue step it goes on to assert.
+        session.load("/p/main.cpp");
+
         let view = session.view("/p/main.cpp").expect("the file reads");
         let at = view.source.find("Widget w").expect("the use is in the text");
 
@@ -1751,7 +1714,11 @@ mod tests {
             .with_file("/p/a.cpp", "// é comment\nint x = 1;\n")
             .with_file("/p/crlf.cpp", "int a;\r\nint b;\r\n");
         let fixture = Memory::new("position", &files);
-        let session = fixture.session();
+        let mut session = fixture.session();
+        // A view is of a file the session is **holding** (`file::vfs`): nothing has read these yet, so they are
+        // loaded explicitly — the way a notification or an indexing step loads one.
+        session.load("/p/a.cpp");
+        session.load("/p/crlf.cpp");
 
         let view = session.view("/p/a.cpp").expect("the file reads");
         let at = view.source.find("x = 1").expect("the statement is in the text");
@@ -2304,6 +2271,10 @@ mod tests {
         );
     }
 }
+
+
+
+
 
 
 

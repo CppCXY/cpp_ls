@@ -55,6 +55,11 @@ pub async fn on_hover(
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
 
+    // Read in first, under the write lock, so the query itself can be a read (`AnalysisState::prepare` records why).
+    if let Some(path) = uri_to_file_path(&uri) {
+        context.analysis().prepare(&path).await;
+    }
+
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
         let view = session.view(&path)?;
@@ -209,7 +214,7 @@ fn declaration_text(
 ) -> String {
     // From the VFS, which holds the file and its lines: a hover that names a declaration in a header nobody has
     // opened reads that header **once per session**, not once per hover.
-    match session.files().file(file) {
+    match session.files().held(file) {
         Some(declaring) => {
             slice_lines(&declaring.text, fact.range.start_offset, fact.range.end_offset())
         }
@@ -226,7 +231,7 @@ fn definition_line(
     name_offset: usize,
     body_range: Option<cpp_parser::SourceRange>,
 ) -> RenderedText {
-    let Some(defining) = session.files().file(file) else {
+    let Some(defining) = session.files().held(file) else {
         return RenderedText {
             text: format!("<the macro is defined in an unreadable file: {}>", file.display()),
         };
@@ -280,8 +285,7 @@ fn where_clause(session: &Session<DiskFiles>, file: &std::path::Path, offset: us
 
     match session
         .files()
-        .file(file)
-        .as_ref()
+        .held(file)
         .and_then(|declaring| declaring.position_at(offset))
     {
         Some((line, column)) => format!("`{name}:{}:{}`", line + 1, column + 1),
@@ -358,5 +362,6 @@ mod tests {
         assert_eq!(code_block(""), "");
     }
 }
+
 
 

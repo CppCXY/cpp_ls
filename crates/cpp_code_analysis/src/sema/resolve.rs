@@ -817,7 +817,7 @@ mod tests {
     fn definition_of(source: &str, needle: &str) -> Known<crate::Binding> {
         let parsed = tree(source);
         let root = parsed.get_red_root();
-        let scopes = build_scopes(&root);
+        let scopes = build_scopes(&root, &crate::NoMacroBodies);
 
         definition_at(&scopes, &root, at(source, needle))
     }

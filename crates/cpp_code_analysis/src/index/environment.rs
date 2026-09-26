@@ -32,6 +32,7 @@ use std::path::Path;
 
 use crate::condition::{Lookup, MacroValues};
 use crate::guard::Visibility;
+use crate::include::config::CompilerConfig;
 use crate::include::graph::Marked;
 use crate::summary::{FactGuard, FileSummary, MacroFact, MacroKind};
 use crate::ProjectIndex;
@@ -121,6 +122,73 @@ impl<'a> MacrosHere<'a> {
                     && fact.range.start_offset <= self.offset
             })
             .max_by_key(|fact| fact.range.start_offset)
+    }
+}
+
+/// The macros a compilation starts with: what the compiler predefines, then what the command line says.
+///
+/// The order is the compiler's own: a `-D` of a name the compiler also predefines is the one the translation unit
+/// sees, so the built-ins go in first and the command line last. A `-U` — which is how a project removes a
+/// compiler's built-in — is applied after both.
+///
+/// # `configured`: whether this environment is the whole of what the compilation defines
+///
+/// The flag is the difference between `Unknown` and "not defined" for every condition naming something no file
+/// defines, and it is passed in rather than assumed because it is a statement about the caller's **inputs**:
+/// [`crate::Session::open`] sets it when it read the project's own `compile_commands.json`, which is the project
+/// saying how its files are compiled — the `-D`s, the `-std=`, the include paths. Without one, the environment is
+/// what the compiler predefines and nothing else, and a project built with flags nobody wrote down would be read as
+/// if those names were undefined — which is why the unconfigured case stays [`Marked::incomplete`] and answers
+/// `Unknown`.
+///
+/// What the flag is *not* is a promise about the files: a walk that runs into an `#include` that did not resolve, or
+/// one nobody indexed, takes the claim back with [`Marked::mark_incomplete`] — see
+/// [`crate::index::environment`], which is where the two meet.
+///
+/// # Why it is one function and not three
+///
+/// A caller that discovers a toolchain has to make the same three decisions in the same order — the compiler's
+/// predefined names, what the configuration decides (`-std=`, the target), the project's own `-D`/`-U` — and the
+/// **completeness claim** that goes with them. Three copies would be three worlds: a probe that built its own would
+/// be measuring an environment the server never runs with, which is exactly how the difference between "the body of
+/// `_STD_BEGIN` is in force" and "nobody can say" went unnoticed. That difference is measured, and it is not small:
+/// `_STD_BEGIN`'s `#define` sits under `#if _STL_COMPILER_PREPROCESSOR` in `yvals_core.h`, so with an incomplete
+/// seed the whole of MSVC's STL reads as "no replacement lists at all" and not one namespace scope can be opened
+/// from a body (`docs/roadmap.md` §4.2 ①).
+pub fn compilation_environment(
+    config: &CompilerConfig,
+    toolchain: Option<&crate::include::toolchain::Toolchain>,
+    configured: bool,
+) -> Marked {
+    let mut marked = Marked::default();
+
+    if let Some(toolchain) = toolchain {
+        for (name, value) in toolchain.macros() {
+            marked.define_on_the_command_line(name, value);
+        }
+    }
+
+    // **What the configuration itself decides** — the standard it was compiled with, the target it was compiled
+    // for. A toolchain's `-dM` output answers for the *compiler's own default invocation*, which is a different
+    // question from the one the project asked: `-std=c++11` in the compile database means `__cplusplus` is
+    // `201103L` however the compiler would have been run by hand. Applied over the toolchain and under the
+    // project's own `-D`s, which are the last word.
+    for definition in crate::predefined_macros_of(config) {
+        marked.define_on_the_command_line(&definition.name, definition.value.as_deref());
+    }
+
+    for definition in &config.defines {
+        marked.define_on_the_command_line(&definition.name, definition.value.as_deref());
+    }
+
+    for name in &config.undefines {
+        marked.undefine(name);
+    }
+
+    if configured {
+        marked
+    } else {
+        marked.incomplete()
     }
 }
 

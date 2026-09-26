@@ -1703,8 +1703,7 @@ fn parse_postfix_suffixes(
 ///
 /// `fold_operand` is threaded down from [`parse_parenthesized_expression`] and is what licenses a bare `...` to
 /// be an operand; anywhere else it is refused so that the constructs which spell `...` themselves keep it.
-fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
-    match p.current_token() {
+fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {    match p.current_token() {
         // 字面量
         CppTokenKind::IntegerLiteral
         | CppTokenKind::FloatingLiteral
@@ -1921,6 +1920,28 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
                 }
 
                 match p.current_token() {
+                    CppTokenKind::Identifier if super::types::a_macro_qualifies_the_name(p) => {
+                        // **A name whose `::` the macro supplies** (B121) — `_STD addressof(*_Ptr)`, with
+                        // `#define _STD ::std::`. The invocation is kept as what it is (`MacroCall(NameExpr)`,
+                        // nothing dressed up), and the loop **continues** to the name it qualifies: the `::`
+                        // between them is in the replacement list, so there is no token here to consume and none
+                        // to expect. Reading it the other way — the invocation ending the name — left two names
+                        // in a row, which is not an expression: the ternary's `:` was never reached and the
+                        // statement's recovery swallowed the rest of the file (3 800 lines of MSVC's `<vector>`).
+                        //
+                        // The predicate is `types.rs`'s, shared with the same case in [`parse_name`]: one
+                        // question, two grammars, and the second copy is where the exception gets forgotten.
+                        let call = p.mark(CppSyntaxKind::MacroCall);
+                        let name = p.mark(CppSyntaxKind::NameExpr);
+                        p.bump();
+                        name.complete(p);
+                        call.complete(p);
+
+                        if !super::types::at_a_name_segment(p) {
+                            break;
+                        }
+                        continue;
+                    }
                     CppTokenKind::Identifier => p.bump(),
                     CppTokenKind::Tilde => {
                         p.bump();

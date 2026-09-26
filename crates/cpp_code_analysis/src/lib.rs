@@ -137,7 +137,7 @@ pub use project::{
     PROJECT_CONFIG_FILE, ProjectConfig, ProjectDiscovery, Severity, WorkspaceSection, find_cmake_cache,
     find_database, load_config, parse_cmake_cache, parse_config,
 };
-pub use scopes::{build_scopes, declared_module_names};
+pub use scopes::{MacroBodies, NoMacroBodies, build_scopes, declared_module_names};
 // The driver sits above the folders rather than in one of them: it is the join of all four — the toolchain, the
 // include configuration, the summaries and the queries — and putting it inside any one of them would make that
 // folder the owner of the others.

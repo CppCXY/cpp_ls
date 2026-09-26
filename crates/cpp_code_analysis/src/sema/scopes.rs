@@ -32,6 +32,8 @@
 
 use cpp_parser::{CppAstNode, CppSyntaxKind, CppSyntaxNode, CppTokenKind};
 
+use crate::summary::MacroScopeReading;
+
 use crate::symbol::{
     Binding, BindingKind, BindingOrigin, DeclName, Name, QualifiedName, ScopeId, ScopeKind,
     ScopeTree,
@@ -54,13 +56,53 @@ enum Body {
     OpensAScope,
 }
 
+/// Where [`build_scopes`] gets "what does this macro invocation stand for" from.
+///
+/// A file's tokens can say that `_STD_BEGIN` is a name on a line of its own; only the macro's **replacement list**
+/// says that it is `namespace std {`. The list is not in this file — for MSVC's STL it is in `yvals_core.h`, and
+/// for libstdc++'s namespace-version pair it is in `bits/c++config.h` — so it arrives from outside, and this is the
+/// seam it arrives through.
+///
+/// `None` means **nobody says**, never "the body is empty": a body of zero tokens is a body, and a caller that
+/// conflated the two would read every `#define POINTER_32` as an unknown name. That distinction is
+/// [`cpp_parser::MacroEnvironment::body_text_at_or_in_force`]'s, and the trait exists so that the walker does not
+/// have to know which of the two channels answered.
+pub trait MacroBodies {
+    /// What `name`'s replacement list says **at `at`**, when anything says.
+    fn body_at(&self, name: &str, at: usize) -> Option<&str>;
+}
+
+/// The answer for a caller with no macro evidence at all — a buffer parsed on its own, or a test that is about
+/// something else.
+///
+/// Not a "no macros exist" claim: every question gets "nobody says", which is the answer that leaves every reading
+/// exactly where it was before this trait existed.
+pub struct NoMacroBodies;
+
+impl MacroBodies for NoMacroBodies {
+    fn body_at(&self, _name: &str, _at: usize) -> Option<&str> {
+        None
+    }
+}
+
+impl MacroBodies for cpp_parser::MacroEnvironment {
+    fn body_at(&self, name: &str, at: usize) -> Option<&str> {
+        self.body_text_at_or_in_force(name, at)
+    }
+}
+
 /// Build a file's symbol table from its syntax tree.
 ///
 /// The root node is the translation unit, and the table it produces has that as its file scope. See the module
 /// documentation for what is and is not recorded.
-pub fn build_scopes(root: &CppSyntaxNode) -> ScopeTree {
+///
+/// `bodies` is what the file's **includes** say about the macros it invokes — see [`MacroBodies`]. A caller with no
+/// such evidence passes [`NoMacroBodies`] and gets exactly the table this function produced before the parameter
+/// existed.
+pub fn build_scopes(root: &CppSyntaxNode, bodies: &dyn MacroBodies) -> ScopeTree {
     let mut walker = ScopeWalker {
         table: ScopeTree::new(),
+        bodies,
     };
 
     let file = walker.table.create_scope(
@@ -75,16 +117,53 @@ pub fn build_scopes(root: &CppSyntaxNode) -> ScopeTree {
 }
 
 /// Walks a tree, creating a scope per construct and a binding per declaration.
-struct ScopeWalker {
+struct ScopeWalker<'a> {
     table: ScopeTree,
+    /// What the includes say about a macro the file invokes — see [`MacroBodies`].
+    bodies: &'a dyn MacroBodies,
 }
 
-impl ScopeWalker {
+/// What an invocation does to the scope the walk is in, when its replacement list says.
+///
+/// Three alternatives rather than one plus flags, because each is read from a different body — `namespace X {`,
+/// `try {`, `}` — and a single value would have to invent a name for the ones that name nothing.
+enum OpenedByBody {
+    Opens {
+        name: String,
+        /// The namespace's segments, outermost first. Empty for `namespace {`.
+        segments: Vec<String>,
+        body: String,
+        range: cpp_parser::SourceRange,
+    },
+    Closes {
+        name: String,
+        body: String,
+        range: cpp_parser::SourceRange,
+    },
+    /// An invocation that **opens a brace** and names nothing (`try {`, `extern "C" {`).
+    ///
+    /// A frame with no scope behind it: what it buys is that the invocation which closes it pops *this* frame
+    /// rather than a namespace that is still open. Nothing is recorded — a reading is evidence about a scope, and
+    /// there is no scope here.
+    OpensABrace {
+        /// Kept for the diagnostic value of the name in a debugger, since no reading stores it.
+        #[allow(dead_code)]
+        name: String,
+        #[allow(dead_code)]
+        range: cpp_parser::SourceRange,
+    },
+}
+
+impl ScopeWalker<'_> {
     /// Walk the children of `node`, adding what they declare to `scope`.
+    ///
+    /// **The scope can change part way through the list**, and that is the one thing this loop does that the
+    /// original did not: `_STD_BEGIN` is a *sibling* of the declarations it wraps, because the file has no `{` of
+    /// its own for them to live in — the brace is in the macro's body. So the walk keeps a *current* scope, and an
+    /// invocation whose body says `namespace std {` moves the declarations after it into a `std` scope until an
+    /// invocation whose body is `}` moves them back out. See [`ScopeWalker::opened_by_a_body`].
     fn items(&mut self, node: &CppSyntaxNode, scope: ScopeId) {
-        for child in node.children() {
-            self.item(&child, scope);
-        }
+        self.walk_children(node, scope, None);
     }
 
     /// Walk the children of `node` into `scope`, treating a body node as part of `scope` rather than nested.
@@ -94,13 +173,153 @@ impl ScopeWalker {
     /// open a second scope and put every declaration one level too deep — which still looks plausible, and
     /// breaks every lookup that walks outward.
     fn items_in_scope(&mut self, node: &CppSyntaxNode, scope: ScopeId, bodies: &[CppSyntaxKind]) {
+        self.walk_children(node, scope, Some(bodies));
+    }
+
+    /// The one child loop: macro-opened scopes first, then the ordinary [`ScopeWalker::item`].
+    ///
+    /// `same_scope_bodies` are the child kinds whose own contents belong to `scope` rather than to a block inside
+    /// them ([`ScopeWalker::items_in_scope`]); `None` is the plain walk, where a `CompoundStat` is a statement block
+    /// and opens a scope of its own.
+    fn walk_children(
+        &mut self,
+        node: &CppSyntaxNode,
+        scope: ScopeId,
+        same_scope_bodies: Option<&[CppSyntaxKind]>,
+    ) {
+        let mut current = scope;
+        // The scopes an invocation opened and no invocation has closed yet, each with the scope to come back to.
+        // A `Vec` because the constructs nest: `_STD_BEGIN … _EXTERN_C … _END_EXTERN_C … _STD_END` is the shape
+        // `yvals_core.h` writes, and a single slot would leave the second closer undoing the first opener.
+        let mut opened: Vec<(ScopeId, ScopeId)> = Vec::new();
+
         for child in node.children() {
-            if bodies.contains(&CppSyntaxKind::from(child.kind())) {
-                self.items(&child, scope);
-            } else {
-                self.item(&child, scope);
+            match self.opened_by_a_body(&child) {
+                Some(OpenedByBody::Opens {
+                    name,
+                    segments,
+                    body,
+                    range,
+                }) => {
+                    let inner = self.open_from_a_body(&segments, current, range, &name, &body);
+                    opened.push((inner, current));
+                    current = inner;
+                }
+                Some(OpenedByBody::OpensABrace { name: _, range: _ }) => {
+                    // Nothing to open and nothing to record: the frame exists so the closer has something of its
+                    // own to close. The scope the walk is in does not change.
+                    opened.push((current, current));
+                }
+                Some(OpenedByBody::Closes { name, body, range }) => {
+                    // The reading is recorded either way: an invocation that closes a construct is as much a part
+                    // of why this file's scopes look the way they do as one that opens it, and a consumer checking
+                    // the evidence has to be able to see both.
+                    self.table.macro_readings.push(MacroScopeReading {
+                        range,
+                        name,
+                        body,
+                        opens: None,
+                    });
+                    if let Some((_, enclosing)) = opened.pop() {
+                        current = enclosing;
+                    }
+                }
+                None => match same_scope_bodies {
+                    Some(bodies) if bodies.contains(&CppSyntaxKind::from(child.kind())) => {
+                        self.items(&child, current);
+                    }
+                    _ => self.item(&child, current),
+                },
             }
         }
+
+        // A construct this file opens and never closes — an unbalanced `_STD_BEGIN`, or a closer written in a file
+        // the walk never saw — leaves its scope open, and the declarations walked into it stay there. That is the
+        // reading the body asked for, and a missing brace is not something this file's tokens prove.
+    }
+
+    /// What the macro written at this node does to the scope, **when a replacement list says** — the whole of the
+    /// "scope construction sees through the macro" step.
+    ///
+    /// Three conditions, and each one is what keeps a guess out:
+    ///
+    /// * the node is a `MacroCall` at a place the walk is reading declarations from — an invocation the parser read
+    ///   as something else (a specifier, a statement inside a body) declares nothing and is not asked about;
+    /// * the name's replacement list is one of the two structural shapes ([`cpp_parser::shape_of_a_body`]);
+    /// * and the body is asked at the **offset of the invocation**, because a name's meaning is positional:
+    ///   `_GLIBCXX_BEGIN_NAMESPACE_VERSION` is `namespace __8 {` in one configuration and nothing at all in another.
+    ///
+    /// **Why the tree does not do this nesting itself.** The name is in another file, so a `NamespaceDecl` node here
+    /// would have no name token — and a tree whose *shape* depends on what a header says would differ between the
+    /// index's parse (which has the include closure) and an editor's ([`crate::file::FileView`] parses the buffer on
+    /// its own). Two trees that disagree about nesting is a worse defect than one flat tree whose scopes say more:
+    /// the flat shape is what this file's tokens actually say, and the scope is the evidence's contribution,
+    /// recorded in [`ScopeTree::macro_readings`] beside it.
+    fn opened_by_a_body(&self, node: &CppSyntaxNode) -> Option<OpenedByBody> {
+        if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::MacroCall {
+            return None;
+        }
+
+        let name = invocation_name(node)?;
+        let range = cpp_parser::source_range(node.text_range());
+        let body = self.bodies.body_at(&name, range.start_offset)?;
+
+        match cpp_parser::shape_of_a_body(body) {
+            cpp_parser::BodyShape::OpensANamespace(segments) => Some(OpenedByBody::Opens {
+                name,
+                segments,
+                body: body.to_string(),
+                range,
+            }),
+            cpp_parser::BodyShape::ClosesABlock => Some(OpenedByBody::Closes {
+                name,
+                body: body.to_string(),
+                range,
+            }),
+            // A **statement-level opener** — `try {`, `extern "C" {`. It names nothing, so no scope is created and
+            // no reading is recorded (a reading is evidence about a *scope*); what it does is keep the brace
+            // count honest, so the `}`-bodied invocation that closes it pops *this* frame rather than the
+            // namespace around it.
+            cpp_parser::BodyShape::OpensABlock => Some(OpenedByBody::OpensABrace { name, range }),
+            // A qualifier (`_STD` = `::std::`) is not a construct: it changes how a *name* is read, which is the
+            // parser's business (`exprs.rs`/`types.rs`, B121), and it opens and closes nothing. Listed rather than
+            // caught by `_` so that a new shape cannot be added without this match being looked at.
+            cpp_parser::BodyShape::QualifiesAName | cpp_parser::BodyShape::Other => None,
+        }
+    }
+
+    /// Open the namespace an invocation's body spelled, and record where the reading came from.
+    ///
+    /// **No binding is created for the name**, and that is deliberate rather than an omission: a binding is a
+    /// *declaration site* — what a rename edits and what a reference search answers with — and this file does not
+    /// write the name. `std` is spelled nowhere in MSVC's `<vector>`; a binding whose range pointed at `_STD_BEGIN`
+    /// would make "rename `std`" rewrite the macro invocation. The scope is what the query layer needs (a qualified
+    /// name runs through it, so `std::vector` resolves), and a scope with no binding claims nothing about where the
+    /// name was written.
+    fn open_from_a_body(
+        &mut self,
+        segments: &[String],
+        parent: ScopeId,
+        range: cpp_parser::SourceRange,
+        name: &str,
+        body: &str,
+    ) -> ScopeId {
+        let inner = if segments.is_empty() {
+            // `namespace {` — a namespace with no name, whose contents are visible in this file and nowhere else.
+            self.table
+                .create_scope(ScopeKind::Namespace, Some(parent), Some(range))
+        } else {
+            self.open_namespace_chain(segments, parent, range)
+        };
+
+        self.table.macro_readings.push(MacroScopeReading {
+            range,
+            name: name.to_string(),
+            body: body.to_string(),
+            opens: Some(segments.to_vec()),
+        });
+
+        inner
     }
 
     /// Walk one construct, adding what it declares to `scope`.
@@ -1071,6 +1290,21 @@ fn is_unnamed_declaration(node: &CppSyntaxNode) -> bool {
 fn first_child(node: &CppSyntaxNode, kind: CppSyntaxKind) -> Option<CppSyntaxNode> {
     node.children()
         .find(|child| CppSyntaxKind::from(child.kind()) == kind)
+}
+
+/// The name a `MacroCall` invokes, as the file spells it.
+///
+/// The shape is `MacroCall > NameExpr > Identifier`, which every rule that reads an invocation produces
+/// (`parse_macro_call`, `parse_a_macro_that_stands_for_a_declaration`, …), and the first identifier is the name in
+/// all of them: what may follow inside the `NameExpr` is trivia, and what may follow *outside* it is the macro's
+/// arguments or nothing at all.
+fn invocation_name(node: &CppSyntaxNode) -> Option<String> {
+    let name = first_child(node, CppSyntaxKind::NameExpr)?;
+
+    name.children_with_tokens()
+        .filter_map(|child| child.into_token())
+        .find(|token| CppTokenKind::from(token.kind()) == CppTokenKind::Identifier)
+        .map(|token| token.text().to_string())
 }
 
 /// Which kind of entity a bare class-like keyword introduces, if that is what this specifier is.
