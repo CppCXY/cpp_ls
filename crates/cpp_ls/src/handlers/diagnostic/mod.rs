@@ -1,12 +1,10 @@
 mod document_diagnostic;
-mod workspace_diagnostic;
 
 use super::RegisterCapabilities;
 pub use document_diagnostic::on_pull_document_diagnostic;
 use lsp_types::{
     ClientCapabilities, DiagnosticOptions, DiagnosticServerCapabilities, ServerCapabilities,
 };
-pub use workspace_diagnostic::on_pull_workspace_diagnostic;
 
 pub struct DiagnosticCapabilities;
 

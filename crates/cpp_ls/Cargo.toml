@@ -4,24 +4,41 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# The engine: the parser and the analysis layer are the two crates this server exists to serve.
 cpp_parser.workspace = true
 cpp_code_analysis.workspace = true
 
-
+# The protocol. `lsp-server` is the transport-and-framing half (stdio/TCP, JSON-RPC, the initialize
+# handshake); `lsp_types` is the emmy fork of the generated types, which is what the inherited handlers
+# are written against — see `docs/ls-architecture.md` §1.
 lsp-server.workspace = true
-tokio.workspace = true
+lsp_types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-lsp_types.workspace = true
+
+# The runtime. `tokio` because every handler is async and the update queue is a task; `tokio-util` for the
+# `CancellationToken` every request carries.
+tokio.workspace = true
+tokio-util.workspace = true
+
+# Workspace files: watching and walking. `notify` is the OS watcher, used only when the client cannot be
+# asked to watch for us (see `handlers/text_document/register_file_watch.rs`).
+notify.workspace = true
+walkdir.workspace = true
+glob.workspace = true
+percent-encoding.workspace = true
+
+# Logging: `log` for the calls, `fern` for the sink, `chrono` for the timestamp in the file name.
 log.workspace = true
 fern.workspace = true
 chrono.workspace = true
-notify.workspace = true
-tokio-util.workspace = true
+
+# The syntax tree is part of a few answers (a range is a token range), so the tree crate is a direct
+# dependency rather than one reached through the analysis layer.
 rowan.workspace = true
-walkdir.workspace = true
-rust-i18n.workspace = true
-glob.workspace = true
+
+clap = { workspace = true, optional = true }
+mimalloc = { version = "0.1", optional = true, default-features = false }
 
 [[bin]]
 name = "cpp_ls"

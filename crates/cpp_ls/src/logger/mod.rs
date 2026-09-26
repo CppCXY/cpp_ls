@@ -4,7 +4,7 @@ use std::{env, fs, path::PathBuf};
 
 use best_log_path::get_best_log_dir;
 use chrono::Local;
-use emmylua_code_analysis::file_path_to_uri;
+use crate::util::path_to_uri;
 use fern::Dispatch;
 use log::{LevelFilter, info};
 
@@ -91,7 +91,7 @@ pub fn init_logger(root: Option<&str>, cmd_args: &CmdArgs) {
         return;
     }
 
-    let uri = file_path_to_uri(&log_file_path).unwrap();
+    let uri = path_to_uri(&log_file_path).unwrap();
     eprintln!("init logger success with file: {}", uri.as_str());
     info!("{} v{}", CRATE_NAME, CRATE_VERSION);
 }

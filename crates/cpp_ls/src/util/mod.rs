@@ -1,12 +1,19 @@
+//! # Small shared pieces
+//!
+//! Each file here is one concept used from more than one layer, which is the only reason a `util` module earns
+//! its place: `catch_unwind` is the panic boundary every handler call goes through, `uri` is the one place a URI
+//! becomes a path, and `time_cancel_token` is the timeout-plus-cancellation combinator the indexing progress
+//! uses.
+//!
+//! Two files the Lua skeleton had are **gone on purpose**: `desc.rs` (parsing `---@param` doc strings) and
+//! `module_name_convert.rs` (`require` module paths) — both are Lua's language, not this server's. The C++
+//! equivalents (doc comments, header/source pairing) get their own module when the hover and completion work
+//! starts; see `docs/ls-architecture.md` §5.
+
 mod catch_unwind;
-mod desc;
-mod module_name_convert;
 mod time_cancel_token;
+mod uri;
 
 pub use catch_unwind::catch_unwind;
-pub use desc::*;
-#[allow(unused)]
-pub use module_name_convert::{
-    file_name_convert, module_name_convert, to_camel_case, to_pascal_case, to_snake_case,
-};
 pub use time_cancel_token::time_cancel_token;
+pub use uri::{path_to_uri, uri_to_file_path};

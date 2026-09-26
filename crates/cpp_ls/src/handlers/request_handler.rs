@@ -1,54 +1,36 @@
+//! # Request dispatch — method name to handler
+//!
+//! One macro and one table. Every row is a **type** from `lsp_types::request` plus the handler's name, and the
+//! macro does the four things each request needs in the same order:
+//!
+//! ```text
+//! 1. match the method string against <Req>::METHOD      (the client's spelling, not a string literal here)
+//! 2. extract::<Req::Params>()                           (a params type that does not fit is not an error the
+//!                                                        client sees: the row is skipped and the request falls
+//!                                                        through to "handler not found")
+//! 3. context.snapshot()                                 (a handle to the services, cloned per request)
+//! 4. context.task(id, |cancel_token| handler(…))         (spawned, so the message loop keeps reading; the
+//!                                                        token is what `$/cancelRequest` cancels)
+//! ```
+//!
+//! **A handler never touches the connection.** It returns `RequestOutcome<T>` and `ServerContext::task` turns
+//! that into the response — `Ready` → result, `Missing` → `null`, `Cancelled` → the cancel error, a panic →
+//! an internal error. That is why every row below looks the same and why adding one is a one-line edit.
+
 use std::error::Error;
 
 use log::error;
 use lsp_server::{Request, Response};
 use lsp_types::request::{
-    CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare,
-    CodeActionRequest, CodeLensRequest, CodeLensResolve, ColorPresentationRequest, Completion,
-    DocumentColor, DocumentDiagnosticRequest, DocumentHighlightRequest, DocumentLinkRequest,
-    DocumentLinkResolve, DocumentSymbolRequest, ExecuteCommand, FoldingRangeRequest, Formatting,
-    GotoDefinition, GotoImplementation, HoverRequest, InlayHintRequest, InlayHintResolveRequest,
-    InlineValueRequest, OnTypeFormatting, PrepareRenameRequest, RangeFormatting, References,
-    Rename, Request as LspRequest, ResolveCompletionItem, SelectionRangeRequest,
-    SemanticTokensFullRequest, SignatureHelpRequest, WorkspaceDiagnosticRequest,
-    WorkspaceSymbolRequest,
+    DocumentDiagnosticRequest, GotoDefinition, HoverRequest, Request as LspRequest,
 };
 
-use crate::{
-    context::ServerContext,
-    handlers::{
-        diagnostic::{on_pull_document_diagnostic, on_pull_workspace_diagnostic},
-        document_type_format::on_type_formatting_handler
-    },
-};
+use crate::context::ServerContext;
 
 use super::{
-    call_hierarchy::{
-        on_incoming_calls_handler, on_outgoing_calls_handler, on_prepare_call_hierarchy_handler,
-    },
-    code_actions::on_code_action_handler,
-    code_lens::{on_code_lens_handler, on_resolve_code_lens_handler},
-    command::on_execute_command_handler,
-    completion::{on_completion_handler, on_completion_resolve_handler},
     definition::on_goto_definition_handler,
-    document_color::{on_document_color, on_document_color_presentation},
-    document_formatting::on_formatting_handler,
-    document_highlight::on_document_highlight_handler,
-    document_link::{on_document_link_handler, on_document_link_resolve_handler},
-    document_range_formatting::on_range_formatting_handler,
-    document_selection_range::on_document_selection_range_handle,
-    document_symbol::on_document_symbol,
-    emmy_annotator::{EmmyAnnotatorRequest, on_emmy_annotator_handler},
-    fold_range::on_folding_range_handler,
+    diagnostic::on_pull_document_diagnostic,
     hover::on_hover,
-    implementation::on_implementation_handler,
-    inlay_hint::{on_inlay_hint_handler, on_resolve_inlay_hint},
-    inline_values::on_inline_values_handler,
-    references::on_references_handler,
-    rename::{on_prepare_rename_handler, on_rename_handler},
-    semantic_token::on_semantic_token_handler,
-    signature_helper::on_signature_helper_handler,
-    workspace_symbol::on_workspace_symbol_handler,
 };
 
 macro_rules! dispatch_request {
@@ -85,40 +67,11 @@ pub async fn on_request_handler(
     server_context: &mut ServerContext,
 ) -> Result<(), Box<dyn Error + Sync + Send>> {
     dispatch_request!(req, server_context, {
-        HoverRequest => on_hover,
-        DocumentSymbolRequest => on_document_symbol,
-        FoldingRangeRequest => on_folding_range_handler,
-        DocumentColor => on_document_color,
-        ColorPresentationRequest => on_document_color_presentation,
-        DocumentLinkRequest => on_document_link_handler,
-        DocumentLinkResolve => on_document_link_resolve_handler,
-        SelectionRangeRequest => on_document_selection_range_handle,
-        Completion => on_completion_handler,
-        ResolveCompletionItem => on_completion_resolve_handler,
-        InlayHintRequest => on_inlay_hint_handler,
-        InlayHintResolveRequest => on_resolve_inlay_hint,
+        // The first three are the ones the C++ analysis answers today: a location, a type, and a file's
+        // diagnostics. The rest of the table is a one-line row each — see `docs/ls-architecture.md`.
         GotoDefinition => on_goto_definition_handler,
-        GotoImplementation => on_implementation_handler,
-        References => on_references_handler,
-        Rename => on_rename_handler,
-        PrepareRenameRequest => on_prepare_rename_handler,
-        CodeLensRequest => on_code_lens_handler,
-        CodeLensResolve => on_resolve_code_lens_handler,
-        SignatureHelpRequest => on_signature_helper_handler,
-        DocumentHighlightRequest => on_document_highlight_handler,
-        SemanticTokensFullRequest => on_semantic_token_handler,
-        ExecuteCommand => on_execute_command_handler,
-        CodeActionRequest => on_code_action_handler,
-        InlineValueRequest => on_inline_values_handler,
-        WorkspaceSymbolRequest => on_workspace_symbol_handler,
-        Formatting => on_formatting_handler,
-        RangeFormatting => on_range_formatting_handler,
-        OnTypeFormatting => on_type_formatting_handler,
-        CallHierarchyPrepare => on_prepare_call_hierarchy_handler,
-        CallHierarchyIncomingCalls => on_incoming_calls_handler,
-        CallHierarchyOutgoingCalls => on_outgoing_calls_handler,
+        HoverRequest => on_hover,
         DocumentDiagnosticRequest => on_pull_document_diagnostic,
-        WorkspaceDiagnosticRequest => on_pull_workspace_diagnostic,
     });
 
     Ok(())

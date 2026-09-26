@@ -1,41 +1,35 @@
-mod call_hierarchy;
-mod code_actions;
-mod code_lens;
-mod command;
-mod common;
-mod completion;
+//! # LSP handlers — one module per capability
+//!
+//! Every module here has the same two jobs:
+//!
+//! ```text
+//! 1. a handler function with the signature the dispatch table calls:
+//!      request:      async fn(ServerContextSnapshot, Params, CancellationToken) -> RequestOutcome<Result>
+//!      notification: async fn(ServerContextSnapshot, Params) -> Option<()>
+//! 2. a `RegisterCapabilities` implementation, which is what the server advertises in `initialize`
+//! ```
+//!
+//! Both are wired in two places and nowhere else: [`request_handler`] / [`notification_handler`] for the
+//! dispatch, and the `capabilities!` table at the bottom of this file for what the client is told. A module
+//! that is in one and not the other is a handler the client will never call (or a capability with no
+//! implementation), so **the two lists are read together** — see `docs/ls-architecture.md`.
+//!
+//! The table below is deliberately short: it is the set of capabilities this server answers *today*. Adding
+//! one is three edits — the module, the dispatch row, the capability row — and the modules that were removed
+//! from the Lua skeleton (`completion`, `semantic_token`, `rename`, …) come back the same way.
+
 mod configuration;
 mod definition;
 mod diagnostic;
-mod document_color;
-mod document_formatting;
-mod document_highlight;
-mod document_link;
-mod document_range_formatting;
-mod document_selection_range;
-mod document_symbol;
-mod document_type_format;
-mod emmy_annotator;
-mod emmy_gutter;
-mod emmy_syntax_tree;
-mod fold_range;
 mod hover;
-mod implementation;
 mod initialized;
-mod inlay_hint;
-mod inline_values;
 mod notification_handler;
-mod references;
-mod rename;
 mod request_handler;
 mod response_handler;
-mod semantic_token;
-mod signature_helper;
 mod text_document;
 mod workspace;
-mod workspace_symbol;
 
-pub use initialized::{ClientConfig, init_analysis, initialized_handler};
+pub use initialized::{ClientConfig, initialized_handler};
 use lsp_types::{ClientCapabilities, ServerCapabilities};
 pub use notification_handler::on_notification_handler;
 pub use request_handler::on_request_handler;
@@ -47,6 +41,11 @@ pub use text_document::{
 };
 pub use workspace::process_did_rename_files_handler;
 
+/// What a module has to answer to be advertised in `initialize`.
+///
+/// One trait rather than a match over method names, because the *decision* belongs to the module that knows
+/// what it can do, and the client's own capabilities are half of that decision — `inlayHint.dynamicRegistration`
+/// decides whether a hint provider is registered statically or by a later request.
 pub trait RegisterCapabilities {
     fn register_capabilities(
         server_capabilities: &mut ServerCapabilities,
@@ -72,32 +71,12 @@ macro_rules! capabilities {
 }
 
 capabilities!(modules: {
+    // The document lifecycle is not optional: without it no request ever has a file to answer about.
     text_document => TextDocumentCapabilities,
-    document_symbol => DocumentSymbolCapabilities,
-    document_color => DocumentColorCapabilities,
-    document_link => DocumentLinkCapabilities,
-    document_selection_range => DocumentSelectionRangeCapabilities,
-    document_highlight => DocumentHighlightCapabilities,
-    document_formatting => DocumentFormattingCapabilities,
-    document_range_formatting => DocumentRangeFormattingCapabilities,
-    // document_type_format => DocumentTypeFormattingCapabilities,
-    completion => CompletionCapabilities,
-    inlay_hint => InlayHintCapabilities,
-    definition => DefinitionCapabilities,
-    implementation => ImplementationCapabilities,
-    references => ReferencesCapabilities,
-    rename => RenameCapabilities,
-    code_lens => CodeLensCapabilities,
-    signature_helper => SignatureHelperCapabilities,
-    hover => HoverCapabilities,
-    fold_range => FoldRangeCapabilities,
-    semantic_token => SemanticTokenCapabilities,
-    command => CommandCapabilities,
-    code_actions => CodeActionsCapabilities,
-    inline_values => InlineValuesCapabilities,
-    workspace_symbol => WorkspaceSymbolCapabilities,
-    configuration => ConfigurationCapabilities,
-    call_hierarchy => CallHierarchyCapabilities,
     workspace => WorkspaceCapabilities,
+    // The four the C++ analysis can already answer, or is being built to answer first.
+    definition => DefinitionCapabilities,
+    hover => HoverCapabilities,
     diagnostic => DiagnosticCapabilities,
+    configuration => ConfigurationCapabilities,
 });

@@ -1,19 +1,32 @@
-mod goto_def_definition;
-mod goto_label;
-mod goto_module_file;
-mod goto_string;
+//! # `textDocument/definition` — where the name at the cursor is declared
+//!
+//! The port template for a **pull** handler: resolve the position, ask the analysis session, turn `Known` into
+//! `RequestOutcome`. Compare the Lua original (git history of this crate) — the shape is identical and only the
+//! query changed, which is the whole point of the layer split in `docs/ls-architecture.md`.
+//!
+//! ```text
+//! uri + position ──> path + offset ──> session.view(path) ──> session.definition(&view, offset)
+//!                          │                                        │
+//!                          │                                        └─ Known<ProjectDefinition> { file, fact }
+//!                          └─ FileView::offset_at(line, column)         │
+//!                                                                       └─ Yes → Location { uri, range }
+//!                                                                          No / Unknown → Missing (null)
+//! ```
+//!
+//! **`Known` is why this handler does not guess.** `No` means "there is no declaration here" and `Unknown`
+//! means "the index cannot say yet" — both answer `null`, because a client that gets a wrong location is worse
+//! off than one that gets none (`docs/index-design.md`, the same rule the analysis layer follows).
 
-use emmylua_code_analysis::{EmmyLuaAnalysis, FileId};
-use emmylua_parser::{LuaAstNode, LuaAstToken, LuaStringToken, LuaTokenKind};
+use cpp_code_analysis::Known;
 use lsp_types::{
-    ClientCapabilities, GotoDefinitionParams, GotoDefinitionResponse, OneOf, Position,
+    ClientCapabilities, GotoDefinitionParams, GotoDefinitionResponse, Location, OneOf, Range,
     ServerCapabilities,
 };
-use rowan::TokenAtOffset;
 use tokio_util::sync::CancellationToken;
 
 use super::RegisterCapabilities;
 use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
+use crate::util::{path_to_uri, uri_to_file_path};
 
 pub async fn on_goto_definition_handler(
     context: ServerContextSnapshot,
@@ -22,78 +35,27 @@ pub async fn on_goto_definition_handler(
 ) -> RequestOutcome<GotoDefinitionResponse> {
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
-    snapshot_query(context.analysis(), cancel_token, move |analysis| {
-        let file_id = analysis.get_file_id(&uri)?;
-        definition(analysis, file_id, position)
+
+    snapshot_query(context.analysis(), cancel_token, move |session| {
+        let path = uri_to_file_path(&uri)?;
+        let view = session.view(&path)?;
+        let offset = view.offset_at(position.line as usize, position.character as usize)?;
+
+        // TODO(port): `DeclFact` carries the declaration's own token range; until the analysis layer hands it out
+        // as a range (or as offsets we can map back through the *declaring* file's text), the answer is the
+        // declaring file with a zero-width range — honest, and obviously incomplete.
+        match session.definition(&view, offset) {
+            Known::Yes(found) => {
+                let uri = path_to_uri(&found.file)?;
+                Some(GotoDefinitionResponse::Scalar(Location {
+                    uri,
+                    range: Range::default(),
+                }))
+            }
+            Known::No | Known::Unknown(_) => None,
+        }
     })
     .await
-}
-
-pub fn definition(
-    analysis: &EmmyLuaAnalysis,
-    file_id: FileId,
-    position: Position,
-) -> Option<GotoDefinitionResponse> {
-    let model = analysis.semantic_model(file_id);
-    let document = analysis.db.document(file_id)?;
-    let root = model.chunk()?;
-    let position_offset =
-        document.get_offset(position.line as usize, position.character as usize)?;
-
-    if position_offset > root.syntax().text_range().end() {
-        return None;
-    }
-    let token = match root.syntax().token_at_offset(position_offset) {
-        TokenAtOffset::Single(token) => token,
-        TokenAtOffset::Between(left, right) => {
-            if left.kind() == LuaTokenKind::TkName.into()
-                || (left.kind() == LuaTokenKind::TkLeftBracket.into()
-                    && right.kind() == LuaTokenKind::TkInt.into())
-            {
-                left
-            } else {
-                right
-            }
-        }
-        TokenAtOffset::None => {
-            return None;
-        }
-    };
-
-    // 1. Label definition (goto / label).
-    if let Some(response) = goto_label::goto_label_definition(&model, &analysis.db, &token) {
-        return Some(response);
-    }
-
-    // 2. String token: require module file / string template reference.
-    if let Some(string_token) = LuaStringToken::cast(token.clone()) {
-        if let Some(response) =
-            goto_module_file::goto_module_file(&analysis.db, string_token.clone())
-        {
-            return Some(response);
-        }
-        if let Some(response) =
-            goto_string::goto_str_tpl_ref_definition(&model, &analysis.db, string_token)
-        {
-            return Some(response);
-        }
-        return None;
-    }
-
-    // 2.5 Doc description reference / `@see`.
-    if let Some(response) = goto_def_definition::goto_doc_definition(
-        &model,
-        &analysis.db,
-        &token,
-        position_offset,
-        &analysis.get_emmyrc(),
-    ) {
-        return Some(response);
-    }
-
-    // 3. Semantic declarations (decl / member / typedef).
-    let decl = model.find_decl(token.clone().into())?;
-    goto_def_definition::goto_def_definition(&model, &analysis.db, &decl, &token)
 }
 
 pub struct DefinitionCapabilities;
