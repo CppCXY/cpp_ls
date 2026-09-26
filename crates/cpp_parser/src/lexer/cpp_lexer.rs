@@ -147,7 +147,16 @@ impl<'a> CppLexer<'a> {
         match self.reader.current_char() {
             // Whitespace
             '\n' | '\r' => self.lex_newline(),
-            ' ' | '\t' | '\u{feff}' => self.lex_whitespace(),
+            // **A form feed and a vertical tab are whitespace too** (B137). The standard lists five whitespace
+            // characters (`space`, horizontal tab, newline, vertical tab, form feed) and the Windows SDK writes a
+            // form feed as a *page break*: `um/winnt.h:9968` is the two bytes `0C 0D` on a line of its own, and
+            // `um/winioctl.h:9838` the same — eleven messages of `unrecognized character` over the SDK corpus, for
+            // a character no compiler has ever refused outside a literal. `\u{feff}` is a byte-order mark, which is
+            // whitespace here because a BOM at the start of a file is the file's own text — and **the predicate is
+            // shared with `lex_whitespace`**, which is the lesson of the first attempt at this: adding the
+            // character to the dispatch alone left the consumer matching nothing, and a zero-length whitespace
+            // token at a fixed offset is an infinite loop that eats memory (48 GB before it died).
+            ' ' | '\t' | '\u{b}' | '\u{c}' | '\u{feff}' => self.lex_whitespace(),
 
             // Single character tokens
             '(' => {
@@ -496,8 +505,17 @@ impl<'a> CppLexer<'a> {
         }
     }
 
-    /// Lex whitespace characters
-    ///
+/// Is this a character the lexer reads as **trivia whitespace** — run together into one token?
+///
+/// One predicate for the two places that have to agree: the dispatch arm that *starts* a whitespace token and
+/// `lex_whitespace`, which *extends* it. The standard's whitespace is five characters (`space`, horizontal tab,
+/// newline, vertical tab, form feed); newline has its own token, and a byte-order mark is here because a BOM is
+/// the file's own text rather than an unrecognised character — see `lex_whitespace`.
+fn is_trivia_whitespace(ch: char) -> bool {
+    matches!(ch, ' ' | '\t' | '\u{b}' | '\u{c}' | '\u{feff}')
+}
+
+
     /// A **byte-order mark** is whitespace here. `\u{feff}` at the start of a file is the BOM that Visual Studio
     /// and a good many Windows editors write, and the standard has the implementation drop it in translation
     /// phase 1 — so a file saved that way is a perfectly good translation unit. Treating it as an unrecognised
@@ -506,8 +524,13 @@ impl<'a> CppLexer<'a> {
     /// first real C++ project put in front of this parser). It is also the zero-width no-break space, so the same
     /// character in the middle of a file is trivia for the same reason.
     fn lex_whitespace(&mut self) -> CppTokenKind {
-        self.reader
-            .eat_while(|ch| ch == ' ' || ch == '\t' || ch == '\u{feff}');
+        // **The same set the dispatch matches** (B137). The two ran apart for exactly one character's worth of
+        // time: adding `\u{c}` to the dispatch arm above without adding it *here* made this loop consume nothing
+        // and the lexer hand back a zero-length `Whitespace` token at the same offset, for ever — every file with a
+        // form feed in it hung, and the token vector grew until the process died with
+        // `memory allocation of 51539607552 bytes failed`. Measured on a two-byte file (`0C 0D`), which is what
+        // `um/winnt.h:9968` is. One predicate, one place: `is_trivia_whitespace` below.
+        self.reader.eat_while(Self::is_trivia_whitespace);
         CppTokenKind::Whitespace
     }
 

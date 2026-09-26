@@ -454,12 +454,16 @@ standard {}",
         };
 
         details.push(format!(
+            // **The full path**, not the file's name: a closure reaches several copies of a header that share a
+            // name (`winnt.h` exists in the SDK's `um\` and in `shared\`, and the list spellings are normalized),
+            // so a reader who goes to `<name>:<line>` by name reads a *different file* and concludes the line
+            // number is wrong — measured, on the Windows SDK corpus, before this was changed.
             "{:>4}:{:<3} {:<44} | {} :: {}{}",
             line + 1,
             column,
             errors[0].message,
             window.last().unwrap_or(&"").trim().chars().take(70).collect::<String>(),
-            path.file_name().unwrap_or_default().to_string_lossy(),
+            path.display(),
             readable,
         ));
     }

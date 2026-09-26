@@ -6843,6 +6843,31 @@ fn an_annotation_may_follow_a_specifier_the_loop_mistook_for_a_type() {
 }
 
 #[test]
+fn a_form_feed_is_whitespace_and_not_a_character_error() {
+    // `um/winnt.h:9968` is the two bytes `0C 0D` on a line of its own — a **form feed**, which the SDK writes as a
+    // page break — and `um/winioctl.h:9838` the same. The standard lists five whitespace characters and this is
+    // one of them, so refusing it reported `unrecognized character` eleven times over the SDK corpus for a
+    // character no compiler has ever refused outside a literal (B137).
+    //
+    // The test is here rather than in the lexer because the *reading* is what matters: the form feed is trivia, so
+    // the declaration after it is a declaration. The first attempt at this added the character to the lexer's
+    // **dispatch** without adding it to the loop that extends a whitespace run, and a zero-length whitespace token
+    // at a fixed offset is an infinite loop that ate 48 GB before it died — so this assertion also stands guard
+    // over the two staying in step.
+    for source in [
+        "\u{c}\r\nint x;\n",
+        "int \u{c} x;\n",
+        "#define A \u{c}\nint x;\n",
+        "int f(int a, \u{c}\nint b);\n",
+        "int \u{b} y;\n",
+    ] {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert_eq!(tree.to_source_text(), source, "losslessness: {source:?}");
+        assert_eq!(tree.get_errors(), [], "a form feed is whitespace: {source:?}");
+    }
+}
+
+#[test]
 fn a_requires_expression_may_be_a_template_argument() {
     // `type_traits:3946` — a class head whose base clause carries a requires-expression as an argument, and the
     // `;` *inside* its body is what the scans had to learn about.

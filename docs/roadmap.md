@@ -1651,6 +1651,53 @@ parser 的边际收益是"每轮 1–3 个文件"，连续磨十几轮会失去�
         （列 70）：B135 的读法要在模板那条路上再过一遍
    ```
 
+   **第 24 轮：语料补齐到 Windows SDK——新基线 255 个文件 213 干净 / 42 失败 / 337 消息（B137 进队列）**
+
+   ```text
+   做法：`examples/std_closure -- <tu.cpp> --list` 重新生成清单，TU 里加 `#include <windows.h>`
+        旧清单 109 个文件（只有 MSVC 的 STL + UCRT）→ 新清单 `%TEMP%\stdprobe\msvc_all.txt` **255 个文件**
+   读数：clean 213 | failing 42 | messages 337（16 种）—— 旧的 109 文件清单读数仍是 84/208，两者都在，别混
+   新露出来的族（旧清单一个都看不见）：
+     · **lexer 级**：`specstrings_strict.h` 的 `__$allowed_##p`（**标识符里有 `$`**）、
+       `winnt.h:9968` / `winioctl.h:9838` 的 `unrecognized character`（注释里的**非 ASCII 字符**）、
+       `ntdef.h` 的 `unrecognized character '@'`、`sal.h`/`winnt.h` 的 `stray \` 两处
+     · **`#if` 未选中的分支里括号不平衡**：`winbase.h:9939`、`wingdi.h:6415`、`winuser.h:16024`、
+       `winnls.h:3214` 全是 `unterminated argument list`——那些文件在 `RC_INVOKED` 之类的分支里写着半边括号，
+       而我们**刻意**把未选中的分支也读进树（编辑器要能看），两件事第一次撞上
+     · `[System::Security::SecurityCritical]`（`stdlib.h`，C++/CLI 特性）、`STDMETHOD(…)(…)`（B72 第三格）、
+       `WINOLEAPI` 裸用、`prsht.inl` 的 `IsolationAwarePrivateT_SAbnPgpgk…`
+   下一手：**lexer 那三条最便宜**（一条规则可能同时清掉几个 SDK 头），而且它们不是"语法长尾"——是字符集。
+   但动它们之前先看清一件**测量环境**的事：`specstrings_strict.h` 的 `__$allowed_##p` 报 `unrecognized character '$'`，
+   而 lexer **本来就支持标识符里的 `$`**——它由 `LexerConfig::dollar_in_identifier` 把关，这个开关由**工具链的方言**
+   设置（`char_kind.rs` 写明了这个取舍）。普查这一次**没有发现工具链**（那一行自己写着 "no toolchain means none
+   can be answered"），于是方言是默认值、`$` 被拒。也就是说：**这一条是普查环境的产物，不是产品的行为**——
+   要么让普查也走一次工具链发现，要么在报告里把它标成"无工具链世界"的读数再谈修不修。
+   ```
+
+   **第 25 轮：探针打全路径 → 字符级一族各归各位；换页符那一改先炸后修（B137 已修）**
+
+   ```text
+   ① `std_probe` 的失败清单原来只打**文件名**，而闭包里同名头文件不止一份（`winnt.h` 在 `um\` 与 `shared\`）——
+      按名字去读会读到另一个文件、并以为行号是错的（我先这么错了两次）。改成打**完整路径**（已落地，带理由注释）。
+   ② 随之字符级的 75 条各归各位：
+      · shared/specstrings_strict.h  `unrecognized character '$'`（22 条）—— lexer **本来就支持**标识符里的 `$`，
+        由 `LexerConfig::dollar_in_identifier` 把关、方言设置的；普查没发现工具链 ⇒ **测量环境的产物，不是缺陷**
+      · shared/apiset.h:64           `#define API_SET_BY_ORDINAL(X,O,PO)   X @##O NONAME PRIVATE`（32 条）
+      · shared/driverspecs.h:401 / kernelspecs.h:170  `\` 出现在 **#define 体**里（10 条）
+      · um/winnt.h:9968 / um/winioctl.h:9838          该行只有两个字节 **`0C 0D`**（换页符 FF，11 条）
+   ③ 换页符：按标准 FF 就是五个空白字符之一，先把它加进词法器的**分派**里 —— 结果 **255 个文件的 SDK 语料
+      从 337 条直接变成 48 GB 分配失败**（`memory allocation of 51539607552 bytes failed`），而 109 个文件的
+      STL 语料、两份 libstdc++ 一动不动。用**两字节的文件**（`0C 0D`）复现：任何含 FF 的文件都挂。
+      真因不是"下游无界"，而是**分派与消费者各有一套空白集合**：`lex_whitespace` 的 `eat_while` 不认 FF，
+      于是它一个字符都不吃、在原地反复交出一个零长度的 `Whitespace` token，token 向量一路涨到 48 GB。
+      修法：把集合抽成**一个**谓词（`CppLexer::is_trivia_whitespace`），两处共用。
+   ④ 读数：SDK 语料（255 文件）消息 337 → **317**（干净仍 213——受影响文件另有错）；109 文件 STL 语料
+      **208 / 84 不变**；128 → 128/0/0、455 → 454/1+12 不变；21 个 parser 套件全绿、clippy 0。
+      形状断言：gaps.rs `a_form_feed_is_whitespace_and_not_a_character_error`（五种位置 + 无损）
+   ⑤ 还剩的字符级一族：`@` 与 `\` 那 42 条住在 **#define 体**里——编译器在宏被*使用*之前不按 C++ 词法看它们，
+      所以规则应是"**指令体按宽容读**"（能记形状就记，别报编译器不会报的字符）。这是下一手。
+   ```
+
    **还差的（按值排）**：
 
    ```text
