@@ -106,7 +106,7 @@ fn main() {
 
     // --- opening the project ----------------------------------------------------------------------
     let started = Instant::now();
-    let mut session = Session::open(&root, &files, WatchFilter::new(&root));
+    let mut session = Session::open(&root, files.clone(), WatchFilter::new(&root));
     let opened = started.elapsed();
 
     println!("project: {}", root.display());
@@ -224,7 +224,7 @@ fn main() {
     // day, a restart, or the next CI job — and the buffers are the same handles, which is what a client re-sending
     // its open documents looks like from here.
     let started = Instant::now();
-    let mut warm = Session::open(&root, &files, WatchFilter::new(&root));
+    let mut warm = Session::open(&root, files.clone(), WatchFilter::new(&root));
     let warm_opened = started.elapsed();
 
     let started = Instant::now();
@@ -359,7 +359,7 @@ fn write_compile_database(root: &Path) {
 }
 
 /// The members of a type as the session reports them, for an assertion a human can read.
-fn member_names(session: &Session<'_, DiskFiles>, view: &FileView, class: &str) -> Vec<String> {
+fn member_names(session: &Session<DiskFiles>, view: &FileView, class: &str) -> Vec<String> {
     match session.members_of(view, class) {
         Known::Yes(members) => members
             .own()

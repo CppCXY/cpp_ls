@@ -54,8 +54,8 @@ use crate::include::paths::{FileProvider, normalize_path};
 use crate::index::store::{StoreStats, SummaryStore};
 
 /// The order to work a project in, growing as it goes. See the module documentation.
-pub struct Worklist<'s, 'a, F: FileProvider> {
-    store: &'s mut SummaryStore<'a, F>,
+pub struct Worklist<'s, F: FileProvider> {
+    store: &'s mut SummaryStore<F>,
     /// The open files and everything they reach, breadth-first. Worked before [`Worklist::tail`] entirely.
     open: VecDeque<(PathBuf, usize)>,
     /// The caller's project list and everything it reaches. See the module documentation for why this is a second
@@ -66,14 +66,14 @@ pub struct Worklist<'s, 'a, F: FileProvider> {
     seen: HashSet<String>,
 }
 
-impl<'s, 'a, F: FileProvider> Worklist<'s, 'a, F> {
+impl<'s, F: FileProvider> Worklist<'s, F> {
     /// A work list over the files the user is looking at and the rest of the project.
     ///
     /// Neither list has to be sorted, complete, or free of duplicates. A path in both is worked **once**, in the
     /// open half — which is the answer to "I have the file open *and* it is in the project": it is the file the
     /// user is looking at, and that is the reason it goes first.
     pub fn new(
-        store: &'s mut SummaryStore<'a, F>,
+        store: &'s mut SummaryStore<F>,
         open: impl IntoIterator<Item = PathBuf>,
         project: impl IntoIterator<Item = PathBuf>,
     ) -> Self {
@@ -239,7 +239,7 @@ pub fn outcome_of(before: StoreStats, after: StoreStats) -> StepOutcome {
     }
 }
 
-impl<'a, F: FileProvider> SummaryStore<'a, F> {
+impl<F: FileProvider> SummaryStore<F> {
     /// The order to index a project in: see [`Worklist`].
     ///
     /// `open` is what the user is looking at — the editor's open documents, or the one file a query started from.
@@ -250,7 +250,7 @@ impl<'a, F: FileProvider> SummaryStore<'a, F> {
         &'s mut self,
         open: impl IntoIterator<Item = PathBuf>,
         project: impl IntoIterator<Item = PathBuf>,
-    ) -> Worklist<'s, 'a, F> {
+    ) -> Worklist<'s, F> {
         Worklist::new(self, open, project)
     }
 }
@@ -264,14 +264,11 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     /// A store over a few files in memory, with a cache directory of its own.
-    fn store<'a>(
-        name: &str,
-        files: &'a MemoryFiles,
-    ) -> (SummaryStore<'a, MemoryFiles>, std::path::PathBuf) {
+    fn store(name: &str, files: &MemoryFiles) -> (SummaryStore<MemoryFiles>, std::path::PathBuf) {
         let root = std::env::temp_dir().join("cppls-worklist-tests").join(name);
         let _ = std::fs::remove_dir_all(&root);
 
-        let store = SummaryStore::with_provider(&root, CompilerConfig::default(), files);
+        let store = SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
         (store, root)
     }
 
@@ -280,7 +277,7 @@ mod tests {
     }
 
     /// Work a list to the end, keeping the steps in order.
-    fn run(list: &mut Worklist<'_, '_, MemoryFiles>) -> Vec<super::Step> {
+    fn run(list: &mut Worklist<'_, MemoryFiles>) -> Vec<super::Step> {
         let mut steps = Vec::new();
         while let Some(step) = list.step() {
             steps.push(step);
@@ -479,7 +476,7 @@ mod tests {
             [StepOutcome::Built, StepOutcome::Built]
         );
 
-        let mut again = SummaryStore::with_provider(&root, CompilerConfig::default(), &files);
+        let mut again = SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
         let second = run(&mut again.worklist(paths(&["/p/main.cpp"]), paths(&[])));
 
         assert_eq!(

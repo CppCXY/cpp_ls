@@ -20,14 +20,18 @@
 **是什么**：`cpp_ls` 是一个 C++ 语言服务器的内核，两个 crate——
 `cpp_parser`（无损 CST、容错、宏表、外部符号表接口）与 `cpp_code_analysis`（预处理、每文件事实、缓存、跨文件查询）。
 **驱动层已经落地**（`session.rs`：开项目 → 发现工具链 → 惰性索引 → 接 `didOpen`/`didChange` → 查询），
-**还没有语言服务器二进制**——也就是把 `Session` 接到 JSON-RPC 上的那一层，它是队列里的下一条。
+**语言服务器壳也已经能跑**：`crates/cpp_ls` 应答 `initialize`/`initialized`、收 `didOpen`/`didChange`、
+推解析诊断，并回答 `textDocument/definition` 与 `textDocument/hover`；端到端证据是
+`crates/cpp_ls/tests/handshake.rs`（真进程、真 stdio、0.6 秒跑完一轮）。架构、接缝与缺口清单在
+[`ls-architecture.md`](ls-architecture.md)。**下一条**是在这个壳上加能力（语义诊断、document_symbol、completion），
+引擎侧继续按本文档的队列推进。
 
 **现在的数字**（最近一次普查，两份清单都是 `std_probe` 的**真总数**——那份直方图只打前 15 种消息，
 "把看得见的加起来"比总数少，所以探针现在直接把总数打出来）：
 `%TEMP%\stdprobe\files.txt` 的 128 个文件（`<vector>/<string>/<map>/<algorithm>` 的闭包）——
 **`干净 128 / 报错 0`**，消息总数 **0**（带 seeds）；`%TEMP%\cppls-indexed.txt` 的 455 个文件（分析闭包）——
 **`干净 455 / 报错 0 / 消息 0`（带 seeds）**，不带 seeds 的那一遍是 `干净 454 / 报错 1`（剩下的那个文件见下）。
-Rust 侧 `cargo test --workspace` = **1091 个测试 / 34 个套件全绿**。
+Rust 侧 `cargo test --workspace` = **1124 个测试 / 38 个套件全绿**（含 `cpp_ls` 的 28 个单测与 1 个端到端测试）。
 
 **两份读数**：上面这两份的"干净 455/0"是**带 include 证据**（`--seeds --closure`，也就是**带索引的产品形态**）的读数；
 **不带证据**的那一遍 455 个文件是 `干净 454 / 报错 1 / 消息 12`，唯一失败的是 `commdlg.h:577` 的
@@ -39,10 +43,11 @@ Rust 侧 `cargo test --workspace` = **1091 个测试 / 34 个套件全绿**。
 **门禁三条 + 一条**（改完必须全绿，`index-design.md` §门禁有同样的表）：
 
 ```bash
-cargo test --workspace                     # 1091 个测试，34 个套件
+cargo test --workspace                     # 1124 个测试，38 个套件
 cargo clippy --workspace --all-targets     # 零警告
 cargo doc --no-deps -p cpp_code_analysis   # 零警告（cpp_parser 有历史链接问题，不管）
 cargo run -q -p cpp_parser --bin cpp_dump -- crates/cpp_parser/tests/real_world.cpp   # 必须 0 error
+cargo run -q -p cpp_code_analysis --example std_query                                 # 必须 9/9
 ```
 
 `rustfmt` **不是**门禁：这个仓库是手写格式（约 110 列），`cargo fmt` 会重排几千行。
@@ -1324,6 +1329,8 @@ windef.h:366      #include <winnt.h>   条件 Active    ← 第二次，被 visi
 **一轮 parser、一轮语义**（这个节奏是显式选的，见 `std-library.md` 的"判断点"）。理由：
 parser 的边际收益是"每轮 1–3 个文件"，连续磨十几轮会失去设计视角；语义那边每一步都要 parser 先把东西读下来。
 判据是**两个数字**都动：parser 轮看 `clean`，语义轮看查询的实测（能不能答、多少毫秒）。
+**第三条线从这一轮起是语言服务器**（`crates/cpp_ls`）：它已经有壳、有端到端测试，加一个能力比修一条语法便宜得多，
+而且它会把 parser 的问题**以用户能看见的方式**顶出来（第一条就是 B119：少一个 `;` 时一个波浪线都没有）。
 
 **一轮的配方**（照抄即可）：
 
@@ -1334,6 +1341,25 @@ parser 的边际收益是"每轮 1–3 个文件"，连续磨十几轮会失去�
 5. 三份文档各写一处：`grammar-gaps.md` 的条目与约定、`std-library.md` 的数字与队列、
    `index-design.md` 的查询清单与"答不了什么"表；
 6. 门禁四条全绿再收工。
+
+### 4.1 语言服务器这条线的队列（`crates/cpp_ls`）
+
+顺序按"用户看得见多少"排，每条的形状都是**三处编辑**（模块、派发行、能力行——`ls-architecture.md` §6）：
+
+```text
+① 语义诊断：未解析的 include、宏用错形态、`Session::pending() == 0` 仍查不到的名字
+   —— 引擎侧的原料已经有了（`SummaryStore` 的 `UnresolvedEdge`、`Known::Unknown`），缺的是"什么时候敢说"
+   注意：`pending() > 0` 时不许报"名字不存在"（§5 那条约定）
+② document_symbol：我们的 CST 便宜，符号树是现成的（`sema/scopes.rs` 的 `ScopeTree`）
+③ completion：`member_completions` / `name_completions` 已经能用，缺的是 LSP 的 `CompletionItem` 映射与
+   `textEdit`（补全要替换掉光标前的那个词，`NameCompletions` 里有 `prefix`/`range` 吗——先查）
+④ references / rename：`macro_references` 是第一个现成的（含预算与不确定计数）；名字的引用要先有作用域索引
+⑤ 多根工作区、工程配置文件（`.cppls.toml`）、非 UTF-8 文件：缺口表里的其余几行
+```
+
+**这条线的纪律**（与 parser 那边不同，容易忘）：能力落地那天必须有**端到端**测试（`tests/handshake.rs` 那种
+真进程、真 stdio），因为单元测试证明不了"客户端能拿到"；而"引擎答不出来时回 `null` 并记一行日志"是硬约束
+（`Known` 三态存在的理由），不许编空答案。
 
 ---
 
@@ -1402,7 +1428,10 @@ parser 的边际收益是"每轮 1–3 个文件"，连续磨十几轮会失去�
    −37 个变脏）。
 4. **其余语义边界**：类类型下标、模板实参成员、`auto` 返回、`using Base::f;`、运算符重载——`index-design.md`
    末尾那张表就是队列；**`__has_include`**（47 处）接进求值器也在这一档。
-5. **LSP 二进制**最后（客户端会通知我们，见 §3.6）。
+5. **语言服务器**：**壳已经落地**（`crates/cpp_ls`：诊断 + definition + hover，`tests/handshake.rs` 端到端），
+   所以它不再是"最后做"，而是与上面四项**交替**的一条线——队列在 §4.1。
+6. **B119（该报错却没报）**：接客户端时暴露的第一条 parser 侧问题，`grammar-gaps.md` 里有成因与做法；
+   它改的是**诊断口径**（`CppParseError` 是普查的口径），所以要单独一轮、两份读数一起记。
 
 
 

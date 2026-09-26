@@ -104,6 +104,26 @@ impl LineIndex {
         }
     }
 
+    /// The line and column of a byte offset given as a plain `usize` — the same answer as
+    /// [`LineIndex::get_line_col`], for a caller that never sees a [`TextSize`].
+    ///
+    /// Every layer above this one spells an offset as a `usize`: [`crate::SourceRange`] is two of them, a parse
+    /// error is one ([`crate::CppParseError::offsets`]), and a language server's positions are line and column
+    /// numbers rather than a rowan type. This is the single conversion point, which is why it exists instead of a
+    /// `TextSize` import wherever a diagnostic is turned into a protocol range.
+    ///
+    /// An offset past the end of the text answers `None`. The alternative — the last line's column, which is what
+    /// the line lookup alone would give — is a *plausible* position for an offset that is not in the file, and a
+    /// caller that got one would build a range pointing at code the offset never named. The end of the text is
+    /// itself a valid offset: it is where a zero-width range at EOF sits.
+    pub fn position_of(&self, offset: usize, source_text: &str) -> Option<(usize, usize)> {
+        if offset > source_text.len() {
+            return None;
+        }
+
+        self.get_line_col(TextSize::from(u32::try_from(offset).ok()?), source_text)
+    }
+
     // get offset by line and col
     pub fn get_offset(&self, line: usize, col: usize, source_text: &str) -> Option<TextSize> {
         let start_offset = self.get_line_offset(line)?;

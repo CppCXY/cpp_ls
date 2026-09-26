@@ -6,7 +6,7 @@
 //! - external cancellation / replaced by latest-wins → `Cancelled(Client)`
 
 use super::{AnalysisState, RequestManager};
-use emmylua_code_analysis::EmmyLuaAnalysis;
+use cpp_code_analysis::{DiskFiles, Session};
 use tokio_util::sync::CancellationToken;
 
 /// Cancellation source.
@@ -44,7 +44,7 @@ pub async fn analysis_query<T, F>(
 ) -> RequestOutcome<T>
 where
     T: Send + Sync + 'static,
-    F: FnOnce(&EmmyLuaAnalysis) -> Option<T> + Send + 'static,
+    F: FnOnce(&Session<DiskFiles>) -> Option<T> + Send + 'static,
 {
     if let Some(token) = &cancel_token {
         request_manager.begin(key, token.clone()).await;
@@ -83,7 +83,7 @@ pub async fn snapshot_query<T, F>(
 ) -> RequestOutcome<T>
 where
     T: Send + Sync + 'static,
-    F: FnOnce(&EmmyLuaAnalysis) -> Option<T> + Send + 'static,
+    F: FnOnce(&Session<DiskFiles>) -> Option<T> + Send + 'static,
 {
     if cancel_token.is_cancelled() {
         return RequestOutcome::Cancelled(CancelSource::Client);

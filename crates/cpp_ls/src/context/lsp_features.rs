@@ -14,23 +14,20 @@ impl LspFeatures {
     }
 
     pub fn supports_multiline_tokens(&self) -> bool {
-        if let Some(semantic) = &self.client_capabilities.text_document {
-            if let Some(semantic) = &semantic.semantic_tokens {
-                if let Some(supports) = semantic.multiline_token_support {
-                    return supports;
-                }
-            }
-        }
-        false
+        self.client_capabilities
+            .text_document
+            .as_ref()
+            .and_then(|text_document| text_document.semantic_tokens.as_ref())
+            .and_then(|semantic_tokens| semantic_tokens.multiline_token_support)
+            .unwrap_or_default()
     }
 
     pub fn supports_config_request(&self) -> bool {
-        if let Some(workspace) = &self.client_capabilities.workspace {
-            if let Some(supports) = workspace.configuration {
-                return supports;
-            }
-        }
-        false
+        self.client_capabilities
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.configuration)
+            .unwrap_or_default()
     }
 
     pub fn supports_work_done_progress(&self) -> bool {
@@ -53,14 +50,12 @@ impl LspFeatures {
     }
 
     pub fn supports_refresh_diagnostic(&self) -> bool {
-        if let Some(workspace) = &self.client_capabilities.workspace {
-            if let Some(diagnostic) = &workspace.diagnostics {
-                if let Some(supports) = diagnostic.refresh_support {
-                    return supports;
-                }
-            }
-        }
-        false
+        self.client_capabilities
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.diagnostics.as_ref())
+            .and_then(|diagnostic| diagnostic.refresh_support)
+            .unwrap_or_default()
     }
 
     pub fn supports_dynamic_watched_files_registration(&self) -> bool {

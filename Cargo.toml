@@ -4,6 +4,10 @@ members = [
     "crates/*",
 ]
 
+# Every entry here is used by at least one crate. The table was inherited from the Lua project this server's shell
+# came from and carried twenty crates nothing referenced (`notify`, `walkdir`, `dirs`, `tera`, `schemars`,
+# `internment`, `toml_edit`, …); they are gone, and an entry that no `Cargo.toml` names is a dependency a reader
+# has to check rather than trust. See `docs/ls-architecture.md` §5.
 [workspace.dependencies]
 # local
 cpp_parser = { path = "crates/cpp_parser" }
@@ -11,37 +15,19 @@ cpp_code_analysis = { path = "crates/cpp_code_analysis" }
 
 # external
 lsp-server = "0.10.0"
+lsp_types = { version = "0.1.0", package = "emmy_lsp_types" }
 tokio = { version = "1.53", features = ["full"] }
+tokio-util = "0.7.19"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 rowan = { version = "0.17.0" }
-notify = { version = "8.2.0", features = ["serde"] }
-lsp_types = { version = "0.1.0", package = "emmy_lsp_types" }
-schemars = "1.2.2"
-regex = "1"
-internment = { version = "0.8.6", features = ["arc"] }
-rust-i18n = "3"
+glob = "0.3"
+percent-encoding = "2.3"
 log = "0.4.33"
 fern = "0.7.1"
 chrono = "0.4.45"
-tokio-util = "0.7.19"
-walkdir = "2.5.0"
-serde_yaml_ng = "0.10"
-dirs = "6"
-wax = "0.6.0"
-percent-encoding = "2.3"
-flagset = "0.4.7"
-encoding_rs = "0.8"
-url = "2.5.7"
-smol_str = "0.3.6"
-tera = "1.20.1"
-serde_with = "3.12.0"
-proc-macro2 = "1.0"
-syn = "2.0"
-quote = "1.0"
-glob = "0.3"
-include_dir = "0.7.4"
-toml_edit = "0.22.23"
-itertools = "0.14.0"
 clap = { version = "4.6.1", features = ["derive", "wrap_help"] }
+# The parser's own error messages are localized (`t!` in its grammar rules); this is the parser's dependency and
+# not the server's.
+rust-i18n = "3"
 unicode-ident = "1.0.26"

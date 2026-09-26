@@ -4,11 +4,12 @@
 继承下来的骨架，哪些层是我们的、哪些层是抄来的、每个接缝的契约是什么、以及**接下来要按什么顺序把它接上
 `cpp_parser` / `cpp_code_analysis`**。
 
-> 现状（一次大清理之后）：`src/` 从 **169 个 .rs 文件**删到 **49 个**，其中**还引用 `emmylua_*` 的只剩 16 个**
-> （`context/` 5 个、`handlers/` 10 个、`util/uri.rs` 只在注释里提了一句），逐个列在 §5 的表里。
-> **现在还不能编译**——这是有意的：先把架构留下，再把引擎换掉。`cargo build -p cpp_ls` 已经能读到 manifest
-> 与全部模块，剩下的错集中在两类：**未解析的 `emmylua_*` crate** 与**仍然引用旧依赖（`dirs`）的地方**；
-> 把 §5 的 1–5 做完这两类就都消失了。
+> 现状（**这个壳已经能跑**）：`src/` 从 **169 个 .rs 文件**删到 **47 个**（`bin` 1、`server` 6、`context` 13、
+> `handlers` 18、`logger` 2、`util` 5，加上 `cmd_args.rs` 与 `lib.rs`），engine 引用清零，
+> `cargo build -p cpp_ls` 与 `cargo clippy --workspace --all-targets` 都是零警告；
+> `crates/cpp_ls/tests/handshake.rs` 用一个**真的客户端**跑完 `initialize → initialized → didOpen →
+> publishDiagnostics → definition → hover → shutdown/exit`（0.6 秒，见 §5 末尾）。
+> 手上有三个能力：**诊断（push + pull）**、**definition**、**hover**；再往上加一个能力是 §6 第 2 条的三处编辑。
 
 ---
 
@@ -84,12 +85,12 @@ rename / references / code_action / inlay_hint / …）回来时的形状是**�
 | `ClientProxy` | 唯一的出口：`send_response` / `send_notification` / `send_request`（配置要问客户端） | **无**（纯 LSP） |
 | `ClientId` | 是哪个编辑器（vscode/neovim/…），决定配置问不问 | **无** |
 | `LspFeatures` | 客户端能力的**布尔目录**（pull 诊断？动态注册？work-done 进度？） | **无** |
-| `AnalysisState` | 分析会话 + 读写锁 + 阻塞池 | **换引擎**（`EmmyLuaAnalysis` → `cpp_code_analysis::Session`） |
-| `WorkspaceManager` | 工作区根、打开的文件、watch 匹配、客户端配置 | 半换（`Emmyrc`/`WorkspaceFolder` → 我们的配置） |
-| `DiagnosticService` | push 模式的诊断调度（`publishDiagnostics`）与去重 | 半换（诊断来源换成 `FileView::errors()`） |
+| `AnalysisState` | 分析会话 + 读写锁 + 阻塞池 + **索引泵的唤醒信号** | `cpp_code_analysis::Session<DiskFiles>`（§3） |
+| `WorkspaceManager` | 工作区根、打开的文件、`compile_commands.json` 变更后的重载（防抖 + 代次） | 我们的 `WatchFilter`/`PathPattern` |
+| `DiagnosticService` | push 模式诊断的调度：每文件防抖 + 全工作区一遍 | 诊断来源 = `FileView::errors()` |
 | `StatusBar` | `$/progress` 的进度任务（加载工作区、索引） | **无**（纯 LSP） |
-| `RequestManager`（pull_cache） | 同 key 请求串行化 + latest-wins 取消 | **无** |
-| `update_queue` | **一个** worker 串行消费 `DidOpen/DidChange/DidClose/Watched/Rename` | **无**（见下） |
+| `RequestManager`（pull_cache） | 同 key 请求串行化 + latest-wins 取消（现在用在 pull 诊断上） | **无** |
+| `update_queue` | **一个** worker 串行消费 `Opened/Changed/Saved/Closed/WatchedFilesChanged` | **无**（见下） |
 | `ServerContext::task` / `cancel` | 每个请求一个 `CancellationToken`，`$/cancelRequest` 取消它 | **无** |
 
 **`update_queue` 是这套架构里最值得保留的一件事**：协议允许客户端把 `didChange` 连续推过来，而任何分析引擎
@@ -97,6 +98,13 @@ rename / references / code_action / inlay_hint / …）回来时的形状是**�
 `workspace.sync_open_file` → `analysis.update(…)` → 排诊断任务。我们的 `Session` 恰恰是 `&mut self` 的**单写者**
 模型（`did_open` / `did_change` / `did_close` / `changed` / `advance`），所以这条队列与它是**天然吻合**的，
 不需要改架构。
+
+**索引泵**（`handlers/initialized/mod.rs` 的 `index_in_background`）是同一件事的另一半：引擎**故意**不带线程、
+不带调度——`Session::did_change` 把失效的摘要**丢掉并入队**，然后在下一个 `advance` 里重读（"查询在它被重读
+之前必须回答'还没读'，而不是拿用户已经改过的文本作答"）。所以"谁来一直调用 `advance`"是**服务器**的事：
+一个任务不停地 `advance(16)`，队列空了就等 `AnalysisState::wake()`（编辑、关闭、客户端文件事件都会唤醒它），
+一秒一次的兜底超时只是保险。没有这个泵，用户一打字，那个文件的摘要就永久消失——这正是 handshake 测试第一次
+跑出来的 bug（见 §5）。
 
 ---
 
@@ -116,13 +124,18 @@ rename / references / code_action / inlay_hint / …）回来时的形状是**�
 
 编辑（push）
   client ──"textDocument/didChange"──> on_did_change_text_document   ← **只入队**，不碰锁
-    └─ update_tx.send(UpdateEvent::DidChange(params))
+    └─ update_tx.send(UpdateEvent::Changed(params))
         └─ spawn_update_queue 的**唯一 worker**
             └─ process_did_change_text_document
                 ├─ workspace.sync_open_file(uri, text)
-                ├─ analysis.update(|session| session.did_change(path, text))   ← 写锁 + block_in_place
-                └─ 若客户端不支持 pull 诊断：file_diagnostic.add_diagnostic_task(path)
+                ├─ analysis.update_session(|session| session.did_change(path, text))  ← 写锁 + block_in_place
+                ├─ analysis.wake()                                    ← 叫醒索引泵：那份摘要刚被丢掉
+                └─ 若客户端不支持 pull 诊断：file_diagnostic.add_diagnostic_task(path, 500ms)
                       └─ 诊断算好后 ClientProxy::send_notification("textDocument/publishDiagnostics")
+
+索引泵（同一个 context，另一个任务）
+  循环：advance(16) → 队列空？→ 是：推第一遍全工作区诊断（只做一次），然后等 wake（兜底 1 秒）
+        └─ 工作区版本号变了（重载）：这个泵退出，新的泵接手
 ```
 
 **两条规则**（从 Lua 那边继承，也与我们引擎的假设一致）：
@@ -138,10 +151,11 @@ rename / references / code_action / inlay_hint / …）回来时的形状是**�
 `Session` 已经是**面向语言服务器**的：它自带增量队列、overlay（打开缓冲区优先于磁盘）、跨文件索引与光标查询。
 
 ```text
-Session::open(root, &SessionFiles, WatchFilter)   开项目：compile_commands.json → 发现工具链 → 扫描源文件
-session.documents() / did_open / did_change / did_save / did_close
-session.changed([FileEvent]) / respond(batch) / advance(steps) / index_everything() / is_idle()
-session.view(path) -> Option<FileView>            { path, source, tree, root, scopes, open }
+Session::open(root, SessionFiles<DiskFiles>, WatchFilter) -> Session<DiskFiles>   ← 拥有 provider，无生命周期
+session.did_open / did_change / did_save / did_close
+session.changed([FileEvent]) / respond(batch) / advance(steps) / index_everything() / pending() / is_idle()
+session.view(path) -> Option<FileView>            { path, source, tree, root, scopes, open: bool }
+session.text(path) -> Option<String>              只要文本不要解析（hover 显示别的文件里的声明用）
 view.errors() -> &[CppParseError]                 容错解析器的诊断（正在编辑的文件通常非空）
 session.definition(&view, offset) -> Known<ProjectDefinition>        { file: PathBuf, fact: DeclFact }
 session.macro_definition / macro_references / member_completions / name_completions / members_of
@@ -151,30 +165,41 @@ session.macro_definition / macro_references / member_completions / name_completi
 `RequestOutcome::{Ready, Missing, Cancelled}`：`Yes` → `Ready`，`No` → `Missing`，
 `Unknown` → `Missing`（并把 reason 记进日志，而不是编一个空答案给客户端）。
 
-### 唯一的生命周期难题（**先决定，再写代码**）
+### provider 的归属：**引擎改成拥有它**（这一节记的是结论，不是选项）
 
-`Session<'a, DiskFiles>` **借用** `&'a SessionFiles<DiskFiles>`（`OverlayFiles<OpenDocuments, DiskFiles>`），
-而 `OpenDocuments` 是 `Arc` 句柄、可以克隆：
+上一版 `Session` 是 `Session<'a, F>`，字段 `files: &'a SessionFiles<F>`，`SummaryStore` 也一样借用
+（`store: SummaryStore<'a, SessionFiles<F>>`）。于是"一个活到进程结束的服务器同时持有 provider 与借用它的
+session"就是自引用结构，当时的候选方案是 `Box::leak`。
 
-```rust
-// examples/open_project.rs 的写法
-let documents = OpenDocuments::new();
-let files = SessionFiles::new(documents.clone(), DiskFiles);   // ← 被 session 借用
-let mut session = Session::open(&root, &files, WatchFilter::new(&root));
+**这个方案被否掉了，改的是引擎**：`SummaryStore<F>` 与 `Session<F>` 现在**按值拥有** provider，
+`Session::open(root, files, filter)` 收的是 `SessionFiles<F>` 而不是 `&SessionFiles<F>`。理由不是"绕开借用检查"，
+而是**原来那个签名描述错了所有权**：provider 全是**句柄**而不是数据——
+
+```text
+OpenDocuments   Arc<RwLock<HashMap<String, String>>>   克隆 = 同一个 map 的第二个句柄
+DiskFiles       零大小类型                              克隆不复制任何东西
+OverlayFiles    两个句柄的组合                          Clone 派生，语义就是"同一批文件"
 ```
 
-一个活到进程结束的服务器要**同时**持有 `files` 和借用它的 `session`，这在安全 Rust 里是自引用结构。可选方案：
+所以 `SessionFiles` 的克隆**就是**"同一批文件的第二个 owner"，正好是编辑器需要的：会话读的时候，
+客户端还能往里写缓冲区。今天的形状是：
 
-| 方案 | 代价 | 建议 |
-|---|---|---|
-| `Box::leak(Box::new(files))` 拿 `&'static`，放进 `AnalysisState` 的字段 | 一个 provider 的内存**永不回收**（里面只有 Arc 与零状态，不含文本） | **先用这个**，在字段文档里写清为什么 |
-| 把 `Session` 的 `files` 换成 `Arc<SessionFiles<DiskFiles>>`（改 `cpp_code_analysis`） | 动的是引擎的签名，收益是消掉 leak | 若 §5 做完还想收尾，就做这个 |
-| `ouroboros`/`self_cell` 之类的自引用 crate | 新依赖 + 生命周期噪音 | 不建议 |
+```rust
+// context/analysis_state.rs
+struct AnalysisState { files: SessionFiles<DiskFiles>, inner: RwLock<Option<Session<DiskFiles>>>, … }
+
+state.files().overlay.open(path, text);        // 客户端写（会话通过同一个 map 读）
+state.open(root, filter).await;                // Session::open(root, files.clone(), filter)
+```
+
+调用侧的账也一起付了：`examples/` 与测试里 `Session::open(&root, &files, …)` 全改成传值（想留着 `files`
+自己用的地方 `files.clone()`），`Session<'_, DiskFiles>` 这种类型注解全部消失。引擎自己的测试
+（1091 → 1092）一个没少，读数不变（§5）。
 
 **`AnalysisState` 还要处理"还没有 session"**：`ServerContext::new` 发生在 `initialize`（此时不知道 root），
-真正的 `Session::open` 在 `initialized`（此时才知道 workspace folder）。所以引擎字段是
-`RwLock<Option<Session<'static, DiskFiles>>>`：没有 session 时所有查询回答 `Missing`——这正是它该说的话
-（"没人说过"，不是"没有"）。
+真正的 `Session::open` 在 `initialized`（此时才知道 workspace folder）。所以字段是
+`RwLock<Option<Session<DiskFiles>>>`：没有 session 时所有查询回答 `Missing`——这正是它该说的话
+（"没人说过"，不是"没有"）。`initialize` 与 `initialized` 之间到达的请求就落在这里，日志里会留一行。
 
 ---
 
@@ -182,58 +207,84 @@ let mut session = Session::open(&root, &files, WatchFilter::new(&root));
 
 ```text
 initialize        server/mod.rs：应答能力表（handlers::server_capabilities）——此时**没有**任何引擎
-initialized       handlers/initialized/mod.rs：
-  ① 工作区根（workspace_folders，退化用 root_uri）
-  ② 客户端配置（get_client_config：vscode 走文件、其他走 workspace/configuration 请求）
-  ③ AnalysisState::open(root, files, filter)   ← 工具链发现在这里（一次子进程，几十毫秒）
-  ④ status_bar 的 LoadWorkspace 进度 + 后台索引（Session::advance / index_everything）
-  ⑤ register_files_watch：把 watch 交给客户端（动态注册）或落到 notify
-之后              一切请求走 snapshot_query，一切编辑走 update_queue
-shutdown/exit     ServerContext::close()（停 watcher）→ 主循环退出
+                  handlers::initialized_handler 在同一个 spawn 里就跑起来了（Lua 骨架如此）：
+initialized       ① 工作区根（workspace_folders，退化用 root_uri）；多根只分析第一个，其余在日志里
+  ② client_id 与客户端配置（`cppls` section；VS Code 另外读 `files.exclude` 的 glob）
+  ③ AnalysisState::open(root, filter)   ← 工具链发现在这里（一次子进程，几十毫秒）
+  ④ 客户端已经打开的缓冲区再标一次（Session::did_open）——重启后未保存的内容因此不会丢
+  ⑤ 索引泵：advance(16) 直到队列空 → 推第一遍全工作区诊断（客户端不支持 pull 时）
+  ⑥ register_files_watch：把 watch glob 交给客户端（动态注册）；**没有** notify 兜底（见 §1 的 update_queue 旁注）
+之后              一切请求走 snapshot_query / analysis_query，一切编辑走 update_queue → wake 索引泵
+shutdown/exit     主循环退出 → ServerContext::close()（取消所有诊断与挂起的重载）→ 进程退出
+                  **不 join IO 线程**：读线程会一直阻塞在 stdin 直到客户端关管道，join 会让"客户端说了 exit"
+                  反而挂住（handshake 测试抓到的第二个 bug）
 ```
+
+`compile_commands.json` 变了（客户端通过 `workspace/didChangeWatchedFiles` 告诉我们）→ `WorkspaceManager`
+防抖 2 秒 → 清掉旧诊断 → **重走上面 ③–⑤ 一遍**（重载与首次打开是同一条代码路径，差别只是"之前有什么"），
+并用代次号保证两次重载不会都跑。客户端配置变了（`workspace/didChangeConfiguration`）走同一条重载。
 
 ---
 
-## 5. 这次清理做了什么 / 还剩什么
+## 5. 这一遍做了什么（**壳现在是活的**）
 
-### 删掉的（25 个目录/文件、110 个 .rs）
+### 引擎侧（`cpp_code_analysis` / `cpp_parser`）
 
-- **整棵 Lua 能力的 handler 树**：`completion`（含 `providers/` 与 `providers_legacy/` 两套共 30+ 文件）、
-  `semantic_token`、`code_actions`、`code_lens`、`command`（`emmy_*` 命令）、`call_hierarchy`、`fold_range`、
-  `rename`、`references`、`implementation`、`inlay_hint`、`inline_values`、`signature_helper`、`workspace_symbol`、
-  `document_*`（color/link/highlight/formatting/range_formatting/selection_range/symbol）、`hover/{desc,keyword_hover,render}`、
-  `definition/{goto_label,goto_module_file,goto_string}`、`diagnostic/workspace_diagnostic`、`common/`、`initialized/{locale,std_i18n}`、
-  `context/workspace_manager/tests.rs`。
-- **留下的**：`server/`（6）、`context/`（13）、`handlers/`（派发 3 + 文档生命周期 4 + 初始化 4 + 配置 1 +
-  工作区 2 + 能力模板 4）、`logger/`（2）、`util/`（4+1）、`cmd_args.rs`、`bin/`、`lib.rs` = **59 个**。
+| 改动 | 为什么 |
+|---|---|
+| `SummaryStore<'a, F>` / `Session<'a, F>` → `SummaryStore<F>` / `Session<F>`，provider **按值拥有** | §3：原来那个借用描述错了所有权，服务器没法持有；调用侧（examples/tests/`cpp_ls`）全部改成传值或 `clone()` |
+| `Session::text(path)` | hover/definition 要读**别的文件**的文本（显示声明、算名字所在行），不该为此解析一棵树 |
+| `FileView::position_at(offset)` + `LineIndex::position_of(offset, text)` + `CppParseError::offsets()` | 协议要 (line, column)，引擎给的是字节偏移；`TextSize` 是 rowan 的类型，转换点收敛到 `cpp_parser` 内部一处 |
+| `WatchFilter::ignore_pattern(PathPattern)`、`PathPattern`（新类型，`glob` 是私有依赖） | 客户端的 `exclude` 是 glob，不是目录；引擎原来的 `ignore(dir)` 表达不了。模式同时按**整条路径**和**相对根**匹配（`**/build/**` 与 `build/*.h` 两种写法都有人用）。解析失败由调用方报告（引擎不带 logger） |
+| `PathPattern` 的匹配规则：`*` 不跨分隔符，`**` 跨；大小写跟随文件系统 | glob 默认 `*` 跨 `/`，那会忽略比写出来的更多的东西 |
 
-### 还必须改的（**这就是"初始不能编译"的那份清单**，按依赖顺序）
+### 服务器侧（`cpp_ls`）
 
-| # | 文件 | 要做什么 |
+| # | 文件 | 做了什么 |
 |---|---|---|
-| 1 | `context/analysis_state.rs` | `EmmyLuaAnalysis` → `Session<'static, DiskFiles>`（§3 的 `Option` + leak 方案） |
-| 2 | `context/query_runner.rs` | `|&EmmyLuaAnalysis|` → `|&Session|`（`Known::Yes → Ready`，`No/Unknown → Missing`） |
-| 3 | `context/workspace_state.rs` | `Emmyrc`/`WorkspaceFolder`/`WorkspaceFileMatcher` → 我们的 `CompilerConfig` + `WatchFilter` + 一个 `uri_to_file_path` |
-| 4 | `context/workspace_manager.rs` | 同上；`sync_open_file` → `session.did_open/did_change`（或 `documents().open`） |
-| 5 | `context/diagnostic_service.rs` | 诊断来源换成 `session.view(path)?.errors()`；push/pull 两条路保留 |
-| 6 | `handlers/initialized/mod.rs` | 去掉 `Emmyrc`/std lib/`collect_workspace_files`，换成 `Session::open` + 索引进度 |
-| 7 | `handlers/configuration/mod.rs` | `ClientConfig` 保留，`add_reload_workspace_task` 换成"重读配置 + `session.config()` 更新" |
-| 8 | `handlers/text_document/{text_document_handler,watched_file_handler,register_file_watch}.rs` | 把 `analysis.update(…)` 换成 `session.did_*`；`WorkspaceFileMatcher` → 我们的过滤器 |
-| 9 | `handlers/workspace/did_rename_files.rs` | 同上（路径改名 → `session.changed([FileEvent::…])`） |
-| 10 | `handlers/{definition,hover,diagnostic}/` | 用 `Session::definition` / `FileView` / `errors()` 写实（现在还是 Lua 版） |
-| 11 | `lib.rs` + `Cargo.toml` | 去掉 `meta_text`、`rust-i18n`；补 `clap`/`mimalloc`（`lib.rs` 的 `i18n!` 也随之删） |
-| 12 | `util/` | 加一个 `uri_to_file_path`/`path_to_uri`（`percent-encoding` + `lsp_types::Uri`），一处实现 |
+| 1 | `context/analysis_state.rs` | `Session<DiskFiles>` + `OpenDocuments` 句柄；`open`（**替换**语义，重载走同一条路）、`run_blocking`/`query_blocking`、`update_session`、`wake`/`wait_for_work`（索引泵的信号）；窗口期内查询答 `Missing` |
+| 2 | `context/query_runner.rs` | 只把引擎类型换掉（`Known` → `RequestOutcome` 的映射在 handler 里） |
+| 3 | `context/workspace_state.rs` | 根目录（`PathBuf`）+ 打开的缓冲区 + 客户端配置；`contains` 直接用 `WatchFilter::is_ignored`，**"这文件是不是我们的"只有一个实现** |
+| 4 | `context/workspace_manager.rs` | `compile_commands.json` 变更 → 2 秒防抖（新事件**取消**旧的等待）→ 代次号保证只跑一次 → 重载 = 重走初始化 |
+| 5 | `context/diagnostic_service.rs` | 诊断 = `view.errors()`；每文件防抖 + 取消；全工作区一遍（带进度条、可取消）；**pull 与 push 两条路共用 `diagnose_file`** |
+| 6 | `handlers/initialized/mod.rs` | 打开会话、再标缓冲区、**索引泵**（编辑后继续读，见 §1）、第一遍全工作区诊断、日志 |
+| 7 | `handlers/configuration/mod.rs` | 重新问客户端配置，**相同就不重载** |
+| 8 | `handlers/text_document/*` | `didOpen/didChange/didSave/didClose` 只入队；worker 里 `session.did_*` + `wake` + 排诊断；watched files → `session.changed(…)`；watch 注册改成**纯客户端**（删掉 `notify` 依赖） |
+| 9 | `handlers/definition/mod.rs` | `Session::definition` + `DeclFact::name_range` → **真实 range**（名字那一段，不是文件开头） |
+| 10 | `handlers/hover/mod.rs` | 重写（原 Lua 版 85 KB 删掉）：宏优先 → 声明的**原文**+限定名+类型/返回值+基类+条件/恢复标记+所在位置；`Hover.range` 故意不填（见该文件文档） |
+| 11 | `handlers/diagnostic/*` | push/pull 共用 `diagnose_file`；pull 走 `analysis_query`（同 key latest-wins） |
+| 12 | `lib.rs` / `util/` | 去掉 `meta_text`、`rust-i18n`；新增 `util/position.rs`（UTF-16 列 ↔ 字符列 ↔ 字节偏移，唯一实现）；`util/uri.rs` 修了两个真 bug（少 `file://` 前缀、`file:///p` 被当成相对路径），UNC 也走通 |
+| 13 | 删掉 | `handlers/workspace/did_rename_files.rs`（Lua 的 `require` 改写，C++ 没有对应物）、`handlers/hover/build_hover.rs`、`server/mod.rs` 里的 `threads.join()` |
 
-### 接下来该按什么顺序做（建议）
+### 抓到并修掉的两个真 bug（handshake 测试的价值）
+
+1. **编辑后索引永久失效**：`Session::did_*` 故意只丢摘要+入队，而服务器只在启动时 `advance` 过一次——
+   用户一打字，那个文件就从索引里消失了，`definition`/`hover` 对它永远答 `null`。修法是索引泵（§1）。
+2. **`exit` 之后不退出**：`run_ls` 结尾 `threads.join()`，而 IO 读线程阻塞在 stdin 上——
+   客户端说了 `exit` 却不关管道时，服务器反而挂住。
+
+### 还剩什么（**不是待办清单，是缺口**）
+
+| 缺口 | 现在的行为 | 位置 |
+|---|---|---|
+| 语义诊断（未解析的 include、没人声明的名字） | 只报解析错误；语义诊断要等索引完整（`Session::pending` 是那条线） | `handlers/diagnostic` + `docs/roadmap.md` |
+| `document_symbol` / completion / references / rename | 没有能力行；引擎侧 `name_completions`/`member_completions`/`macro_references` 已经能用 | §6 第 2 条 |
+| 多根工作区 | 只分析第一个根，其余记一行日志 | `handlers/initialized` |
+| 工程配置文件（`.cppls.toml`） | 只读客户端的 `exclude`；不读自己的配置文件 | `client_config` |
+| 非 UTF-8 文件 | `DiskFiles` 按 UTF-8 读，非 UTF-8 的文件读不出来 → 答 `Missing` | 引擎 `paths.rs` |
+| 工作区级 pull 诊断 | 能力表里 `workspaceDiagnostics: false`（逐文件解析没有跨文件信息可加） | `handlers/diagnostic` |
+| 成员访问的 `definition` 之外的查询（如 `w.size` 的 references） | 引擎有 `members_of`/`member_completions`；references 只做了宏 | `docs/roadmap.md` |
+
+### 验收（这一遍跑过的门禁）
 
 ```text
-① 先让 §5 的 1–5 编译过（引擎接缝），哪怕 handler 全是 todo!()——**一个能跑的壳**比十个半成品模块值钱：
-   `cargo run -p cpp_ls` 能应答 initialize、能收 didOpen/didChange、能把解析错误当诊断推回去
-② 再做 definition（`Session::definition` 已经有了）+ hover（拿 `DeclFact` 的类型文本）
-③ 然后是 pull 诊断（`textDocument/diagnostic`）与 push 诊断的取舍：`LspFeatures` 已经把两个都考虑好了
-④ 之后按"值多少用户"排：document_symbol（我们的 CST 便宜）→ completion（`member_completions`/`name_completions`
-   已经有）→ references/rename（`macro_references` 是现成的第一个）
-⑤ parser/分析侧继续按 `docs/roadmap.md` 的队列推进（那边有它自己的门禁与普查）
+cargo test --workspace                                 1092 通过（引擎 1064 + cpp_ls 28）
+cargo test -p cpp_ls --test handshake                  1 通过（真进程、真 stdio、0.6 秒）
+cargo clippy --workspace --all-targets                 0 警告
+cargo doc --no-deps -p cpp_code_analysis               0 警告
+cargo run -q -p cpp_parser --bin cpp_dump -- …/real_world.cpp     0 错误
+cargo run -q -p cpp_code_analysis --example std_query  9/9
+census：seeded 455 / seeded 128 / unseeded 455         455/0/0、128/0/0、454/1（与改动前逐文件一致）
 ```
 
 ---
@@ -251,3 +302,9 @@ shutdown/exit     ServerContext::close()（停 watcher）→ 主循环退出
    并记一行日志；**不要**编一个空答案——那正是 `Known` 三态存在的理由。
 6. **删掉的 Lua 模块不是"待办"**：能力回来时按第 2 条重写，不要从 git 历史里整棵拷回来——那会把
    `emmylua_*` 的依赖一起带回来。
+7. **引擎不带的，服务器要带**：`Session` 没有线程、没有时钟、没有调度（这是它的设计），所以"谁一直调用
+   `advance`""谁防抖""谁定时"都是这一层的职责。今天三处：索引泵（`initialized`）、诊断防抖
+   （`DiagnosticService`）、配置重载防抖（`WorkspaceManager`）。**任何"改完引擎就完事"的想法都会漏掉它们。**
+8. **`AnalysisState::wake()` 要跟着"入队"走**：任何让 `session.did_*`/`changed` 入队的地方，后面都要有一句
+   `wake()`。漏了不会报错，只会让那个文件在索引里消失（这正是第一次端到端测试抓到的 bug）——
+   加新的编辑类通知时，把这一句当成契约的一部分。

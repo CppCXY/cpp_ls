@@ -78,7 +78,7 @@ fn main() {
 
     let documents = OpenDocuments::new();
     let files = SessionFiles::new(documents.clone(), DiskFiles);
-    let mut session = Session::open(&root, &files, WatchFilter::new(&root));
+    let mut session = Session::open(&root, files.clone(), WatchFilter::new(&root));
     session.did_open(&main_file, MAIN);
     session.index_everything();
 
@@ -564,7 +564,7 @@ fn names_asked(
 /// condition can use (`macro_value` in `condition.rs` refuses it for the same reason), so it is left out — and a
 /// `#define NAME` with *no* body is left out too, because `#if NAME` on it is a syntax error rather than a number.
 fn single_token_bodies(
-    session: &Session<'_, DiskFiles>,
+    session: &Session<DiskFiles>,
     files: &SessionFiles<DiskFiles>,
     builtins: &HashSet<String>,
 ) -> HashMap<String, String> {
@@ -608,7 +608,7 @@ fn single_token_bodies(
 ///
 /// The same move as discovering the include paths: ask the toolchain instead of guessing. It is what makes "is
 /// `_WIN32` defined?" answerable at all — the answer is not in any header.
-fn compiler_builtins(session: &Session<'_, DiskFiles>) -> HashSet<String> {
+fn compiler_builtins(session: &Session<DiskFiles>) -> HashSet<String> {
     use cpp_code_analysis::CommandRunner;
 
     let Some(toolchain) = session.toolchain() else {

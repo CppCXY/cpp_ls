@@ -56,7 +56,7 @@ pub use store::{
     IncludeBudget, IncludeIndex, NotIndexed, NotIndexedReason, StoreStats, SummaryStore,
     UnresolvedEdge,
 };
-pub use watch::{ChangeBatch, EventKind, FileEvent, Response, WatchFilter};
+pub use watch::{ChangeBatch, EventKind, FileEvent, PathPattern, Response, WatchFilter};
 pub use worklist::{Priority, Step, StepOutcome, Worklist, outcome_of};
 
 use crate::cache::{SummaryKey, content_hash};

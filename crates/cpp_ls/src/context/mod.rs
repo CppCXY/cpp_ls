@@ -14,12 +14,12 @@ mod workspace_state;
 pub use analysis_state::AnalysisState;
 pub use client::ClientProxy;
 pub use client_id::{ClientId, get_client_id};
-pub use diagnostic_service::DiagnosticService;
+pub use diagnostic_service::{DEFAULT_DIAGNOSTIC_INTERVAL, DiagnosticService};
 pub use lsp_features::LspFeatures;
 use lsp_server::{Connection, ErrorCode, RequestId, Response};
 use lsp_types::ClientCapabilities;
 pub use pull_cache::RequestManager;
-pub use query_runner::{CancelSource, RequestOutcome, analysis_query, snapshot_query};
+pub use query_runner::{RequestOutcome, analysis_query, snapshot_query};
 pub use snapshot::ServerContextSnapshot;
 pub use status_bar::ProgressTask;
 pub use status_bar::StatusBar;
@@ -27,7 +27,7 @@ use std::{collections::HashMap, future::Future, sync::Arc};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 pub use update_queue::{UpdateEvent, spawn_update_queue};
-pub use workspace_manager::*;
+pub use workspace_manager::WorkspaceManager;
 
 use crate::context::snapshot::ServerContextInner;
 use crate::util::catch_unwind;
@@ -53,9 +53,7 @@ impl ServerContext {
             client.clone(),
         ));
         let workspace_manager = Arc::new(Mutex::new(WorkspaceManager::new(
-            client.clone(),
             file_diagnostic.clone(),
-            lsp_features.clone(),
         )));
 
         let (update_tx, update_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -135,9 +133,14 @@ impl ServerContext {
         }
     }
 
+    /// Everything the workspace holds goes away: the pending diagnostics, the pending reloads, and the watcher
+    /// registration the client was given.
+    ///
+    /// The analysis session itself is left open, because a client that says goodbye and then keeps talking (a
+    /// restart in place) does not want its project re-read; a session is replaced by the next `initialized`.
     pub async fn close(&self) {
-        let mut workspace_manager = self.inner.workspace_manager.lock().await;
-        workspace_manager.watcher = None;
+        let workspace_manager = self.inner.workspace_manager.lock().await;
+        workspace_manager.clear_workspace().await;
     }
 
     pub async fn send_response(&self, response: Response) {

@@ -1,53 +1,153 @@
-#[cfg(all(test, feature = "slow-tests"))]
-mod tests;
+//! # WorkspaceManager — reloads, and the debounce in front of them
+//!
+//! One question, asked in two ways: **the project's build description changed, so what should be re-read?** For this
+//! server that description is `compile_commands.json` — the flags, the include paths, the file list — and it changes
+//! whenever a build system runs (`cmake`, a `configure`, a fresh `bear` trace). Those events arrive in bursts, so a
+//! reload is debounced: the newest event cancels the pending wait, and one reload runs after the burst.
+//!
+//! ```text
+//! the database changed ──▶ a 2 s quiet period ──▶ the workspace is re-opened
+//!                          (a newer event cancels this one's wait)
+//! ```
+//!
+//! A reload is: replace the session (the compiler is run again, the new flags are read, the summaries that have not
+//! changed are served from the cache), re-mark the open buffers, index, publish the diagnostics again. It is the
+//! same code path as the first `initialized` — `handlers::initialized::start_analysis` — because a reload and an
+//! open differ only in what was there before.
+//!
+//! # Why the state and the orchestration are separate types
+//!
+//! [`WorkspaceState`] is data: folders, buffers, the client's configuration. This type is what *changes* it, and it
+//! is deliberately the only writer — the lock order `docs/ls-architecture.md` §4 fixes is `workspace_manager`
+//! before `analysis`, and keeping the mutations here is what makes that rule checkable by reading one file.
 
-use std::collections::HashSet;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, Ordering};
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::time::Duration;
 
-use super::workspace_state::{OpenFilesSnapshot, WorkspaceState};
-use super::{AnalysisState, ClientProxy, DiagnosticService};
-use crate::context::ServerContextSnapshot;
-use crate::context::lsp_features::LspFeatures;
-use crate::handlers::{ClientConfig, init_analysis, register_files_watch};
-use emmylua_code_analysis::{
-    Emmyrc, WorkspaceFolder, load_configs, read_file_with_encoding, uri_to_file_path,
-};
-use lsp_types::Uri;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 
+use super::workspace_state::WorkspaceState;
+use super::{DiagnosticService, ServerContextSnapshot};
+use crate::handlers::ClientConfig;
+
+/// How long the events have to stop before a reload runs.
+///
+/// Two seconds because the events do not stop when a build system is done with the file: a `cmake` run writes it,
+/// then the editor's watcher reports it, then the build writes it again for the next target. A reload costs a
+/// compiler run and a re-read of the database, so waiting is cheap and reloading twice is not.
+const CONFIG_RELOAD_DELAY: Duration = Duration::from_secs(2);
+
 pub struct WorkspaceManager {
-    client: Arc<ClientProxy>,
     config_reload_token: Arc<PendingTask>,
     reload_lock: Arc<AsyncMutex<()>>,
     reload_generation: Arc<AtomicU64>,
     file_diagnostic: Arc<DiagnosticService>,
-    lsp_features: Arc<LspFeatures>,
-    pub state: WorkspaceState,
-    workspace_diagnostic_level: Arc<AtomicU8>,
+    /// Bumped whenever the workspace changes underneath the analysis, so a background pass can see that it has been
+    /// superseded and stop instead of writing into a workspace that no longer exists.
     workspace_version: Arc<AtomicI64>,
+    pub state: WorkspaceState,
 }
 
 impl WorkspaceManager {
-    pub fn new(
-        client: Arc<ClientProxy>,
-        file_diagnostic: Arc<DiagnosticService>,
-        lsp_features: Arc<LspFeatures>,
-    ) -> Self {
+    pub fn new(file_diagnostic: Arc<DiagnosticService>) -> Self {
         Self {
-            client,
             config_reload_token: Arc::new(PendingTask::default()),
             reload_lock: Arc::new(AsyncMutex::new(())),
             reload_generation: Arc::new(AtomicU64::new(0)),
             file_diagnostic,
-            lsp_features,
-            state: WorkspaceState::new(ClientConfig::default()),
-            workspace_diagnostic_level: Arc::new(AtomicU8::new(
-                WorkspaceDiagnosticLevel::Fast.to_u8(),
-            )),
             workspace_version: Arc::new(AtomicI64::new(0)),
+            state: WorkspaceState::new(ClientConfig::default()),
+        }
+    }
+
+    /// Open the workspace over the folders the client named.
+    pub fn set_roots(&mut self, roots: Vec<PathBuf>) {
+        if roots.len() > 1 {
+            log::warn!(
+                "{} workspace folders were opened; analysing the first one until multi-root is implemented",
+                roots.len()
+            );
+        }
+
+        self.state.set_roots(roots);
+    }
+
+    /// The root the analysis runs over.
+    pub fn root(&self) -> Option<&std::path::Path> {
+        self.state.root()
+    }
+
+    pub fn set_client_config(&mut self, client_config: ClientConfig) {
+        self.state.set_client_config(client_config);
+    }
+
+    /// A number that changes whenever the workspace does.
+    pub fn workspace_version(&self) -> i64 {
+        self.workspace_version.load(Ordering::Acquire)
+    }
+
+    /// Is this path the project's build description?
+    ///
+    /// The question is answered by the session's own filter (`WatchFilter::is_configuration`), so that "the
+    /// configuration file" means one thing in this server: the file the analysis reads to configure itself.
+    pub fn is_configuration_file(&self, path: &std::path::Path) -> bool {
+        self.state
+            .watch_filter()
+            .is_some_and(|filter| filter.is_configuration(path))
+    }
+
+    /// Schedule a reload because a configuration file changed, replacing any reload already pending.
+    pub async fn add_update_config_task(&self, context: ServerContextSnapshot, config_path: PathBuf) {
+        if !self.is_configuration_file(&config_path) {
+            return;
+        }
+
+        let (cancel_token, cancelled_existing) =
+            self.config_reload_token.replace(CONFIG_RELOAD_DELAY).await;
+        if cancelled_existing {
+            log::debug!("a reload was already pending; waiting for the events to stop");
+        }
+
+        let config_reload_token = self.config_reload_token.clone();
+        let handles = self.reload_task_handles();
+        tokio::spawn(async move {
+            cancel_token.wait().await;
+            if cancel_token.is_cancelled() {
+                // A newer event owns the wait now: it will see the newer database, so this one does nothing.
+                config_reload_token.clear(&cancel_token).await;
+                return;
+            }
+
+            log::info!("reloading the workspace: {} changed", config_path.display());
+            spawn_workspace_reload_task(handles, context);
+            config_reload_token.clear(&cancel_token).await;
+        });
+    }
+
+    /// Schedule a reload now — for a change of *folders*, which is not a debounced event.
+    pub fn add_reload_workspace_task(&self, context: ServerContextSnapshot) {
+        spawn_workspace_reload_task(self.reload_task_handles(), context);
+    }
+
+    /// Drop what belongs to the workspace being left behind, and mark the workspace as changed.
+    ///
+    /// The published diagnostics are cleared: a path in the old workspace may be a different file in the new one,
+    /// and a client that kept the old errors would show them against text nobody has parsed. The buffers stay —
+    /// they are the editor's, not the workspace's.
+    pub async fn clear_workspace(&self) {
+        self.file_diagnostic.cancel_all().await;
+        self.workspace_version.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn reload_task_handles(&self) -> ReloadTaskHandles {
+        ReloadTaskHandles {
+            reload_lock: self.reload_lock.clone(),
+            reload_generation: self.reload_generation.clone(),
+            workspace_version: self.workspace_version.clone(),
         }
     }
 }
@@ -66,212 +166,67 @@ impl DerefMut for WorkspaceManager {
     }
 }
 
-impl WorkspaceManager {
-    pub fn get_workspace_diagnostic_level(&self) -> WorkspaceDiagnosticLevel {
-        let value = self.workspace_diagnostic_level.load(Ordering::Acquire);
-        WorkspaceDiagnosticLevel::from_u8(value)
-    }
+/// What a reload needs to own while it runs, so the spawned task holds no borrow of the manager.
+#[derive(Clone)]
+struct ReloadTaskHandles {
+    reload_lock: Arc<AsyncMutex<()>>,
+    reload_generation: Arc<AtomicU64>,
+    workspace_version: Arc<AtomicI64>,
+}
 
-    pub fn update_workspace_version(&self, level: WorkspaceDiagnosticLevel, add_version: bool) {
-        self.workspace_diagnostic_level
-            .store(level.to_u8(), Ordering::Release);
-        if add_version {
-            self.workspace_version.fetch_add(1, Ordering::AcqRel);
-        }
-    }
+/// Reload the workspace, unless a newer reload has started while this one waited for the lock.
+///
+/// The generation counter is why this is not just a spawn: two reloads in a row must not both do their work — the
+/// later one's answer is the only true one, and the earlier would publish a state that no longer exists.
+fn spawn_workspace_reload_task(handles: ReloadTaskHandles, context: ServerContextSnapshot) {
+    let generation = handles.reload_generation.fetch_add(1, Ordering::AcqRel) + 1;
 
-    pub fn get_workspace_version(&self) -> i64 {
-        self.workspace_version.load(Ordering::Acquire)
-    }
-
-    pub async fn add_update_emmyrc_task(
-        &self,
-        context: ServerContextSnapshot,
-        config_path: PathBuf,
-    ) {
-        let Some(config_root) = self.config_root() else {
-            return;
-        };
-        if config_path.parent() != Some(config_root.as_path()) {
+    tokio::spawn(async move {
+        let _reload_guard = handles.reload_lock.lock().await;
+        if generation != handles.reload_generation.load(Ordering::Acquire) {
             return;
         }
 
-        let (cancel_token, cancelled_existing) =
-            self.config_reload_token.replace(CONFIG_RELOAD_DELAY).await;
-        if cancelled_existing {
-            log::debug!("cancel pending config reload: {:?}", config_path);
+        {
+            let workspace_manager = context.workspace_manager().lock().await;
+            workspace_manager.clear_workspace().await;
         }
 
-        let workspace_folders = self.workspace_folders.clone();
-        let client_config = self.client_config.clone();
-        let config_reload_token = self.config_reload_token.clone();
-        let reload_task_handles = self.reload_task_handles();
-        tokio::spawn(async move {
-            cancel_token.wait().await;
-            if cancel_token.is_cancelled() {
-                config_reload_token.clear(&cancel_token).await;
-                return;
-            }
+        // The same path as the first open: the compiler runs again, the new flags are read, the buffers are
+        // re-marked, the project is indexed, and the diagnostics are published again.
+        crate::handlers::start_analysis(context.clone()).await;
 
-            let emmyrc = load_emmy_config(Some(config_root), client_config);
-            spawn_workspace_reload_task(reload_task_handles, context, workspace_folders, emmyrc);
-            config_reload_token.clear(&cancel_token).await;
-        });
-    }
-
-    pub fn add_reload_workspace_task(&self, context: ServerContextSnapshot) {
-        let emmyrc = load_emmy_config(self.config_root(), self.client_config.clone());
-        spawn_workspace_reload_task(
-            self.reload_task_handles(),
-            context,
-            self.workspace_folders.clone(),
-            emmyrc,
-        );
-    }
-
-    // pub async fn reindex_workspace(&self, delay: Duration) {
-    //     log::info!("reindex workspace with delay: {:?}", delay);
-    //     let (cancel_token, cancelled_existing) = self.reindex_token.replace(delay).await;
-    //     if cancelled_existing {
-    //         log::info!("cancel reindex workspace");
-    //     }
-
-    //     let analysis = self.analysis.clone();
-    //     let client = self.client.clone();
-    //     let file_diagnostic = self.file_diagnostic.clone();
-    //     let lsp_features = self.lsp_features.clone();
-    //     let reindex_token = self.reindex_token.clone();
-    //     let workspace_diagnostic_level = self.workspace_diagnostic_level.clone();
-    //     tokio::spawn(async move {
-    //         cancel_token.wait().await;
-    //         if cancel_token.is_cancelled() {
-    //             reindex_token.clear(&cancel_token).await;
-    //             return;
-    //         }
-
-    //         // Perform reindex as a single serialized analysis update.
-    //         analysis
-    //             .update(|analysis| {
-    //                 // Clean up nonexistent files before reindexing.
-    //                 analysis.cleanup_nonexistent_files();
-    //                 analysis.reindex();
-    //             })
-    //             .await;
-
-    //         refresh_workspace_diagnostics(
-    //             file_diagnostic,
-    //             lsp_features,
-    //             client,
-    //             workspace_diagnostic_level,
-    //         )
-    //         .await;
-    //         reindex_token.clear(&cancel_token).await;
-    //     });
-    // }
-
-    fn reload_task_handles(&self) -> ReloadTaskHandles {
-        ReloadTaskHandles {
-            client: self.client.clone(),
-            file_diagnostic: self.file_diagnostic.clone(),
-            lsp_features: self.lsp_features.clone(),
-            reload_lock: self.reload_lock.clone(),
-            reload_generation: self.reload_generation.clone(),
-            workspace_diagnostic_level: self.workspace_diagnostic_level.clone(),
-        }
-    }
+        handles.workspace_version.fetch_add(1, Ordering::AcqRel);
+    });
 }
 
-const CONFIG_FILE_NAMES: [&str; 3] = [".luarc.json", ".emmyrc.json", ".emmyrc.lua"];
-const CONFIG_RELOAD_DELAY: Duration = Duration::from_secs(2);
-
-pub fn load_emmy_config(config_root: Option<PathBuf>, client_config: ClientConfig) -> Arc<Emmyrc> {
-    let mut config_files = Vec::new();
-
-    extend_config_files(&mut config_files, dirs::home_dir());
-    extend_config_files(
-        &mut config_files,
-        dirs::config_dir().map(|path| path.join("emmylua_ls")),
-    );
-
-    if let Ok(path) = std::env::var("EMMYLUALS_CONFIG") {
-        let path = PathBuf::from(path);
-        if path.exists() {
-            log::info!("load config from: {:?}", path);
-            config_files.push(path);
-        }
-    }
-
-    extend_config_files(&mut config_files, config_root.clone());
-
-    let mut emmyrc = load_configs(config_files, client_config.partial_emmyrcs.clone());
-    merge_client_config(client_config, &mut emmyrc);
-    if let Some(workspace_root) = &config_root {
-        emmyrc.pre_process_emmyrc(workspace_root);
-    }
-
-    log::info!("loaded emmyrc complete");
-    emmyrc.into()
-}
-
-fn merge_client_config(client_config: ClientConfig, emmyrc: &mut Emmyrc) -> Option<()> {
-    emmyrc.runtime.extensions.extend(client_config.extensions);
-    emmyrc.workspace.ignore_globs.extend(client_config.exclude);
-    if client_config.encoding != "utf-8" {
-        emmyrc.workspace.encoding = client_config.encoding;
-    }
-
-    Some(())
-}
-
-fn extend_config_files(config_files: &mut Vec<PathBuf>, dir: Option<PathBuf>) {
-    let Some(dir) = dir else {
-        return;
-    };
-
-    for file_name in CONFIG_FILE_NAMES {
-        let path = dir.join(file_name);
-        if path.exists() {
-            log::info!("load config from: {:?}", path);
-            config_files.push(path);
-        }
-    }
-}
-
+/// One pending reload. A newer event **cancels** it, and the newest event's wait is the one that ends in a reload.
 #[derive(Debug)]
 struct DebounceToken {
-    cancel_token: CancellationToken,
-    time_sleep: Duration,
-    need_re_sleep: AtomicBool,
+    cancelled: CancellationToken,
+    quiet: Duration,
 }
 
 impl DebounceToken {
-    fn new(time_sleep: Duration) -> Self {
+    fn new(quiet: Duration) -> Self {
         Self {
-            cancel_token: CancellationToken::new(),
-            time_sleep,
-            need_re_sleep: AtomicBool::new(false),
+            cancelled: CancellationToken::new(),
+            quiet,
         }
     }
 
+    /// Wait out the quiet period, or return as soon as this token is superseded.
     async fn wait(&self) {
-        loop {
-            tokio::select! {
-                _ = tokio::time::sleep(self.time_sleep) => {
-                    if !self.need_re_sleep.swap(false, Ordering::AcqRel) {
-                        break;
-                    }
-                }
-                _ = self.cancel_token.cancelled() => break,
-            }
-        }
+        let _ = tokio::time::timeout(self.quiet, self.cancelled.cancelled()).await;
     }
 
+    /// This token is superseded: the new event's wait replaces it, so this one must not reload.
     fn cancel(&self) {
-        self.cancel_token.cancel();
+        self.cancelled.cancel();
     }
 
     fn is_cancelled(&self) -> bool {
-        self.cancel_token.is_cancelled()
+        self.cancelled.is_cancelled()
     }
 }
 
@@ -281,244 +236,84 @@ struct PendingTask(AsyncMutex<Option<Arc<DebounceToken>>>);
 impl PendingTask {
     async fn replace(&self, delay: Duration) -> (Arc<DebounceToken>, bool) {
         let mut current = self.0.lock().await;
-        let had_existing_token = current.is_some();
+        let had_existing = current.is_some();
         if let Some(token) = current.as_ref() {
             token.cancel();
         }
 
         let next = Arc::new(DebounceToken::new(delay));
         current.replace(next.clone());
-        (next, had_existing_token)
+        (next, had_existing)
     }
 
-    async fn clear(&self, finished_token: &Arc<DebounceToken>) {
+    async fn clear(&self, finished: &Arc<DebounceToken>) {
         let mut current = self.0.lock().await;
         if current
             .as_ref()
-            .is_some_and(|token| Arc::ptr_eq(token, finished_token))
+            .is_some_and(|token| Arc::ptr_eq(token, finished))
         {
             current.take();
         }
     }
 }
 
-async fn refresh_workspace_diagnostics(
-    file_diagnostic: Arc<DiagnosticService>,
-    lsp_features: Arc<LspFeatures>,
-    client: Arc<ClientProxy>,
-    workspace_diagnostic_level: Arc<AtomicU8>,
-) {
-    file_diagnostic.cancel_workspace_diagnostic().await;
-    workspace_diagnostic_level.store(WorkspaceDiagnosticLevel::Fast.to_u8(), Ordering::Release);
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
 
-    if lsp_features.supports_workspace_diagnostic() {
-        client.refresh_workspace_diagnostics();
-    } else {
-        file_diagnostic
-            .add_workspace_diagnostic_task(500, true)
-            .await;
-    }
-}
+    use super::{DebounceToken, PendingTask};
 
-#[derive(Clone)]
-struct ReloadTaskHandles {
-    client: Arc<ClientProxy>,
-    file_diagnostic: Arc<DiagnosticService>,
-    lsp_features: Arc<LspFeatures>,
-    reload_lock: Arc<AsyncMutex<()>>,
-    reload_generation: Arc<AtomicU64>,
-    workspace_diagnostic_level: Arc<AtomicU8>,
-}
+    #[tokio::test]
+    async fn a_superseded_wait_ends_immediately_and_says_so() {
+        // The whole point of the debounce: the newest event's wait is the one that ends in a reload, and the one it
+        // replaced has to wake up and find out that it must not reload.
+        let pending = PendingTask::default();
+        let (first, _) = pending.replace(Duration::from_secs(60)).await;
 
-fn spawn_workspace_reload_task(
-    handles: ReloadTaskHandles,
-    context: ServerContextSnapshot,
-    workspace_folders: Vec<WorkspaceFolder>,
-    emmyrc: Arc<Emmyrc>,
-) {
-    let generation = handles.reload_generation.fetch_add(1, Ordering::AcqRel) + 1;
-    tokio::spawn(async move {
-        let _reload_guard = handles.reload_lock.lock().await;
-        if generation != handles.reload_generation.load(Ordering::Acquire) {
-            return;
-        }
+        let started = Instant::now();
+        let (second, replaced) = pending.replace(Duration::from_secs(60)).await;
+        first.wait().await;
 
-        apply_workspace_reload(context, workspace_folders, emmyrc).await;
-        if generation != handles.reload_generation.load(Ordering::Acquire) {
-            return;
-        }
-
-        refresh_workspace_diagnostics(
-            handles.file_diagnostic,
-            handles.lsp_features,
-            handles.client,
-            handles.workspace_diagnostic_level,
-        )
-        .await;
-    });
-}
-
-async fn apply_workspace_reload(
-    context: ServerContextSnapshot,
-    workspace_folders: Vec<WorkspaceFolder>,
-    emmyrc: Arc<Emmyrc>,
-) {
-    let open_files = {
-        let mut workspace_manager = context.workspace_manager().lock().await;
-        workspace_manager.update_match_state(emmyrc.as_ref());
-        workspace_manager.workspace_open_files_snapshot()
-    };
-
-    {
-        context
-            .analysis()
-            .update(|analysis| analysis.clear_non_std_workspaces())
-            .await;
+        assert!(replaced, "the caller is told that it superseded a wait");
+        assert!(
+            first.is_cancelled(),
+            "the superseded wait knows it must not reload"
+        );
+        assert!(!second.is_cancelled());
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
-    init_analysis(
-        context.analysis(),
-        context.status_bar(),
-        context.file_diagnostic(),
-        context.lsp_features(),
-        workspace_folders,
-        emmyrc,
-        open_files.files.clone(),
-    )
-    .await;
-    sync_reloaded_open_files(context.clone(), open_files).await;
+    #[tokio::test]
+    async fn an_unsuperseded_wait_finishes_after_its_quiet_period() {
+        let token = DebounceToken::new(Duration::from_millis(20));
+        let started = Instant::now();
 
-    register_files_watch(context).await;
-}
+        token.wait().await;
 
-async fn sync_reloaded_open_files(
-    context: ServerContextSnapshot,
-    mut applied_snapshot: OpenFilesSnapshot,
-) {
-    loop {
-        let snapshot_update = {
-            let workspace_manager = context.workspace_manager().lock().await;
-            let next_snapshot = workspace_manager.workspace_open_files_snapshot();
-            if next_snapshot.version == applied_snapshot.version {
-                None
-            } else {
-                let next_open_uris = next_snapshot
-                    .files
-                    .iter()
-                    .map(|(uri, _)| uri.clone())
-                    .collect::<HashSet<_>>();
-                let removed_actions = applied_snapshot
-                    .files
-                    .iter()
-                    .filter_map(|(uri, _)| {
-                        if next_open_uris.contains(uri) {
-                            return None;
-                        }
-
-                        if workspace_manager.is_workspace_file(uri)
-                            && let Some(path) = uri_to_file_path(uri)
-                            && path.exists()
-                        {
-                            return Some(OpenFileSyncAction::RestoreFromDisk(uri.clone(), path));
-                        }
-
-                        Some(OpenFileSyncAction::Remove(uri.clone()))
-                    })
-                    .collect::<Vec<_>>();
-                Some((next_snapshot, removed_actions))
-            }
-        };
-        let Some((next_snapshot, removed_actions)) = snapshot_update else {
-            return;
-        };
-
-        let removed_uris = apply_open_file_sync(
-            context.analysis(),
-            next_snapshot.files.clone(),
-            removed_actions,
-        )
-        .await;
-        if !context.lsp_features().supports_pull_diagnostic() {
-            for uri in removed_uris {
-                context.file_diagnostic().clear_push_file_diagnostics(uri);
-            }
-        }
-
-        applied_snapshot = next_snapshot;
-    }
-}
-
-async fn apply_open_file_sync(
-    analysis: &AnalysisState,
-    current_open_files: Vec<(Uri, String)>,
-    removed_actions: Vec<OpenFileSyncAction>,
-) -> Vec<Uri> {
-    if current_open_files.is_empty() && removed_actions.is_empty() {
-        return Vec::new();
+        assert!(!token.is_cancelled());
+        assert!(
+            started.elapsed() >= Duration::from_millis(20),
+            "the quiet period is what the reload waits for"
+        );
     }
 
-    let encoding = analysis
-        .with_snapshot(|analysis| analysis.get_emmyrc().workspace.encoding.clone())
-        .unwrap_or_default();
-    let mut updates = current_open_files
-        .into_iter()
-        .map(|(uri, text)| (uri, Some(text)))
-        .collect::<Vec<_>>();
-    let mut removed_uris = Vec::new();
+    #[tokio::test]
+    async fn clearing_a_stale_token_leaves_the_newer_one_pending() {
+        let pending = PendingTask::default();
+        let (first, _) = pending.replace(Duration::from_millis(1)).await;
+        let (second, _) = pending.replace(Duration::from_millis(1)).await;
+        assert!(!second.is_cancelled());
 
-    for action in removed_actions {
-        match action {
-            OpenFileSyncAction::RestoreFromDisk(uri, path) => {
-                if let Some(text) = read_file_with_encoding(&path, &encoding) {
-                    updates.push((uri, Some(text)));
-                } else {
-                    removed_uris.push(uri);
-                }
-            }
-            OpenFileSyncAction::Remove(uri) => {
-                removed_uris.push(uri);
-            }
-        }
+        // The superseded task finishes *after* the one that replaced it started: clearing must not take the newer
+        // wait away, or a reload would be dropped on the floor by the reload it replaced.
+        pending.clear(&first).await;
+
+        let (third, had_existing) = pending.replace(Duration::from_millis(1)).await;
+        assert!(
+            had_existing,
+            "the newer token was still pending, so replacing it found one"
+        );
+        assert!(second.is_cancelled(), "and it is the one that got cancelled");
+        assert!(!third.is_cancelled());
     }
-
-    analysis
-        .update(|analysis| {
-            for uri in &removed_uris {
-                analysis.remove_file_by_uri(uri);
-            }
-            if !updates.is_empty() {
-                analysis.update_files_by_uri(updates);
-            }
-        })
-        .await;
-
-    removed_uris
-}
-
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkspaceDiagnosticLevel {
-    None = 0,
-    Fast = 1,
-    Slow = 2,
-}
-
-impl WorkspaceDiagnosticLevel {
-    pub fn from_u8(value: u8) -> Self {
-        match value {
-            1 => Self::Fast,
-            2 => Self::Slow,
-            _ => Self::None,
-        }
-    }
-
-    pub fn to_u8(self) -> u8 {
-        self as u8
-    }
-}
-
-#[derive(Debug, Clone)]
-enum OpenFileSyncAction {
-    RestoreFromDisk(Uri, PathBuf),
-    Remove(Uri),
 }

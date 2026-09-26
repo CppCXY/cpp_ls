@@ -82,7 +82,8 @@ fn main() {
     let files = SessionFiles::new(documents.clone(), DiskFiles);
 
     let started = Instant::now();
-    let mut session = Session::open(&root, &files, WatchFilter::new(&root));
+    // The session owns its provider chain; this handle is the example's own, for the reads it does itself.
+    let mut session = Session::open(&root, files.clone(), WatchFilter::new(&root));
     let opened = started.elapsed();
     session.did_open(&main_file, MAIN);
 
@@ -395,7 +396,7 @@ fn main() {
 ///
 /// The intersection with "something defines it" is what makes the list *macros* rather than popular words.
 fn busiest_macros(
-    session: &Session<'_, DiskFiles>,
+    session: &Session<DiskFiles>,
     texts: &[(PathBuf, String)],
 ) -> Vec<(String, usize, usize)> {
     let mut definitions: HashMap<String, usize> = HashMap::new();
@@ -512,7 +513,7 @@ fn tokens_named(texts: &[&str], name: &str) -> usize {
 }
 
 /// The names with a definition whose conditional settles the name, sorted.
-fn settling_names(session: &Session<'_, DiskFiles>) -> Vec<String> {
+fn settling_names(session: &Session<DiskFiles>) -> Vec<String> {
     let mut names: Vec<String> = session
         .index()
         .summaries()

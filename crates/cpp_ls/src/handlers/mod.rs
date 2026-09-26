@@ -27,9 +27,10 @@ mod notification_handler;
 mod request_handler;
 mod response_handler;
 mod text_document;
-mod workspace;
 
-pub use initialized::{ClientConfig, initialized_handler};
+pub use diagnostic::diagnose_file;
+
+pub use initialized::{ClientConfig, initialized_handler, start_analysis};
 use lsp_types::{ClientCapabilities, ServerCapabilities};
 pub use notification_handler::on_notification_handler;
 pub use request_handler::on_request_handler;
@@ -37,9 +38,8 @@ pub use response_handler::on_response_handler;
 pub use text_document::register_files_watch;
 pub use text_document::{
     process_did_change_text_document, process_did_change_watched_files, process_did_close_document,
-    process_did_open_text_document,
+    process_did_open_text_document, process_did_save_text_document,
 };
-pub use workspace::process_did_rename_files_handler;
 
 /// What a module has to answer to be advertised in `initialize`.
 ///
@@ -73,8 +73,7 @@ macro_rules! capabilities {
 capabilities!(modules: {
     // The document lifecycle is not optional: without it no request ever has a file to answer about.
     text_document => TextDocumentCapabilities,
-    workspace => WorkspaceCapabilities,
-    // The four the C++ analysis can already answer, or is being built to answer first.
+    // The capabilities the C++ analysis can already answer, or is being built to answer first.
     definition => DefinitionCapabilities,
     hover => HoverCapabilities,
     diagnostic => DiagnosticCapabilities,

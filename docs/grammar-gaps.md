@@ -13,6 +13,7 @@
 
 | 条目 | 是什么 | 值多少 |
 |---|---|---|
+| **B119** | `return 1 }`：语句末尾少一个 `;` 时**树是对的、报错是空的**（`parse_return_statement` 发的是零宽 `MissingNode`，而它**有意**不记 `CppParseError`）——语言服务器的诊断就是 `view.errors()`，所以用户少打一个分号时一个波浪线都没有 | 每条语句都要，且这是打字过程中最常见的中间状态 |
 | **B42** | 函数定义里的 `try`（function-try-block）：`void f() try { } catch (…) { }` | 语料里 0 个文件 |
 | **B65** | 声明按分支各写一遍，每个分支自带尾巴和分号（第二支是**片段**） | 1 个文件（`parallel/algorithmfwd.h:700`） |
 | **B72**（剩） | `STDMETHOD(QueryInterface) (…) PURE;`：声明符的名字在**宏自己的实参**里 | 1 个文件（`commdlg.h:577`） |
@@ -29,6 +30,39 @@
 - **缺信息（missing information）**——从这段代码的 token 里无论怎么看都定不下来，需要跨编译单元的类型索引。这类是**刻意的取舍**，不是待办。
 
 每条都会标注属于哪一类。标了"取舍"的不要试图消灭它，那会走回 clang 的老路。
+
+### B119（新开的一条轴）：**该报错却没报**——`MissingNode` 是树里的话，不是客户端的话
+
+这一条不是"读不了"，是"读对了但没说"。它是接语言服务器时暴露出来的第一件事（`cpp_ls` 的端到端测试
+原来拿 `int g() { return 1 }` 当"一定有错"的素材，结果诊断列表是**空的**）：
+
+```text
+cpp_dump:  0 error
+树:        ReturnStat@10..19 { return, LiteralExpr(1) } → Token(RightBrace)@19..20
+编译器:    g++ 直接拒绝（expected `;` before `}`）
+```
+
+**成因**是 `parse_return_statement` 的最后一段：
+
+```rust
+if p.current_token() == CppTokenKind::Semicolon { p.bump(); } else { p.emit_missing_node(); }
+```
+
+`emit_missing_node` 的文档说得很清楚——零宽节点"让补全在坏掉的位置也能工作"——它是**树里的标记**；而
+`get_errors()`（也就是 `FileView::errors()`，也就是客户端的诊断列表）**只收 `CppParseError`**。于是同一件事
+在树里看得见、在协议上不存在。同一个文件里 `parse_expression_statement` 是**报错**的
+（`expected `;` after expression`），`parse_keyword_statement` 也是——所以这不是设计，是**三处不一致**。
+
+**它值多少**：用户把函数体写完但还没打最后那个分号时，今天客户端**什么都不显示**，打了分号才"突然好了"。
+语言服务器的诊断全部来自这个列表，所以这一类（"恢复成功但没报"）有多少，用户就瞎多少。
+
+**做法（便宜，但要一次决定）**：把"缺的是一个**终结符**"（语句末尾的 `;`、`)`、`}`）与"表达式读到一半"
+分开——前者在**语句/声明的收尾处**报一条 `CppParseError`（范围取当前 token 的起点，与
+`parse_keyword_statement` 同形），后者继续只发 `MissingNode`（那是"还在打字"，边界就在这里）。
+
+**要注意的第二件事**：`CppParseError` 是**普查的口径**（干净/报错），所以这一改语料读数会变——变的是
+"有多少文件会报一条我们以前不报的错"，**不是**"有多少文件读不下来"。改的时候两份数字必须分开说，
+`std_probe` 的"干净/报错"与"每文件错误数直方图"要一起看，并在 §0 记下新的 455/128 读数。
 
 ## 严重度分级
 

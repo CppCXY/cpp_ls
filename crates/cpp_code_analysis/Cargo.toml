@@ -5,3 +5,8 @@ edition = "2024"
 
 [dependencies]
 cpp_parser.workspace = true
+
+# `WatchFilter` ignores paths by *pattern* as well as by directory (`**/build/**`, `*.generated.h`): which trees a
+# project considers its own source is a convention no analysis can guess, so a caller says it — and a caller with a
+# configuration file has a glob in its hand, not a directory.
+glob.workspace = true

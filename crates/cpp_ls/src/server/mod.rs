@@ -44,7 +44,12 @@ pub async fn run_ls(cmd_args: CmdArgs) -> Result<(), Box<dyn Error + Sync + Send
     // Create async connection wrapper
     let async_connection = AsyncConnection::from_sync(connection);
     main_loop::main_loop(async_connection, initialization_params, cmd_args).await?;
-    threads.join()?;
+
+    // The I/O threads are deliberately **not** joined. They read and write the client's pipes, and the reader
+    // blocks until the client closes stdin — so joining here would make a clean shutdown (`shutdown`, then `exit`)
+    // hang until the client went away as well, which is the opposite of what `exit` asks for. Returning from `main`
+    // is what closes the pipes; nothing after this point can be waiting for a message.
+    drop(threads);
 
     eprintln!("Server shutting down.");
     Ok(())

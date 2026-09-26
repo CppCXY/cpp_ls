@@ -110,12 +110,12 @@ pub use toolchain::{
 pub use index::{
     ChangeBatch, EventKind, FileEvent, FileIndexer, FileReferences, IncludeBudget, IncludeIndex,
     IncludeVisibility, MacroReferences, MemberCompletions, MemberList, NameCompletions, NotIndexed,
-    NotIndexedReason, OfferedName, Priority, ProjectDefinition, ProjectIndex, ProjectMacro,
-    ProjectMember, Reference, ReferenceBudget, ReferenceKind, Rename, Response, Step, StepOutcome,
-    StoreStats, SummaryReadError, SummaryStore, UnlistedBase, UnresolvedEdge, VisibleDeclaration,
-    WatchFilter, Worklist, definition_across_files, macro_across_files, macro_references,
-    member_across_files, member_completions_at, members_of, name_completions_at, outcome_of,
-    read_summary, summarize, write_summary,
+    NotIndexedReason, OfferedName, PathPattern, Priority, ProjectDefinition, ProjectIndex,
+    ProjectMacro, ProjectMember, Reference, ReferenceBudget, ReferenceKind, Rename, Response, Step,
+    StepOutcome, StoreStats, SummaryReadError, SummaryStore, UnlistedBase, UnresolvedEdge,
+    VisibleDeclaration, WatchFilter, Worklist, definition_across_files, macro_across_files,
+    macro_references, member_across_files, member_completions_at, members_of, name_completions_at,
+    outcome_of, read_summary, summarize, write_summary,
 };
 pub use macros::{MacroBody, MacroDef, MacroTable, Parameter, ParameterKind};
 pub use module_info::{ImportDeclaration, ImportTarget, ModuleInfo, ModuleUnit};

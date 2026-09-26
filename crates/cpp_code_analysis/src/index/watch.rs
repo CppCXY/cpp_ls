@@ -159,9 +159,12 @@ impl FileEvent {
 /// something includes it. See [`SummaryStore::respond`].
 #[derive(Debug, Clone)]
 pub struct WatchFilter {
+    root: PathBuf,
     cache: PathBuf,
     configuration: PathBuf,
     ignored: Vec<PathBuf>,
+    /// Ignored by **pattern**, for the exclusions a caller has as a glob rather than as a directory.
+    ignored_patterns: Vec<PathPattern>,
 }
 
 impl WatchFilter {
@@ -170,9 +173,11 @@ impl WatchFilter {
         let root = root.as_ref();
 
         WatchFilter {
+            root: root.to_path_buf(),
             cache: root.join(crate::CACHE_DIRECTORY),
             configuration: root.join(COMPILE_DATABASE),
             ignored: Vec::new(),
+            ignored_patterns: Vec::new(),
         }
     }
 
@@ -182,6 +187,21 @@ impl WatchFilter {
     /// project is entitled to call its build tree `tmp`. So the caller says, and this layer does not invent.
     pub fn ignore(mut self, directory: impl Into<PathBuf>) -> Self {
         self.ignored.push(directory.into());
+        self
+    }
+
+    /// Ignore every path matching a pattern — `**/build/**`, `*.generated.h`, `third_party/**`.
+    ///
+    /// The other half of [`WatchFilter::ignore`], for the caller that has a *configuration file*: an editor's
+    /// `exclude` list is written as globs, and turning each one into a directory would be guessing. The pattern is
+    /// parsed by the caller ([`PathPattern`]), so a typo is reported where the user can see it rather than
+    /// swallowed here.
+    ///
+    /// A pattern is tried against the whole path **and** against the path relative to this filter's root, because
+    /// a settings file writes both: `**/build/**` names any `build` directory, and `build/*.h` names one from the
+    /// root.
+    pub fn ignore_pattern(mut self, pattern: PathPattern) -> Self {
+        self.ignored_patterns.push(pattern);
         self
     }
 
@@ -205,14 +225,102 @@ impl WatchFilter {
             return true;
         }
 
-        self.ignored
+        if self
+            .ignored
             .iter()
             .any(|directory| under(&path, &normalize(directory)))
+        {
+            return true;
+        }
+
+        if self.ignored_patterns.is_empty() {
+            return false;
+        }
+
+        // Two spellings, because a settings file uses both: `**/build/**` names a directory anywhere in the tree,
+        // and `build/*.h` names one from the project root. Matching only the whole path would silently ignore
+        // nothing for the second, which is the failure mode nobody notices.
+        let root = normalize(&self.root);
+        let relative = path.strip_prefix(&root).map(|rest| rest.trim_start_matches('/'));
+
+        self.ignored_patterns.iter().any(|pattern| {
+            pattern.matches(Path::new(&path))
+                || relative.is_some_and(|relative| pattern.matches(Path::new(relative)))
+        })
     }
 
     /// Is this path the compile database?
     pub fn is_configuration(&self, path: &Path) -> bool {
         normalize(path) == normalize(&self.configuration)
+    }
+}
+
+/// How an ignored-by-pattern path is matched.
+///
+/// `require_literal_separator` is the one that matters: with glob's default, `*` happily crosses a `/`, so
+/// `build/*` would ignore `build/generated/deep/file.cpp` — more than the pattern says, and an exclusion that
+/// silently swallows more than it names is the wrong way to be wrong. Here `*` stays inside one path segment and
+/// `**` is how a pattern reaches across them.
+///
+/// Case sensitivity follows the filesystem, which is the same rule [`FileProvider::is_case_insensitive`] states:
+/// `SPEED.H` and `speed.h` are one file on Windows and two on Linux, so an exclusion has to mean the same thing.
+const PATTERN_OPTIONS: glob::MatchOptions = glob::MatchOptions {
+    case_sensitive: !cfg!(windows),
+    require_literal_separator: true,
+    require_literal_leading_dot: false,
+};
+
+/// A path pattern, as a caller's configuration writes one: `**/build/**`, `*.generated.h`.
+///
+/// `glob` is the implementation rather than the API. This crate defines its own types at its boundary — a
+/// [`cpp_parser::SourceRange`] rather than rowan's range, a [`crate::FoundIn`] rather than a boolean pair — and a
+/// pattern is no different: a caller hands over the string a settings file held and gets back either a pattern or
+/// a sentence saying why it is not one. Reporting that sentence is the caller's job, because the layer with a user
+/// in front of it is the caller's (the same division `CompileCommands::malformed` makes).
+///
+/// What a pattern means here:
+///
+/// ```text
+/// build/*.h        the headers directly in `build` — `*` does not cross a separator
+/// **/build/**      every `build` directory at any depth, and everything under it
+/// *.generated.h    a file whose name ends that way, in any directory (`*` is name-only)
+/// ```
+///
+/// It is matched against a **normalized** path, so a pattern is written with `/` on every platform, and against
+/// both the whole path and the path as written from the project root (see [`WatchFilter::ignore_pattern`]).
+#[derive(Debug, Clone)]
+pub struct PathPattern(glob::Pattern);
+
+impl PathPattern {
+    /// Parse a pattern, or say what is wrong with it.
+    pub fn new(pattern: &str) -> Result<PathPattern, String> {
+        glob::Pattern::new(pattern)
+            .map(PathPattern)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Does this path match?
+    ///
+    /// The path is normalized the way resolution normalizes one (`\` and `/` are one separator, and case is folded
+    /// where the filesystem folds it), because a pattern from a settings file is written against paths as that
+    /// filesystem spells them.
+    pub fn matches(&self, path: &Path) -> bool {
+        let normalized = normalize(path);
+        self.0
+            .matches_path_with(Path::new(&normalized), PATTERN_OPTIONS)
+    }
+
+    /// The pattern as it was written.
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::str::FromStr for PathPattern {
+    type Err = String;
+
+    fn from_str(pattern: &str) -> Result<Self, Self::Err> {
+        PathPattern::new(pattern)
     }
 }
 
@@ -348,7 +456,7 @@ impl Response {
     }
 }
 
-impl<'a, F: FileProvider> SummaryStore<'a, F> {
+impl<F: FileProvider> SummaryStore<F> {
     /// What the index has to do about a batch of events.
     ///
     /// Three answers, and the reasoning for each is the module documentation:
@@ -603,7 +711,7 @@ fn normalize(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChangeBatch, EventKind, FileEvent, WatchFilter};
+    use super::{ChangeBatch, EventKind, FileEvent, PathPattern, WatchFilter};
     use crate::include::config::CompilerConfig;
     use crate::include::paths::{DiskFiles, MemoryFiles};
     use crate::index::store::SummaryStore;
@@ -612,6 +720,11 @@ mod tests {
     /// A batch over a filter with the cache and `.git` rules, and nothing else.
     fn batch(root: &str) -> ChangeBatch {
         ChangeBatch::new(WatchFilter::new(root))
+    }
+
+    /// A pattern the test wrote, which therefore parses.
+    fn pattern(text: &str) -> PathPattern {
+        PathPattern::new(text).expect("the test's own pattern is a pattern")
     }
 
     fn kinds(batch: &ChangeBatch) -> Vec<(String, EventKind)> {
@@ -663,6 +776,50 @@ mod tests {
 
         assert!(!batch.push(FileEvent::modified("/p/build/generated.h")));
         assert!(batch.push(FileEvent::modified("/p/src/generated.h")));
+    }
+
+    #[test]
+    fn a_pattern_the_caller_names_is_ignored() {
+        // An editor's exclusion list is globs, not directories: `**/build/**` is how a client says "every build
+        // tree, wherever it is", and a filter that only understood directories would index them all.
+        let mut batch = ChangeBatch::new(
+            WatchFilter::new("/p").ignore_pattern(pattern("**/build/**")),
+        );
+
+        assert!(!batch.push(FileEvent::modified("/p/build/generated.h")));
+        assert!(!batch.push(FileEvent::created("/p/sub/deep/build/generated.cpp")));
+        assert!(batch.push(FileEvent::modified("/p/src/generated.h")));
+        assert!(
+            batch.push(FileEvent::modified("/p/src/build.h")),
+            "a file that merely shares the name is not inside the ignored directory"
+        );
+    }
+
+    #[test]
+    fn a_star_stays_inside_one_directory_and_two_of_them_do_not() {
+        // The rule `PATTERN_OPTIONS` records: `build/*.h` is the headers directly in `build`, and reaching deeper
+        // takes `**`. A pattern that ignored more than it says would silently drop a project's sources.
+        let mut batch = ChangeBatch::new(
+            WatchFilter::new("/p")
+                .ignore_pattern(pattern("build/*.h"))
+                .ignore_pattern(pattern("gen/**/*.cpp")),
+        );
+
+        assert!(!batch.push(FileEvent::modified("/p/build/one.h")));
+        assert!(batch.push(FileEvent::modified("/p/build/deep/two.h")));
+        assert!(!batch.push(FileEvent::modified("/p/gen/a/b/three.cpp")));
+        assert!(!batch.push(FileEvent::modified("/p/gen/four.cpp")));
+    }
+
+    #[test]
+    fn a_pattern_that_is_not_one_says_so() {
+        // The typo in a client's settings is reported where the user can see it, which is why parsing is the
+        // caller's step rather than something a builder swallows.
+        let error = PathPattern::new("**/[unclosed").expect_err("an unclosed class is not a pattern");
+        assert!(
+            error.contains("Pattern syntax error"),
+            "the error should say what is wrong with the pattern, got {error:?}"
+        );
     }
 
     #[test]
@@ -771,14 +928,11 @@ mod tests {
     // paths it names. What happens when those paths are actually read is the next section's business.
     // -------------------------------------------------------------------------------------------
 
-    fn memory_store<'a>(
-        name: &str,
-        files: &'a MemoryFiles,
-    ) -> (SummaryStore<'a, MemoryFiles>, PathBuf) {
+    fn memory_store(name: &str, files: &MemoryFiles) -> (SummaryStore<MemoryFiles>, PathBuf) {
         let root = std::env::temp_dir().join("cppls-watch-tests").join(name);
         let _ = std::fs::remove_dir_all(&root);
 
-        let store = SummaryStore::with_provider(&root, CompilerConfig::default(), files);
+        let store = SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
         (store, root)
     }
 
@@ -955,7 +1109,7 @@ mod tests {
         let root = std::env::temp_dir().join("cppls-watch-tests").join("outranks");
         let _ = std::fs::remove_dir_all(&root);
 
-        let mut store = SummaryStore::with_provider(&root, config, &files);
+        let mut store = SummaryStore::with_provider(&root, config, files.clone());
         let held = store.get(Path::new("/p/a.cpp")).expect("the file reads").clone();
         assert_eq!(
             held.includes[0].resolved.as_deref(),
@@ -984,7 +1138,7 @@ mod tests {
         let root = std::env::temp_dir().join("cppls-watch-tests").join("loses");
         let _ = std::fs::remove_dir_all(&root);
 
-        let mut store = SummaryStore::with_provider(&root, config, &files);
+        let mut store = SummaryStore::with_provider(&root, config, files.clone());
         store.get(Path::new("/p/a.cpp")).expect("the file reads");
 
         let mut events = batch("/p");
@@ -1209,7 +1363,7 @@ mod tests {
             std::fs::remove_file(self.path(name)).expect("the fixture is removed");
         }
 
-        fn store(&self, config: CompilerConfig) -> SummaryStore<'static, DiskFiles> {
+        fn store(&self, config: CompilerConfig) -> SummaryStore<DiskFiles> {
             SummaryStore::open(&self.root, config)
         }
 
@@ -1227,7 +1381,7 @@ mod tests {
 
     /// Do the work a response asks for, the way a caller would: the named files are the seeds of a work list, and
     /// the work list follows their includes from there.
-    fn work(store: &mut SummaryStore<'_, DiskFiles>, seeds: &[PathBuf]) {
+    fn work(store: &mut SummaryStore<DiskFiles>, seeds: &[PathBuf]) {
         let mut list = store.worklist(seeds.to_vec(), Vec::new());
         while list.step().is_some() {}
     }

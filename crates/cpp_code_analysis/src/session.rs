@@ -12,24 +12,29 @@
 //! answer a question  parse the buffer the cursor is in, then ask the index about it
 //! ```
 //!
-//! # Why the caller owns the providers
+//! # Who owns the providers
 //!
-//! A [`Session`] reads through an [`OverlayFiles`] — the editor's open buffers in front of the filesystem — and
-//! borrows it, because a [`SummaryStore`] borrows the provider it was built over. That makes the borrow part of
-//! the API rather than an implementation detail, and the shape it forces is the right one:
+//! The session does. A [`Session`] reads through a [`SessionFiles`] — the editor's open buffers in front of the
+//! filesystem — and keeps it, together with the [`SummaryStore`] that reads through the same chain:
 //!
 //! ```text
 //! let documents = OpenDocuments::new();
 //! let files = SessionFiles::new(documents.clone(), DiskFiles);
-//! let mut session = Session::open(root, &files, WatchFilter::new(root));
+//! let mut session = Session::open(root, files, WatchFilter::new(root));
 //!
-//! documents.open(path, buffer_text);   // ← works while the session is alive
+//! documents.open(path, buffer_text);   // ← the handle is a second owner, not a borrow
 //! ```
 //!
-//! The handle is the point: an edit has to reach the analysis **while the store holds the provider**, and
-//! `OverlayFiles` is read through `&self` because its overlay has interior mutability. A session that owned its
-//! providers would be self-referential — the store borrowing a field of the struct it sits in — which Rust has no
-//! safe way to express and which is not worth an unsafe one.
+//! The clone on the second line is the whole of the arrangement, and it is not a trick: every provider in this
+//! crate is a **handle** rather than data — `OpenDocuments` is a map behind a lock that an `Arc` shares, `DiskFiles`
+//! is a unit struct — so the session's copy and the caller's copy read the same buffers and duplicate nothing. An
+//! edit reaches the analysis while the store reads through that chain, and no borrow is involved on either side:
+//! what the two owners share has interior mutability and both read it through `&self`.
+//!
+//! The version before this one *borrowed* the provider for the session's whole life, which forced every caller to
+//! declare a provider that outlived the session. A test can do that; a language server cannot, because it builds
+//! its session once when the workspace opens and keeps it until the editor exits — the borrow would have had to be
+//! leaked, or the session boxed behind a self-referential struct, to fit in a function that returns.
 //!
 //! # What it deliberately is not
 //!
@@ -129,7 +134,8 @@ pub type SessionFiles<F = DiskFiles> = OverlayFiles<OpenDocuments, F>;
 ///
 /// `OverlayFiles` is the *shape* — one provider in front of another — and it is generic over both halves. This is
 /// the front half an editor needs: a set of buffers that changes while the analysis reads through it, keyed by
-/// normalized path, and readable through `&self` because the store holds that borrow for as long as it lives.
+/// normalized path, and readable through `&self` because the handle is shared rather than borrowed — the session
+/// holds one, and every caller that kept this handle holds another.
 ///
 /// # What an open document means
 ///
@@ -142,9 +148,12 @@ pub type SessionFiles<F = DiskFiles> = OverlayFiles<OpenDocuments, F>;
 ///
 /// # Why a lock rather than `&mut self`
 ///
-/// Because the alternative is a session that cannot be edited. The store borrows the provider chain for its whole
-/// life, so a mutable borrow of the overlay could not be taken while it exists; interior mutability with a
-/// read-mostly lock is what lets `did_change` run between two queries. The lock is never held across one.
+/// Because two owners write here and they are not the same owner. A session writes through
+/// [`Session::did_open`], which holds `&mut Session` and is the editor's ordinary notification path; a caller that
+/// kept this handle writes without the session at all. An editor that had to borrow its session mutably to record
+/// one keystroke would serialise every request behind that keystroke. A read-mostly lock is what lets an edit land
+/// *between* two queries instead — this handle is written while a session reads through it. The lock is never held
+/// across one.
 #[derive(Debug, Clone, Default)]
 pub struct OpenDocuments {
     buffers: Arc<RwLock<HashMap<String, String>>>,
@@ -278,10 +287,28 @@ impl FileView {
             .get_offset(line, column, &self.source)
             .map(usize::from)
     }
+
+    /// A byte offset back to a **line and column**, both counted from zero — the inverse of
+    /// [`FileView::offset_at`], and the direction a diagnostic needs: the parser reports offsets and a client wants
+    /// a position.
+    ///
+    /// The line index is built per call for the same reason it is in `offset_at`: one call per request is what this
+    /// is for. A caller with a list of ranges to map (every diagnostic in a file) should build one itself —
+    /// `cpp_parser::LineIndex::parse` and `position_of` are the same two steps this does.
+    ///
+    /// A position past the end of the text answers `None` rather than clamping: an offset that is not in the file
+    /// is a caller's mistake, and a range built from a clamped one would point at the wrong code.
+    pub fn position_at(&self, offset: usize) -> Option<(usize, usize)> {
+        cpp_parser::LineIndex::parse(&self.source).position_of(offset, &self.source)
+    }
 }
 
 /// One open project: the configuration, the facts read so far, and the order the rest will be read in.
-pub struct Session<'a, F: FileProvider = DiskFiles> {
+///
+/// The provider chain is owned rather than borrowed, which is what lets a long-lived caller — a language server —
+/// hold a session in a field. See the module documentation: the caller keeps a handle to the same chain by cloning
+/// it before the session takes it, and a clone of a provider is a second handle on the same files.
+pub struct Session<F: FileProvider = DiskFiles> {
     root: PathBuf,
     config: CompilerConfig,
     /// What `discover` found, or `None` when no compiler answered. Kept for a human reading a log line, and for
@@ -290,11 +317,11 @@ pub struct Session<'a, F: FileProvider = DiskFiles> {
     /// The compile database the configuration came from, when there was one. Kept because it is the project's own
     /// answer to "how is this built", which a caller diagnosing a wrong analysis wants to see.
     database: Option<CompileCommands>,
-    /// The providers, borrowed. See the module documentation for why they are the caller's.
-    files: &'a SessionFiles<F>,
+    /// The providers. Owned; the store holds a second handle to the same chain.
+    files: SessionFiles<F>,
     /// The buffer half of `files`, as a handle this session can write through.
     documents: OpenDocuments,
-    store: SummaryStore<'a, SessionFiles<F>>,
+    store: SummaryStore<SessionFiles<F>>,
     /// Which paths the client's events and the project scan are about. Kept because both questions — "is this
     /// event interesting" and "is this file part of the project" — have one answer, and the cache directory is the
     /// case that makes that concrete: it is not project source and it is not an event anybody wants.
@@ -304,7 +331,7 @@ pub struct Session<'a, F: FileProvider = DiskFiles> {
     queue: Work,
 }
 
-impl<'a> Session<'a, DiskFiles> {
+impl Session<DiskFiles> {
     /// Open a project the way a language server does: ask the machine what it compiles with.
     ///
     /// The three steps, in the order their results depend on each other:
@@ -325,16 +352,16 @@ impl<'a> Session<'a, DiskFiles> {
     /// something to do before anything is opened.
     pub fn open(
         root: impl Into<PathBuf>,
-        files: &'a SessionFiles<DiskFiles>,
+        files: SessionFiles<DiskFiles>,
         filter: WatchFilter,
-    ) -> Session<'a, DiskFiles> {
+    ) -> Session<DiskFiles> {
         let root = root.into();
-        let database = read_compile_database(files, &root);
+        let database = read_compile_database(&files, &root);
         let base = base_config(database.as_ref());
         let for_file = first_compiled_file(database.as_ref()).unwrap_or_else(|| root.clone());
 
         let toolchain = toolchain::discover(
-            files,
+            &files,
             &DiskCommands,
             database.as_ref(),
             &for_file,
@@ -365,30 +392,30 @@ impl<'a> Session<'a, DiskFiles> {
     }
 }
 
-impl<'a, F: FileProvider> Session<'a, F> {
+impl<F: FileProvider + Clone> Session<F> {
     /// A session with the configuration the caller already has: no compile database is read and no compiler is run.
     ///
     /// The path for a caller that knows how the project is built — a test, a build-system integration — and the
     /// only one that works over a provider that is not the disk.
     pub fn with_config(
         root: impl Into<PathBuf>,
-        files: &'a SessionFiles<F>,
+        files: SessionFiles<F>,
         filter: WatchFilter,
         config: CompilerConfig,
-    ) -> Session<'a, F> {
+    ) -> Session<F> {
         Session::assemble(root.into(), files, filter, config, None, None)
     }
 
     fn assemble(
         root: PathBuf,
-        files: &'a SessionFiles<F>,
+        files: SessionFiles<F>,
         filter: WatchFilter,
         config: CompilerConfig,
         toolchain: Option<Toolchain>,
         database: Option<CompileCommands>,
-    ) -> Session<'a, F> {
+    ) -> Session<F> {
         let documents = files.overlay.clone();
-        let project = project_files(files, &filter, &root, database.as_ref());
+        let project = project_files(&files, &filter, &root, database.as_ref());
 
         // **Not** `database.is_some()`, and the measurement is why: with the environment declared complete, the
         // standard-library closure decides 440 of its 486 conditional includes instead of 85 (`condition_reach`),
@@ -399,7 +426,7 @@ impl<'a, F: FileProvider> Session<'a, F> {
         // visit, a claim this strong would turn honest doubt into a wrong answer, which is the one thing this layer
         // must not do.
         let configured = false;
-        let store = SummaryStore::with_provider(root.clone(), config.clone(), files).with_macros(
+        let store = SummaryStore::with_provider(root.clone(), config.clone(), files.clone()).with_macros(
             compilation_environment(&config, toolchain.as_ref(), configured),
         );
 
@@ -698,10 +725,7 @@ impl<'a, F: FileProvider> Session<'a, F> {
     pub fn view(&self, path: impl AsRef<Path>) -> Option<FileView> {
         let path = path.as_ref();
         let open = self.documents.is_open(path);
-        let source = match self.documents.text(path) {
-            Some(text) => text,
-            None => self.files.read(path)?,
-        };
+        let source = self.text(path)?;
 
         let tree = CppParser::parse(&source, ParserConfig::default());
         let root = tree.get_red_root();
@@ -715,6 +739,19 @@ impl<'a, F: FileProvider> Session<'a, F> {
             scopes,
             open,
         })
+    }
+
+    /// The text the analysis reads for a path — the buffer when it is open, the file otherwise.
+    ///
+    /// [`Session::view`] without the parse, for a consumer that wants the text rather than the tree: a hover that
+    /// shows a declaration the cursor is not in, a search over a file the index already holds. `None` when there is
+    /// neither a buffer nor a readable file.
+    pub fn text(&self, path: impl AsRef<Path>) -> Option<String> {
+        let path = path.as_ref();
+        match self.documents.text(path) {
+            Some(text) => Some(text),
+            None => self.files.read(path),
+        }
     }
 
     /// Which declaration the name at `offset` means, using this file's scopes and then the index.
@@ -759,7 +796,7 @@ impl<'a, F: FileProvider> Session<'a, F> {
 
         macro_references(
             self.store.index(),
-            self.files,
+            &self.files,
             &name,
             ReferenceBudget::default(),
         )
@@ -1143,9 +1180,9 @@ mod tests {
 
     /// A project in memory: the files, the buffers in front of them, and the providers that join the two.
     ///
-    /// A struct rather than a tuple because the providers have to *outlive* the session they are borrowed by —
-    /// which is the same ownership rule the module documentation describes for a real caller, so the fixture is
-    /// that rule made visible in a test.
+    /// The fixture keeps the providers and hands each session a **clone**, which is what a caller outside a test
+    /// does too — a provider is a handle, so the fixture's copy and the session's copy read the same files, and a
+    /// test can go on looking at what the analysis read while the session owns its own chain.
     struct Memory<'a> {
         files: &'a MemoryFiles,
         documents: OpenDocuments,
@@ -1169,10 +1206,10 @@ mod tests {
             }
         }
 
-        fn session(&self) -> Session<'_, MemoryFiles> {
+        fn session(&self) -> Session<MemoryFiles> {
             Session::with_config(
                 &self.root,
-                &self.providers,
+                self.providers.clone(),
                 WatchFilter::new(&self.root),
                 CompilerConfig::default(),
             )
@@ -1626,6 +1663,54 @@ mod tests {
         assert!(session.view("/p/not_there.cpp").is_none());
     }
 
+    #[test]
+    fn a_position_maps_back_onto_the_offset_it_came_from() {
+        // The direction a diagnostic needs: the parser reports byte offsets and a client wants a position. The two
+        // mappings have to agree, and the case that makes that worth a test is a line that is not ASCII — the
+        // column a client sends counts **characters**, so a one-byte-per-column round trip is the wrong answer the
+        // moment a line contains `é`.
+        let files = MemoryFiles::new()
+            .with_file("/p/a.cpp", "// é comment\nint x = 1;\n")
+            .with_file("/p/crlf.cpp", "int a;\r\nint b;\r\n");
+        let fixture = Memory::new("position", &files);
+        let session = fixture.session();
+
+        let view = session.view("/p/a.cpp").expect("the file reads");
+        let at = view.source.find("x = 1").expect("the statement is in the text");
+        assert_eq!(
+            view.position_at(at),
+            Some((1, 4)),
+            "the offset of `x` is line 1, column 4"
+        );
+
+        // The round trip in both directions, on the line with the two-byte character.
+        let (line, column) = view.position_at(at).expect("the offset is in the file");
+        assert_eq!(view.offset_at(line, column), Some(at));
+
+        let comment = view.source.find('é').expect("the character is in the text");
+        assert_eq!(
+            view.position_at(comment),
+            Some((0, 3)),
+            "a character counts as one column, whatever it costs in bytes"
+        );
+
+        // And a CRLF file is one line break, not two: the `\r` is part of line 0, so line 1 starts after it.
+        let crlf = session.view("/p/crlf.cpp").expect("the file reads");
+        let second = crlf.source.find("int b").expect("the second line is in the text");
+        assert_eq!(crlf.position_at(second), Some((1, 0)));
+        assert_eq!(
+            crlf.position_at(crlf.source.len()),
+            Some((2, 0)),
+            "the end of the text is a position: it is where a range at EOF sits"
+        );
+
+        assert_eq!(
+            crlf.position_at(crlf.source.len() + 1),
+            None,
+            "an offset past the end is not a position"
+        );
+    }
+
     // -------------------------------------------------------------------------------------------
     // Opening a project on disk
     // -------------------------------------------------------------------------------------------
@@ -1687,7 +1772,7 @@ mod tests {
 
         let session = Session::with_config(
             &project.root,
-            &providers,
+            providers.clone(),
             filter,
             CompilerConfig::default(),
         );
@@ -1726,7 +1811,7 @@ mod tests {
 
         let documents = OpenDocuments::new();
         let providers = SessionFiles::new(documents, DiskFiles);
-        let session = Session::open(&project.root, &providers, WatchFilter::new(&project.root));
+        let session = Session::open(&project.root, providers.clone(), WatchFilter::new(&project.root));
 
         let database = session.compile_database().expect("the database is read");
         assert_eq!(database.len(), 2);
@@ -1772,7 +1857,7 @@ mod tests {
 
         let documents = OpenDocuments::new();
         let providers = SessionFiles::new(documents, DiskFiles);
-        let mut session = Session::open(&project.root, &providers, WatchFilter::new(&project.root));
+        let mut session = Session::open(&project.root, providers.clone(), WatchFilter::new(&project.root));
 
         // Both files, because the closure of `main.cpp` is what the query walks.
         session.advance(64);

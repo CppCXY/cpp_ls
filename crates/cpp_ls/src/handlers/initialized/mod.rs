@@ -1,222 +1,279 @@
+//! # `initialized` — where the workspace becomes an analysis
+//!
+//! The handshake has two halves and they arrive at different times, which is why this module exists at all:
+//!
+//! ```text
+//! initialize    the client's capabilities and its clientInfo — the server, and nothing about a project
+//! initialized   the workspace folders — and *this* is what a session is opened over
+//! ```
+//!
+//! So the work here is the order the pieces depend on each other:
+//!
+//! ```text
+//! 1. roots            from the params, with `rootUri` as the fallback a client still sends
+//! 2. logger           needs a root, because the log lives under the workspace
+//! 3. client config    what the client says is not source (`workspace/configuration`)
+//! 4. the session      opened over the first root: the compiler is run, `compile_commands.json` is read
+//! 5. the buffers      a client restarting sends its open documents *after* this, but a reload has them already
+//! 6. indexing         in the background, so the first request is answered while the project is still being read
+//! 7. file watches     the globs the client should tell us about, registered dynamically
+//! 8. diagnostics      the first full pass, once the index holds something
+//! ```
+//!
+//! Steps 6 to 8 are what make this a *language server* rather than a query engine: the session is usable the moment
+//! step 4 returns, and everything after it makes the answers better without making the editor wait.
+
 mod client_config;
-mod locale;
-mod std_i18n;
 
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 
-use crate::{
-    cmd_args::CmdArgs,
-    context::{
-        AnalysisState, DiagnosticService, LspFeatures, ProgressTask, ServerContextSnapshot,
-        StatusBar, get_client_id, load_emmy_config,
-    },
-    handlers::{
-        initialized::std_i18n::try_generate_translated_std, text_document::register_files_watch,
-    },
-    logger::init_logger,
-};
-pub use client_config::{ClientConfig, get_client_config};
-use emmylua_code_analysis::{
-    Emmyrc, WorkspaceFolder, build_workspace_folders, collect_workspace_files, uri_to_file_path,
-};
 use lsp_types::InitializeParams;
+
+use crate::cmd_args::CmdArgs;
+use crate::context::{DiagnosticService, ProgressTask, ServerContextSnapshot, get_client_id};
+use crate::handlers::register_files_watch;
+use crate::logger::init_logger;
+use crate::util::uri_to_file_path;
+
+pub use client_config::{ClientConfig, get_client_config};
+
+/// How many files one background slice reads before it lets the runtime run something else.
+///
+/// A slice is a transaction against the analysis: it takes the write lock once and gives it back, so a query
+/// arriving mid-index waits for a slice and not for a project. Sixteen files is a few milliseconds of parsing
+/// (measured in `docs/index-design.md`) — short enough that a keystroke does not feel it, long enough that the
+/// indexing does not spend its time taking locks.
+const INDEX_SLICE: usize = 16;
+
+/// How long the pump sleeps when there is nothing to read, before looking again.
+///
+/// A safety net rather than the mechanism: an edit *wakes* the pump (`AnalysisState::wake`), and a wake-up that
+/// arrives while the pump is busy is remembered. This is the backstop for one arriving in the instant between the
+/// queue being found empty and the wait starting — one lock acquisition a second, against an index that would
+/// otherwise stay stale for the rest of the session if that ever happened.
+const IDLE_WAIT: std::time::Duration = std::time::Duration::from_millis(1000);
 
 pub async fn initialized_handler(
     context: ServerContextSnapshot,
     params: InitializeParams,
     cmd_args: CmdArgs,
 ) -> Option<()> {
-    // init locale
-    locale::set_ls_locale(&params);
-    let workspace_folders = get_workspace_folders(&params);
-    let main_root: Option<&str> = match workspace_folders.first() {
-        Some(path) => path.root.to_str(),
-        None => None,
-    };
+    let roots = workspace_roots(&params);
+    init_logger(roots.first().and_then(|root| root.to_str()), &cmd_args);
 
-    // init logger
-    init_logger(main_root, &cmd_args);
-    log::info!("main root: {:?}", main_root);
-
-    let client_id = if let Some(editor) = &cmd_args.editor {
-        editor.clone().into()
-    } else {
-        get_client_id(&params.client_info)
+    let client_id = match &cmd_args.editor {
+        Some(editor) => editor.clone().into(),
+        None => get_client_id(&params.client_info),
     };
     let supports_config_request = params
         .capabilities
         .workspace
-        .as_ref()?
-        .configuration
+        .as_ref()
+        .and_then(|workspace| workspace.configuration)
         .unwrap_or_default();
-    log::info!("client_id: {:?}", client_id);
+    log::info!("client {client_id:?}, workspace roots {roots:?}");
 
-    {
-        log::info!("set workspace folders: {:?}", workspace_folders);
-        let mut workspace_manager = context.workspace_manager().lock().await;
-        workspace_manager.workspace_folders = workspace_folders.clone();
-        log::info!("workspace folders set");
-    }
-
+    // The client's configuration is read **before** the session is opened, because one of the things it says —
+    // which files are not the project's — is part of the filter the session is opened with.
     let client_config = get_client_config(&context, client_id, supports_config_request).await;
-    log::info!("client_config: {:?}", client_config);
-
-    let params_json = serde_json::to_string_pretty(&params).unwrap();
-    log::info!("initialization_params: {}", params_json);
-
-    // init config
-    // todo! support multi config
-    let config_root: Option<PathBuf> = main_root.map(PathBuf::from);
-
-    let emmyrc = load_emmy_config(config_root, client_config.clone());
-
-    // init std lib
-    init_std_lib(context.analysis(), &cmd_args, emmyrc.clone()).await;
-
+    log::info!("client config: {client_config:?}");
     {
         let mut workspace_manager = context.workspace_manager().lock().await;
-        workspace_manager.client_config = client_config.clone();
-        workspace_manager.update_match_state(emmyrc.as_ref());
-        log::info!("workspace manager updated with client config and watch file patterns")
+        workspace_manager.set_roots(roots.clone());
+        workspace_manager.set_client_config(client_config);
     }
 
-    init_analysis(
-        context.analysis(),
-        context.status_bar(),
-        context.file_diagnostic(),
-        context.lsp_features(),
-        workspace_folders,
-        emmyrc.clone(),
-        Vec::new(),
-    )
-    .await;
-
+    start_analysis(context.clone()).await;
     register_files_watch(context.clone()).await;
+
     Some(())
 }
 
-pub async fn init_analysis(
-    analysis: &AnalysisState,
-    status_bar: &StatusBar,
-    file_diagnostic: &DiagnosticService,
-    lsp_features: &LspFeatures,
-    workspace_folders: Vec<WorkspaceFolder>,
-    emmyrc: Arc<Emmyrc>,
-    open_files: Vec<(lsp_types::Uri, String)>,
-) {
-    if let Ok(emmyrc_json) = serde_json::to_string_pretty(emmyrc.as_ref()) {
-        log::info!("current config : {}", emmyrc_json);
-    }
+/// Open the analysis over the workspace and start reading it.
+///
+/// Called once at `initialized` and again on every workspace reload (`WorkspaceManager`), which is why it takes the
+/// context and asks the state where the workspace is rather than being handed a root.
+pub async fn start_analysis(context: ServerContextSnapshot) {
+    let Some(root) = open_session(&context).await else {
+        return;
+    };
 
-    status_bar
+    context.status_bar().update_progress_task(
+        ProgressTask::LoadWorkspace,
+        None,
+        Some(format!("Indexing {}", root.display())),
+    );
+
+    index_in_background(context).await;
+}
+
+/// Open a session over the workspace root, with the client's buffers already in front of it.
+///
+/// `None` when the client has named no folder: there is nothing to open over, and every query answers "no analysis"
+/// until it does — which is the honest state rather than an empty project.
+async fn open_session(context: &ServerContextSnapshot) -> Option<PathBuf> {
+    let (root, filter) = {
+        let workspace_manager = context.workspace_manager().lock().await;
+        (
+            workspace_manager.root()?.to_path_buf(),
+            workspace_manager.watch_filter()?,
+        )
+    };
+
+    context
+        .status_bar()
         .create_progress_task(ProgressTask::LoadWorkspace)
         .await;
-    status_bar.update_progress_task(
-        ProgressTask::LoadWorkspace,
-        None,
-        Some("Loading workspace files".to_string()),
-    );
 
-    let workspace_folders = build_workspace_folders(&workspace_folders, emmyrc.as_ref());
+    // The compiler is run here (`Session::open` asks it for its search paths), so this is the one slow call in the
+    // handshake, and it happens on the blocking pool rather than on the runtime's own thread.
+    context.analysis().open(root.clone(), filter).await;
 
-    status_bar.update_progress_task(
-        ProgressTask::LoadWorkspace,
-        None,
-        Some(String::from("Collecting files")),
-    );
+    // The open buffers are read **after** the session exists, and the order is the point: a client that restarted
+    // with unsaved files would otherwise have the analysis answer about the disk, and a change that arrived while
+    // the session was being built (the update queue is a separate task) is in this list because it is read now.
+    let open_files = {
+        let workspace_manager = context.workspace_manager().lock().await;
+        workspace_manager.workspace_open_files()
+    };
 
-    // load files
-    let files = collect_workspace_files(&workspace_folders, &emmyrc, None, None);
-    let files: Vec<(PathBuf, Option<String>)> =
-        files.into_iter().map(|file| file.into_tuple()).collect();
-    let file_count = files.len();
-    if file_count != 0 {
-        status_bar.update_progress_task(
-            ProgressTask::LoadWorkspace,
-            None,
-            Some(format!("Indexing {} files", file_count)),
-        );
-    }
-
-    // Only write critical section: update config / workspace roots / file set, then broadcast the new snapshot.
-    let removed_uris = analysis
-        .update(|analysis| {
-            analysis.update_config(emmyrc.clone());
-            for workspace in &workspace_folders {
-                if workspace.is_library {
-                    log::info!("add library workspace: {:?}", workspace.root);
-                    analysis.add_library_workspace(workspace);
-                } else {
-                    log::info!("add workspace root: {:?}", workspace.root);
-                    analysis.add_main_workspace(workspace.root.clone());
+    if !open_files.is_empty() {
+        let count = open_files.len();
+        context
+            .analysis()
+            .update_session(move |session| {
+                for (uri, text) in &open_files {
+                    if let Some(path) = uri_to_file_path(uri) {
+                        session.did_open(path, text);
+                    }
                 }
-            }
-            analysis.reload_workspace_files(files, open_files)
-        })
-        .await;
-
-    status_bar.update_progress_task(
-        ProgressTask::LoadWorkspace,
-        None,
-        Some(String::from("Finished loading workspace files")),
-    );
-    status_bar.finish_progress_task(
-        ProgressTask::LoadWorkspace,
-        Some("Indexing complete".to_string()),
-    );
-
-    if !lsp_features.supports_pull_diagnostic() {
-        for uri in removed_uris {
-            file_diagnostic.clear_push_file_diagnostics(uri);
-        }
-    }
-
-    if !lsp_features.supports_workspace_diagnostic() {
-        file_diagnostic
-            .add_workspace_diagnostic_task(0, false)
-            .await;
-    }
-}
-
-pub fn get_workspace_folders(params: &InitializeParams) -> Vec<WorkspaceFolder> {
-    let mut workspace_folders = Vec::new();
-    if let Some(workspaces) = &params.workspace_folders {
-        for workspace in workspaces {
-            if let Some(path) = uri_to_file_path(&workspace.uri) {
-                workspace_folders.push(WorkspaceFolder::new(path, false));
-            }
-        }
-    }
-
-    if workspace_folders.is_empty() {
-        // However, most LSP clients still provide this field
-        #[allow(deprecated)]
-        if let Some(uri) = &params.root_uri {
-            let root_workspace = uri_to_file_path(uri);
-            if let Some(path) = root_workspace {
-                workspace_folders.push(WorkspaceFolder::new(path, false));
-            }
-        }
-    }
-
-    workspace_folders
-}
-
-pub async fn init_std_lib(analysis: &AnalysisState, cmd_args: &CmdArgs, emmyrc: Arc<Emmyrc>) {
-    log::info!(
-        "initializing std lib with resources path: {:?}",
-        cmd_args.resources_path
-    );
-    if cmd_args.load_stdlib.0 {
-        try_generate_translated_std();
-        analysis
-            .update(|analysis| {
-                // double update config
-                analysis.update_config(emmyrc);
-                analysis.init_std_lib(cmd_args.resources_path.0.clone());
             })
             .await;
+        log::info!("re-marked {count} open buffers as the text the analysis reads");
     }
 
-    log::info!("initialized std lib complete");
+    log::info!("analysing {}", root.display());
+    Some(root)
+}
+
+/// Read the project — now, and again after every edit that queues work.
+///
+/// In the background because opening a project is not a thing an editor waits for: the session answers queries from
+/// the moment it exists — each query reads what it needs, which is `Session`'s lazy indexing — and this loop is what
+/// makes the *rest* of the project available: a jump into a header nobody has opened, a project-wide diagnostic
+/// pass, a rename.
+///
+/// # Why it does not stop when the first pass ends
+///
+/// Because the analysis drops what an edit invalidates and *queues* the file rather than re-reading it
+/// (`Session::did_open`: "the summary is dropped and the file goes to the front of the open half of the queue").
+/// A server that pumped the queue only at startup would answer about an empty index for the rest of the session —
+/// every query in a file the user has typed in would be "not read yet" — so the pump is what makes an edit visible
+/// again, and it is one task rather than a rule every handler would have to remember.
+async fn index_in_background(context: ServerContextSnapshot) {
+    tokio::spawn(async move {
+        let version = context
+            .workspace_manager()
+            .lock()
+            .await
+            .workspace_version();
+        let mut first_pass = true;
+
+        loop {
+            // A reload bumps the version and starts a pump of its own: this one stops rather than racing it for
+            // the write lock, because its idea of what the project is is the one that was replaced.
+            if context
+                .workspace_manager()
+                .lock()
+                .await
+                .workspace_version()
+                != version
+            {
+                log::debug!("the workspace was reloaded; this indexing pass stops");
+                return;
+            }
+
+            let Some(pending) = context
+                .analysis()
+                .update_session(|session| {
+                    session.advance(INDEX_SLICE);
+                    session.pending()
+                })
+                .await
+            else {
+                log::warn!("the workspace was closed while it was being indexed");
+                return;
+            };
+
+            if pending > 0 {
+                context.status_bar().update_progress_task(
+                    ProgressTask::LoadWorkspace,
+                    None,
+                    Some(format!("{pending} files to read")),
+                );
+
+                // Yield between slices: the runtime is also serving requests, and a loop that never awaits would
+                // hold the worker it runs on.
+                tokio::task::yield_now().await;
+                continue;
+            }
+
+            // Nothing to read. The first time that happens the project is loaded, and the diagnostics that were
+            // waiting for it are published — after that the loop simply waits for the next edit.
+            if first_pass {
+                first_pass = false;
+                context.status_bar().finish_progress_task(
+                    ProgressTask::LoadWorkspace,
+                    Some("Workspace loaded".to_string()),
+                );
+                log::info!("the workspace is indexed");
+
+                publish_workspace_diagnostics(&context).await;
+            }
+
+            context.analysis().wait_for_work(IDLE_WAIT).await;
+        }
+    });
+}
+
+/// The first full diagnostic pass, once the index holds something.
+///
+/// Published rather than pulled, because a client that supports pull diagnostics asks for a file's diagnostics when
+/// it shows that file — and there is nothing to push to it. A client that does not would otherwise see an empty
+/// problem list until it opened every file in the project.
+async fn publish_workspace_diagnostics(context: &ServerContextSnapshot) {
+    let file_diagnostic: &DiagnosticService = context.file_diagnostic();
+    if context.lsp_features().supports_pull_diagnostic() {
+        if context.lsp_features().supports_refresh_diagnostic() {
+            context.client().refresh_workspace_diagnostics();
+        }
+        return;
+    }
+
+    file_diagnostic.add_workspace_diagnostic_task(0).await;
+}
+
+/// The folders the client opened.
+///
+/// `workspaceFolders` first, then the deprecated `rootUri` — which most clients still send, and which is the only
+/// thing a client that predates workspace folders has.
+pub fn workspace_roots(params: &InitializeParams) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+
+    if let Some(folders) = &params.workspace_folders {
+        for folder in folders {
+            if let Some(path) = uri_to_file_path(&folder.uri) {
+                roots.push(path);
+            }
+        }
+    }
+
+    if roots.is_empty() {
+        #[allow(deprecated)]
+        if let Some(path) = params.root_uri.as_ref().and_then(uri_to_file_path) {
+            roots.push(path);
+        }
+    }
+
+    roots
 }

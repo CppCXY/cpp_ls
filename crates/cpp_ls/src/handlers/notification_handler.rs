@@ -6,8 +6,8 @@ use lsp_types::{
     CancelParams, DidChangeConfigurationParams, NumberOrString,
     notification::{
         Cancel, DidChangeConfiguration, DidChangeTextDocument, DidChangeWatchedFiles,
-        DidCloseTextDocument, DidOpenTextDocument, DidRenameFiles, DidSaveTextDocument,
-        Notification as LspNotification, SetTrace,
+        DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument, Notification as LspNotification,
+        SetTrace,
     },
 };
 
@@ -19,7 +19,6 @@ use super::{
         on_did_change_text_document, on_did_change_watched_files, on_did_close_document,
         on_did_open_text_document, on_did_save_text_document, on_set_trace,
     },
-    workspace::on_did_rename_files_handler,
 };
 
 macro_rules! dispatch_notification {
@@ -82,7 +81,6 @@ pub async fn on_notification_handler(
             DidCloseTextDocument => on_did_close_document,
             DidChangeWatchedFiles => on_did_change_watched_files,
             SetTrace => on_set_trace,
-            DidRenameFiles => on_did_rename_files_handler,
         }
     });
 

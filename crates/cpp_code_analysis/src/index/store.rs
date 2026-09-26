@@ -68,12 +68,20 @@ use crate::index::{FileIndexer, read_summary, write_summary};
 use crate::summary::{FileSummary, IncludeFact};
 
 /// A project's summaries on disk and in memory, and the rule for when each is rebuilt.
-pub struct SummaryStore<'a, F: FileProvider = DiskFiles> {
+///
+/// # Why the provider is owned
+///
+/// Because a store that borrowed its provider could only live inside the scope that declared the borrow, and the
+/// caller that needs it most — a language server, which holds one store for as long as the editor is open — has no
+/// such scope: the provider and the store are both created at startup and both outlive the function that made
+/// them. Providers are *handles* rather than data ([`crate::OpenDocuments`] is a lock behind an `Arc`, `DiskFiles`
+/// is a unit struct), so owning one costs a pointer and a clone shares the same buffers rather than copying them.
+pub struct SummaryStore<F: FileProvider = DiskFiles> {
     /// The project root. The cache lives under it, because `docs/index-design.md` puts it there on purpose: it
     /// travels with a checkout, so CI gets the same warm cache a developer has.
     root: PathBuf,
     config: CompilerConfig,
-    files: &'a F,
+    files: F,
     index: ProjectIndex,
     stats: StoreStats,
 }
@@ -205,30 +213,23 @@ pub enum NotIndexedReason {
     Unreadable,
 }
 
-impl<'a> SummaryStore<'a, DiskFiles> {
+impl SummaryStore<DiskFiles> {
     /// A store over a project on disk.
-    pub fn open(root: impl Into<PathBuf>, config: CompilerConfig) -> SummaryStore<'static, DiskFiles> {
-        // `DiskFiles` is a unit struct, so a `'static` borrow of one is free and the default type parameter is
-        // the ordinary case.
-        static DISK: DiskFiles = DiskFiles;
-
-        SummaryStore {
-            root: root.into(),
-            config,
-            files: &DISK,
-            index: ProjectIndex::new(),
-            stats: StoreStats::default(),
-        }
+    pub fn open(root: impl Into<PathBuf>, config: CompilerConfig) -> SummaryStore<DiskFiles> {
+        SummaryStore::with_provider(root, config, DiskFiles)
     }
 }
 
-impl<'a, F: FileProvider> SummaryStore<'a, F> {
+impl<F: FileProvider> SummaryStore<F> {
     /// A store over any provider, which is what makes the whole layer testable without a filesystem.
+    ///
+    /// By value, and a caller that wants to keep talking to the same provider clones it first: every provider in
+    /// this crate is a handle, so the clone reads the same buffers and the same disk.
     pub fn with_provider(
         root: impl Into<PathBuf>,
         config: CompilerConfig,
-        files: &'a F,
-    ) -> SummaryStore<'a, F> {
+        files: F,
+    ) -> SummaryStore<F> {
         SummaryStore {
             root: root.into(),
             config,
@@ -297,7 +298,7 @@ impl<'a, F: FileProvider> SummaryStore<'a, F> {
         }
 
         self.stats.rebuilt += 1;
-        let summary = FileIndexer::new(self.files, &self.config).index(path, &source, key);
+        let summary = FileIndexer::new(&self.files, &self.config).index(path, &source, key);
 
         // The one rule about the filesystem: a summary that records a *failed* search must not be stored, because
         // nothing in the key would notice the header appearing. See the module documentation.
@@ -444,7 +445,7 @@ impl<'a, F: FileProvider> SummaryStore<'a, F> {
         }
 
         let directory = path.parent().unwrap_or(Path::new("."));
-        let resolver = crate::include::IncludeResolver::new(self.files, &self.config);
+        let resolver = crate::include::IncludeResolver::new(&self.files, &self.config);
         let mut interner = crate::include::paths::PathInterner::new(cfg!(windows));
 
         summary.includes.iter().all(|fact| {
@@ -587,14 +588,11 @@ mod tests {
     /// A fresh directory per test, because the cache is keyed by *content* rather than by path: two tests with
     /// the same fixture text would otherwise share an entry, and a test would pass because of another test's
     /// leftovers.
-    fn store<'a>(
-        name: &str,
-        files: &'a MemoryFiles,
-    ) -> (SummaryStore<'a, MemoryFiles>, std::path::PathBuf) {
+    fn store(name: &str, files: &MemoryFiles) -> (SummaryStore<MemoryFiles>, std::path::PathBuf) {
         let root = std::env::temp_dir().join("cppls-store-tests").join(name);
         let _ = std::fs::remove_dir_all(&root);
 
-        let store = SummaryStore::with_provider(&root, CompilerConfig::default(), files);
+        let store = SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
         (store, root)
     }
 
@@ -614,7 +612,7 @@ mod tests {
         assert_eq!(store.stats().reused, 0);
 
         // A second store over the same root and the same text: the summary is on disk, so nothing is rebuilt.
-        let mut reopened = SummaryStore::with_provider(&root, CompilerConfig::default(), &files);
+        let mut reopened = SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
         let second = reopened.get(Path::new("/p/widget.h")).expect("the file reads");
 
         assert_eq!(second.declarations, first.declarations);
@@ -640,14 +638,14 @@ mod tests {
         let one = MemoryFiles::new().with_file("/p/a.cpp", "int x;\n");
         let two = MemoryFiles::new().with_file("/p/a.cpp", "int y;\n");
 
-        let mut store = SummaryStore::with_provider(&root, CompilerConfig::default(), &one);
+        let mut store = SummaryStore::with_provider(&root, CompilerConfig::default(), one.clone());
         store.get(Path::new("/p/a.cpp")).expect("the file reads");
 
-        let mut other = SummaryStore::with_provider(&root, CompilerConfig::default(), &two);
+        let mut other = SummaryStore::with_provider(&root, CompilerConfig::default(), two.clone());
         other.get(Path::new("/p/a.cpp")).expect("the file reads");
         assert_eq!(other.stats().rebuilt, 1, "the second text is new");
 
-        let mut back = SummaryStore::with_provider(&root, CompilerConfig::default(), &one);
+        let mut back = SummaryStore::with_provider(&root, CompilerConfig::default(), one.clone());
         back.get(Path::new("/p/a.cpp")).expect("the file reads");
         assert_eq!(
             back.stats().reused,
@@ -668,7 +666,7 @@ mod tests {
         // The same path with different text. The key changes, so the stored entry no longer names it and there is
         // nothing to reuse.
         let edited = MemoryFiles::new().with_file("/p/widget.h", "struct Widget { int a; int b; };\n");
-        let mut second = SummaryStore::with_provider(&root, CompilerConfig::default(), &edited);
+        let mut second = SummaryStore::with_provider(&root, CompilerConfig::default(), edited.clone());
         let summary = second
             .get(Path::new("/p/widget.h"))
             .expect("the file reads")
@@ -753,7 +751,7 @@ mod tests {
         store.get(Path::new("/p/a.cpp")).expect("the file reads");
 
         let configured = CompilerConfig::default().with_standard("c++20");
-        let mut second = SummaryStore::with_provider(&root, configured, &files);
+        let mut second = SummaryStore::with_provider(&root, configured, files.clone());
         second.get(Path::new("/p/a.cpp")).expect("the file reads");
 
         assert_eq!(
@@ -769,8 +767,8 @@ mod tests {
     fn an_identical_configuration_gives_an_identical_key() {
         // The other half: the hash has to be stable, or the cache would never hit at all.
         let files = MemoryFiles::new();
-        let one = SummaryStore::with_provider("r", CompilerConfig::default(), &files);
-        let two = SummaryStore::with_provider("r", CompilerConfig::default(), &files);
+        let one = SummaryStore::with_provider("r", CompilerConfig::default(), files.clone());
+        let two = SummaryStore::with_provider("r", CompilerConfig::default(), files.clone());
 
         assert_eq!(
             one.context_hash(Path::new("/p/a.cpp")),
@@ -780,7 +778,7 @@ mod tests {
         let different = SummaryStore::with_provider(
             "r",
             CompilerConfig::default().with_define(crate::CommandLineMacro::defined("A")),
-            &files,
+            files.clone(),
         );
         assert_ne!(
             one.context_hash(Path::new("/p/a.cpp")),
@@ -798,12 +796,12 @@ mod tests {
         let gnu = SummaryStore::with_provider(
             "r",
             CompilerConfig::default().with_dialect(Dialect::Gnu),
-            &files,
+            files.clone(),
         );
         let msvc = SummaryStore::with_provider(
             "r",
             CompilerConfig::default().with_dialect(Dialect::Msvc),
-            &files,
+            files.clone(),
         );
 
         assert_ne!(
@@ -828,7 +826,7 @@ mod tests {
                 CompilerConfig::default()
                     .with_include_path("inc")
                     .with_working_directory(directory),
-                &files,
+                files.clone(),
             )
         };
         assert_ne!(
@@ -843,7 +841,7 @@ mod tests {
                 CompilerConfig::default()
                     .with_include_path("/opt/inc")
                     .with_working_directory(directory),
-                &files,
+                files.clone(),
             )
         };
         assert_eq!(
@@ -875,7 +873,7 @@ mod tests {
         let with_header = MemoryFiles::new()
             .with_file("/p/main.cpp", "#include \"missing.h\"\nint x;\n")
             .with_file("/p/missing.h", "struct Now { int here; };\n");
-        let mut second = SummaryStore::with_provider(&root, CompilerConfig::default(), &with_header);
+        let mut second = SummaryStore::with_provider(&root, CompilerConfig::default(), with_header.clone());
         let rebuilt = second
             .get(Path::new("/p/main.cpp"))
             .expect("the file reads")
@@ -906,7 +904,7 @@ mod tests {
         store.get(Path::new("/p/main.cpp")).expect("the file reads");
         assert_eq!(store.stats().unstored, 0);
 
-        let mut reopened = SummaryStore::with_provider(&root, CompilerConfig::default(), &files);
+        let mut reopened = SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
         reopened.get(Path::new("/p/main.cpp")).expect("the file reads");
         assert_eq!(reopened.stats().reused, 1, "the entry is usable");
         assert_eq!(reopened.stats().rebuilt, 0);
@@ -1040,7 +1038,7 @@ mod tests {
         let after_build = files.exists_of("/p/widget.h");
         assert_eq!(after_build, 1, "one candidate, probed once while resolving");
 
-        let mut reopened = SummaryStore::with_provider(&root, CompilerConfig::default(), &files);
+        let mut reopened = SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
         reopened.get(Path::new("/p/main.cpp")).expect("the file reads");
 
         assert_eq!(reopened.stats().reused, 1);
@@ -1083,7 +1081,7 @@ mod tests {
             "/p/main.cpp",
             "#include \"widget.h\"\nvoid f() { Widget w; }\n",
         );
-        let mut reopened = SummaryStore::with_provider(&root, CompilerConfig::default(), &without);
+        let mut reopened = SummaryStore::with_provider(&root, CompilerConfig::default(), without.clone());
         let rebuilt = reopened
             .get(Path::new("/p/main.cpp"))
             .expect("the file reads")
@@ -1233,7 +1231,7 @@ mod tests {
             "the class is visible through the include: {found:?}"
         );
 
-        let mut reopened = SummaryStore::with_provider(&root, CompilerConfig::default(), &files);
+        let mut reopened = SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
         for path in ["/p/config.h", "/p/widget.h", "/p/main.cpp"] {
             reopened.get(Path::new(path)).expect("the file reads");
         }
@@ -1545,12 +1543,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
 
         let cold = {
-            let mut store = SummaryStore::with_provider(&root, CompilerConfig::default(), &files);
+            let mut store = SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
             store.index_includes_from(Path::new("/p/main.cpp"), IncludeBudget::default())
         };
         assert_eq!(cold.stats.rebuilt, 3);
 
-        let mut reopened = SummaryStore::with_provider(&root, CompilerConfig::default(), &files);
+        let mut reopened = SummaryStore::with_provider(&root, CompilerConfig::default(), files.clone());
         let warm = reopened.index_includes_from(Path::new("/p/main.cpp"), IncludeBudget::default());
 
         assert_eq!(indexed(&warm), indexed(&cold), "the same files, in the same order");
