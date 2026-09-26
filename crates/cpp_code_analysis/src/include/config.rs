@@ -119,7 +119,7 @@ pub struct CompilerConfig {
     /// and a plain name to cl.exe, `__int64` is the other way round, and `_Float16` is GCC's. Reading one of them
     /// the wrong way is not a diagnostic but a **silent wrong tree** — with `__int128` read as a name,
     /// `unsigned __int128 x;` comes out as a declaration of a variable called `__int128` with a macro suffix `x`
-    /// (`docs/grammar-gaps.md` B61) — so the parser has to be told which compiler is reading the file.
+    /// — so the parser has to be told which compiler is reading the file.
     ///
     /// Set from the toolchain's own predefined macros (`__GNUC__` / `_MSC_VER`, see
     /// [`Dialect::from_predefined_macros`]) rather than guessed from the flags, and it is part of the summary's

@@ -103,7 +103,7 @@ fn a_real_compiler_answers_with_the_macros_it_predefines() {
     };
 
     // **Not a count.** GCC's `-dM` prints ~470 names and MSVC's `/PD` prints 58 — the fact sheet in
-    // `docs/msvc-notes.md` measured the second one — so a count assertion would be an assertion about *which
+    // measured the second one — so a count assertion would be an assertion about *which
     // compiler this machine has*. What every C++ compiler's table must contain is the names it identifies itself
     // by and the language level, because those are what `#ifdef _WIN32` and `#if __cplusplus >= …` ask.
     let has = |name: &str| {
@@ -144,7 +144,7 @@ fn a_real_compiler_answers_with_the_macros_it_predefines() {
     // **The floor is C++11, not C++17**, and MSVC is why: this asks with no `-std=`/`/std:` at all — no compile
     // database was read — so the answer is the compiler's *default* language level, which for MSVC 19.35 is C++14
     // (`201402L`). That is the honest answer to the question asked; a project's standard travels with the request
-    // (`search_paths` documents why), and `docs/msvc-notes.md` measured the four combinations.
+    // (`search_paths` documents why), and measured the four combinations.
     let standard = value_of("__cplusplus");
     assert!(
         standard

@@ -68,7 +68,7 @@ pub async fn on_request_handler(
 ) -> Result<(), Box<dyn Error + Sync + Send>> {
     dispatch_request!(req, server_context, {
         // The first three are the ones the C++ analysis answers today: a location, a type, and a file's
-        // diagnostics. The rest of the table is a one-line row each — see `docs/ls-architecture.md`.
+        // diagnostics. The rest of the table is a one-line row each
         GotoDefinition => on_goto_definition_handler,
         HoverRequest => on_hover,
         DocumentDiagnosticRequest => on_pull_document_diagnostic,

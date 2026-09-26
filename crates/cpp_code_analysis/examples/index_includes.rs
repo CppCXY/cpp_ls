@@ -10,7 +10,7 @@
 //! it should parse nothing at all.
 //!
 //! The standard-library part of the closure is the interesting half, and it is why this exists as a measurement
-//! rather than as a test: the shape of the answer depends on the toolchain installed, and `docs/std-library.md`
+//! rather than as a test: the shape of the answer depends on the toolchain installed.
 //! records what it looked like on the machine this was written on.
 
 use std::path::{Path, PathBuf};

@@ -3,7 +3,7 @@
 //! Everything below this module is a *capability*: [`discover`](crate::discover) can find a toolchain,
 //! [`SummaryStore`] can cache a file's facts, [`Worklist`](crate::Worklist) knows the order that answers a user's
 //! question first, and the queries in [`crate::index`] answer about a name, a member or a cursor. Nothing joined
-//! them, which is why `docs/index-design.md` calls "opening a project" the shortest piece of product work left:
+//! them, which is why calls "opening a project" the shortest piece of product work left:
 //!
 //! ```text
 //! open a project     discover the toolchain, read compile_commands.json, list the sources
@@ -40,8 +40,7 @@
 //!
 //! * **No LSP types.** Positions here are byte offsets, and the answers are this crate's own. A server maps
 //!   `Position` onto an offset (`cpp_parser::LineIndex::get_offset` is that mapping) and the answers onto protocol
-//!   responses; keeping the protocol out means this layer is testable without a client, and `docs/index-design.md`
-//!   records the mapping as the next piece of work rather than a thing to guess at here.
+//!   responses; keeping the protocol out means this layer is testable without a client.
 //! * **No OS watcher, no threads, no clock.** The client is the event source — LSP's `didOpen`/`didChange`/
 //!   `didSave`/`didClose`/`workspace/didChangeWatchedFiles` are notifications, so `notify` is not needed and a
 //!   debounce clock is the client's. [`Session::advance`] does a bounded amount of work per call and returns, so a
@@ -68,7 +67,7 @@
 //! the first entry's, applied to every file. Real projects compile different targets with different `-D`s, so this
 //! is an approximation, and the place it would be fixed is [`SummaryStore`], which holds one configuration for
 //! every file it caches — the key already records the whole compilation context, so per-file configurations are
-//! representable and simply not implemented. `docs/roadmap.md` carries it.
+//! representable and simply not implemented. carries it.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -250,7 +249,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     root: PathBuf,
     config: CompilerConfig,
     /// What `discover` found, or `None` when no compiler answered. Kept for a human reading a log line, and for
-    /// `docs/std-library.md`'s measurements.
+    /// 's measurements.
     toolchain: Option<Toolchain>,
     /// **What this analysis thinks the project is**: the configuration file, the compile database and where it was
     /// found, CMake's cache, and every problem. Kept whole rather than reduced to the parts the analysis uses,
@@ -479,7 +478,7 @@ impl<F: FileProvider + Clone> Session<F> {
         //
         // `ProjectIndex::macro_candidates` now asks the graph rather than the route ("is this file certainly part
         // of the translation unit", B131), so a certain path can no longer be skipped in favour of a conditional
-        // one. What that did to the two names above is measured in `docs/roadmap.md` §3.5c and §7.
+        // one. What that did to the two names above is measured.
         let configured = database.is_some();
         let mut store = SummaryStore::with_provider(root.clone(), config.clone(), files.clone())
             .with_macros(crate::index::environment::compilation_environment(
@@ -657,7 +656,7 @@ impl<F: FileProvider + Clone> Session<F> {
 
     /// The client reported filesystem changes — its own watcher's events, not ours.
     ///
-    /// The entry point `docs/index-design.md` fixes for the "no OS watcher" decision: a client that watches (or an
+    /// The entry point for the "no OS watcher" decision: a client that watches (or an
     /// editor that simply knows, because it is what wrote the file) sends events, and this turns them into work.
     /// The batch is built here from the same [`WatchFilter`] the session was opened with, so the cache directory,
     /// `.git` and any ignored build tree are filtered once, in one place.
@@ -1462,7 +1461,7 @@ mod tests {
 
     #[test]
     fn the_open_file_is_worked_first_and_its_includes_next() {
-        // The order `docs/index-design.md` fixes, read off the steps: what the user is looking at, then what it
+        // The order fixes, read off the steps: what the user is looking at, then what it
         // includes, and only then the project. A session that worked the project first would answer the first
         // question after ten thousand files.
         let files = MemoryFiles::new()
@@ -1911,7 +1910,7 @@ mod tests {
 
         // And the reading is recorded as **evidence** rather than as a conclusion: the summary says which body
         // opened the scope, which is what lets a consumer re-read it when the macro changes. See
-        // `docs/index-design.md` §"宏体推导出的事实：记证据，不进键".
+        // A fact derived from a macro body is evidence, not part of the key.
         let summary = session.index().summary(&widget).expect("indexed");
         assert!(
             !summary.macro_readings.is_empty(),

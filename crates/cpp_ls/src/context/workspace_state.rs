@@ -9,7 +9,7 @@
 //! A client may open several folders, and a [`Session`](cpp_code_analysis::Session) is opened over **one** root —
 //! that is the engine's shape, because the compile database, the cache directory and the configuration all live
 //! under one project. So the first root is the one the analysis runs over, and the others are recorded here and
-//! reported at startup rather than silently dropped. `docs/ls-architecture.md` §5 carries the multi-root item; the
+//! reported at startup rather than silently dropped; the multi-root item is carried below, and the
 //! honest state today is "one folder is analysed, and the log says which".
 
 use std::collections::HashMap;

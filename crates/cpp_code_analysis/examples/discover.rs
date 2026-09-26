@@ -18,7 +18,7 @@
 //! ```
 //!
 //! It is also the instrument the toolchain work is measured with: the numbers it prints — how many include paths
-//! came from where, whether a compiler answered at all — are the ones `docs/ls-architecture.md` §5 records.
+//! came from where, whether a compiler answered at all — are the ones records.
 
 use std::path::{Path, PathBuf};
 

@@ -22,7 +22,7 @@
 //! `#ifdef NT_INCLUDED` comes out false in a header that a real translation unit includes, and a wrong answer
 //! there is worse than a missing one: it hides declarations that exist.
 //!
-//! The next step is recorded in `docs/roadmap.md`: the macros a *closure* defines, threaded in translation order
+//! The next step is recorded: the macros a *closure* defines, threaded in translation order
 //! by the same walk that finds the files. That is the half which would decide the conditions naming a header's own
 //! feature macros (`_GLIBCXX_USE_CXX11_ABI` and the like), and it needs the complete-input question answered
 //! first — an unresolved `#include` or an unindexed header is a hole in exactly the reasoning that would make
@@ -154,7 +154,7 @@ impl<'a> MacrosHere<'a> {
 /// `_STD_BEGIN` is in force" and "nobody can say" went unnoticed. That difference is measured, and it is not small:
 /// `_STD_BEGIN`'s `#define` sits under `#if _STL_COMPILER_PREPROCESSOR` in `yvals_core.h`, so with an incomplete
 /// seed the whole of MSVC's STL reads as "no replacement lists at all" and not one namespace scope can be opened
-/// from a body (`docs/roadmap.md` §4.2 ①).
+/// from a body.
 pub fn compilation_environment(
     config: &CompilerConfig,
     toolchain: Option<&crate::include::toolchain::Toolchain>,
@@ -393,7 +393,7 @@ mod tests {
         // compile database: these are the compilation's definitions, every `#include` that mattered resolved, and
         // nothing indexed defines `NT_INCLUDED` — so the guard *is* taken.
         //
-        // This is the decision the whole macro line was blocked on (`docs/std-library.md`, round 14): `windef.h`
+        // This is the decision the whole macro line was blocked on: `windef.h`
         // has `#ifndef NT_INCLUDED / #include <winnt.h> / #endif`, `NT_INCLUDED` is defined nowhere in the MinGW
         // headers, and every one of `STDMETHODCALLTYPE`'s four thousand references was "maybe" because of it.
         let source = "int early;\n#ifndef NT_INCLUDED\n#include \"winnt.h\"\n#endif\n";

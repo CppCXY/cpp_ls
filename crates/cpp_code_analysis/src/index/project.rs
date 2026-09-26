@@ -2,7 +2,7 @@
 //!
 //! [`crate::index`] turns one file into a [`FileSummary`]. This module is what holds a project's worth of them
 //! and answers the questions that cross a file boundary — which is the whole reason an index exists, and the
-//! layer `docs/index-design.md` calls `resolve`.
+//! layer calls `resolve`.
 //!
 //! # Why the reverse map is built here and not stored
 //!
@@ -190,7 +190,7 @@ pub struct ProjectIndex {
 ///
 /// Step 3 is why this was cheap to add: a declaration fact records the qualified spelling of the scope it was
 /// written in, so `Widget::size` is a question the existing lookup answers. What is new is step 2, and it is the
-/// beginning of the `infer` layer `docs/index-design.md` describes — deliberately narrow: the object has to be a
+/// beginning of the `infer` layer — deliberately narrow: the object has to be a
 /// **name**, because inferring the type of an arbitrary expression is a different and much larger problem.
 ///
 /// # The four answers
@@ -570,7 +570,7 @@ pub struct MemberCompletions {
 /// * `Yes(completions)` — the members of the object's type.
 /// * `Unknown(UnknownType)` — the object's type could not be worked out. **The common case in real code**, and
 ///   the honest one: `f().size` needs a return type computed, `(*p).size` needs a dereference followed, and
-///   `arr[i].size` needs a subscript — see [`members_of`]'s note and `docs/index-design.md`. A consumer shows
+///   `arr[i].size` needs a subscript — see [`members_of`]'s note. A consumer shows
 ///   nothing rather than offering the members of some other type.
 /// * `Unknown(NotDeclaredHere)` — the object's type is a class nothing visible declares.
 /// * `Unknown(ConditionalCompilation)` — that class is only reachable through a guarded `#include`.
@@ -1221,7 +1221,7 @@ fn unary_operand_with(
 /// The base of a `[…]` expression, when that is what this node is.
 ///
 /// `arr[0]` and `w.size` are both `IndexExpr` — the parser reads `w.size` as an index expression with a `.`
-/// where the brackets would be (see `docs/grammar-gaps.md`, maintenance convention 18) — so the operator is
+/// where the brackets would be — so the operator is
 /// what tells them apart. A member access is not a subscript and never reaches the inference for one.
 fn subscript_base(node: &cpp_parser::CppSyntaxNode) -> Option<cpp_parser::CppSyntaxNode> {
     if cpp_parser::CppSyntaxKind::from(node.kind()) != cpp_parser::CppSyntaxKind::IndexExpr {
@@ -1997,7 +1997,7 @@ impl ProjectIndex {
     ///
     /// One environment for the whole index, which is an approximation the caller should know about: a project
     /// whose files are built with different `-D`s has one environment per *target*, and this models the one the
-    /// caller supplies. Recorded in `docs/roadmap.md` rather than guessed at here.
+    /// caller supplies. Recorded rather than guessed at here.
     ///
     /// # Complete or not, and who decides
     ///
@@ -2550,7 +2550,7 @@ impl ProjectIndex {
     /// A file's `#define`s and its `#include`s are read **in offset order**, and the state in `state` is brought up
     /// to each point before anything is asked about that point. That is not an implementation detail: it is what
     /// makes `#ifdef X` decidable in a header whose *includer* defined `X`, which is the whole of what
-    /// `docs/roadmap.md` §3.5c's second half is about. Two lists walked separately would decide every condition
+    /// 's second half is about. Two lists walked separately would decide every condition
     /// against the environment as it was before the file was read.
     ///
     /// # What the state is allowed to take from a fact
@@ -3884,7 +3884,7 @@ mod tests {
 
     #[test]
     fn a_member_of_the_standard_librarys_string_resolves_into_basic_string() {
-        // The case `docs/roadmap.md` §3.1 names: `basic_string` is where every member is declared, and the
+        // The case: `basic_string` is where every member is declared, and the
         // alias's target is written **unqualified** inside `namespace std`, so following it needs the alias's own
         // scope. Getting that wrong looks up a global `basic_string` and finds nothing.
         let source = "namespace std {\n  template<typename T> struct basic_string {\n    int size;\n    \
@@ -4761,7 +4761,7 @@ mod tests {
     #[test]
     fn a_destructor_without_a_specifier_is_not_a_member_yet() {
         // The boundary, asserted rather than left to be discovered — see "现在答不了什么" in
-        // `docs/index-design.md`, and `a_destructor_without_a_specifier_declares_nothing_yet` in
+        // and `a_destructor_without_a_specifier_declares_nothing_yet` in
         // `tests/scopes.rs` for the rule and for what landing it needs.
         //
         // What this test is really pinning is the *other* half: the class is found by its own name. Before the fix

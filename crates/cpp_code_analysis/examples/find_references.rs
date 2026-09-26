@@ -4,7 +4,7 @@
 //! cargo run --release -p cpp_code_analysis --example find_references
 //! ```
 //!
-//! `roadmap.md` §3.5 says this query is expensive and that the first thing to do is measure *how* expensive:
+//! This query is expensive, and the first thing to do is measure *how* expensive:
 //! "找引用要扫多少文件、筛完还剩多少要解析". This probe answers that on the real standard-library closure, for the
 //! macros that are actually used most in it — picked by counting, not by taste.
 //!
@@ -64,7 +64,7 @@ fn main() {
     )
     .expect("the fixture writes");
 
-    // A compile database, with the files and no flags: a real project has one. See `roadmap.md` §3.5c for what the
+    // A compile database, with the files and no flags: a real project has one. See the note above for what the
     // stronger claim that goes with it would buy (440 of 486 conditional includes) and why it is not made yet.
     let root_text = root.to_string_lossy().replace('\\', "/");
     std::fs::write(

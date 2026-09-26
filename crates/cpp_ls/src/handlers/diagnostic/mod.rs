@@ -3,7 +3,7 @@
 //! The C++ analysis reports rather than fails: a file being typed at parses into a tree with errors attached
 //! (`FileView::errors`), and those errors **are** the diagnostics. There is no separate "check" pass, because the
 //! parse is the check this layer has today — semantic diagnostics need the index to be complete, which is the same
-//! boundary [`Session::pending`] marks, and `docs/roadmap.md` carries that work.
+//! boundary [`Session::pending`] marks, and carries that work.
 //!
 //! ```text
 //! path ──> session.view(path) ──> view.errors() ──> Diagnostic { range, severity, message }
@@ -77,7 +77,7 @@ impl RegisterCapabilities for DiagnosticCapabilities {
                 // and claiming otherwise would invite a client to re-request diagnostics on every edit anywhere.
                 inter_file_dependencies: false,
                 // Which is also why workspace diagnostics are not offered yet: they would be this same parse over
-                // every indexed file, with no cross-file finding to add. See `docs/roadmap.md`.
+                // every indexed file, with no cross-file finding to add.
                 workspace_diagnostics: false,
                 ..Default::default()
             }))

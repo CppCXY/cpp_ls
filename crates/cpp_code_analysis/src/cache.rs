@@ -1,6 +1,6 @@
 //! The on-disk cache: **one file per file**, keyed by a hash of everything that determines a summary.
 //!
-//! The rules this module implements are the ones `docs/index-design.md` fixes; what follows is the part a reader
+//! The rules this module implements are the ones fixes; what follows is the part a reader
 //! of the code needs to know to change it safely.
 //!
 //! # Why one file per summary

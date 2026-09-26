@@ -736,7 +736,7 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
         // ```
         //
         // Read as an invocation inside the sequence rather than expanded: the file's own tokens are all that enters
-        // the tree, and the body is what says the name is a specifier. See `docs/grammar-gaps.md` B91.
+        // the tree, and the body is what says the name is a specifier. B91.
         if let Some(names_a_type) = a_macro_that_is_a_specifier(p, !allow_second_name) {
             let call = p.mark(CppSyntaxKind::MacroCall);
             let name = p.mark(CppSyntaxKind::NameExpr);
@@ -1644,7 +1644,7 @@ fn parse_one_decl_specifier_inner(
 /// `a_body_follows_the_class_head` counted `Greater` alone, so in `class D : public Base<K, std::shared_ptr<V>> {`
 /// the depth was still one when the scanner reached the `{`, the head was read as *not* opening a body, and the
 /// class definition failed with `expected ;` against its own name — while the same base clause with a
-/// single-level argument list parsed fine. That is maintenance convention #14 in `docs/grammar-gaps.md`: the
+/// single-level argument list parsed fine. That is maintenance convention #14: the
 /// second use of a predicate is where the exception gets forgotten, so it is extracted the second time.
 ///
 /// **The `previous` argument is the second thing the copies drifted on**, and it is why the rule takes one now. A
@@ -1783,7 +1783,7 @@ struct NamesMayJoin {
     /// MY_DECL_SUFFIX;`).
     a_further_name: bool,
     /// A **macro-shaped** name may close a **type-id**, where there is no declarator to make room for: the cast in
-    /// `return ((unsigned __LONG32) (ULONG_PTR) h);`. See [`written_like_a_macro`] and `docs/grammar-gaps.md` B74.
+    /// `return ((unsigned __LONG32) (ULONG_PTR) h);`. See [`written_like_a_macro`] and B74.
     a_macro_shaped_name_closes_a_type_id: bool,
 }
 
@@ -3974,7 +3974,7 @@ fn a_parenthesised_declarator_with_a_name_follows(p: &CppParser) -> bool {
     // name, so `(x y)` and `(* x y)` keep the readings they had.
     //
     // The first of the two was written once before and reverted: the predicate and the reader were added and the
-    // error moved from column 16 to column 51 without the file reading (B98, `docs/grammar-gaps.md`). What was
+    // error moved from column 16 to column 51 without the file reading (B98). What was
     // missing is the **reader's** other half — a macro *before* the operator — which is what
     // [`parse_parenthesised_declarator`] now consumes.
     if matches!(
@@ -4932,7 +4932,7 @@ enum ImplementationKeyword {
 /// `int __cdecl g(void);` parsed *successfully* as a declaration whose declarator was named `__cdecl` and whose
 /// suffix was a macro call `g(void)` — the sequence type, name, macro-suffix, which is a shape this grammar
 /// reads on purpose (see [`super::decls::eat_a_macro_suffix`]). Well formed, lossless, no diagnostic, and every
-/// name in it wrong. That is the class of defect `docs/grammar-gaps.md` opens with, and the reason the second
+/// name in it wrong. That is the class of defect opens with, and the reason the second
 /// position below matters as much as the first: `int *__cdecl _errno(void);` writes the keyword after the `*`.
 ///
 /// # Measured, on the closure of six standard headers
@@ -5037,7 +5037,7 @@ fn a_type_the_compiler_spells(p: &CppParser) -> bool {
 /// is the compiler's extension rather than this parser's guess.
 ///
 /// A **spelling** test rather than a table one, and that is not the convention-without-evidence that
-/// `docs/grammar-gaps.md` entry 16 warns about. Two things make it evidence: the standard reserves these names to
+/// Maintenance convention 16 warns about. Two things make it evidence: the standard reserves these names to
 /// the implementation, so a program that `#define`s `__attribute__` is not a program this has to read; and the
 /// extension is the *compiler's*, not the file's, so no `#define` in any header is what makes it one. Both halves
 /// have to hold for a spelling test to be legitimate, and neither holds for `MY_API`.

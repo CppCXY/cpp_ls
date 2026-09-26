@@ -263,7 +263,7 @@ fn a_class_with_an_operator_in_its_body_keeps_its_own_name() {
 /// A declaration whose declarator is **not** wrapped in an `InitDeclarator` declares nothing here yet.
 ///
 /// The boundary, written down rather than left to be discovered — see "现在答不了什么" in
-/// `docs/index-design.md`. It is a gap in this walker, not a decision: `~Widget();` is
+/// It is a gap in this walker, not a decision: `~Widget();` is
 /// `Declaration[Declarator[NameExpr(~ Widget), ParameterList]]`, with no `DeclSpecifierSeq` and no
 /// `InitDeclarator`, and [`is_unnamed_declaration`] asks `CppDeclaration::get_name_text` — which reads the first
 /// `init-declarator` — so the declaration looks unnamed and is dropped.

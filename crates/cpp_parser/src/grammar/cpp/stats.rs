@@ -63,7 +63,7 @@ pub(crate) fn parse_compound_stat(p: &mut CppParser) -> ParseResult {
 /// Parse statements until a token that cannot start one.
 pub fn parse_stats(p: &mut CppParser) {
     // **How many `}` this block owes to statements it gave up on** — the statement-level half of the brace debt
-    // the class body keeps (`grammar/cpp/decls.rs`, and `docs/grammar-gaps.md` B58). A statement that failed after
+    // the class body keeps (`grammar/cpp/decls.rs`, and B58). A statement that failed after
     // consuming a `{` — an initialiser, a lambda's body, a nested block — leaves the block one brace short, and the
     // recovery below skips *to* the next `}`, which belongs to the failed statement: the block ends there and every
     // statement after it is left to the enclosing rule.
@@ -511,7 +511,7 @@ fn at_a_macro_statement_with_a_block(p: &CppParser) -> bool {
 ///   block is deliberately **not** one of them, because `g(x) { }` is the mistake the block form of this rule
 ///   already has to weigh (see [`super::decls::a_macro_definition_follows`]);
 /// * the reading is asked for **after** the declaration reading. At file scope `MACRO(args) name (…)` is a
-///   *declaration whose specifiers are the macro* (`docs/grammar-gaps.md` B73), and a rule that claimed it first
+///   *declaration whose specifiers are the macro*, and a rule that claimed it first
 ///   would take that reading away — the first version of this one did exactly that, and
 ///   `a_macro_may_stand_between_the_type_and_the_declarator` caught it.
 ///
@@ -673,7 +673,7 @@ fn parse_a_macro_invocation_statement(p: &mut CppParser, start: usize) -> ParseR
 /// header. The file's own `#define` table has never seen it, so asking only that table answers "no body" and the
 /// invocation is read as the head of a declaration: the whole file becomes one `Declaration` whose specifier is
 /// `_STD_BEGIN` and whose payload is the class it was supposed to introduce. The failure is silent — a tree
-/// like that is still lossless and can still be error-free — which is what `docs/grammar-gaps.md` calls the A0
+/// like that is still lossless and can still be error-free — which is what calls the A0
 /// class, and why the shape assertion in `tests/gaps.rs` is the thing that pins this rule rather than a count.
 ///
 /// [`CppParser::macro_body_kinds_at`] is the positional channel built for exactly this: this file's own
@@ -930,7 +930,7 @@ fn ends_a_statement(kind: CppTokenKind) -> bool {
 /// `_GLIBCXX_BEGIN_INLINE_ABI_NAMESPACE(__cxx11)`, is a macro from a header: `bits/c++config.h` expands the first
 /// to `namespace __8 {` in one branch and to **nothing at all** in the other. No table the parser can be handed
 /// knows the name — the `#define` is in an *included* file, and the external hook is not wired to a file's
-/// includes (see `eat_namespace_head_macros`, and `docs/std-library.md` for why that connection is a design round
+/// includes (see `eat_namespace_head_macros`, and for why that connection is a design round
 /// of its own). So the shape decides, and it decides only where it has no competitor:
 ///
 /// ```text
@@ -974,7 +974,7 @@ fn at_a_macro_that_stands_for_a_declaration(p: &CppParser) -> bool {
         return false;
     }
 
-    // Evidence first, and this is the documented order rather than a preference: `docs/index-design.md` fixes
+    // Evidence first, and this is the documented order rather than a preference: fixes
     // symbol queries as **this file's table, then the caller's, then the shape**. A name the file `#define`d, or
     // one the caller's table describes, is read by the rule that knows what a macro is — the specifier sequence
     // for `MY_API Widget const w;` (where the macro is part of the *declaration*, which is a better answer than a
@@ -1228,6 +1228,9 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
 /// statements — see [`super::decls::parse_braced_initializer`].
 pub(super) fn parse_preprocessor_directive(p: &mut CppParser) -> ParseResult {
     let m = p.mark(CppSyntaxKind::PreprocessorDirective);
+    // Where the directive begins, for the one thing that has to be said about its *text* afterwards: a
+    // replacement list is not C++ (see the `forget_unrecognized_characters_within` call at the end).
+    let directive_from = p.current_token_range().start_offset;
 
     // A directive runs to the end of its **logical** line, and a `\`-newline splice does not end one.
     //
@@ -1370,6 +1373,15 @@ pub(super) fn parse_preprocessor_directive(p: &mut CppParser) -> ParseResult {
         p.record_macro_body(&recording.name, recording.kinds);
     }
 
+    // **A replacement list is not C++ text** (B137). `shared/apiset.h:64` is
+    // `#define API_SET_BY_ORDINAL(X,O,PO)   X @##O NONAME PRIVATE` inside `#ifdef _API_SET_HOST` — apiset-tool
+    // syntax in a branch no compiler takes — and `shared/driverspecs.h:401` carries a `\` in a SAL macro's body.
+    // A compiler lexes neither until the macro is *used*, so the character diagnostics that landed inside this
+    // directive's own line are dropped: 42 messages over the SDK corpus, all of them about text no compiler would
+    // refuse. Everything else inside the line is still reported — see the method's own documentation.
+    let directive_to = p.current_token_range().start_offset;
+    p.forget_unrecognized_characters_within(directive_from, directive_to);
+
     Ok(m.complete(p))
 }
 
@@ -1475,7 +1487,7 @@ fn parse_if_statement(p: &mut CppParser) -> ParseResult {
     //
     // Accepted by shape rather than by table, and the shape is decisive: `if` is followed by a `(` in every
     // program C++ accepts, so an identifier in between takes no valid program away. That is the fallback side of
-    // maintenance convention 16 in `docs/grammar-gaps.md` — where a table cannot answer because the `#define` is
+    // maintenance convention 16 — where a table cannot answer because the `#define` is
     // in an *included* header (`bits/c++config.h`), and where both readings of the tokens are wrong if the macro
     // is not one. It is *not* evidence-free in the way `MY_API` was: nothing legal is being re-read.
     //
@@ -1910,8 +1922,8 @@ fn parse_switch_statement(p: &mut CppParser) -> ParseResult {
 ///
 /// # Why the spelling, and not a table
 ///
-/// The same reasoning as the compiler's attribute spellings (`__attribute__`, `__declspec` — see
-/// `docs/grammar-gaps.md`, maintenance convention 24), with the same two conditions satisfied: the names are
+/// The same reasoning as the compiler's attribute spellings (`__attribute__`, `__declspec`):
+/// maintenance convention 24, with the same two conditions satisfied: the names are
 /// **reserved to the implementation** (a double underscore, so no conforming program may define them), and the
 /// `#define` that gives them meaning is the *implementation's*, not the file's — no header a project writes can
 /// turn `__try` into something else. Both matter: the rule that reads a macro from a header
@@ -1930,7 +1942,7 @@ fn parse_switch_statement(p: &mut CppParser) -> ParseResult {
 /// statement under the branch that has exceptions on, and reading it as a macro would lose the pairing between
 /// the body and its handlers — the one thing a consumer of a `try` is looking for. The `if (true)`/`if (false)`
 /// branch would be a different statement, and it is the branch a reader cannot see without evaluating
-/// `__EXCEPTIONS`; `docs/index-design.md` records that both branches of a conditional are read as text, and this
+/// `__EXCEPTIONS`; records that both branches of a conditional are read as text, and this
 /// takes the reading that keeps the structure.
 const THE_KEYWORD_TRY_IS_SPELLED: &str = "__try";
 
@@ -1987,7 +1999,7 @@ fn parse_try_statement(p: &mut CppParser) -> ParseResult {
     // block was not the try's block at all, so the statement ended there and the `catch` became a statement with
     // no statement before it — reported as `expected }` against the `catch`.
     //
-    // Read as the nodes they are, exactly as B23, B24 and the three other places `docs/grammar-gaps.md` records
+    // Read as the nodes they are, exactly as B23, B24 and the three other places records
     // for the same argument; a `#` anywhere it cannot be a directive is still an error.
     if let Err(err) = eat_preprocessor_directives(p) {
         p.close_marks_above(base);
@@ -2039,7 +2051,7 @@ fn parse_try_statement(p: &mut CppParser) -> ParseResult {
 /// Read the preprocessor directives at the cursor as nodes, and stop at the first thing that is not one.
 ///
 /// For the constructs whose parts a conditional can separate — see [`parse_try_statement`], and B23/B24 in
-/// `docs/grammar-gaps.md` for the same reading in an initializer, in a string-literal run, and between a
+/// the same reading applies in an initializer, in a string-literal run, and between a
 /// function's head and its body. The directives stay in the tree, so nothing is lost and a consumer can see
 /// which branch each one guards.
 fn eat_preprocessor_directives(p: &mut CppParser) -> ParseResult {

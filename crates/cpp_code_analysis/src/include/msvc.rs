@@ -1,6 +1,6 @@
 //! Microsoft's toolchain: where it is, what its `INCLUDE` is, and what it predefines.
 //!
-//! Every claim in this module is measured; [`docs/msvc-notes.md`](../../../../docs/msvc-notes.md) is the fact sheet,
+//! Every claim in this module is measured; is the fact sheet,
 //! with the command and the raw output behind each one. The five that shaped the code:
 //!
 //! ```text
@@ -457,7 +457,7 @@ pub fn predefined_macros(
 /// `MSVC <toolset> (_MSC_VER <n>)` — a version line for a human, built from facts already in hand.
 ///
 /// Deliberately not `/Bv`: that is another 62 ms and another process, to print what the toolset's directory name
-/// and the macro table already say (`docs/msvc-notes.md`, *Timing*).
+/// and the macro table already say.
 pub fn version_line(msvc: &Msvc, macros: &[CommandLineMacro]) -> String {
     let value_of = |name: &str| {
         macros

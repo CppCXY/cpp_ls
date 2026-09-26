@@ -3,7 +3,7 @@
 //! This server does **not** watch the filesystem. LSP has a notification for exactly this, clients implement it,
 //! and a client's watcher is better informed than any server's: it is the process that wrote the file, it knows
 //! about an atomic save's temporary rename, and it does not have to poll. So the design is: the client watches and
-//! tells us (`docs/index-design.md`, "no OS watcher"), and this module is what receives it.
+//! tells us, and this module is what receives it.
 //!
 //! ```text
 //! created / changed ──▶ session.changed([FileEvent]) ──▶ the index decides what to re-read ──▶ diagnostics

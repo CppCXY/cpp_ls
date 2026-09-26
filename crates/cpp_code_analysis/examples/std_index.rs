@@ -33,7 +33,7 @@ fn main() {
 
     // The aliases, counted the way the query layer recognises them: a **type** fact with a `type_of` is a
     // `typedef`/`using` and the field is what it points at; a class is a type fact without one. Printed because
-    // `docs/roadmap.md` §3.1 asks for the number — following an alias one step is what makes the standard
+    // asks for the number — following an alias one step is what makes the standard
     // library's names (`std::string`, `std::vector`, every `*_type`) reachable at all, so how many there are is
     // how much of the surface that step is holding up.
     let aliases: usize = summaries

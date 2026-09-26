@@ -387,7 +387,7 @@ fn own_guard_region(
         // `<string>`'s own `#include` (where `_STRING_` is defined by the line above), answered `Inactive`, and
         // **dropped every include of the file** — so `_STL_COMPILER_PREPROCESSOR` was never defined, region 1
         // (`#if _STL_COMPILER_PREPROCESSOR`) never held, and every query in MSVC's STL answered
-        // `ConditionalCompilation` (`docs/grammar-gaps.md` B125).
+        // `ConditionalCompilation`.
         crate::guards::Guard::PragmaOnce => {
             crate::guards::has_a_macro_guard(&preprocessing.directives, root).then_some(0)
         }
@@ -744,7 +744,7 @@ mod tests {
         //
         // The spelling this test used before was `unsigned __int128 x;`, and it stopped distinguishing the two
         // dialects when the specifier sequence learned to let a name join a type that is already there
-        // (`docs/grammar-gaps.md` B72): `__int128 x` is a type and a declarator under *both* dialects now, which
+        //: `__int128 x` is a type and a declarator under *both* dialects now, which
         // is the better reading of both. What the dialect decides is whether the token **can** be a declarator, and
         // that is what this spelling asks.
         let files = MemoryFiles::new();
@@ -1421,7 +1421,7 @@ mod tests {
 
     #[test]
     fn a_summary_carries_no_resolved_conclusions() {
-        // The first invariant of `docs/index-design.md`, asserted rather than assumed: a summary holds names as
+        // The first invariant, asserted rather than assumed: a summary holds names as
         // written and nothing that would have to be recomputed when a header changes.
         let summary = summary("namespace ns { struct Widget { int member; }; }\n");
 

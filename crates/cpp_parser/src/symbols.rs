@@ -101,14 +101,14 @@ impl SymbolTable for NoSymbols {
 
 /// A macro the file **includes** rather than writes, with the offset it becomes visible at.
 ///
-/// The whole point of the offset is the measurement `docs/roadmap.md` §2.0 opens with: a **position-less** table of
+/// The whole point of the offset is the measurement: a **position-less** table of
 /// the closure's macros made 46 files *worse*, because "some header defines this name" was read as "this name is a
 /// macro **here**" — `_GLIBCXX_BEGIN_NAMESPACE_VERSION` is `namespace __8 {` in one place and nothing at all in
 /// another, and a name's shape is not a property of the name.
 ///
 /// What the index *does* know is the **translation order** of the file it is reading: which `#include` comes where,
 /// and which `#define` each included file writes. Feeding that as offsets is what this type carries. It is the same
-/// stream `docs/index-design.md` §"闭包自己的宏：按翻译顺序边走边喂" already builds for **conditions** — the parser
+/// stream already builds for **conditions** — the parser
 /// is the second consumer of it, not a new source of truth.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncludedMacro {
@@ -122,7 +122,7 @@ pub struct IncludedMacro {
     /// The shape in `definition` says what *kind of thing* the name stands for; this says **what it says**, and
     /// it is what turns "this name is a macro" into a reading: `namespace __8 {` is a namespace head, `, noexcept`
     /// is a parameter-list fragment, `virtual HRESULT STDMETHODCALLTYPE method` is a declarator head whose name is
-    /// the macro's own argument. See the expansion section of `docs/index-design.md`.
+    /// the macro's own argument. See the expansion section.
     ///
     /// `None` is the ordinary answer — an `#undef`, a body nobody stored, or a caller that only had shapes.
     pub body_text: Option<Box<str>>,
@@ -328,7 +328,7 @@ impl MacroEnvironment {
     /// them: `iosfwd:27` says `#define _TRY_IO_BEGIN _TRY_BEGIN`, and `yvals.h` is where `_TRY_BEGIN` turns out to
     /// be `try {`. A reader that stops at the first hop sees `[Identifier]` and answers "nothing structural", which
     /// is how one `try` inside `<xstring>` cost the class body of `basic_string` and every `std::string` lookup
-    /// with it (`docs/grammar-gaps.md` B122).
+    /// with it.
     ///
     /// Bounded and cycle-safe, because a header is not a proof: the chain is followed at most
     /// [`BODY_CHAIN_LIMIT`] hops, and a name that has already been asked about ends the walk with `None` — "nobody
@@ -407,7 +407,7 @@ fn a_sole_name_in(text: &str) -> Option<&str> {
 ///
 /// The list is the keywords that can stand in front of a brace: a namespace or a class-like definition, a linkage
 /// block, and the statements that own a body. It is a *closed* grammatical set, like `can_begin_a_declaration`
-/// (`docs/grammar-gaps.md` convention 16): every entry says "a `{` may follow me", which is a different claim from
+///: every entry says "a `{` may follow me", which is a different claim from
 /// "this token may begin a statement".
 ///
 /// **Measured before it was written**: the corpus writes `namespace X {` (`_STD_BEGIN`) and `try {` (`_TRY_BEGIN`,
@@ -482,7 +482,7 @@ pub enum BodyShape {
     /// MSVC's STL spells `std::` nowhere: `<vector>` writes `_STD addressof(*_Ptr)` and `yvals_core.h` says
     /// `#define _STD ::std::`. Two names in a row are not an expression in any reading, so without this the
     /// invocation ends the expression and the token after it is a syntax error — which is how one `return`
-    /// statement inside a ternary swallowed the remaining 3 800 lines of `<vector>` (`docs/grammar-gaps.md`
+    /// statement inside a ternary swallowed the remaining 3 800 lines of `<vector>` (
     /// B121).
     QualifiesAName,
 
@@ -904,7 +904,7 @@ mod tests {
 
     /// **The evidence is positional**, which is the whole reason this exists: the same name is a macro in one
     /// region of a file and not in another, and a flat table cannot say so — feeding one cost 46 files in
-    /// `docs/roadmap.md` §2.0.
+    ///
     #[test]
     fn a_macro_from_an_include_is_in_force_only_from_its_own_offset() {
         let environment = MacroEnvironment::from_included_macros([

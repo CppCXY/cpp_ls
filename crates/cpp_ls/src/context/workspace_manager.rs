@@ -18,7 +18,7 @@
 //! # Why the state and the orchestration are separate types
 //!
 //! [`WorkspaceState`] is data: folders, buffers, the client's configuration. This type is what *changes* it, and it
-//! is deliberately the only writer — the lock order `docs/ls-architecture.md` §4 fixes is `workspace_manager`
+//! is deliberately the only writer — the lock order fixes is `workspace_manager`
 //! before `analysis`, and keeping the mutations here is what makes that rule checkable by reading one file.
 
 use std::ops::{Deref, DerefMut};

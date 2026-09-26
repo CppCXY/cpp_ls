@@ -5,7 +5,7 @@
 //! cargo run --release -p cpp_code_analysis --example std_probe -- files.txt
 //! ```
 //!
-//! `docs/std-library.md` records the numbers this prints and what they decide. It exists so that the numbers can
+//! records the numbers this prints and what they decide. It exists so that the numbers can
 //! be reproduced after a fix rather than remembered: the point of the standard-library work is to move "failing
 //! files" towards zero, and a claim about progress that cannot be re-measured is not a claim.
 //!
@@ -47,7 +47,7 @@ fn main() {
     let seeded = std::env::args().any(|argument| argument == "--seeds");
     // `--closure` walks each direct include's **own** closure rather than stopping one hop down. The two answer
     // different questions — one hop is what the file literally includes, the closure is what the preprocessor
-    // sees — and the difference is what the bill of remaining failures turns on (see `docs/index-design.md`).
+    // sees — and the difference is what the bill of remaining failures turns on.
     let closure = std::env::args().any(|argument| argument == "--closure");
     // `--macro NAME` asks what the environment knows about **one name** in each file, channel by channel. It is the
     // question that separates "the evidence was never built" from "the evidence is there and no rule used it" —
@@ -223,7 +223,7 @@ standard {}",
     // either a finding or a broken instrument, and the two are indistinguishable without this number: the
     // convenience `summarize` resolves no includes at all (`NoFiles`), so a probe built on it seeds **nothing**.
     // **How many decision points a parse has**: how often the grammar asks what a name is as a macro, and about how
-    // many distinct names. This is the number `docs/index-design.md` gates expansion on — the work expansion adds
+    // many distinct names. This is the number gates expansion on — the work expansion adds
     // is `Σ(decision points) × O(body)`, and it has to be small enough to be invisible next to the parse itself.
     let mut macro_questions = 0usize;
     let mut macro_question_names = 0usize;
@@ -286,7 +286,7 @@ standard {}",
                 // the point of its `#include`, seeded at offset 0 because another file's offsets mean nothing here.
                 // That is the only way a header sees a name none of its own includes define — `commdlg.h` and
                 // `STDMETHOD`, whose definition is in a file its own include list does not mention
-                // (`docs/grammar-gaps.md` B90/B91).
+                //.
                 let context = includers.get(path).map(|(includer, at)| {
                     let summary = summaries.get(includer).expect("an includer is indexed");
                     cpp_code_analysis::macros_in_force_before_the_include(summary, *at, look_up, &seed, &mut macro_definitions)
@@ -471,7 +471,7 @@ standard {}",
 
     // Which experiment this run is, stated in the output: "the evidence arrived and changed nothing" and "the
     // evidence was never built" look identical in the numbers, and that confusion has already cost this project
-    // one vacuous census (see `docs/roadmap.md`, B82).
+    // one vacuous census.
     if seeded {
         println!(
             "seeding mode: {}\n",

@@ -1,6 +1,6 @@
 //! Turning filesystem events into work: which of them the index cares about, and what each one implies.
 //!
-//! `docs/index-design.md` gives the watcher three jobs, and this module is all three of them and nothing else:
+//! gives the watcher three jobs, and this module is all three of them and nothing else:
 //!
 //! ```text
 //! filter      ignore what churns and what the index wrote itself
@@ -50,7 +50,7 @@
 //! Enumerating from the file's side is also what makes a batch of a thousand creations one pass over the index
 //! rather than a thousand.
 //!
-//! The same test answers the other half, which is the hole `docs/index-design.md` promises this layer closes: a
+//! The same test answers the other half, which is the hole this layer closes: a
 //! file created **earlier in the search order** than the one that resolution currently points at takes over. The
 //! rank of a candidate is the rank the resolver itself computes, so "earlier" is the resolver's own order rather
 //! than a guess about it.
@@ -215,7 +215,7 @@ impl WatchFilter {
     ///
     /// A name rather than a path: the cache lives under the project root or it is not the project's cache, and the
     /// rule that keeps a watcher from re-indexing the index's own writes has to be the same one the store writes
-    /// under. `docs/index-design.md` gives the reason the cache is inside the checkout at all.
+    /// under. gives the reason the cache is inside the checkout at all.
     pub fn with_cache_directory(mut self, name: &str) -> Self {
         if !name.is_empty() {
             self.cache = self

@@ -45,7 +45,7 @@
 //! answering "unresolved" after the header appears, with nothing in the key to notice: which candidate paths exist
 //! is deliberately not part of a key that has to stay computable from the text alone. So such a file is built,
 //! returned, and not written; the caller is told through [`StoreStats::unstored`], and the reason is the same one
-//! `docs/index-design.md` gives for `Unknown` being a first-class answer: a wrong entry is worse than a missing
+//! gives for `Unknown` being a first-class answer: a wrong entry is worse than a missing
 //! one.
 //!
 //! The same reasoning covers the other direction — a header that appears *earlier* on a search path than the one
@@ -77,7 +77,7 @@ use crate::summary::{FileSummary, IncludeFact};
 /// them. Providers are *handles* rather than data ([`crate::OpenDocuments`] is a lock behind an `Arc`, `DiskFiles`
 /// is a unit struct), so owning one costs a pointer and a clone shares the same buffers rather than copying them.
 pub struct SummaryStore<F: FileProvider = DiskFiles> {
-    /// The project root. The cache lives under it, because `docs/index-design.md` puts it there on purpose: it
+    /// The project root. The cache lives under it, because puts it there on purpose: it
     /// travels with a checkout, so CI gets the same warm cache a developer has.
     root: PathBuf,
     /// Where the summaries are written: `<root>/.cppls`, or the directory `index.cache_dir` names.
@@ -90,7 +90,7 @@ pub struct SummaryStore<F: FileProvider = DiskFiles> {
 
 /// What the store did, so that a caller can see the cache working.
 ///
-/// A counter rather than a log line, because the four numbers `docs/index-design.md` says to measure before
+/// A counter rather than a log line, because the four numbers says to measure before
 /// building more — build time, resident memory, cache hit rate, and the proportion of unanswerable queries —
 /// all start here, and a number nobody can read is how a cache quietly stops hitting.
 ///
@@ -152,7 +152,7 @@ impl Default for IncludeBudget {
     /// Roomy enough that a real closure is never truncated, bounded enough to be a limit.
     ///
     /// The measured worst case is `<bits/stdc++.h>` at 359 files and a normal translation unit's closure at 185
-    /// (`docs/std-library.md`), so 4096 is more than ten times the largest case anyone has measured — while a
+    /// so 4096 is more than ten times the largest case anyone has measured — while a
     /// project whose include graph is that large is one a caller wants to hear about anyway, which is what
     /// [`IncludeIndex::not_indexed`] is for.
     fn default() -> Self {
@@ -364,7 +364,7 @@ impl<F: FileProvider> SummaryStore<F> {
     /// # What it does not do
     ///
     /// * **No macro environment.** Each file is indexed on its own, so a header's conditions are decided without
-    ///   the `-D`s of the translation unit that includes it. `docs/std-library.md` calls that the expensive layer
+    ///   the `-D`s of the translation unit that includes it. That is the expensive layer
     ///   (P3) and keeps it separate on purpose: feeding the macro environment in means the key must name it, which
     ///   invalidates every stored summary in every project.
     /// * **No scheduling and no watching.** The caller says when. A file that changes afterwards is
@@ -842,7 +842,7 @@ mod tests {
     fn coming_back_to_earlier_text_finds_the_entry_again() {
         // The branch-switch property, in miniature: two texts, then back to the first. The third lookup is a hit
         // because the key names the *text* — the entry for the first one was never overwritten, and nothing had to
-        // remember which texts have been seen. `docs/index-design.md` sets a hit rate of >90% for this case.
+        // remember which texts have been seen. sets a hit rate of >90% for this case.
         let root = std::env::temp_dir().join("cppls-store-tests").join("branch-switch");
         let _ = std::fs::remove_dir_all(&root);
 
@@ -1003,7 +1003,7 @@ mod tests {
     fn the_key_knows_which_compiler_the_file_is_read_for() {
         // The dialect is not a detail of the flags: it changes what the *text* means, so two targets are two
         // summaries of the same file. `unsigned __int128 x;` declares `x` under GNU and something else under MSVC
-        // (see `docs/grammar-gaps.md` B61), and a cache that confused the two would answer with the wrong facts —
+        //, and a cache that confused the two would answer with the wrong facts
         // the one failure mode a key must not have.
         let files = MemoryFiles::new();
         let gnu = SummaryStore::with_provider(
@@ -1749,7 +1749,7 @@ mod tests {
     fn the_second_call_reads_the_whole_closure_from_disk() {
         // The point of the whole exercise. A second session — a new store, nothing in memory, only what the first
         // one wrote — must reach the same index without parsing anything: that is what makes opening a real
-        // project cheap the second time, and it is the number `docs/std-library.md` measures at 11 ms for 185
+        // project cheap the second time, and it is the number measures at 11 ms for 185
         // files against a second and a half of parsing.
         let files = chain();
         let root = std::env::temp_dir().join("cppls-store-tests").join("closure-warm");
@@ -1801,7 +1801,7 @@ mod tests {
     fn the_default_budget_does_not_truncate_a_measured_real_closure() {
         // The default is a limit, and a limit that cuts into something real is a bug rather than a policy. The
         // worst case measured on a real toolchain is `<bits/stdc++.h>` at 359 files, so the default has to clear
-        // that with room — see `docs/std-library.md`.
+        // that with room
         let budget = IncludeBudget::default();
 
         assert!(

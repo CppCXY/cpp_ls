@@ -86,8 +86,8 @@ pub struct EventStreamAudit {
     /// Number of zero-width nodes. Expected to be non-zero — `Marker::complete` drops empty nodes
     /// on purpose — but tracked so the count can be asserted to stay stable.
     pub empty_nodes: usize,
-    /// **How many times the grammar asked what a name is as a macro.** The decision-point count
-    /// `docs/index-design.md` gates expansion on: the work a parse would add is
+    /// **How many times the grammar asked what a name is as a macro.** **The measurement expansion is gated on**:
+    /// the work a parse would add is
     /// `Σ(decision points) × O(body)`, and this is the upper bound of that sum.
     pub macro_questions: usize,
     /// How many **distinct** names those questions were about — the number that decides whether the expansion
@@ -133,7 +133,7 @@ impl MacroEvidence {
 
     /// Could an invocation of this macro stand where a **statement** goes, with no `;` of its own?
     ///
-    /// The question behind the macro-statement rule (B41 in `docs/grammar-gaps.md`), and the one place where a
+    /// The question behind the macro-statement rule (), and the one place where a
     /// wrong "yes" costs a diagnostic: a call whose `;` is missing is exactly this shape. So the answer is "yes"
     /// only for a body that *is* a statement, and for a name this file defines — where the replacement list is
     /// unread and taking the reading is what the file's own `#define` licenses.
@@ -274,7 +274,7 @@ pub struct CppParser<'a> {
     /// reading `g(x)` with its `;` missing (a typo). See [`crate::parser::MacroNames`].
     macro_names: crate::parser::MacroNames,
     /// **How often the grammar asks what a name is as a macro, and about how many distinct names** — the
-    /// measurement `docs/index-design.md` gates expansion on ("count the decision points before building it").
+    /// measurement gates expansion on ("count the decision points before building it").
     ///
     /// Counted here rather than in the probe because the question is asked *inside* the grammar and nowhere else.
     /// `&self` forces interior mutability: a `Cell` for the count and a `RefCell` for the names, both of which
@@ -289,7 +289,7 @@ pub struct CppParser<'a> {
     ///
     /// Only the **kinds**, not the spellings: a rule asks "does this body open a namespace", "is it a lone `}`",
     /// "does it start with a comma" — and the kinds answer all three. The text stays where it is (the directive's
-    /// tokens are in the tree), so nothing here re-spells a body. See `docs/index-design.md`, the expansion section.
+    /// tokens are in the tree), so nothing here re-spells a body. the expansion section.
     macro_bodies: std::cell::RefCell<std::collections::HashMap<Box<str>, Vec<CppTokenKind>>>,
     /// The names this file `#define`d with an **empty** body — see `record_macro_body` for why they are kept apart
     /// from the shaped bodies.
@@ -803,7 +803,7 @@ impl<'a> CppParser<'a> {
                 // there is. The cost was not a worse tree but a *wrong target*: the analysis layer's fallback for
                 // an unfolded angle include reconstructed the name from these tokens, and every file that
                 // included one then resolved its includes to nothing and was never cached. See
-                // `docs/grammar-gaps.md` — a whitelist here is a rule about the lexer's token kinds pretending to
+                // A whitelist here is a rule about the lexer's token kinds pretending to
                 // be a rule about header names.
                 CppTokenKind::Newline | CppTokenKind::LineContinuation | CppTokenKind::Eof => return false,
                 _ => {}
@@ -866,7 +866,7 @@ impl<'a> CppParser<'a> {
     /// body, a function body, a block — leaves a brace behind that the enclosing body then spends its own `}` on.
     /// The class body ends early, every member after it is read at file scope, and the only diagnostic in the file
     /// lands on the leftover brace at the end (which is exactly what `bits/alloc_traits.h` did before B57, and
-    /// what `docs/grammar-gaps.md` B58 is about).
+    /// what B58 is about).
     ///
     /// Counted from the **events**, not the token stream: a rollback truncates the events, so a token read, thrown
     /// away and read again counts once — the same reason [`CppParser::events_contain_any`] reads them.
@@ -1771,6 +1771,33 @@ impl<'a> CppParser<'a> {
 
     pub fn push_error(&mut self, err: CppParseError) {
         self.errors.push(err);
+    }
+
+    /// Forget the "unrecognised character" diagnostics that fall inside `from..to`.
+    ///
+    /// The one caller is the directive rule, and the rule it implements is that **a replacement list is not C++
+    /// text** (B137): `shared/apiset.h:64` writes `#define API_SET_BY_ORDINAL(X,O,PO) X @##O NONAME PRIVATE`,
+    /// inside `#ifdef _API_SET_HOST` — a branch only Microsoft's apiset tooling takes — and the `@` is that tool's
+    /// syntax rather than C++'s. A compiler never lexes the branch, and never lexes a replacement list until the
+    /// macro is *used*; reporting the character anyway cost 42 messages over the Windows SDK corpus and told the
+    /// reader about text no compiler would refuse.
+    ///
+    /// **Only the character diagnostics**, and only inside the directive: the same `@` in C++ position is still a
+    /// gap in the lexer, and every other diagnostic inside a directive's line — an unterminated argument list, a
+    /// malformed `#if` — is still reported. A rule that dropped all of them would be hiding defects rather than
+    /// declining to report non-C++ text.
+    pub(crate) fn forget_unrecognized_characters_within(&mut self, from: usize, to: usize) {
+        self.errors.retain(|error| {
+            let about_a_character_no_cpp_token_has = error.message.starts_with("unrecognized character")
+                // A `\` that is neither a splice nor a universal character name is the other one, and it is the
+                // same claim: the character has no reading *as C++*. `shared/driverspecs.h:401` carries one inside a
+                // SAL macro's replacement list.
+                || error.message.starts_with("stray");
+
+            !(about_a_character_no_cpp_token_has
+                && usize::from(error.range.start()) >= from
+                && usize::from(error.range.end()) <= to)
+        });
     }
 
     /// Append a token produced by the documentation layer to the event stream.

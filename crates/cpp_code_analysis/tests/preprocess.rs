@@ -1218,7 +1218,7 @@ fn evaluate(condition: &str, macros: &impl MacroValues) -> Value {
 /// `#if WINAPI_FAMILY_PARTITION (WINAPI_PARTITION_APP)` is `((WINAPI_FAMILY & 0x2) == 0x2)`, and `WINAPI_FAMILY` is
 /// a name that another `#define` gives a value to, written across two lines with a `\` splice. If the evaluator
 /// only read literals, every one of those guards would be `Unknown` — and that is exactly the shape measured as the
-/// blocker for `STDMETHOD` reaching `commdlg.h` (`docs/index-design.md` B96).
+/// blocker for `STDMETHOD` reaching `commdlg.h`.
 #[test]
 fn a_condition_expands_a_name_whose_body_names_another() {
     // The plain nesting first: `A` is `B`, and `B` is `3`.

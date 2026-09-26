@@ -476,7 +476,7 @@ fn a_table_can_be_built_and_shared_from_outside_the_crate() {
 ///
 /// `BOOL_OPTION(flag)` on a line of its own is the shape the statement rule owns, and the *only* thing that makes
 /// the reading available is evidence that the name is a macro whose body is a whole statement (see
-/// `at_a_macro_call_statement`, and B36 in `docs/grammar-gaps.md`): without it, the tokens are a call with its `;`
+/// `at_a_macro_call_statement`, and ): without it, the tokens are a call with its `;`
 /// missing, which is an error, and with it they are a macro invocation.
 ///
 /// The second half is the whole reason the evidence carries an **offset**: the same file, the same call, the same

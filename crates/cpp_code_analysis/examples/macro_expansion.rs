@@ -26,7 +26,7 @@
 //! ✘ no condition evaluation: the definitions are the whole closure's, and which of them is *in force* at an
 //!   offset is the condition layer's question (`ProjectIndex::macros_at`), not this probe's
 //! ✘ no positions: the expanded text is a *reading*, and mapping every token back to the file it was written in is
-//!   the part a product version would have to add (see `docs/roadmap.md` §7)
+//! the part a product version would have to add
 //! ```
 //!
 //! The raw reading here is **without** the closure's evidence, which is deliberately the strictest baseline: the

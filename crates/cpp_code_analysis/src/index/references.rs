@@ -22,7 +22,7 @@
 //! 正是它们。第 4 级是**唯一**不靠形状而是靠语义的一步，也正因为有它，第 2、3 级可以宽松。
 //!
 //! 要不要在摘要里存一张"标识符位置表"（那样就不必读正文）是一个**量出来的问题**，不是设计偏好：
-//! `examples/find_references.rs` 把上面四级各自的代价打出来，`docs/index-design.md` 记着结论。
+//! `examples/find_references.rs` 把上面四级各自的代价打出来， 记着结论。
 //!
 //! # 它刻意不做的事
 //!
@@ -703,7 +703,7 @@ mod tests {
         // include is certain, and the use behind it is a use.
         //
         // This is the MinGW `windef.h` shape, and the reason every one of `STDMETHODCALLTYPE`'s four thousand
-        // references was a "maybe" (`docs/std-library.md`, round 14).
+        // references was a "maybe".
         let files = MemoryFiles::new()
             .with_file("/p/winnt.h", "#define WIN_ONLY int\n")
             .with_file(

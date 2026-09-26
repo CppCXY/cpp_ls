@@ -30,8 +30,8 @@
 //!
 //! `-D`, `-U` and `-std` are **not** put on the command line. They change what the code means rather than where
 //! it is, and feeding them in would mean the macro environment becomes part of what a summary depends on — which
-//! `docs/index-design.md` records as a change that must bring the macro environment back into the key and bump
-//! `FORMAT_VERSION`. `docs/std-library.md` calls that the expensive layer and keeps it separate on purpose.
+//! records as a change that must bring the macro environment back into the key and bump
+//! `FORMAT_VERSION`. calls that the expensive layer and keeps it separate on purpose.
 //!
 //! # Why the answer is not cached on disk
 //!
@@ -39,7 +39,7 @@
 //! for "which compiler is this", and a stale include path is a *wrong* answer rather than a slow one: it would
 //! make `#include <vector>` resolve into a directory that no longer holds it, and every declaration after it
 //! would be attributed to the wrong file. The measured cost does not buy that risk, so the answer lives in memory
-//! and is re-asked next session. (See `docs/std-library.md`: the same reasoning is applied there to the decision
+//! and is re-asked next session. (: the same reasoning is applied there to the decision
 //! *not* to index the standard library ahead of time.)
 //!
 //! # MSVC is deliberately not handled
@@ -69,7 +69,7 @@ pub struct Output {
     /// Load-bearing for one compiler: `cl` has no `-v`, so the only signal that distinguishes "could not be asked"
     /// from "asked and the answer is empty" is the status. Measured: `1` is the environment not obtained, `2` is
     /// the command line rejected or headers missing, `4` is a resource failure, `0` is success
-    /// (`docs/msvc-notes.md`, *Failure modes*). A caller that read only the text would treat a silent exit 1 as
+    /// A caller that read only the text would treat a silent exit 1 as
     /// "this compiler predefines nothing".
     pub status: Option<i32>,
     pub succeeded: bool,
@@ -100,7 +100,7 @@ pub trait CommandRunner {
     ///
     /// The environment is a parameter rather than the process's own because one toolchain needs it: `cl` finds its
     /// headers through `INCLUDE` and has no `-E -v` to ask, so the analysis **sets `INCLUDE` itself** and runs the
-    /// compiler with it (`docs/msvc-notes.md` measures that this works, and that going through `vcvars64.bat`
+    /// compiler with it ( measures that this works, and that going through `vcvars64.bat`
     /// instead costs ~1.3 s against ~50 ms).
     fn run(
         &self,
@@ -139,7 +139,7 @@ impl CommandRunner for DiskCommands {
             // Lossy rather than an error: compiler output is ASCII except for the paths in it, and a path with a
             // byte that is not UTF-8 is still a path worth trying. (It is also *localized*: every `cl` diagnostic
             // on the machine this was written on is Chinese, so no caller may match on message text — match on the
-            // exit status and on the `D####`/`C####` codes, as `docs/msvc-notes.md` records.)
+            // exit status and on the `D####`/`C####` codes, as records.)
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             status: output.status.code(),
@@ -388,7 +388,7 @@ pub fn parse_builtin_macros(output: &str) -> Vec<CommandLineMacro> {
 /// ```text
 /// 1. compile_commands.json's compiler for this file   the project saying which compiler builds it
 /// 2. `CXX`, then `CC`                                 the person saying which compiler
-/// 3. the platform's own: MSVC on Windows              the machine's convention — see `docs/msvc-notes.md`
+/// 3. the platform's own: MSVC on Windows the machine's convention
 /// 4. `g++`, `clang++`, `c++`, … on `PATH`             the machine's default
 /// 5. the system's header directories                  nothing could be asked: headers without macros
 /// ```
@@ -879,7 +879,7 @@ mod tests {
     /// *shape* a compiler prints — `COLLECT_GCC`, the `#include "..."` block that must not be read, the `bin/../lib`
     /// that has to be folded, the `ignoring duplicate directory` line in between — and a fixture that spells out the
     /// directory of the machine it was recorded on is a fixture nobody else can run and nobody can tell from a
-    /// machine-specific assertion. (See `docs/msvc-notes.md` for why a recorded shape is worth having at all: the
+    /// machine-specific assertion. (A recorded shape is worth having at all: the
     /// alternative is a parser written against what a compiler is *documented* to print.)
     const GCC: &str = "\
 Using built-in specs.

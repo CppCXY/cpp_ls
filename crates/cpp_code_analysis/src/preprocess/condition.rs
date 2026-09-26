@@ -252,7 +252,7 @@ pub fn evaluate(tokens: &[Token], macros: &impl MacroValues) -> Value {
     // a condition work at all: `#if WINAPI_FAMILY_PARTITION (WINAPI_PARTITION_APP)` is a call, the condition grammar
     // has no call production, and by the time an expression is read it is `((WINAPI_FAMILY & 0x2) == 0x2)`. Reading
     // the unexpanded tokens answered `Unknown` for every guard written that way — which is most of the Windows
-    // headers, and the reason `STDMETHOD` never reached `commdlg.h` (`docs/index-design.md` B96/B97).
+    // headers, and the reason `STDMETHOD` never reached `commdlg.h`.
     let expanded = expand_condition(tokens, macros);
 
     match parse_condition(&expanded) {
@@ -434,7 +434,7 @@ const EXPANSION_BUDGET: usize = 4096;
 /// `#define WINAPI_FAMILY WINAPI_FAMILY_DESKTOP_APP` is another name. Reading a single integer literal out of the
 /// body — which is what this did — answers `Unknown` for everything else, and the Windows and libstdc++ headers are
 /// full of those: it is what made `#if WINAPI_FAMILY_PARTITION (WINAPI_PARTITION_APP)` undecidable and kept
-/// `STDMETHOD` out of `commdlg.h` (`docs/index-design.md` B96/B97).
+/// `STDMETHOD` out of `commdlg.h`.
 ///
 /// The expander does the nesting, so this stays one step: it resolves `FAMILY`'s two names, and its own depth cap
 /// and budget are what stop a self-referential definition. A body that still names **its own macro** afterwards is

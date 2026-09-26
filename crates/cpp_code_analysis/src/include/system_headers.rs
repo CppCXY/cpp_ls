@@ -26,7 +26,7 @@
 //! platform's own convention (`/usr/include`, and the toolset layout on Windows) are worth having; a list of
 //! fifteen directory names copied from a wiki is not, because a wrong include path makes a header resolve to the
 //! wrong file — and that is worse than not resolving it. So each entry below is either the POSIX convention or
-//! measured in `docs/msvc-notes.md`.
+//! measured.
 
 use std::path::{Path, PathBuf};
 

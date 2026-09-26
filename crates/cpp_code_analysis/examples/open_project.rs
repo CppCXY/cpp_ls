@@ -319,7 +319,7 @@ fn main() {
                 // **Every** member the query offers, not only the ones written in the class itself: what a
                 // completion after `m.` must list includes the inherited ones, and on MSVC's STL that is the
                 // difference between 7 and 9 here — `std::map` declares none of `find`/`begin`, `std::_Tree` does
-                // (the base walk, `docs/grammar-gaps.md` B128). Filtering on `own()` is what a reader of this probe
+                // (the base walk, B128). Filtering on `own()` is what a reader of this probe
                 // sees as "the type has no such member" while the type does.
                 let hit = found
                     .members

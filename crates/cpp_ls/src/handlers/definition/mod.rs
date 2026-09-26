@@ -14,7 +14,7 @@
 //!
 //! **`Known` is why this handler does not guess.** `No` means "there is no such declaration" and `Unknown` means
 //! "the index cannot say yet" — both answer `null`, because a client that jumps to a wrong location is worse off
-//! than one that gets no location at all (`docs/index-design.md`, the same rule the analysis layer follows).
+//! than one that gets no location at all.
 //!
 //! # The range is the name, in the *declaring* file
 //!

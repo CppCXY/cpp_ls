@@ -61,7 +61,7 @@ fn main() {
 
     // A compile database, with no flags beyond the compiler and the file: a real project has one, and it is what
     // makes the session **configured** — the caller has said how its files are built. The stronger claim that goes
-    // with it ("so nothing else can define a name") is deliberately *not* made yet: `docs/roadmap.md` §3.5c has the
+    // with it ("so nothing else can define a name") is deliberately *not* made yet, and the
     // measurement (440/486 decided, and two families of references lost because a conditional first visit to a
     // header suppresses the certain one).
     let root_text = root.to_string_lossy().replace('\\', "/");
@@ -367,7 +367,7 @@ fn main() {
     // The ceiling for the next step: the closure's own `#define`s
     // ============================================================================================
     //
-    // `roadmap.md` §3.5c's second half is "feed the macros the *closure* defines into the environment, in
+    // The second half of the plan is "feed the macros the *closure* defines into the environment, in
     // translation order". Before building that, measure what it can buy: of the conditions the evaluation left
     // `Unknown`, how many test **only** names that some file in the closure defines (or that the compiler
     // predefines)?
@@ -616,7 +616,7 @@ fn compiler_builtins(session: &Session<DiskFiles>) -> HashSet<String> {
     };
 
     // The toolchain's own table, whichever way it was obtained: a GNU-like compiler prints it with `-dM`, and MSVC
-    // — which has no such mode — was already asked for it during discovery (`docs/msvc-notes.md`).
+    // — which has no such mode — was already asked for it during discovery.
     if !toolchain.builtin_macros.is_empty() {
         return toolchain
             .builtin_macros

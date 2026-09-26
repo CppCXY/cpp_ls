@@ -2,7 +2,7 @@
 //!
 //! [`SummaryStore`] indexes one file when it is asked about it. Nothing so far decides *which* file to ask about
 //! next, and on a cold cache that decision is the whole difference between a language server that answers a
-//! go-to-definition after one file and one that answers it after ten thousand. `docs/index-design.md` fixes the
+//! go-to-definition after one file and one that answers it after ten thousand. The rule fixes the
 //! order:
 //!
 //! ```text

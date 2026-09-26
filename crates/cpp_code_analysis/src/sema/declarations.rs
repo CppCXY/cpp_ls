@@ -8,7 +8,7 @@
 //!
 //! A fact is what the file **says**: a name was declared here, with this spelling, in this scope, inside this
 //! conditional region. It is not a resolution — no "this refers to that", no type, no overload set. That is
-//! `docs/index-design.md`'s first invariant, and the reason is invalidation: a `#define` changes the meaning of
+//! That is the first invariant, and the reason is invalidation: a `#define` changes the meaning of
 //! every name below it in every file that includes it, so a stored *conclusion* would have to be recomputed
 //! project-wide, while a stored *fact* goes stale exactly when its own file changes.
 //!
@@ -600,7 +600,7 @@ fn fact_for(
     // It used to be stored **empty** ("a declaration is here" and nothing more), and the measurement that changed
     // it is why: `DeclFact::qualified_name` of a nameless fact *is* its scope, so every destructor answered for
     // its own class. `definition("std::vector")` then found the class **and** its destructor and reported
-    // `Ambiguous`, which is how MSVC's STL answered "not declared" for every member query (`docs/roadmap.md`
+    // `Ambiguous`, which is how MSVC's STL answered "not declared" for every member query (
     // §4.2 ①). The declaration stays findable by position, which was the point of keeping it at all.
     let name = binding.name.text();
 

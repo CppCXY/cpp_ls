@@ -8,7 +8,7 @@
 //! Two files the Lua skeleton had are **gone on purpose**: `desc.rs` (parsing `---@param` doc strings) and
 //! `module_name_convert.rs` (`require` module paths) — both are Lua's language, not this server's. The C++
 //! equivalents (doc comments, header/source pairing) get their own module when the hover and completion work
-//! starts; see `docs/ls-architecture.md` §5.
+//! starts;
 
 mod catch_unwind;
 mod position;

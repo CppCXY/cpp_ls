@@ -5,7 +5,7 @@
 //! A summary is a flat list of small records with five field types between them: a `u32`, a `u64`, a length-prefixed
 //! string, a `SourceRange`, and a handful of enums. `serde` plus a binary format would generate the same bytes with
 //! a build dependency, an attribute on every type, and a version negotiation nobody can read — and the schema is
-//! `docs/index-design.md`'s to define, not a macro's. The project has already made this trade once, in
+//! That is the design's to define, not a macro's. The project has already made this trade once, in
 //! `include/paths.rs`, for the same reason.
 //!
 //! # The one rule that matters

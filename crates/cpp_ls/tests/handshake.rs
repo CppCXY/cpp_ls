@@ -39,7 +39,7 @@ const WIDGET_H: &str = "struct Widget { int size; };\n";
 /// The unclosed `{` is deliberate and it is the *only* error in the file: the parser reports `expected ;` at the
 /// end of the last line, which gives the diagnostic assertion a line and a column to check rather than a count.
 /// (`int g() { return 1 }` — a missing semicolon before a closing brace — is **not** reported by this parser; that
-/// is a real gap in its error reporting and it is recorded in `docs/grammar-gaps.md`.)
+/// is a real gap in its error reporting and it is recorded.)
 const MAIN_CPP: &str = "#include \"widget.h\"\n\nvoid f() {\n    Widget w;\n    w.size = 1;\n}\nstruct Unclosed { int x;\n";
 
 #[test]

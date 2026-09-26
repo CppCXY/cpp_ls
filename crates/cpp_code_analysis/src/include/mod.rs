@@ -589,7 +589,7 @@ mod tests {
 // those resolutions form (`graph`), and the one place that asks the toolchain where its own headers are
 // (`toolchain`) — which is what makes `#include <vector>` resolve at all, and therefore what makes a project's own
 // files cacheable. `msvc` and `system_headers` are the two halves of the answer on a machine where no compiler can
-// be asked: Microsoft's layout (measured in `docs/msvc-notes.md`), and the conventional directories of an operating
+// be asked: Microsoft's layout (measured), and the conventional directories of an operating
 // system.
 //
 // **`paths` is not here any more**: reading a file is the *file* layer's business (`crate::file::paths`), and this

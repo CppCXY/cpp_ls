@@ -41,7 +41,7 @@ pub use client_config::{ClientConfig, get_client_config};
 ///
 /// A slice is a transaction against the analysis: it takes the write lock once and gives it back, so a query
 /// arriving mid-index waits for a slice and not for a project. Sixteen files is a few milliseconds of parsing
-/// (measured in `docs/index-design.md`) — short enough that a keystroke does not feel it, long enough that the
+/// (measured) — short enough that a keystroke does not feel it, long enough that the
 /// indexing does not spend its time taking locks.
 const INDEX_SLICE: usize = 16;
 

@@ -104,7 +104,7 @@ pub struct CompileSection {
     /// what its compilation is, and merging two sets of flags would make the result depend on their order (two
     /// `-std=` options, a `-I` before and after) in a way nobody can predict by reading the file. The cost is real
     /// — change a `target_compile_definitions` in `CMakeLists.txt` and this file has to be updated by hand — and
-    /// the way out is `extra_args`, which adds to whichever flags won. `docs/ls-architecture.md` §5 records the
+    /// the way out is `extra_args`, which adds to whichever flags won. It records the
     /// decision and the alternatives.
     #[serde(default)]
     pub args: Option<Vec<String>>,

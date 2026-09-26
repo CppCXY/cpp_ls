@@ -1470,7 +1470,7 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
     //
     // A `#` here cannot be anything else: a declarator is followed by a body, a `;`, an initializer — or a
     // directive. Read as the node it is, and the match below is then asked about the token that really follows.
-    // The same argument as the two places `docs/grammar-gaps.md` records for B23; a `#` anywhere else in an
+    // The same argument as the two other places do; a `#` anywhere else in an
     // expression is still an error.
     //
     // # Why this alternates with the macro suffixes
@@ -1579,7 +1579,7 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
             // What the three attempts agree on is that the `;` of the last branch is the *declaration's* `;` and
             // the three readers that share this machinery do not agree on who owns it. That is a design question
             // about `parse_a_definition_per_branch` rather than a missing rule, and it is written up in
-            // `docs/grammar-gaps.md` B77 with the numbers — the enumerator seam beside it, which shares nothing with
+            // B77 with the numbers — the enumerator seam beside it, which shares nothing with
             // it, landed.
             let init = p.mark(CppSyntaxKind::Initializer);
 
@@ -1611,7 +1611,7 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
             //
             // A `#` where an initializer should begin cannot be anything else — an expression has no `#` — so the
             // directive is read as the node it is and the initializer rule is asked again about the token that
-            // follows it. This is the same argument as the two seams `docs/grammar-gaps.md` records for B23, and
+            // follows it. This is the same argument as the two other seams of the same kind, and
             // the same one the suffix loop above spells out for a *function's* head; what was missing is only that
             // the declaration's own `=` is a seam too.
             //
@@ -3356,8 +3356,8 @@ pub fn parse_for_init_declaration(p: &mut CppParser) -> ParseResult {
 /// ```
 ///
 /// The first is the one worth remembering: every file in the census was lossless and error-free on that reading,
-/// so no count could have moved. See `a_condition_may_declare_a_variable` in `tests/gaps.rs` and the entry in
-/// `docs/grammar-gaps.md`.
+/// so no count could have moved. See `a_condition_may_declare_a_variable` in `tests/gaps.rs`.
+///
 pub fn parse_condition_declaration(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::Declaration);
@@ -3553,7 +3553,7 @@ fn parse_member_initializer_list(p: &mut CppParser) -> ParseResult {
 /// One declarator, one initializer list **per branch**. Reading a single list and returning left the `#else` and
 /// the second `:` to the matcher, which has no reading for either: the constructor failed, and the recovery then
 /// took its `{ }` for the class's closing brace — so `class basic_string` ended 3400 lines early and every member
-/// after it was read at file scope (`docs/grammar-gaps.md`, tenth round). A directive and a `:` are the only two
+/// after it was read at file scope. A directive and a `:` are the only two
 /// tokens this loop accepts, so it stops at the first body brace, `;` or anything else.
 fn parse_further_member_initializer_lists(p: &mut CppParser) -> ParseResult {
     loop {
@@ -4145,7 +4145,7 @@ fn parse_class_body_members(p: &mut CppParser) -> ParseResult {
     // `}` — a requires-expression's body, a function body, a block — leaves the body's own brace counting one
     // short, and the next `}` (which belongs to the *failed member*) would be taken for the end of the class:
     // every member after it lands at file scope, and the file's only diagnostic appears on the leftover brace at
-    // the end. That is `bits/alloc_traits.h` before B57 and `docs/grammar-gaps.md` B58.
+    // the end. That is `bits/alloc_traits.h` before B57 and B58.
     //
     // The debt is paid **before** the body is allowed to end, and the brace that pays it is read as an error node
     // — it is a token no rule claimed, which is what an error node is for. Closing the failed member's markers
@@ -4187,7 +4187,7 @@ fn parse_class_body_members(p: &mut CppParser) -> ParseResult {
         // Without this, the `#if` line was read as a **member declaration** whose declarator name is
         // `__cplusplus`, and every declaration after it became a child of that bogus member: the tree stayed
         // lossless and free of diagnostics, the class's *own* members were no longer members, and
-        // `bits/basic_string.h` indexed seven typedefs and not one method. See `docs/roadmap.md` §2.1 — the
+        // `bits/basic_string.h` indexed seven typedefs and not one method — the
         // failure mode here is a wrong *shape*, which is why no error-based check could see it.
         //
         // Read as the node it is, then go round the loop again: the next token is a member, an access specifier, or
@@ -4245,7 +4245,7 @@ fn parse_class_body_members(p: &mut CppParser) -> ParseResult {
         // group, and whatever that group was the beginning of is gone. The standard library charged 111 members
         // for it.
         //
-        // So the queue entry stands (`roadmap.md` §2.3) and the evidence it needs is **macro evidence**, not
+        // So the question stands, and the evidence it needs is **macro evidence**, not
         // shape: either the macro environment (P3) or a source that reaches `bits/c++config.h`.
 
         // A member is a declaration; anything that is not gets wrapped in an error node so the
@@ -4474,7 +4474,7 @@ pub(super) fn a_semicolon_follows_the_group(p: &CppParser) -> bool {
 /// other reading is an expression that continues. Two copies of this list would be free to disagree about what
 /// begins a declaration, and the list is a closed grammatical set — every entry says "a declaration may start
 /// with this", which is a different kind of claim from the "which token kinds may be inside a header name" list
-/// whose cost `docs/grammar-gaps.md` entry 22 records.
+/// whose cost entry 22 records.
 ///
 /// The kinds whose answer needs the tokens *after* them (`decltype`, and `concept`, which is contextual) are not
 /// here: they stay in [`starts_declaration`], where that lookahead is available.
@@ -5049,7 +5049,7 @@ pub fn parse_namespace_declaration(p: &mut CppParser) -> ParseResult {
 ///
 /// The name is `#define`d in `c++config.h`, an **included** header, so nothing the parser can be handed knows it:
 /// this file's own `MacroNames` never saw the definition, and the external hook (`symbols.rs`) is not wired to a
-/// file's includes — see `docs/std-library.md`, where that connection is called out as the expensive layer it is.
+/// file's includes — where that connection is called out as the expensive layer it is.
 /// What *is* knowable here is the shape, and the shape settles it: **no valid C++ has anything between a
 /// namespace's name and its `{`** — the two readings are `namespace std {` and an error — so accepting a macro
 /// costs nothing, which is maintenance convention 16's fallback side of the rule ("both readings are wrong, pick
@@ -5140,7 +5140,7 @@ pub fn parse_linkage_block(p: &mut CppParser) -> ParseResult {
     // container that reads declarations until a `}`, and the third time this file pays for the same thing. A
     // declaration that fails after consuming a `{` leaves the block one brace short, and the next `}` (which
     // closes *that declaration*) would end the linkage block instead. See `parse_class_body_members` for the whole
-    // argument and `docs/grammar-gaps.md` B58 for the measurements.
+    // argument and B58 for the measurements.
     let mut unclosed_braces = 0isize;
 
     while p.current_token() != CppTokenKind::RightBrace || unclosed_braces > 0 {

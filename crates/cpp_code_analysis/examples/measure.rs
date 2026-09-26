@@ -1,4 +1,4 @@
-//! Measuring the two numbers `docs/index-design.md` says to measure first: what a summary costs to build, and
+//! Measuring the two numbers that matter first: what a summary costs to build, and
 //! what a cache hit costs.
 //!
 //! ```text

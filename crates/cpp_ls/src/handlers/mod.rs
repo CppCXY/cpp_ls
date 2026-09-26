@@ -12,7 +12,7 @@
 //! Both are wired in two places and nowhere else: [`request_handler`] / [`notification_handler`] for the
 //! dispatch, and the `capabilities!` table at the bottom of this file for what the client is told. A module
 //! that is in one and not the other is a handler the client will never call (or a capability with no
-//! implementation), so **the two lists are read together** — see `docs/ls-architecture.md`.
+//! implementation), so **the two lists are read together**
 //!
 //! The table below is deliberately short: it is the set of capabilities this server answers *today*. Adding
 //! one is three edits — the module, the dispatch row, the capability row — and the modules that were removed

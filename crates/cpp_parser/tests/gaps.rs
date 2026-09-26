@@ -86,7 +86,7 @@ fn condition_is_a_declaration(fragment: &str) -> bool {
 /// ```
 ///
 /// The silent one is the reason this test asserts a **shape** and not just "it parses": every file in the census
-/// was lossless and error-free on that reading, so no count could have moved. `docs/grammar-gaps.md` records it as
+/// was lossless and error-free on that reading, so no count could have moved. It stands as
 /// the second number of maintenance convention 29.
 ///
 /// The negative half is what the fix has to keep: a condition that *names* something without declaring it stays an
@@ -229,7 +229,7 @@ fn an_allocation_initialiser_is_not_a_parameter_list() {
 /// the `#endif` with no `;`. The fix is that a branch is an alternative: `#else`/`#elif` puts back the three things
 /// the specifier loop started with (no type named *in this branch*, the one-name allowance unspent, and the evidence
 /// window moved past the directive). `#endif` is deliberately not such a boundary — the tail after it needs what
-/// the branches agreed on. `docs/grammar-gaps.md` B53 keeps the wrong first diagnosis next to the right one.
+/// the branches agreed on. B53 keeps the wrong first diagnosis next to the right one.
 ///
 /// The negative half is the reading that must not change: a branch that names no type leaves the tail's name as the
 /// type (`#else static` / `#endif` / `C f()`), and the second name of a split head without a macro is still the
@@ -320,7 +320,7 @@ fn a_split_member_head_may_name_its_type_in_the_else_branch() {
 /// sequence, the declaration anchors, `a_decltype_here_is_a_type` — now answers for them too.
 ///
 /// Measured: `bits/stl_heap.h`, `bits/stl_uninitialized.h` and `stddef.h` of the standard-library closure, which
-/// are three of the files that went from failing to clean in the round this was written (`docs/std-library.md`).
+/// are three of the files that went from failing to clean in the round this was written.
 #[test]
 fn the_gnu_spellings_of_decltype_are_that_keyword() {
     assert_reads(
@@ -505,7 +505,7 @@ fn a_functional_conversion_may_have_no_arguments() {
 /// The **type** reading is what hid it: `array<int, 3>` and `Grid<T, 3>::fill` put the comma after a type the type
 /// reading has already accepted, so the fallback never ran for the spellings anyone would try by hand. The rule
 /// belongs to the family [`Level`] lists in `exprs.rs` — a rule that spells its own separators reads one element —
-/// and `docs/grammar-gaps.md` B54 records that the list said so before the code did.
+/// and B54 records that the list said so before the code did.
 ///
 /// The negative half is the other direction: a comma **inside parentheses** is still the comma operator, because
 /// the parentheses are what say so, and a type argument is still read by the type reading.
@@ -700,7 +700,7 @@ fn a_braced_conversion_is_a_value_not_a_type() {
 
     // **The silent half, which is the whole reason this test asserts shapes.** `X<int{}> m;` was a well-formed
     // `BinaryExpr` before the fix — `(X < int{}) > m` as an `ExpressionStat` — so `assert_reads` would have called
-    // it correct, and a declaration read as a comparison is exactly the A0 defect `docs/grammar-gaps.md` opens
+    // it correct, and a declaration read as a comparison is exactly the A0 defect opens
     // with.
     let tree = CppParser::parse("X<int{}> m;", ParserConfig::default());
     let root = tree.get_red_root();
@@ -779,7 +779,7 @@ fn a_braced_conversion_is_a_value_not_a_type() {
 /// **What it cost, and why this is the last of a chain**: the failed member also closed the *class* early (the
 /// known gap pinned at the bottom of this test), so every member after it was read at namespace scope and the
 /// file's only diagnostic landed on the leftover `}` at its very end — line 1053 of 1053. Moving that error back
-/// one construct at a time is what the five fixes before this one did (`docs/roadmap.md` §2.0: 454 → 536 → 689 →
+/// one construct at a time is what the five fixes before this one did (: 454 → 536 → 689 →
 /// 941 → 1053 → clean).
 ///
 /// The shape assertion is the real one: a directive is a node of the requires-expression, the requirements are
@@ -870,7 +870,7 @@ fn a_conditional_may_decide_a_requirement() {
 /// reach, because it is about **tokens** rather than about nodes: when the abandoned member had consumed a `{`
 /// that never met its `}`, the class body spent its own `}` on it, ended early, and every member after it was read
 /// at **file scope** — which is how `bits/alloc_traits.h` came to report its only diagnostic 900 lines after the
-/// member that was actually broken (`docs/grammar-gaps.md` B58).
+/// member that was actually broken.
 ///
 /// The fix is a **brace debt**: a failed member is charged for the braces it consumed and never closed, and the
 /// body pays that debt by reading the next `}`s as error nodes before it is allowed to end. Both paths a failure
@@ -980,7 +980,7 @@ fn a_typedef_may_carry_an_attribute() {
 /// the declaration rule reads it itself (`template <typename T> [[nodiscard]] T p();`). What it did *not* have was
 /// the **directive**, and a conditional in front of the first specifier is not the specifier sequence's to read —
 /// it reads directives only *between* specifiers, because a declaration that begins with one is the caller's
-/// (`docs/grammar-gaps.md` B60):
+///
 ///
 /// ```cpp
 /// template<typename _Ex>                                  // bits/nested_exception.h:203
@@ -1048,7 +1048,7 @@ fn a_conditional_may_decide_an_attribute() {
 /// A handful of reserved spellings have no single answer: `__int128` is a builtin type to GCC and Clang and a
 /// plain name to cl.exe, `__int64` is the other way round, and `_Float16` belongs to GCC. Read as a *name* — the
 /// only reading available before the dialect existed — the failure is silent and shaped like a declaration of
-/// something else (`docs/grammar-gaps.md` B61, measured on `bits/bmi2intrin.h`):
+/// something else:
 ///
 /// ```text
 /// unsigned __int128 x;      Declaration[ DeclSpecifierSeq[unsigned]  InitDeclarator[__int128]  MacroCall[x] ]
@@ -1317,7 +1317,7 @@ fn a_cast_of_a_cast_is_still_a_cast() {
 /// **A conditional inside a template head, or where a name segment stands** — three seams of the same family.
 ///
 /// The directive seams were done for statements, declarations, class members, initialisers and requirements
-/// (`docs/grammar-gaps.md` §2.1 and B57/B60); these are the three that were left, and each is a real spelling in
+/// These are the three that were left, and each is a real spelling in
 /// libstdc++:
 ///
 /// ```cpp
@@ -1811,7 +1811,7 @@ fn a_directive_may_decide_a_parameter_or_stand_between_two() {
 /// The negative half is the price, and it is pinned here rather than left implicit: **a genuinely broken call is
 /// read as a macro's arguments and reported by nobody.** No shape separates the two — the arguments of a macro
 /// *are* arbitrary tokens — so the choice is between the diagnostic on `g(1 +)` and every use of every macro from
-/// every header. B70 in `docs/grammar-gaps.md` records it as a cost rather than as a gap.
+/// every header. records it as a cost rather than as a gap.
 #[test]
 fn a_macros_arguments_that_are_not_expressions_stay_tokens() {
     assert_reads(
@@ -1830,7 +1830,7 @@ fn a_macros_arguments_that_are_not_expressions_stay_tokens() {
 
     // The neighbouring shape — a **declaration whose head is such a macro** — used to be the boundary of this
     // rule and is now read by the one that owns it: `WINOLEAPI_(void) CoUninitialize (void);` is a declaration
-    // whose specifiers are a macro invocation (`docs/grammar-gaps.md` B72), and it is asserted there.
+    // whose specifiers are a macro invocation, and it is asserted there.
     assert_reads(
         Where::File,
         &["SHSTDAPI_(WINBOOL) InitNetworkAddressControl (void);"],
@@ -2851,7 +2851,7 @@ fn count_of(source: &str, kind: CppSyntaxKind) -> usize {
 /// libstdc++ header, and `_GLIBCXX_BEGIN_NAMESPACE_VERSION` on a line of its own inside the body. Neither name is
 /// in any table the parser can be handed — the `#define`s are in `bits/c++config.h`, an *included* file — so the
 /// shape is what decides, and it decides only where it has no competitor. Measured on the closure of six standard
-/// headers: 48 of 185 files read cleanly before these two rules, 78 after (`docs/std-library.md`).
+/// headers: 48 of 185 files read cleanly before these two rules, 78 after.
 ///
 /// The negative assertions are the point of the test. Each is a shape that looks similar and must keep the
 /// reading it already had:
@@ -2943,7 +2943,7 @@ fn a_macro_from_a_header_can_stand_where_a_declaration_goes() {
 ///
 /// The defect this pins was silent, and silence is why it needs a *shape* assertion rather than a diagnostic
 /// count: ``_STD_BEGIN struct vector { int size; };`` parses **cleanly** whichever way it is read, so a census of
-/// errors cannot tell the two readings apart (`docs/grammar-gaps.md`, the A0 class). What tells them apart is
+/// errors cannot tell the two readings apart. What tells them apart is
 /// where the `StructDef` ended up — inside the invocation's specifier sequence, or beside it as the declaration
 /// it is — and that is what the four cases below assert, one per channel the evidence can come through:
 ///
@@ -3214,7 +3214,7 @@ fn qualifier_body() -> cpp_parser::MacroEnvironment {
 ///
 /// `__attribute__((…))` and `__declspec(…)` mean what `[[…]]` means, and they are the *compiler's* extension
 /// rather than the file's macro: the standard reserves both names, so matching them by spelling is not the
-/// convention-without-evidence that `docs/grammar-gaps.md` entry 16 warns about — there is no `#define` anywhere
+/// convention-without-evidence that entry 16 warns about — there is no `#define` anywhere
 /// that could make them something else. libstdc++ writes them in positions a declaration cannot otherwise have
 /// anything in: between a template head and the declaration it wraps, between `extern "C++"` and the declaration,
 /// and after a parameter list.
@@ -3359,7 +3359,7 @@ fn a_macro_can_stand_among_a_declarators_suffixes() {
 /// declaration — lossless, well formed, silent, and with all of those members no longer members of the class.
 /// That is exactly what `bits/basic_string.h` did: measured before these seven, `std::basic_string` had **117**
 /// indexed members and none of the public interface; after them it has **326**, and `examples/std_query.rs` went
-/// from 0/7 to 2/7 (`docs/roadmap.md` §2.1). So each entry says how many members the class has, and the
+/// from 0/7 to 2/7. So each entry says how many members the class has, and the
 /// assertion is that the number did not change.
 #[test]
 fn a_directive_inside_a_declaration_keeps_the_members_after_it_members() {
@@ -3705,7 +3705,7 @@ fn a_template_argument_may_be_a_call_or_a_function_type() {
 /// statement that failed after eating a `{` — a braced initialiser, a lambda's body, a nested block — therefore
 /// left the block one brace short, the recovery skipped *to* the next `}`, and that one belonged to the failed
 /// statement: the block ended there and the statements after it were left to the enclosing rule. The fix is a
-/// **brace debt** (kept by `parse_stats`, and by the class body for the member-level case — `docs/grammar-gaps.md`
+/// **brace debt** (kept by `parse_stats`, and by the class body for the member-level case
 /// B58): the failed statement is charged for the braces it consumed and never closed, and the block pays the debt
 /// by reading the next `}`s as error nodes before it may end.
 #[test]
@@ -3980,7 +3980,7 @@ int after;
     );
 
     // **A declaration inside the block that fails with a brace left open** must not cost the block either — the
-    // third container that keeps a brace debt (`docs/grammar-gaps.md` B58), and the one the MinGW headers needed:
+    // third container that keeps a brace debt, and the one the MinGW headers needed:
     // a braced initialiser whose initialiser is written in two branches fails with the `{` consumed, and without
     // the debt the block's own `}` paid for it.
     let source = "extern \"C\" {\n  S s{\n#if X\n    1\n#endif\n    ;\n  };\n  int after;\n}\n";
@@ -4304,7 +4304,7 @@ fn constructs_the_parser_reads() {
             // with: the name is `#define`d in an *included* file, so no table the parser can be handed knows it and
             // the shape is what decides. File scope is where that works — see
             // `a_macro_from_a_header_can_stand_where_a_declaration_goes` for the shapes that must *not* be read
-            // this way, and `docs/grammar-gaps.md` entry 23.
+            // this way, and entry 23.
             "namespace std _GLIBCXX_VISIBILITY(default) { int x; }",
             "_GLIBCXX_BEGIN_NAMESPACE_VERSION\nint x;\n",
             "_GLIBCXX_BEGIN_INLINE_ABI_NAMESPACE(__cxx11)\nint x;\n",
@@ -4347,7 +4347,7 @@ fn constructs_the_parser_reads() {
             // made every standard-library class lose its members: the `#if` line used to be read as a *member
             // declaration* named after the condition's first identifier, and everything after it became a child of
             // that bogus member — lossless, diagnostic-free, and wrong. Measured: `std::basic_string` went from
-            // 7 indexed members (all typedefs, no methods) to 117. See `docs/roadmap.md` §2.1.
+            // 7 indexed members (all typedefs, no methods) to 117.
             "struct S {\n  int a;\nprotected:\n#if FEATURE\n  int b;\n#else\n  int c;\n#endif\nprivate:\n  int d;\n};",
             "struct S {\n#if FEATURE\n  int a;\n#endif\n  int b;\n};",
             // The same seam **inside one declaration**, which is the other half of it and the one that decides
@@ -4925,7 +4925,7 @@ fn constructs_the_parser_does_not_read_yet() {
             (
                 "g(x) { }",
                 "a call with its `;` missing, followed by a block — not a macro, since the name is not spelled \
-                 like one; see B36 in docs/grammar-gaps.md",
+                 like one",
             ),
             (
                 "NUMBER_OPTION(tab_width)\ng(x)",
@@ -5036,7 +5036,7 @@ fn constructs_the_parser_does_not_read_yet() {
             // Rare outside constructors, and loud rather than silent, so it is logged rather than fixed.
             (
                 "void f() try { } catch (const E& e) { }",
-                "the declarator's tail has no rule for `try` — see B25 in docs/grammar-gaps.md",
+                "the declarator's tail has no rule for `try`",
             ),
         ],
     );
@@ -5302,7 +5302,7 @@ fn assert_fragment_contains(fragments: &[(&str, CppSyntaxKind)]) {    let missin
 /// `cpp_code_analysis/tests/preprocess.rs` has the reconstruction, and this has the fold.
 ///
 /// A whitelist here is a rule about the *lexer's token kinds* pretending to be a rule about header names, which
-/// is why the fix is a list of what cannot appear rather than of what can. See `docs/grammar-gaps.md` entry 22.
+/// is why the fix is a list of what cannot appear rather than of what can. entry 22.
 #[test]
 fn a_header_name_is_one_token_whatever_is_in_it() {
     let folds = |source: &str| {
@@ -5652,7 +5652,8 @@ fn modern_constructs_produce_the_right_nodes() {
         "a member's `:` is still a bit-field width"
     );
 
-    // **How many enumerators an enum has.** This is the assertion the A0 defect of B26 needed and did not have:    // with the initializer read at the comma-operator level, `enum E { A = 0, B };` came out as *one*
+    // **How many enumerators an enum has.** This is the assertion the A0 defect of B26 needed and did not have.
+    // With the initializer read at the comma-operator level, `enum E { A = 0, B };` came out as *one*
     // `EnumeratorDecl` whose initializer was the expression `0, B` — lossless, well formed, no diagnostic, and
     // with `B` no longer a member of the enum. Counting members is the only question that sees it, and the census
     // above cannot ask it ("does this construct parse?" was answered `yes` by the wrong tree all along).
@@ -6724,7 +6725,7 @@ fn annotations_may_stand_in_runs_before_the_type_they_annotate() {
     // in front of a grouped one is read as a type by the same arm's precondition (the cursor must be on a name with
     // a group), which is the remaining half of this family in `ucrt/stdio.h:612`
     // (`_In_z_ _Printf_format_string_params_(2) char const* _Format`). It fails the day it starts working — see
-    // `docs/grammar-gaps.md` B134.
+    // B134.
     assert!(
         reads("int f(Wat Wobble(2) char const* _Format);\n", Where::File).is_err(),
         "a bare annotation before a grouped one is the next shape, not this one"
@@ -6865,6 +6866,47 @@ fn a_form_feed_is_whitespace_and_not_a_character_error() {
         assert_eq!(tree.to_source_text(), source, "losslessness: {source:?}");
         assert_eq!(tree.get_errors(), [], "a form feed is whitespace: {source:?}");
     }
+}
+
+#[test]
+fn a_replacement_list_is_not_cpp_text() {
+    // `shared/apiset.h:64` writes, inside `#ifdef _API_SET_HOST` — a branch only Microsoft's apiset tooling takes:
+    //
+    // ```c
+    // #define API_SET_BY_ORDINAL(X,O,PO)   X @##O NONAME PRIVATE
+    // ```
+    //
+    // and `shared/driverspecs.h:401` carries a `\` inside a SAL macro's replacement list. **A replacement list is
+    // not C++ text**: a compiler lexes neither until the macro is *used*, so reporting the character told the
+    // reader about text no compiler would refuse — 42 messages over the Windows SDK corpus, and with the cascades
+    // they caused, 64 (B137).
+    for source in [
+        "#define API_SET_BY_ORDINAL(X,O,PO)   X @##O NONAME PRIVATE\nint x;\n",
+        "#define A param\tt)\nint x;\n",
+    ] {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert_eq!(tree.to_source_text(), source, "losslessness: {source:?}");
+        assert_eq!(
+            tree.get_errors(),
+            [],
+            "a character C++ has no token for, inside a directive: {source:?}"
+        );
+    }
+
+    // **The same characters in C++ position are still reported**, which is what keeps this from being a licence to
+    // swallow them: the rule is about *where* the text is, not about the character.
+    assert!(
+        !CppParser::parse("int @ x;\n", ParserConfig::default())
+            .get_errors()
+            .is_empty(),
+        "an `@` in an expression is a gap in the lexer and stays one"
+    );
+    assert!(
+        !CppParser::parse("int x = 1 \\ 2;\n", ParserConfig::default())
+            .get_errors()
+            .is_empty(),
+        "and so is a stray backslash outside a directive"
+    );
 }
 
 #[test]

@@ -31,7 +31,7 @@
 //! ```
 //!
 //! Number 4 is the one with teeth. A `SymbolTable` is asked `kind_of(name)` with **no position**, so one table for
-//! a whole closure is an approximation with a known failure mode (`docs/index-design.md`, "索引与 parser 的关系：
+//! a whole closure is an approximation with a known failure mode (, "索引与 parser 的关系：
 //! 先不接"): a name that is a macro in one header and something else in another gets one answer for both. The
 //! "became dirty" count is that failure mode measured rather than argued about.
 

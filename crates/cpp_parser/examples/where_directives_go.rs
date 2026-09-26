@@ -14,7 +14,7 @@
 //!
 //! `winnt.h` was the measured case: 936 of its 4090 `#` lines were not directive nodes, it saw 204 `#if`s against
 //! 196 `#endif`s, and the reason turned out to be one construct — a linkage block whose loop had no branch for a
-//! directive (see B44 in `docs/grammar-gaps.md`). After that fix the file reads 4090/4090.
+//! directive (see ). After that fix the file reads 4090/4090.
 //!
 //! So this probe answers the two questions that matter when a whole-file analysis refuses to run:
 //!

@@ -7,7 +7,7 @@
 //!
 //! Everything below is something the file **says** — a declaration, a `#define`, an `#include`, a module. Nothing
 //! is a resolved answer: no "this name refers to that declaration", no "this type is `int`", no expansion result.
-//! `docs/index-design.md` fixes that as an invariant, and the reason is invalidation: a `#define` changes the
+//! That is an invariant, and the reason is invalidation: a `#define` changes the
 //! meaning of every name below it in every file that includes it, so a stored conclusion would have to be
 //! recomputed project-wide, while a stored *fact* goes stale exactly when its own file changes.
 //!
@@ -144,7 +144,7 @@ pub struct DeclFact {
     ///
     /// `false` when a parse error fell inside the declaration this fact was written in. The tokens are all there
     /// and the node is well formed — the parser is total — but the reading around it was *recovered from*, so
-    /// what this declaration says is not to be trusted. This is the record `docs/index-design.md`'s third
+    /// what this declaration says is not to be trusted. This is the record 's third
     /// invariant asks for: the parser is tolerant, so the layers above have to be able to see how much was
     /// recovered.
     ///
@@ -301,7 +301,7 @@ pub struct MacroFact {
     /// `condition::macro_value` only accepts a single integer literal — so a body of two tokens, a body
     /// that is a name, and no body at all are the same answer to a condition, and storing any of them would be a
     /// longer way of saying `Unknown`. This is what makes `#if __cplusplus >= 201703L && _GLIBCXX_USE_CXX11_ABI`
-    /// decidable once the file that defines the second name has been walked (see `docs/roadmap.md` §3.5c).
+    /// decidable once the file that defines the second name has been walked.
     ///
     /// Stored as the literal's **text**, so that reading it back needs no lexer: whoever reads it knows what it is
     /// — the same reason the fact stores a name's range rather than a way to find it.
@@ -413,7 +413,7 @@ impl IncludeFact {
 
 /// The macros a file's **direct includes** contribute, each in force from the end of its own `#include`.
 ///
-/// This is the first half of the answer `docs/index-design.md` §"位置化的宏，第二个消费者" describes: the index
+/// This is the first half of the answer the positional half describes: the index
 /// already stores, per file, where each macro is defined (`MacroFact`) and where each `#include` resolved
 /// (`IncludeFact::resolved`) — this turns those two into the **positional** evidence the parser asks for, stamped
 /// with the offset the include ended at.
@@ -425,7 +425,7 @@ impl IncludeFact {
 /// * **the include's offset, not the macro's** — a macro becomes visible where it is brought in, which is what makes
 ///   the evidence positional at all;
 /// * **unconditional facts only** — a `#define` inside an `#if` may not have run, and seeding it would be the flat
-///   table's mistake in a new disguise (see the measured cost in `docs/roadmap.md` §2.0);
+///   table's mistake in a new disguise (see the measured cost);
 /// * **`#undef` is carried** — a name that stops being a macro is evidence too, and dropping it would leave the
 ///   earlier definition in force for the rest of the file.
 ///
@@ -521,7 +521,7 @@ pub struct ClosureEvidence {
 
 /// What the translation unit has defined **so far** — the state a condition written later is answered against.
 ///
-/// This is the "边走边喂" half of `docs/index-design.md`: a condition is a question about what the unit had seen
+/// This is the "边走边喂" half of: a condition is a question about what the unit had seen
 /// when the preprocessor reached it, and the answer changes as the walk moves on. `#ifdef STDMETHOD` is false
 /// before `objbase.h` and true after it, in the *same* translation unit.
 ///
@@ -620,7 +620,7 @@ impl MacroDefinitions {
 /// between two operands and answers `Unknown`. Measured, and it is what kept `STDMETHOD` out of `commdlg.h` for
 /// three batches: `WINAPI_FAMILY_DESKTOP_APP` is written across two lines in `winapifamily.h`, so
 /// `#if WINAPI_FAMILY_PARTITION (WINAPI_PARTITION_APP)` — the guard around `combaseapi.h`'s C++ `#define
-/// STDMETHOD` — could never be answered (`docs/grammar-gaps.md` B90, `docs/index-design.md` B94/B95).
+/// STDMETHOD` — could never be answered.
 fn read_back_a_define(source: &str, fact: &MacroFact) -> Option<MacroDef> {
     let raw = source.get(fact.range.start_offset..)?;
 
@@ -707,7 +707,7 @@ impl crate::condition::MacroValues for UnitMacros<'_> {
             // `#ifndef X / #define X`, so a table read at the end of the file answers "`X` is defined" — and that
             // makes the guard's own region inactive and every fact inside it invisible. Measured: it is what kept
             // `combaseapi.h`'s `STDMETHOD` out of `commdlg.h` after the condition itself had been made answerable
-            // (`docs/index-design.md` B97).
+            //.
             let written_below = self
                 .here
                 .is_some_and(|(file, at)| &*binding.defined_in == file && binding.defined_at >= at);
@@ -741,7 +741,7 @@ pub fn macros_from_the_closure_with_bodies<'a>(
 /// includes are `winapifamily.h`, `_mingw_unicode.h`, `prsht.h`, `pshpack1.h`, `poppack.h`, and the definition
 /// arrives because `windows.h:108` includes `commdlg.h` **after** `objbase.h` — the *includer's order* is the
 /// translation unit, and a per-file walk stops at the file's own edge. Measured: the seed for that line is empty,
-/// which is why the reading rules could not fix the file (see `docs/grammar-gaps.md` B90).
+/// which is why the reading rules could not fix the file.
 ///
 /// The entries are seeded at offset **0** and not at the includer's offsets: the offsets of a *different* file mean
 /// nothing here, and every macro the unit had in force before the inclusion is in force from this file's first
@@ -767,7 +767,7 @@ pub fn macros_in_force_before_the_include<'a>(
 /// `#if WINAPI_FAMILY_PARTITION (WINAPI_PARTITION_APP)` in `combaseapi.h` is a question about a macro
 /// `winapifamily.h` defines. Answering every condition against one fixed table — which is what this walk did
 /// before — reports `Unknown`, and an `Unknown` branch is a `#define` that never becomes evidence. That is why
-/// nothing from `combaseapi.h` reached `commdlg.h` (`docs/grammar-gaps.md` B90, `docs/index-design.md` B92/B94).
+/// nothing from `combaseapi.h` reached `commdlg.h`.
 ///
 /// So the walk visits the closure in **include order** (depth first: the first `#include` of a file is read
 /// before its second, and before the file's own next sibling) and feeds every definition it puts in force into
@@ -874,7 +874,7 @@ impl<'a> Walked<'a> {
 /// includes `winapifamily.h` at its top and asks `#if WINAPI_FAMILY_PARTITION (…)` sixty lines later, so a walk
 /// that read a file's macros *before* its includes judges that condition against a table which does not have the
 /// macro yet. Measured: that is exactly why `combaseapi.h`'s `STDMETHOD` never came into force, and therefore
-/// never reached `commdlg.h` (`docs/grammar-gaps.md` B90, `docs/index-design.md` B94/B95).
+/// never reached `commdlg.h`.
 #[allow(clippy::too_many_arguments)]
 fn walk_one_file<'a>(
     path: &'a std::path::Path,

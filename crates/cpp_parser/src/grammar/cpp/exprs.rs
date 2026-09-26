@@ -264,14 +264,14 @@ pub fn parse_argument(p: &mut CppParser) -> ParseResult {
 /// # The criterion, and what it costs
 ///
 /// The **preference comes first and its failure is what is handled** — the same shape as B62, B66 and B68 in
-/// `docs/grammar-gaps.md`: arguments are expressions until that reading fails, and only then are they tokens.
+///: arguments are expressions until that reading fails, and only then are they tokens.
 /// Nothing about the callee is consulted, because nothing about it is knowable: the macro's `#define` is in
 /// another file.
 ///
 /// The cost is real, and it is why this is a fallback and not a rule: `f(1 +)`, a genuinely broken call, is read
 /// as a macro's arguments and reported by nobody. No shape separates the two cases — the arguments of a macro
 /// *are* arbitrary tokens — so the choice is between the diagnostic on the broken call and every use of the
-/// macro. B70 in `docs/grammar-gaps.md` records the measurement behind taking the second.
+/// macro. records the measurement behind taking the second.
 pub fn parse_call_arguments(p: &mut CppParser) -> ParseResult {
     expect_token(p, CppTokenKind::LeftParen)?;
 
@@ -389,7 +389,7 @@ pub fn parse_expr_without_pack_expansion(p: &mut CppParser) -> ParseResult {
 /// Each row claims something a test cannot see — that a *specific* rule calls the reader it names — so the table
 /// has to be checkable by hand, and it was, row by row, when the last row turned out to be wrong: the template
 /// argument's expression fallback still called [`parse_expr`] while this table said it read one element (B54 in
-/// `docs/grammar-gaps.md`; `S<3, 4>` was one argument, with no diagnostic). The check is a grep of the rule for
+/// `S<3, 4>` was one argument, with no diagnostic). The check is a grep of the rule for
 /// the reader it calls, and the rows that pass it are: the call arm ([`parse_argument`]), `parse_expression_list`,
 /// `parse_initializer_clause`, [`parse_capture`], the bit-field arm of `finish_init_declarator`, the
 /// default-argument arm of `parse_template_parameter`, and `parse_template_argument` — all
@@ -1064,7 +1064,7 @@ fn is_a_type_in_parentheses(p: &CppParser) -> bool {
         // the operand check above already answers for — including a cast to a qualified type the file has never
         // heard of, `(::std::string)x`. What it deliberately leaves out is the ambiguous operator case, and that
         // reading is the same one an unqualified name gets: `(T)*p` is a multiplication, which is the cheaper
-        // mistake (see `operators.rs` and T1 in `docs/grammar-gaps.md`).
+        // mistake (see `operators.rs` and T1).
         _ => false,
     }
 }
@@ -2249,7 +2249,7 @@ fn parse_requires_expression(p: &mut CppParser) -> ParseResult {
     // The body: one requirement per `;`. A requirement may hold anything an expression can, so the `;` is what
     // says where each one ends.
     while p.current_token() != CppTokenKind::RightBrace && !p.is_eof() {
-        // A **directive between requirements**, which is the same seam as the nine `docs/grammar-gaps.md` records
+        // A **directive between requirements**, which is the same seam as the nine records
         // for statements and declarations, and the last place it was missing. libstdc++ writes the two
         // alternatives of one requirement in two branches — `bits/alloc_traits.h:140` is the file this was found
         // in:

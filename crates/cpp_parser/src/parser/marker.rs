@@ -95,7 +95,7 @@ pub(crate) trait MarkerEventContainer {
     /// ```
     ///
     /// That is `bits/stl_vector.h`'s `_Vector_impl` and, through it, all of `std::vector`: one declaration
-    /// the parser gave up on took the rest of the class with it, silently (`docs/grammar-gaps.md`, tenth
+    /// the parser gave up on took the rest of the class with it, silently (, tenth
     /// round). Emitting the ends keeps what was read — the declaration node is there, with its specifiers and
     /// its declarator — and lets the recovery carry on beside it rather than inside it.
     ///

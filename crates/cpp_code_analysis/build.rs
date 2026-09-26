@@ -1,6 +1,6 @@
 //! Fingerprint of the **readers** that produce a summary, for the cache key.
 //!
-//! `docs/index-design.md` fixes the rule this script implements: `format_version` **contains the parser's
+//! fixes the rule this script implements: `format_version` **contains the parser's
 //! version — the parser moves, the whole store is void**. That rule was written down and then relied on being
 //! remembered, and it was not: the grammar has changed in dozens of rounds while the number stayed at 1, so every
 //! summary on disk was written by an *older* reader and served as if it were current. A stale summary is not a
