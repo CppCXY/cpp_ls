@@ -789,11 +789,67 @@ pub(super) fn a_macro_invocation_starts_at(p: &CppParser, index: usize) -> bool 
         && ends_a_statement(p.token_kind_at(after))
 }
 
-/// The kind of the first significant token **after** the balanced group that follows the token at `index`.
+/// Does a run of annotation invocations stand **in front of** the declaration it annotates?
+///
+/// MSVC's SAL annotations are written that way, and no table needs to know any of them (they are the
+/// `_SAL2_Source_` family in `<sal.h>`):
+///
+/// ```c
+/// _Check_return_wat_
+/// _Success_(return == 0)
+/// _ACRTIMP errno_t __cdecl fopen_s(…);
+/// ```
+///
+/// The declaration reading fails on the **second** name's group: `_Check_return_wat_ _Success_(return == 0)` reads
+/// as `type name(parameters)`, and `_ACRTIMP` cannot continue it — so the file got an expression statement and
+/// then `expected ';'` against the name it could not consume. What is left is the reading the file means: each
+/// name is an invocation, and the declaration follows them.
+///
+/// Three things make it a rule rather than a licence:
+///
+/// * every name must be one the **implementation** reserved
+///   ([`super::types::written_in_the_implementations_namespace`]), which is what keeps `Wat Ever f(void);` — a
+///   declaration with unknown specifiers — reading as a declaration;
+/// * **at least one of them must carry a group**, because the group is what says these names are invoked and not
+///   declared (`_Check_return_ _Ret_notnull_` on its own is a declaration head);
+/// * the run must end **where a declaration begins** — a specifier keyword or a name — which is the anchor: a run
+///   that ends anywhere else is left to the error it already had.
+///
+/// The names are asked about by **shape, not by evidence**, and that is measured: with the closure's macro bodies
+/// in force (the census's environment) `_Success_` is a macro with a positional body, and a parse with no toolchain
+/// behind it has never heard of the name — the file is the same file and the reading has to be the same reading.
+///
+/// Returns the index just past the run, or `None` when there is no run here.
+fn index_after_a_run_of_annotation_invocations(p: &CppParser, index: usize) -> Option<usize> {
+    let mut index = index;
+    let mut saw_a_group = false;
+
+    loop {
+        if p.token_kind_at(index) != CppTokenKind::Identifier
+            || !super::types::written_in_the_implementations_namespace(p.token_text_at(index))
+        {
+            break;
+        }
+
+        if p.token_kind_at(super::decls::next_significant_index(p, index)) == CppTokenKind::LeftParen {
+            index = index_after_the_balanced_group(p, index)?;
+            saw_a_group = true;
+        } else {
+            index = super::decls::next_significant_index(p, index);
+        }
+    }
+
+    let a_declaration_begins_here =
+        starts_a_new_declaration(p.token_kind_at(index)) || p.token_kind_at(index) == CppTokenKind::Identifier;
+
+    (saw_a_group && a_declaration_begins_here).then_some(index)
+}
+
+/// The index of the first significant token **after** the balanced group that follows the token at `index`.
 ///
 /// `None` when there is no such group (an unbalanced one, or a `;` before it closes — the call already ended, so
 /// the question does not arise).
-fn kind_after_the_balanced_group(p: &CppParser, index: usize) -> Option<CppTokenKind> {
+fn index_after_the_balanced_group(p: &CppParser, index: usize) -> Option<usize> {
     let mut index = super::decls::next_significant_index(p, index);
     let mut depth = 0isize;
     while index < p.token_count() {
@@ -802,8 +858,7 @@ fn kind_after_the_balanced_group(p: &CppParser, index: usize) -> Option<CppToken
             CppTokenKind::RightParen => {
                 depth -= 1;
                 if depth == 0 {
-                    let after = super::decls::next_significant_index(p, index);
-                    return Some(p.token_kind_at(after));
+                    return Some(super::decls::next_significant_index(p, index));
                 }
             }
             CppTokenKind::Semicolon | CppTokenKind::Eof | CppTokenKind::None => return None,
@@ -813,6 +868,14 @@ fn kind_after_the_balanced_group(p: &CppParser, index: usize) -> Option<CppToken
     }
 
     None
+}
+
+/// The kind of the first significant token **after** the balanced group that follows the token at `index`.
+///
+/// `None` when there is no such group (an unbalanced one, or a `;` before it closes — the call already ended, so
+/// the question does not arise).
+fn kind_after_the_balanced_group(p: &CppParser, index: usize) -> Option<CppTokenKind> {
+    index_after_the_balanced_group(p, index).map(|after| p.token_kind_at(after))
 }
 
 /// Can this token **not** continue the expression that ends with the group before it — so that the group was the
@@ -1137,6 +1200,14 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
             // is a declaration of nothing. See [`at_a_macro_call_statement_without_evidence`].
             if a_macro_invocation_starts_at(p, start) {
                 return parse_a_macro_invocation_statement(p, start);
+            }
+            // **A run of annotations in front of the declaration they annotate** (B133). One invocation per
+            // statement: the next statement begins at the next name of the run and this same decision is asked
+            // again, so `_Check_return_wat_` / `_Success_(…)` / the declaration come out as two invocations and
+            // the declaration — which is what the file wrote. See
+            // [`index_after_a_run_of_annotation_invocations`].
+            if index_after_a_run_of_annotation_invocations(p, start).is_some() {
+                return parse_a_macro_that_stands_for_a_declaration(p);
             }
             // Not a declaration, and not a macro from a header. Read it as an expression.
             parse_expression_statement(p)

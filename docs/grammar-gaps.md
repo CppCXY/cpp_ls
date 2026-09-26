@@ -4390,13 +4390,215 @@ let mut level = bases_of(index, scopes, root, path, &named) ...  // owner 也用
   `WINAPI`         66 uses / 2658 uncertain → **435 uses / 2187 uncertain**
   `STDMETHODCALLTYPE` 4078 uncertain **不变**（它那条路要 `__has_include`，那 46 个条件今天还答不了——
                       诚实的 `Unknown` 保住了，这正是当初不敢打开 `configured` 的那条底线）
-门禁 tests **1185** / clippy 0 / doc 0 / cpp_dump 0 error
+门禁 tests **1188** / clippy 0 / doc 0 / cpp_dump 0 error
 ```
 
 **顺带清掉**：`examples/find_references.rs` 里一段提交进来的 `// TEMPORARY DEBUG`（那个 `ZZ` 块，是排查同一
 条链时留下的）——探针要保持是探针。**没有抬版本号**：`READING_FINGERPRINT` 由 `build.rs` 对整个
 `cpp_code_analysis/src` + `cpp_parser/src` 取指纹，改读法的源码一变，旧缓存条目全部够不着，这正是它存在的原因
 （`cache.rs` 写着 `FORMAT_VERSION` 只负责"源码里留不下痕迹"的那些改动）。
+
+## B132：字面量运算符的**两种拼法**——`operator"" sv` 只认了没空格的那种
+
+**已修复。** 这是 `<xstring>` 的**第一个**错（98 个里的第一个），而那个文件是 `std::string` 全部事实的来源：
+
+```cpp
+// <xstring>:1868 —— MSVC 为每个 `sv` 都这么写
+_EXPORT_STD _NODISCARD constexpr string_view operator"" sv(const char* _Str, size_t _Len) noexcept {
+```
+
+**报表**：`xstring:1868:98 expected ';'`（第 98 列 = `noexcept`）。
+
+**定位过程**（照老规矩：先看树，再缩）：
+
+```text
+cpp_dump --tree  ⇒ 整个 `int operator"" _km(double) { return 0; }` 读成 **ExpressionStat**
+  也就是说声明那条路放弃了，退回到表达式语句
+缩小矩阵（12 格，`--body` 通道复现出与真文件一字不差的 1868:98）
+  空格拼法 + 有函数体       ✘ 报错       无空格拼法 + 有函数体   ✔
+  空格拼法 + 只有声明       ✔           类体里的空格拼法       ✔
+  ⇒ 触发条件是"**空格拼法** 且 有函数体（在文件作用域）"这一格
+```
+
+**成因**：`literal-operator-id` 有两条产生式——`operator "" identifier` 与
+`operator user-defined-string-literal`——**两条都合法**（MSVC 写的是第一条）。写了哪一条，决定了**词法器**把多少东西放进一个
+token：写在一起时 `""_km` 是一个 `UserDefinedLiteral`（整个名字都在里面）；分开写时它是 `StringLiteral` + 空白 +
+`Identifier`。而 `parse_operator_name` 只读了第一种：
+
+```rust
+CppTokenKind::StringLiteral | CppTokenKind::UserDefinedLiteral => p.bump(),   // 旧
+```
+
+于是空格拼法把后缀 `_km` **留给了声明符**：那里期待的是参数表，出来的是一个名字 ⇒ 声明失败 ⇒ 退回表达式语句 ⇒
+在 `noexcept` 处报 `expected ';'`（错误位置也因此离题）。
+
+**修复**：`""` 之后**如果是标识符就一起读掉**（后缀只能是标识符，`""` 后面也没有别的合法延续，所以这就是规则本身）：
+
+```rust
+CppTokenKind::StringLiteral => { p.bump(); if p.current_token() == CppTokenKind::Identifier { p.bump(); } }
+CppTokenKind::UserDefinedLiteral => p.bump(),
+```
+
+**按维护约定第 5 条列过的入口**：自己拼这串 token 的地方有三处——声明符的名字（`types.rs` 的 `parse_name`）、
+`::` 之后的名字（`exprs.rs`）、以及表达式里的运算符名——**三处都走 `parse_operator_name`**，所以改一处即全部；
+`decls.rs` 那条"声明以 `operator` 开头"的分支处理的是转换运算符（`operator bool()`），字面量运算符身上总有一个
+返回类型写在前面，到不了那条路。
+
+**形状断言**：`crates/cpp_parser/tests/gaps.rs`
+`a_literal_operator_may_be_spelled_with_a_space_before_its_suffix`——空格拼法必须干净、并且断言**形状**
+（`NameExpr` 的文本是 `operator"" _km`，且 `noexcept` 不在名字里），因为语法宽容的读法有两种，只有一种把后缀放进
+名字；无空格拼法与类体内两种留作对照。
+
+**落地的读数**：
+
+```text
+MSVC 闭包（带 seeds）   干净 79 → **80**；消息 316 → **306**（−10）
+                        `<xstring>` **从首错清单里消失了**（那一格 98 个错全清）
+std_query 的 unclean 标记 5 → **3**（`<xstring>` 里那两条字面量运算符原来是"读到了但不干净"）
+                        事实**条数**没变（`[where] xstring — 1631 facts`，前后都是 1631）——错误恢复本来就把
+                        这些声明收进来了，变的是它们现在 `clean`，而"诚实"那条线读的正是这个标志
+128 / 455（libstdc++）  128 → 128/0/0；455 → 454/1、12 条消息（不变）
+端到端                   std_query 两个方向 9/9；驱动层 open_project 两个方向 9/9（110 文件/12743 声明、
+                        458 文件/50616 声明，均不变）
+门禁                    tests **1188** / clippy 0 / doc 0 / cpp_dump 0 error
+```
+
+**下一个族**（B133 已修掉一半，见下一条）。
+
+## B134：注解跑在**参数类型前面**是一串；而"一个分组宏后面跟一个名字"这个判据要**接着问**
+
+**已修复一半**（下一条记剩下那一半）。B124 那条"宏站在说明符位置"的规则只允许**一个**注解，而且只在序列的**最前面**
+（`specifiers == 0`）。UCRT 写的是**一串**，于是第二个注解被读成*类型*、它的分组被读成那个类型的声明符，声明整体失败并由
+**它自己那一行**报 `expected primary expression`：
+
+```c
+// ucrt/stdio.h:400-402 —— `stdio.h` 的首错
+_ACRTIMP void __cdecl setbuf(
+    _Inout_                                             FILE* _Stream,
+    _Inout_updates_opt_(BUFSIZ) _Post_readable_size_(0) char* _Buffer
+    );
+```
+
+**定位**（这一次两步都靠缩小，且都验证过复现的是**当前**的首错）：
+
+```text
+cut 文件普查：stdio.h 的 1..403 ⇒ 首错 400:13；缩到 `1..11 + 385..403`（连 #include 都不要）⇒ 仍 400:13
+再缩成 7 行（verbatim 抄下来）⇒ 复现 ✔
+再缩到一行：`int f(Wat(1) Wobble(2) char* x);` ⇒ 复现 ✔
+邻居：`Wat(1) char* x` ✔、`Wat Wobble char* x` ✔、`Wat(1) Wobble(2) int x` ✘、`Wat(1) Wobble(2) x` ✘
+```
+
+**两处都改了，缺一处读数都不动**（这条是量出来的，不是推出来的）：
+
+```text
+① 门槛：`specifiers == 0` → `!has_type_specifier`
+   原来的注释写着 `specifiers == 0` 是为了"别在一个已经点明类型的地方开火（那里的 name+group 是声明符的参数表）"，
+   而那句话说的正是**类型**有没有被点名，循环里早就有这个状态（`has_type_specifier`，`name_joins_the_type` 用的就是它）
+② 判据：`a_specifier_follows_the_group` 要**接着问**
+   分组后面跟一个名字、而那个名字自己也带分组——这正是"声明符的参数表"的样子，于是它判 false。
+   但那个分组是**下一个注解**：从第二个名字再问一次同一个问题就分开了
+     Wat(1) Wobble(2) char* x                第二个分组后面是 `char` ⇒ 两个都是说明符
+     WINOLEAPI_(HINSTANCE) CoFreeLibrary (…) 它自己的分组后面是 `;` ⇒ 那一个是声明头（读数不变）
+   只改 ① 时普查**一条消息都没动**——判据才是真正挡住这一族的东西
+```
+
+**形状断言**：`crates/cpp_parser/tests/gaps.rs`
+`annotations_may_stand_in_runs_before_the_type_they_annotate`——四种"一串注解 + 类型"必须干净、
+`WINOLEAPI_(…) CoFreeLibrary (…)` 必须仍是**一个** `Declaration`（那是一次测量的回归点），
+外加一条**守卫**：镜像形状（裸注解在前、带分组的注解在后）今天仍然是错的，它开始工作的那天这条断言会失败。
+
+**落地的读数**：
+
+```text
+MSVC 闭包（带 seeds）   消息 276 → **255**（−21）；干净仍是 82（这几个文件的错误被推到更后面，还没有一个整file转干净）
+                        `stdio.h` 首错 400 → **609**；`string.h` 487 → 479；`corecrt_wtime.h` 也前移
+128 / 455（libstdc++）  128 → 128/0/0；455 → 454/1、12 条消息（不变）
+门禁                    全部 parser 套件通过（见 roadmap 的整轮读数）
+```
+
+**剩下的一半**（同一个族的镜像）：**裸注解在前、带分组的注解在后**——
+`int f(Wat Wobble(2) char const* _Format);` 仍然报错，真实出处是 `ucrt/stdio.h:612`：
+
+```c
+_In_z_ _Printf_format_string_params_(2) char const*      _Format,
+```
+
+现在的那条 arm 的前置条件要求"游标上的名字**自己带分组**"，所以裸名字先被读成了类型；要修就得让 arm 也接受
+"一个裸名字 + 后面跟着一个**注解**"（判据可以复用同一套：那个注解的分组后面是说明符）。这一条已经缩到一行，
+下一轮直接做。
+
+## B133：SAL 注解是**一串**，声明在它们后面——`_Check_return_wat_` / `_Success_(…)` / 声明
+
+**已修复。** 这是 MSVC 侧**最大的一族**首错（14 个 UCRT 头文件），形如：
+
+```c
+// ucrt/stdio.h:100-102
+_Check_return_wat_
+_Success_(return == 0)
+_ACRTIMP errno_t __cdecl fopen_s(…);
+```
+
+**报表**：`stdio.h:101:8 expected ';' after expression`（`_Success_(return == 0)` 那一行），
+`corecrt_wstdio.h:78:4`、`string.h:157:0`、`wchar.h:48:23`、`malloc.h:54:14`… 同一族。
+
+**定位**：先看树，再缩。
+
+```text
+cpp_dump --tree ⇒ 第一条语句读成 ExpressionStat(_Check_return_wat_)，**其余整个文件变成裸 token**
+  也就是说：声明那条路放弃了，表达式那条路又要 `;`，于是错误恢复把文件吞了
+缩小（12 格）：
+  _Check_return_wat_ + _Success_(…) + `Wat f(void);`      ✘     单独 _Success_(…) + `int f(void);`   ✔
+  _Check_return_wat_ + `Wat Ever f(void);`（无 group）     ✔     类体里的同形                      ✔
+  ⇒ 触发条件 = "一个函数式宏调用" + "后面那行声明的说明符里有没人认识的名字"
+```
+
+**两种失效模式，两套证据都要有**（这是这一轮最容易走错的地方）：
+
+```text
+① 没有任何证据（不带闭包的普查、没有工具链的调用方）：三个名字都是普通标识符
+② 有**位置化证据**（真的那次：闭包带宏体，`_Success_` 的体是 `_SAL2_Source_(…)`）——四个普查走的就是这一档
+把 ① 修好之后普查**一点没动**，因为真实环境是 ②；`cpp_dump --macro NAME=BODY`（位置化通道）能一字不差地
+复现 ②：`Error at line 1, column 0: expected ';' after expression`，连树里的 ExpressionStat 都一样
+```
+
+**成因**：`_Check_return_wat_ _Success_(return == 0)` 读成"类型 + 名字(参数表)"，后面的 `_ACRTIMP` 接不上 ⇒
+声明读法失败；而 `a_macro_invocation_starts_at` 对**不带 group** 的名字要求证据（防"函数体里一个裸名字是变量"），
+对**带 group** 的名字又要求"表里不认识 + 它后面那个 token 结束语句"——两条都不满足 ⇒ 落到表达式语句 ⇒ 报错。
+
+**修复**：在"声明读法失败"那一支里加一条**按形状**问的规则
+`index_after_a_run_of_annotation_invocations`：从游标起走一串**实现保留的名字**（`_` 开头，带不带 group 都行），要求
+
+```text
+· 每个名字都是保留名（written_in_the_implementations_namespace）—— 这才是 `Wat Ever f(void);` 不被改写的原因
+· 这一串里**至少有一个带 group** —— group 才是"这些名字是被调用的"；没有 group 的一串本来就读成声明头
+· 这一串**结束在声明该开始的地方**（starts_a_new_declaration 或一个标识符）—— 锚点
+```
+
+读法是"一条语句一个调用"：`parse_a_macro_that_stands_for_a_declaration` 读掉第一个名字，下一轮同一条决策接着
+从第二个名字开始 ⇒ 两个 MacroCall + 声明。**只在这一支里问**，成功路径一个字没动；
+`kind_after_the_balanced_group` 顺手改成"索引版 + 取 kind"，一个扫描器两处用。
+
+**形状断言**：`crates/cpp_parser/tests/gaps.rs`
+`a_run_of_annotations_may_stand_in_front_of_the_declaration_it_annotates`——**两条通道都钉**（无证据 /
+位置化证据），并记下两者读法的差别（无证据时剩下的名字成为声明的说明符；有证据时每个注解各自是一个 `MacroCall`），
+外加两个否定：不带 group 的一串保持原读法（**改动前后逐字节相同**，拿 `git stash` 量过）、group 之后什么都不跟时
+仍是两个调用。
+
+**落地的读数**：
+
+```text
+MSVC 闭包（带 seeds）   干净 80 → **82**；消息 306 → **276**（−30）
+驱动层                  open_project 的 MSVC 那遍声明 12743 → **12818**（新读干净的文件的声明进来了），9/9 不变
+128 / 455（libstdc++）  128 → 128/0/0；455 → 454/1、12 条消息（不变）
+端到端                  std_query 与驱动层各两个方向，全 9/9
+门禁                    tests **1188** / clippy 0 / doc 0 / cpp_dump 0 error
+```
+
+**下一族**（剩下 27 个失败文件里最大的）：`expected primary expression` 打在一串 **DLL 导入 / 调用约定**前缀上——
+`_ACRTIMP void __cdecl setbuf(`、`_ACRTIMP int __cdecl __stdio_common_vfwprintf(`、`_DCRTIMP int __cdecl …`、
+`__inline wchar_t _CONST_RETURN* __CRTDECL wmemchr(`。它们在**孤立**时是干净的（`_ACRTIMP void __cdecl f(...)`
+单独解析 ✔），所以要么与前面的上下文有关，要么和 `__declspec(noinline) __inline unsigned __int64*` 这一小族一起
+（`corecrt_stdio_config.h:87` 的错误已经从事先那串注解推进到了 `__declspec` 那一行）。
 
 ## 维护约定
 1. **修好一条**：把本文档的条目改成"已修复"（保留成因与修复过程，下一个人会需要），并写进 `crates/cpp_parser/tests/gaps.rs` 的已支持清单。`gaps.rs` 的机制是"构造一旦开始工作，钉住它的测试就会失败"，那是防漏报的护栏。

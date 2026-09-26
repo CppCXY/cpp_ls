@@ -31,7 +31,7 @@
 `%TEMP%\stdprobe\files.txt` 的 128 个文件（`<vector>/<string>/<map>/<algorithm>` 的闭包）——
 **`干净 128 / 报错 0`**，消息总数 **0**（带 seeds）；`%TEMP%\cppls-indexed.txt` 的 455 个文件（分析闭包）——
 **`干净 455 / 报错 0 / 消息 0`（带 seeds）**，不带 seeds 的那一遍是 `干净 454 / 报错 1`（剩下的那个文件见下）。
-Rust 侧 `cargo test --workspace` = **1185 个测试 / 38 个套件全绿**（含 `cpp_ls` 的 28 个单测与 2 个端到端测试）。
+Rust 侧 `cargo test --workspace` = **1188 个测试 / 38 个套件全绿**（含 `cpp_ls` 的 28 个单测与 2 个端到端测试）。
 
 **两份读数**：上面这两份的"干净 455/0"是**带 include 证据**（`--seeds --closure`，也就是**带索引的产品形态**）的读数；
 **不带证据**的那一遍 455 个文件是 `干净 454 / 报错 1 / 消息 12`，唯一失败的是 `commdlg.h:577` 的
@@ -43,7 +43,7 @@ Rust 侧 `cargo test --workspace` = **1185 个测试 / 38 个套件全绿**（�
 **门禁三条 + 一条**（改完必须全绿，`index-design.md` §门禁有同样的表）：
 
 ```bash
-cargo test --workspace                     # 1185 个测试，38 个套件
+cargo test --workspace                     # 1188 个测试，38 个套件
 cargo clippy --workspace --all-targets     # 零警告
 cargo doc --no-deps -p cpp_code_analysis   # 零警告（cpp_parser 有历史链接问题，不管）
 cargo run -q -p cpp_parser --bin cpp_dump -- crates/cpp_parser/tests/real_world.cpp   # 必须 0 error
@@ -1554,20 +1554,79 @@ parser 的边际收益是"每轮 1–3 个文件"，连续磨十几轮会失去�
      （`open_project` 的探针现在用**本机 discover 到的**编译器写编译数据库，所以两个方向都能测：
      不钉 = MSVC 的 STL，钉住 = libstdc++；它自己还只查 own() 成员，改成查全部成员才看得见继承来的 find）
 
+   **第 18 轮：`<xstring>:1868` 修好了（B132）——MSVC 闭包 79 → 80 干净、消息 316 → 306**
+
+   ```text
+   构造：`_NODISCARD constexpr string_view operator"" sv(const char*, size_t) noexcept { … }`
+     —— 字面量运算符的**空格拼法**（`operator "" identifier`），`literal-operator-id` 的两条产生式之一
+   症状：整个函数定义读成 ExpressionStat、在 `noexcept` 处报 expected `;`——声明那条路放弃了
+   成因：写在一起时 `""_km` 是一个 UserDefinedLiteral（整个名字一个 token），分开写是 StringLiteral +
+     Identifier，而 parse_operator_name 只读了第一种 ⇒ 后缀留给了声明符
+   修复：`""` 之后是标识符就一起读掉（三处拼运算符名的入口都走这一个函数，见 B132）
+   读数：MSVC（带 seeds）干净 79 → **80**、消息 316 → **306**；`<xstring>` 从首错清单里消失（那一格 98 个错全清）
+        std_query 的 unclean 标记 5 → **3**（事实**条数**不变：错误恢复本来就把这些声明收进来了，
+        变的是它们现在 `clean`——而"诚实"那条线读的就是这个标志）
+        128 → 128/0/0、455 → 454/1+12 不变；std_query 与驱动层两个方向都 9/9（声明数均不变）
+        门禁 tests 1188 / clippy 0 / doc 0 / cpp_dump 0
+        形状断言：gaps.rs `a_literal_operator_may_be_spelled_with_a_space_before_its_suffix`
+   下一族（约 12 个文件，最大的一族）：**SAL 注解宏站在声明最前面**（`_Success_(return == 0)`、
+     `_Check_return_ _Ret_notnull_`、`_When_(…)`），都是 `expected ';' after expression`
+   ```
+
+   **第 19 轮：SAL 注解那一族（B133）——MSVC 闭包 80 → 82 干净、消息 306 → 276**
+
+   ```text
+   构造：`_Check_return_wat_` / `_Success_(return == 0)` / `_ACRTIMP errno_t __cdecl fopen_s(…);`
+     —— 一串实现保留的名字（有的带 group）站在声明前面；`<sal.h>` 给它们的是 `_SAL2_Source_(…)` 这样的体
+   症状：第一条语句读成 ExpressionStat、在第二个名字处报 expected `;`，**其余整个文件变成裸 token**
+   成因：`_Check_return_wat_ _Success_(…)` 读成"类型 名字(参数)"，后面接不上；而现有的两条 invocation 规则
+     一条要证据（裸名字）、一条要"表里不认识"（带 group 的名字）——真实环境两个都不满足
+   关键的一课：**先修好了"没有证据"那一档，普查一点没动**——真跑时闭包带宏体（位置化证据），
+     用 `cpp_dump --macro NAME=BODY` 才能一字不差地复现
+   修复：只加在"声明读法失败"那一支里的一条**形状**规则（保留名成串 + 至少一个带 group + 结束在声明开始处），
+     一条语句读一个调用 ⇒ 两个 MacroCall + 声明；成功路径一个字没动
+   读数：MSVC（带 seeds）干净 80 → **82**、消息 306 → **276**；open_project 的 MSVC 那遍声明 12743 → **12818**；
+     128 → 128/0/0、455 → 454/1+12 不变；std_query 与驱动层四个读数全 9/9；门禁 tests 1188 / clippy 0 / doc 0 / cpp_dump 0
+     形状断言：gaps.rs `a_run_of_annotations_may_stand_in_front_of_the_declaration_it_annotates`
+   下一族：`expected primary expression` 打在 `_ACRTIMP void __cdecl setbuf(`、`_DCRTIMP int __cdecl …`、
+     `__inline wchar_t _CONST_RETURN* __CRTDECL wmemchr(` 这一串 DLL 导入/调用约定前缀上（孤立时是干净的）
+   ```
+
+   **第 20 轮：注解跑在参数类型前面（B134）——MSVC 消息 276 → 255**
+
+   ```text
+   构造：`_Inout_updates_opt_(BUFSIZ) _Post_readable_size_(0) char* _Buffer`（ucrt/stdio.h:402）
+     —— 一串 SAL 注解站在参数**类型**前面；B124 那条 arm 只允许一个、而且只在序列最前面（specifiers == 0）
+   症状：第二个注解被读成类型、它的分组被读成声明符，声明失败并由**自己那一行**报 expected primary expression
+   定位：cut 文件普查（1..403 ⇒ 400:13；1..11 + 385..403 仍 400:13）→ 7 行 verbatim → 一行
+     `int f(Wat(1) Wobble(2) char* x);`
+   两处都改了，**缺一处读数一条消息都不动**：
+     ① `specifiers == 0` → `!has_type_specifier`（那句注释说的本就是"类型有没有被点名"）
+     ② `a_specifier_follows_the_group` 要**接着问**：分组后面那个名字自己也带分组时，从第二个名字再问一次
+       （判据仍是老的那条：它自己的分组后面是不是说明符）——`WINOLEAPI_(…) CoFreeLibrary (…)` 的读数因此不变
+   读数：MSVC（带 seeds）消息 276 → **255**（−21），干净仍 82；`stdio.h` 首错 400 → **609**；
+     open_project 的 MSVC 那遍声明 12818 → **12961**；128 → 128/0/0、455 → 454/1+12 不变；
+     std_query 与驱动层四个读数全 9/9；门禁 tests 1188 / clippy 0 / doc 0 / cpp_dump 0
+     形状断言：gaps.rs `annotations_may_stand_in_runs_before_the_type_they_annotate`（含一条**守卫**：镜像形状
+       今天仍失败，它开始工作的那天断言会失败）
+   剩下的一半：**裸注解在前、带分组的注解在后**（`int f(Wat Wobble(2) char const* _Format);`，
+     真实出处 ucrt/stdio.h:612 的 `_In_z_ _Printf_format_string_params_(2) char const* _Format`）
+   ```
+
    **还差的（按值排）**：
 
    ```text
-   ① <xstring>:1868 `_EXPORT_STD _NODISCARD constexpr string_view operator"" sv(…)` 的 ``expected `;` ``
-     —— 那个文件 98 个错，是 MSVC 侧最大的一格；它正是 std_query 里 `s.*` 三条事实的来源
-   ② std::vector 的"两次声明"（B129）：`<vector>` 里 19311 是主模板、94905 是
-     `class vector<bool, _Alloc>;`（偏特化的前置声明），模板实参被 `base_type_name` 剥掉后两者
-     限定名都是 `std::vector`，而事实里没有字段能分辨 ⇒ `definition` 报 Ambiguous（报得过头，不是报错）。
-     查询不受影响（成员走 `type_of` → `member_fact`）。要修得给事实加"写出来的模板形参"，
-     那是新字段、要抬 FORMAT_VERSION —— 单独一轮的事
-   ③ 视图那条路（`FileView::parse` 仍是 `NoMacroBodies`）：用户在**自己缓冲区里**写
-     `#define FOO namespace x {` 还不认——它要的是"这个文件的 include 闭包"，视图手里只有一段文本。
-     索引那条路已经通了（B131 ③），差的是视图与环境的接线
-   ④ 别名的成员表少了目标的基类（B130）：一行 + 一条断言
+   ① B134 剩下的一半（上一段）：裸注解 + 带分组的注解，已在 `gaps.rs` 里留了守卫
+   ② `expected primary expression` 那一族（同一批文件、更靠后的行）：`_ACRTIMP int __cdecl __stdio_common_vfprintf(`、
+     `_DCRTIMP int __cdecl __conio_common_vcwprintf(`、`__declspec(noinline) __inline unsigned __int64*`、
+     `__inline wchar_t _CONST_RETURN* __CRTDECL wmemchr(`，以及函数体里的 `void const* const _Pvc = _Pv;`
+     与 `return wcstok(_String, _Delimiter, 0);`
+   ② `enable_if_t<(_Align > __STDCPP_DEFAULT_NEW_ALIGNMENT__)>`（模板实参里的 `>` 比较）、
+     `using _Prhand = void(__cdecl*)(const exception&);`（函数指针类型里的调用约定）、
+     `struct _Maximum<…> : _Max…`（基类子句里的包展开）
+   ③ std::vector 的"两次声明"（B129）：要新字段 + 抬 FORMAT_VERSION
+   ④ 视图那条路（`FileView::parse` 仍是 `NoMacroBodies`）：缓冲区里自己写的宏体还不认
+   ⑥ 别名的成员表少了目标的基类（B130）：一行 + 一条断言
    ```
 
    **另外两件撞上的**（一件已解决）：环境必须完整才有宏体（`_STL_COMPILER_PREPROCESSOR` 那条链）——

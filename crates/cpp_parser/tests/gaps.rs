@@ -6598,6 +6598,140 @@ fn a_qualified_head_is_a_type_even_when_it_ends_in_template_arguments() {
 }
 
 #[test]
+fn a_run_of_annotations_may_stand_in_front_of_the_declaration_it_annotates() {
+    // MSVC's SAL annotations are a **run** of reserved names before the declaration, and `<sal.h>` gives them
+    // bodies that are themselves macro calls. `ucrt/stdio.h:100-102`:
+    //
+    // ```c
+    // _Check_return_wat_
+    // _Success_(return == 0)
+    // _ACRTIMP errno_t __cdecl fopen_s(…);
+    // ```
+    //
+    // The declaration reading fails on the *second* name's group — `_Check_return_wat_ _Success_(return == 0)`
+    // reads as `type name(parameters)` and `_ACRTIMP` cannot continue it — and the statement then came out an
+    // `ExpressionStat` that wanted a `;` at the name it could not consume. Measured on the closure: that was the
+    // first error of **fourteen** UCRT headers (B133).
+    let source = "_Check_return_wat_\n_Success_(return == 0)\n_ACRTIMP errno_t __cdecl fopen_s(FILE** _Stream);\n";
+
+    // **Both channels, because the reading has to be clean in both.** With no toolchain behind it a parse has
+    // never heard of these names (the census's `--seeds` run without a closure), and with the closure's bodies in
+    // force `_Success_` is a macro with a positional body — measured, and the two were *different* failures before
+    // this rule: the first shape errored on the declaration, the second on the very same `;`.
+    //
+    // What the two do **not** share is how much of the run is an invocation, and that difference is the evidence:
+    // a name nobody knows is read as a specifier of the declaration that follows, while a name with a body is its
+    // own invocation. Both are clean, both are lossless, and only the second one puts every annotation where it
+    // belongs — which is what the closure's bodies are for.
+    assert_eq!(
+        shape_body_of_the_file_reads(source, None),
+        vec!["MacroCall:_Check_return_wat_", "Declaration:_Success_"],
+        "with no evidence, the run's remaining names are specifiers of the declaration"
+    );
+
+    let closure = MacroEnvironment::from_included_macros([
+        IncludedMacro::defined_with_body(
+            0,
+            "_Check_return_wat_",
+            false,
+            MacroBody::Unknown,
+            Some("_Check_return_"),
+        ),
+        IncludedMacro::defined_with_body(
+            0,
+            "_Success_",
+            true,
+            MacroBody::Unknown,
+            Some("_SAL2_Source_(_Success_, (expr), _Success_impl_(expr))"),
+        ),
+    ]);
+    assert_eq!(
+        shape_body_of_the_file_reads(source, Some(&closure)),
+        vec![
+            "MacroCall:_Check_return_wat_",
+            "MacroCall:_Success_",
+            "Declaration:_ACRTIMP",
+        ],
+        "and with the closure's bodies, every annotation is its own invocation"
+    );
+
+    // The control is the run with **no group anywhere**, and it is here to say what this rule does *not* do: two
+    // reserved names in front of a declaration are already read as two invocations by the rule for a macro standing
+    // where a declaration goes, and this rule leaves that reading exactly as it was (measured with the change
+    // reverted: the same three nodes, byte for byte). The `saw_a_group` gate is what keeps the two rules from
+    // overlapping on a shape whose reading nobody asked to change.
+    assert_eq!(
+        shape_body_of_the_file_reads("_Check_return_ _Ret_notnull_ int f(void);\n", None),
+        vec![
+            "MacroCall:_Check_return_",
+            "MacroCall:_Ret_notnull_",
+            "Declaration:int",
+        ],
+        "a run with no group keeps the reading it already had"
+    );
+
+    // Two more negatives the rule is written to keep, measured rather than assumed: a run that ends at no
+    // declaration at all never reaches this rule (the anchor refuses it), and the error a file already had stays
+    // the error it had.
+    assert_eq!(
+        shape_body_of_the_file_reads("_Check_return_ _Success_(x)\n", None),
+        vec!["MacroCall:_Check_return_", "MacroCall:_Success_"],
+        "reserved names with a group and nothing after them are two invocations, not a run before a declaration"
+    );
+}
+
+#[test]
+fn annotations_may_stand_in_runs_before_the_type_they_annotate() {
+    // MSVC's UCRT writes **runs** of SAL annotations where a parameter's specifiers go, and the type comes after
+    // them (`ucrt/stdio.h:400-402`):
+    //
+    // ```c
+    // _ACRTIMP void __cdecl setbuf(
+    //     _Inout_                                             FILE* _Stream,
+    //     _Inout_updates_opt_(BUFSIZ) _Post_readable_size_(0) char* _Buffer
+    //     );
+    // ```
+    //
+    // The arm that reads "a macro where a specifier goes" allowed exactly **one**, at the head of the sequence
+    // (`specifiers == 0`), so the second annotation was read as a *type*, its group as that type's declarator, and
+    // the declaration came out `expected primary expression` against its own first line. Which is what the closure
+    // measured: `stdio.h`'s first error was `_ACRTIMP void __cdecl setbuf(`, and fourteen UCRT headers were behind
+    // it (B134).
+    for source in [
+        // Two annotations, one group each — the shape the header writes.
+        "int f(_Inout_updates_opt_(BUFSIZ) _Post_readable_size_(0) char* _Buffer);\n",
+        // …and any number of them.
+        "int f(Wat(1) Wobble(2) Qux(3) int x);\n",
+        // The neighbour that already worked, kept so the relaxation cannot be what breaks it.
+        "int f(Wat(1) char* x);\n",
+        "int f(Wat(1) Wobble char* x);\n",
+    ] {
+        assert_eq!(reads(source, Where::File), Ok(()), "{source:?}");
+    }
+
+    // **The reading that must not change**, and the measurement that put the name follower out of the simple case
+    // (`objbase.h:95`): a group followed by a name whose own group *is* the declarator's parameter list is a
+    // declaration whose head is the invocation — one node, not two. The chained question is what tells the two
+    // apart: `CoFreeLibrary (…)` is followed by `;`, so it is the head; a second annotation is followed by a
+    // specifier, so it is not.
+    assert_eq!(
+        shape_body_of_the_file_reads("WINOLEAPI_(HINSTANCE) CoFreeLibrary (HINSTANCE hInst);\n", None),
+        vec!["Declaration:WINOLEAPI_"],
+        "a name after the group is the declaration's head, and its `(…)` is the parameter list"
+    );
+
+    // The **mirror image is still a gap**, and this assertion is its guard rather than its fix: a *bare* annotation
+    // in front of a grouped one is read as a type by the same arm's precondition (the cursor must be on a name with
+    // a group), which is the remaining half of this family in `ucrt/stdio.h:612`
+    // (`_In_z_ _Printf_format_string_params_(2) char const* _Format`). It fails the day it starts working — see
+    // `docs/grammar-gaps.md` B134.
+    assert!(
+        reads("int f(Wat Wobble(2) char const* _Format);\n", Where::File).is_err(),
+        "a bare annotation before a grouped one is the next shape, not this one"
+    );
+}
+
+#[test]
 fn a_requires_expression_may_be_a_template_argument() {
     // `type_traits:3946` — a class head whose base clause carries a requires-expression as an argument, and the
     // `;` *inside* its body is what the scans had to learn about.
@@ -6713,6 +6847,60 @@ fn a_macro_may_supply_the_rest_of_a_template_parameter_list() {
     assert!(
         reads("template<typename... _Args int> struct S;\n", Where::File).is_err(),
         "a keyword there is not a macro either"
+    );
+}
+
+#[test]
+fn a_literal_operator_may_be_spelled_with_a_space_before_its_suffix() {
+    // `literal-operator-id` has two productions — `operator "" identifier` and
+    // `operator user-defined-string-literal` — and MSVC's `<xstring>` writes the spaced one, for every `sv` in the
+    // file:
+    //
+    // ```cpp
+    // _NODISCARD constexpr string_view operator"" sv(const char* _Str, size_t _Len) noexcept { … }
+    // ```
+    //
+    // Which production was written decides how much of the name the **lexer** put in one token: written together,
+    // `""_km` is a `UserDefinedLiteral` and the whole name is in it; written apart it is a `StringLiteral` and then
+    // an identifier. Only the first was read after `operator`, so the suffix was left for the declarator — which
+    // wanted `;` at `noexcept`, gave up, and left the file an `ExpressionStat` where a function definition was.
+    // Measured: that line is `<xstring>`'s **first** error, with 98 more behind it, and `<xstring>` is where every
+    // `std::string` fact comes from (B132).
+    let spaced = "constexpr int operator\"\" _km(double) noexcept { return 0; }\n";
+    assert_eq!(
+        reads(spaced, Where::File),
+        Ok(()),
+        "the spaced spelling is the same name as the unspaced one"
+    );
+
+    // …and it is read as a **name**: the suffix belongs to the operator, not to whatever comes after it. Asserted
+    // on the shape rather than on the error count because a tolerant reader can accept this construct in two ways
+    // and only one of them puts `_km` where a declaration's name goes.
+    let tree = CppParser::parse(spaced, ParserConfig::default());
+    let named: Vec<String> = tree
+        .get_red_root()
+        .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr)
+        .map(|node| node.text().to_string())
+        .collect();
+    assert!(
+        named.iter().any(|name| name == "operator\"\" _km"),
+        "the operator's name is `operator\"\" _km`, suffix and all: {named:?}"
+    );
+    assert!(
+        named.iter().all(|name| !name.contains("noexcept")),
+        "and nothing after the parameter list is inside it: {named:?}"
+    );
+
+    // The unspaced spelling is the one the lexer already made a single token of, and it must keep working.
+    let unspaced = "constexpr int operator\"\"_km(double) noexcept { return 0; }\n";
+    assert_eq!(reads(unspaced, Where::File), Ok(()));
+
+    // A class member is the same name in the same position (this one was already clean, and it is the control that
+    // says the fix is about the spelling rather than about literal operators in general).
+    assert_eq!(
+        reads("int operator\"\" _km(double) noexcept { return 0; }", Where::Class),
+        Ok(())
     );
 }
 

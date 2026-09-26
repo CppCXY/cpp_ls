@@ -1215,7 +1215,7 @@ loc          没有限定符：从游标所在的作用域往外，每一层能�
 ### 门禁：三件事必须全绿
 
 ```bash
-cargo test --workspace                              # 1185 个测试，38 个套件
+cargo test --workspace                              # 1188 个测试，38 个套件
 cargo clippy --workspace --all-targets              # 零警告
 cargo doc --no-deps -p cpp_code_analysis            # 零警告（cpp_parser 还有 32 条历史链接问题，不管）
 cargo run -q -p cpp_code_analysis --example std_query   # 9/9，钉不钉工具链都是（两份 STL 各测一遍）

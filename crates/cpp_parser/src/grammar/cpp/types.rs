@@ -513,12 +513,34 @@ fn is_a_type_specifier_kind(kind: CppTokenKind) -> bool {
 /// [`storage_or_function_specifier`] are asked, which is what makes `inline` — the token `binders.h` writes after
 /// its `_GLIBCXX11_DEPRECATED_SUGGEST("std::bind")` — the answer here.
 fn a_specifier_follows_the_group(p: &CppParser) -> bool {
+    a_specifier_follows_the_group_at(p, 0)
+}
+
+/// The same question asked from the **name** `offset` tokens past the cursor.
+///
+/// One question, two entry points, because the run of annotations is read as a run (B134): `Wat(1) Wobble(2) char*
+/// x` has a *name* after the first group, and the name carries a group of its own — so the answer for the first
+/// group is the answer for the second. Recursing is what tells the two readings apart without a second rule:
+///
+/// ```text
+/// Wat(1) Wobble(2) char* x        the second group is followed by a specifier  → both are specifiers
+/// WINOLEAPI_(HINSTANCE) CoFreeLibrary (HINSTANCE h)   …followed by `;`          → the head, and the `(…)` is
+///                                                                                the declarator's parameter list
+/// ```
+///
+/// The second shape must keep its reading — it is the measurement that put the name follower out of the simple
+/// case — and it does, because the question asked from `CoFreeLibrary` finds `;` after *its* group.
+fn a_specifier_follows_the_group_at(p: &CppParser, name_offset: usize) -> bool {
     let mut depth = 0isize;
 
-    for (position, kind) in p.peek_token_kind_at(1..64).into_iter().enumerate() {
-        // Offsets are relative to the cursor, which is on the macro's **name**: `1` is the `(` that opens its
-        // argument list.
-        let offset = position + 1;
+    for (position, kind) in p
+        .peek_token_kind_at(name_offset + 1..name_offset + 64)
+        .into_iter()
+        .enumerate()
+    {
+        // Offsets are relative to the cursor, which is on the macro's **name**: one past it is the `(` that opens
+        // its argument list.
+        let offset = name_offset + 1 + position;
 
         match kind {
             CppTokenKind::LeftParen => depth += 1,
@@ -558,8 +580,17 @@ fn a_specifier_follows_the_group(p: &CppParser) -> bool {
                         // while anything else there means the sequence has not reached its declarator yet.
                         Some(CppTokenKind::Identifier) => {
                             a_specifier_macro_at(p, after)
-                                || p.peek_token_kind_at(after + 1..after + 2).first().copied()
-                                    != Some(CppTokenKind::LeftParen)
+                                || match p.peek_token_kind_at(after + 1..after + 2).first().copied() {
+                                    // A **name with a group of its own** after the group: either the next
+                                    // annotation of the same run (B134) or the declarator's head. Asking the same
+                                    // question from there is what tells them apart — see
+                                    // [`a_specifier_follows_the_group_at`].
+                                    Some(CppTokenKind::LeftParen) => {
+                                        a_specifier_follows_the_group_at(p, after)
+                                    }
+                                    // Anything else means the sequence has not reached its declarator yet.
+                                    _ => true,
+                                }
                         }
                         _ => false,
                     };
@@ -761,18 +792,17 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
         // [`a_specifier_follows_the_group`] for both the reason and the measurement that put the name case on the
         // other side of the line.
         //
-        // Why the **head of the sequence** and the **group** are enough: no declaration begins with a call — a
-        // declaration's first tokens are specifiers — so a name and a balanced group there is a shape nothing else
-        // wants. A member that is only an invocation is claimed before any of this by
-        // [`super::decls::at_a_macro_member`], and the compiler's own attribute spellings are refused here (see
-        // [`at_an_attribute`], which has a reader that knows what they are), so what is left is the shape this arm
-        // is for. The `specifiers == 0` half is what keeps it from firing *inside* a sequence that has already
-        // named a type, where a name-plus-group is a declarator's parameter list.
+        // Why a **name and a group** are enough: no declaration begins with a call — a declaration's first tokens
+        // are specifiers — so a name and a balanced group there is a shape nothing else wants. A member that is only
+        // an invocation is claimed before any of this by [`super::decls::at_a_macro_member`], and the compiler's own
+        // attribute spellings are refused here (see [`at_an_attribute`], which has a reader that knows what they
+        // are), so what is left is the shape this arm is for.
         //
         // The arguments are kept as **raw tokens** ([`super::decls::parse_balanced_token_group`], the reader the
         // other macro arms use): what stands there is the macro's own text, and `("std::bind")` is not a grammar
         // this file can read — a `#define` in another file is what knows whether it is a string, a type or an
         // expression.
+        //
         // **What the evidence gate is, after the MSVC measurement (B124).** The arm used to require that **nobody**
         // describes the name (`macro_evidence` and `macro_body_kinds_at` both `None`), and the reason is still
         // right: a name some rule can *read* belongs to that rule. But a described name is not the same as a name
@@ -790,7 +820,38 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
         // after its group and stays with [`a_macro_call_begins_the_declaration`], which is the reading the
         // two-files-backwards measurement was about. Asking the follower instead of the evidence keeps that line
         // where it is and lets a described annotation macro through.
-        if specifiers == 0
+        //
+        // **"Before the type", not "at the head of the sequence"** (B134). The gate was `specifiers == 0`, which
+        // allows exactly one annotation and only as the sequence's first token — and MSVC's UCRT writes **runs** of
+        // them, so the second was read as a *type*, its group as a *declarator*, and the declaration that followed
+        // came out as `expected primary expression` reported against its own first line:
+        //
+        // ```c
+        // _Check_return_opt_
+        // _ACRTIMP int __cdecl _rmtmp(void);
+        //
+        // _CRT_INSECURE_DEPRECATE(setvbuf)
+        // _ACRTIMP void __cdecl setbuf(
+        //     _Inout_                                             FILE* _Stream,
+        //     _Inout_updates_opt_(BUFSIZ) _Post_readable_size_(0) char* _Buffer    // ucrt/stdio.h:400-402
+        //     );
+        // ```
+        //
+        // Each annotation here is followed by a specifier (`_ACRTIMP`, `char`), which is the discriminator this arm
+        // already asks for; what the count was really protecting is the case the paragraph above it describes — a
+        // name-plus-group *after* a type has been named is a declarator's parameter list. `has_type_specifier` says
+        // exactly that ("a type has been named, as opposed to merely a specifier consumed"), and it is the state the
+        // rest of this loop already reasons with ([`name_joins_the_type`]) — so the gate is that flag and not the
+        // number of specifiers.
+        //
+        // Two halves were needed, and the measurement is what found the second: with the flag alone the closure did
+        // not move at all, because [`a_specifier_follows_the_group`] refused the shape — a *name* follows the group
+        // and the name carries a group of its own, which is exactly what a declarator's parameter list looks like.
+        // Asking the same question from the second name is the other half (`Wobble(2)` is followed by `char`, so both
+        // are specifiers; `CoFreeLibrary (…)` is followed by `;`, so that one is the declarator). Measured together:
+        // the MSVC closure 276 → **255** messages with no file lost, `stdio.h`'s first error 400 → 609, the two
+        // libstdc++ readings and every parser test unchanged.
+        if !has_type_specifier
             && allow_second_name
             && p.current_token() == CppTokenKind::Identifier
             && p.peek_next_token() == CppTokenKind::LeftParen
@@ -3262,8 +3323,29 @@ fn parse_operator_name(p: &mut CppParser) -> ParseResult {
                 }
             }
         }
-        // `operator""_suffix` — a user-defined literal operator. The literal is already one token.
-        CppTokenKind::StringLiteral | CppTokenKind::UserDefinedLiteral => p.bump(),
+        // `operator""_suffix` — a user-defined literal operator.
+        //
+        // **Two spellings, and the standard allows both**: `literal-operator-id` is `operator "" identifier` as
+        // well as `operator user-defined-string-literal`. Which one was written decides how much of the name the
+        // lexer put in one token — written together the literal *is* the whole name (a `UserDefinedLiteral`), and
+        // written apart it is a `StringLiteral` and then an identifier. Only the first was read here, so the
+        // second left the suffix for the declarator: `_km` came out as a name where the parameter list was
+        // expected, the declaration gave up, and the file got an `ExpressionStat` where a function definition was.
+        //
+        // Measured on MSVC's STL, which spells it apart: `<xstring>:1868` is
+        // `_NODISCARD constexpr string_view operator"" sv(const char*, size_t) noexcept { … }`, and it is that
+        // file's **first** error — 98 errors behind it, and the file is where every `std::string` fact comes from
+        // (B132). The suffix is an identifier and nothing else can follow `""` in a name, so reading it here is the
+        // whole of the rule; `operator""` followed by anything else keeps the old reading.
+        CppTokenKind::StringLiteral => {
+            p.bump();
+
+            if p.current_token() == CppTokenKind::Identifier {
+                p.bump();
+            }
+        }
+        // The suffix was written without a space, so the lexer already made one token of it.
+        CppTokenKind::UserDefinedLiteral => p.bump(),
         // Any other overloadable operator is a single token the lexer already produced. `>=` and
         // `>>=` etc. are fine as-is.
         kind if is_overloadable_operator(kind) => p.bump(),
