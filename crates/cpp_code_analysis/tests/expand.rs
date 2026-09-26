@@ -58,7 +58,7 @@ fn tokens_of(source: &str) -> Vec<Token> {
 /// A macro table built from a source string full of `#define`s.
 fn table(defines: &str) -> MacroTable {
     let tree = CppParser::parse(defines, ParserConfig::default());
-    preprocess(&tree.get_red_root()).macros
+    preprocess(defines, tree.get_tokens()).macros
 }
 
 /// Expand a use site against a set of definitions.

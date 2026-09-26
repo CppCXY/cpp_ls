@@ -472,10 +472,8 @@ impl<'a> CppParser<'a> {
         config: ParserConfig<'a>,
         errors: &'a mut Vec<CppParseError>,
     ) -> CppParser<'a> {
-        let tokens = {
-            let mut lexer = CppLexer::new(text, config.lexer_config(), errors);
-            lexer.tokenize()
-        };
+        let (tokens, lexical_errors) = crate::lexer::lex(text, &config.lexer_config());
+        errors.extend(lexical_errors);
 
         CppParser {
             text,
@@ -529,7 +527,8 @@ impl<'a> CppParser<'a> {
             builder.finish()
         };
 
-        let tree = CppSyntaxTree::new(root, errors);
+        let tokens = std::mem::take(&mut parser.tokens);
+        let tree = CppSyntaxTree::new(root, errors, tokens);
         (tree, events)
     }
 
@@ -557,7 +556,8 @@ impl<'a> CppParser<'a> {
             builder.finish()
         };
 
-        (CppSyntaxTree::new(root, errors), audit)
+        let tokens = std::mem::take(&mut parser.tokens);
+        (CppSyntaxTree::new(root, errors, tokens), audit)
     }
 
     /// Position the cursor on the first non-trivia token, emitting the leading trivia as events.

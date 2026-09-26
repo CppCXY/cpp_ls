@@ -1481,7 +1481,7 @@ mod tests {
         assert_eq!(tree.get_errors(), [], "the input must parse cleanly");
 
         let root = tree.get_red_root();
-        build_facts(&build_scopes(&root, &crate::NoMacroBodies), &preprocess(&root), &root, &[])
+        build_facts(&build_scopes(&root, &crate::NoMacroBodies), &preprocess(source, tree.get_tokens()), &root, &[])
     }
 
     /// The facts of a file that **does not** parse cleanly, with the diagnostics that say so.
@@ -1503,7 +1503,7 @@ mod tests {
             .collect();
 
         (
-            build_facts(&build_scopes(&root, &crate::NoMacroBodies), &preprocess(&root), &root, &errors).0,
+            build_facts(&build_scopes(&root, &crate::NoMacroBodies), &preprocess(source, tree.get_tokens()), &root, &errors).0,
             errors,
         )
     }

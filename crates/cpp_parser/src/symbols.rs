@@ -126,6 +126,13 @@ pub struct IncludedMacro {
     ///
     /// `None` is the ordinary answer — an `#undef`, a body nobody stored, or a caller that only had shapes.
     pub body_text: Option<Box<str>>,
+    /// The **parameter list as written**, parentheses included — `"(a, b)"`, `"()"` — when the caller has it.
+    ///
+    /// What expansion needs and a shape cannot imply: a function-like macro is substituted *by parameter*, so a
+    /// body without its parameter list cannot be substituted into. `None` for an object-like macro and for a
+    /// caller that did not carry it; [`IncludedMacro::defined_with_body`] leaves it `None`, which the cooker reads
+    /// as "not usable for expansion" rather than as "no parameters".
+    pub parameters: Option<Box<str>>,
 }
 
 impl IncludedMacro {
@@ -139,6 +146,7 @@ impl IncludedMacro {
                 body,
             }),
             body_text: None,
+            parameters: None,
         }
     }
 
@@ -161,6 +169,23 @@ impl IncludedMacro {
                 body,
             }),
             body_text: body_text.map(Box::from),
+            parameters: None,
+        }
+    }
+
+    /// [`IncludedMacro::defined_with_body`] **with the parameter list**, which is what makes a function-like
+    /// macro expandable. See [`IncludedMacro::parameters`].
+    pub fn defined_with_body_and_parameters(
+        from_offset: usize,
+        name: &str,
+        function_like: bool,
+        body: MacroBody,
+        body_text: Option<&str>,
+        parameters: Option<&str>,
+    ) -> Self {
+        Self {
+            parameters: parameters.map(Box::from),
+            ..Self::defined_with_body(from_offset, name, function_like, body, body_text)
         }
     }
 
@@ -170,6 +195,74 @@ impl IncludedMacro {
             name: name.into(),
             definition: None,
             body_text: None,
+            parameters: None,
+        }
+    }
+}
+
+/// What the in-force channel stores per name: whether the macro takes parameters, its parameter list, its body.
+///
+/// A named shape rather than a tuple inline, because "is this macro function-like, and does anybody know its
+/// parameters" is the question expansion asks of every entry and a four-element tuple makes it a puzzle.
+type InForceEntry = (Option<bool>, Option<Box<str>>, Box<str>);
+
+/// One body a caller contributes to the **in-force** channel of a [`MacroEnvironment`].
+///
+/// The flag is `Option` because the two callers know different things: the index knows whether the macro takes
+/// parameters (`MacroFact::function_like`), while a probe that carries only text does not. `None` is *not*
+/// "object-like" — see the field's note in `MacroEnvironment`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InForceBody {
+    pub name: Box<str>,
+    pub function_like: Option<bool>,
+    /// The parameter list, when the caller has it — see [`IncludedMacro::parameters`]. A function-like body
+    /// **with** its parameters is usable; without them it is not.
+    pub parameters: Option<Box<str>>,
+    pub body: Box<str>,
+}
+
+impl From<(Box<str>, Box<str>)> for InForceBody {
+    fn from((name, body): (Box<str>, Box<str>)) -> Self {
+        InForceBody {
+            name,
+            function_like: None,
+            parameters: None,
+            body,
+        }
+    }
+}
+
+impl From<(Box<str>, bool, Option<Box<str>>, Box<str>)> for InForceBody {
+    fn from(
+        (name, function_like, parameters, body): (Box<str>, bool, Option<Box<str>>, Box<str>),
+    ) -> Self {
+        InForceBody {
+            name,
+            function_like: Some(function_like),
+            parameters,
+            body,
+        }
+    }
+}
+
+impl From<(Box<str>, Option<bool>, Box<str>)> for InForceBody {
+    fn from((name, function_like, body): (Box<str>, Option<bool>, Box<str>)) -> Self {
+        InForceBody {
+            name,
+            function_like,
+            parameters: None,
+            body,
+        }
+    }
+}
+
+impl From<(Box<str>, bool, Box<str>)> for InForceBody {
+    fn from((name, function_like, body): (Box<str>, bool, Box<str>)) -> Self {
+        InForceBody {
+            name,
+            function_like: Some(function_like),
+            parameters: None,
+            body,
         }
     }
 }
@@ -192,6 +285,9 @@ pub struct MacroEnvironment {
     /// The replacement list per `(offset, name)`, kept beside the history rather than inside it so that the
     /// common lookup — "is this a macro here" — stays a binary search over a slice of small values.
     body_texts: std::collections::HashMap<(usize, Box<str>), Box<str>>,
+    /// The parameter list per `(offset, name)`, beside the body and for the same reason: expansion substitutes
+    /// *by parameter*, so a body without its parameters cannot be substituted into.
+    parameters: std::collections::HashMap<(usize, Box<str>), Box<str>>,
     /// The replacement lists of macros whose definition is **conditional but in force** — read for *what they say*,
     /// never for *whether the name is a macro*.
     ///
@@ -200,7 +296,10 @@ pub struct MacroEnvironment {
     /// the name, which cost 3 files clean→failing on the corpus (`corecrt.h`, `swprintf.inl`, `types.h`, each a
     /// declaration headed by an `__MINGW_EXTENSION`-style macro) and gained none. A **body** cannot do that: no
     /// rule asks "is there a body" in order to refuse a reading, so this channel can only enable one.
-    bodies_in_force: std::collections::HashMap<Box<str>, Box<str>>,
+    /// The body, and whether the macro takes parameters — **`None` when nobody said**, which is the honest
+    /// answer for a caller that only has the text. Pasting a body whose parameters are unknown is the guess
+    /// this layer refuses to make, so `None` is read as "not usable for expansion" and not as "object-like".
+    bodies_in_force: std::collections::HashMap<Box<str>, InForceEntry>,
 }
 
 impl MacroEnvironment {
@@ -211,9 +310,13 @@ impl MacroEnvironment {
         let mut by_name: std::collections::HashMap<Box<str>, Vec<(usize, Option<SymbolKind>)>> =
             std::collections::HashMap::new();
         let mut body_texts = std::collections::HashMap::new();
+        let mut parameters = std::collections::HashMap::new();
         for entry in entries {
             if let Some(text) = entry.body_text {
                 body_texts.insert((entry.from_offset, entry.name.clone()), text);
+            }
+            if let Some(list) = entry.parameters {
+                parameters.insert((entry.from_offset, entry.name.clone()), list);
             }
             by_name
                 .entry(entry.name)
@@ -227,6 +330,7 @@ impl MacroEnvironment {
         Self {
             by_name,
             body_texts,
+            parameters,
             bodies_in_force: std::collections::HashMap::new(),
         }
     }
@@ -268,11 +372,17 @@ impl MacroEnvironment {
     /// this says what the rule will read. See [`IncludedMacro::body_text`].
     /// Add the bodies of macros whose definition is conditional **but in force** — the second channel. See the
     /// field's note for the measurement that keeps the two apart.
-    pub fn with_bodies_in_force(
+    pub fn with_bodies_in_force<I: Into<InForceBody>>(
         mut self,
-        bodies: impl IntoIterator<Item = (Box<str>, Box<str>)>,
+        bodies: impl IntoIterator<Item = I>,
     ) -> Self {
-        self.bodies_in_force.extend(bodies);
+        self.bodies_in_force
+            .extend(bodies.into_iter().map(Into::into).map(|body| {
+                (
+                    body.name,
+                    (body.function_like, body.parameters, body.body),
+                )
+            }));
         self
     }
 
@@ -281,13 +391,77 @@ impl MacroEnvironment {
     /// For **reading only**: a rule that wants to know whether a name is a macro must ask
     /// [`MacroEnvironment::is_a_macro_at`], which does not consult this.
     pub fn body_text_in_force(&self, name: &str) -> Option<&str> {
-        self.bodies_in_force.get(name).map(Box::as_ref)
+        self.bodies_in_force.get(name).map(|(_, _, body)| &**body)
+    }
+
+    /// The **parameter list** of a body in force, when its caller carried one.
+    pub fn parameters_in_force(&self, name: &str) -> Option<&str> {
+        self.bodies_in_force.get(name).and_then(|(_, list, _)| list.as_deref())
+    }
+
+    /// Is the body in force for `name` one whose arguments we could substitute — because the caller said the
+    /// macro is **object-like**?
+    ///
+    /// `false` for a function-like macro and for one nobody classified: see the field's note.
+    pub fn body_in_force_is_object_like(&self, name: &str) -> bool {
+        matches!(self.bodies_in_force.get(name), Some((Some(false), _, _)))
+    }
+
+    /// Every definition the includes contribute, in no particular order, as
+    /// `(name, from_offset, function_like, body_text)`.
+    ///
+    /// The queries above answer *about a name*; this one is for a caller that has to build something out of the
+    /// whole environment rather than ask it a question — cooking a file's tokens into what a compiler would parse
+    /// needs the definitions as **values**, and a value cannot be fetched one name at a time when the names are
+    /// the ones the file happens to mention.
+    ///
+    /// Two things are deliberately not here. An `#undef` is not a definition, so it does not appear; and a body
+    /// that only the *in-force* channel has ([`MacroEnvironment::body_text_in_force`]) is not a definition either,
+    /// so it does not appear as one — a caller that wants those has to say so, because for it they are a different
+    /// question.
+    pub fn definitions(&self) -> impl Iterator<Item = (&str, usize, bool, Option<&str>)> {
+        let bodies = &self.body_texts;
+        self.by_name.iter().flat_map(move |(name, history)| {
+            let bodies = bodies;
+            history.iter().filter_map(move |(offset, definition)| {
+                let Some(SymbolKind::Macro { function_like, .. }) = definition else {
+                    return None;
+                };
+                let body = bodies.get(&(*offset, name.clone())).map(Box::as_ref);
+                Some((&**name, *offset, *function_like, body))
+            })
+        })
+    }
+
+    /// Every body that only the **in-force** channel has, as `(name, body)`.
+    ///
+    /// See [`MacroEnvironment::body_text_in_force`] for what that channel is and why it is kept apart.
+    pub fn bodies_in_force(&self) -> impl Iterator<Item = (&str, Option<bool>, Option<&str>, &str)> {
+        self.bodies_in_force.iter().map(
+            |(name, (function_like, parameters, body))| {
+                (
+                    &**name,
+                    *function_like,
+                    parameters.as_deref(),
+                    &**body,
+                )
+            },
+        )
     }
 
     pub fn body_text_of(&self, name: &str, offset: usize) -> Option<&str> {
         let history = self.by_name.get(name)?;
         let in_force = history[..history.partition_point(|(from, _)| *from <= offset)].last()?;
         self.body_texts
+            .get(&(in_force.0, name.into()))
+            .map(Box::as_ref)
+    }
+
+    /// The **parameter list** of `name` at `offset`, when the caller stored one. See [`IncludedMacro::parameters`].
+    pub fn parameters_of(&self, name: &str, offset: usize) -> Option<&str> {
+        let history = self.by_name.get(name)?;
+        let in_force = history[..history.partition_point(|(from, _)| *from <= offset)].last()?;
+        self.parameters
             .get(&(in_force.0, name.into()))
             .map(Box::as_ref)
     }

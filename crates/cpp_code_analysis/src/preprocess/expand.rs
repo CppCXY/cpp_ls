@@ -1020,12 +1020,18 @@ fn stringize(argument: &[Token], call_site: SourceRange) -> Token {
 /// The re-lex is the point. `+` pasted with `=` is `+=`, and a caller that concatenated the spelling
 /// would hand the parser two tokens where the language has one.
 ///
-/// The joined token's own range is the *left* token's, which is a position in the macro body rather
-/// than anywhere the text exists. That is deliberate: the origin recorded for the pasted token is
-/// [`Origin::Pasted`], and its call site is what a consumer reports against.
+/// The joined spelling exists nowhere in the file, so the token's range cannot cover it: it covers the
+/// **left** token as written, which is the position a consumer reports against, and the joined text is
+/// carried by the token itself. The origin is [`Origin::Pasted`], whose call site is what a diagnostic
+/// points at.
+///
+/// It used to be the left token's start with the *joined* length, and that is a range over whatever happens
+/// to follow the left token: `#define P(a, b) a##b` used as `P(x, y)` claimed a range over `x,` — the
+/// argument and the comma that separates it — so a consumer slicing the source by range got a token's text
+/// that was not the token's text, and a long enough paste would have sliced past the end of the file.
 fn paste(left: &Token, right: &Token) -> Vec<Marked> {
     let joined = format!("{}{}", left.text(), right.text());
-    let range = SourceRange::new(left.range.start_offset, joined.len());
+    let range = left.range;
 
     let lexed = lex_fragment(&joined, range);
 

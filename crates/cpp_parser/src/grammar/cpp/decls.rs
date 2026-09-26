@@ -1963,12 +1963,13 @@ fn at_a_pointer_operator(kind: CppTokenKind) -> bool {
 fn at_an_operator_led_parenthesized_declarator(p: &CppParser) -> bool {
     let mut index = p.current_token_index();
 
-    if !at_a_pointer_operator(p.token_kind_at(index)) {
-        // The type took them: the operator is the token before the `(`, and without one this is not the shape.
+    // Is there an operator in front of the group — at the cursor, or already taken into the type?
+    let mut an_operator_leads = at_a_pointer_operator(p.token_kind_at(index));
+    if !an_operator_leads {
+        // The type took them: the operator is the token before the `(`, and without one this shape has to earn
+        // its place some other way — see the bare-name requirement at the end.
         let before = previous_significant_index(p, index);
-        if !before.is_some_and(|at| at_a_pointer_operator(p.token_kind_at(at))) {
-            return false;
-        }
+        an_operator_leads = before.is_some_and(|at| at_a_pointer_operator(p.token_kind_at(at)));
     }
 
     while at_a_pointer_operator(p.token_kind_at(index)) {
@@ -1981,12 +1982,14 @@ fn at_an_operator_led_parenthesized_declarator(p: &CppParser) -> bool {
     index = next_significant_index(p, index);
 
     // The declarator inside the parentheses: a name, behind whatever decorates it.
+    let mut decorated = false;
     while at_a_pointer_operator(p.token_kind_at(index))
         || matches!(
             p.token_kind_at(index),
             CppTokenKind::ConstKeyword | CppTokenKind::VolatileKeyword
         )
     {
+        decorated = true;
         index = next_significant_index(p, index);
     }
     if p.token_kind_at(index) != CppTokenKind::Identifier {
@@ -2000,7 +2003,21 @@ fn at_an_operator_led_parenthesized_declarator(p: &CppParser) -> bool {
     index = next_significant_index(p, index);
 
     // …and the parameter list, which is what makes it a function rather than a product.
-    p.token_kind_at(index) == CppTokenKind::LeftParen
+    if p.token_kind_at(index) != CppTokenKind::LeftParen {
+        return false;
+    }
+
+    // **With no operator anywhere, the group must hold a bare name.** `T (max)(T a)` is the same declaration as
+    // `T max(T a)` — the standard's declarator may be parenthesized — and the declaration before it is what a
+    // **template** writes (`template <class _Ty> constexpr _Ty (max)(…)`, the other half of B135): there the
+    // specifier sequence has read a real type name, so the second half of the branch below is closed, and only
+    // this shape can open the first.
+    //
+    // The bare-name requirement is what keeps the readings around it: `Widget w(1, 2)` and `T (a, b)` are
+    // direct-initialisations (their group holds a comma, and nothing follows the `)` but a `;`), and a K&R
+    // parameter list (`int main(argc, argv)`) holds two names and a comma. A product (`a * (b)`) has no `(`
+    // after its `)` at all.
+    an_operator_leads || !decorated
 }
 
 /// The index of the last significant token before `index`.

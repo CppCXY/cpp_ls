@@ -26,7 +26,7 @@ fn run(source: &str) -> FilePreprocessing {
         source,
         "the parse must stay lossless before anything is read out of it"
     );
-    preprocess(&tree.get_red_root())
+    preprocess(source, tree.get_tokens())
 }
 
 /// Every directive's kind, in order.
@@ -148,7 +148,7 @@ fn a_truncated_directive_is_read_as_far_as_it_goes() {
     ] {
         let tree = CppParser::parse(text, ParserConfig::default());
         assert_eq!(tree.to_source_text(), text, "{text:?}");
-        let _ = preprocess(&tree.get_red_root());
+        let _ = preprocess(text, tree.get_tokens());
     }
 }
 

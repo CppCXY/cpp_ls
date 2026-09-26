@@ -202,8 +202,7 @@ fn declares_something_before(root: &CppSyntaxNode, offset: usize) -> bool {
 
 /// Analyse a parsed file's guards.
 pub fn analyse(source: &str, tree: &CppSyntaxTree) -> GuardAnalysis {
-    let preprocessing = preprocess(&tree.get_red_root());
-    let _ = source;
+    let preprocessing = preprocess(source, tree.get_tokens());
     analyse_guards(&preprocessing, &tree.get_red_root())
 }
 

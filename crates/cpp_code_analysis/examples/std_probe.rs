@@ -71,6 +71,13 @@ fn main() {
     // `--no-toolchain` is the "no compiler was found" world: then the **configuration alone** is what the
     // condition layer has, which is exactly what injecting the standard and the target is for.
     let without_toolchain = std::env::args().any(|argument| argument == "--no-toolchain");
+    // `--cooked`: parse **what a compiler would parse** — the file preprocessed with the closure's macros —
+    // instead of the file's own text. Message *counts* are the comparable thing; the positions are offsets
+    // into the rendering (`CookedStream::render`), not into the file, so the first-error list is not.
+    let cooked_mode = std::env::args().any(|argument| argument == "--cooked");
+    // `--in-force-bodies`: let the cooker use the bodies of macros whose definition is conditional but in force
+    // (where MSVC's `_ACRTIMP` arrives from). Off by default — see `configuration_from_environment_with`.
+    let in_force_bodies = std::env::args().any(|argument| argument == "--in-force-bodies");
 
     // **A real indexer, not the convenience `summarize`**: that one resolves no includes at all (`NoFiles`), so a
     // probe built on it seeds nothing and the whole positional experiment would be a silent no-op — which the
@@ -301,7 +308,7 @@ standard {}",
                             || context
                                 .conditional_bodies
                                 .iter()
-                                .any(|(defined, _)| &**defined == name)
+                                .any(|(defined, _, _, _)| &**defined == name)
                     });
                     conditional_asked += context.conditional_facts;
                     conditional_taken += context.facts_in_force;
@@ -351,7 +358,7 @@ standard {}",
             cpp_parser::MacroEnvironment::from_included_macros(seeds).with_bodies_in_force(bodies)
         });
 
-        let config = match &environment {
+        let raw_config = match &environment {
             Some(environment) => cpp_parser::ParserConfig::default().with_macros_from_includes(environment),
             None => cpp_parser::ParserConfig::default(),
         };
@@ -375,7 +382,18 @@ standard {}",
                 );
             }
         }
-        let (tree, audit) = cpp_parser::CppParser::parse_with_audit(&source, config);
+        let (tree, audit) = if cooked_mode {
+            let (tokens, _) = cpp_parser::lex(&source, &cpp_parser::LexerConfig::default());
+            let configuration = match &environment {
+                Some(environment) => cpp_code_analysis::configuration_from_environment_with(environment, in_force_bodies),
+                None => cpp_code_analysis::Configuration::default(),
+            };
+            let rendered =
+                cpp_code_analysis::cook_with(&source, &tokens, &configuration.table).render();
+            cpp_parser::CppParser::parse_with_audit(&rendered.text, cpp_parser::ParserConfig::default())
+        } else {
+            cpp_parser::CppParser::parse_with_audit(&source, raw_config)
+        };
         macro_questions += audit.macro_questions;
         if audit.macro_question_names > macro_question_names {
             macro_question_names = audit.macro_question_names;
@@ -389,13 +407,17 @@ standard {}",
             clean += 1;
             counts.push(0);
             // The invariants hold on this corpus too, and are checked rather than assumed: a header is not a
-            // gentler input than a test fixture.
-            assert_eq!(
-                tree.to_source_text(),
-                source,
-                "losslessness broke on {}",
-                path.display()
-            );
+            // gentler input than a test fixture. **Not in cooked mode**: there the tree is over the rendering,
+            // which is not the file — the directives are gone and one branch of every conditional with them.
+            // Losslessness is the raw stream's property (`CppSyntaxTree::get_tokens`), not this text's.
+            if !cooked_mode {
+                assert_eq!(
+                    tree.to_source_text(),
+                    source,
+                    "losslessness broke on {}",
+                    path.display()
+                );
+            }
             continue;
         }
 
@@ -405,18 +427,52 @@ standard {}",
             *by_message.entry(error.message.clone()).or_default() += 1;
         }
 
-        let index = cpp_parser::LineIndex::parse(&source);
-        let Some((line, column)) = index.get_line_col(errors[0].range.start(), &source) else {
-            continue;
+        // In cooked mode the errors are offsets into the **rendering**, so neither the line index nor the text
+        // window below can be read against the file. The map is what turns one into the other — and this is its
+        // first consumer: `written_at` is where the cooked offset was written, `written_span` where the
+        // node came from. Without it a cooked failure would be a message with no address at all.
+        let rendered = if cooked_mode {
+            let (tokens, _) = cpp_parser::lex(&source, &cpp_parser::LexerConfig::default());
+            let configuration = match &environment {
+                Some(environment) => cpp_code_analysis::configuration_from_environment_with(environment, in_force_bodies),
+                None => cpp_code_analysis::Configuration::default(),
+            };
+            Some(cpp_code_analysis::cook_with(&source, &tokens, &configuration.table).render())
+        } else {
+            None
         };
 
-        // The offending line and the two before it: a macro that breaks a declaration is usually written on the
-        // line itself or the one above, and a diagnostic often lands a line late.
-        let window: Vec<&str> = source
-            .lines()
-            .skip(line.saturating_sub(2))
-            .take(3)
-            .collect();
+        let (line, column, window) = match &rendered {
+            Some(rendered) => {
+                let at = usize::from(errors[0].range.start());
+                let cooked = &rendered.text[at.saturating_sub(60).min(rendered.text.len())
+                    ..at.saturating_add(60).min(rendered.text.len())];
+                let written = rendered.written_at(at);
+                // The file position of whatever the rendering put there, as line and column — counted here
+                // rather than through the line index because the offset came from the map and not from the file.
+                let offset = written.map_or(0, |range| range.start_offset).min(source.len());
+                let before = &source[..offset];
+                let line = before.lines().count();
+                let column = before.len() - before.rfind('\n').map_or(0, |at| at + 1);
+                (
+                    line,
+                    column,
+                    format!("RENDERED …{cooked}…"),
+                )
+            }
+            None => {
+                let index = cpp_parser::LineIndex::parse(&source);
+                let Some((line, column)) = index.get_line_col(errors[0].range.start(), &source) else {
+                    continue;
+                };
+                let window: Vec<&str> =
+                    source.lines().skip(line.saturating_sub(2)).take(3).collect();
+                (line, column, window.join(" "))
+            }
+        };
+        let window = [window.as_str()];
+
+
         let mentions = |names: &HashSet<String>| {
             window.join(" ").split(|c: char| !(c.is_alphanumeric() || c == '_')).any(
                 |word| word.len() > 2 && names.contains(word),

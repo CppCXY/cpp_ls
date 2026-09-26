@@ -159,7 +159,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         let key = SummaryKey::new(content_hash(source), key.context_hash);
 
         let root = tree.get_red_root();
-        let preprocessing = preprocess(&root);
+        let preprocessing = preprocess(source, tree.get_tokens());
         // The same evidence object for both readers — see the field's note. The cast is the point: the scope walk
         // asks the trait, the parse asked the concrete type, and there is one value behind both.
         let evidence: &dyn crate::sema::scopes::MacroBodies = match self.bodies {
@@ -1341,7 +1341,7 @@ mod tests {
 
         for (source, expected) in cases {
             let tree = CppParser::parse(source, ParserConfig::default());
-            let preprocessing = preprocess(&tree.get_red_root());
+            let preprocessing = preprocess(source, tree.get_tokens());
 
             let Directive::Define(define) = &preprocessing.directives[0].directive else {
                 panic!("{source:?} must be a define");
@@ -1362,7 +1362,7 @@ mod tests {
         // it an expression would be right in this case and wrong for a statement that happens to be written that
         // way, so the answer is `Unknown` — which still rules out the call reading.
         let tree = CppParser::parse("#define A (a) + (b)", ParserConfig::default());
-        let preprocessing = preprocess(&tree.get_red_root());
+        let preprocessing = preprocess("#define A (a) + (b)", tree.get_tokens());
 
         let Directive::Define(define) = &preprocessing.directives[0].directive else {
             panic!("must be a define");
@@ -1375,7 +1375,7 @@ mod tests {
     #[test]
     fn an_unresolved_include_does_not_stop_the_other_facts() {
         let tree = CppParser::parse("#include <nonexistent_xyz>\nstruct W { int a; };\n", ParserConfig::default());
-        let preprocessing = preprocess(&tree.get_red_root());
+        let preprocessing = preprocess("#include <nonexistent_xyz>\nstruct W { int a; };\n", tree.get_tokens());
 
         let files = MemoryFiles::new();
         let config = CompilerConfig::default();

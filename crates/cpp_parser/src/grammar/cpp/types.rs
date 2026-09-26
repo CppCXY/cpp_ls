@@ -3523,6 +3523,7 @@ pub fn parse_abstract_declarator(p: &mut CppParser, name_possible: bool) -> Pars
             // declarator with `C` at the cursor, this loop broke immediately on a name, and the parentheses came
             // out empty and the declaration failed — the form an out-of-line member-pointer *typedef* is written
             // in.
+
             CppTokenKind::Identifier if pointer_to_member_operator_length(p, 0).is_some() => {
                 let _ = container!();
                 let op = p.mark(CppSyntaxKind::PointerType);
@@ -3959,6 +3960,32 @@ fn a_parenthesised_declarator_with_a_name_follows(p: &CppParser) -> bool {
         return true;
     }
 
+    // …and the **abstract** spelling of that same shape: a macro before the operator and **no name at all**,
+    // which is how a function-pointer type with a calling convention is written as a *type* rather than as a
+    // declaration of something:
+    //
+    // ```cpp
+    // typedef void (__cdecl *)(void);      // ucrt: the signature of `_onexit_t`
+    // typedef int  (__stdcall *)(int);
+    // ```
+    //
+    // Its two neighbours above both need a name (`(WINAPI PM_OPEN_PROC)`, `(*STDAPICALLTYPE LPFN…)`), so this
+    // group fell through to the abstract-declarator reading, which read the `(` and then stopped on the macro —
+    // leaving `(`, `__cdecl`, `*`, `)` as bare tokens and reporting ``expected `;` `` at the `(`. The macro's
+    // **spelling** is what keeps the case out of everything else, exactly as it does above: `(x *)` is not a
+    // declarator in any reading, but only a name written the way an implementation macro is gets read as one.
+    if matches!(
+        p.peek_token_kind_at(1..4).as_slice(),
+        [
+            CppTokenKind::Identifier,
+            CppTokenKind::Star | CppTokenKind::Ampersand | CppTokenKind::LogicalAnd,
+            CppTokenKind::RightParen
+        ]
+    ) && p.peek_token_kind_at(4..5) == [CppTokenKind::LeftParen]
+        && written_like_a_macro(p.peek_token_text_at(1))
+    {
+        return true;
+    }
     // …and the same macro **around the declarator's own operator**, which is the other two positions a calling
     // convention and an attribute are written in — the two halves of one shape, and the reason each is here:
     //
@@ -4359,7 +4386,13 @@ fn parse_parenthesised_declarator(p: &mut CppParser) -> ParseResult {
         m.complete(p);
     }
 
-    parse_name(p)?;
+    // A group with **no name at all** is the abstract spelling of the shape the fourth case in
+    // `a_parenthesised_declarator_with_a_name_follows` claims — `typedef void (__cdecl *)(void);` — and there is
+    // nothing to read where the name would go. The groups that do have one (`(*f)`, `(WINAPI PM_OPEN_PROC)`) are
+    // unaffected: their cursor is on the name, not on the `)`.
+    if p.current_token() != CppTokenKind::RightParen {
+        parse_name(p)?;
+    }
     expect_token(p, CppTokenKind::RightParen)?;
 
     Ok(m.complete(p))

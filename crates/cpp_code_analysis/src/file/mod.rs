@@ -125,7 +125,7 @@ impl FileAnalysis {
     pub fn new(source: &str, tree: &CppSyntaxTree) -> Self {
         FileAnalysis {
             tokens: FileTokens::from_tree(source, tree),
-            preprocessing: preprocess(&tree.get_red_root()),
+            preprocessing: preprocess(source, tree.get_tokens()),
         }
     }
 

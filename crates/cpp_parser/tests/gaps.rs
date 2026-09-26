@@ -7082,3 +7082,60 @@ fn a_literal_operator_may_be_spelled_with_a_space_before_its_suffix() {
     );
 }
 
+/// **The same spelling in a template declaration** — B135's other half, and the last thing the cooked reading
+/// of MSVC's `<utility>` was failing on.
+///
+/// `template <class _Ty> constexpr _Ty (max)(…)` is that header's `max`, and the branch that reads a
+/// parenthesized declarator could not reach it: the specifier sequence has read a real **type name** (`_Ty`),
+/// which closes the "no type named yet" half of the condition, and there is no operator in front of the group
+/// for the other half. What decides it here is the whole shape — `( name ) (` — and the bare-name requirement
+/// is what keeps the readings around it: a direct-initialisation and a K&R parameter list both hold more than a
+/// name inside their parentheses, and a product has no `(` after its `)` at all.
+#[test]
+fn a_template_declaration_may_spell_its_functions_name_in_parentheses() {
+    let declaration = "template <class _Ty> constexpr _Ty (max)(_Ty a);\n";
+    assert_reads(Where::File, &[declaration]);
+    assert_eq!(count_of(declaration, CppSyntaxKind::Declaration), 1);
+
+    let definition = "template <class _Ty> constexpr _Ty (max)(_Ty a) { return a; }\n";
+    assert_reads(Where::File, &[definition]);
+
+    // The spellings that must keep their old reading.
+    assert_reads(Where::File, &["Widget w(1, 2);\n"]);
+    assert_reads(Where::Body, &["g(1, 2);\n"]);
+    assert_reads(Where::File, &["int x = a * (b);\n"]);
+
+    let knr = "int main(argc, argv)\nint argc;\nchar **argv;\n{\n    return 0;\n}\n";
+    assert_reads(Where::File, &[knr]);
+    assert_eq!(
+        count_of(knr, CppSyntaxKind::OldStyleParameterList),
+        1,
+        "a K&R parameter list is still a parameter list"
+    );
+}
+
+/// **A calling convention inside a parenthesised *abstract* declarator** — `typedef void (__cdecl *)(void);`.
+///
+/// Its two neighbours — `(WINAPI PM_OPEN_PROC)` and `(*STDAPICALLTYPE LPFN…)` — both **name** the declarator, so
+/// the group with no name fell through: the macro was left as a bare token, the parentheses came out empty, and
+/// the declaration reported ``expected `;` `` at its own `(`. What decides the case is the macro's **spelling**
+/// (`written_like_a_macro`), exactly as it does for the two named spellings — an ordinary `(x *)` is not a
+/// declarator in any reading.
+///
+/// Measured: 255-file SDK corpus 253 → 251 messages, 109-file 208 → 206, and the *cooked* reading gains a clean
+/// file in both (242 → 243, 100 → 101) — this is the shape `ucrt`'s `_onexit_t` is written in.
+#[test]
+fn an_abstract_declarator_may_carry_a_calling_convention_before_its_operator() {
+    assert_reads(
+        Where::File,
+        &[
+            "typedef void (__cdecl *)(void);\n",
+            "typedef int (__stdcall *)(int);\n",
+            "void (__cdecl *)(void);\n",
+            // The neighbours that already read must keep reading.
+            "typedef void (*)(void);\n",
+            "typedef void (__cdecl * p)(void);\n",
+            "typedef DWORD (WINAPI PM_OPEN_PROC)(LPWSTR);\n",
+        ],
+    );
+}

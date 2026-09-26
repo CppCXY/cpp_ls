@@ -17,7 +17,7 @@
 //! that wants to see it, and for the other branch of an `#if`), and which of them are in force is
 //! answered by position through the guard on the table.
 
-use cpp_parser::CppSyntaxNode;
+use cpp_parser::CppTokenData;
 
 use crate::{
     directive::{Directive, DirectiveKind, SpannedDirective, scan_directives},
@@ -102,8 +102,12 @@ impl crate::condition::MacroValues for PositionalMacros<'_> {
 }
 
 /// Read a file's directives, macros, and conditionals in one pass.
-pub fn preprocess(root: &CppSyntaxNode) -> FilePreprocessing {
-    let directives = scan_directives(root);
+///
+/// **The input is the token stream**, not the tree: a directive is a line, and where a line begins is a
+/// fact about tokens. The tree is built *from* this same stream (see `cpp_parser::lex`), so the two cannot
+/// disagree about where a token is — there is one stream and both read it.
+pub fn preprocess(source: &str, tokens: &[CppTokenData]) -> FilePreprocessing {
+    let directives = scan_directives(source, tokens);
     let mut macros = MacroTable::new();
     let mut stack = GuardStack::new();
 
@@ -184,15 +188,16 @@ pub fn opens_unclosed_region(directive: &Directive) -> bool {
 
 // The pieces this entry point is built from:
 //
-//   PreprocessorDirective nodes -> typed Directive values       (directive)
+//   the token stream              -> typed Directive values        (directive)
 //   #define                     -> MacroDef, token sequence      (macros)
 //   #if / #elif                 -> Guard conditions over macros  (condition, guard, guards)
 //   a macro call                -> a shadow token stream, every
 //                                  token carrying its origin      (expand)
 //
-// Nothing here is re-lexed from the source: `directive` walks the parser's `PreprocessorDirective` nodes, which is
-// what keeps the two layers from drifting apart.
+// Nothing here is re-lexed from the source: the tokens come from `cpp_parser::lex`, which is the same
+// function the parser reads its own stream from, so the two layers cannot drift apart.
 pub mod condition;
+pub mod cooked;
 pub mod directive;
 pub mod expand;
 pub mod guard;

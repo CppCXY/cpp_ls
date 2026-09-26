@@ -271,6 +271,46 @@ pub enum DeclKind {
     Other,
 }
 
+/// The **parameter list** of a `#define`, read back from the file it was written in.
+///
+/// The fact records where the replacement list starts and nothing else, so the parameter list is the
+/// parenthesised group that ends where the body begins. That is exact rather than a search: the standard's
+/// parameter list holds identifiers, commas, `...` and whitespace, and nothing else — no string literal, no
+/// comment, no nesting beyond a parameter's own name. A balanced scan back to the matching `(` is therefore the
+/// whole rule, and `None` (no `)` there, or no body at all) is the honest answer for an object-like macro.
+fn parameters_before(source: &str, body_start: usize) -> Option<&str> {
+    let before = source.get(..body_start)?.trim_end();
+    let bytes = before.as_bytes();
+    if bytes.last() != Some(&b')') {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    let mut at = bytes.len();
+    while at > 0 {
+        at -= 1;
+        match bytes[at] {
+            b')' => depth += 1,
+            b'(' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&before[at..]);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+/// A conditional definition's body, as the closure evidence carries it: the fact's `function_like`, the parameter
+/// list when the file it came from had one, and the replacement list.
+pub type ConditionalBody = (Box<str>, bool, Option<Box<str>>, Box<str>);
+
+/// The same three things while the walk is still collecting them, before the name is prepended.
+type ConditionalBodyValue = (bool, Option<Box<str>>, Box<str>);
+
 /// A `#define`, as the index needs it.
 ///
 /// The body is **not** stored — only its shape, which is what the parser's rules ask for (`MacroBody`) and what the
@@ -462,12 +502,14 @@ pub fn macros_from_direct_includes_with_bodies<'a>(
                 .and_then(|range| source.get(range.start_offset..range.start_offset + range.length));
 
             entries.push(if fact.kind.is_definition() {
-                cpp_parser::IncludedMacro::defined_with_body(
+                cpp_parser::IncludedMacro::defined_with_body_and_parameters(
                     from_offset,
                     &fact.name,
                     fact.function_like,
                     fact.body,
                     body_text,
+                    fact.body_range
+                        .and_then(|range| parameters_before(source, range.start_offset)),
                 )
             } else {
                 cpp_parser::IncludedMacro::undefined_at(from_offset, &fact.name)
@@ -511,7 +553,7 @@ pub fn macros_from_direct_includes_with_bodies<'a>(
 pub struct ClosureEvidence {
     pub macros: Vec<cpp_parser::IncludedMacro>,
     /// `(name, replacement list)` — last definition in translation order wins, like everything else here.
-    pub conditional_bodies: Vec<(Box<str>, Box<str>)>,
+    pub conditional_bodies: Vec<ConditionalBody>,
     /// Conditional facts the walk met, and how many of them the conditions put **in force**. Two numbers rather
     /// than one, because "nothing here was conditional" and "every condition was unanswerable" look the same in
     /// the evidence — and because the second number is what moves when the environment gets better at answering.
@@ -823,7 +865,9 @@ struct Walked<'a> {
     /// `(where the name becomes visible, the fact, the file that wrote it)` in translation order, last wins.
     entries: Vec<(usize, &'a MacroFact, &'a str)>,
     /// Bodies of definitions a condition guards that came out **in force** — the second channel (B89).
-    conditional_bodies: std::collections::BTreeMap<Box<str>, Box<str>>,
+    /// The body, the fact's `function_like`, and the parameter list — the two things expansion needs and reading
+    /// does not. A function-like body **with** its parameters is expandable; without them it is not.
+    conditional_bodies: std::collections::BTreeMap<Box<str>, ConditionalBodyValue>,
     conditional_facts: usize,
     facts_in_force: usize,
 }
@@ -845,12 +889,14 @@ impl<'a> Walked<'a> {
                     .and_then(|range| source.get(range.start_offset..range.start_offset + range.length));
 
                 if fact.kind.is_definition() {
-                    cpp_parser::IncludedMacro::defined_with_body(
+                    cpp_parser::IncludedMacro::defined_with_body_and_parameters(
                         from_offset,
                         &fact.name,
                         fact.function_like,
                         fact.body,
                         body_text,
+                        fact.body_range
+                            .and_then(|range| parameters_before(source, range.start_offset)),
                     )
                 } else {
                     cpp_parser::IncludedMacro::undefined_at(from_offset, &fact.name)
@@ -860,7 +906,13 @@ impl<'a> Walked<'a> {
 
         ClosureEvidence {
             macros,
-            conditional_bodies: self.conditional_bodies.into_iter().collect(),
+            conditional_bodies: self
+                .conditional_bodies
+                .into_iter()
+                .map(|(name, (function_like, parameters, body))| {
+                    (name, function_like, parameters, body)
+                })
+                .collect(),
             conditional_facts: self.conditional_facts,
             facts_in_force: self.facts_in_force,
         }
@@ -965,9 +1017,14 @@ fn walk_one_file<'a>(
                     .body_range
                     .and_then(|range| source.get(range.start_offset..range.start_offset + range.length))
             {
-                walked
-                    .conditional_bodies
-                    .insert(Box::from(&*fact.name), Box::from(text));
+                let parameters = fact
+                    .body_range
+                    .and_then(|range| parameters_before(source, range.start_offset))
+                    .map(Box::from);
+                walked.conditional_bodies.insert(
+                    Box::from(&*fact.name),
+                    (fact.function_like, parameters, Box::from(text)),
+                );
             }
 
             continue;

@@ -64,10 +64,15 @@
 
 ### 2.1 token 流 —— 唯一无损的事实
 
-- 入口:`CppLexer::tokenize() -> Vec<CppTokenData>`(`crates/cpp_parser/src/lexer/`)。**它现在就能独立跑**,
-  不经过任何语法。
-- 内容:每个 token 有 `kind` 与绝对 `SourceRange`;空白、注释、续行都是 token(trivia 也是事实)。
+- 入口:**`cpp_parser::lex(text, &LexerConfig) -> (Vec<CppTokenData>, Vec<CppParseError>)`**——唯一的词法实现,
+  parser 也通过它取 token(`CppParser::with_text`)。解析用的那一份由 `CppSyntaxTree::get_tokens()` 交出来,
+  所以"消费者拿到的流"与"parser 读到的流"是同一份数据,不是两次词法碰巧一致。
+- 内容:每个 token 有 `kind` 与绝对 `SourceRange`;空白、注释、续行都是 token(trivia 也是事实);没有 `Eof`
+  token,"最后一个 token 之后"就是 `text.len()`。
 - 不变量:把 token 的文本按 offset 拼回去,等于文件本身;token 索引在一次编辑的版本内稳定。
+- **唯一的例外**:header name。`<` 与 `>` 对上下文无关的扫描来说是运算符,只有语法知道那里该是头文件名,
+  所以 `#include <vector>` 的折叠由解析器做,`get_tokens()` 里是**一个** `HeaderName` 而 `lex` 里是三个 token。
+  这条差异有断言守着(`tests/invariants.rs`),不允许出现第二种改写。
 - 谁读它:前驱扫描(§2.2)、LSP 里所有不需要语法的功能(§4)。
 
 ### 2.2 前驱状态 —— 可共享,且**不是树**
@@ -176,21 +181,209 @@
 
 每一步都能单独验收;不许出现"两个机制长期共存"的状态。
 
-### M0 —— token 流成为一等产物
-`CppLexer::tokenize()` 已经是独立入口。让 parser 不再独占 token 副本;词法的配置(方言、`$`、语言级别)
-跟着 token 流走。
+### M0 —— token 流成为一等产物(**已完成**,见 §10)
+`cpp_parser::lex` 是唯一的词法入口,parser 通过它取 token;`CppSyntaxTree::get_tokens()` 把这次解析用的那一份
+交出来。词法的配置(方言、`$`、语言级别)跟着 token 流走。
 **验收**:同一份文本,`tokenize` 的 token 序列与 parser 内部读到的逐字节一致。
 
-### M1 —— 前驱层改从 token 流读
-把 `preprocess` 的输入从红树换成 token 流。include / 条件 / guard / 宏表的**形状不变**。
+### M1 —— 前驱层改从 token 流读(**已完成**,见 §10)
+`preprocess(source, tokens)`:指令由语言自己的行规则从 token 流上认出,include / 条件 / guard / 宏表的
+**形状不变**。
 **验收**:`FileSummary` 与 `Guards` 在四个语料上的读数**逐文件**不变(总数不算数)。
 
-### M2 —— 位置化展开器 → 熟 token 流
-给展开器 per-offset 的宏状态与条件求值,产出带 `Origin` 的熟流;按 (文件, 配置哈希) 缓存。
-**验收**:对一个真实 TU,熟流与 `clang -E` 的 token 序列一致(预处理指令与空白按约定归一化)。
+### M2 —— 位置化展开器 → 熟 token 流(**文件级已完成**,见 §10)
+`preprocess/cooked.rs`:`cook(source, tokens)`(档 0)与 `cook_with(source, tokens, initial)`(档 1/2,`initial`
+是编译器的内建宏、`-D`、以及闭包在首行已生效的宏)。它丢掉指令、丢掉没被编译的分支(span 报在 `inactive`)、
+把宏调用换成展开(`Origin` 链保留),并且**自己维护一张只喂"走到的"定义的宏表**——死分支里的 `#define` 不生效,
+这是与 `preprocess` 的分别(`preprocess` 记录每一条定义,因为"这个宏在哪定义"的消费者要看见没编译的那些)。
+**验收(实测)**:
+- 内建 fixture(对象宏/函数宏/`#`/`##`/条件/死分支里的 `#define`/`#undef`):与 `g++ -E -P` **逐 token 一致**(60/60);
+- **13 个真实头文件**(MSVC STL/UCRT,去掉 `#include` 行)**:13/13 一致**(指令行按约定归一化,并把编译器
+  `-dM` 的内建宏喂给我们这一侧)。其中 `corecrt.h` 212 对 212 个 token,`sal.h` 4 对 4;`string` 是 0 对 0
+  (去掉 include 后剩下的内容全在两边都不取的分支里,属于空一致,不算证据)。
+- 这条外部判据立刻抓到一个真缺陷并已修:`##` 结果的 range 用了"左 token 起点 + **拼接后**长度",于是
+  `#define P(a,b) a##b` 用在 `P(x, y)` 上时,range 盖住的是 `x,`(参数加逗号)——按 range 切源码的消费者会读到
+  另一个 token 的文本,拼得足够长还会越过文件末尾。现在 range 是**左 token 本身**的范围,拼接后的拼写由
+  token 的 `text` 携带(和 `#` 产生的字符串字面量一样:它的拼写本来就不在文件里)。
 
-### M3 —— 熟流上的真实语法树
-真实树 + 映射层。**验收:删掉只用于模拟展开的规则**;被删掉的规则数写进提交信息。
+**M2 还没做的**:把整个 TU 拼起来(按 include 顺序把每个文件的熟流缝进去)——那需要 include 图;以及缓存,
+它要等到有一个**热的**消费者才有意义(现在没有,先不建)。
+
+### M3 —— 熟流上的真实语法树(**机制已完成**,见 §10)
+`CookedStream::render()` 把熟流拼成一段**渲染文本**(token 之间一个空格),并给出 `RenderedSpan` 表:每个 token
+在渲染里的位置(`cooked`)、它**写在哪**(`written`)、以及它的 `Origin`。真实树就是**用现有语法解析这段渲染
+文本**——parser 一行没改。
+
+**渲染文本不是文件**:它的 offset 不是文件位置,谁把它当文件位置谁就错,而且没有任何东西会拦住他。位置只能
+经 `written_at` / `written_span` 问。这也是 rowan 在这里仍然可用的原因:树需要一个文本,而我们**给它一个**,
+代价是必须同时带上映射表(§2.4 的"节点 offset 不是身份"就是这条纪律)。
+
+**验收**:
+- **一条配置**:`struct S { #if FEATURE int a; #else int b; #endif };` —— 裸树里 `a` 和 `b` **都在**(条件不是
+  语法问题,规则无从下手),熟树里只有编译的那一个;把 `FEATURE` 定义为 `1` 再烤一次,换成另一个。这是 M3 买到
+  的、任何形状规则都买不到的东西。
+- **不得比规则读得差**:B133/B134/B136 那四个注解家族今天在裸树下**已经读通**(规则是有效的),熟读必须与裸读
+  **逐条一致**(`get_errors()` 相等),并且用的是不含任何宏名的语法。
+
+**档 2 的熟流普查(实测)**,`std_probe <list> --seeds --closure [--cooked]`,同一命令只差一个开关:
+
+| 语料 | 档 | 干净 | 消息 | 消息种类 |
+|---|---|---|---|---|
+| 255 文件 SDK+STL | 2 裸 | 217 | 253 | 12 |
+| 255 文件 SDK+STL | 2 **熟** | **242** / 255 | **99** | **3** |
+| 109 文件 STL+UCRT | 2 裸 | 84 | 208 | 11 |
+| 109 文件 STL+UCRT | 2 **熟** | **100** / 109 | **74** | **2** |
+
+按文件分布(不是总数):255 的 `217\|9\|16\|13` → `242\|3\|4\|6`;109 的 `84\|4\|10\|11` → `100\|2\|2\|5` ——
+文件只从差的一侧往外走,没有文件变差。
+
+**整族消失的**:`expected a parameter list or an initializer`(12 条,**就是 B136 那一族**)、
+`expected a declarator name`、`unexpected token`、`expected }`、`expected a template argument`、
+`expected ), but get \|`,以及中间那一版查出来的 `expected ), but get ::`、`expected ;, but get (`。
+剩下的只有三族:`expected primary expression`(42)、`expected ; after expression`(32)、`expected ;`(25)。
+
+### 那 9 条新失败查清了:其中 7 条是**我们自己**的缺陷
+
+初版的熟读在 109 语料上把 89 文件读干净、156 条消息,同时多出三族新失败。把**渲染文本**打出来(为此给
+`std_probe --cooked` 接了映射表:错误在渲染里的 offset 经 `written_at` 换回文件的行列,并把渲染片段一起
+打印——这是映射表的第一个真实消费者),一眼就看出来了:
+
+```text
+concepts:5:17  expected `;` after expression | RENDERED …NE__ ) "): " MESSAGE ) ( "warning " # NUMBER ": " MESSAGE )…
+exception:4:6  expected primary expression    | RENDERED …tern "C++" void __cdecl __ExceptionPtrCreate ( ( SAL_name , …
+```
+
+**`#`、`NUMBER`、`MESSAGE`、`SAL_name` 是宏体被原样贴进流里**——`_STL_MSG(...)` 这类**函数宏**的体
+(带 `#` 和参数名)被当成对象宏贴了出去。原因在 `configuration_from_environment`:in-force 通道只带
+**文本体**、不带"是不是函数宏",于是我初版把它当对象宏用了。
+
+一个体不是定义。修法是把那条通道**只计数、不使用**(`Configuration::in_force_without_a_parameter_list`):
+通道当初是为**读**一个体而建的(`_STD_BEGIN` 告诉规则"这里开了个命名空间"),而"能代入参数地展开它"是
+一个**更强**的断言,证据不够就不该下。改掉之后:109 → **100 干净 / 74 条 / 2 族**,255 → **242 干净 /
+99 条 / 3 族**。
+
+### 剩下三族的逐条分类(255 语料 13 个失败文件的首错,都带渲染片段)
+
+**真语法缺口**(裸读时被宏名挡住了,熟读把它露出来):
+
+| 渲染里读不动的形状 | 文件 | 缺口 |
+|---|---|---|
+| `int ( __cdecl * _onexit_t ) ( void ) ;` | `ucrt/stdlib.h` | **括号声明符里的调用约定**;`new` 里的 `void ( __cdecl * ) ( )` 同族 |
+| `new ( :: std :: addressof ( _Obj ) ) _Ty ( … )` | `xutility` | placement new 里的**限定名表达式** |
+| `_Tuple_conditional_explicit_v0<tuple_size_v<_Dest> == sizeof...(_Srcs), …>` | `tuple` | 模板实参是**表达式**,且带**包展开** |
+| ~~`template <class _Ty> constexpr _Ty ( max ) ( … )`~~ | `utility` | ~~B135 那一族~~ **已修**(见下) |
+
+**不是语法问题,是熟读还读不动:函数宏的体没有参数名,所以没展开**(这是证据的缺口,不是语法的):
+
+| 渲染里留下的名字 | 文件 |
+|---|---|
+| `_ACRTIMP`、`_SAL2_Source_`、`_Check_return_` | `ucrt/corecrt_wio.h`、`ucrt/corecrt_wstring.h` |
+| `_Success_ ( return != 0 )`、`_Ret_writes_z_ ( 26 )` | `ucrt/corecrt_wtime.h` |
+| `_Struct_size_bytes_ ( Size )` | `um/ncrypt.h`、`um/winioctl.h`、`shared/ktmtypes.h` |
+| `_Post_equal_to_`、`__inline` | `arm_neon.h`、`arm64_neon.h` |
+
+两件事由此变得清楚,而且都有数字支撑:
+
+1. **`_ACRTIMP` 是对象宏,却被跳过了** —— 它的 `#define` 在一个条件区域里,所以只从 **in-force 通道**到达,而
+   那条通道**不带"是不是函数宏"**。给通道补上这个标志,`_ACRTIMP` 这种就能回来,`_STL_MSG` 那种继续跳过:
+   这是下一步里最便宜、收益最直接的一条。
+2. **SAL 那一批必须等参数表**:`_Success_(return != 0)` 要按参数替换,证据里没有参数名就没法做。要动
+   `MacroFact` 的编码 → `CODEC_VERSION` bump。
+
+### 函数宏的**参数表**已进证据(不需要 `CODEC_VERSION` bump)
+
+原先以为这一步要动 `MacroFact` 的编码(加一个字段 → 版本 bump)。**不用**:事实里已经有**体**的范围
+(`body_range`),而参数表就是**紧挨着体、在它之前的那一组括号**。于是遍历时从 `body_range.start_offset`
+**向前做一次配平扫描**就够了——这**不是**搜索,而是精确的:标准里宏的参数表只允许标识符、逗号、`...` 和空白
+(没有字符串、没有注释、参数里也不会嵌套括号),所以配平扫描就是全部规则。
+
+- `IncludedMacro.parameters` / `MacroEnvironment::parameters_of` / `parameters_in_force`:证据带着它走;
+- `InForceBody` 多了 `parameters`,并新增一条 4 元组 `From`(旧的三条 `From` 一律给 `None`,即"没人说过");
+- 熟读的判据变成:**对象宏可用,或者函数宏且参数表在手**(`definition_text` 拼出 `NAME(params) body`,再交给
+  指令层同一个 `parse_define`);
+- 于是"函数宏没参数名"这个计数从**一整类**缩成"证据里确实没有的少数"。
+
+**实测**(同一命令,只差开关):
+
+| | 默认(开关关) | `--in-force-bodies` |
+|---|---|---|
+| 255 文件 | 242 干净 / 99 条 / 3 族 | 241 / **83** / 7 |
+| 109 文件 | 100 / 74 / 2 | **99** / **69** / 6 |
+
+默认路径**一个数没动**(这正是要的:证据变丰富不该动没打开开关的读数)。开关打开后,109 语料**多干净一个文件、
+少七条消息**;255 语料干净数不变、消息数反而从 71 涨到 83——因为 SAL 那一批现在**真的展开**了,而展开之后
+露出来的正是那三条语法缺口。**证据侧到这里基本做完,剩下的是语法。**
+### 剩下三条的**最小复现与边界**(下一轮从这里开始)
+
+把它们缩到最小之后,边界比原来的描述干净得多,而且两条**不是**我原先猜的形状:
+
+```text
+typedef void (*)(void);            干净
+typedef void (__cdecl * p)(void);  干净      ← 组里有名字就没事
+typedef void (__cdecl *)(void);    失败 "expected ;" 落在那个 `(`
+```
+
+**已修**。原因不是"抽象声明符里读不了调用约定",而是组里**没有名字**:那个判定认得的三条形状
+(`(*f)`、`(WINAPI PM_OPEN_PROC)`、`(*STDAPICALLTYPE LPFN…)`)**全都要一个名字**,于是 `( __cdecl * )` 落到了
+抽象声明符那条路上,读了 `(` 就在宏名上停住,把 `( __cdecl * )` 留成裸 token。加的是第四种形状
+`( 宏 运算符 )`:靠**宏的拼法**(`written_like_a_macro`)与"后面跟着参数表"两条守住,普通名字的 `(x *)` 不受影响;
+读取端相应地允许组里**没有名字**(抽象拼法)。
+
+**实测**:裸读 255 `253 → 251` 条、109 `208 → 206` 条、128 文件不变;**熟读多一个干净文件**
+(255 `242 → 243`、109 `100 → 101`)。这是第一条让**默认**熟读读数动起来的语法修复。
+
+(顺带记下上一次的失败:我先前把分支加在 `parse_abstract_declarator` 的循环里,**三份普查一个数都没动**,
+因为它压根没被执行到——于是撤了。修对了地方才看得见读数,这条经验比补丁本身有用。)
+
+```text
+void f() { ::new (p) T(1); }                  干净
+void g() { new (p) T(::std::addressof(x)); }  失败 "expected ), but get ::"
+```
+
+placement new 的**实参**以 `::` 开头时读不动(`new (p) T(::x)`),而 `new` 本身带 `::` 没问题。
+
+`tuple` 那条用我的最小拼法(`F<sizeof(D) == sizeof...(S), D, S...>`)是**干净**的,所以它的形状比我原先写的
+更窄——下次要拿它真正的上下文(`tuple_size_v<_Dest> == sizeof...(_Srcs)` 出现在**偏特化的实参**里)去缩。
+### B135 的另一半:模板声明里的括号函数名(已修)
+
+`template <class _Ty> constexpr _Ty (max)(_Ty a);` 读不动,原因与 B135 当初那个一样,但门槛在另一边:
+那条分支有两半 —— "**在光标处看到 `(` 且还没有类型名**"和"**整形状是 `运算符* ( 声明符 ) (`**"。模板声明里
+说明符序列已经读到了一个**真的类型名**(`_Ty`),前半关了;`(max)` 前面又没有运算符,后半也关了。现在后半的
+条件放宽成"**没运算符时,组里必须是一个光名字**":`T (max)(T a)` 正是 `T max(T a)` 的另一种拼法,而同形状的
+`Widget w(1, 2)`、`T (a, b)`(直接初始化)、`int main(argc, argv)` + 声明(K&R)组里都装不下"一个光名字"。
+
+**实测**:五份默认普查**一个数都没动**(裸 255 `217/253`、裸 109 `84/208`、熟 255 `242/99`、熟 109 `100/74`、
+裸 128 `128 干净`),因为这个形状只在**用了 in-force 的体**之后才出现——开关关着的时候,那些 STL 头本来就
+读得通。把开关打开再测(新增 `std_probe --in-force-bodies`):**241 干净 / 81 → 71 条 / 6 族**,即这条修复在
+那个模式下减掉 10 条消息,但干净数仍是 241(关着是 242)。所以默认照旧关闭,而四个真缺口的清单现在是**三条**。
+### in-force 通道的 `function_like`:机制已就位,默认**关闭**(测出来的)
+
+`InForceBody` 把三样东西一起交给通道:**名字、`Option<bool>` 的 function_like、体**。`Option` 而不是 `bool`,
+因为两个调用者知道的东西不同:索引知道(`MacroFact::function_like`),只带文本的探针不知道——而 **`None` 不是
+"对象宏"**,它是"没人说过",于是按不可用处理。`Configuration::in_force_without_a_parameter_list` 数出来的
+就是"留下了多少"。
+
+打开它(`configuration_from_environment_with(environment, true)`),同一批普查:
+
+```text
+255 文件:干净 242 → 241 | 消息 99 → 81 | 族 3 → 6
+109 文件:干净 100 →  98 | 消息 74 → 76 | 族 2 → 6
+```
+
+它**修好了七个 `_ACRTIMP` 开头的文件**(`corecrt_wstring.h`、`corecrt_wio.h`、`corecrt_wtime.h`、`stat.h`、
+`stdlib.h`、`ctype.h`、`winnt.h`),同时**弄坏了另外几个**(`xstring` 在内)——展开一个体,就把体后面那个
+语法缺口露出来了,与前面四个真缺口是同一个故事。
+
+**干净文件数下降不是这一层有权自己做的交易**,所以开关默认关闭:代码在、两条路都有断言,等那四个真缺口修完
+再打开。这就是"先量后改"在这条线上的样子——机制就位,决定留给数字。
+
+**删规则的位置也更清楚了**:等上面两条做完,剩下要删的是"注解站在说明符/声明符位置"那一批形状规则
+(B133/B134/B136),而**真语法缺口那四条**(调用约定、placement new、模板实参表达式、`_Ty(max)(…)`)与展开无关,
+它们该由语法自己修——这正是 M4 之后 parser 那一侧的清单。
+
+**一条纪律**:熟流的树**没有无损性**(指令没了、每个条件只留一支),所以普查在 `--cooked` 下必须跳过
+`to_source_text() == source` 这条断言——无损性是**原始 token 流**的属性(`CppSyntaxTree::get_tokens`),
+不是渲染文本的。`std_probe` 里现在就是这么写的。
 
 ### M4 —— 文件 CST 降级
 裸树只保留:无损、括号/指令结构、浅层声明扫描。此时它那侧的门禁放宽到"结构正确",不再要求 C++ 正确。
@@ -203,7 +396,7 @@
 
 ## 7. 度量与门禁
 
-每次改动后必须全绿(测试基线:**1192 个测试**,2026-02 实测;`cargo clippy --workspace --all-targets`
+每次改动后必须全绿(测试基线:**1193 个测试**,实测;`cargo clippy --workspace --all-targets`
 零警告,`cargo doc` 零警告,`cpp_dump` 零错误):
 
 ```bash
@@ -213,16 +406,29 @@ cargo doc --no-deps -p cpp_code_analysis      # 零警告
 cargo run -q -p cpp_parser --bin cpp_dump -- crates/cpp_parser/tests/real_world.cpp   # 零错误
 ```
 
-四个语料 + 两个端到端(命令形状;**列表文件由 `std_probe --seeds --closure` 生成,不进仓库**):
+四个语料 + 两个端到端。**每个语料必须记下它是哪一档跑出来的**(§5):同一个 255 文件语料,档 0(只有文本)
+是 206 干净 / 995 消息,档 2(闭包)是 217 干净 / 253 消息——这正是"缺宏知识"值多少的度量,把两档混着比
+就是拿两个问题互相回答。命令形状:
 
-| 语料 | 现状基线 |
-|---|---|
-| libstdc++ 128 文件(缓冲) | 128 干净 / 0 消息 |
-| libstdc++ 闭包 455 文件 | 454 干净(1 个文件 12 条) |
-| Windows SDK + MSVC STL 255 文件(缓冲) | 217 干净 / 253 消息 |
-| MSVC STL + UCRT 109 文件(缓冲) | 84 干净 / 208 消息 |
-| `std_query` 两个方向 | 9/9 |
-| driver 声明查询 | 9/9 |
+```bash
+# 档 0:只有文本
+std_probe <list>
+# 档 2:闭包(种子 TU + --closure)
+std_probe <list> --seeds --closure
+```
+
+| 语料 | 档 | 现状基线 |
+|---|---|---|
+| libstdc++ 128 文件 | 0 | 128 干净 / 0 消息 |
+| libstdc++ 455 文件(闭包清单) | 0 | 454 干净(1 个文件 12 条) |
+| Windows SDK + MSVC STL 255 文件 | 0 | 206 干净 / 995 消息 |
+| Windows SDK + MSVC STL 255 文件 | 2 | **217 干净 / 253 消息** |
+| MSVC STL + UCRT 109 文件 | 0 | 75 干净 / 936 消息 |
+| MSVC STL + UCRT 109 文件 | 2 | **84 干净 / 208 消息** |
+| `std_query` 两个方向 | 2 | 9/9 |
+| driver 声明查询 | 2 | 9/9 |
+
+列表文件由 `std_probe --seeds --closure` 或编译器的 `-M` 输出生成,**不进仓库**。
 
 纪律:
 
@@ -265,11 +471,46 @@ cargo run -q -p cpp_parser --bin cpp_dump -- crates/cpp_parser/tests/real_world.
 
 **已有**(可跑、有测试):
 
-- 词法器与 token 流:`CppLexer::tokenize`,`CppTokenKind`、trivia、续行、原始字符串;
+- **M0 已完成**:`cpp_parser::lex` 是唯一的词法入口(parser 通过它拿 token),`CppSyntaxTree::get_tokens()`
+  把这次解析用的 token 流交出来——token 流是一等产物,tree 是它的一个视图。唯一的例外写在断言里:
+  `#include <vector>` 的 `<…>` 只有语法知道那里该是头文件名,所以 **header name 的折叠是解析器做的**,
+  token 流因此只在这一点上与 `lex` 不同(`tests/invariants.rs` 的 `the_parser_reads_the_stream_the_lexer_produces`
+  逐 token 走两遍,只允许这一种差异)。
+- **M1 已完成**:预处理层从 **token 流**读指令(`scan_directives(source, tokens)`),规则是语言自己的:
+  `#` 是它所在**逻辑行**的第一个 token(`LineContinuation` 不算换行,所以 `#define F(a) \` 折行后的 `#a`
+  不是新指令)。指令的 span 与树给的完全一致,包括尾随 trivia。
+  **实测**(`examples/directive_scan_audit.rs`):128 文件 libstdc++ 与 455 文件闭包 **node only 0 /
+  scan only 0**——语法读得通的地方两条规则是同一个规则;255 文件 SDK 语料 **node only 0 / scan only 6950**
+  (49 个文件解析失败),也就是解析失败的地方旧路径把剩下的指令**藏起来了**。预处理层不再继承语法的失败。
+- 词法器与 token 流:`CppTokenKind`、trivia、续行、原始字符串;
 - 无损 rowan CST + 宽容语法(`cpp_parser`),含针对真实头文件的缺漏断言集;
 - 分析层:预处理(include / 条件 / guard / 宏环境)、每文件摘要与缓存、项目索引、会话;
 - **影子展开器**,带 `Origin` 调用链,目前只服务展开视图;
 - LSP 壳:`cpp_ls`,诊断(push + pull)、definition、hover,真客户端握手测试。
 
-**要翻正的那一件事**:预处理层今天建在 CST **之上**(`index/mod.rs` 里 `preprocess(&root)`),也就是"先解析
-文本,再从树里反推预处理"。这份文档的全部内容,归结起来就是把它挪到 token 流之上(§6 M1–M3)。
+**M0/M1 之后的读数**:四个语料 + `std_query` 9/9 + driver 9/9 **全部与迁移前一致**(§7),测试 1192 → 1193。
+
+- **M2(文件级)已完成**:`cook` / `cook_with` 产出**熟 token 流**,外部判据是与编译器自己的预处理逐 token 一致
+  (`examples/cook_vs_compiler.rs`,实测见 §6 M2)。
+- 副产品:那个判据抓到并修掉了一个 `##` 的 range 缺陷(§6 M2 最后一段),以及 `Branch::holds` 现在被两个
+  消费者共用(条件判断只有一处实现)。
+
+- **M3 的机制已完成**:`render()` + `RenderedSpan` 映射表,真实树由现有语法在渲染文本上建出来(parser 未改)。
+- **档 2 的宏表已完成**:`configuration_from_environment` 把 include 闭包给出的定义变成 `MacroDef`(对象宏;
+  函数宏因为证据里**没有参数名**而计数跳过——按参数替换的东西不能猜),`std_probe --cooked` 因此能跑熟流普查。
+- **熟流普查有了数字**:255 文件 253→**99** 条消息、217→**242** 干净;109 文件 208→**74**、84→**100**;
+  九族消失(B136 那族在内),只剩三族(§6 M3)。
+- **普查里查出的第一个真缺陷已修**:in-force 通道的**函数宏体**被当对象宏贴了出去(`#` 与参数名进了流),
+  修法是那条通道只计数不使用;这一改把 255 语料从 227 干净推到 **242**,并让新失败族全部消失。
+- **映射表的第一个真实消费者**:`std_probe --cooked` 用 `written_at` 把渲染里的错误位置换回文件行列。
+- **剩下三族已逐条分类**:13 个失败文件的首错分成"四个真语法缺口"与"两类熟读还读不动(函数宏缺参数名;
+  in-force 通道缺 function_like 标志)"——§6 M3 有表。
+
+**下一步(按依赖排序)**:
+1. **给 in-force 通道补 `function_like`** —— **已完成并测过,默认关闭**(见下);
+2. **函数宏的参数表进证据**(要动 `MacroFact` 的编码 → `CODEC_VERSION` bump),SAL 注解那一批才吃得下;
+3. **四个真语法缺口**:括号声明符里的调用约定、placement new 的限定名、模板实参里的表达式+包展开、
+   `_Ty(max)(…)`——这些与展开无关,该由语法自己修,修完熟读的读数会再上一个台阶;
+3. **TU 级拼接**:按 include 顺序缝熟流;
+4. 缓存(等有热的消费者);
+5. M4/M5:裸树降级、双向映射接进补全/悬停/跳转。

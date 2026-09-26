@@ -1141,3 +1141,18 @@ fn is_trivia_whitespace(ch: char) -> bool {
         }
     }
 }
+
+/// **The one lexer entry point**: every token of `text`, plus whatever the lexer could not read.
+///
+/// It exists so that there is exactly one token stream. The parser reads its tokens through this
+/// function, and a caller that wants only tokens — the preprocessor layer, folding, semantic tokens —
+/// calls it directly; a second implementation would be free to disagree with the first about where a
+/// token begins, and "the directive starts here" is a question both layers ask.
+///
+/// The stream covers the file byte for byte: concatenating the tokens' text reproduces `text`. There is
+/// no `Eof` token — the lexer stops there, and "past the last token" is `text.len()`.
+pub fn lex(text: &str, config: &LexerConfig) -> (Vec<CppTokenData>, Vec<CppParseError>) {
+    let mut errors = Vec::new();
+    let tokens = CppLexer::new(text, *config, &mut errors).tokenize();
+    (tokens, errors)
+}

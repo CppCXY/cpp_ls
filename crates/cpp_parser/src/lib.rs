@@ -11,13 +11,13 @@ pub use grammar::doc::{DocCommandArgs, DocCommandKind, command_args, command_kin
 pub use kind::*;
 pub use lexer::{
     CppLexer, CppTokenData, DocCommentStyle, DocToken, DocTokenKind, LexerConfig, is_block_comment,
-    is_doc_whitespace, is_documentation_comment, lex_comment,
+    is_doc_whitespace, is_documentation_comment, lex, lex_comment,
 };
 pub use parser::{Checkpoint, CppParser, EventStreamAudit, MacroEvidence, MarkEvent, ParserConfig};
 pub use parser_error::{CppParseError, CppParseErrorKind};
 pub use symbols::{
-    BodyShape, IncludedMacro, MacroBody, MacroEnvironment, NoSymbols, SymbolKind, SymbolMap,
-    SymbolTable, shape_of_a_body,
+    BodyShape, InForceBody, IncludedMacro, MacroBody, MacroEnvironment, NoSymbols, SymbolKind,
+    SymbolMap, SymbolTable, shape_of_a_body,
 };
 pub use syntax::*;
 pub use text::{LineIndex, Reader, SourceRange};

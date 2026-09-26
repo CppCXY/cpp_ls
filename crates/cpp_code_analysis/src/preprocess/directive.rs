@@ -1,10 +1,13 @@
 //! Preprocessor directives, structured.
 //!
-//! The parser keeps a directive as one leaf holding its tokens — `#`, the name, and the rest of the
-//! logical line — which is what a lossless tree needs and nothing more. Every consumer of a directive
-//! then has to re-derive the same things: where the name ends, whether the next token is a parameter
-//! list, what the condition expression is, whether `#include` used `<...>` or `"..."`. This module
-//! derives them once.
+//! A directive is a **line**, not a construct: it starts at a `#` that is the first token of its logical
+//! line and runs to the newline that ends it. That is why this module reads the token stream rather than
+//! the tree — the tree's `PreprocessorDirective` nodes are one view of the same thing, and the rule that
+//! decides where a directive begins belongs to the line, not to the grammar.
+//!
+//! Every consumer of a directive then has to derive the same things: where the name ends, whether the next
+//! token is a parameter list, what the condition expression is, whether `#include` used `<...>` or `"..."`.
+//! This module derives them once.
 //!
 //! # What is *not* decided here
 //!
@@ -17,11 +20,11 @@
 //! [`Directive::Other`], not a diagnostic: a file mid-edit has directives without arguments, and an
 //! editor that flags `#if` on the line the user is still typing is worse than one that stays quiet.
 
-use cpp_parser::{CppSyntaxKind, CppSyntaxNode, CppTokenKind, SourceRange};
+use cpp_parser::{CppTokenData, CppTokenKind, SourceRange};
 
 use crate::{
     macros::{MacroDef, parse_define},
-    token::{Token, is_trivia, tokens_of},
+    token::{Token, is_trivia},
 };
 
 /// The directive's name, as a typed value.
@@ -284,23 +287,46 @@ pub struct SpannedDirective {
 
 /// Read every directive in a file, in source order.
 ///
-/// Walks the tree's `PreprocessorDirective` nodes rather than re-scanning tokens. That is deliberate:
-/// the parser already decided which `#` begins a directive and which is a token inside a macro body,
-/// and re-deriving that would be a second implementation of the same rule, free to disagree with the
-/// first.
-pub fn scan_directives(root: &CppSyntaxNode) -> Vec<SpannedDirective> {
+/// **Read from the token stream, not from the tree**, because the rule is a rule about lines: a `#` begins
+/// a directive when it is the first token of its **logical** line. A splice is not a newline —
+/// `LineContinuation` is a token kind of its own — which is what keeps `#define F(a) \` continued on the
+/// next line from starting a second directive at the `#` of a stringized parameter.
+///
+/// A directive's **span** is the one the tree gives it: from the `#` through the trivia that follows its
+/// last token, up to the next token that is not trivia. That trailing trivia (the newline, blank lines,
+/// the comment before the following line) belongs to the span because the parser attaches it to the
+/// directive it just finished, and a consumer asking for "the text of this directive" has always got it.
+pub fn scan_directives(source: &str, tokens: &[CppTokenData]) -> Vec<SpannedDirective> {
     let mut out = Vec::new();
     let mut depth = 0usize;
+    let mut index = 0usize;
 
-    for node in root.descendants() {
-        if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::PreprocessorDirective {
+    while index < tokens.len() {
+        if tokens[index].kind != CppTokenKind::Hash || !starts_its_logical_line(tokens, index) {
+            index += 1;
             continue;
         }
 
-        let range = cpp_parser::source_range(node.text_range());
-        let tokens = tokens_of(&node);
-        let directive = parse_directive_tokens(&tokens, range);
+        // The logical line ends at the first real newline; everything up to it — the `\`-newline splices
+        // included — is this directive. Then the trivia after that newline rides along, for the reason the
+        // span is described above.
+        let mut end = index;
+        while end < tokens.len() && tokens[end].kind != CppTokenKind::Newline {
+            end += 1;
+        }
+        let mut after = if end < tokens.len() { end + 1 } else { end };
+        while after < tokens.len() && is_trivia(tokens[after].kind) {
+            after += 1;
+        }
 
+        let start_offset = tokens[index].range.start_offset;
+        let end_offset = tokens
+            .get(after)
+            .map_or(source.len(), |token| token.range.start_offset);
+        let range = SourceRange::new(start_offset, end_offset.saturating_sub(start_offset));
+
+        let directive =
+            parse_directive_tokens(&to_tokens(source, &tokens[index..after]), range);
         let kind = directive.kind();
 
         // `#endif` is the only directive that *ends* a region. `#elif` and `#else` continue the one they are
@@ -316,6 +342,7 @@ pub fn scan_directives(root: &CppSyntaxNode) -> Vec<SpannedDirective> {
                 condition_depth: depth.saturating_sub(1),
             });
             depth = depth.saturating_sub(1);
+            index = after.max(index + 1);
             continue;
         }
 
@@ -328,9 +355,40 @@ pub fn scan_directives(root: &CppSyntaxNode) -> Vec<SpannedDirective> {
         if kind.opens_a_condition() {
             depth += 1;
         }
+        index = after.max(index + 1);
     }
 
     out
+}
+
+/// Is this token the first thing on its **logical** line?
+///
+/// Scanned backwards over trivia. A `Newline` makes the answer yes; any other token makes it no; reaching
+/// the start of the file makes it yes. A `LineContinuation` is trivia and is deliberately *not* a newline:
+/// a directive cannot begin on a line that the previous line was spliced onto.
+fn starts_its_logical_line(tokens: &[CppTokenData], index: usize) -> bool {
+    let mut i = index;
+    while i > 0 {
+        i -= 1;
+        if tokens[i].kind == CppTokenKind::Newline {
+            return true;
+        }
+        if !is_trivia(tokens[i].kind) {
+            return false;
+        }
+    }
+    true
+}
+
+/// The tokens of a span, with their text taken out of the source — what [`parse_directive_tokens`] reads.
+pub(super) fn to_tokens(source: &str, tokens: &[CppTokenData]) -> Vec<Token> {
+    tokens
+        .iter()
+        .map(|token| {
+            let text = &source[token.range.start_offset..token.range.end_offset()];
+            Token::new(token.kind, text, token.range)
+        })
+        .collect()
 }
 
 /// Read one directive from its tokens, including the leading `#`.

@@ -1,8 +1,8 @@
 use rowan::GreenNode;
 
 use crate::{
-    CppAstNode, CppTranslationUnit, kind::CppSyntaxKind, parser_error::CppParseError,
-    syntax::CppSyntaxNode,
+    CppAstNode, CppTranslationUnit, kind::CppSyntaxKind, lexer::CppTokenData,
+    parser_error::CppParseError, syntax::CppSyntaxNode,
 };
 
 /// The parse result for one source file.
@@ -10,15 +10,34 @@ use crate::{
 /// Holds a `GreenNode` (not a red `SyntaxNode`) because `SyntaxNode` is neither `Send` nor `Sync`,
 /// while the green tree is immutable and freely shareable across threads — the LSP layer relies
 /// on that. Call [`CppSyntaxTree::get_red_root`] to obtain a typed cursor into the tree.
+///
+/// It also carries the **token stream it was parsed from**. That is not a convenience: the token
+/// stream is the primary artifact and the tree is one view of it — every directive, every region and
+/// every query that needs positions rather than structure reads the tokens, and re-lexing to get them
+/// would be a second answer to a question that already has one. The vector is `Clone`d with the tree
+/// and costs about twelve bytes per token.
 #[derive(Debug, Clone)]
 pub struct CppSyntaxTree {
     root: GreenNode,
     errors: Vec<CppParseError>,
+    tokens: Vec<CppTokenData>,
 }
 
 impl CppSyntaxTree {
-    pub fn new(root: GreenNode, errors: Vec<CppParseError>) -> Self {
-        CppSyntaxTree { root, errors }
+    pub fn new(root: GreenNode, errors: Vec<CppParseError>, tokens: Vec<CppTokenData>) -> Self {
+        CppSyntaxTree {
+            root,
+            errors,
+            tokens,
+        }
+    }
+
+    /// Every token of the file, in order, trivia included — the stream this tree was parsed from.
+    ///
+    /// Losslessness is a property of this stream as much as of the tree: concatenating each token's
+    /// text reproduces the file byte for byte.
+    pub fn get_tokens(&self) -> &[CppTokenData] {
+        &self.tokens
     }
 
     pub fn get_red_root(&self) -> CppSyntaxNode {
@@ -85,6 +104,7 @@ mod tests {
                 builder.finish_node();
                 builder.finish()
             },
+            Vec::new(),
             Vec::new(),
         );
 

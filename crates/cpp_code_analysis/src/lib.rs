@@ -64,9 +64,10 @@ pub use cache::{
 };
 pub use file::token;
 pub use include::{config, graph, msvc, paths, system_headers, toolchain};
-pub use preprocess::{condition, directive, expand, guards, macros};
+pub use preprocess::{condition, cooked, directive, expand, guards, macros};
 pub use sema::declarations::{build_facts, by_name, declared_type_of, scope_of};
 pub use sema::{module_info, modules, parser_symbols, scopes, symbol};
+pub use summary::ConditionalBody;
 pub use summary::{
     ConditionAt, ConditionalRegion, DeclFact, DeclKind, FactGuard, FileSummary, GuardBranch,
     IncludeFact, MacroFact, MacroKind, SummaryGuards, macros_from_direct_includes,
@@ -131,6 +132,10 @@ pub use paths::{
     normalize_path, parent_normalized,
 };
 pub use preprocess::{FilePreprocessing, PositionalMacros, preprocess};
+pub use cooked::{
+    Configuration, CookedStream, RenderedCooked, RenderedSpan, configuration_from_environment,
+    configuration_from_environment_with, cook, cook_with,
+};
 pub use project::{
     CONFIGURATION_FILE_NAMES, CmakeCache, CompileSection, ConfigProblem, ConfigReport, Database,
     DatabaseOrigin, DiagnosticsSection, DiscoveryProblem, HoverSection, IndexSection,

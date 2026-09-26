@@ -704,10 +704,94 @@ fn trivia_tokens_tile_the_source_exactly() {
 /// makes it usable as the reference in a comparison: a check that reads trivia out of the tree and
 /// compares it with itself would agree no matter what was thrown away.
 fn lex_source(source: &str) -> Vec<cpp_parser::CppTokenData> {
-    let mut errors = Vec::new();
-    let mut lexer =
-        cpp_parser::CppLexer::new(source, cpp_parser::LexerConfig::default(), &mut errors);
-    lexer.tokenize()
+    cpp_parser::lex(source, &cpp_parser::LexerConfig::default()).0
+}
+
+/// **The token stream is one stream.**
+///
+/// `cpp_parser::lex` is the only lexing implementation, and the tree carries the stream the parser
+/// actually read. The two are not always *equal*, and the exception is worth stating precisely because
+/// it is the only one: a **header name** is only a header name once the grammar knows one is expected
+/// (`#include <vector>` — `<` and `>` are operators to a context-free sweep), so the parser folds that
+/// run into a single `HeaderName` token while parsing. Everything else must be identical, token for
+/// token, and this test is what keeps a second rewriting step from appearing unnoticed.
+#[test]
+fn the_parser_reads_the_stream_the_lexer_produces() {
+    for (name, source) in CORPUS {
+        let (lexed, lexical_errors) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+        let tree = CppParser::parse(source, ParserConfig::default());
+
+        // Losslessness is a property of the stream as much as of the tree, and this is the half a
+        // consumer that never looks at a tree depends on.
+        for (which, tokens) in [("lex", lexed.as_slice()), ("the tree", tree.get_tokens())] {
+            let mut text = String::with_capacity(source.len());
+            for token in tokens {
+                text.push_str(&source[token.range.start_offset..token.range.end_offset()]);
+            }
+            assert_eq!(
+                text, *source,
+                "{name}: {which}'s token stream does not reproduce the file"
+            );
+        }
+
+        assert_only_header_names_were_folded(&lexed, tree.get_tokens(), source, name);
+
+        // Lexing and parsing report into one list, and lexing happened first: what `lex` reported is a
+        // prefix of what the tree reports. A parser that dropped a lexical error would break this.
+        assert_eq!(
+            &tree.get_errors()[..lexical_errors.len()],
+            lexical_errors.as_slice(),
+            "{name}: the lexical diagnostics are not the ones the tree carries"
+        );
+    }
+}
+
+/// Walk the two streams together, allowing exactly one difference: a `HeaderName` in the parsed stream
+/// standing where the lexed stream has the run of tokens it covers.
+#[track_caller]
+fn assert_only_header_names_were_folded(
+    lexed: &[cpp_parser::CppTokenData],
+    parsed: &[cpp_parser::CppTokenData],
+    source: &str,
+    name: &str,
+) {
+    let (mut i, mut j) = (0usize, 0usize);
+
+    while i < lexed.len() && j < parsed.len() {
+        if lexed[i] == parsed[j] {
+            i += 1;
+            j += 1;
+            continue;
+        }
+
+        let folded = parsed[j];
+        assert_eq!(
+            folded.kind,
+            cpp_parser::CppTokenKind::HeaderName,
+            "{name}: the streams differ at {:?} (lexed) against {:?} (parsed), and the difference is \
+             not a header name",
+            &source[lexed[i].range.start_offset..lexed[i].range.end_offset()],
+            &source[folded.range.start_offset..folded.range.end_offset()],
+        );
+
+        // The run it replaces must be contiguous and inside it: the fold rewrites tokens, it does not
+        // re-span the file.
+        let start = folded.range.start_offset;
+        let end = folded.range.end_offset();
+        let first = i;
+        while i < lexed.len() && lexed[i].range.start_offset < end {
+            assert!(lexed[i].range.start_offset >= start, "{name}: run escapes it");
+            i += 1;
+        }
+        assert!(i > first, "{name}: a header name replaced no token at all");
+        j += 1;
+    }
+
+    assert_eq!(
+        (i, j),
+        (lexed.len(), parsed.len()),
+        "{name}: one stream ran out before the other"
+    );
 }
 
 /// The event stream must come out of recovery balanced: no node left open, and never a `NodeEnd`

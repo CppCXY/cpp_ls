@@ -481,9 +481,8 @@ fn visit<F: FileProvider>(
     interner: &mut PathInterner,
     depth: usize,
 ) -> Marked {
-    let _ = source;
     let root = tree.get_red_root();
-    let preprocessing = crate::preprocess::preprocess(&root);
+    let preprocessing = crate::preprocess::preprocess(source, tree.get_tokens());
     let guard_analysis = analyse_guards(&preprocessing, &root);
 
     // What this file was reached with, recorded before anything in it changes the picture.
@@ -1203,7 +1202,7 @@ impl Marked {
 /// Read one `#define` from a source string, the way a directive's tokens are read.
 fn parse_define_source(source: &str) -> Option<crate::macros::MacroDef> {
     let tree = cpp_parser::CppParser::parse(source, cpp_parser::ParserConfig::default());
-    let preprocessing = crate::preprocess::preprocess(&tree.get_red_root());
+    let preprocessing = crate::preprocess::preprocess(source, tree.get_tokens());
     preprocessing.macros.iter().next().cloned()
 }
 

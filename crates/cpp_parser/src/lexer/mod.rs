@@ -9,7 +9,7 @@ pub use cpp_doc_lexer::{
     DocCommentStyle, DocToken, is_block_comment, is_doc_whitespace, is_documentation_comment,
     lex_comment,
 };
-pub use cpp_lexer::CppLexer;
+pub use cpp_lexer::{CppLexer, lex};
 pub use doc_token_kind::DocTokenKind;
 pub use lexer_config::LexerConfig;
 pub use token_data::CppTokenData;
