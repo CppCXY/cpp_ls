@@ -31,7 +31,7 @@
 `%TEMP%\stdprobe\files.txt` 的 128 个文件（`<vector>/<string>/<map>/<algorithm>` 的闭包）——
 **`干净 128 / 报错 0`**，消息总数 **0**（带 seeds）；`%TEMP%\cppls-indexed.txt` 的 455 个文件（分析闭包）——
 **`干净 455 / 报错 0 / 消息 0`（带 seeds）**，不带 seeds 的那一遍是 `干净 454 / 报错 1`（剩下的那个文件见下）。
-Rust 侧 `cargo test --workspace` = **1179 个测试 / 38 个套件全绿**（含 `cpp_ls` 的 28 个单测与 2 个端到端测试）。
+Rust 侧 `cargo test --workspace` = **1184 个测试 / 38 个套件全绿**（含 `cpp_ls` 的 28 个单测与 2 个端到端测试）。
 
 **两份读数**：上面这两份的"干净 455/0"是**带 include 证据**（`--seeds --closure`，也就是**带索引的产品形态**）的读数；
 **不带证据**的那一遍 455 个文件是 `干净 454 / 报错 1 / 消息 12`，唯一失败的是 `commdlg.h:577` 的
@@ -43,17 +43,20 @@ Rust 侧 `cargo test --workspace` = **1179 个测试 / 38 个套件全绿**（�
 **门禁三条 + 一条**（改完必须全绿，`index-design.md` §门禁有同样的表）：
 
 ```bash
-cargo test --workspace                     # 1179 个测试，38 个套件
+cargo test --workspace                     # 1184 个测试，38 个套件
 cargo clippy --workspace --all-targets     # 零警告
 cargo doc --no-deps -p cpp_code_analysis   # 零警告（cpp_parser 有历史链接问题，不管）
 cargo run -q -p cpp_parser --bin cpp_dump -- crates/cpp_parser/tests/real_world.cpp   # 必须 0 error
-cargo run -q -p cpp_code_analysis --example std_query                                 # 必须 9/9（**钉住工具链**，见下）
+cargo run -q -p cpp_code_analysis --example std_query                                 # 必须 9/9（**两个方向都是**）
 ```
 
-> **门禁里的两条命令要钉住工具链**（`$env:CXX = <mingw g++>`）：两份普查清单是 mingw 的 libstdc++ 闭包，
-> 而 `toolchain::discover` 现在在 Windows 上默认选 MSVC（§4.2）。不钉住的话 `std_query` 是 **0/9**——
-> 那是**另一个测量**（拿 MSVC 的 STL 读同一个探针），不是这一条命令坏了；它的**根因已经查明**（§4.2 ①）：
-> MSVC 的 STL 用 `_STD_BEGIN`（`#define _STD_BEGIN namespace std {`）包住一切，而我们的作用域构建看不穿这个宏。
+> **`std_query` 不再需要钉工具链**（第 16 轮起）：钉住 `CXX = <mingw g++>` 是 9/9，不钉（本机默认 MSVC）
+> 也是 9/9。两边测的是**两份不同的标准库**：libstdc++（457 个文件的闭包）与 MSVC 的 STL（109 个），
+> 所以两个读数都要看，缺一个就漏掉一半事实。这条门禁以前必须钉住，是因为 MSVC 那条路从 0/9 起——
+> 根因与十六轮的收尾记在 §4.2 ①。
+>
+> **两份普查清单是 mingw 的 libstdc++ 闭包**（`%TEMP%\stdprobe\files.txt` 128 个、`%TEMP%\cppls-indexed.txt`
+> 455 个），它们是钉住不变的读数：128 → 128 干净 / 0 报错；455 → 454 干净 / 1 报错 / 12 条消息。
 
 `rustfmt` **不是**门禁：这个仓库是手写格式（约 110 列），`cargo fmt` 会重排几千行。
 
@@ -1374,10 +1377,12 @@ parser 的边际收益是"每轮 1–3 个文件"，连续磨十几轮会失去�
 测量工具是 `cargo run -q -p cpp_code_analysis --example discover -- <project root>`；MSVC 的实测证据在
 [`msvc-notes.md`](msvc-notes.md)。架构与决策记在 [`ls-architecture.md`](ls-architecture.md) §5.1。
 
-**开着的事**（按值排）：
+**这条线的账**（按值排；① 已闭环，它下面留着全过程——十六轮的每一个读数都在，因为它们各自删掉了一个
+"看起来像答案"的猜测）：
 
 ```text
-① MSVC 的 STL：闭包只到 109 个文件、std_query 0/9（libstdc++ 是 279 个文件、9/9）
+① MSVC 的 STL：闭包 109 个文件 —— **已闭环（第 16 轮）：不钉 CXX 的 std_query 0/9 → 9/9**
+   （钉住 CXX 的 libstdc++ 侧一路 9/9；两边现在读同一份探针、同样 9/9。剩下的开放项见本节末尾）
    **根因（2026-09-26 重测，比原来那句更窄也更准）**：STL 本身**读得对**——`<vector>` 165 条事实、
    `vector` 这个类 15 个成员、`<map>` 333 条都读出来了，全部落在 `<file scope>`。缺的只有**作用域**：
    MSVC 的 `<vector>` 里一处字面 `namespace std` 都没有，只有第 24 行一行 `_STD_BEGIN`，
@@ -1485,13 +1490,55 @@ parser 的边际收益是"每轮 1–3 个文件"，连续磨十几轮会失去�
    读数：不钉 CXX 仍 2/9；四份普查与门禁与第 7 轮逐字节相同
    ```
 
+   **第 13–14 轮：可见性那条链闭环了——不钉 CXX 2/9 → 7/9**
+
+   ```text
+   ✔ B126 落地：include_visibility 的 #else 反转（`#else` 的含义就是"前面都没被取"）
+   ✔ B127 落地：visible_files 那条规则接上求值器，并且
+     · 答案记忆化在索引上（`ProjectIndex::visibility_answers`，键 (文件,区域)，insert_at 清空，Mutex 保持 Sync）
+     · **单向**：只有 Active 被使用（条件成立 ⇒ 无条件），Inactive/Unknown 留在 Conditional
+       —— "没被取"在本会话里两次都是错的（own guard、#else），单向的规则只会加事实不会丢
+   量到：不钉 CXX **7/9**（std::string 解析到 <xstring> 的 alias，type_of 也对）；
+        钉 CXX 9/9 保持（探针整轮 19.7 s → 33.7 s）；四份普查与门禁全绿
+   还剩 2 条：`m.find`/`m.begin` —— `std::map` 查得到，但 `find` 在它的基类 `_Tree` 里，
+        要的是**基类链**那一步（与可见性无关）
+   ```
+
+   **第 15–16 轮：① 闭环了——不钉 CXX 7/9 → 9/9（MSVC 的 STL 与 libstdc++ 读同一份探针，两边都 9/9）**
+
+   ```text
+   第 15 轮先把最后 2 条拆到只剩一环（三个实测都通过）：
+     `std::map` 的 bases 记着 `_Tree<…>` ✔；`base_type_name` 归一化成 `_Tree` ✔；
+     `std::_Tree` 在索引里、126 个成员、4 条 `find` ✔ —— 可 `[members]` 仍报
+     `UnlistedBase { "_Tree", NotDeclaredHere }`。仪器一跑就清楚了：
+       definition("_Tree") -> xtree, scope Some("std")        （名字查得到）
+       declarations_in("_Tree") -> 0  vs  declarations_in("std::_Tree") -> 126   （成员按限定名归档）
+
+   第 16 轮（B128）：两条基类走查（`members_of` 的层级循环、`member_fact` 的单成员循环）原来都拿
+     `bases_of` 给的拼写**照原样**查。C++ 的规则是从**包围该类的那个作用域**起、由内向外查，
+     所以 `namespace std` 里的 `class map : _Tree<…>` 说的是 `std::_Tree`；文件作用域的同名 `_Tree`
+     不该被查到（更近的作用域有这个名字就停）。
+     `resolved_in_the_enclosing_scopes(index, scopes, path, owner, base)` 把这条规则做在一处，
+     两条走查共用（`resolve_aliases` 早就为别名目标做过同一条规则的同一小步，也走同一个 `is_declared`）。
+
+   量到：不钉 CXX **9/9**（`m.find -> xtree std::_Tree::find`、`m.begin -> xtree std::_Tree::begin`）；
+        `std::map` 的成员表 41 + 1 unlisted → **135 members, 0 unlisted**（find ×4 在 depth 1）
+        钉 CXX 9/9 保持且答案一字不变（libstdc++ 的 `map` 自己声明 `find`，这条走查它本来不需要）
+        形状断言：project.rs `a_base_of_a_class_in_a_namespace_is_looked_up_in_that_namespace`
+        （两条走查都钉 + 一个负例：文件作用域的同名类**不得**被查到）
+        门禁 tests 1184 / clippy 0 / doc 0 / cpp_dump 0；四份普查 128 → 128/0/0、455 → 454/1 + 12 条
+   ```
+
    **还差的（按值排）**：
 
    ```text
    ① B125 的求值器（上面那条）：std::string 的 5 条全卡在这里
    ② <xstring>:1868 `_EXPORT_STD _NODISCARD constexpr string_view operator"" sv(…)` 的 ``expected `;` ``
-   ③ std::vector::size / std::map::find：类与成员表都在，卡在查询那一步的限定名匹配
-   ④ std::vector 的"两次声明"是诚实的（主模板 + 偏特化），要选主模板得让事实记住写出来的名字
+   ③ std::vector 的"两次声明"：**已定量**（B129）——`<vector>` 里 19311 是主模板、94905 是
+     `class vector<bool, _Alloc>;`（偏特化的前置声明），模板实参被 `base_type_name` 剥掉后两者
+     限定名都是 `std::vector`，事实里没有字段能分辨 ⇒ `definition` 报 Ambiguous（报得过头，不是报错）。
+     查询不受影响（成员走 `type_of` → `member_fact`）。要修得给事实加"写出来的模板形参"，
+     那是新字段、要抬 FORMAT_VERSION —— 单独一轮的事
    ```
 
    **另外两件与本轮无关但撞上的**：环境必须完整才有宏体（`_STL_COMPILER_PREPROCESSOR` 那条链）；

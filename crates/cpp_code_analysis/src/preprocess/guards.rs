@@ -107,6 +107,16 @@ pub fn analyse_guards(preprocessing: &FilePreprocessing, root: &CppSyntaxNode) -
 }
 
 /// Recognise a file's guard, given its directives in source order.
+/// Does the file write a **macro guard** — `#ifndef NAME` with its `#define NAME` immediately inside?
+///
+/// The question [`detect_guard`] cannot answer for a file that also writes `#pragma once`: it reports the pragma
+/// (the stronger answer, and the right one for "may the file be skipped next time"), while a caller asking
+/// "which region is this file's own guard" needs the *region*. Kept beside `detect_guard` so the two cannot
+/// disagree about what a guard is.
+pub(crate) fn has_a_macro_guard(directives: &[SpannedDirective], root: &CppSyntaxNode) -> bool {
+    detect_macro_guard(directives, root).is_some()
+}
+
 pub fn detect_guard(directives: &[SpannedDirective], root: &CppSyntaxNode) -> Guard {
     if has_pragma_once(directives) {
         return Guard::PragmaOnce;

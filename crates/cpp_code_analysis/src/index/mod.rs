@@ -377,11 +377,22 @@ fn own_guard_region(
     preprocessing: &crate::FilePreprocessing,
     root: &cpp_parser::CppSyntaxNode,
 ) -> Option<usize> {
-    matches!(
-        crate::guards::detect_guard(&preprocessing.directives, root),
-        crate::guards::Guard::Macro(_)
-    )
-    .then_some(0)
+    match crate::guards::detect_guard(&preprocessing.directives, root) {
+        // The macro form: region 0 **is** the file's guard.
+        crate::guards::Guard::Macro(_) => Some(0),
+        // `#pragma once` alone opens no region, so there is nothing to de-guard. But it is usually written
+        // **above** the `#ifndef` guard — every MSVC header starts `#pragma once` then `#ifndef _STRING_` —
+        // and `detect_guard` reports the pragma first, which lost the macro guard entirely. The cost was
+        // measured and it is the whole library: without `own_guard`, the walk evaluated `#ifndef _STRING_` at
+        // `<string>`'s own `#include` (where `_STRING_` is defined by the line above), answered `Inactive`, and
+        // **dropped every include of the file** — so `_STL_COMPILER_PREPROCESSOR` was never defined, region 1
+        // (`#if _STL_COMPILER_PREPROCESSOR`) never held, and every query in MSVC's STL answered
+        // `ConditionalCompilation` (`docs/grammar-gaps.md` B125).
+        crate::guards::Guard::PragmaOnce => {
+            crate::guards::has_a_macro_guard(&preprocessing.directives, root).then_some(0)
+        }
+        crate::guards::Guard::None => None,
+    }
 }
 
 /// Treat everything inside a file's own include guard as **unconditional**.

@@ -166,6 +166,14 @@ pub struct ProjectIndex {
     /// still does for a caller that builds an index by hand. See [`crate::index::environment`] for what the field
     /// is complete about and what it deliberately is not.
     macros: Marked,
+    /// What the **condition** on a guarded `#include` was last answered, by `(file, region)`.
+    ///
+    /// A memo, not a fact: it is cleared whenever a summary is inserted, because that is the only thing that can
+    /// change an answer. It exists because the answer is expensive — evaluating one condition builds the file's
+    /// whole closure state (`macros_at`) — and the same question is asked once per query and once per walk, over
+    /// hundreds of edges. `std::sync::Mutex` rather than a `RefCell` so the index stays `Sync`: a language server
+    /// holds one of these behind a lock, and a cache that cost that property would be a bad trade.
+    visibility_answers: std::sync::Mutex<HashMap<(String, u32), crate::Visibility>>,
 }
 
     /// Which member a `obj.member` or `ptr->member` at `offset` names.
@@ -337,16 +345,23 @@ pub fn members_of(
     // Then outward, one level of bases at a time — which is the order C++ hides in: a base's member is hidden by
     // a same-named member of anything nearer, so a level that has already contributed a name removes it from
     // every level below.
-    let mut level = bases_of(index, scopes, root, path, class)
+    //
+    // Each base is carried with **the class whose base-clause wrote it**, because that is what decides which scope
+    // an unqualified base name is looked up in: see `resolved_in_the_enclosing_scopes`.
+    let mut level: Vec<(String, String)> = bases_of(index, scopes, root, path, class)
         .value()
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .map(|base| (base, class.to_string()))
+        .collect();
     let mut depth = 1;
 
     while !level.is_empty() {
         let mut found: Vec<ProjectMember> = Vec::new();
-        let mut next: Vec<String> = Vec::new();
+        let mut next: Vec<(String, String)> = Vec::new();
 
-        for base in level {
+        for (written, owner) in level {
+            let base = resolved_in_the_enclosing_scopes(index, scopes, path, &owner, &written);
             if !visited.insert(base.clone()) {
                 continue;
             }
@@ -375,7 +390,9 @@ pub fn members_of(
             }));
 
             match bases_of(index, scopes, root, path, &base) {
-                Known::Yes(further) => next.extend(further),
+                Known::Yes(further) => {
+                    next.extend(further.into_iter().map(|base_of_base| (base_of_base, base.clone())))
+                }
                 Known::Unknown(reason) => list.unlisted.push(UnlistedBase {
                     spelling: base,
                     reason,
@@ -1496,16 +1513,23 @@ fn member_fact(
     // which is what C++ does, so the search stops at the first level that has any answer. Two answers at the same
     // level are ambiguous — a diamond where both sides declare the name — and reporting that is the honest
     // outcome: picking one would be a jump to an entity the language says is not uniquely named.
-    let mut level = bases_of(index, scopes, root, path, class)
+    //
+    // As in `members_of`, each base is carried with the class whose base-clause wrote it, because that decides the
+    // scope an unqualified base name is looked up in — `struct map : _Tree<…>` in `std` names `std::_Tree`.
+    let mut level: Vec<(String, String)> = bases_of(index, scopes, root, path, class)
         .value()
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .map(|base| (base, class.to_string()))
+        .collect();
     let mut visited: Vec<String> = vec![class.to_string()];
 
     while !level.is_empty() {
         let mut found: Vec<(DeclFact, PathBuf)> = Vec::new();
-        let mut next: Vec<String> = Vec::new();
+        let mut next: Vec<(String, String)> = Vec::new();
 
-        for base in level {
+        for (written, owner) in level {
+            let base = resolved_in_the_enclosing_scopes(index, scopes, path, &owner, &written);
             if visited.contains(&base) {
                 continue;
             }
@@ -1519,7 +1543,9 @@ fn member_fact(
             next.extend(
                 bases_of(index, scopes, root, path, &base)
                     .value()
-                    .unwrap_or_default(),
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|base_of_base| (base_of_base, base.clone())),
             );
         }
 
@@ -1849,6 +1875,49 @@ fn lookup_names(bases: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// The spelling a base-clause name resolves to, given the class it was written in.
+///
+/// A base name is looked up **from the scope enclosing the class**, outward — so `_Tree` written in
+/// `namespace std { class map : _Tree<…> }` names `std::_Tree`, and a `_Tree` at file scope could not answer it
+/// even if there were one. Both base walks used to look for the spelling exactly as written, and MSVC's `<map>`
+/// inherits from `_Tree`, declared in `<xtree>` inside `_STD_BEGIN` (= `namespace std {`): the member list reported
+/// `UnlistedBase { "_Tree", NotDeclaredHere }` while `std::_Tree` sat in the index with 126 members, four of them
+/// `find` — which is what the last two queries of `examples/std_query.rs` were failing on (measured, B128).
+///
+/// The enclosing scopes are tried innermost first and **the spelling as written is the last candidate**, which is
+/// what the rule says (the global name space is the outermost scope) and also what keeps a base named at file
+/// scope — `struct Derived : public Base` — answering as it always did.
+///
+/// A base that already carries a `::` is returned untouched: a qualified name is a claim about where the name
+/// lives, and `std::_Tree` written in a class in `std` means that name and no other. A **leading** `::` is such a
+/// claim too, and `base_type_name` has already taken it off; the name it leaves is the global one, which is what
+/// the last candidate below is.
+///
+/// The same one step of the same rule is what [`resolve_aliases`] does for an alias's target and documents there;
+/// both ask it through [`is_declared`], so "the buffer first, the index second" is not decided twice.
+fn resolved_in_the_enclosing_scopes(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    path: &Path,
+    owner: &str,
+    base: &str,
+) -> String {
+    if base.contains("::") {
+        return base.to_string();
+    }
+
+    let mut enclosing = owner;
+    while let Some((outer, _)) = enclosing.rsplit_once("::") {
+        let candidate = format!("{outer}::{base}");
+        if is_declared(index, scopes, path, &candidate) {
+            return candidate;
+        }
+        enclosing = outer;
+    }
+
+    base.to_string()
+}
+
 /// The class whose scope encloses `offset`, for `this`.
 ///
 /// The nearest class-like scope on the chain, which is the same answer in a member function, in a nested class's
@@ -1918,6 +1987,7 @@ impl ProjectIndex {
             // defined". An index built by hand has been told nothing, and the default has to be the answer that
             // claims nothing: `Marked::default()` on its own would decide every `#ifdef` in every file as false.
             macros: Marked::default().incomplete(),
+            visibility_answers: std::sync::Mutex::new(HashMap::new()),
             ..ProjectIndex::default()
         }
     }
@@ -1979,6 +2049,11 @@ impl ProjectIndex {
     /// whose keys match have the same declarations, at the same offsets, with the same ranges, *and* the same
     /// resolved includes.
     pub fn insert_at(&mut self, path: &Path, summary: FileSummary) {
+        // A new summary can change any condition's answer, so the memo goes: it is cheap to lose and a wrong
+        // answer is not.
+        if let Ok(mut answers) = self.visibility_answers.lock() {
+            answers.clear();
+        }
         let mut summary = summary;
         summary.path = path.to_path_buf();
 
@@ -2160,28 +2235,62 @@ impl ProjectIndex {
                 };
                 let next = normalize(resolved);
 
-                // **A guarded `#include` is `Conditional` here without its condition being asked** (B125), and that
-                // is a measured defect with a measured *attempt* recorded against it.
+                // **A guarded `#include` stays `Conditional` here, and the reason is now cost** (B125/B127).
                 //
-                // Every standard header wraps its includes in a feature test — `<string>` writes
-                // `#if _STL_COMPILER_PREPROCESSOR / #include <xstring>` — so every fact in the library comes out
-                // `Conditional` and every query answers `ConditionalCompilation`, even when the condition holds in
-                // the very environment the query is holding (`_STL_COMPILER_PREPROCESSOR` is `1` there).
+                // The conditions *are* answerable — `crate::index::environment::visibility_at` answers
+                // `#if _STL_COMPILER_PREPROCESSOR` correctly once its two upstream bugs are fixed (`own_guard` not
+                // recognising `#pragma once` + `#ifndef`, and a fact in an `#else` judged by the `#if`'s verdict) —
+                // and wiring it in here is what finally resolved MSVC's `std::string`: the probe went 2/9 → 7/9.
                 //
-                // The obvious repair — ask [`crate::index::environment::visibility_at`], keep the edge on `Active`,
-                // drop it on `Inactive`, stay `Conditional` when it cannot decide — was written and measured, and it
-                // made the answer **worse**: `std::basic_string` lost all of its candidates. The measurement that
-                // explains it is in `docs/grammar-gaps.md` B125: the evaluator answers `Inactive` for
-                // `#if _STL_COMPILER_PREPROCESSOR` — a condition that **holds** — because the state it evaluates
-                // against does not carry what the included headers define, while the seed claims completeness. So the
-                // repair is not "call the evaluator here"; it is "feed the closure's macros into the evaluator"
-                // (`docs/index-design.md`, the conditional-evaluation section). Until that lands, this line stays:
-                // `Conditional` is a **missing** answer, and dropping the edge would be a wrong one.
+                // What it also did is make the pinned probe run for **minutes**: `visible_files` walks the whole
+                // include graph, and asking the evaluator per guarded include builds a closure state per include
+                // (`macros_at`). The libstdc++ closure has hundreds of them. So the rule is right and the
+                // *implementation* is not: it needs the incremental state `ProjectIndex::macro_environment` builds
+                // (one walk per file, conditions answered as they are reached) before it can be used here — and
+                // until then this line stays, because a query that takes minutes is not an answer.
                 let step = match include.guard {
                     FactGuard::Unconditional => so_far,
-                    FactGuard::Region(_) => IncludeVisibility::Conditional,
-                };
+                    // **The condition is asked, and the answer is remembered** (B125/B127). Asking costs the file's
+                    // whole closure state; the same question is asked by every query and every walk over hundreds of
+                    // edges, and the answer cannot change until a summary is inserted — so it is memoised on the
+                    // index (`visibility_answers`), which `insert_at` clears.
+                    //
+                    // Only `Active` is *used*: a condition that holds makes the include unconditional, and anything
+                    // else leaves the answer exactly where it was (`Conditional`). Dropping the edge on `Inactive` is
+                    // what the three-valued vocabulary invites, and it was measured twice and reverted twice — the
+                    // evaluator's "not taken" was wrong on both corpora in this session (an unrecognised own guard,
+                    // a fact in an `#else`, both since fixed). One-directional, this rule can only add facts.
+                    FactGuard::Region(region) => {
+                        let key = (current.clone(), region);
+                        let answer = match self
+                            .visibility_answers
+                            .lock()
+                            .ok()
+                            .and_then(|answers| answers.get(&key).copied())
+                        {
+                            Some(answer) => answer,
+                            None => {
+                                let answer = crate::index::environment::visibility_at(
+                                    self,
+                                    Path::new(&current),
+                                    include.guard,
+                                    include.range.start_offset,
+                                );
+                                if let Ok(mut answers) = self.visibility_answers.lock() {
+                                    answers.insert(key, answer);
+                                }
+                                answer
+                            }
+                        };
 
+                        match answer {
+                            crate::Visibility::Active => so_far,
+                            crate::Visibility::Inactive | crate::Visibility::Unknown => {
+                                IncludeVisibility::Conditional
+                            }
+                        }
+                    }
+                };
                 match best.get(&next) {
                     // Already known, and no worse: nothing new to explore through it.
                     Some(known) if *known <= step => continue,
@@ -2460,7 +2569,6 @@ impl ProjectIndex {
             if take_fact {
                 let fact = facts.next().expect("peeked");
                 let reach = self.fact_reach(summary, &mut verdicts, state, fact.guard, at);
-
                 if reach == FactReach::Inactive {
                     continue;
                 }
@@ -2522,6 +2630,7 @@ impl ProjectIndex {
         }
     }
 
+
     /// Was the code the guard names compiled, with the state the walk has built and the verdicts it has recorded?
     fn include_visibility(
         &self,
@@ -2573,7 +2682,40 @@ impl ProjectIndex {
 
             match holds {
                 Some(true) => {}
-                Some(false) => return Visibility::Inactive,
+                Some(false) => {
+                    // **An `#else` is taken precisely when the condition is *not*** (B126). The verdict above
+                    // answers "did this region's `#if` hold", which is the right question for the branch the
+                    // condition guards and the wrong one for the `#else`, whose whole meaning is "nothing before me
+                    // was taken". One of those decides MSVC's entire STL: `yvals_core.h` writes
+                    //
+                    // ```cpp
+                    // #if defined(RC_INVOKED) || defined(Q_MOC_RUN) || defined(__midl)
+                    // #define _STL_COMPILER_PREPROCESSOR 0
+                    // #else
+                    // #define _STL_COMPILER_PREPROCESSOR 1     // ← this is the definition that is in force
+                    // #endif
+                    // ```
+                    //
+                    // so the definition that *is* compiled was judged "not taken" (measured: `reach = Inactive`
+                    // for both facts), `#if _STL_COMPILER_PREPROCESSOR` then had no value, and every query in the
+                    // library answered `ConditionalCompilation`.
+                    // Inverted for the #else: see the note above this match.
+                    let in_the_else = summary
+                        .guards
+                        .conditionals
+                        .get(at.region as usize)
+                        .is_some_and(|conditional| {
+                            conditional.branches.iter().any(|branch| {
+                                branch.kind == crate::DirectiveKind::Else
+                                    && offset >= branch.body.start_offset
+                                    && offset <= branch.body.end_offset()
+                            })
+                        });
+                    if in_the_else {
+                        continue;
+                    }
+                    return Visibility::Inactive;
+                }
                 None => unknown = true,
             }
         }
@@ -4738,6 +4880,56 @@ mod tests {
         assert!(matches!(list.unlisted[0].reason, UnknownReason::NotDeclaredHere(_)),
             "the reason has to say that the base is not here, not that the list ended: {:?}",
             list.unlisted[0].reason
+        );
+    }
+
+    #[test]
+    fn a_base_of_a_class_in_a_namespace_is_looked_up_in_that_namespace() {
+        // The rule that took `examples/std_query.rs` from 7/9 to 9/9, in the shape MSVC's STL has it: `std::map`
+        // inherits from `_Tree`, `_Tree` is declared in `<xtree>` inside `_STD_BEGIN` (= `namespace std {`), and
+        // the base clause spells it **unqualified**. A base name is looked up from the scope *enclosing* the class
+        // and outward, so `_Tree` written inside `std` names `std::_Tree` — and the file-scope `_Tree` below,
+        // which declares something else entirely, must not be consulted: the enclosing namespace is a nearer scope
+        // and unqualified lookup stops at the first scope that has the name.
+        //
+        // Both walks are asserted here because both had the same hole and a fix to one is invisible from the
+        // other: the list (`members_of`) and the single member (`member_across_files`).
+        let lib = "namespace std {\nstruct _Tree {\n  void find();\n};\nstruct map : _Tree {\n  int count;\n};\n}\n";
+        let source = "#include \"lib.h\"\nstruct _Tree {\n  void wrong();\n};\nvoid f() {\n  std::map m;\n  m.find();\n  m.wrong();\n}\n";
+        let files: &[(&str, &str)] = &[("/p/lib.h", lib)];
+
+        let Known::Yes(list) = members_of_class(files, "/p/a.cpp", source, "std::map") else {
+            panic!("`std::map` is in the indexed header");
+        };
+        assert_eq!(
+            names(&list),
+            ["count", "find"],
+            "`find` comes from the base, and `wrong` is not a member of anything this class inherits"
+        );
+        assert!(
+            list.unlisted.is_empty(),
+            "the base was found, so nothing here is a gap: {:?}",
+            list.unlisted
+        );
+        assert_eq!(
+            list.members[1].declared_in, "std::_Tree",
+            "the answer names the scope the base was found in, not the spelling the class wrote"
+        );
+        assert_eq!(list.members[1].depth, 1);
+
+        let found = member_of(files, "/p/a.cpp", source, "find();");
+        let Known::Yes(found) = found else {
+            panic!("`m.find` is `std::_Tree::find`: {found:?}");
+        };
+        assert_eq!(found.file, Path::new("/p/lib.h"));
+        assert_eq!(found.fact.qualified_name(), "std::_Tree::find");
+
+        assert!(
+            matches!(
+                member_of(files, "/p/a.cpp", source, "wrong();"),
+                Known::Unknown(UnknownReason::NotDeclaredHere(_))
+            ),
+            "a base name that a nearer scope has does not fall through to the file-scope `_Tree`"
         );
     }
 

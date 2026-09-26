@@ -3983,42 +3983,6 @@ std::basic_string 的成员表 0 → 155
 **顺带说明为什么它值一整条**：一个 524 行的读法错误，代价不是 524 行的诊断，而是**类体到文件尾全错作用域**；
 这正是维护约定第 8 条（一个缺陷遮住另一个缺陷）的又一例：`std::string` 找不到的成因在两千行之外的一个 `try` 上。
 
-## B122：**体是另一个宏的名字**（`_TRY_IO_BEGIN` → `_TRY_BEGIN` → `try {`）—— 两层都已修，下一处已定位
-
-**第 5 轮落地**：
-
-```text
-(a) 体是另一个宏的名字时**跟着再问一次**：`MacroEnvironment::body_text_resolved`，有界（8 跳）且防环。
-    链接的判据是**词法**而不是拼写：`#define _TRY_IO_BEGIN _TRY_BEGIN // begin try block` 带尾注释，
-    第一版按文本 trim 判"是不是一个标识符"就漏了它——体是 C++ token，要问词法器。
-(b) **语句位置的块开启者**：体以 `{` 结尾、首 token 是块头关键字（`try`/`catch`/`do`/`switch`/`if`/`else`/
-    `for`/`while`/`extern`/`namespace`/`class`/`struct`/`union`/`enum`）时，调用整体读成一条语句。
-    `body_shapes_the_braces`（kinds 通道）与 `shape_of_a_body`（文本通道）**判据对齐**：
-    两边都要求"以 `{` 结尾"，所以 `namespace std`（没有花括号）两边都不认——
-    这是这一轮踩到的坑：只改一边会让同一份文件被 parser 和作用域遍历读出两种结构。
-(c) 作用域遍历给这类开启者压一个**没有作用域的帧**（`OpenedByBody::OpensABrace`），
-    这样关它的那个 `}` 体宏弹掉的是这一帧，而不是还开着的命名空间
-```
-
-**量到的**：
-
-```text
-std_query 不钉 CXX      1/9 → 2/9；std::basic_string 的成员表 155 → 173（构造函数也带上了类名）
-<xstring> 的首错         524 行（_TRY_IO_BEGIN）→ 592 行 —— 这一类修好了
-钉住的读数              128/0/0、455=454/1+12、带 seeds 全干净、std_query 钉 CXX 9/9，四份普查逐字节不变
-形状断言                gaps.rs 里那条现在同时钉"以 { 结尾才算开启者"；symbols.rs 新增
-                        a_body_that_is_another_macros_name_is_followed（含尾注释、多 token、环、未知名四个边界）
-```
-
-**下一处（已定位，还没修）**：`<xstring>:592`
-
-```cpp
-constexpr bool _Traits_equal(_In_reads_(_Left_size) const _Traits_ptr_ _Left, ...)
-```
-
-``expected `)`, but get const`` —— SAL 注解宏（`_In_reads_(n)` = `_SAL2_Source_(…)` 那一族）站在参数声明里，
-后面还跟着 `const`。这与 B122 无关，是参数列表里"宏 + 限定符"的形状。
-
 ## B124：**被描述过的宏站在说明符位置**（SAL 注解），以及"证据门"错在哪 —— 已修复
 
 `<xstring>:592`：
@@ -4141,12 +4105,227 @@ rule to the facts nested inside it"），而这个走查一直没照它办：`#i
     而 `uncertain` 就会是 true（实测是 false），所以 (a) 更可能
 ```
 
-**下一轮的仪器（一句话）**：把 yvals_core.h 的 summary 里所有 `_STL_*` fact 名打出来，看这条在不在；
-再顺着看它在 `#ifndef _STL_COMPILER_PREPROCESSOR` 里的 `guard` 是否被 `own_guard` 之外的东西影响。
-（第 10 轮是这一轮目标的最后一轮，验收 9/9 未达成：**不钉 CXX 仍是 2/9**，钉住 CXX 9/9、四份普查与门禁全绿。）
+**根因找到了（第 11 轮，B125 收口）**：`<string>` 的 `own_guard` 是 **`None`**——因为
+`detect_guard` 先看 `#pragma once`（它在 `#ifndef _STRING_` **上面**，每个 MSVC 头都这么写），
+返回 `Guard::PragmaOnce`，而 `own_guard_region` 当时只接受 `Guard::Macro(_)`。
+
+**已经修掉**：`own_guard_region` 现在两种写法都认（`Guard::PragmaOnce` 时再问一次
+`has_a_macro_guard`，它是 `detect_guard` 旁边的新帮手，两者因此不会对"什么算 guard"各说各话）。
+这条修的是**答错**：在那之前，`macros_at`/`macro_environment` 那类走查会对文件自己的 guard 区域求值，
+发现 `_STRING_` 已被上一行定义，于是**把这个文件的每条 include 都跳过**。
+
+**第二次试接 `visible_files`（也撤回了，这次的数更有信息量）**：即使 `own_guard` 已经修好，
+求值器**仍然**对承载 `<xstring>` 的那条边说 `Inactive`——`std::basic_string` 与 `std::string`
+的候选**再次全部消失**。而 state 那一边的数是实打实的：`macros_at(<string>, 239)` 把
+`_STL_COMPILER_PREPROCESSOR` 报成 `defined = Some(false)`（`uncertain = false`）——**自信的错答案**。
+所以修法只剩一条路：把闭包按翻译顺序喂进那个 state（`docs/index-design.md` §条件求值末尾那一格）。
+在那之前 `visible_files` 保持"一律 Conditional"：**缺的答案**胜过**错的答案**。
+
+## B126：**`#else` 分支里的代码被按 `#if` 的结论判成"没编译"** —— 已定位，修法两段都写好了（本轮未落地）
+
+第 12 轮的仪器（`macro_candidates` 里打印"进入哪个文件"与每条 fact 的 `reach`）把最后一个环扣上了。
+`own_guard` 修好之后：
+
+```text
+DEBUG enter .../include/yvals_core.h upto=None                       ← 走查终于进去了（修 own_guard 之前从不进）
+DEBUG fact _STL_COMPILER_PREPROCESSOR guard=Region(2) at=527 reach=Inactive
+DEBUG fact _STL_COMPILER_PREPROCESSOR guard=Region(2) at=572 reach=Inactive
+```
+
+`yvals_core.h` 那一段是：
+
+```cpp
+#if defined(RC_INVOKED) || defined(Q_MOC_RUN) || defined(__midl)   // Region(2) 的 #if
+#define _STL_COMPILER_PREPROCESSOR 0                              // at=527 ← 这一支没被取，Inactive 是对的
+#else
+#define _STL_COMPILER_PREPROCESSOR 1                              // at=572 ← **生效的就是这一支**，却也答 Inactive
+#endif
+```
+
+`include_visibility` 的链式判定：
+
+```rust
+for at in summary.guards.conditions_of(region) {
+    match holds {
+        Some(true) => {}
+        Some(false) => return Visibility::Inactive,   // ← 对 #if 那一支对，对 #else 那一支是反的
+        None => unknown = true,
+    }
+}
+```
+
+**`#else` 的含义正是"前面都没被取"**，所以 `Some(false)` 对写在 `#else` 里的东西应当是**生效**。
+"被编译的那条定义"因此被判成没编译 ⇒ `#if _STL_COMPILER_PREPROCESSOR` 无值 ⇒ 整库 Conditional。
+
+**修法（两段，已写好，未落进树）**：
+
+```rust
+// 1) 链式判定里，Some(false) 之前先问"这个偏移是不是落在该区域的 #else 里"
+Some(false) => {
+    if is_in_an_else_branch(summary, at.region, offset) { continue; }
+    return Visibility::Inactive;
+}
+
+// 2) 判据本身（branches 已经带 kind 与 body 范围，不需要新 API）
+fn is_in_an_else_branch(summary: &FileSummary, region: u32, offset: usize) -> bool {
+    summary.guards.conditionals.get(region as usize).is_some_and(|conditional| {
+        conditional.branches.iter().any(|branch| {
+            branch.kind == crate::DirectiveKind::Else
+                && offset >= branch.body.start_offset
+                && offset <= branch.body.end_offset()
+        })
+    })
+}
+```
+
+修好之后才轮到 `visible_files` 那一行（B125 的第二次尝试）：那时求值器才真能答 `Active`。
+
+**本轮状态**：这两段没落地（第一次替换的锚点没匹配上；随后清理临时仪器时把 `project.rs` 切坏过一次，
+已修复回绿色）。`own_guard` 那条修复（第 11 轮）在树里。读数：不钉 CXX 2/9、钉住 9/9、四份普查不变；
+tests 1183 / clippy / doc / cpp_dump 全绿。
+
+## B127：B125 的规则已落地（记忆化 + 单向）——不钉 CXX 从 2/9 到 **7/9**
+
+第 13 轮把两件事做完了：`#else` 反转（B126）落地，然后把 `visible_files` 那行接上求值器。结果分两半：
+
+```text
+✔ 不钉 CXX：std_query **2/9 → 7/9**（s.size / s.substr / s.empty / v.push_back / v.size / (*p).size /
+  arr[0].empty 全部命中；`std::string` 现在解析到 <xstring> 的 `using string = basic_string<char,…>`，
+  连 type_of 都对）—— B125 那条链（own_guard → #else 反转 → 求值器 → visible_files）到这一刻才闭环
+✘ 钉 CXX：**9/9 → 4/9**，而且**跑了几分钟没结束**（被 kill）
+```
+
+原因是实现而不是语义：`visible_files` 走整张 include 图，而**每条带条件的 include** 都去问一次求值器，
+`visibility_at` 每次都现建一个闭包 state（`macros_at`）。libstdc++ 的闭包里有几百条这样的边，
+一次查询于是把整个闭包走几百遍——正是 `macros_at` 注释里那句"要问成千上万次就该用增量状态"踩中的坑。
+
+**解决代价的办法（第 14 轮，已落地）**：答案**记忆化在索引上**——`ProjectIndex::visibility_answers`，
+键是 `(文件, 区域)`，`insert_at` 时清空（摘要一变，任何条件的答案都可能变）。用 `std::sync::Mutex` 而不是
+`RefCell`，因为索引要保持 `Sync`（语言服务器把它放在锁后面）。同一个问题在一轮里被每条查询、每次走查各问
+一次，而一轮里真正不同的问题只有几百个——记忆化之后那些走查只付一次。
+
+**单向**：只有 `Active` 被*使用*（条件成立 ⇒ 这条 include 变成无条件）；`Inactive`/`Unknown` 都留在
+`Conditional`。三值词汇邀请你在 `Inactive` 时丢掉这条边，而这个"没被取"在本会话里**两次都是错的**
+（没认出的 own guard、`#else` 里的定义）——单向的规则只会**增加**事实，不会丢。
+
+**落地的读数**：
+
+```text
+不钉 CXX   std_query 2/9 → **7/9**（s.size / s.substr / s.empty / v.push_back / v.size / (*p).size /
+           arr[0].empty；`std::string` 解析到 <xstring> 的 `using string = basic_string<char,…>`，type_of 也对）
+钉 CXX     9/9 保持，探针整轮 19.7 s → **33.7 s**（记忆化之后的代价，可接受但要记着）
+四份普查   128 → 128/0/0；455 → 454/1、12 条消息（不变）
+门禁       tests 1183 / clippy 0 / doc 0 / cpp_dump 0 error
+```
+
+**还剩 2 条**（`m.find`、`m.begin`）：`std::map` 查得到（`<map>`，kind Type，scope `std`），
+但它的 41 条成员里**没有 `find`**——MSVC 的 `map : public _Tree<…>` 把 `find` 放在基类里，
+所以这 2 条要的是**基类链**那一步（`DeclFact::bases` 与 `member_across_files` 的基类走查），
+与可见性这条线无关。
+## B128：基类名要**在包围它的作用域里查**——`_Tree` 是 `std::_Tree`。不钉 CXX 7/9 → **9/9**
+
+第 15 轮把最后 2 条（`m.find`/`m.begin`）拆到只剩一环，第 16 轮修好。链条是**四个实测**，前三个都对，
+错在第四步的**查法**：
+
+```text
+[have] std::map -> map (Type, scope Some("std")) bases ["_Tree<_Tmap_traits<_Kty, _Ty, _Pr, _Alloc, false>>"]
+       ✔ 基类记下来了（`DeclFact::bases`）
+[members] std::map -> 41 members, 1 unlisted
+[members]   unlisted base "_Tree" (`_Tree` is not declared in this file, …)
+       ✔ 基类拼写被 `base_type_name` 归一化成 `_Tree`（模板实参、`::`、elaborated 都剥掉了）
+[base] std::_Tree -> 126 members, `find`: 4
+       ✔ 基类**在索引里**，而且 `find` 有四条事实（<xtree> 里）
+definition("_Tree")  -> xtree, scope Some("std")      <-- 名字查得到
+declarations_in("_Tree") -> 0 | declarations_in("std::_Tree") -> 126   <-- 成员却按 `std::_Tree` 归档
+```
+
+**成因**：两条基类走查（`members_of` 的层级循环、`member_fact` 的单成员循环）都拿 `bases_of` 给的拼写
+**照原样**去查——`_Tree`。而 MSVC 的 `<map>` 写的是 `class map : public _Tree<…>`，`_Tree` 在 `<xtree>` 里、
+在 `_STD_BEGIN`（= `namespace std {`）里声明，所以事实的 scope 是 `std`，成员按 `std::_Tree` 归档：
+`declarations_in("_Tree")` 是 0，`definition("_Tree")` 虽然命中（`matches` 也认裸名），但
+`direct_members` 末段的判据是"事实自己的限定名等于问的拼写"，`std::_Tree ≠ _Tree`，于是报
+`Unknown(NotDeclaredHere("_Tree"))`——**不是找不到基类，是问错了名字**。
+
+**修复**（第 16 轮）：C++ 里基类名的查找从**包围该类的那个作用域**开始、由内向外；`std::map` 的基类
+`_Tree` 就是 `std::_Tree`，而文件作用域的 `_Tree` **不该**被查到（由内向外在第一个有这个名的作用域就停）。
+`resolved_in_the_enclosing_scopes(index, scopes, path, owner, base)`：owner 的每个包围作用域拼出
+`<scope>::<base>` 依次问 `is_declared`，**最后才是原拼写**（全局名字空间就是最外层作用域）；带 `::` 的
+基类原样返回（限定名是关于"名字住在哪"的断言，不该被改写）。两条走查现在都走这一个函数，所以"先缓冲区、
+再索引"这件事只决定一次——`resolve_aliases` 早就为别名目标做过**同一条规则的同一小步**，并在那里写着它。
+
+**形状断言**：`crates/cpp_code_analysis/src/index/project.rs`
+`a_base_of_a_class_in_a_namespace_is_looked_up_in_that_namespace`——两条走查都钉（列表 + 单成员），
+带一个负例：查询文件里另有一个文件作用域的 `_Tree { void wrong(); }`，`m.wrong` 必须**仍然查不到**
+（更近的作用域有这个名字，查找就停在那里，不会落到外面那个同名类）。
+
+**落地的读数**：
+
+```text
+不钉 CXX   std_query 7/9 → **9/9**（m.find -> xtree std::_Tree::find，m.begin -> xtree std::_Tree::begin）
+           `std::map` 的成员表 41 + 1 unlisted → **135 members, 0 unlisted**（find ×4 在 depth 1，声明于 std::_Tree）
+钉 CXX     9/9 保持，答案一字不变（m.find -> stl_map.h std::map::find：libstdc++ 的 `map` 自己就声明 `find`，
+           这条走查它本来就不需要——所以钉住的读数测不到这条规则，可它必须不变，实测不变）
+四份普查   128 → 128/0/0；455 → 454/1、12 条消息（不变）
+门禁       tests 1184 / clippy 0 / doc 0 / cpp_dump 0 error
+```
+
+## B129：**偏特化的前置声明**与主模板撞同一个限定名，`definition` 报 `Ambiguous`
+
+量出声的一张新缺口，与 B128 同一条查询链上、但不是它的一部分：
+
+```text
+[have] std::vector -> unknown: `std::vector` is declared more than once in what this file can see
+         candidate: vector name="vector" qualified="std::vector" (Type, scope std, offset 19311, Unconditional)
+         candidate: vector name="vector" qualified="std::vector" (Type, scope std, offset 94905, Unconditional)
+```
+
+两处都在同一个文件 `<vector>` 里：19311 是主模板定义 `class vector { … }`，94905 是
+`template <class _Alloc> class vector<bool, _Alloc>;`——**偏特化的前置声明**。`base_type_name`
+把模板实参剥掉（这是它对基类和对 `DeclFact.type_of` 一律要做的），于是两者的限定名都是 `std::vector`，
+而事实里没有任何字段说"这条声明带模板实参 / 这条只是声明"，索引**没有依据**分辨它们，只能报歧义。
+
+**性质**：`Ambiguous` 的语义是"两个**不同实体**共用一个拼写，语言拒绝替你选"，而前置声明与定义是**同一个
+实体**——所以这里是"报得过头"，不是"报错了"。**当前无害**：探针的 `v.push_back`/`v.size` 走的是对象的
+`type_of` → `member_fact`，两条事实的成员一起被取，9/9 实测不受影响。要真正修好，得在事实里记下"这条
+声明的模板形参列表是什么"（或至少"这是个偏特化"），那是**新字段**、要抬 `FORMAT_VERSION`，不该顺手塞进
+一轮里。
+
+libstdc++ 那侧同形（钉 CXX 的读数，两条都不是本轮引入的）：
+
+```text
+[have] std::map        -> unknown: `std::map` is declared more than once in what this file can see
+[have] std::map::find  -> unknown: `std::map::find` is declared more than once …
+```
+
+`m.find` 照样答 `stl_map.h std::map::find`（`member_fact` 的逐层走查不受影响），所以**同一个"报得过头"
+只出现在名字查询上**——这也说明它和 B128 是两件事：B128 是"问错了名字"，这条是"名字对了但有两条声明"。
+
+## B130：别名的成员表**少了目标的基类**（B128 的同形，但**没落地**）
+
+**性质**：从代码读出来的结构缺口，**未实测**（这一轮的门禁读数都是在它未修的状态下测的，所以留作队列条目）。
+
+`members_of("std::string")` 的两半走的是两个拼写：
+
+```text
+自己的成员  direct_members 里 resolve_aliases("std::string") -> "std::basic_string"  ✔ 对
+基类        bases_of(..., "std::string")  —— 用的是**别名**那个拼写
+```
+
+而 `DeclFact.bases` 对别名是空的（`declarations.rs`：`declared_bases_of` "Empty for anything that is not a
+class"）：`using string = basic_string<char>` 没有基类子句。于是别名那一层的走查**立刻停下**——
+MSVC 的 `basic_string : public _String_val<_Val_types>` 这一级的成员不会出现在 `std::string` 的成员表里
+（`std::basic_string` 自己的表不受影响，探针的 9 条也都不需要它，所以看不到症状）。libstdc++ 的
+`basic_string` 没有基类，钉住的那一侧本来就没有这一步。
+
+**最小修法**（一行，但会改行为，所以留给单独一轮 + 一条形状断言）：走查的**入口**也用解析后的拼写算基类，
+而 `declared_in`（level 0）仍旧报问的那个拼写：
+
+```rust
+let named = resolve_aliases(index, scopes, root, path, class);   // 只为走查取基类
+let mut level = bases_of(index, scopes, root, path, &named) ...  // owner 也用 named
+```
 
 ## 维护约定
-
 1. **修好一条**：把本文档的条目改成"已修复"（保留成因与修复过程，下一个人会需要），并写进 `crates/cpp_parser/tests/gaps.rs` 的已支持清单。`gaps.rs` 的机制是"构造一旦开始工作，钉住它的测试就会失败"，那是防漏报的护栏。
 2. **发现新缺漏**：先加进本文档（带四要素：例子、现象、成因、性质），需要护栏时再加进 `gaps.rs`。本文档是队列，`gaps.rs` 是回归。
 3. **标了"取舍"的不要动**。如果非动不可，先在这里写清楚为什么值得推翻原先的决定。**反之亦然**：标了取舍的条目如果被证明"其实不需要查找"，就该像 T1 那样改掉，别让一个错误的取舍判断挡住一条能修的规则。
@@ -4369,7 +4548,6 @@ rule to the facts nested inside it"），而这个走查一直没照它办：`#i
     一个读法被丢掉时，它为这个读法报的问题不是关于文件的事实，而是关于一个猜测的事实：留着它，编辑器就会给一段**用户没写过的代码**划线。修法是把 `errors.len()` 也记进 `Checkpoint`、在 `rollback` 里截断。**量到的**：插桩跑遍两个语料（583 个文件）加 53 段片段，**没有任何输入走到过这条路上（0 次）**——也就是说它是一个**契约修复**，不是症状修复。所以它的钉子不能是文件形状的：`cpp_parser` 里直接驱动 parser 的三条单测（`try_parse` 丢诊断 / 保留读法的诊断照留 / `Checkpoint` 的四样状态都回得去），把那条契约钉住；同时 `CppParser::with_text` 被抽出来，二十个字段的构造从两处重复变成一处——那本身也是这一条的一部分：**不在事件流里的状态越多，两处构造漂移的代价越大**。
 
     **顺带一条做法**：这一轮的缺口（B42/B43）是拿**一堆合法的 C++ 片段**过 parser 量出来的，任何报错都值得看一眼。用它的时候有一条纪律：**片段要先过一遍编译器**——三条候选里有一条是我们对了、片段写错了（`sizeof (T) (x);`，g++ 也拒绝），而"我们的 parser 报错"和"代码本身是错的"长得一模一样。
-
 
 
 

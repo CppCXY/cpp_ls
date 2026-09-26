@@ -1049,6 +1049,15 @@ loc          没有限定符：从游标所在的作用域往外，每一层能�
 
 **还剩下的那一半**：`visible_declarations` 仍然要遍历**所有**摘要的所有事实（308 个文件约一万条），在这一轮的量级上是几十微秒。一万个文件时它才是瓶颈，那时要的倒排表（名字 → 声明位置、作用域 → 声明位置）仍然是"下一步"里那一项，这一轮只是把"每个文件一次图搜索"这个更大的常数先拿掉了。
 
+**第三次量到它（B128 那轮，2026-09-26）**：`visible_files` **本身还没有记忆化**——每次 `definition`/`files_declaring`/`is_declared` 都从查询文件开始重走一遍整张图，而 B128 给基类走查的每一层都加了一次 `is_declared`。release 下的实测（`examples/std_query.rs`）：
+
+```text
+不钉 CXX（MSVC，109 个文件）   整轮 9.6 s，其中索引 7.4 s  ⇒ 查询段 ~2.2 s
+钉 CXX（libstdc++，457 个文件）整轮 41.5 s，其中索引 18.9 s ⇒ 查询段 ~22.6 s
+```
+
+索引段是主体，但查询段在 457 个文件上是每问一次就一次全图走查，量级已经不能忽略（B127 记忆化的是**条件的答案**，不是**走查的结果**）。修法与 `visibility_answers` 同形：把 `visible_files(from)` 的结果按 `from` 记忆化在索引上，`insert_at` 时清空——一次插入会让所有答案失效，和条件答案的理由一模一样。**没有落地**：它只改代价不改答案，而这一轮的门禁读数是按未落地的状态测的，不该在同一轮里既改变代价又宣称读数不变。
+
 ### 三个被测试抓出来的键错误
 
 三个都是**看起来在工作的错答案**，都靠"重启后重新打开应该命中"这一类端到端断言暴露：
@@ -1177,9 +1186,10 @@ loc          没有限定符：从游标所在的作用域往外，每一层能�
 ### 门禁：三件事必须全绿
 
 ```bash
-cargo test --workspace                              # 1059 个测试，34 个套件
+cargo test --workspace                              # 1184 个测试，38 个套件
 cargo clippy --workspace --all-targets              # 零警告
 cargo doc --no-deps -p cpp_code_analysis            # 零警告（cpp_parser 还有 32 条历史链接问题，不管）
+cargo run -q -p cpp_code_analysis --example std_query   # 9/9，钉不钉工具链都是（两份 STL 各测一遍）
 ```
 
 外加一条只与 parser 有关的：`crates/cpp_parser/tests/real_world.cpp` 必须 **0 error**（它被 `tests/ast.rs` 与 `tests/doc.rs` 读进去断言）。改了 parser 的读法，先跑 `cargo run -p cpp_parser --bin cpp_dump -- <文件>` 把树打出来看，别猜形状——**文件有错时加 `--tree`**，否则它只打诊断；排查缺规则要问的正是"这个构造被读成了什么节点"。

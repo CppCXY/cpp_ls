@@ -104,7 +104,9 @@ fn main() {
         }
     };
 
-    let started = std::time::Instant::now();    // **The compilation's own macros, and the claim that goes with them.** `_STD_BEGIN`'s `#define` is written
+    let started = std::time::Instant::now();
+
+    // **The compilation's own macros, and the claim that goes with them.** `_STD_BEGIN`'s `#define` is written
     // under `#if _STL_COMPILER_PREPROCESSOR` in `yvals_core.h`, and *that* name is decided three lines above it by
     // `#if defined(RC_INVOKED) || defined(Q_MOC_RUN) || defined(__midl)`. An environment that does not know those
     // names answers `Unknown`, the branch is not put in force, and **not one** replacement list in MSVC's STL
@@ -157,14 +159,32 @@ disk, {} not stored, {} unresolved includes)",
     // several causes that look identical from the answer alone — the name is not indexed, it is indexed but not
     // *visible* from the probe, the class's members are filed under another scope spelling, or the target of an
     // alias is missing — and this is the cheapest way to tell them apart.
-    for name in ["std::string", "std::basic_string", "std::vector"] {
+    //
+    // **Two of these lines read as failures and are not**, which is worth knowing before chasing them:
+    //
+    // ```text
+    // std::map::find   unknown: not declared in this file
+    //                  — `definition` answers a *name*, and nobody writes the name `std::map::find`: the member is
+    //                    inherited from `std::_Tree`. The query that walks the bases is `m.find` below, and it
+    //                    answers `std::_Tree::find`. Kept here because the contrast is the point: a qualified
+    //                    spelling is looked up as a name, a member access is looked up in the class **and its
+    //                    bases**, and only the second one can see an inherited member.
+    // std::vector      unknown: declared more than once
+    //                  — the two facts are the primary template (`class vector { … }`) and the forward
+    //                    declaration of the partial specialization `class vector<bool, _Alloc>;`, whose template
+    //                    arguments `base_type_name` strips, so both carry the qualified name `std::vector` and the
+    //                    index has no way to tell them apart (B129). The queries are unaffected: `v.push_back`
+    //                    goes through the object's type and `member_fact`, which takes the members of both facts.
+    // ```
+    for name in ["std::string", "std::basic_string", "std::vector", "std::map", "std::map::find"] {
         match store.index().definition(name, &probe) {
             Known::Yes(found) => println!(
-                "  [have] {name} -> {} kind {:?} type_of {:?} scope {:?}",
+                "  [have] {name} -> {} kind {:?} type_of {:?} scope {:?} bases {:?}",
                 short(&found.file),
                 found.fact.kind,
                 found.fact.type_of,
-                found.fact.scope
+                found.fact.scope,
+                found.fact.bases
             ),
             Known::Unknown(reason) => println!("  [have] {name} -> unknown: {}", reason.describe()),
             Known::No => println!("  [have] {name} -> no"),
@@ -173,7 +193,8 @@ disk, {} not stored, {} unresolved includes)",
         // **Every** file that declares it, and the visibility of each — because `Unknown` has several causes that
         // read the same from the answer alone: nothing declares the name, two things do, or one does and is
         // reachable only through a conditional include. The list is the cheapest way to tell them apart, and
-        // "two files declare `std::vector`" is a fact about the closure worth seeing rather than guessing at.
+        // "one file declares this name twice" (which is `<vector>`'s `std::vector`) is a fact worth seeing rather
+        // than guessing at.
         let candidates = store.index().files_declaring(name, &probe);
         if candidates.len() != 1 {
             for found in &candidates {
