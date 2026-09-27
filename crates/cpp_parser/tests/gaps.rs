@@ -7464,23 +7464,64 @@ fn a_calling_convention_may_precede_a_pointer_to_members_class_name() {
             "typedef int (C::*fp)(int);\n",
             "typedef int (C::*fp)(int) const;\n",
             "void h(int (C::*p)(int));\n",
+            // The two spellings that were **not** read when this test was written, and are now: the calling
+            // convention *and* a ref-qualifier, in a template argument and in an alias's type-id. They were the
+            // first error of 	ype_traits once the one-walk translation unit expanded what the compiler expands.
+            "template <class R, class A, class... T> struct X<R (__cdecl A::*)(T...) &> { };\n",
+            "using m = void (__cdecl A::*)() &;\n",
+            "using m = void (__cdecl A::*)(int) const;\n",
         ],
     );
 
-    assert_does_not_read_yet(
+
+    // **A note on how this was found**, because the record is the useful part: the shape was invisible until the
+    // evidence improved. In the per-file reading a macro chain kept the calling convention unexpanded, so the
+    // tokens were the ordinary names and the group was never reached; the one-walk `TranslationUnit` expands what
+    // the compiler expands, and `type_traits:409` became that file's first error. Same story as every other gap
+    // this corpus has exposed — the measurement is the *reading*, not the file.
+}
+
+/// **A comparison inside a group is not a template-argument-list opener** — the class-head scan and the
+/// argument-list scan each had this wrong, and `type_traits` is where both were paid for.
+///
+/// `_Maximum` is the shape (`type_traits:1107`):
+///
+/// ```cpp
+/// template <size_t _First, size_t _Second, size_t... _Rest>
+/// struct _Maximum<_First, _Second, _Rest...>
+///     : _Maximum<(_First < _Second ? _Second : _First), _Rest...>::type { };
+/// ```
+///
+/// 1. **The class-head scan** (`a_body_follows_the_class_head`) counted the `<` of `_First < _Second` as an
+///    opener, so the head's own `{` was seen at depth 1 — not "the body" — the scan ran on to the `;` and
+///    answered false: the base clause was never read, and the diagnostic landed on the head's own `:`.
+/// 2. **The argument-list scan** (`a_matching_angle_bracket_follows`) had the same `<` open a depth that its own
+///    `>` could not close, so it met the `:` of `::type`, called the `<` a comparison, and stopped recognising the
+///    template-id: ``expected `;` `` against the `<` of `_Maximum`.
+///
+/// Both are the "a matched group hides the structural boundary" rule the scans already state for braces and
+/// brackets — the parentheses were the group neither of them looked inside. The neighbours below are the ones
+/// that must keep their readings, including the two spellings the argument scan's own comment records as measured
+/// against g++.
+#[test]
+fn a_comparison_inside_parentheses_is_not_an_angle_bracket() {
+    assert_reads(
         Where::File,
         &[
-            (
-                "template <class R, class A, class... T> struct X<R (__cdecl A::*)(T...) &> { };",
-                "a calling convention **and** a ref-qualifier on a member-pointer type in a template argument — \
-                 MSVC's `_IS_MEMFUNPTR` with `REF_OPT` = `&` (`type_traits:409`). Without the macro the same \
-                 argument reads, so the missing piece is the interaction of the two, not the ref-qualifier",
-            ),
-            (
-                "using m = void (__cdecl A::*)() &;",
-                "the same pair in an alias's type-id: the parenthesised-declarator rule is reached with a macro \
-                 where it wants a name, and reports ``expected a name``",
-            ),
+            // The measured case, in the file's own spelling and with the names cut down to nothing.
+            "template <size_t _First, size_t _Second, size_t... _Rest>\n\
+             struct _Maximum<_First, _Second, _Rest...> : _Maximum<(_First < _Second ? _Second : _First), \
+             _Rest...>::type {\n};\n",
+            "struct S : M<(A < B ? B : A), R...>::type { };\n",
+            "M<(A < B ? B : A)>::type x;\n",
+            // …and the neighbours: a group with no comparison, a plain argument, and the two argument-level
+            // comparisons that were already read.
+            "struct S : M<(A + B), R...>::type { };\n",
+            "struct S : M<A, R...>::type { };\n",
+            "struct S : M<(A ? B : C)>::type { };\n",
+            "C<1 < 2> c;\n",
+            "C<(T(0) < T(0))> c;\n",
+            "C<sizeof(T) < 3> c;\n",
         ],
     );
 }

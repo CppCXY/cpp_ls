@@ -2634,6 +2634,9 @@ fn a_body_follows_the_class_head(p: &CppParser) -> bool {
     // (`bits/alloc_traits.h:941`). Counted the way the angles are — and a `}` that closes nothing still ends the
     // scan, because that one is the enclosing body's own.
     let mut braces = 0isize;
+    // Matched parentheses, for the same reason `braces` is counted: `(A < B ? B : A)` holds a `<` that is a
+    // comparison and not the start of a template-argument list — see the arm that reads it below.
+    let mut parens = 0isize;
     let mut after_a_directive = false;
     // The token before the one being looked at, for the `<` question [`angle_depth_delta`] answers. The scan
     // starts at the head's own `:`, which cannot end a template-name, so that is what it starts as.
@@ -2677,6 +2680,23 @@ fn a_body_follows_the_class_head(p: &CppParser) -> bool {
             CppTokenKind::Semicolon | CppTokenKind::RightBrace | CppTokenKind::Eof => return false,
             // The `#` of a directive: everything past it is on another line, and may be another branch.
             CppTokenKind::Hash => after_a_directive = true,
+            CppTokenKind::LeftParen => parens += 1,
+            CppTokenKind::RightParen => parens = (parens - 1).max(0),
+            // **A `<` inside matched parentheses is not an angle bracket**, and counting it as one is what made
+            // this scan lose a head whose base clause holds a *comparison*:
+            //
+            // ```cpp
+            // template <size_t _First, size_t _Second, size_t... _Rest>
+            // struct _Maximum<_First, _Second, _Rest...>
+            //     : _Maximum<(_First < _Second ? _Second : _First), _Rest...>::type { … }   // type_traits:1108
+            // ```
+            //
+            // The `<` of `_First < _Second` opened a depth nothing closed, so the head's own `{` was seen at depth
+            // 1 — not "the body" — the scan ran on to the `;`, answered **false**, and the base clause was never
+            // read: ``expected `;` `` at the head's own `:`. This is the "a matched group hides the structural
+            // boundary" rule the braced case above and the parenthesised case in `a_matching_angle_bracket_follows`
+            // are both written for.
+            _ if parens > 0 => {}
             kind => depth += angle_depth_delta(previous, kind),
         }
 
@@ -3139,6 +3159,24 @@ fn a_matching_angle_bracket_follows(p: &CppParser) -> bool {
     'scan: {
         for kind in p.peek_token_kind_at(1..128) {
             match kind {
+                // **An angle inside matched parentheses is an expression's, not this list's.**
+                //
+                // The parens counter above was written to keep a matched group from *ending* the scan, and that is
+                // only half of what a matched group means: nothing inside it is a boundary of this list either —
+                // including the `<` of a comparison, which otherwise opens a depth that nothing closes:
+                //
+                // ```cpp
+                // template <size_t _First, size_t _Second, size_t... _Rest>
+                // struct _Maximum<_First, _Second, _Rest...>
+                //     : _Maximum<(_First < _Second ? _Second : _First), _Rest...>::type { … }   // type_traits:1108
+                // ```
+                //
+                // The `<` of `_First < _Second` made the depth 2, the list's own `>` brought it back to 1, and the
+                // scan then met the `:` of `::type` and answered "this `<` is a comparison after all" — so the
+                // template-id was not one, the type ended at `_Maximum`, and the base clause was reported as
+                // ``expected `;` `` at the `<`. Angles inside a matched group are **balanced within it** in any
+                // valid argument, so ignoring the whole family there cannot lose a `>` that closes this list.
+                CppTokenKind::Less | CppTokenKind::Greater | CppTokenKind::RightShift if parens > 0 => {}
                 CppTokenKind::Less if can_end_a_template_name(previous) => depth += 1,
                 CppTokenKind::Question => open_questions += 1,
                 CppTokenKind::Colon if open_questions > 0 => open_questions -= 1,
@@ -4011,7 +4049,8 @@ fn eat_cv_qualifiers(p: &mut CppParser) {
 /// wrapped in them without a name, since a declarator's parentheses have to *hold* a declarator. `int (int)`
 /// reaches this with a type keyword inside, is refused here, and stays a parameter list; `int (x)` reaches it
 /// with a name, is refused for the same reason, and stays a name.
-fn a_parenthesised_abstract_declarator_follows(p: &CppParser) -> bool {    matches!(
+fn a_parenthesised_abstract_declarator_follows(p: &CppParser) -> bool {
+    matches!(
         p.peek_token_kind_at(1..2).first(),
         Some(&CppTokenKind::Star)
             | Some(&CppTokenKind::Ampersand)
@@ -4023,7 +4062,30 @@ fn a_parenthesised_abstract_declarator_follows(p: &CppParser) -> bool {    match
     // of member-pointer-to-function type, `void h(int (C::*)(int));`. The named spelling `(C::*h)` never reaches
     // here — [`a_parenthesised_declarator_with_a_name_follows`] claims it first.
     || pointer_to_member_operator_length(p, 1).is_some()
-    // …and a **calling convention in front of the operator**, with no name after it: `( __cdecl * )`. That is the
+    // …and the same pointer-to-member group with a **calling convention in front of the class name** —
+    // `( __cdecl A :: * )`, which is how MSVC's `type_traits` writes every member-pointer predicate:
+    //
+    // `cpp
+    // #define _IS_MEMFUNPTR(CALL_OPT, CV_OPT, REF_OPT, NOEXCEPT_OPT)                       \
+    //     template <class _Ret, class _Arg0, class... _Types>                               \
+    //     struct _Is_memfunptr<_Ret (CALL_OPT _Arg0::*)(_Types...) CV_OPT REF_OPT ...>      \
+    //         : _Arg_types<CV_OPT _Arg0*, _Types...> { ... }                                // type_traits:406
+    // `
+    //
+    // `CALL_OPT` is `__cdecl`/`__stdcall`/empty, so the class name stands **one token further along** than
+    // the line above looks, and the group had no reading at all: the type-id ended at the return type, the
+    // argument reader wanted a `,` or a `>` and found a `(`, and the whole specialisation was reported as
+    // `expected a template argument`. The follower is the group's own ), which is the only thing that can
+    // stand there — the *named* spelling `( __cdecl A :: * p )` is claimed by the named predicate, whose arm
+    // requires the name for exactly that reason.
+    //
+    // It took better evidence to see this one: in the per-file reading a macro chain kept the calling convention
+    // unexpanded, so the tokens were the ordinary names and the shape was never reached. The one-walk
+    // `TranslationUnit` expands what the compiler expands, and 	ype_traits:409 became that file's first error.
+    || (written_like_a_macro(p.peek_token_text_at(1))
+        && pointer_to_member_operator_length(p, 2).is_some_and(|length| {
+            p.peek_token_kind_at(2 + length..3 + length) == [CppTokenKind::RightParen]
+        }))    // …and a **calling convention in front of the operator**, with no name after it: `( __cdecl * )`. That is the
     // abstract spelling of `int (__cdecl * _onexit_t)(void)`, which a `using` alias writes —
     // `using new_handler = void (__cdecl *)();` (`new:111`), and the same type in `type_traits`. The named
     // spelling reaches [`a_parenthesised_declarator_with_a_name_follows`] instead; here the group has no name,
@@ -4264,17 +4326,15 @@ fn a_parenthesised_declarator_with_a_name_follows(p: &CppParser) -> bool {
         let after = 2 + length;
         let follower = p.peek_token_kind_at(after..after + 2);
 
-        // **Named or nameless**, which the arm below has to keep apart and this one does not: there it is the
-        // *name* that tells a declarator group from a parameter (`(C::*h)` against `(C::*)(int)`), and here the
-        // macro before the operator has already done that — a parameter cannot begin with one. Both spellings
-        // occur:
+        // **With a name**, which is what this predicate is about: `( __cdecl A :: * p )`. The nameless spelling
+        // `( __cdecl A :: * )` has no declarator to hold and belongs to the abstract predicate, which claims it
+        // for the same reason the arm below leaves the nameless `(C::*)` alone.
         //
         // ```cpp
         // struct _Is_memfunptr<_Ret (__cdecl _Arg0::*)(_Types...) &> : …     // named, in the specialisation
         // using member = void (__cdecl _Arg0::*)();                           // nameless, in an alias
         // ```
-        return follower.first() == Some(&CppTokenKind::RightParen)
-            || follower.as_slice() == [CppTokenKind::Identifier, CppTokenKind::RightParen];
+        return follower.as_slice() == [CppTokenKind::Identifier, CppTokenKind::RightParen];
     }
 
     // `(C::*h)`, `(A::B::*h)` — a **pointer to member**, whose class name stands where the operator would, and
@@ -4332,11 +4392,13 @@ fn a_parenthesised_declarator_with_a_name_follows(p: &CppParser) -> bool {
 /// Exposed for the alias rule, which needs it for the same reason the type-id does: `using Arr = int[4];`
 /// writes a type whose array part has nothing enclosing it to attach to.
 pub fn parse_declarator_suffixes(p: &mut CppParser) -> ParseResult {
+
     loop {
         match p.current_token() {
             CppTokenKind::LeftParen => {
                 let _ = super::decls::parse_parameter_list(p)?;
                 eat_function_qualifiers(p);
+
             }
             CppTokenKind::LeftBracket => {
                 let array = p.mark(CppSyntaxKind::ArrayType);
