@@ -1123,7 +1123,7 @@ fn sort_and_hide(names: &mut Vec<OfferedName>) {
 /// dereference (`(*p).size`), a subscript, an arithmetic expression. Each of those needs a type *computed* rather
 /// than read off a declaration, which is a different and much larger problem — and answering `Unknown` is what
 /// keeps this layer from being wrong in a way a consumer cannot see.
-fn type_of_expression(
+pub(crate) fn type_of_expression(
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
@@ -1437,6 +1437,18 @@ impl NamedDeclaration {
             NamedDeclaration::Indexed(fact, _) => what_a_call_has_in(fact),
         }
     }
+
+    /// The offset of the declared **name**, in the file [`NamedDeclaration::file`] answers with.
+    ///
+    /// A name range rather than the declaration's range, because the two answer different questions: a rename
+    /// edits the name, and a caller looking for the declaration's own declarator has to be *at* the name — see
+    /// [`callee_of_a_call`].
+    fn name_offset(&self) -> usize {
+        match self {
+            NamedDeclaration::Here(binding) => binding.name_range.start_offset,
+            NamedDeclaration::Indexed(fact, _) => fact.name_range.start_offset,
+        }
+    }
 }
 
 /// [`NamedDeclaration::what_a_call_has`] for a declaration the index (or a member lookup) produced.
@@ -1511,8 +1523,35 @@ fn type_of_a_call(
         return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
     };
 
-    // A member call: the object's type, then the member's declaration, then what a call of it has.
-    if let Some(access) = crate::sema::resolve::member_access_of(&callee) {
+    match declaration_of_a_callee(index, scopes, root, path, &callee, written) {
+        Known::Yes(named) => match named.what_a_call_has(root) {
+            Some(type_of) => Known::Yes((type_of, named.file(path))),
+            None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+        },
+        Known::Unknown(reason) => Known::Unknown(reason),
+        Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+    }
+}
+
+/// The declaration a **callee expression** names — `make` in `make()`, `fac.build` in `fac.build()`.
+///
+/// The two lookups a call needs, in one place: a member access goes through the member lookup (the object's type,
+/// then the member in it), everything else through the name lookup. The callers differ only in what they then ask
+/// of the declaration — [`type_of_a_call`] wants what a call of it *has*, a parameter hint wants the parameters
+/// it declares — and neither is a reason for a second copy of the resolution.
+///
+/// `written` is the **call's** spelling rather than the callee's, and it is what the `Unknown` answers carry: a
+/// consumer reporting "not known" should name the code the user wrote, not the half of it the lookup started at.
+fn declaration_of_a_callee(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    callee: &cpp_parser::CppSyntaxNode,
+    written: &str,
+) -> Known<NamedDeclaration> {
+    // A member call: the object's type, then the member's declaration.
+    if let Some(access) = crate::sema::resolve::member_access_of(callee) {
         let object = match type_of_expression(index, scopes, root, path, &access.object) {
             Known::Yes((type_of, _)) => type_of,
             Known::Unknown(reason) => return Known::Unknown(reason),
@@ -1524,27 +1563,63 @@ fn type_of_a_call(
             return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
         }
 
-        let found = member_fact(index, scopes, root, path, class, &access.member);
-        let Known::Yes((fact, file)) = found else {
-            let Known::Unknown(reason) = found else {
-                unreachable!("the first match established that this is an `Unknown`")
-            };
-            return Known::Unknown(reason);
-        };
-
-        return match what_a_call_has_in(&fact) {
-            Some(type_of) => Known::Yes((type_of, file)),
-            None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+        return match member_fact(index, scopes, root, path, class, &access.member) {
+            Known::Yes((fact, file)) => Known::Yes(NamedDeclaration::Indexed(fact, file)),
+            Known::Unknown(reason) => Known::Unknown(reason),
+            Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
         };
     }
 
     // Everything else is a name — `make()`, `Widget()`, `ns::make()` — and the name lookup is the one every other
     // question about a name goes through.
-    match declaration_of_expression(index, scopes, root, path, &callee) {
-        Known::Yes(named) => match named.what_a_call_has(root) {
-            Some(type_of) => Known::Yes((type_of, named.file(path))),
-            None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
-        },
+    declaration_of_expression(index, scopes, root, path, callee)
+}
+
+/// Where a call's callee is declared — what a parameter hint is read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Callee {
+    /// The file the declaration is written in.
+    pub file: PathBuf,
+    /// The offset of the declared **name** in that file.
+    pub name_offset: usize,
+}
+
+/// The declaration a call names, as **a place in a file**: the file it is in, and the offset of its name.
+///
+/// [`type_of_a_call`]'s question asked for a different answer: "what does a call of this have" needs the
+/// declaration's return type, while a parameter hint needs the parameters it declares — and both need the
+/// declaration found the same way.
+///
+/// Nothing is refused here for not being a function. `Widget(1, 2)` and `fp(1)` are calls whose declaration is a
+/// class or a variable, and whether either has a parameter list is a question about the *declaration's own
+/// declarator*, which the caller asks: a class name has no declarator at all, and a function pointer's parameters
+/// belong to its type rather than to the name. Answering "here is the declaration" and letting that reading say
+/// "no parameters" keeps one rule instead of two.
+///
+/// # Why the *name's* offset rather than the declaration's first token
+///
+/// A caller looking for the parameters finds them in the declarator the name is a name *of*, so it has to start at
+/// the name: a `const`, a `static` or a return type is outside the declarator, and a declaration may hold more
+/// than one declarator (`void (*f(int a))(int b)`).
+pub(crate) fn callee_of_a_call(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    call: &cpp_parser::CppSyntaxNode,
+) -> Known<Callee> {
+    let written = call.text().to_string();
+    let written = written.trim();
+
+    let Some(callee) = call.children().next() else {
+        return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
+    };
+
+    match declaration_of_a_callee(index, scopes, root, path, &callee, written) {
+        Known::Yes(named) => Known::Yes(Callee {
+            file: named.file(path),
+            name_offset: named.name_offset(),
+        }),
         Known::Unknown(reason) => Known::Unknown(reason),
         Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
     }

@@ -26,7 +26,7 @@
 //! header the analysis has not read. So the two "no" answers are kept apart — [`UnknownReason::NotDeclaredHere`]
 //! says the name is somewhere else, which is a fact about the file, while [`Known::No`] would say it is nowhere.
 
-use cpp_parser::{CppSyntaxKind, CppSyntaxNode, SourceRange};
+use cpp_parser::{CppAstNode, CppSyntaxKind, CppSyntaxNode, SourceRange};
 
 use crate::sema::symbol::{
     Binding, BindingKind, Known, Name, Scope, ScopeId, ScopeTree, UnknownReason,
@@ -423,6 +423,39 @@ pub fn member_access_at(root: &CppSyntaxNode, offset: usize) -> Option<MemberAcc
     // For a nameless access the range is empty and sits just past the operator, so this accepts exactly the one
     // offset that means "here is where the member goes" and not the whole line it is on.
     contains_range(access.member_range, SourceRange::new(offset, 0)).then_some(access)
+}
+
+/// The expression the cursor at `offset` is in, if it is in one.
+///
+/// The **innermost** one, which is what makes a hover on `this` in `this->size` about `this` rather than about the
+/// member access it is part of. "Is this node an expression" is the parser's own answer
+/// ([`cpp_parser::CppExpr::can_cast`]) rather than a list of kinds kept here: the grammar is where that set is
+/// decided, and a second copy of it would be a list to update the day a kind is added.
+///
+/// `None` for a cursor that is in no expression at all — a `#define`, the punctuation between two statements, a
+/// declaration's type — which is the ordinary answer for most positions.
+pub fn expression_at(root: &CppSyntaxNode, offset: usize) -> Option<CppSyntaxNode> {
+    let mut found = None;
+    let mut node = root.clone();
+
+    loop {
+        if !contains(&node, offset) {
+            return found;
+        }
+
+        if cpp_parser::CppExpr::can_cast(CppSyntaxKind::from(node.kind())) {
+            found = Some(node.clone());
+        }
+
+        match node
+            .children_with_tokens()
+            .find(|element| contains_element(element, offset))
+            .and_then(|element| element.into_node())
+        {
+            Some(child) => node = child,
+            None => return found,
+        }
+    }
 }
 
 /// The shape of a node that **is** a member access: its object, its member, and where the member was written.

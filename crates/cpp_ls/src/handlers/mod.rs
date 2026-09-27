@@ -16,8 +16,9 @@
 //!
 //! The table below is deliberately short: it is the set of capabilities this server answers *today*. Adding
 //! one is three edits — the module, the dispatch row, the capability row — and the modules that were removed
-//! from the Lua skeleton (`semantic_token`, `inlay_hint`, …) come back the same way: `completion`, `document_symbol`,
-//! `folding_range`, `references`, `rename`, `selection_range` and `workspace_symbol` all came back that way.
+//! from the Lua skeleton (`semantic_token`, `signature_help`, …) come back the same way: `completion`,
+//! `document_symbol`, `folding_range`, `references`, `rename`, `selection_range`, `workspace_symbol` and
+//! `inlay_hint` all came back that way.
 
 mod completion;
 mod configuration;
@@ -26,6 +27,7 @@ mod diagnostic;
 mod document_symbol;
 mod folding_range;
 mod hover;
+mod inlay_hint;
 mod initialized;
 mod notification_handler;
 mod references;
@@ -52,8 +54,9 @@ pub use text_document::{
 /// What a module has to answer to be advertised in `initialize`.
 ///
 /// One trait rather than a match over method names, because the *decision* belongs to the module that knows
-/// what it can do, and the client's own capabilities are half of that decision — `inlayHint.dynamicRegistration`
-/// decides whether a hint provider is registered statically or by a later request.
+/// what it can do, and the client's own capabilities are half of that decision — a client that cannot show a
+/// popup at all is one a hover provider does not have to be announced to, and the flag that says so is read by
+/// the module that would have to honour it rather than by a table here.
 pub trait RegisterCapabilities {
     fn register_capabilities(
         server_capabilities: &mut ServerCapabilities,
@@ -87,6 +90,7 @@ capabilities!(modules: {
     completion => CompletionCapabilities,
     document_symbol => DocumentSymbolCapabilities,
     folding_range => FoldingRangeCapabilities,
+    inlay_hint => InlayHintCapabilities,
     references => ReferencesCapabilities,
     rename => RenameCapabilities,
     selection_range => SelectionRangeCapabilities,

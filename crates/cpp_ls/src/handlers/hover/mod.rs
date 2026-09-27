@@ -1,10 +1,11 @@
 //! # `textDocument/hover` — what the name under the cursor is
 //!
-//! Two questions, in the order the preprocessor asks them:
+//! Three questions, in the order the preprocessor asks them:
 //!
 //! ```text
 //! 1. is this a macro?        a name that a #define settles IS that macro at this point in the file
 //! 2. otherwise, what does it name?  the index's declaration, rendered from what the fact records
+//! 3. and if it names nothing, what is it?  the type of the expression the cursor is in — see below
 //! ```
 //!
 //! Macros first because that is what the text means: `#define WIDGET_MAX 8` makes `WIDGET_MAX` eight, and a hover
@@ -17,9 +18,13 @@
 //!
 //! The declaration **as the file writes it** (the fact carries the declaration's range, and the text is read
 //! through the session — the buffer for an open file), the qualified name, what kind of thing it is, its written
-//! type or return type, and the caveats the fact itself records: a declaration inside a conditional block, or one
-//! the parser recovered around. That last part is the point of a fact-only hover: everything shown is something the
-//! analysis *knows*, and nothing is a guess dressed as a signature.
+//! type or return type, the documentation comment above it, and the caveats the fact itself records: a declaration
+//! inside a conditional block, or one the parser recovered around. That is the point of a fact-only hover:
+//! everything shown is something the analysis *knows*, and nothing is a guess dressed as a signature.
+//!
+//! The third question is the one a cursor on `this`, `*p` or `f(1)` needs, and it is asked **only** when the
+//! second one names nothing: a name is what a reader is asking about, and the type of the expression around it is
+//! a fallback rather than a second answer competing with the first.
 //!
 //! No `range` is set on the answer: an LSP hover may carry one, and computing it would mean deciding where the
 //! name under the cursor starts and ends — a second implementation of "what is a name" beside the one the analysis
@@ -46,6 +51,12 @@ use crate::util::{offset_at_position, uri_to_file_path};
 /// boundary so that what is shown is still code, and the count says how much was left out — an elision a reader
 /// can see, rather than a `…` that might be the file's own text.
 const MAX_HOVER_LINES: usize = 12;
+
+/// How long an expression quoted in a hover may be before it is cut.
+///
+/// An expression is quoted *inside a line of markdown*, so it is collapsed to one line first; the cut is what
+/// keeps a long call from filling the popup with code the reader is already looking at.
+const MAX_INLINE_CHARS: usize = 80;
 
 pub async fn on_hover(
     context: ServerContextSnapshot,
@@ -84,15 +95,16 @@ pub fn hover(session: &Session<DiskFiles>, view: &FileView, offset: usize) -> Op
 
     // The macro question first: it is about the text, and it is answered without the scope tree.
     if let Known::Yes(found) = session.macro_definition(view, offset) {
-        return Some(markdown(macro_markdown(session, &found)));
+        return Some(markdown(macro_markdown(session, view, &found)));
     }
 
     match session.definition(view, offset) {
-        Known::Yes(found) => Some(markdown(declaration_markdown(session, &found))),
-        // `No` and `Unknown` are both "nothing to show": the first says the analysis looked and there is no such
-        // declaration, the second that it cannot say yet (the file's includes are still being read). A hover that
-        // guessed at either would be showing the user something the analysis does not know.
-        Known::No | Known::Unknown(_) => None,
+        Known::Yes(found) => Some(markdown(declaration_markdown(session, view, &found))),
+        // `No` and `Unknown` both leave the name question unanswered: the first says the analysis looked and there
+        // is no such declaration, the second that it cannot say yet (the file's includes are still being read).
+        // Either way the cursor may still be *in* something the analysis can type — `this`, `*p`, `f(1)` — which is
+        // a different question about the same position, and the one a reader on a keyword is asking.
+        Known::No | Known::Unknown(_) => expression_markdown(session, view, offset).map(markdown),
     }
 }
 
@@ -107,7 +119,7 @@ fn markdown(value: String) -> Hover {
 }
 
 /// A macro, as the definition writes it.
-fn macro_markdown(session: &Session<DiskFiles>, found: &ProjectMacro) -> String {
+fn macro_markdown(session: &Session<DiskFiles>, view: &FileView, found: &ProjectMacro) -> String {
     let fact = &found.fact;
 
     if !fact.kind.is_definition() {
@@ -138,11 +150,21 @@ fn macro_markdown(session: &Session<DiskFiles>, found: &ProjectMacro) -> String 
         where_clause(session, &found.file, fact.range.start_offset)
     ));
 
+    if let Some(documentation) =
+        documentation_markdown(session, view, &found.file, fact.range.start_offset)
+    {
+        out.push_str(&format!("\n{documentation}\n"));
+    }
+
     out
 }
 
 /// A declaration, rendered from the fact the index holds.
-fn declaration_markdown(session: &Session<DiskFiles>, found: &ProjectDefinition) -> String {
+fn declaration_markdown(
+    session: &Session<DiskFiles>,
+    view: &FileView,
+    found: &ProjectDefinition,
+) -> String {
     let fact = &found.fact;
     let mut out = String::new();
 
@@ -150,9 +172,21 @@ fn declaration_markdown(session: &Session<DiskFiles>, found: &ProjectDefinition)
     out.push_str(&code_block(&declaration));
 
     out.push_str(&format!(
-        "\n`{}` — {}\n\nDeclared in {}",
+        "\n`{}` — {}\n",
         fact.qualified_name(),
-        kind_words(fact),
+        kind_words(fact)
+    ));
+
+    // The comment the file writes above the declaration, in the place clangd and the C++ extension put it: after
+    // the signature, before where it was declared from.
+    if let Some(documentation) =
+        documentation_markdown(session, view, &found.file, fact.range.start_offset)
+    {
+        out.push_str(&format!("\n{documentation}\n"));
+    }
+
+    out.push_str(&format!(
+        "\nDeclared in {}",
         where_clause(session, &found.file, fact.name_range.start_offset)
     ));
 
@@ -171,6 +205,100 @@ fn declaration_markdown(session: &Session<DiskFiles>, found: &ProjectDefinition)
     }
 
     out
+}
+
+/// The comment a declaration is documented by, as markdown — `None` when the file writes none.
+///
+/// # Why only a comment written *as* documentation
+///
+/// The parser answers "which comment documents this declaration" for any comment above it, and it also answers
+/// whether that comment is written as documentation ([`cpp_parser::CppDocComment::is_documentation`]): `///`, `//!`, `/**`,
+/// `/*!`. This asks the second question as well, because of what a plain `//` comment above a declaration usually
+/// is in a real codebase — `// TODO`, `// NOLINT`, a banner of slashes — and a popup that showed every one of them
+/// would dress a note to the reader as an interface description. A codebase that documents with plain `//` gets no
+/// hover text: a deliberate miss rather than a silent wrong answer.
+///
+/// # Why the comment is shown as it was written
+///
+/// Doxygen's `@brief` and `@param` are left as the file spells them rather than turned into a markdown list. That
+/// is the same choice clangd and the C++ extension make, and the alternative is a *rendering policy* the file did
+/// not write: the structure is available (`CppDocComment::get_commands`) for the feature that needs it, and
+/// signature help — which has to line a parameter up with its documentation — is where that will be.
+fn documentation_markdown(
+    session: &Session<DiskFiles>,
+    view: &FileView,
+    file: &std::path::Path,
+    offset: usize,
+) -> Option<String> {
+    let comment = session.documentation(view, file, offset)?;
+
+    if !comment.is_documentation() {
+        return None;
+    }
+
+    // Delimiters, line markers and the blank lines around them are the parser's reading; an empty comment — `///`
+    // with nothing after it — has nothing to show.
+    let text = comment.get_comment_text();
+    let text = text.trim();
+
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// What the expression at the cursor is, when no declaration is at it.
+///
+/// The fallback for `this`, `*p`, `f(1)`, `w.size`: positions where there is no *name* to look up and the analysis
+/// still knows the type. `None` when it does not — which is the ordinary answer, because most positions are in no
+/// expression at all and the ones that are may be a call through a function pointer or a template parameter that
+/// nothing here instantiates.
+fn expression_markdown(
+    session: &Session<DiskFiles>,
+    view: &FileView,
+    offset: usize,
+) -> Option<String> {
+    let Known::Yes(found) = session.type_at(view, offset) else {
+        return None;
+    };
+
+    // `this` is the one expression whose type is not what the word means: the analysis answers with the enclosing
+    // *class*, and calling that the type of `this` would be wrong about a pointer.
+    if found.expression == "this" {
+        return Some(format!(
+            "`this` — a pointer to the enclosing class `{}`",
+            found.type_of
+        ));
+    }
+
+    Some(format!(
+        "`{}` — has type `{}`",
+        inline(&found.expression),
+        found.type_of
+    ))
+}
+
+/// An expression's text for a line of markdown: one line, and short enough to read.
+fn inline(text: &str) -> String {
+    let mut collapsed = String::new();
+    let mut after_space = false;
+
+    for character in text.chars() {
+        if character.is_whitespace() {
+            after_space = true;
+            continue;
+        }
+
+        if after_space && !collapsed.is_empty() {
+            collapsed.push(' ');
+        }
+        after_space = false;
+        collapsed.push(character);
+    }
+
+    if collapsed.chars().count() <= MAX_INLINE_CHARS {
+        return collapsed;
+    }
+
+    let cut: String = collapsed.chars().take(MAX_INLINE_CHARS - 1).collect();
+    format!("{cut}…")
 }
 
 /// What kind of declaration this is, as a sentence fragment.
@@ -355,6 +483,26 @@ mod tests {
         let block = code_block("const char* s = R\"(```)\";");
         assert!(block.starts_with("````cpp\n"));
         assert!(block.ends_with("````\n"));
+    }
+
+    /// An expression quoted in a line of markdown: one line, and bounded.
+    ///
+    /// Both halves matter in a popup: a newline inside a single pair of backticks ends the markdown *span*, so the
+    /// rest of the answer would be rendered as prose, and an unbounded quote would push the declaration itself out
+    /// of the popup the reader opened.
+    #[test]
+    fn an_expression_is_collapsed_to_one_bounded_line() {
+        assert_eq!(inline("scale(1,\n     2)"), "scale(1, 2)");
+        assert_eq!(inline("  spaced   out  "), "spaced out");
+
+        let long = "a".repeat(MAX_INLINE_CHARS + 20);
+        let shown = inline(&long);
+        assert_eq!(shown.chars().count(), MAX_INLINE_CHARS);
+        assert!(shown.ends_with('…'), "the cut is visible: {shown}");
+
+        // Exactly at the bound nothing is cut: an elision of nothing would be a lie.
+        let exact = "b".repeat(MAX_INLINE_CHARS);
+        assert_eq!(inline(&exact), exact);
     }
 
     #[test]

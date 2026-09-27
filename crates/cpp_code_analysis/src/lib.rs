@@ -43,6 +43,7 @@ pub mod file;
 pub mod folding;
 pub mod include;
 pub mod index;
+pub mod inlay;
 pub mod preprocess;
 pub mod project;
 pub mod sema;
@@ -155,9 +156,10 @@ pub use scopes::{MacroBodies, NoMacroBodies, build_scopes, declared_module_names
 // The driver sits above the folders rather than in one of them: it is the join of all four — the toolchain, the
 // include configuration, the summaries and the queries — and putting it inside any one of them would make that
 // folder the owner of the others.
+pub use inlay::ParameterHint;
 pub use session::{
-    CookedReading, DiagnosticReading, FileDiagnostic, FileDiagnostics, OpenDocuments, Session,
-    SessionFiles,
+    CookedReading, DiagnosticReading, ExpressionType, FileDiagnostic, FileDiagnostics, OpenDocuments,
+    Session, SessionFiles,
 };
 // The *file* layer's two public faces: a view is one file parsed (what a cursor query is answered against), and a
 // VFS is the set of files being held (their text, and the line index of that text). They live in `file` rather

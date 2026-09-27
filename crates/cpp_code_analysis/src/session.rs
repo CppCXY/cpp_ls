@@ -83,6 +83,7 @@ use crate::index::project::{
     MemberCompletions, MemberList, NameCompletions, ProjectDefinition, ProjectIndex, ProjectMacro,
 };
 use crate::index::references::{MacroReferences, ReferenceBudget, macro_references};
+use crate::inlay::ParameterHint;
 use crate::index::store::{StoreStats, SummaryStore};
 use crate::index::worklist::StepOutcome;
 use crate::summary::OutlineSymbol;
@@ -1441,6 +1442,95 @@ impl<F: FileProvider + Clone> Session<F> {
         )
     }
 
+    /// **The documentation comment above a declaration** — what a hover shows when a file writes one.
+    ///
+    /// `file` and `offset` are the declaration's own coordinates, which is why they are arguments rather than
+    /// something read from `view`: the fact a query resolved carries them, and the declaration can be in a file
+    /// other than the one the cursor is in.
+    ///
+    /// # The one file that is not re-parsed
+    ///
+    /// The declaration in the file being edited is answered from the view the request already built, so a hover in
+    /// the current file costs nothing extra. A declaration in another file needs that file's tree, which this
+    /// session does not keep — a parse per question is the honest price of not caching a tree per file — and it is
+    /// paid **only when the text before the declaration could hold a comment at all**
+    /// ([`crate::file::view::might_be_documented`]). A header with no documentation above the declaration is
+    /// therefore never parsed to find that out.
+    ///
+    /// The answer is the parser's node, not text: what a comment *says* — delimiters, line markers, `@param` — is
+    /// the documentation layer's reading, and every consumer asking this question wants that reading rather than a
+    /// copy of it.
+    pub fn documentation(
+        &self,
+        view: &FileView,
+        file: &Path,
+        offset: usize,
+    ) -> Option<cpp_parser::CppDocComment> {
+        if file == view.path {
+            return crate::file::view::documentation_at(&view.root, offset);
+        }
+
+        let declared_in = self.vfs.held(file)?;
+        if !crate::file::view::might_be_documented(&declared_in.text, offset) {
+            return None;
+        }
+
+        let tree =
+            cpp_parser::CppParser::parse(&declared_in.text, cpp_parser::ParserConfig::default());
+        crate::file::view::documentation_at(&tree.get_red_root(), offset)
+    }
+
+    /// **The type of the expression at `offset`**, as far as this analysis can tell — what a hover shows when the
+    /// cursor is not on a name.
+    ///
+    /// The three answers are three different facts and a caller should keep them apart:
+    ///
+    /// * [`Known::Yes`] with the expression's text, its type, and the file the type came from — `this` in a member
+    ///   function, `*p`, `f(x)`, `w.size`, a plain name;
+    /// * [`Known::No`] when the cursor is in **no expression at all** — a `#define`, the punctuation between two
+    ///   statements, a declaration's `const`. The question does not apply, which is not the same as an answer that
+    ///   is missing;
+    /// * [`Known::Unknown`] with the infer layer's own reason when the expression is there but its type is not
+    ///   knowable here: a template that was never instantiated, a name nothing declares, a type computed rather
+    ///   than read.
+    ///
+    /// # What "the expression" is
+    ///
+    /// The **innermost** one containing the offset ([`crate::sema::resolve::expression_at`]), so a cursor on
+    /// `this` in `this->size` asks about `this`. A cursor in whitespace inside a statement is in no expression, and
+    /// that is also the honest answer.
+    pub fn type_at(&self, view: &FileView, offset: usize) -> Known<ExpressionType> {
+        let Some(expression) = crate::sema::resolve::expression_at(&view.root, offset) else {
+            return Known::No;
+        };
+
+        let written = expression.text().to_string().trim().to_string();
+        match crate::index::project::type_of_expression(
+            self.store.index(),
+            &view.scopes,
+            &view.root,
+            &view.path,
+            &expression,
+        ) {
+            Known::Yes((type_of, file)) => Known::Yes(ExpressionType {
+                expression: written,
+                type_of,
+                file,
+            }),
+            Known::Unknown(reason) => Known::Unknown(reason),
+            Known::No => Known::No,
+        }
+    }
+
+    /// **The parameter names to draw at the calls in `range`** — see [`crate::inlay`].
+    ///
+    /// `range` is the range the client asked about, in the file's own coordinates. Everything this needs beyond
+    /// the file in hand is the *callee's* file, which is why it is a session method: [`Session::view`] is how a
+    /// header a call reaches into is parsed, and it is parsed once per declaring file however many calls reach it.
+    pub fn inlay_hints(&self, view: &FileView, range: cpp_parser::SourceRange) -> Vec<ParameterHint> {
+        crate::inlay::parameter_hints(self.store.index(), view, range, |path| self.view(path))
+    }
+
     /// **The file's foldable regions** — see [`crate::folding`].
     ///
     /// Read from the **buffer's own tokens and directives**, which is the same source the outline uses and for the
@@ -1512,6 +1602,21 @@ pub enum DiagnosticReading {
     /// The text a **compiler** parses: the file's bytes with its translation unit's macros expanded and the branches
     /// nobody takes left out.
     Cooked,
+}
+
+/// The type of the expression at a cursor — see [`Session::type_at`].
+///
+/// Three fields rather than one, because a consumer that shows the type needs to say *about what*: the expression's
+/// own text is what the user recognises, and the file is where the declaration the type was read from lives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpressionType {
+    /// The expression's own text, as the file writes it — `this`, `*p`, `make(1)`, `w.size`.
+    pub expression: String,
+    /// The type, spelled the way the declaration it was read from spells it. Not a canonical type: an alias is an
+    /// alias name, and `const Widget&` is those three tokens, because that is what the file says.
+    pub type_of: String,
+    /// The file that declaration is in.
+    pub file: PathBuf,
 }
 
 /// One thing to report, with **file** offsets and the message as the parser wrote it.

@@ -1096,20 +1096,10 @@ impl ScopeWalker<'_> {
 
     /// The parameters of a function declarator.
     fn parameters(&mut self, list: &CppSyntaxNode, scope: ScopeId) {
-        for parameter in list.children() {
-            if CppSyntaxKind::from(parameter.kind()) != CppSyntaxKind::Parameter {
-                continue;
-            }
-
-            // A parameter's name is in its own declarator, and an unnamed parameter — `void f(int);` — has
-            // none, which is ordinary C++ and declares nothing.
-            for declarator in parameter
-                .children()
-                .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
-            {
-                if let Some((name, name_range)) = declared_name(&declarator) {
-                    self.bind(scope, name, BindingKind::Variable, &declarator, name_range);
-                }
+        for (declarator, declared) in parameters_of(list) {
+            // An unnamed parameter — `void f(int);` — declares nothing, which is ordinary C++ rather than a gap.
+            if let Some((name, name_range)) = declared {
+                self.bind(scope, name, BindingKind::Variable, &declarator, name_range);
             }
         }
     }
@@ -1417,8 +1407,40 @@ fn declared_name(node: &CppSyntaxNode) -> Option<(Name, cpp_parser::SourceRange)
     Some((name, cpp_parser::source_range(token.text_range())))
 }
 
-/// The `NameExpr` naming a declarator, following only the nodes that carry a declared name.
+/// A function's parameters, in order: each one's declarator, and the name it declares where it declares one.
 ///
+/// The one reading of "what are this function's parameters", shared by the two consumers that need it: the scope
+/// builder, which binds the named ones, and the inlay hints, which label an argument at a call site with the
+/// parameter it lands in.
+///
+/// # Why the *unnamed* parameters are kept
+///
+/// `void f(int, int b);` is ordinary C++ and declares nothing for its first parameter — but it still occupies the
+/// first position, and a hint is placed **by position**. A reading that dropped the unnamed ones would put `b`
+/// against the first argument, which is a wrong answer rather than a missing one; the `None` in its place is what
+/// keeps the alignment.
+///
+/// # Why a parameter's name is the declarator's
+///
+/// [`declared_name`] is the reading that decides what a declaration introduces, and a parameter's declarator is
+/// what introduces the parameter: `void f(int (*cb)(int a));` has a parameter named `cb`, and the `a` inside the
+/// nested parameter list belongs to the function pointer's own type.
+pub(crate) fn parameters_of(
+    list: &CppSyntaxNode,
+) -> Vec<(CppSyntaxNode, Option<(Name, cpp_parser::SourceRange)>)> {
+    list.children()
+        .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Parameter)
+        .map(|parameter| {
+            let declared = parameter
+                .children()
+                .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+                .find_map(|declarator| declared_name(&declarator));
+
+            (parameter, declared)
+        })
+        .collect()
+}
+
 /// The segments of a namespace's name, outermost first: `["a", "b"]` for `namespace a::b { }`.
 ///
 /// Empty for an anonymous namespace, and for one whose name could not be read — both mean "this construct

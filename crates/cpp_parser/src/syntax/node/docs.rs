@@ -306,6 +306,113 @@ fn next_construct(node: &CppSyntaxNode) -> Option<CppSyntaxNode> {
     }
 }
 
+// ============================================================================
+// The other direction
+// ============================================================================
+
+/// The comment that documents `node`, if one does.
+///
+/// The reverse of [`CppDocComment::get_documented_declaration`], and it is a separate walk rather
+/// than a second accessor on the declaration because the tree only points one way: a comment is a
+/// *sibling* of what it documents — [`CppDocComment::get_owner`] gives the reason — so nothing
+/// inside a declaration knows that a comment above it was written about it.
+///
+/// # How the search goes backwards
+///
+/// [`previous_construct`] is [`next_construct`] in reverse — the previous sibling, and when there is
+/// none, the previous construct before the enclosing node — and preprocessor directives are stepped
+/// over, which is what the forward rule does with them too.
+///
+/// A construct that is not a comment is asked for the last comment *inside* it ([`last_comment_in`]),
+/// which is not a guess about the grammar but the grammar: a comment is emitted into whatever node
+/// was open when it was found, so the `/// doc` above a class member is the last child of the member
+/// written before it. That construct ends the search either way, because a comment written before
+/// *it* documents it rather than this node.
+///
+/// # Why the search does not decide
+///
+/// A candidate is not an answer. Every candidate found here is handed to the **forward** accessors —
+/// [`CppDocComment::get_owner`] and [`CppDocComment::get_documented_declaration`] — and only a
+/// comment those agree documents `node` is returned. One rule with one implementation: a comment
+/// that documents nothing (a trailing `///<`, one that documents the next declaration instead) is
+/// rejected by the code that accepts the others, so the two directions cannot drift apart.
+///
+/// Whether the comment returned is *written* as documentation (`///`, `/**`) is a separate question
+/// with its own answer, [`CppDocComment::is_documentation`]: this looks for the comment a reader
+/// would call the documentation of `node`, and a consumer that wants only Doxygen's spellings asks
+/// for them.
+pub fn documentation_of(node: &CppSyntaxNode) -> Option<CppDocComment> {
+    let mut candidate = previous_construct(node);
+
+    while let Some(before) = candidate {
+        match CppSyntaxKind::from(before.kind()) {
+            // A comment ends the search whichever way it goes: the forward rule never steps over one,
+            // so a comment that does not document this node means this node is not documented.
+            CppSyntaxKind::DocComment => {
+                let comment = CppDocComment::cast(before)?;
+                return documents_it(&comment, node).then_some(comment);
+            }
+            // A directive between the documentation and the code it describes is stepped over — the
+            // forward walk's rule, in the same order.
+            CppSyntaxKind::PreprocessorDirective => candidate = previous_construct(&before),
+            // Anything else ends the search, but it may hold the comment at its end: see above.
+            _ => {
+                let comment = last_comment_in(&before)?;
+                return documents_it(&comment, node).then_some(comment);
+            }
+        }
+    }
+
+    None
+}
+
+/// The construct before a node, in the order a reader would reach it.
+///
+/// [`next_construct`] mirrored: the previous sibling, and when there is none, the construct before
+/// the enclosing node — recursively. The outward step is what makes a comment written *above* a
+/// nested node reachable at all, because the grammar emits it wherever the enclosing node happens to
+/// be. Nothing precedes the first construct of a file, so the walk terminates there.
+fn previous_construct(node: &CppSyntaxNode) -> Option<CppSyntaxNode> {
+    let mut current = node.clone();
+
+    loop {
+        if let Some(sibling) = current
+            .siblings_with_tokens(rowan::Direction::Prev)
+            .skip(1)
+            .find_map(|element| element.into_node())
+        {
+            return Some(sibling);
+        }
+
+        // Outward: the remaining siblings are the enclosing node's.
+        current = current.parent()?;
+    }
+}
+
+/// The textually last comment inside a construct, if it holds one.
+///
+/// `descendants` is a preorder walk, so its last comment is the last one in the file's own order —
+/// which is the one written closest to whatever follows the construct.
+fn last_comment_in(node: &CppSyntaxNode) -> Option<CppDocComment> {
+    node.descendants().filter_map(CppDocComment::cast).last()
+}
+
+/// Does `comment` document `node`? Asked of the forward accessors, which are the rule.
+fn documents_it(comment: &CppDocComment, node: &CppSyntaxNode) -> bool {
+    // A trailing comment documents what comes *before* it, and the forward accessor declines it for
+    // that reason. It has to be declined here too, or `int x; ///< the x` would be read as the
+    // documentation of the declaration after it — a `get_owner` answer that is true about the text
+    // and wrong about the meaning.
+    if comment.is_trailing() {
+        return false;
+    }
+
+    comment.get_owner().is_some_and(|owner| owner == *node)
+        || comment
+            .get_documented_declaration()
+            .is_some_and(|documented| documented.syntax() == node)
+}
+
 /// The body of a documentation comment: everything that is not part of a command.
 ///
 /// One of these wraps the whole group's content, so it is also the node that carries the comment's

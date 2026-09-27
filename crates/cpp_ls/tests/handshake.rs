@@ -1494,3 +1494,245 @@ fn the_outline_shows_the_file_and_not_the_compiler() {
     server.request(999, "shutdown", Value::Null);
     server.notify("exit", Value::Null);
 }
+
+/// The hover fixture: a documented function, one with a plain comment above it, and a `this` in a member function.
+const HOVER_CPP: &str = "\
+/// Adds two counts.
+/// @param a the first
+/// @param b the second
+int add(int a, int b);
+
+// A note to the reader, which is not documentation.
+int undocumented(int c);
+
+struct Widget {
+    int size;
+    int scaled(int factor) const { return size * factor; }
+    int go() const { return this->scaled(2); }
+};
+";
+
+/// **Hover shows what the file wrote about a declaration — and only what it wrote as documentation.**
+///
+/// Three positions in one fixture, because the interesting part is the *boundary*: the documented declaration
+/// carries its comment (Doxygen markers and all, the way clangd shows them), the one under a plain `//` comment
+/// carries none — a `// TODO` dressed as an interface description is the failure the parser's own classification
+/// exists to prevent — and `this`, which names no declaration at all, is answered by the expression question
+/// instead: the class it points at.
+#[test]
+fn hover_shows_the_documentation_and_refuses_a_plain_comment() {
+    let project = Project::new("hover");
+    project.write("main.cpp", HOVER_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": HOVER_CPP }
+        }),
+    );
+
+    let documented = hover_over(&mut server, 100, &main_uri, HOVER_CPP, "add(int a, int b);");
+    let text = documented["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a markdown answer was expected, got {documented}"));
+    assert!(
+        text.contains("Adds two counts."),
+        "the comment above the declaration is the documentation: {text}"
+    );
+    assert!(
+        text.contains("@param a the first"),
+        "shown as the file wrote it, markers included: {text}"
+    );
+    assert!(
+        text.contains("add(int a, int b)"),
+        "with the declaration itself: {text}"
+    );
+
+    let plain = hover_over(&mut server, 200, &main_uri, HOVER_CPP, "undocumented(int c);");
+    let text = plain["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a markdown answer was expected, got {plain}"));
+    assert!(
+        !text.contains("A note to the reader"),
+        "a plain `//` comment is not documentation: {text}"
+    );
+    assert!(
+        text.contains("undocumented(int c)"),
+        "the declaration is still what the hover is about: {text}"
+    );
+
+    let this = hover_over(&mut server, 300, &main_uri, HOVER_CPP, "this->scaled(2)");
+    let text = this["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a markdown answer was expected for `this`, got {this}"));
+    assert!(
+        text.contains("enclosing class `Widget`"),
+        "`this` names no declaration, so the expression question answers: {text}"
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
+/// A hover whose position is the first character of the line containing `needle`.
+fn hover_over(
+    server: &mut Server,
+    first_id: i64,
+    uri: &str,
+    fixture: &str,
+    needle: &str,
+) -> Value {
+    let line = line_of(fixture, needle);
+    let character = fixture
+        .lines()
+        .nth(line as usize)
+        .and_then(|text| text.find(needle))
+        .expect("the fixture writes it");
+
+    server.ask_until(first_id, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+            },
+        })
+    })
+}
+
+/// The line of a fixture that contains `needle`, counted from zero.
+fn line_of(text: &str, needle: &str) -> u64 {
+    text.lines()
+        .position(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("{needle:?} is not in the fixture"))
+        .try_into()
+        .expect("a fixture this size fits in a u32")
+}
+
+/// The inlay fixture: a call whose argument already spells the parameter, one that does not, and a member call.
+const INLAY_CPP: &str = "\
+double scale(int count, double factor);
+
+struct Widget {
+    int size_of(int scale) const;
+};
+
+double f(Widget& w, int count) {
+    return scale(count, 1) + w.size_of(2);
+}
+";
+
+/// **A parameter name is drawn at the argument — and not where the argument already says it.**
+///
+/// Three arguments, two hints: `scale(count, …)` needs no `count:` in front of `count`, `1` is the second
+/// parameter however it is spelled, and the member call's argument is named by the *member's* declaration rather
+/// than by anything in the calling file. The request is refused (`null`) until the index has read everything,
+/// which is why this goes through `ask_until`: a hint whose callee has not been read yet would be *missing* rather
+/// than wrong, and "no hints" is not something a client should be told while that is true.
+#[test]
+fn parameter_names_are_drawn_at_the_arguments() {
+    let project = Project::new("inlay-hints");
+    project.write("main.cpp", INLAY_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    let capabilities = server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    assert_eq!(
+        capabilities["result"]["capabilities"]["inlayHintProvider"]["resolveProvider"],
+        json!(false),
+        "the client is told the server hints, and that there is nothing to resolve: {capabilities}"
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": INLAY_CPP }
+        }),
+    );
+
+    let call_line = line_of(INLAY_CPP, "return scale(count, 1)");
+    let answer = server.ask_until(100, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/inlayHint",
+            "params": {
+                "textDocument": { "uri": main_uri },
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": INLAY_CPP.lines().count(), "character": 0 },
+                },
+            },
+        })
+    });
+
+    let hints = answer["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("an inlay hint list was expected, got {answer}"));
+    let seen: Vec<(u64, String)> = hints
+        .iter()
+        .map(|hint| {
+            (
+                hint["position"]["line"].as_u64().expect("a line"),
+                hint["label"].as_str().expect("a label").to_string(),
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        seen,
+        vec![
+            (call_line, "factor:".to_string()),
+            (call_line, "scale:".to_string()),
+        ],
+        "`count` spells its parameter and gets no hint; the other two do: {answer}"
+    );
+
+    // The position is on the argument itself and the padding is after the label, so a client draws `factor: 1`
+    // rather than `factor :1`.
+    let factor = &hints[0];
+    let argument = INLAY_CPP
+        .lines()
+        .nth(call_line as usize)
+        .and_then(|line| line.find("scale(count, 1)"))
+        .expect("the fixture writes the call")
+        + "scale(count, ".len();
+    assert_eq!(
+        factor["position"]["character"],
+        json!(argument),
+        "the hint sits on the argument: {factor}"
+    );
+    assert_eq!(factor["paddingRight"], json!(true), "{factor}");
+    assert_eq!(factor["kind"], json!(2), "a parameter hint: {factor}");
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}

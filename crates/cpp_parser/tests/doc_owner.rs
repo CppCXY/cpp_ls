@@ -15,7 +15,7 @@
 
 use cpp_parser::{
     CppAstNode, CppDeclaration, CppDocComment, CppParser, CppSyntaxKind, CppSyntaxTree,
-    ParserConfig,
+    ParserConfig, documentation_of,
 };
 
 fn parse(source: &str) -> CppSyntaxTree {
@@ -343,5 +343,193 @@ double dist(const Point& a, const Point& b);
             Some("dist".to_string()),
         ],
         "every comment that documents something finds it, in source order"
+    );
+}
+
+// ============================================================================
+// The same relationship, read backwards
+// ============================================================================
+
+/// The documentation a declaration reports for itself, as a hover asks for it.
+///
+/// The declaration is found by name so that a test says which one it is asking about, and the answer
+/// is the comment's *text*, because that is what a consumer renders.
+fn documentation_above(source: &str, name: &str) -> Option<String> {
+    let tree = parse(source);
+    let declaration = tree
+        .get_red_root()
+        .descendants()
+        .filter_map(CppDeclaration::cast)
+        .find(|declaration| declaration.get_name_text().as_deref() == Some(name))
+        .unwrap_or_else(|| panic!("{source:?} declares no `{name}`"));
+
+    documentation_of(declaration.syntax()).map(|comment| comment.get_comment_text())
+}
+
+/// The one case the forward suite is built on, from the other end: the declaration is asked, not the
+/// comment.
+#[test]
+fn a_declaration_finds_the_comment_above_it() {
+    assert_eq!(
+        documentation_above("/// Doc.\nint x;\n", "x"),
+        Some("Doc.".to_string())
+    );
+}
+
+/// Every form the forward direction handles, asked backwards.
+#[test]
+fn every_form_of_declaration_finds_its_comment() {
+    let cases = [
+        ("/// Doc.\nint f();\n", "f", "Doc."),
+        ("/// Doc.\nint x = 1;\n", "x", "Doc."),
+        ("/// Doc.\nvoid f() { }\n", "f", "Doc."),
+        ("/// A grid.\nclass Grid {\n    int n;\n};\n", "Grid", "A grid."),
+    ];
+
+    for (source, name, expected) in cases {
+        assert_eq!(
+            documentation_above(source, name),
+            Some(expected.to_string()),
+            "{source:?}"
+        );
+    }
+}
+
+/// A directive between the comment and the declaration is stepped over — the forward walk's rule, so
+/// the reverse walk has to step over it too.
+#[test]
+fn the_reverse_walk_steps_over_a_directive() {
+    assert_eq!(
+        documentation_above("/// Doc.\n#define N 3\nint x;\n", "x"),
+        Some("Doc.".to_string())
+    );
+}
+
+/// A comment directly above a member of a class body documents that member.
+#[test]
+fn a_member_finds_the_comment_above_it() {
+    let source = "struct S {\n    /// The n.\n    int n;\n    int m;\n};\n";
+
+    assert_eq!(
+        documentation_above(source, "n"),
+        Some("The n.".to_string())
+    );
+    assert_eq!(
+        documentation_above(source, "m"),
+        None,
+        "the comment above `n` is not borrowed by the member after it"
+    );
+}
+
+/// **The nesting wart, read backwards.**
+///
+/// A comment written after a member is emitted *inside* that member's declaration (see
+/// [`a_comment_after_a_member_is_nested_but_still_finds_its_declaration`]), so the comment above `y`
+/// is the last child of `x`. The reverse walk has to look *inside* the construct before it, not only
+/// at comment siblings, or every member but the first would appear undocumented.
+#[test]
+fn a_member_finds_a_comment_nested_in_the_member_before_it() {
+    assert_eq!(
+        documentation_above("struct S {\n    int x;\n    /// The y.\n    int y;\n};\n", "y"),
+        Some("The y.".to_string())
+    );
+}
+
+/// A trailing `///<` documents the member before it, so it is not the documentation of the member
+/// after it. The forward accessor declines it, and the reverse lookup has to as well — otherwise
+/// `int a; ///< the a` would be read as documentation of `b`, and the popup would describe the wrong
+/// member.
+#[test]
+fn a_trailing_comment_does_not_document_what_follows() {
+    let source = "struct S {\n    int a; ///< the a\n    int b;\n};\n";
+
+    assert_eq!(documentation_above(source, "b"), None);
+    assert_eq!(
+        documentation_above(source, "a"),
+        None,
+        "and the member it does document is not reachable forwards either — the parser declines the \
+         marker rather than following it backwards"
+    );
+}
+
+/// A comment documents the declaration *after* it and nothing else: the declaration below the next
+/// one is not documented by the same comment.
+#[test]
+fn a_comment_is_not_borrowed_by_the_second_declaration_after_it() {
+    let source = "/// First.\nint a;\nint b;\n";
+
+    assert_eq!(
+        documentation_above(source, "a"),
+        Some("First.".to_string())
+    );
+    assert_eq!(documentation_above(source, "b"), None);
+}
+
+/// A comment above a class documents the class, not its first member: the walk leaves the class body
+/// looking for a construct before it, finds the class's own comment, and the forward accessor rejects
+/// it for the member.
+#[test]
+fn a_class_comment_is_not_the_documentation_of_its_first_member() {
+    let source = "/// The point.\nstruct Point {\n    int x;\n};\n";
+
+    assert_eq!(
+        documentation_above(source, "Point"),
+        Some("The point.".to_string())
+    );
+    assert_eq!(documentation_above(source, "x"), None);
+}
+
+/// A blank line ends a comment group, so the group nearer the declaration is the one that documents
+/// it.
+#[test]
+fn the_group_nearest_the_declaration_is_the_one_found() {
+    assert_eq!(
+        documentation_above("/// First.\n\n/// Second.\nint x;\n", "x"),
+        Some("Second.".to_string())
+    );
+}
+
+/// A file whose declarations are all documented round-trips: every declaration finds its own comment,
+/// which is the forward suite's [`every_documented_declaration_in_a_file_is_found`] asked the other
+/// way.
+#[test]
+fn every_declaration_in_a_file_finds_its_comment() {
+    let source = "\
+/// A point.
+struct Point {
+    /// The x.
+    int x;
+    /// The y.
+    int y;
+};
+
+/// Distance.
+double dist(const Point& a, const Point& b);
+";
+
+    let tree = parse(source);
+    let found: Vec<(String, Option<String>)> = tree
+        .get_red_root()
+        .descendants()
+        .filter_map(CppDeclaration::cast)
+        .filter_map(|declaration| {
+            let name = declaration.get_name_text()?;
+            let documentation =
+                documentation_of(declaration.syntax()).map(|comment| comment.get_comment_text());
+            Some((name, documentation))
+        })
+        .collect();
+
+    assert_eq!(
+        found,
+        vec![
+            ("Point".to_string(), Some("A point.".to_string())),
+            ("x".to_string(), Some("The x.".to_string())),
+            ("y".to_string(), Some("The y.".to_string())),
+            (
+                "dist".to_string(),
+                Some("Distance.".to_string())
+            ),
+        ]
     );
 }

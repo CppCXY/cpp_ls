@@ -34,7 +34,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cpp_parser::{CppParseError, CppSyntaxNode, CppSyntaxTree, LineIndex};
+use cpp_parser::{CppDocComment, CppParseError, CppSyntaxNode, CppSyntaxTree, LineIndex};
 
 use crate::file::paths::FileId;
 use crate::file::vfs::VfsFile;
@@ -59,6 +59,72 @@ pub struct FileView {
     pub scopes: ScopeTree,
     /// Did the text come from an open buffer rather than from the file?
     pub open: bool,
+}
+
+/// **The documentation of what is declared at `offset`** — the comment a hover shows above a declaration.
+///
+/// The token's ancestors are asked, innermost first, because a cursor can be anywhere on a declaration: on the
+/// name, on the type, on a `*`, on the `;`. Asking every ancestor is what makes the answer the same for all of
+/// them, and it cannot answer with the *wrong* node: a node inside a declarator has no documentation of its own —
+/// a comment is a sibling of the declaration, see [`cpp_parser::documentation_of`] — and that accessor verifies
+/// every candidate against the forward rule, so only the node the comment actually documents matches.
+///
+/// The comment is returned as the parser's own node rather than as text: delimiters, line markers and `@param` are
+/// the documentation layer's reading, and a rendering here would be a second implementation of it.
+pub fn documentation_at(root: &CppSyntaxNode, offset: usize) -> Option<CppDocComment> {
+    let ancestors = match cpp_parser::token_at(root, offset) {
+        Some(token) => token.parent_ancestors().collect::<Vec<_>>(),
+        // No token at that offset (past the end of the file): the node walk still answers, and the root always has
+        // a range.
+        None => root.ancestors().collect(),
+    };
+
+    ancestors
+        .into_iter()
+        .find_map(|node| cpp_parser::documentation_of(&node))
+}
+
+/// Could a comment be attached to the construct at `offset` in `text`?
+///
+/// A **filter, not a reading.** It exists so that a question about a declaration in a file this session has not
+/// parsed does not parse a whole header to find out that the declaration has no documentation — and it is only
+/// ever allowed to be *too permissive*: `false` is final, `true` means the parse decides.
+///
+/// Which is why it is loose on purpose. It walks up over the lines a comment can be separated from a declaration
+/// by — blank lines and preprocessor directives, both of which the parser's own rule steps over — and accepts a
+/// line that starts a line comment or that holds the end of a block comment. A `////` banner, a string literal
+/// containing `*/`, a comment that turns out to document something else: each costs one parse, and the other
+/// mistake is not symmetric — a `false` where a comment is would lose the documentation silently.
+pub fn might_be_documented(text: &str, offset: usize) -> bool {
+    let before = text
+        .get(..offset.min(text.len()))
+        .unwrap_or_default()
+        .trim_end();
+
+    // A block comment on the same line as the declaration: `/** Doc. */ int x;`.
+    if before.ends_with("*/") {
+        return true;
+    }
+
+    // Otherwise the comment is above, with only blank lines and directives in between.
+    let mut rest = before;
+    loop {
+        let line = match rest.rfind('\n') {
+            Some(newline) => &rest[newline + 1..],
+            None => rest,
+        };
+        let line = line.trim();
+
+        if !line.is_empty() && !line.starts_with('#') {
+            return line.starts_with("//") || line.contains("*/");
+        }
+
+        // Only blank and directive lines so far: the previous line, or no comment at all.
+        match rest.rfind('\n') {
+            Some(newline) => rest = &rest[..newline],
+            None => return false,
+        }
+    }
 }
 
 impl FileView {

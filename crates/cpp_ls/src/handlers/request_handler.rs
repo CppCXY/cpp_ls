@@ -23,8 +23,8 @@ use log::error;
 use lsp_server::{Request, Response};
 use lsp_types::request::{
     Completion, DocumentDiagnosticRequest, DocumentSymbolRequest, FoldingRangeRequest,
-    GotoDefinition, HoverRequest, PrepareRenameRequest, References, Rename, Request as LspRequest,
-    SelectionRangeRequest,
+    GotoDefinition, HoverRequest, InlayHintRequest, PrepareRenameRequest, References, Rename,
+    Request as LspRequest, SelectionRangeRequest,
     WorkspaceSymbolRequest,
 };
 
@@ -37,6 +37,7 @@ use super::{
     document_symbol::on_document_symbol,
     folding_range::on_folding_range,
     hover::on_hover,
+    inlay_hint::on_inlay_hint,
     references::on_references,
     selection_range::on_selection_range,
     rename::{on_prepare_rename, on_rename},
@@ -84,6 +85,7 @@ pub async fn on_request_handler(
         Completion => on_completion,
         DocumentSymbolRequest => on_document_symbol,
         FoldingRangeRequest => on_folding_range,
+        InlayHintRequest => on_inlay_hint,
         References => on_references,
         SelectionRangeRequest => on_selection_range,
         PrepareRenameRequest => on_prepare_rename,

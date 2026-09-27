@@ -216,7 +216,10 @@ impl RegisterCapabilities for CompletionCapabilities {
             // request per trigger character, and the second `:` finds the list already asked for.
             trigger_characters: Some(vec![".".to_string(), ">".to_string(), ":".to_string()]),
             // No `completionItem/resolve`: everything a client needs is in the item, and a resolve round trip
-            // would exist to fetch documentation this layer does not read yet.
+            // would exist to fetch documentation this layer does not read *here*. The analysis can answer it now
+            // (`Session::documentation`, the hover section of §6), but attaching it would be one documentation
+            // lookup per offered name — a hundred tree walks for a list the user is about to filter by typing — so
+            // what a client shows is what this layer already knows: an inherited-from note and an ambiguity note.
             resolve_provider: Some(false),
             ..CompletionOptions::default()
         });
