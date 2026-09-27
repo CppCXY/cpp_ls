@@ -512,3 +512,35 @@ fn an_object_like_body_in_force_is_used_by_default_and_can_be_turned_off() {
     let rendered = cpp_code_analysis::cook_with(source, &tokens, &conservative.table).render();
     assert!(rendered.text.starts_with("_ACRTIMP"), "{:?}", rendered.text);
 }
+
+/// **A cook over two layers answers like a cook over the two merged.**
+///
+/// The layered starting state (`Over`, and `FileMacros` behind it) replaced a per-file table build and a per-file
+/// `extend_from`: the bindings are the same objects either way, and only the *order* decides what wins. That order
+/// is the one the flat table had by construction — the newer layer was inserted later, and the lookup takes the
+/// last binding in force — so this test pins it down on the one thing that is easy to get backwards: a builtin the
+/// compilation defines, and a header's definition of the same name.
+#[test]
+fn a_cook_over_two_layers_answers_like_the_two_merged() {
+    let seed = defines("#define MY_API 1\n#define ONLY_IN_THE_SEED 2\n#define LATE(x) seed_##x\n");
+    let environment = defines("#define MY_API 3\n");
+
+    // The two readings being compared: layered, and merged the way the table used to be built.
+    let mut merged = seed.clone();
+    merged.extend_from(&environment);
+
+    let source = "MY_API + ONLY_IN_THE_SEED + LATE(1)\n";
+    let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+
+    let layered = cpp_code_analysis::Over::new(&environment, &seed);
+    let from_layers = cpp_code_analysis::cook_with(source, &tokens, &layered).render();
+    let from_the_merge = cpp_code_analysis::cook_with(source, &tokens, &merged).render();
+
+    assert_eq!(from_layers.text, from_the_merge.text);
+    assert_eq!(
+        from_layers.text.trim(),
+        "3 + 2 + seed_1",
+        "the newer layer's `MY_API` wins, the seed answers for what the newer layer never mentions, and both \
+         directions expand"
+    );
+}

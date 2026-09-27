@@ -80,7 +80,9 @@
 - 内容:include 图(每条 `#include` 的形式与解析出的路径)、条件区域(`#if` 的分支、哪一支在效力)、宏表
   (名字 → 参数形式 + 替换列表)、guard(include guard / `#pragma once`)。
 - 为什么不是树:**同一个头在不同宏状态下包含进来,结果不同**。所以宏环境是**位置化**的——某个 offset 之后
-  才生效,`MacroEnvironment` 就是这个形状,不许换成"一个文件一张表"。
+  才生效,`MacroFacts`(`cpp_parser::symbols`)就是这个形状,不许换成"一个文件一张表"。它有两个实现:
+  一次闭包走出来的 `MacroEnvironment`(物化),和一次 TU 走出来的 `MacroView`(借用时间线的一个位置,
+  不物化)—— 查询语义由 `tests/cpp_code_analysis/translation_unit.rs` 的逐问题等价断言绑在一起。
 - 共享的粒度是 **(文件, 配置哈希)**,不是"文件"。缓存键已经有这套:`SummaryKey::new(content_hash, context_hash)`。
 - 它今天已经存在(`crates/cpp_code_analysis/src/preprocess/`、`summary.rs`、`index/`)。**要改的是它的输入**:
   现在从红树读(`index/mod.rs` 的 `preprocess(&root)`),要改成从 token 流读(§6 M1)。
@@ -297,7 +299,7 @@ exception:4:6  expected primary expression    | RENDERED …tern "C++" void __cd
 **向前做一次配平扫描**就够了——这**不是**搜索,而是精确的:标准里宏的参数表只允许标识符、逗号、`...` 和空白
 (没有字符串、没有注释、参数里也不会嵌套括号),所以配平扫描就是全部规则。
 
-- `IncludedMacro.parameters` / `MacroEnvironment::parameters_of` / `parameters_in_force`:证据带着它走;
+- `IncludedMacro.parameters` / `MacroFacts::parameters_of` / `parameters_in_force`:证据带着它走;
 - `InForceBody` 多了 `parameters`,并新增一条 4 元组 `From`(旧的三条 `From` 一律给 `None`,即"没人说过");
 - 熟读的判据变成:**对象宏可用,或者函数宏且参数表在手**(`definition_text` 拼出 `NAME(params) body`,再交给
   指令层同一个 `parse_define`);
@@ -816,6 +818,150 @@ token)。定义本身与文件无关——与文件有关的只有**绑定生效
 
 下一步要量的是**展开那 6 s**:`MacroTable` 的查表与替换本身(每个 token 一次 `binding_at` 的**线性反查**,
 与"每文件走闭包"是同一个形状的隐患),以及视图那 2.3 s。
+### 第三次同一个形状:`MacroTable` 的查表(已改)与"每文件重建表"(下一个)
+
+展开那 6 s 里,`MacroTable::binding_at` 是**整表反向线性扫**,而它的调用者是展开器 —— 每个标识符 token
+一次、每个 body 里遇到的名字再一次。这是同一个形状的第三次出现(类头扫描的窗口、`rollback` 的 `retain`、
+`TypeNames` 的线性扫),于是同样处理:表按名字建索引(`name → 该名字各绑定的下标`),查询只看**这个名字自己的
+历史**。同一次会话里展开 6.0 s → **3.4 s**。
+
+同时把"定义"这一路的所有权也统一到 `Arc` 上,好让"每文件构建一张表"这件事本身变便宜:
+`MacroFacts::for_each_definition` / `for_each_body_in_force` / `parameters_of` 现在交出**环境自己持有的
+`Arc`**(以前 `definitions` / `bodies_in_force` 交 `&str`,而调用方 `Arc::from` 又各复制一份 —— 一个语料
+250 万次);`MacroDef.name` 一路到 `Binding.name` 和索引键都是共享的。(那两个迭代器后来变成了**访问器**:
+`MacroFacts` 要能装进 `&dyn`,而 `impl Iterator` 不是对象安全的 —— 见下一节。)
+
+**一条测量纪律,这一轮踩到了**:这些百分比的差别会被机器负载淹没。同一个二进制连跑三次,`parse alone`
+在 15.9 / 17.5 / 18.3 / 20.3 s 之间漂;拿 `parse_scale` 校准同一个文件(60 ms → 82 ms)才看出**机器当时慢了
+约 35%**。所以上面那些"改前 / 改后"只在**同一次会话、相邻两次运行**里成立(60 → 602 ms 那次十倍、
+5.5 → 0.46 s 那次十倍都是这样测的),跨会话只比数量级。
+
+**下一个病灶已经指出来了**:每文件仍然重建一张上万条绑定的表(`configuration_from_environment_and` 里
+~5 s + 表构建 ~2 s)。表的内容对同一批头文件的每个文件几乎一样,只有**绑定偏移**不同 —— 所以下一步是把
+`MacroEnvironment` 的**视图**做成借用(不物化),`cook_with` 也不再 clone 起始表(用一张小 overlay 叠在
+共享表上)。那是 L1/L2(内容缓存 + 名字驻留)真正要服务的东西。
+### 环境本身也只剩一张表(语义等价,收益在噪声之内)
+
+`MacroEnvironment` 原来是**三张哈希表**:`by_name`(名字 → 历史)、`body_texts` 与 `parameters`
+(键都是 `(偏移, 名字)`)。后两张表读的时候用的偏移与历史表一模一样,等于一个条目插三次、每个键一份
+`Box<str>`。现在只有一张 `by_name`(名字 → 该名字的历史),每个绑定把 `at / definition / body / parameters`
+放在一起,键是**共享的** `Arc<str>`(时间线产出一份,所有文件引用它)。查询也顺带简化成一条
+`binding_in_force(name, offset)` 的二分。
+
+同一次改动里,`IncludedMacro.name` / `InForceBody.name` 也变成 `Arc<str>`:以前每个文件物化环境时,每个条目
+都要为新名字分配一次字符串。
+
+**同一次会话内的 A/B(机器空载,两个二进制交替跑)**,对照点是**上一个提交**:
+
+| | 上一个提交 | 现在 | |
+|---|---|---|---|
+| 255 熟读 `parse alone` | 15.64 s | **13.83 s** | −12% |
+| 109 熟读 `parse alone` | 4.15 s | **3.81 s** | −8% |
+| 255 裸读(整轮) | 12.6 s | 11.8 s | −6% |
+| 读数 | 254 / 108 / 225 | **254 / 108 / 225** | 不变 |
+
+所以这一批改动(名字索引 + `Arc` 名字/体贯穿定义这条路 + 环境并成一张表)是**真的约 10%**,不是噪声 ——
+区别在于这次是**同一次会话、交替运行**,并用 `parse_scale` 校准过机器(422 KB 渲染 55.5 ms,与最早那次
+60 ms 同一水平)。`tests/translation_unit.rs` 的逐问题等价断言同时保证语义没动。
+
+**剩下的那块**是**视图本身的物化**:每个文件还要把时间线读成 ~1 万条 `Arc` 克隆 + 一万次哈希插入
+(255 语料 1.7 s),以及表构建(1.4 s)。要再往下走就得把 `MacroEnvironment` 做成**借用时间线的视图**
+(不物化、不建表,查询直接在事件流上二分),并让 `cook_with` 用小 overlay 叠在共享表上而不是 clone 整张表。
+
+### 环境变成"时间线上的一个位置"(借用视图,已落地)
+
+上一节结尾指出的方向做出来了,形状是 clang 的形状:文件没有自己的宏状态,**文件在时间线上的位置**才是
+宏状态。落地为三件事:
+
+1. `TranslationUnit` 多了两张**派生索引**(构造时算,不进缓存格式 —— 写下去的派生字段会和它派生自的东西
+   不一致):`by_name`(名字 → 该名字各事件的**走序下标**)与 `paths`(每个 frame → 它的祖先链,每个祖先带
+   "本 frame 的文本在该祖先里从哪个 offset 生效")。有了它们,"这个文件在 offset O 处 `_STD` 是什么"退化成
+   一次哈希 + 走这个名字自己的一小段历史。
+2. `MacroView<'unit>` = `{ unit, frame }`,两个词。开一个视图是**免费**的;可见性规则就是三条:`event.frame ==
+   本 frame` → 看不见(自己的 `#define` 是解析器自己从文本里读的);`event.frame` 落在本 frame 的子树区间里
+   → 从**最外层那条 `#include`** 的结尾生效(`offset_in`,`paths` 查表);下标 `< entry_seq` → 从 offset 0 生效;
+   其余 → 看不见。对一个名字而言,这些 offset 在走序里**单调不减**(前缀全是 0,`#include` 按文本顺序走),
+   所以"走序里最后一个可见事件"就是"当时在效力的那个" —— 与被替换掉的那张 map 的 last-wins 折叠是同一条规则,
+   只是**在查询时读**而不是在构建时冻结。
+3. `MacroFacts`(`cpp_parser::symbols`)是那道缝:`MacroEnvironment`(物化)和 `MacroView`(借用)实现同一组
+   问题,`ParserConfig` 持有 `&dyn MacroFacts`。整个环境的两条通道做成**访问器**(`for_each_definition` /
+   `for_each_body_in_force`),因为 `impl Iterator` 不是对象安全的,而装箱迭代器会在"每文件走一遍"的路径上
+   多一次分配。`configuration_from_environment_and` / `FileIndexer::with_macro_bodies` / `MacroBodies` 都改成
+   走这道缝(最后一个用 blanket impl,免得每加一个实现就要加一条 `impl`)。
+
+**一个被量掉的错误设计(记下来免得再犯)**:为了廉价地限制视图扫描的范围,先给 `TuFrame` 加了 `end_seq`
+(离开文件时的事件数),理由是"文件看见的全部就是 `events[..end_seq]`"。它是对的,也是**没用**的:在伞形 TU 里
+每个文件看见的事件里绝大多数落在**继承前缀**里(必须从 0 扫起),把尾巴切掉一分钱都没省 —— 255 语料视图
+1.7109 s → 1.6988 s(−0.7%,就是噪声)。于是它被删掉了(codec 退回 v14),"界限"改由可见性判断结构性给出。
+
+**同一次会话、相邻两次运行(机器空载)**,对照点是本轮的起点:
+
+| | 起点 | 现在 | |
+|---|---|---|---|
+| 255 熟读 视图 | 1.71 s | **0.29 ms** | 不再物化 |
+| 255 熟读 视图+表构建 | 5.43 s | **4.18 s** | −23% |
+| 255 熟读 `parse alone` | 13.83–14.37 s | **12.25 s** | −12~15% |
+| 读数(255 熟 / 109 熟 / 455 熟 / 128 裸 / 255 裸 / 455 裸) | 254 / 108 / 452 / 128 / 213 / 454 | **同左** | 不变 |
+
+`parse` 那一段没有变慢(2.16 → 2.20 s):视图的每次查询比物化表的一次二分略贵,但**不再有每文件的建表**。
+语义由 `tests/translation_unit.rs` 的逐问题等价断言守着(同一个 `answers(&dyn MacroFacts, name, offset)`
+同时问两条路),缓存往返也仍然逐问题相等。
+
+**下一块**:表本身。现在每个文件还要**建**一张表(`configuration_from_environment_and` 里 ~4 s:遍历全单元
+名字 → `define_shared_at`)并在 `cook_with` 里 **clone** 它(展开 3.24 s 的一部分)。表的内容对同一批头文件
+几乎一样,只有**绑定偏移**不同 —— 所以下一步是把表的**基座**做成共享的(单元一张表,绑定带
+`(frame, 文件内 offset)`),每个文件只叠一张**小 overlay**(它自己的 `#define`s),`cook_with` 的 `clone` 随之
+消失;绑定偏移的换算已经是 `paths` 给得起的。那才是 L1/L2(内容缓存 + 名字驻留)真正要服务的东西。
+
+### 表也不再每文件建/拷了(已落地):一次读定义 + 三层
+
+上一节结尾那块做完了,形状是"**定义按单元读一次,偏移按文件解析**":
+
+1. `TranslationUnit::definitions(&mut ParsedDefinitions) -> UnitDefinitions`:**一次**读完单元里每个能拼成
+   `#define` 的事实,结果按**事件下标**排(`by_event`,与 `events` 平行的 `Vec`)、文本经 run 级
+   `ParsedDefinitions` 去重(255 语料 40 331 条,102 ms)。定义的身份是名字+参数表+体,**与哪个文件在看无关**
+   —— 有关的只有偏移。
+2. `FileMacros<'unit>`:一个文件的起步状态,三层,新→旧:**in-force 通道**(条件里生效的体,从 offset 0 起)→
+   **定义通道**(单元自己的 `#define`,偏移由 `MacroView::visible_binding` 在这个文件的坐标系里算出来)→
+   **seed**(`-dM` 与配置决定的名字)。层的顺序就是原来那张扁平表的**插入顺序**,所以"谁盖谁"逐字节等价。
+3. `MacroBindings`(`preprocess/macros.rs`)是第四道缝:`MacroTable` / `FileMacros` / `Over` 都实现它,
+   `PositionalMacros`、`cook_with`、`decide`、`rests_on_an_undefined_name` 一律走 `&dyn`。`cook_with` 内的
+   `initial.clone()` 换成 `Live { own: 文件自己的指令, base: &dyn … }` —— 文件自己的 `#define` 本来就是最新的
+   一层,不需要为它先把别人的一万条绑定抄一遍。
+4. `Over<'a>`:闭包路径(没有 TU 的那条)用它把 `Configuration` 叠在 seed 上,连 `extend_from` 的每文件拷贝也
+   一并去掉。
+
+**踩到并修掉的一个真回归**:新路径最初在"文件不在 TU 里"时给的是**空表**,而旧路径永远是
+"seed + 环境" —— 455 语料立刻从 452 干净掉到 **445**(少了 7 个)。seed 是**每个**文件的最老一层,包括 TU 走不到
+的文件;补上后 452 回来。这条也是唯一一次读数变化,其余五组读数自始至终不变。
+
+**同一次会话、机器空载**(255 熟读):
+
+| | 上一轮之后 | 现在 | |
+|---|---|---|---|
+| `parse alone` | 12.01–12.25 s | **4.25 s** | −65% |
+| cooked: definitions(单元一次) | — | 103 ms / 40 331 条 | 新增的一遍 |
+| cooked: evidence(每文件配置) | 4.06 s | **17 µs** | 不再建表 |
+| cooked: macro table(每文件 seed+extend) | 1.43 s | **58 µs** | 不再拷贝 |
+| cooked: expansion(含 `cook_with` 的 clone) | 3.19 s | **1.92 s** | clone 没了 |
+| cooked: view | 0.3 ms | 0.17 ms | 开一个视图 |
+| 读数(255熟/109熟/455熟/128裸/255裸/455裸) | 254/108/452/128/213/454 | **同左** | 不变 |
+
+渲染字节数也一样(`3237720` / 255 熟读、`1540358` / 109 熟读),即**逐字节相同的渲染**;`tests/cooked.rs` 新增
+"两层 = 合并成一张表"的断言,`tests/translation_unit.rs` 新增"同一个文件经单元与经自己的表 **cook 出同一段
+文本**"的断言(夹具覆盖 in-force 通道、`#undef`、seed 同名)。
+
+**两件要记住的语义变化**:
+
+- `unusable_*` 四个计数在单次走查路径上改成**按单元**计一次(原来是每文件累加,等于把同一个不可用定义按
+  "能看见它的文件数"重复计数);闭合路径仍是每文件。读数(干净数)不受影响。
+- **一个没修的已知缺口**,这次用测试钉住而不是顺手改:`#undef` 在单元的宏表里**没有条目**(它不是定义),
+  所以单元 `#undef` 掉一个名字后,cook 的表里 seed 的同名定义会**漏回来**。上一轮的表有同一个洞、原因相同
+  (读数逐字节一致),要修就得给层加第三种状态("这里确定没定义"),那是另一件要单独量的事。
+
+**下一块**:`UnitDefinitions` 目前每次 run 重读一遍(102 ms/255 语料),而它是**纯派生**——可以随 TU 一起落盘
+(L4 缓存已经有了),也可以只读"用到的那部分";再往下是 L1/L2(内容缓存 + 名字驻留)真正要服务的东西。
+
 ### M4 —— 文件 CST 降级
 裸树只保留:无损、括号/指令结构、浅层声明扫描。此时它那侧的门禁放宽到"结构正确",不再要求 C++ 正确。
 **验收**:宽容语法里针对展开的谓词清零。

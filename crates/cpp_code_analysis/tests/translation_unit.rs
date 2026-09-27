@@ -24,9 +24,10 @@ use std::path::{Path, PathBuf};
 
 use cpp_code_analysis::graph::Marked;
 use cpp_code_analysis::{
-    CompilerConfig, FileIndexer, FileSummary, MacroDefinitions, MemoryFiles, SummaryKey,
-    TranslationUnit, TranslationUnitCache,
+    CompilerConfig, FileIndexer, FileSummary, MacroBindings, MacroDefinitions, MemoryFiles,
+    SummaryKey, TranslationUnit, TranslationUnitCache,
 };
+use cpp_parser::MacroFacts;
 
 /// A file set in memory, indexed once, with the two ways of asking for a file's environment.
 struct Unit {
@@ -117,8 +118,12 @@ impl Unit {
 }
 
 /// Every question the parser can ask of an environment, asked of both readings.
+///
+/// `&dyn MacroFacts` rather than either of the two types, because comparing the readings is the whole point: the
+/// per-file walk answers them out of a materialised `MacroEnvironment` and the unit answers them out of a
+/// [`cpp_code_analysis::MacroView`], and a test that had to name one of them could not ask both the same question.
 fn answers(
-    environment: &cpp_parser::MacroEnvironment,
+    environment: &dyn cpp_parser::MacroFacts,
     name: &str,
     offset: usize,
 ) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
@@ -126,7 +131,7 @@ fn answers(
     (
         kind,
         environment.body_text_of(name, offset).map(str::to_string),
-        environment.parameters_of(name, offset).map(str::to_string),
+        environment.parameters_of(name, offset).map(|list| list.to_string()),
         environment.body_text_in_force(name).map(str::to_string),
     )
 }
@@ -478,4 +483,145 @@ fn a_walked_unit_can_be_kept_and_read_back() {
     );
 
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// **A file cooks the same through the unit as through a table of its own.**
+///
+/// The one-walk path stopped building a table per file: it reads the unit's definitions **once**
+/// ([`TranslationUnit::definitions`]) and answers each query positionally (`FileMacros`). That is a different
+/// mechanism for the same question, and the only thing that matters about it is that the answer is the same — a
+/// binding that is in force in one reading and not in the other changes what the cooker pastes, which shows up
+/// much later as a parse that reads something else.
+///
+/// So this test cooks every file of a fixture **twice**: once from the shared unit, once from the table the
+/// per-file reading built, and compares the rendered text byte for byte. The fixture is chosen to put every layer
+/// of the new state under the comparison: a definition inside a taken `#if` (the in-force channel, which is the
+/// newest layer), a conditional definition the seed decides, an `#undef` in the middle of a file (which must
+/// shadow what the include brought in from that offset on), and a name the seed also carries.
+#[test]
+fn a_file_cooks_the_same_through_the_unit_as_through_a_table_of_its_own() {
+    let files = [
+        (
+            "/p/config.h",
+            "#ifndef _CONFIG_H_\n\
+             #define _CONFIG_H_\n\
+             #ifdef __cplusplus\n\
+             #define SA(id) id\n\
+             #else\n\
+             #define SA(id) SA_##id\n\
+             #endif\n\
+             #define OBJECT 1\n\
+             #endif\n",
+        ),
+        (
+            "/p/api.h",
+            "#include \"config.h\"\n\
+             #define LATE(x) (x)\n\
+             int f = OBJECT + LATE(2);\n\
+             #undef OBJECT\n\
+             int g = SA(GG);\n",
+        ),
+        (
+            "/p/main.cpp",
+            "#include \"api.h\"\n\
+             #define LATE(x) [x]\n\
+             int h = OBJECT;\n\
+             LATE(3)\n",
+        ),
+    ];
+
+    let unit = Unit::new(&files);
+    let mut definitions = MacroDefinitions::default();
+    let timeline = unit.timeline_of("/p/main.cpp", &mut definitions);
+
+    // The unit's definitions, read once — what replaced the per-file table build.
+    let mut parsed = cpp_code_analysis::ParsedDefinitions::new();
+    let shared = timeline.definitions(&mut parsed);
+
+    let mut rendered_something_the_reading_can_be_told_apart_by = false;
+
+    for (path, text) in &files {
+        let path = Path::new(path);
+        let view = timeline
+            .environment_of(path)
+            .unwrap_or_else(|| panic!("the unit reaches {}", path.display()));
+
+        // The reading that builds a table for this file…
+        let mut per_file_definitions = cpp_code_analysis::ParsedDefinitions::new();
+        let configuration =
+            cpp_code_analysis::configuration_from_environment_and(&view, true, &mut per_file_definitions);
+
+        // …and the reading that reads the unit once and answers positionally.
+        let file_macros = cpp_code_analysis::FileMacros::new(view, &shared, None, true);
+
+        let (tokens, _) = cpp_parser::lex(text, &cpp_parser::LexerConfig::default());
+        let from_the_table = cpp_code_analysis::cook_with(text, &tokens, &configuration.table);
+        let from_the_unit = cpp_code_analysis::cook_with(text, &tokens, &file_macros);
+
+        // The precondition of the comparison, asserted rather than assumed: this file really does expand
+        // something from outside itself, so "they agree" is not "both rendered an empty stream". (A header of
+        // nothing but directives renders to nothing, and that is correct — `config.h` is exactly that.)
+        rendered_something_the_reading_can_be_told_apart_by |= !from_the_table.render().text.trim().is_empty();
+
+        assert_eq!(
+            from_the_unit.render().text,
+            from_the_table.render().text,
+            "{} cooked differently through the unit than through its own table",
+            path.display()
+        );
+    }
+
+    assert!(
+        rendered_something_the_reading_can_be_told_apart_by,
+        "the fixture rendered nothing at all, so the comparison above was vacuous"
+    );
+
+    // **The seed is the oldest layer**, and the order is the whole of what makes the shared state equal to the
+    // table it replaced: a name the unit defines wins over the compiler's own, a name the unit says nothing about
+    // still comes from the seed, and a name the unit has **said something else** about is settled by that and not
+    // by the seed.
+    //
+    // Asked of `main.cpp`'s view, and that is the point rather than a detail: `config.h`'s own `#define`s are not
+    // in `config.h`'s environment — a file does not inherit its own facts, which is the contract
+    // `TranslationUnit::environment_at` documents and the parser relies on (it reads the file's own `#define`s out
+    // of the text). `main.cpp` includes `api.h`, so for *it* those facts are the unit's.
+    let builtins = "#define LATE 99\n#define OBJECT 99\n#define _FROM_THE_SEED_ 1\n";
+    let (tokens, _) = cpp_parser::lex(builtins, &cpp_parser::LexerConfig::default());
+    let seed = cpp_code_analysis::preprocess::preprocess(builtins, &tokens).macros;
+
+    let body_of = |definition: &cpp_code_analysis::macros::MacroDef| -> String {
+        definition
+            .body
+            .significant()
+            .map(|token| token.text().to_string())
+            .collect()
+    };
+    let with_seed = cpp_code_analysis::FileMacros::new(timeline.root_environment(), &shared, Some(&seed), true);
+
+    assert_eq!(
+        with_seed.definition("LATE").map(&body_of),
+        Some("(x)".to_string()),
+        "api.h's `#define LATE(x) (x)` arrives through the include and is in force over the seed's `99` \
+         (main.cpp's own `LATE(x) [x]` is the *own* layer, which the cook adds — not this one)"
+    );
+    assert!(
+        with_seed.definition("_FROM_THE_SEED_").is_some(),
+        "a name only the seed defines still reaches the cook — that is what the oldest layer is for"
+    );
+    // **A gap this round did not change, asserted so that it stays visible.** api.h `#undef`s `OBJECT`, and the
+    // unit knows it — but the cook's table has no way to say "not defined": an entry that said so would have to
+    // shadow the seed, and the environment's `#undef` facts are not entries at all (an `#undef` is not a
+    // definition, which is what `for_each_definition` yields). So the seed's `99` comes back. It did before this
+    // round too — the per-file table had the same hole for the same reason, and the readings are byte-identical —
+    // so this is a *known gap* rather than a behaviour this round introduced. Fixing it means a third state in
+    // the layer ("certainly not defined here"), which is worth doing on purpose and with its own measurement.
+    assert_eq!(
+        with_seed.definition("OBJECT").map(&body_of),
+        Some("99".to_string()),
+        "the unit's `#undef` does not reach the cook's table — see the note above"
+    );
+    assert!(
+        with_seed.definition("_NOBODY_SAYS_").is_none(),
+        "and a name nobody defines is nobody's: the seed does not invent one"
+    );
 }

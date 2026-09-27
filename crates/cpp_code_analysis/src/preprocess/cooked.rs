@@ -223,21 +223,10 @@ pub fn cook(source: &str, tokens: &[CppTokenData]) -> CookedStream {
     cook_with(source, tokens, &MacroTable::new())
 }
 
-/// One definition the evidence contributes, on its way into the cook's starting table.
-///
-/// `(name, the binding's offset, the parameter list, the replacement list, whether it may be used at all)` — a
-/// named shape because five positional fields in a `Vec` is a puzzle at the loop below, and because the two
-/// `None`s mean different things: no parameters is an object-like macro, no body is a definition this cook cannot
-/// expand and counts instead.
-type Definition<'a> = (
-    &'a str,
-    usize,
-    Option<std::sync::Arc<str>>,
-    Option<std::sync::Arc<str>>,
-    bool,
-);
-
 /// A body that only the **in-force** channel carries: its name, its parameter list, its text.
+///
+/// Kept as a tuple rather than a struct because it never leaves this function: the environment hands it over a
+/// [`cpp_parser::BodyFacts`], this is what survives the filter, and the loop below destructures it in place.
 type InForceDefinition<'a> = (&'a str, Option<std::sync::Arc<str>>, std::sync::Arc<str>);
 /// A definition written the way a directive writes it: `NAME(params) body`.
 ///
@@ -269,7 +258,7 @@ pub struct Configuration {
     ///
     /// **The gap is now only the missing list, not the arity.** A function-like definition *with* its list is
     /// expanded like any other, because the list is what substitution needs and
-    /// [`cpp_parser::MacroEnvironment::parameters_of`] supplies it; the count that used to be "every function-like
+    /// [`cpp_parser::MacroFacts::parameters_of`] supplies it; the count that used to be "every function-like
     /// definition in the closure" was measured at ... see the module's own census.
     pub function_like_without_parameters: usize,
     /// Bodies that arrive through the **in-force channel only** — no definition, so nothing that says whether the
@@ -334,7 +323,11 @@ impl ParsedDefinitions {
     ///
     /// `None` is "this text is not a definition this reader can put back together" — a fact about the text, so it
     /// is remembered too: a body that does not read once does not read on the two hundredth file either.
-    fn definition(
+    ///
+    /// `pub(crate)` because a *unit's* definitions are read through it in one pass
+    /// ([`crate::TranslationUnit::definitions`]): the same cache, one caller that knows the whole timeline
+    /// instead of one caller per file.
+    pub(crate) fn definition(
         &mut self,
         name: &str,
         parameters: Option<&std::sync::Arc<str>>,
@@ -387,7 +380,7 @@ fn parse_a_definition(text: &str) -> Option<crate::macros::MacroDef> {
 /// **Bodies that only the in-force channel has are used only when the caller classified them as object-like**
 /// — see [`Configuration::in_force_without_a_parameter_list`] for the measurement that decided it, and
 /// [`cpp_parser::InForceBody`] for why the flag is an `Option`.
-pub fn configuration_from_environment(environment: &cpp_parser::MacroEnvironment) -> Configuration {
+pub fn configuration_from_environment(environment: &dyn cpp_parser::MacroFacts) -> Configuration {
     configuration_from_environment_with(environment, true)
 }
 
@@ -415,7 +408,7 @@ pub fn configuration_from_environment(environment: &cpp_parser::MacroEnvironment
 /// wins on both primary numbers, so it is the default and [`configuration_from_environment_with`] is how a caller
 /// asks for the conservative reading instead.
 pub fn configuration_from_environment_with(
-    environment: &cpp_parser::MacroEnvironment,
+    environment: &dyn cpp_parser::MacroFacts,
     use_in_force_bodies: bool,
 ) -> Configuration {
     // A cache of one file's definitions: what a caller that has no run to share gets, and the honest default for
@@ -434,7 +427,7 @@ pub fn configuration_from_environment_with(
 /// copies the result into its own table. A caller that cooks more than one file (a census, an editor's session,
 /// an index build) passes the same cache each time.
 pub fn configuration_from_environment_and(
-    environment: &cpp_parser::MacroEnvironment,
+    environment: &dyn cpp_parser::MacroFacts,
     use_in_force_bodies: bool,
     parsed: &mut ParsedDefinitions,
 ) -> Configuration {
@@ -445,91 +438,227 @@ pub fn configuration_from_environment_and(
     // **Usable** means: object-like, or function-like *with* its parameter list — a body that takes arguments can
     // be expanded only when the arguments have names to be substituted into, and a body nobody classified cannot
     // be expanded at all. What is left is counted, not guessed at.
-    let usable = |function_like: Option<bool>, parameters: Option<&str>| match function_like {
+    let usable = |function_like: Option<bool>, parameters: Option<&std::sync::Arc<str>>| match function_like {
         Some(false) => true,
         Some(true) => parameters.is_some(),
         None => false,
     };
-    let in_force: Vec<InForceDefinition<'_>> = if use_in_force_bodies {
-        environment
-            .bodies_in_force()
-            .filter(|(_, function_like, parameters, _)| usable(*function_like, *parameters))
-            .map(|(name, _, parameters, body)| {
-                (
-                    name,
-                    parameters.map(std::sync::Arc::from),
-                    std::sync::Arc::from(body),
-                )
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+    // **Both channels in one pass each**: the visitor hands over the facts, and what it hands over is what the
+    // two answers below are counted from — the bodies this run may use, and the ones it may not.
+    let mut in_force: Vec<InForceDefinition<'_>> = Vec::new();
+    let mut bodies_in_force = 0usize;
+    environment.for_each_body_in_force(&mut |facts| {
+        bodies_in_force += 1;
+        if use_in_force_bodies && usable(facts.function_like, facts.parameters) {
+            // Cloned `Arc`s rather than fresh copies of the text — see the note on the other channel below.
+            in_force.push((facts.name, facts.parameters.cloned(), std::sync::Arc::clone(facts.body)));
+        }
+    });
 
     let mut out = Configuration {
-        in_force_without_a_parameter_list: environment.bodies_in_force().count() - in_force.len(),
+        in_force_without_a_parameter_list: bodies_in_force - in_force.len(),
         ..Configuration::default()
     };
 
-    // `(name, at, text, usable)`. The text is a whole definition written the way a directive writes it, so the
-    // **arity** is in the text and not in a flag beside it — `#define NAME(params) body` is read back by the same
-    // `parse_define` the directive layer uses, and a definition that says it takes parameters takes them wherever
-    // it came from. What the text cannot say is what is **missing**, and that is `usable`.
-    // `(name, at, parameters, body, usable)`. The **text** is no longer built here: it is what the cache below
-    // keys on, and building it for every entry of every file was one of the two costs this function's own
-    // measurement named (2.5 million `format!` calls for 42 939 distinct definitions).
-    let definitions: Vec<Definition<'_>> = environment
-        .definitions()
-        .map(|(name, at, function_like, body)| {
-            let parameters = environment.parameters_of(name, at).map(std::sync::Arc::from);
-            // **A function-like definition whose parameter list the evidence does not have is not usable**, and
-            // that is the whole of the rule that used to be "every function-like definition is skipped": without
-            // the list [`definition_text`] would write `#define NAME body`, the table would read the macro as
-            // **object-like**, and a body that needs arguments would be pasted verbatim — the failure
-            // `Configuration::in_force_without_a_parameter_list` records (`( "warning " # NUMBER ": " MESSAGE )`).
-            //
-            // With the list, substitution is exactly what a function-like macro means, and the skip is now a gap
-            // rather than a policy: it was written when no channel carried parameters at all. Measured on the
-            // 255-file SDK corpus, which is why it changed — the SAL annotations of `sal.h`/`specstrings.h` are
-            // function-like macros that expand to nothing (`_Struct_size_bytes_(size)` on `ncrypt.h:267`), and
-            // reading them as names left `typedef _Struct_size_bytes_ ( … ) struct …` in the stream.
-            let usable = !function_like || parameters.is_some();
-            (name, at, parameters, body.map(std::sync::Arc::from), usable)
-        })
-        .chain(in_force.iter().map(|(name, parameters, body)| {
-            (
-                *name,
-                0usize,
-                parameters.clone(),
-                Some(std::sync::Arc::clone(body)),
-                true,
-            )
-        }))
-        .collect();
-
-    for (name, at, parameters, body, usable) in definitions {
+    // `(name, at, parameters, body, usable)`. The **text** is not built here: it is what the cache below keys on,
+    // and building it for every entry of every file was one of the two costs this function's own measurement
+    // named (2.5 million `format!` calls for 42 939 distinct definitions).
+    //
+    // **A function-like definition whose parameter list the evidence does not have is not usable**, and that is
+    // the whole of the rule that used to be "every function-like definition is skipped": without the list
+    // [`definition_text`] would write `#define NAME body`, the table would read the macro as **object-like**, and a
+    // body that needs arguments would be pasted verbatim — the failure
+    // `Configuration::in_force_without_a_parameter_list` records (`( "warning " # NUMBER ": " MESSAGE )`).
+    //
+    // With the list, substitution is exactly what a function-like macro means, and the skip is now a gap rather
+    // than a policy: it was written when no channel carried parameters at all. Measured on the 255-file SDK
+    // corpus, which is why it changed — the SAL annotations of `sal.h`/`specstrings.h` are function-like macros
+    // that expand to nothing (`_Struct_size_bytes_(size)` on `ncrypt.h:267`), and reading them as names left
+    // `typedef _Struct_size_bytes_ ( … ) struct …` in the stream.
+    environment.for_each_definition(&mut |facts| {
+        let usable = !facts.function_like || facts.parameters.is_some();
         if !usable {
             // No parameter names in the evidence — see the field's note.
             out.function_like_without_parameters += 1;
-            continue;
+            return;
         }
 
         // A definition the evidence carries **without a body** is counted rather than parsed: there is nothing to
         // expand, and the count is what says how much of the corpus is in that state.
-        let Some(body) = body else {
+        let Some(body) = facts.body_text else {
             out.without_a_body += 1;
-            continue;
+            return;
         };
 
-        match parsed.definition(name, parameters.as_ref(), &body) {
+        match parsed.definition(facts.name, facts.parameters, body) {
             // The **binding's** offset, not the definition's: see `MacroTable::define_shared_at`.
-            Some(definition) => out.table.define_shared_at(definition, at),
+            Some(definition) => out.table.define_shared_at(definition, facts.at),
+            None => out.unreadable += 1,
+        }
+    });
+
+    // The **in-force** bodies take effect from offset 0: they are not positional evidence but a body a condition
+    // settled, and the file sees them from its first line. See `Configuration::in_force_without_a_parameter_list`.
+    for (name, parameters, body) in in_force {
+        match parsed.definition(name, parameters.as_ref(), &body) {
+            Some(definition) => out.table.define_shared_at(definition, 0),
             None => out.unreadable += 1,
         }
     }
 
     out
 }
+/// **What one file of a walked unit starts with**, as the cooker asks it: the unit's definitions *as that file
+/// sees them*, with the compilation's own builtins underneath.
+///
+/// # The three layers, newest first
+///
+/// A cook's starting state is not one table, and the order is what makes it equal to the table it replaced. It
+/// used to be built by inserting, in this order, into one flat table: the builtins (`-dM`), then the
+/// environment's definitions, then the environment's **in-force bodies**; the table's lookup is
+/// "the last inserted binding in force at this offset", so the later layers shadow the earlier ones. This type
+/// answers in exactly that order:
+///
+/// 1. the **in-force channel** — a body a condition settled, in force from offset 0, and the newest layer, so it
+///    wins outright when it is usable (see `Configuration::in_force_without_a_parameter_list`);
+/// 2. the **definition channel** — the unit's own `#define`s, in force from the offset the fact came into force
+///    at *in this file*, which is what [`crate::MacroView::visible_binding`] resolves;
+/// 3. the **seed** — what the compiler predefines, the oldest layer, so a header that redefines a builtin is in
+///    force over it.
+///
+/// # Why it is a view and not a table
+///
+/// Every file used to get its own: ~10 000 bindings copied per file, the same definitions differing only in the
+/// offset each was in force from (255 files, 1.7 s of environment plus 4.1 s of table build in the census). None
+/// of that is per file: the **definitions** are the unit's ([`crate::UnitDefinitions`], parsed once) and the
+/// **offsets** are a property of the file, computed by the view when a query names one.
+pub struct FileMacros<'unit> {
+    view: crate::MacroView<'unit>,
+    definitions: &'unit crate::UnitDefinitions,
+    /// What the compiler predefines and the configuration decides — the oldest layer.
+    seed: Option<&'unit MacroTable>,
+    /// May the in-force channel be used? A decision the measurement left open, and the caller's to make: see
+    /// [`configuration_from_environment_with`].
+    use_in_force_bodies: bool,
+}
+
+impl<'unit> FileMacros<'unit> {
+    /// What `view`'s file starts with, over the unit's definitions and the compilation's seed.
+    pub fn new(
+        view: crate::MacroView<'unit>,
+        definitions: &'unit crate::UnitDefinitions,
+        seed: Option<&'unit MacroTable>,
+        use_in_force_bodies: bool,
+    ) -> Self {
+        FileMacros {
+            view,
+            definitions,
+            seed,
+            use_in_force_bodies,
+        }
+    }
+
+    /// The definition that is in force from offset 0 because a condition settled it — layer 1.
+    ///
+    /// `None` for a name the in-force channel does not carry **or cannot use**: an unusable body is not in the
+    /// table at all (it is counted instead), so it must not shadow the definitions underneath it.
+    fn in_force(&self, name: &str) -> Option<&'unit std::sync::Arc<crate::macros::MacroDef>> {
+        if !self.use_in_force_bodies {
+            return None;
+        }
+        self.definitions.of(self.view.visible_body_in_force(name)?)
+    }
+
+    /// The unit's own definition of `name`, with the offset it is in force from **in this file** — layer 2.
+    ///
+    /// A fact whose last visible entry is not a usable definition (an `#undef`, a body nobody carried) answers
+    /// `None` rather than searching further back: the last entry is what a name *is* there, and that is what the
+    /// name's collapse meant before this type existed. `None` is therefore "the unit says nothing usable", which
+    /// leaves the seed underneath.
+    fn positional(&self, name: &str) -> Option<(usize, &'unit std::sync::Arc<crate::macros::MacroDef>)> {
+        let (at, index) = self.view.visible_binding(name)?;
+        Some((at, self.definitions.of(index)?))
+    }
+}
+
+impl crate::macros::MacroBindings for FileMacros<'_> {
+    fn definition_at(&self, name: &str, offset: usize) -> Option<&crate::macros::MacroDef> {
+        if let Some(definition) = self.in_force(name) {
+            // In force from offset 0, so every offset sees it — see the type's note on the layer order.
+            return Some(definition);
+        }
+        if let Some((at, definition)) = self.positional(name)
+            && at <= offset
+        {
+            return Some(definition);
+        }
+        self.seed?.definition_at(name, offset)
+    }
+
+    fn definition(&self, name: &str) -> Option<&crate::macros::MacroDef> {
+        self.definition_at(name, usize::MAX)
+    }
+}
+
+/// **The cook's running state**: the file's own directives over what it started with.
+///
+/// A file's `#define`s are the *newest* layer, which is why the walk over them is a layer of its own rather than
+/// a copy: `cook_with` used to `clone()` the whole starting table (~10 000 bindings per file) to get a table it
+/// could add to, and every one of those bindings was already shared and immutable.
+struct Live<'base> {
+    own: MacroTable,
+    base: &'base dyn crate::macros::MacroBindings,
+}
+
+impl crate::macros::MacroBindings for Live<'_> {
+    fn definition_at(&self, name: &str, offset: usize) -> Option<&crate::macros::MacroDef> {
+        self.own
+            .definition_at(name, offset)
+            .or_else(|| self.base.definition_at(name, offset))
+    }
+
+    fn definition(&self, name: &str) -> Option<&crate::macros::MacroDef> {
+        self.own
+            .definition(name)
+            .or_else(|| self.base.definition(name))
+    }
+}
+
+/// **Two layers of starting state, newest first** — a materialised environment over the compiler's builtins.
+///
+/// The one-walk path does not need this: [`FileMacros`] carries its own three layers, because the unit knows what
+/// is newest. The **closure** path does: what a file starts with there is a `Configuration` built for that file,
+/// and underneath it the builtins are the same table for every file in the run. Copying one into the other is what
+/// `MacroTable::extend_from` used to do per file — and it is a copy of bindings that are already shared.
+pub struct Over<'a> {
+    newest: &'a dyn crate::macros::MacroBindings,
+    oldest: &'a dyn crate::macros::MacroBindings,
+}
+
+impl<'a> Over<'a> {
+    /// `newest` wins wherever it has a binding in force; `oldest` answers everything else.
+    pub fn new(
+        newest: &'a dyn crate::macros::MacroBindings,
+        oldest: &'a dyn crate::macros::MacroBindings,
+    ) -> Self {
+        Over { newest, oldest }
+    }
+}
+
+impl crate::macros::MacroBindings for Over<'_> {
+    fn definition_at(&self, name: &str, offset: usize) -> Option<&crate::macros::MacroDef> {
+        self.newest
+            .definition_at(name, offset)
+            .or_else(|| self.oldest.definition_at(name, offset))
+    }
+
+    fn definition(&self, name: &str) -> Option<&crate::macros::MacroDef> {
+        self.newest
+            .definition(name)
+            .or_else(|| self.oldest.definition(name))
+    }
+}
+
 /// Cook one file with the macros a **configuration** starts it with.
 ///
 /// `initial` is what the compilation defines before the file is read: the compiler's own builtins (`-dM`),
@@ -543,14 +672,18 @@ pub fn configuration_from_environment_and(
 pub fn cook_with(
     source: &str,
     tokens: &[CppTokenData],
-    initial: &MacroTable,
+    initial: &dyn crate::macros::MacroBindings,
 ) -> CookedStream {
     let directives = crate::directive::scan_directives(source, tokens);
 
     // The macros this walk has actually reached, on top of what the configuration supplied. A `#define` in
     // the file shadows a builtin of the same name, which is exactly what the table's positional lookup does
-    // when the file's definition is written later than offset 0.
-    let mut live = initial.clone();
+    // when the file's definition is written later than offset 0 — and it is a **layer** rather than a copy of
+    // what the file started with: every binding underneath is already shared, so there is nothing to copy.
+    let mut live = Live {
+        own: MacroTable::new(),
+        base: initial,
+    };
     let mut regions: Vec<Region> = Vec::new();
 
     let mut out = CookedStream::default();
@@ -617,14 +750,14 @@ pub fn cook_with(
                     && let Directive::Define(define) = &spanned.directive
                     && let Some(definition) = &define.macro_def
                 {
-                    live.define(definition.clone());
+                    live.own.define(definition.clone());
                 }
             }
             DirectiveKind::Undef => {
                 if was_live
                     && let Directive::Undef { name: Some(name) } = &spanned.directive
                 {
-                    live.undefine(name, spanned.range.start_offset);
+                    live.own.undefine(name, spanned.range.start_offset);
                 }
             }
             _ => {}
@@ -701,7 +834,7 @@ fn merge_span(spans: &mut Vec<SourceRange>, span: SourceRange) {
 fn decide(
     directive: &Directive,
     range: SourceRange,
-    live: &MacroTable,
+    live: &dyn crate::macros::MacroBindings,
     tokens: &[CppTokenData],
     token_index: usize,
 ) -> Option<bool> {
@@ -722,12 +855,12 @@ fn decide(
 /// architecture's ladder) is expected to drive to zero.
 fn rests_on_an_undefined_name(
     directive: &Directive,
-    live: &MacroTable,
+    live: &dyn crate::macros::MacroBindings,
     token_index: usize,
     tokens: &[CppTokenData],
 ) -> bool {
     let offset = token_start(tokens, token_index);
-    let unknown = |name: &str| live.get_at(name, offset).is_none();
+    let unknown = |name: &str| live.definition_at(name, offset).is_none();
 
     match directive {
         Directive::Ifdef { name, .. } => unknown(name),
@@ -769,7 +902,7 @@ fn expand_run(
     tokens: &[CppTokenData],
     from: usize,
     to: usize,
-    live: &MacroTable,
+    live: &dyn crate::macros::MacroBindings,
     out: &mut CookedStream,
 ) {
     let run = crate::directive::to_tokens(source, &tokens[from..to]);

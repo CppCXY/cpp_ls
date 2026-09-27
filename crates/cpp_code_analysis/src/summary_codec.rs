@@ -385,7 +385,7 @@ pub fn decode_translation_unit(
     let event_count = reader.count()?;
     let mut events = Vec::with_capacity(event_count);
     for _ in 0..event_count {
-        let name: Box<str> = reader.string()?.into_boxed_str();
+        let name: std::sync::Arc<str> = std::sync::Arc::from(reader.string()?);
         let function_like = match reader.u8()? {
             0 => None,
             1 => Some(false),

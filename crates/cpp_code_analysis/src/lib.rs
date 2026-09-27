@@ -65,7 +65,8 @@ pub use cache::{
 pub use file::token;
 pub use include::{config, graph, msvc, paths, system_headers, toolchain};
 pub use preprocess::{condition, cooked, directive, expand, guards, macros};
-pub use cooked::{ParsedDefinitions, configuration_from_environment_and};
+pub use cooked::{FileMacros, Over, ParsedDefinitions, configuration_from_environment_and};
+pub use macros::MacroBindings;
 pub use sema::declarations::{build_facts, by_name, declared_type_of, scope_of};
 pub use sema::{module_info, modules, parser_symbols, scopes, symbol};
 mod tu_cache;
@@ -75,7 +76,7 @@ pub use tu_cache::{TRANSLATION_UNITS_DIRECTORY, TranslationUnitCache};
 pub use summary::ConditionalBody;
 pub use summary::{
     ConditionAt, ConditionalRegion, DeclFact, DeclKind, FactGuard, FileSummary, GuardBranch,
-    IncludeFact, MacroFact, MacroKind, SummaryGuards, TranslationUnit,
+    IncludeFact, MacroFact, MacroKind, MacroView, SummaryGuards, TranslationUnit, UnitDefinitions,
     macros_from_direct_includes, macros_from_direct_includes_with_bodies,
     macros_from_the_closure_with_bodies, ClosureEvidence, macros_in_force_before_the_include,
     MacroDefinitions,

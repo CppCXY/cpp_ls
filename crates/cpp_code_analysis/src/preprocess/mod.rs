@@ -22,7 +22,7 @@ use cpp_parser::CppTokenData;
 use crate::{
     directive::{Directive, DirectiveKind, SpannedDirective, scan_directives},
     guard::{Branch, Guard, GuardStack, Visibility},
-    macros::MacroTable,
+    macros::{MacroBindings, MacroTable},
 };
 
 /// Everything one pass over a file produces.
@@ -86,8 +86,11 @@ impl FilePreprocessing {
 /// This is what [`crate::condition::MacroValues`] is implemented for, so a condition is evaluated
 /// against the macros that were in force where it was written — not against the file's final table,
 /// which is a different question with different answers.
+///
+/// The table is a `&dyn` because the same offset question is asked of a per-file table and of a whole walked
+/// translation unit's view — see [`MacroBindings`], which is where the three sources of an answer are named.
 pub struct PositionalMacros<'a> {
-    table: &'a MacroTable,
+    table: &'a dyn MacroBindings,
     offset: usize,
 }
 
@@ -96,7 +99,7 @@ impl crate::condition::MacroValues for PositionalMacros<'_> {
         use crate::condition::Lookup;
 
         self.table
-            .get_at(name, self.offset)
+            .definition_at(name, self.offset)
             .map_or(Lookup::Undefined, Lookup::Defined)
     }
 }

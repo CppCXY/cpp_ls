@@ -114,7 +114,7 @@ impl SymbolTable for NoSymbols {
 pub struct IncludedMacro {
     /// The offset in **this** file from which the entry applies: the end of the `#include` that brought it in.
     pub from_offset: usize,
-    pub name: Box<str>,
+    pub name: std::sync::Arc<str>,
     /// What the name is from that offset on — or `None` for an `#undef`, which takes it away again.
     pub definition: Option<SymbolKind>,
     /// The macro's **replacement list as text**, when the caller has it.
@@ -145,7 +145,7 @@ impl IncludedMacro {
     pub fn defined_at(from_offset: usize, name: &str, function_like: bool, body: MacroBody) -> Self {
         Self {
             from_offset,
-            name: name.into(),
+            name: std::sync::Arc::from(name),
             definition: Some(SymbolKind::Macro {
                 function_like,
                 body,
@@ -168,7 +168,7 @@ impl IncludedMacro {
     ) -> Self {
         Self {
             from_offset,
-            name: name.into(),
+            name: std::sync::Arc::from(name),
             definition: Some(SymbolKind::Macro {
                 function_like,
                 body,
@@ -209,7 +209,7 @@ impl IncludedMacro {
     ) -> Self {
         Self {
             from_offset,
-            name: name.into(),
+            name: std::sync::Arc::from(name),
             definition: Some(SymbolKind::Macro {
                 function_like,
                 body,
@@ -222,7 +222,7 @@ impl IncludedMacro {
     pub fn undefined_at(from_offset: usize, name: &str) -> Self {
         Self {
             from_offset,
-            name: name.into(),
+            name: std::sync::Arc::from(name),
             definition: None,
             body_text: None,
             parameters: None,
@@ -247,7 +247,7 @@ type InForceEntry = (
 /// "object-like" — see the field's note in `MacroEnvironment`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InForceBody {
-    pub name: Box<str>,
+    pub name: std::sync::Arc<str>,
     pub function_like: Option<bool>,
     /// The parameter list, when the caller has it — see [`IncludedMacro::parameters`]. A function-like body
     /// **with** its parameters is usable; without them it is not.
@@ -260,7 +260,7 @@ impl InForceBody {
     /// The body a caller already holds **shared** — a translation unit's walk, handing the same text to every
     /// file that has it in force.
     pub fn shared(
-        name: Box<str>,
+        name: std::sync::Arc<str>,
         function_like: Option<bool>,
         parameters: Option<std::sync::Arc<str>>,
         body: std::sync::Arc<str>,
@@ -277,7 +277,7 @@ impl InForceBody {
 impl From<(Box<str>, Box<str>)> for InForceBody {
     fn from((name, body): (Box<str>, Box<str>)) -> Self {
         InForceBody {
-            name,
+            name: std::sync::Arc::from(name),
             function_like: None,
             parameters: None,
             body: std::sync::Arc::from(body),
@@ -290,7 +290,7 @@ impl From<(Box<str>, bool, Option<Box<str>>, Box<str>)> for InForceBody {
         (name, function_like, parameters, body): (Box<str>, bool, Option<Box<str>>, Box<str>),
     ) -> Self {
         InForceBody {
-            name,
+            name: std::sync::Arc::from(name),
             function_like: Some(function_like),
             parameters: parameters.map(std::sync::Arc::from),
             body: std::sync::Arc::from(body),
@@ -301,7 +301,7 @@ impl From<(Box<str>, bool, Option<Box<str>>, Box<str>)> for InForceBody {
 impl From<(Box<str>, Option<bool>, Box<str>)> for InForceBody {
     fn from((name, function_like, body): (Box<str>, Option<bool>, Box<str>)) -> Self {
         InForceBody {
-            name,
+            name: std::sync::Arc::from(name),
             function_like,
             parameters: None,
             body: std::sync::Arc::from(body),
@@ -312,7 +312,7 @@ impl From<(Box<str>, Option<bool>, Box<str>)> for InForceBody {
 impl From<(Box<str>, bool, Box<str>)> for InForceBody {
     fn from((name, function_like, body): (Box<str>, bool, Box<str>)) -> Self {
         InForceBody {
-            name,
+            name: std::sync::Arc::from(name),
             function_like: Some(function_like),
             parameters: None,
             body: std::sync::Arc::from(body),
@@ -320,76 +320,70 @@ impl From<(Box<str>, bool, Box<str>)> for InForceBody {
     }
 }
 
-/// The macros a file's **includes** contribute, each with the offset it applies from.
+/// **The macro facts a file can see** — every question a consumer asks of an environment, and the two ways of
+/// answering them.
 ///
-/// Built once per file by the caller that knows the include graph (the index), queried by the parser at the offset
-/// it is reading. The answer is positional by construction: [`MacroEnvironment::kind_of`] returns whatever was in
-/// force **at that offset**, so the same name may be a macro in one region of a file and an ordinary identifier in
-/// another — which is exactly what the flat table could not say, and the reason it lost.
+/// The questions are the parser's (`kind_of`, `knows`, `body_text_resolved` — one per token, so they must be
+/// cheap) and the cooker's (the whole environment as **values**: a table cannot be built one name at a time when
+/// the names are the ones the file happens to mention).
 ///
-/// Not `Clone` on purpose: it is built once and borrowed for the parse.
-#[derive(Debug, Default)]
-pub struct MacroEnvironment {
-    /// One entry per name: `(offset, definition)` in offset order, with `None` for an `#undef`.
-    ///
-    /// Sorted per name rather than globally because a query is by name — the parser asks "what is `MY_API` here",
-    /// never "what is visible here" — and because a name's own history is short.
-    by_name: std::collections::HashMap<Box<str>, Vec<(usize, Option<SymbolKind>)>>,
-    /// The replacement list per `(offset, name)`, kept beside the history rather than inside it so that the
-    /// common lookup — "is this a macro here" — stays a binary search over a slice of small values.
-    ///
-    /// Shared (`Arc<str>`) like [`IncludedMacro::body_text`]: one walk produces a body once, and every file that
-    /// has it in force refers to it.
-    body_texts: std::collections::HashMap<(usize, Box<str>), std::sync::Arc<str>>,
-    /// The parameter list per `(offset, name)`, beside the body and for the same reason: expansion substitutes
-    /// *by parameter*, so a body without its parameters cannot be substituted into.
-    parameters: std::collections::HashMap<(usize, Box<str>), std::sync::Arc<str>>,
-    /// The replacement lists of macros whose definition is **conditional but in force** — read for *what they say*,
-    /// never for *whether the name is a macro*.
-    ///
-    /// Two channels rather than one, and the split is **measured** rather than aesthetic: handing a conditional
-    /// definition out as a definition switches off every rule that reads *shape* precisely because no table knows
-    /// the name, which cost 3 files clean→failing on the corpus (`corecrt.h`, `swprintf.inl`, `types.h`, each a
-    /// declaration headed by an `__MINGW_EXTENSION`-style macro) and gained none. A **body** cannot do that: no
-    /// rule asks "is there a body" in order to refuse a reading, so this channel can only enable one.
-    /// The body, and whether the macro takes parameters — **`None` when nobody said**, which is the honest
-    /// answer for a caller that only has the text. Pasting a body whose parameters are unknown is the guess
-    /// this layer refuses to make, so `None` is read as "not usable for expansion" and not as "object-like".
-    bodies_in_force: std::collections::HashMap<Box<str>, InForceEntry>,
-}
+/// # Why this is a trait
+///
+/// There are two answers, and the difference between them is the point:
+///
+/// * [`MacroEnvironment`] — the facts **materialised** into maps, built by a caller that walked an include graph
+///   ([`crate::IncludedMacro`] entries, one per name). Every file that wants its environment pays for a map of
+///   every name it sees.
+/// * `cpp_code_analysis::MacroView` — the facts as a **position in a translation unit**: the same questions
+///   answered out of the unit's one timeline, with nothing copied per file. That type is the analysis crate's (it
+///   is a view of *its* walked unit), which is why the seam is a trait here rather than an inherent API.
+///
+/// Object-safe on purpose: `ParserConfig` holds a `&dyn MacroFacts`, and the caller that has a unit hands it a
+/// view while the caller that has only a closure hands it an owned environment — one type in the parser, one set
+/// of rules, no second parser for the cheaper answer.
+///
+/// The two whole-environment methods are **visitors** rather than iterators for the same reason `impl Iterator`
+/// cannot appear here (it is not object-safe), and because a boxed iterator would put an allocation on a path a
+/// caller walks once per file.
+pub trait MacroFacts {
+    /// What `name` is **at `offset`** — the last entry that has come into force by then, or `None` when the name is
+    /// not a macro there (including when an `#undef` has taken it away).
+    fn kind_of(&self, name: &str, offset: usize) -> Option<SymbolKind>;
 
-impl MacroEnvironment {
-    /// Build the environment from what the file's includes contribute.
+    /// The replacement list of `name` **at `offset`**, as text, when the caller stored it.
     ///
-    /// Entries may arrive in any order; they are sorted per name here, once.
-    pub fn from_included_macros(entries: impl IntoIterator<Item = IncludedMacro>) -> Self {
-        let mut by_name: std::collections::HashMap<Box<str>, Vec<(usize, Option<SymbolKind>)>> =
-            std::collections::HashMap::new();
-        let mut body_texts = std::collections::HashMap::new();
-        let mut parameters = std::collections::HashMap::new();
-        for entry in entries {
-            if let Some(text) = entry.body_text {
-                body_texts.insert((entry.from_offset, entry.name.clone()), text);
-            }
-            if let Some(list) = entry.parameters {
-                parameters.insert((entry.from_offset, entry.name.clone()), list);
-            }
-            by_name
-                .entry(entry.name)
-                .or_default()
-                .push((entry.from_offset, entry.definition));
-        }
-        for history in by_name.values_mut() {
-            history.sort_by_key(|(offset, _)| *offset);
-        }
+    /// The second half of the positional answer, and the one expansion needs: a shape says which *rule* may look,
+    /// this says what the rule will read. See [`IncludedMacro::body_text`].
+    fn body_text_of(&self, name: &str, offset: usize) -> Option<&str>;
 
-        Self {
-            by_name,
-            body_texts,
-            parameters,
-            bodies_in_force: std::collections::HashMap::new(),
-        }
-    }
+    /// The **parameter list** of `name` at `offset`, when the caller stored one. See [`IncludedMacro::parameters`].
+    ///
+    /// Handed out as the **shared** `Arc` rather than as a `&str`: a consumer that keeps it (the cooker builds a
+    /// table per file out of these) would otherwise allocate a second copy of a list the environment already owns —
+    /// 2.5 million copies for one corpus, measured.
+    fn parameters_of(&self, name: &str, offset: usize) -> Option<&std::sync::Arc<str>>;
+
+    /// What a macro's replacement list says, when the only definition of it that is in force is a conditional one.
+    ///
+    /// For **reading only**: a rule that wants to know whether a name is a macro must ask
+    /// [`MacroFacts::is_a_macro_at`], which does not consult this.
+    fn body_text_in_force(&self, name: &str) -> Option<&str>;
+
+    /// The **parameter list** of a body in force, when its caller carried one.
+    fn parameters_in_force(&self, name: &str) -> Option<&str>;
+
+    /// Is the body in force for `name` one whose arguments we could substitute — because the caller said the
+    /// macro is **object-like**?
+    ///
+    /// `false` for a function-like macro and for one nobody classified: see the field's note.
+    fn body_in_force_is_object_like(&self, name: &str) -> bool;
+
+    /// Does the environment have **any** entry for `name` — even one that says it is not a macro there?
+    ///
+    /// The difference matters at the call site: "no entry" means the includes say nothing and a weaker source of
+    /// evidence may still be consulted, while "an entry that is not a macro" is an answer, and a table that
+    /// contradicts it must not be.
+    fn knows(&self, name: &str) -> bool;
 
     /// Does this environment know **nothing at all** — neither a definition nor a body?
     ///
@@ -400,71 +394,15 @@ impl MacroEnvironment {
     /// in-force channel is the one MSVC's `_STD_BEGIN` arrives through (its `#define` is inside a conditional
     /// region of `yvals_core.h`, so it is a body and not a definition), and a `debug` tool that skipped the
     /// attach showed the invocation read as a declaration head, which is the defect the body was fetched to fix.
-    pub fn is_empty(&self) -> bool {
-        self.by_name.is_empty() && self.bodies_in_force.is_empty()
-    }
+    fn is_empty(&self) -> bool;
 
     /// How many names the includes contribute **as definitions**.
     ///
-    /// Bodies in force are counted apart on purpose: they are what a rule may *read*, and [`MacroEnvironment::len`]
-    /// is the number the seeding measurements report.
-    pub fn len(&self) -> usize {
-        self.by_name.len()
-    }
+    /// Bodies in force are counted apart on purpose: they are what a rule may *read*, and this is the number the
+    /// seeding measurements report.
+    fn len(&self) -> usize;
 
-    /// What `name` is **at `offset`** — the last entry that has come into force by then, or `None` when the name is
-    /// not a macro there (including when an `#undef` has taken it away).
-    pub fn kind_of(&self, name: &str, offset: usize) -> Option<SymbolKind> {
-        let history = self.by_name.get(name)?;
-        // The last entry whose offset has been reached. `partition_point` on a sorted slice, so a query is
-        // logarithmic and the parser can ask at every token without a cursor to keep in step.
-        let in_force = history[..history.partition_point(|(from, _)| *from <= offset)].last()?;
-        in_force.1
-    }
-
-    /// What `name` expands to **at `offset`**, as text, when the caller stored it.
-    ///
-    /// The second half of the positional answer, and the one expansion needs: a shape says which *rule* may look,
-    /// this says what the rule will read. See [`IncludedMacro::body_text`].
-    /// Add the bodies of macros whose definition is conditional **but in force** — the second channel. See the
-    /// field's note for the measurement that keeps the two apart.
-    pub fn with_bodies_in_force<I: Into<InForceBody>>(
-        mut self,
-        bodies: impl IntoIterator<Item = I>,
-    ) -> Self {
-        self.bodies_in_force
-            .extend(bodies.into_iter().map(Into::into).map(|body| {
-                (
-                    body.name,
-                    (body.function_like, body.parameters, body.body),
-                )
-            }));
-        self
-    }
-
-    /// What a macro's replacement list says, when the only definition of it that is in force is a conditional one.
-    ///
-    /// For **reading only**: a rule that wants to know whether a name is a macro must ask
-    /// [`MacroEnvironment::is_a_macro_at`], which does not consult this.
-    pub fn body_text_in_force(&self, name: &str) -> Option<&str> {
-        self.bodies_in_force.get(name).map(|(_, _, body)| &**body)
-    }
-
-    /// The **parameter list** of a body in force, when its caller carried one.
-    pub fn parameters_in_force(&self, name: &str) -> Option<&str> {
-        self.bodies_in_force.get(name).and_then(|(_, list, _)| list.as_deref())
-    }
-
-    /// Is the body in force for `name` one whose arguments we could substitute — because the caller said the
-    /// macro is **object-like**?
-    ///
-    /// `false` for a function-like macro and for one nobody classified: see the field's note.
-    pub fn body_in_force_is_object_like(&self, name: &str) -> bool {
-        matches!(self.bodies_in_force.get(name), Some((Some(false), _, _)))
-    }
-
-    /// Every definition the includes contribute, in no particular order, as
-    /// `(name, from_offset, function_like, body_text)`.
+    /// Every definition this environment contributes, in no particular order, as a [`DefinitionFacts`].
     ///
     /// The queries above answer *about a name*; this one is for a caller that has to build something out of the
     /// whole environment rather than ask it a question — cooking a file's tokens into what a compiler would parse
@@ -472,82 +410,32 @@ impl MacroEnvironment {
     /// the ones the file happens to mention.
     ///
     /// Two things are deliberately not here. An `#undef` is not a definition, so it does not appear; and a body
-    /// that only the *in-force* channel has ([`MacroEnvironment::body_text_in_force`]) is not a definition either,
-    /// so it does not appear as one — a caller that wants those has to say so, because for it they are a different
+    /// that only the *in-force* channel has ([`MacroFacts::body_text_in_force`]) is not a definition either, so it
+    /// does not appear as one — a caller that wants those has to say so, because for it they are a different
     /// question.
-    pub fn definitions(&self) -> impl Iterator<Item = (&str, usize, bool, Option<&str>)> {
-        let bodies = &self.body_texts;
-        self.by_name.iter().flat_map(move |(name, history)| {
-            let bodies = bodies;
-            history.iter().filter_map(move |(offset, definition)| {
-                let Some(SymbolKind::Macro { function_like, .. }) = definition else {
-                    return None;
-                };
-                let body = bodies.get(&(*offset, name.clone())).map(std::sync::Arc::as_ref);
-                Some((&**name, *offset, *function_like, body))
-            })
-        })
-    }
+    fn for_each_definition<'s>(&'s self, visit: &mut dyn FnMut(DefinitionFacts<'s>));
 
-    /// Every body that only the **in-force** channel has, as `(name, body)`.
+    /// Every body that only the **in-force** channel has, as a [`BodyFacts`].
     ///
-    /// See [`MacroEnvironment::body_text_in_force`] for what that channel is and why it is kept apart.
-    pub fn bodies_in_force(&self) -> impl Iterator<Item = (&str, Option<bool>, Option<&str>, &str)> {
-        self.bodies_in_force.iter().map(
-            |(name, (function_like, parameters, body))| {
-                (
-                    &**name,
-                    *function_like,
-                    parameters.as_deref(),
-                    &**body,
-                )
-            },
-        )
-    }
-
-    pub fn body_text_of(&self, name: &str, offset: usize) -> Option<&str> {
-        let history = self.by_name.get(name)?;
-        let in_force = history[..history.partition_point(|(from, _)| *from <= offset)].last()?;
-        self.body_texts
-            .get(&(in_force.0, name.into()))
-            .map(std::sync::Arc::as_ref)
-    }
-
-    /// The **parameter list** of `name` at `offset`, when the caller stored one. See [`IncludedMacro::parameters`].
-    pub fn parameters_of(&self, name: &str, offset: usize) -> Option<&str> {
-        let history = self.by_name.get(name)?;
-        let in_force = history[..history.partition_point(|(from, _)| *from <= offset)].last()?;
-        self.parameters
-            .get(&(in_force.0, name.into()))
-            .map(std::sync::Arc::as_ref)
-    }
+    /// See [`MacroFacts::body_text_in_force`] for what that channel is and why it is kept apart.
+    fn for_each_body_in_force<'s>(&'s self, visit: &mut dyn FnMut(BodyFacts<'s>));
 
     /// Is `name` a macro at `offset`? The question almost every caller asks.
-    pub fn is_a_macro_at(&self, name: &str, offset: usize) -> bool {
+    fn is_a_macro_at(&self, name: &str, offset: usize) -> bool {
         matches!(
             self.kind_of(name, offset),
             Some(SymbolKind::Macro { .. })
         )
     }
 
-    /// Does the environment have **any** entry for `name` — even one that says it is not a macro there?
-    ///
-    /// The difference matters at the call site: "no entry" means the includes say nothing and a weaker source of
-    /// evidence may still be consulted, while "an entry that is not a macro" is an answer, and a table that
-    /// contradicts it must not be.
-    pub fn knows(&self, name: &str) -> bool {
-        self.by_name.contains_key(name)
-    }
-
     /// What `name`'s replacement list says **at `at`** — the positional answer first, and the in-force one when
     /// position cannot answer.
     ///
-    /// The order is [`MacroEnvironment::body_text_of`]'s and then [`MacroEnvironment::body_text_in_force`]'s, which
-    /// is the order every reader of a *body* uses: a definition the include order puts in force here is better
-    /// evidence than a branch some condition settled, and the second is only consulted when the first is silent.
-    /// `None` means **nobody says** — never "the body is empty", which is a body of zero tokens and a different
-    /// answer.
-    pub fn body_text_at_or_in_force(&self, name: &str, at: usize) -> Option<&str> {
+    /// The order is [`MacroFacts::body_text_of`]'s and then [`MacroFacts::body_text_in_force`]'s, which is the
+    /// order every reader of a *body* uses: a definition the include order puts in force here is better evidence
+    /// than a branch some condition settled, and the second is only consulted when the first is silent. `None`
+    /// means **nobody says** — never "the body is empty", which is a body of zero tokens and a different answer.
+    fn body_text_at_or_in_force(&self, name: &str, at: usize) -> Option<&str> {
         self.body_text_of(name, at)
             .or_else(|| self.body_text_in_force(name))
     }
@@ -566,7 +454,7 @@ impl MacroEnvironment {
     ///
     /// A body that is a name **and something else** (`NAME (args)`) is not a link in a chain: only a body that is
     /// exactly one identifier is, because anything longer is a replacement list in its own right.
-    pub fn body_text_resolved<'s>(&'s self, name: &'s str, at: usize) -> Option<&'s str> {
+    fn body_text_resolved<'s>(&'s self, name: &'s str, at: usize) -> Option<&'s str> {
         let mut current = name;
         let mut seen: Vec<&str> = Vec::new();
 
@@ -576,7 +464,6 @@ impl MacroEnvironment {
             }
 
             let text = self.body_text_at_or_in_force(current, at)?;
-
             match a_sole_name_in(text) {
                 Some(next) => {
                     seen.push(current);
@@ -588,7 +475,219 @@ impl MacroEnvironment {
     }
 }
 
-/// How many `#define A B` hops [`MacroEnvironment::body_text_resolved`] follows before giving up.
+/// One definition a [`MacroFacts`] environment contributes, in the form a caller that **builds a table** needs it.
+///
+/// A named type rather than a five-element tuple because every field is a different kind of thing — a name, a
+/// position, an arity, two shared texts — and the one thing a tuple of five makes certain is that a caller
+/// confuses two of them.
+pub struct DefinitionFacts<'a> {
+    pub name: &'a str,
+    /// The offset this definition is in force **from**, in the file the environment was built for.
+    pub at: usize,
+    /// `true` for a function-like macro. Only definitions appear here, so this is not an `Option`.
+    pub function_like: bool,
+    /// The parameter list as written, when the caller had it.
+    pub parameters: Option<&'a std::sync::Arc<str>>,
+    /// The replacement list as text, when the caller had it. `None` is a definition whose body nobody stored.
+    pub body_text: Option<&'a std::sync::Arc<str>>,
+}
+
+/// One replacement list that only the **in-force** channel has — see [`MacroFacts::for_each_body_in_force`].
+pub struct BodyFacts<'a> {
+    pub name: &'a str,
+    /// `None` when nobody said — which is not "object-like". See [`InForceBody`].
+    pub function_like: Option<bool>,
+    pub parameters: Option<&'a std::sync::Arc<str>>,
+    /// The replacement list. Shared, for the same reason [`IncludedMacro::body_text`] is: a consumer that builds a
+    /// table per file would otherwise copy every one of them per file.
+    pub body: &'a std::sync::Arc<str>,
+}
+
+/// The macros a file's **includes** contribute, each with the offset it applies from.
+///
+/// Built once per file by the caller that knows the include graph (the index), queried by the parser at the offset
+/// it is reading. The answer is positional by construction: [`MacroFacts::kind_of`] returns whatever was in
+/// force **at that offset**, so the same name may be a macro in one region of a file and an ordinary identifier in
+/// another — which is exactly what the flat table could not say, and the reason it lost.
+///
+/// Not `Clone` on purpose: it is built once and borrowed for the parse. See [`MacroFacts`] for the other
+/// implementation of the same questions — a view of a walked translation unit, which materialises nothing.
+#[derive(Debug, Default)]
+pub struct MacroEnvironment {
+    /// One entry per name: its whole history, oldest first, with everything known about each binding.
+    ///
+    /// **One map, not three.** The body and the parameter list used to live in maps of their own keyed by
+    /// `(offset, name)`, which made a lookup of "what is `MY_API` here" three hashes and — worse for a caller that
+    /// *builds* an environment per file — three insertions and two `Box<str>` keys per entry. Measured on the
+    /// 255-file corpus that construction was seconds of a cooked census, and the two extra maps bought nothing:
+    /// they were read at exactly the same offset as the history they were keyed against.
+    ///
+    /// Sorted per name rather than globally because a query is by name — the parser asks "what is `MY_API` here",
+    /// never "what is visible here" — and because a name's own history is short.
+    ///
+    /// The key is **shared** (`Arc<str>`): the timeline produced the name once and every file's environment refers
+    /// to it, so building an environment allocates no strings at all.
+    by_name: std::collections::HashMap<std::sync::Arc<str>, Vec<Binding>>,
+    /// The replacement lists of macros whose definition is **conditional but in force** — read for *what they say*,
+    /// never for *whether the name is a macro*.
+    ///
+    /// Two channels rather than one, and the split is **measured** rather than aesthetic: handing a conditional
+    /// definition out as a definition switches off every rule that reads *shape* precisely because no table knows
+    /// the name, which cost 3 files clean→failing on the corpus (`corecrt.h`, `swprintf.inl`, `types.h`, each a
+    /// declaration headed by an `__MINGW_EXTENSION`-style macro) and gained none. A **body** cannot do that: no
+    /// rule asks "is there a body" in order to refuse a reading, so this channel can only enable one.
+    /// The body, and whether the macro takes parameters — **`None` when nobody said**, which is the honest
+    /// answer for a caller that only has the text. Pasting a body whose parameters are unknown is the guess
+    /// this layer refuses to make, so `None` is read as "not usable for expansion" and not as "object-like".
+    bodies_in_force: std::collections::HashMap<std::sync::Arc<str>, InForceEntry>,
+}
+
+/// One entry in a name's history: where it came into force, and everything the caller knew about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Binding {
+    /// The offset in **this** file from which the entry applies.
+    at: usize,
+    /// `None` for an `#undef`.
+    definition: Option<SymbolKind>,
+    /// The replacement list, when the caller had it.
+    body: Option<std::sync::Arc<str>>,
+    /// The parameter list as written, when the caller had it.
+    parameters: Option<std::sync::Arc<str>>,
+}
+
+impl MacroEnvironment {
+    /// Build the environment from what the file's includes contribute.
+    ///
+    /// Entries may arrive in any order; they are sorted per name here, once.
+    pub fn from_included_macros(entries: impl IntoIterator<Item = IncludedMacro>) -> Self {
+        let mut by_name: std::collections::HashMap<std::sync::Arc<str>, Vec<Binding>> =
+            std::collections::HashMap::new();
+        for entry in entries {
+            by_name
+                .entry(entry.name)
+                .or_default()
+                .push(Binding {
+                    at: entry.from_offset,
+                    definition: entry.definition,
+                    body: entry.body_text,
+                    parameters: entry.parameters,
+                });
+        }
+        for history in by_name.values_mut() {
+            history.sort_by_key(|binding| binding.at);
+        }
+
+        Self {
+            by_name,
+            bodies_in_force: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Add the bodies of macros whose definition is conditional **but in force** — the second channel. See the
+    /// field's note for the measurement that keeps the two apart.
+    pub fn with_bodies_in_force<I: Into<InForceBody>>(
+        mut self,
+        bodies: impl IntoIterator<Item = I>,
+    ) -> Self {
+        self.bodies_in_force
+            .extend(bodies.into_iter().map(Into::into).map(|body| {
+                (
+                    body.name,
+                    (body.function_like, body.parameters, body.body),
+                )
+            }));
+        self
+    }
+
+    /// The binding of `name` in force at `offset` — the one query every positional question is built on.
+    ///
+    /// `partition_point` on a sorted slice, so a query is logarithmic and the parser can ask at every token without
+    /// a cursor to keep in step.
+    fn binding_in_force(&self, name: &str, offset: usize) -> Option<&Binding> {
+        let history = self.by_name.get(name)?;
+        history[..history.partition_point(|binding| binding.at <= offset)].last()
+    }
+}
+
+impl MacroFacts for MacroEnvironment {
+    fn is_empty(&self) -> bool {
+        self.by_name.is_empty() && self.bodies_in_force.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.by_name.len()
+    }
+
+    fn kind_of(&self, name: &str, offset: usize) -> Option<SymbolKind> {
+        self.binding_in_force(name, offset)?.definition
+    }
+
+    fn body_text_in_force(&self, name: &str) -> Option<&str> {
+        self.bodies_in_force.get(name).map(|(_, _, body)| &**body)
+    }
+
+    fn parameters_in_force(&self, name: &str) -> Option<&str> {
+        self.bodies_in_force.get(name).and_then(|(_, list, _)| list.as_deref())
+    }
+
+    fn body_in_force_is_object_like(&self, name: &str) -> bool {
+        matches!(self.bodies_in_force.get(name), Some((Some(false), _, _)))
+    }
+
+    /// Every definition the includes contribute, in no particular order — **one entry per binding**, so a name
+    /// that was defined twice contributes twice and the last one is what a table built in this order keeps.
+    fn for_each_definition<'s>(&'s self, visit: &mut dyn FnMut(DefinitionFacts<'s>)) {
+        for (name, history) in &self.by_name {
+            for binding in history {
+                let Some(SymbolKind::Macro { function_like, .. }) = binding.definition else {
+                    continue;
+                };
+                visit(DefinitionFacts {
+                    name,
+                    at: binding.at,
+                    function_like,
+                    parameters: binding.parameters.as_ref(),
+                    body_text: binding.body.as_ref(),
+                });
+            }
+        }
+    }
+
+    /// Every body that only the **in-force** channel has, as a [`BodyFacts`].
+    ///
+    /// The bodies come out as the **shared** `Arc`s the environment owns: a consumer that builds a table out of
+    /// them once per file would otherwise copy every one of them per file — 2.5 million copies for one corpus,
+    /// measured, and most of what the cooker's table build cost.
+    fn for_each_body_in_force<'s>(&'s self, visit: &mut dyn FnMut(BodyFacts<'s>)) {
+        for (name, (function_like, parameters, body)) in &self.bodies_in_force {
+            visit(BodyFacts {
+                name,
+                function_like: *function_like,
+                parameters: parameters.as_ref(),
+                body,
+            });
+        }
+    }
+
+    fn body_text_of(&self, name: &str, offset: usize) -> Option<&str> {
+        self.binding_in_force(name, offset)?.body.as_deref()
+    }
+
+    /// The **parameter list** of `name` at `offset`, when the caller stored one. See [`IncludedMacro::parameters`].
+    ///
+    /// Handed out as the **shared** `Arc` rather than as a `&str`: a consumer that keeps it (the cooker builds a
+    /// table per file out of these) would otherwise allocate a second copy of a list the environment already owns —
+    /// 2.5 million copies for one corpus, measured.
+    fn parameters_of(&self, name: &str, offset: usize) -> Option<&std::sync::Arc<str>> {
+        self.binding_in_force(name, offset)?.parameters.as_ref()
+    }
+
+    fn knows(&self, name: &str) -> bool {
+        self.by_name.contains_key(name)
+    }
+}
+
+/// How many `#define A B` hops [`MacroFacts::body_text_resolved`] follows before giving up.
 ///
 /// Eight is far past anything a header writes (the measured chains are one and two hops: `_TRY_IO_BEGIN` →
 /// `_TRY_BEGIN` → `try {`) and small enough that a pathological header cannot turn one parse question into a
@@ -1018,8 +1117,8 @@ pub enum MacroBody {
 #[cfg(test)]
 mod tests {
     use super::{
-        BodyShape, IncludedMacro, MacroBody, MacroEnvironment, NoSymbols, SymbolKind, SymbolMap,
-        SymbolTable, shape_of_a_body,
+        BodyShape, IncludedMacro, MacroBody, MacroEnvironment, MacroFacts, NoSymbols, SymbolKind,
+        SymbolMap, SymbolTable, shape_of_a_body,
     };
 
     /// **Only two bodies are structural**, and everything next to them is not — this is the vocabulary the

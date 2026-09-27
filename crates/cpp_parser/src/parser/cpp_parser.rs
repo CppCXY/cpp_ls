@@ -1267,7 +1267,7 @@ impl<'a> CppParser<'a> {
     ///
     /// 1. this file's own `#define`s — the text being parsed, so the freshest thing there is;
     /// 2. what the file's **includes** contribute **at this offset** — the caller's positional table, which is the
-    ///    only kind that can say "this name is a macro *here*" (see [`MacroEnvironment`]);
+    ///    only kind that can say "this name is a macro *here*" (see [`crate::MacroFacts`]);
     /// 3. the caller's flat table — everything the file cannot see, and kept for callers that have one;
     /// 4. nothing, and the caller falls back to a shape preference.
     ///
@@ -2046,7 +2046,7 @@ impl<'a> CppParser<'a> {
 /// that a directive continued onto the next line.
 /// The token kinds a macro body's **text** lexes to, trivia left out.
 ///
-/// An included macro's body reaches the parser as text ([`MacroEnvironment::body_text_of`]), and the rules compare
+/// An included macro's body reaches the parser as text ([`crate::MacroFacts::body_text_of`]), and the rules compare
 /// shapes — so it is lexed here, at this parse's dialect, rather than re-spelled or classified by hand. One
 /// vocabulary then serves both answers: a body this file wrote ([`CppParser::macro_body_kinds`]) and a body a
 /// header wrote ([`CppParser::macro_body_kinds_at`]) are read by the same lexer. Trivia is dropped so that "the

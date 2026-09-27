@@ -3,7 +3,7 @@ use rowan::NodeCache;
 use crate::{
     kind::{CppLanguageLevel, Dialect},
     lexer::LexerConfig,
-    symbols::{MacroEnvironment, SymbolTable},
+    symbols::{MacroFacts, SymbolTable},
 };
 
 pub struct ParserConfig<'cache> {
@@ -17,9 +17,8 @@ pub struct ParserConfig<'cache> {
     lexer_config: LexerConfig,
     node_cache: Option<&'cache mut NodeCache>,
     symbol_table: Option<&'cache dyn SymbolTable>,
-    /// What the file's **includes** contribute, each entry in force from its own offset — see
-    /// [`MacroEnvironment`].
-    macros_from_includes: Option<&'cache MacroEnvironment>,
+    /// What the file's **includes** contribute, each entry in force from its own offset — see [`MacroFacts`].
+    macros_from_includes: Option<&'cache dyn MacroFacts>,
 }
 
 impl<'cache> ParserConfig<'cache> {
@@ -73,8 +72,10 @@ impl<'cache> ParserConfig<'cache> {
     }
 
     /// Parse with what the file's **includes** contribute, each macro in force from the offset its `#include`
-    /// ended at. See [`MacroEnvironment`]: the evidence is *positional*, which is what a flat table failed to be.
-    pub fn with_macros_from_includes(mut self, macros: &'cache MacroEnvironment) -> Self {
+    /// ended at. See [`MacroFacts`]: the evidence is *positional*, which is what a flat table failed to be — and a
+    /// `&dyn` rather than one concrete type because a caller that has walked a translation unit hands over a
+    /// **view** of it (the analysis crate's `MacroView`), which materialises nothing per file.
+    pub fn with_macros_from_includes(mut self, macros: &'cache dyn MacroFacts) -> Self {
         self.macros_from_includes = Some(macros);
         self
     }
@@ -83,7 +84,7 @@ impl<'cache> ParserConfig<'cache> {
     ///
     /// `None` is the ordinary case for a buffer parsed on its own, and every caller must read it as no evidence
     /// from outside — never as nothing is a macro.
-    pub fn macros_from_includes(&self) -> Option<&'cache MacroEnvironment> {
+    pub fn macros_from_includes(&self) -> Option<&'cache dyn MacroFacts> {
         self.macros_from_includes
     }
 

@@ -23,6 +23,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+/// The seam the two readings share: the unit's `MacroView` and the closure path's owned `MacroEnvironment` are
+/// asked the same questions through this trait — see where `environment` is bound.
+use cpp_parser::MacroFacts;
+
 fn main() {
     let list = std::env::args().nth(1).expect("a file list");
     let paths: Vec<PathBuf> = std::fs::read_to_string(&list)
@@ -306,6 +310,12 @@ standard {}",
     let mut rendered_bytes = 0usize;
     // Why a definition the evidence *has* did not make it into the table, summed over the corpus — see the four
     // fields of `cpp_code_analysis::Configuration`.
+    //
+    // **Counted once per unit on the one-walk path**, and that is a change of meaning worth naming: the unit's
+    // facts are read once ([`cpp_code_analysis::TranslationUnit::definitions`]), so an unusable fact is counted
+    // where it *is* rather than once per file that could see it. The per-file sum was `without_a_body` × the
+    // number of files that include the header, which is not a measurement of the corpus; the closure path below
+    // still counts per file, because there it is per file's closure that the number describes.
     let mut unusable_in_force = 0usize;
     let mut unusable_function_like = 0usize;
     let mut unusable_without_a_body = 0usize;
@@ -394,6 +404,46 @@ standard {}",
         bodies_in_force += in_force;
     }
 
+    // **The unit's definitions, read once** — the second half of what the one-walk path replaced. A file's cook
+    // used to walk its whole environment (every name the unit knows), parse each definition through the run's
+    // cache and copy the result into a table of its own: 4.1 s of the 255-file census, for definitions that do not
+    // depend on which file is asking. Only the **offset** a binding is in force from does, and the view resolves
+    // that per query (`cpp_code_analysis::FileMacros`).
+    let mut definitions_time = std::time::Duration::ZERO;
+    let unit_definitions = timeline.as_ref().map(|unit| {
+        let reading = std::time::Instant::now();
+        let definitions = unit.definitions(&mut parsed_definitions);
+        definitions_time += reading.elapsed();
+        definitions
+    });
+    if let Some(definitions) = unit_definitions.as_ref() {
+        // Once per **unit**, not once per file: see the note where these four are declared.
+        unusable_in_force += definitions.in_force_without_a_parameter_list;
+        unusable_function_like += definitions.function_like_without_parameters;
+        unusable_without_a_body += definitions.without_a_body;
+        unusable_unreadable += definitions.unreadable;
+    }
+
+    // **What the compiler predefines**, built once: it is the same for every file, and it is the oldest layer of
+    // every file's cook. The seed holds the compiler's own predefined names (`-dM`: `__cplusplus`, `_MSC_VER`,
+    // `_WIN32`, …) plus what the configuration decides (`predefined_macros_of`) — without it the cook's own
+    // condition evaluator meets `#ifdef __cplusplus` with no entry and applies C's rule, taking the **C branch of
+    // every C++ header that asks** (measured on `codeanalysis/sourceannotations.h`: `SA_All` where the compiler
+    // sees `All`).
+    //
+    // The order is the one that makes the closure win: the builtins are the **oldest** layer, and a definition the
+    // closure carries shadows them for the same name — a header that redefines a builtin is in force over it.
+    let mut seed_table = cpp_code_analysis::MacroTable::new();
+    {
+        let building_the_table = std::time::Instant::now();
+        for name in seed.defined_names() {
+            if let Some(definition) = seed.get(&name) {
+                seed_table.define(definition.clone());
+            }
+        }
+        table_time += building_the_table.elapsed();
+    }
+
     let started = std::time::Instant::now();
     for (position, path) in paths.iter().enumerate() {
         let Ok(source) = std::fs::read_to_string(path) else {
@@ -411,25 +461,31 @@ standard {}",
         // translation unit at all, and whether what it sees carries the name being watched.
         let mut in_the_unit = false;
         let mut the_view_carries_the_watched_name = false;
-        let environment = if !seeded {
-            None
-        } else if let Some(unit) = timeline.as_ref() {
+        // **The two readings have two types and one interface.** The unit's answer is a `MacroView` — a position
+        // in the timeline, which materialises nothing — and the closure path's is an owned `MacroEnvironment`. The
+        // probe asks both the same questions through `&dyn MacroFacts`, which is what that trait is for, and the
+        // view is taken first so that the two are exclusive: a run with a unit never walks a closure.
+        let mut the_view = None;
+        if seeded && let Some(unit) = timeline.as_ref() {
             let building_the_view = std::time::Instant::now();
-            let view = unit.environment_of(path);
+            the_view = unit.environment_of(path);
             view_time += building_the_view.elapsed();
-            in_the_unit = view.is_some();
-            if view.is_some() {
+            in_the_unit = the_view.is_some();
+            if the_view.is_some() {
                 files_with_context += 1;
             }
-            the_view_carries_the_watched_name = view
+            the_view_carries_the_watched_name = the_view
                 .as_ref()
                 .is_some_and(|view| watched.iter().any(|name| view.knows(name)));
-            view
-        } else {
-            // Building the evidence is itself a measurement: the closure version reads the whole include graph of
-            // every direct include, so its cost is the thing that decides whether this layer can be per-file.
-            let started = std::time::Instant::now();
-            let (seeds, bodies) = if closure {
+        }
+
+        let owned_environment: Option<cpp_parser::MacroEnvironment> =
+            if seeded && timeline.is_none() {
+                // Building the evidence is itself a measurement: the closure version reads the whole include graph
+                // of every direct include, so its cost is the thing that decides whether this layer can be
+                // per-file.
+                let started = std::time::Instant::now();
+                let (seeds, bodies) = if closure {
                 let look_up = |wanted: &std::path::Path| {
                     summaries.get(wanted).map(|summary| {
                         (summary, definition_sources.get(wanted).map(String::as_str).unwrap_or(""))
@@ -505,6 +561,16 @@ standard {}",
                 }
             }
             Some(cpp_parser::MacroEnvironment::from_included_macros(seeds).with_bodies_in_force(bodies))
+        } else {
+            None
+        };
+
+        // One value, two implementations — see the note where the view is taken.
+        let environment: Option<&dyn cpp_parser::MacroFacts> = match the_view.as_ref() {
+            Some(view) => Some(view),
+            None => owned_environment
+                .as_ref()
+                .map(|environment| environment as &dyn cpp_parser::MacroFacts),
         };
 
         // Both parses take the **same** lexical reading — see `lexer_config`. A probe whose two arms read
@@ -512,12 +578,12 @@ standard {}",
         let parser_config = || {
             cpp_parser::ParserConfig::default().with_lexer_config(lexer_config)
         };
-        let raw_config = match &environment {
+        let raw_config = match environment {
             Some(environment) => parser_config().with_macros_from_includes(environment),
             None => parser_config(),
         };
 
-        if let Some(environment) = environment.as_ref() {
+        if let Some(environment) = environment {
             for name in &watched {
                 let Some(at) = source.find(name.as_str()) else {
                     continue;
@@ -545,55 +611,55 @@ standard {}",
         let rendered = if cooked_mode {
             let (tokens, _) = cpp_parser::lex(&source, &lexer_config);
             let converting = std::time::Instant::now();
-            let configuration = match &environment {
-                Some(environment) => cpp_code_analysis::configuration_from_environment_and(
+            // **Two readings, two starting states, one interface.** On the one-walk path a file's starting state
+            // is a `FileMacros`: the unit's definitions as *this* file sees them, over the builtins — a view, built
+            // in constant time, with nothing copied. The closure path still materialises a `Configuration`, and
+            // that is the whole difference the two censuses are there to measure.
+            let file_macros = match (the_view, unit_definitions.as_ref()) {
+                (Some(view), Some(definitions)) => Some(cpp_code_analysis::FileMacros::new(
+                    view,
+                    definitions,
+                    Some(&seed_table),
+                    !without_in_force_bodies,
+                )),
+                _ => None,
+            };
+            let configuration = match (&file_macros, environment) {
+                (None, Some(environment)) => cpp_code_analysis::configuration_from_environment_and(
                     environment,
                     !without_in_force_bodies,
                     &mut parsed_definitions,
                 ),
-                None => cpp_code_analysis::Configuration::default(),
+                _ => cpp_code_analysis::Configuration::default(),
+            };
+            // The builtins are the **oldest** layer of every file, whether the file is in the unit or not: a file
+            // the unit never reaches (the 455-header census asks about files outside the walked closure) still
+            // sees what the compiler predefines, and without it the cook takes the C branch of every `#ifdef
+            // __cplusplus`. Measured: dropping it cost 7 of 455 files, which is how this line came to exist.
+            let layered;
+            let starting: &dyn cpp_code_analysis::MacroBindings = match &file_macros {
+                Some(file_macros) => file_macros,
+                None if environment.is_none() => &seed_table,
+                None => {
+                    layered = cpp_code_analysis::Over::new(&configuration.table, &seed_table);
+                    &layered
+                }
             };
             evidence_time += converting.elapsed();
-            // **What the compilation starts with, then what the closure adds** — and the first half was missing.
-            //
-            // The seed (`Marked`) is what every `#ifdef` in the *walk* is answered against, and it holds the
-            // compiler's own predefined names (`-dM`: `__cplusplus`, `_MSC_VER`, `_WIN32`, …) plus what the
-            // configuration decides (`predefined_macros_of`). The cook was handed **only** the closure's
-            // definitions, so its own condition evaluator met `#ifdef __cplusplus` with no table entry and applied
-            // C's rule — "a name nobody defines is 0" — and therefore took the **C branch of every C++ header that
-            // asks**. Measured on `codeanalysis/sourceannotations.h`, whose `#ifdef __cplusplus` chooses between
-            // `#define SA(id) id` and `#define SA(id) SA_##id`: the rendering came out with `SA_All` where the
-            // compiler sees `All`, which is the C spelling of a header compiled as C++.
-            //
-            // The order is the one that makes the closure win: the builtins are defined **first**, at offset 0,
-            // and a definition the closure carries shadows them for the same name — a header that redefines a
-            // builtin is in force over it.
-            // A timer of its own: the loop's `started` is the whole run, and reusing it here measured the run
-            // rather than the table (296 s of "table building" inside a 7 s census — the number was impossible,
-            // which is the only reason the mistake was visible at all).
             let building_the_table = std::time::Instant::now();
-            let mut initial = cpp_code_analysis::MacroTable::new();
-            for name in seed.defined_names() {
-                if let Some(definition) = seed.get(&name) {
-                    initial.define(definition.clone());
-                }
-            }
-            // **Shared, not copied**: a `MacroDef` owns its parameter list and its body tokens, and the same
-            // definitions are in both tables — the loop this replaces deep-cloned every one of them, once per file
-            // (5.5 s of a 24 s census, measured).
-            initial.extend_from(&configuration.table);
             let built_the_table = building_the_table.elapsed();
 
             // What the table **could not** take from the evidence, summed over the corpus. These are the reasons a
             // name stayed a name, and without them a census can only say "the macro did not expand" — which is the
             // same sentence for "the evidence has no body", "the body has no parameter list" and "the evidence was
-            // never built at all", three different pieces of work.
+            // never built at all", three different pieces of work. (On the one-walk path they were counted once
+            // for the unit — see where they are declared.)
             unusable_in_force += configuration.in_force_without_a_parameter_list;
             unusable_function_like += configuration.function_like_without_parameters;
             unusable_without_a_body += configuration.without_a_body;
             unusable_unreadable += configuration.unreadable;
 
-            let rendering = cpp_code_analysis::cook_with(&source, &tokens, &initial).render();
+            let rendering = cpp_code_analysis::cook_with(&source, &tokens, starting).render();
             table_time += built_the_table;
             cook_time += building_the_table.elapsed() - built_the_table;
             Some(rendering)
@@ -824,7 +890,8 @@ built in {seeding_time:?}\n\
          conditional facts met {conditional_asked} | branches in force {conditional_taken} | bodies in force \
 {bodies_in_force} (no toolchain means none can be answered)\n\
          read inside an includer {files_with_context} files (the translation unit's half of the environment)\n\
-         cooked: evidence {evidence_time:?} ({distinct_definitions} distinct definitions) | macro table {table_time:?} | expansion {cook_time:?} | view {view_time:?} | parse {parse_time:?}\n\
+         cooked: definitions {definitions_time:?} ({distinct_definitions} distinct) | evidence {evidence_time:?} | \
+macro table {table_time:?} | expansion {cook_time:?} | view {view_time:?} | parse {parse_time:?}\n\
          rendering: {rendered_to_nothing} of {} files rendered to nothing (whitespace only) | {rendered_bytes} bytes \
 of rendering for {total_bytes} of text{}{}\n\
          table: left out — bodies in force without a parameter list {unusable_in_force} | function-like definitions \

@@ -890,6 +890,27 @@ fn walk_the_translation_unit<'a>(
 pub struct TranslationUnit {
     pub(crate) events: Vec<TuEvent>,
     pub(crate) frames: Vec<TuFrame>,
+    /// **The name index**: one entry per macro name the walk saw, holding its events' indices in walk order.
+    ///
+    /// This is what makes a file's environment a *view* rather than a map. Without it, answering "what is `_STD`
+    /// here" means looking at every event in the unit; with it, the question is a hash and a walk of that name's
+    /// own history — and a name's history is short, because a header defines a name once.
+    ///
+    /// The key is the **shared** `Arc<str>` the event already holds, so indexing the unit allocates no strings;
+    /// [`std::borrow::Borrow`] is what lets a query with a `&str` find it without building a key.
+    ///
+    /// Derived state, like [`TranslationUnit::paths`]: it is a function of `events`, so it is built by the
+    /// constructors rather than stored in the cache format.
+    pub(crate) by_name: std::collections::HashMap<std::sync::Arc<str>, Vec<u32>>,
+    /// **The frame paths**: for each frame, the frames it is nested in, each with the offset in that ancestor at
+    /// which this frame's text becomes live — `(outermost include's ancestor, offset)`, nearest ancestor first.
+    ///
+    /// One entry per (frame, ancestor) pair, so the whole table is a few thousand `(u32, usize)` for a corpus and
+    /// it answers [`TranslationUnit::offset_in`] without walking the parent chain — a query the parser makes for
+    /// every name it asks about, in every file.
+    ///
+    /// Derived state: the parents and the `from_in_parent` offsets already say all of it.
+    pub(crate) paths: Vec<Vec<(u32, usize)>>,
     /// The frame a file was entered as, the **first** time the walk reached it. A file included twice is walked
     /// once (see `walk_one_file`), so a second entry has no frame of its own.
     entered: std::collections::HashMap<std::path::PathBuf, u32>,
@@ -904,7 +925,7 @@ pub struct TranslationUnit {
 /// `pub(crate)` for the codec, which writes these records to the cache: the type is the unit's own shape, and the
 /// alternative — a second struct in the codec that mirrors it — is a second place for a field to be forgotten.
 pub(crate) struct TuEvent {
-    pub(crate) name: Box<str>,
+    pub(crate) name: std::sync::Arc<str>,
     /// `None` for an `#undef`.
     pub(crate) function_like: Option<bool>,
     /// The shape of the replacement list, as the parser reads it.
@@ -973,7 +994,7 @@ impl TimelineBuilder {
             .map(std::sync::Arc::from);
 
         self.events.push(TuEvent {
-            name: Box::from(&*fact.name),
+            name: std::sync::Arc::from(&*fact.name),
             function_like: fact.kind.is_definition().then_some(fact.function_like),
             body: fact.kind.is_definition().then_some(fact.body),
             body_text,
@@ -1021,20 +1042,23 @@ impl TranslationUnit {
         );
 
         let timeline = walked.timeline.take().expect("just built");
-        TranslationUnit {
-            events: timeline.events,
-            frames: timeline.frames,
-            entered: timeline.entered,
-            conditional_facts: walked.conditional_facts,
-            facts_in_force: walked.facts_in_force,
-        }
+        TranslationUnit::from_parts(
+            timeline.events,
+            timeline.frames,
+            walked.conditional_facts,
+            walked.facts_in_force,
+        )
     }
 
     /// Rebuild a timeline from its parts — the decoder's constructor, and the only caller that may hand this type
     /// a `frames` vector it did not build itself.
     ///
-    /// `entered` is recomputed here rather than stored: it *is* "the frame each file was first entered as", which
-    /// the frames already say, and a second copy in the file would be a second thing to keep in step.
+    /// Three fields are recomputed here rather than stored, because all three *are* statements about the parts:
+    /// `entered` is "the frame each file was first entered as" (the frames say it), the name index is a function of
+    /// the events, and the frame paths are a function of the parents and their offsets. The cache format stores the
+    /// parts and nothing else — see [`crate::summary_codec`], whose whole contract is that a field is written only
+    /// when it cannot be derived, since a derived field that was *written* could disagree with what it derives
+    /// from.
     pub(crate) fn from_parts(
         events: Vec<TuEvent>,
         frames: Vec<TuFrame>,
@@ -1046,9 +1070,39 @@ impl TranslationUnit {
             entered.entry(frame.file.clone()).or_insert(index as u32);
         }
 
+        let mut by_name: std::collections::HashMap<std::sync::Arc<str>, Vec<u32>> =
+            std::collections::HashMap::new();
+        for (index, event) in events.iter().enumerate() {
+            // Walk order, which is the order the queries rely on: the last entry of a name's list is the last fact
+            // the walk put in force for it.
+            by_name
+                .entry(std::sync::Arc::clone(&event.name))
+                .or_default()
+                .push(index as u32);
+        }
+
+        let mut paths: Vec<Vec<(u32, usize)>> = Vec::with_capacity(frames.len());
+        for frame in &frames {
+            // Nearest ancestor first, and each one's offset is the `from_in_parent` of the **child** on the path —
+            // that is the frame whose text is this frame's, so a fact written here is in force in that ancestor
+            // from exactly that offset. Read off the ancestor already built, so the whole table is one pass.
+            let mut path = Vec::new();
+            let mut offset = frame.from_in_parent;
+            let mut parent = frame.parent;
+            while let Some(ancestor) = parent {
+                path.push((ancestor, offset));
+                let reached = &frames[ancestor as usize];
+                offset = reached.from_in_parent;
+                parent = reached.parent;
+            }
+            paths.push(path);
+        }
+
         TranslationUnit {
             events,
             frames,
+            by_name,
+            paths,
             entered,
             conditional_facts,
             facts_in_force,
@@ -1058,6 +1112,67 @@ impl TranslationUnit {
     /// How many macro facts the unit's walk put in force — the size of the timeline.
     pub fn len(&self) -> usize {
         self.events.len()
+    }
+
+    /// **Read every definition this unit carries, once**, through the run's parse cache.
+    ///
+    /// This is what replaced the per-file configuration build. Cooking a file used to walk its whole environment
+    /// — every name the unit knows — parse each definition through [`crate::preprocess::cooked::ParsedDefinitions`] and copy the result into
+    /// a table of that file's own, which the census measured at **4.1 s** for 255 files of the SDK corpus, on top
+    /// of the map the environment itself built (1.7 s). The definitions are the *same* definitions every time: a
+    /// fact's identity is its name, its parameters and its body, and none of those depend on which file is
+    /// asking. Only the **offset** does, and the offset is resolved per query by [`MacroView`].
+    ///
+    /// So a run reads the unit once and every file's cook is a lookup. Nothing here is per file, and the
+    /// counters below are therefore counted **once for the unit** rather than once per file: they say how much of
+    /// the unit's vocabulary expansion cannot use, where the per-file version counted each unusable fact once per
+    /// file that could see it (`without_a_body` × 200 is not a measurement of the corpus).
+    pub fn definitions(&self, parsed: &mut crate::preprocess::cooked::ParsedDefinitions) -> UnitDefinitions {
+        let mut by_event: Vec<Option<std::sync::Arc<crate::macros::MacroDef>>> =
+            vec![None; self.events.len()];
+        let mut counted = UnitDefinitions::default();
+
+        for (index, event) in self.events.iter().enumerate() {
+            let Some(body) = event.body_text.as_ref() else {
+                // A fact with no replacement list is not a definition this reader can paste — but only the
+                // **definition** channel counts it: the in-force channel is defined by having a body.
+                if event.unconditional && event.function_like.is_some() {
+                    counted.without_a_body += 1;
+                }
+                continue;
+            };
+
+            if !event.unconditional {
+                // The in-force channel: a body a condition settled, usable only when the caller classified the
+                // macro as object-like or carried its parameter list — see `Configuration`'s note.
+                match event.function_like {
+                    Some(false) => {}
+                    Some(true) if event.parameters.is_some() => {}
+                    _ => {
+                        counted.in_force_without_a_parameter_list += 1;
+                        continue;
+                    }
+                }
+            } else {
+                // The definition channel: a definition whose parameter list nobody carried cannot be pasted, and
+                // one whose shape the walk could not read is not a definition at all.
+                match (event.function_like, event.body) {
+                    (Some(true), _) if event.parameters.is_none() => {
+                        counted.function_like_without_parameters += 1;
+                        continue;
+                    }
+                    (Some(_), Some(_)) => {}
+                    _ => continue,
+                }
+            }
+
+            match parsed.definition(&event.name, event.parameters.as_ref(), body) {
+                Some(definition) => by_event[index] = Some(definition),
+                None => counted.unreadable += 1,
+            }
+        }
+
+        UnitDefinitions { by_event, ..counted }
     }
 
     /// How many of those facts carry a **replacement list**, and how many are in the **in-force** channel.
@@ -1117,23 +1232,23 @@ impl TranslationUnit {
     ///
     /// `None` is the honest answer for a file nothing includes: nothing in this translation unit says what it
     /// sees, and inventing a context for it is what the earlier per-file census did with a heuristic.
-    pub fn environment_of(&self, path: &std::path::Path) -> Option<cpp_parser::MacroEnvironment> {
+    pub fn environment_of(&self, path: &std::path::Path) -> Option<MacroView<'_>> {
         let &frame = self.entered.get(path)?;
         Some(self.environment_at(frame))
     }
 
     /// The environment of the file the unit starts with.
-    pub fn root_environment(&self) -> cpp_parser::MacroEnvironment {
+    pub fn root_environment(&self) -> MacroView<'_> {
         self.environment_at(0)
     }
 
-    /// Build one file's environment out of the timeline — **no walk, no copy of the bodies**.
+    /// One file's environment as **a position in this timeline** — no walk, no copy of the bodies, and no map.
     ///
     /// The three kinds of event a file's environment is made of, and the offset each is in force from:
     ///
-    /// * the facts of the files it **includes**, from the offset the `#include` ended at — `offset_in` resolves
-    ///   that through the frame chain, because a definition three includes down is in force in this file from the
-    ///   outermost `#include` on the path;
+    /// * the facts of the files it **includes**, from the offset the `#include` ended at — a definition three
+    ///   includes down is in force in this file from the **outermost** `#include` on the path, which is
+    ///   [`TranslationUnit::offset_in`]'s question;
     /// * everything the walk had already emitted when this file was entered (the **inherited prefix**), from
     ///   offset 0 — the state a header's first line sees, which is what the old one-hop includer lookup was
     ///   approximating and what the real translation unit knows exactly;
@@ -1144,100 +1259,327 @@ impl TranslationUnit {
     /// back as "the includes contributed this" would double-count them, and — worse — would say a name is a macro
     /// from its own `#define` line in a branch the reader cannot evaluate. What the environment is *for* is what
     /// the file cannot see by looking at itself.
-    fn environment_at(&self, frame: u32) -> cpp_parser::MacroEnvironment {
-        let entry_seq = self.frames[frame as usize].entry_seq;
-        let tout = self.frames[frame as usize].tout;
-
-        // Per name, the entry in force — last wins in walk order, exactly as `Walked::into_evidence` collapses.
-        // The second map's value is [`ConditionalBodyValue`]'s shape with shared bodies: the arity, the parameter
-        // list, the body — named here rather than spelled out, since the type is the interface between the walk
-        // and the environment and a four-element tuple makes it a puzzle (the same reason the alias exists).
-        type InForce = (Option<bool>, Option<std::sync::Arc<str>>, std::sync::Arc<str>);
-        let mut definitions: std::collections::HashMap<&str, (usize, &TuEvent)> =
-            std::collections::HashMap::new();
-        let mut conditional: std::collections::HashMap<&str, InForce> =
-            std::collections::HashMap::new();
-        // `frame → the offset in **this** file the frame's text becomes live at`, resolved on demand: the same
-        // nested header is reached through one path in a well-formed unit, and the chain is short.
-        let mut offsets: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
-
-        for (index, event) in self.events.iter().enumerate() {
-            let from = if event.frame == frame {
-                // The file's own text — see the method's note.
-                continue;
-            } else if event.frame > frame && event.frame < tout {
-                self.offset_in(event.frame, frame, &mut offsets)
-            } else if (index as u32) < entry_seq {
-                0
-            } else {
-                continue;
-            };
-
-            if event.unconditional {
-                definitions.insert(&event.name, (from, event));
-            } else if let Some(body) = event.body_text.clone() {
-                conditional.insert(&event.name, (event.function_like, event.parameters.clone(), body));
-            }
-        }
-
-        let macros = definitions.into_iter().map(|(name, (from, event))| {
-            match (event.function_like, event.body) {
-                (Some(function_like), Some(body)) => cpp_parser::IncludedMacro::defined_with_shared_body(
-                    from,
-                    name,
-                    function_like,
-                    body,
-                    event.body_text.clone(),
-                    event.parameters.clone(),
-                ),
-                // An `#undef`, or a definition whose shape the index could not read: the name is a fact, the
-                // shape is not.
-                _ => cpp_parser::IncludedMacro::undefined_at(from, name),
-            }
-        });
-
-        cpp_parser::MacroEnvironment::from_included_macros(macros).with_bodies_in_force(
-            conditional
-                .into_iter()
-                .map(|(name, (function_like, parameters, body))| {
-                    cpp_parser::InForceBody::shared(Box::from(name), function_like, parameters, body)
-                }),
-        )
+    ///
+    /// # Why this is a view and not a map
+    ///
+    /// It used to build a `MacroEnvironment`: one entry per name in force, each with the offset it applies from.
+    /// That is the whole environment materialised per file, and the census measured what it costs — **1.7 s of a
+    /// 13.8 s run** for 255 files of the Windows SDK corpus, in map builds alone, with every file paying for the
+    /// names it never asks about. A view answers the *same* questions out of the unit's name index, lazily: a query
+    /// is a hash of the name and a walk of that name's own (short) history, which is what the parser does per token
+    /// and all it ever needed.
+    ///
+    /// The answers are not merely equivalent, they are the same rule: for one name, everything visible to a file
+    /// has an offset that **does not decrease** in walk order — the inherited prefix is all at offset 0, and the
+    /// includes are walked in text order — so "the last one in walk order" *is* "the last one in force", and the
+    /// final binding is the only one that can be in force at any offset. That is the same collapse the map did
+    /// (last wins per name), read at the offset it is asked about instead of frozen at build time.
+    fn environment_at(&self, frame: u32) -> MacroView<'_> {
+        MacroView { unit: self, frame }
     }
 
     /// The offset in `consumer` at which `frame`'s text becomes live: the `#include` end of the **outermost**
     /// frame on the path from `consumer` to `frame`.
-    fn offset_in(
+    ///
+    /// Read out of the precomputed frame paths ([`TranslationUnit::paths`]) rather than walked per query: this is
+    /// on the parser's per-token path (the offset of every inherited fact is this answer), and a chain walk per
+    /// query would trade a map build for a pointer chase.
+    fn offset_in(&self, frame: u32, consumer: u32) -> usize {
+        self.paths[frame as usize]
+            .iter()
+            .find(|(ancestor, _)| *ancestor == consumer)
+            .map(|(_, offset)| *offset)
+            // A frame outside the consumer's subtree never gets here — the caller's interval test is what keeps it
+            // out — so this is the root, and offset 0 is the only answer that means anything.
+            .unwrap_or(0)
+    }
+}
+
+/// **A unit's definitions, read once** — what [`TranslationUnit::definitions`] produces, and what every file's
+/// cook then asks about by name.
+///
+/// It is a `Vec` parallel to the unit's events rather than a map: the question is never "what is this name", it is
+/// "what does the fact at this index spell", and the index comes from the view — which already resolved *which*
+/// fact is in force. A map here would be a second name lookup on the hot path and a second place for the two to
+/// disagree.
+#[derive(Default)]
+pub struct UnitDefinitions {
+    /// Parallel to `TranslationUnit::events`: the definition a fact becomes as a `#define` line, or `None` when
+    /// that fact is not one this reader can put back together.
+    by_event: Vec<Option<std::sync::Arc<crate::macros::MacroDef>>>,
+    /// Definitions whose parameter list the evidence does not carry — a function-like macro that cannot be
+    /// substituted into, so it is not in the table. Counted for the unit; see [`TranslationUnit::definitions`].
+    pub function_like_without_parameters: usize,
+    /// Definitions with no replacement list stored at all: nothing to expand.
+    pub without_a_body: usize,
+    /// Definitions whose replacement list did not read as a macro definition.
+    pub unreadable: usize,
+    /// Bodies that arrived through the in-force channel and could not be used — nobody said whether the macro
+    /// takes parameters. See `Configuration::in_force_without_a_parameter_list`.
+    pub in_force_without_a_parameter_list: usize,
+}
+
+impl UnitDefinitions {
+    /// The definition the fact at `index` spells, when it spells one.
+    pub(crate) fn of(&self, index: u32) -> Option<&std::sync::Arc<crate::macros::MacroDef>> {
+        self.by_event.get(index as usize)?.as_ref()
+    }
+
+    /// How many facts of the unit spell a definition this reader could use.
+    pub fn len(&self) -> usize {
+        self.by_event.iter().filter(|it| it.is_some()).count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// **One file's environment, as a position in the unit's timeline** — the borrowed half of
+/// [`TranslationUnit::environment_at`].
+///
+/// A view is two words: the unit and the frame. Opening one is free, and that is the point: the census built 255
+/// environments per corpus (1.7 s of materialised maps) for callers that ask about a handful of names each, and a
+/// file's macro state is not a *thing* the unit owns — it is where the file sits in the walk.
+///
+/// The three questions a view answers, and the rule behind all of them:
+///
+/// * the file's **own** facts are invisible here (the parser reads those out of the text itself);
+/// * a fact of a file this one **includes** is in force from the offset the outermost `#include` on the path ended
+///   at — one `#include` is what a file's own text can name, however deep the definition was written;
+/// * a fact from **before this file was entered** is in force from offset 0, which is what a header's first line
+///   sees;
+/// * and everything else — a later sibling, a file the unit reaches after this one — is not visible at all.
+///
+/// For one name, the offsets of everything it can see **do not decrease in walk order** (all of the inherited
+/// prefix is at offset 0, and the walk follows `#include`s in text order), so the *last* visible fact for a name is
+/// the only one that can be in force, and asking "what is it at this offset" is one comparison. That is what makes
+/// a query a hash and a short walk rather than a materialised history — and it is why this answers exactly what the
+/// map it replaced answered, which `tests/translation_unit.rs` asserts question by question.
+///
+/// `Copy` because a view **is** its two words: a caller that has one — to report about, to cook with — hands it on
+/// without giving up its own, which is what a caller holding two readings of one file does.
+#[derive(Clone, Copy)]
+pub struct MacroView<'unit> {
+    unit: &'unit TranslationUnit,
+    frame: u32,
+}
+
+impl<'unit> MacroView<'unit> {
+    /// The file this view is of.
+    pub fn file(&self) -> &'unit std::path::Path {
+        &self.unit.frames[self.frame as usize].file
+    }
+
+    /// The offset in **this file** at which the event at `index` comes into force, or `None` when this file cannot
+    /// see it at all.
+    fn offset_of(&self, index: usize, event: &TuEvent) -> Option<usize> {
+        let frame = &self.unit.frames[self.frame as usize];
+
+        if event.frame == self.frame {
+            // The file's own text — see the type's note.
+            None
+        } else if event.frame > self.frame && event.frame < frame.tout {
+            // A file this one includes: the interval test is the frame's subtree (frames are in DFS preorder), so
+            // this is a descendant, and the offset is found by walking the precomputed path.
+            Some(self.unit.offset_in(event.frame, self.frame))
+        } else if (index as u32) < frame.entry_seq {
+            // Emitted before this file was entered: the inherited prefix, in force from its first line.
+            Some(0)
+        } else {
+            // A sibling's subtree, or something the walk reached after this file was left: not visible here.
+            None
+        }
+    }
+
+    /// The **last** fact for `name` this file can see that `wanted` accepts, with the offset it applies from.
+    ///
+    /// The search runs the name's own history backwards, which is the whole cost of a query: a name's events are
+    /// appended in walk order, so the first one that is visible is the one in force. A name defined once — almost
+    /// every name — costs one visibility test.
+    ///
+    /// The history arrives as a slice so that a caller **enumerating the whole environment** passes the one it is
+    /// already holding: hashing a name to find a list the caller has in hand is work a per-file loop must not do
+    /// twice, and `for_each_definition` runs for every name in the unit, in every file.
+    fn last_visible(
         &self,
-        frame: u32,
-        consumer: u32,
-        memo: &mut std::collections::HashMap<u32, usize>,
-    ) -> usize {
-        if let Some(&known) = memo.get(&frame) {
-            return known;
-        }
-
-        let mut passed = Vec::new();
-        let mut current = frame;
-        let from = loop {
-            let reached = &self.frames[current as usize];
-            match reached.parent {
-                Some(parent) if parent == consumer => break reached.from_in_parent,
-                Some(parent) => {
-                    passed.push(current);
-                    current = parent;
-                }
-                // A frame outside the consumer's subtree never gets here — the caller's interval test is what
-                // keeps it out — so this is the root, and offset 0 is the only answer that means anything.
-                None => break 0,
+        indices: &[u32],
+        wanted: impl Fn(&TuEvent) -> bool,
+    ) -> Option<(usize, u32)> {
+        indices.iter().rev().find_map(|&index| {
+            let event = &self.unit.events[index as usize];
+            if !wanted(event) {
+                return None;
             }
-        };
+            self.offset_of(index as usize, event).map(|at| (at, index))
+        })
+    }
 
-        memo.insert(frame, from);
-        for id in passed {
-            memo.insert(id, from);
+    /// [`MacroView::last_visible`] for a caller that has a name and not the history — the query path.
+    fn last_visible_of(
+        &self,
+        name: &str,
+        wanted: impl Fn(&TuEvent) -> bool,
+    ) -> Option<(usize, u32)> {
+        self.last_visible(self.unit.by_name.get(name)?, wanted)
+    }
+
+    /// The fact that settles what `name` **is** in this file, on the channel that says what a name is.
+    ///
+    /// The definition channel, the last visible fact of it, and — with it — whether that fact is a definition at
+    /// all: an `#undef`, or a `#define` whose shape the walk could not read, is a fact about the name whose
+    /// *definition* is `None`. See [`cpp_parser::IncludedMacro::undefined_at`], which is where that distinction
+    /// lives.
+    fn the_binding(&self, name: &str) -> Option<(usize, &'unit TuEvent)> {
+        let (at, index) = self.last_visible_of(name, |event| event.unconditional)?;
+        Some((at, &self.unit.events[index as usize]))
+    }
+
+    /// The **in-force** channel: the last visible fact whose replacement list this file can read.
+    fn the_body_in_force(&self, name: &str) -> Option<&'unit TuEvent> {
+        let (_, index) = self.last_visible_of(name, |event| {
+            !event.unconditional && event.body_text.is_some()
+        })?;
+        Some(&self.unit.events[index as usize])
+    }
+
+    /// [`MacroView::the_binding`] as **the timeline index** of that fact, with the offset it applies from.
+    ///
+    /// The index rather than the event because the cooker needs to reach what the fact was *parsed into*
+    /// ([`UnitDefinitions`]), and that parse is per event rather than per file: one definition reaches every file
+    /// that sees it, and re-parsing it per file is what the census measured at seconds of a run.
+    pub(crate) fn visible_binding(&self, name: &str) -> Option<(usize, u32)> {
+        self.last_visible_of(name, |event| event.unconditional)
+    }
+
+    /// [`MacroView::the_body_in_force`] as the timeline index of that fact.
+    pub(crate) fn visible_body_in_force(&self, name: &str) -> Option<u32> {
+        self.last_visible_of(name, |event| {
+            !event.unconditional && event.body_text.is_some()
+        })
+        .map(|(_, index)| index)
+    }
+}
+
+impl cpp_parser::MacroFacts for MacroView<'_> {
+    fn kind_of(&self, name: &str, offset: usize) -> Option<cpp_parser::SymbolKind> {
+        let (at, event) = self.the_binding(name)?;
+        if at > offset {
+            // Defined, but later than the offset being asked about: not a macro *here*.
+            return None;
         }
-        from
+        match (event.function_like, event.body) {
+            (Some(function_like), Some(body)) => {
+                Some(cpp_parser::SymbolKind::Macro { function_like, body })
+            }
+            // An `#undef`, or a definition whose shape the index could not read: the name is a fact, the shape is
+            // not. See the type's note on the two channels.
+            _ => None,
+        }
+    }
+
+    fn body_text_of(&self, name: &str, offset: usize) -> Option<&str> {
+        let (at, event) = self.the_binding(name)?;
+        match (at <= offset, event.function_like, event.body) {
+            (true, Some(_), Some(_)) => event.body_text.as_deref(),
+            _ => None,
+        }
+    }
+
+    fn parameters_of(&self, name: &str, offset: usize) -> Option<&std::sync::Arc<str>> {
+        let (at, event) = self.the_binding(name)?;
+        match (at <= offset, event.function_like, event.body) {
+            (true, Some(_), Some(_)) => event.parameters.as_ref(),
+            _ => None,
+        }
+    }
+
+    fn body_text_in_force(&self, name: &str) -> Option<&str> {
+        self.the_body_in_force(name)
+            .and_then(|event| event.body_text.as_deref())
+    }
+
+    fn parameters_in_force(&self, name: &str) -> Option<&str> {
+        self.the_body_in_force(name).and_then(|event| event.parameters.as_deref())
+    }
+
+    fn body_in_force_is_object_like(&self, name: &str) -> bool {
+        matches!(
+            self.the_body_in_force(name).map(|event| event.function_like),
+            Some(Some(false))
+        )
+    }
+
+    fn knows(&self, name: &str) -> bool {
+        self.the_binding(name).is_some()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.unit.by_name.values().all(|indices| {
+            self.last_visible(indices, |event| event.unconditional)
+                .is_none()
+                && self
+                    .last_visible(indices, |event| {
+                        !event.unconditional && event.body_text.is_some()
+                    })
+                    .is_none()
+        })
+    }
+
+    /// How many names this file sees a fact about, of the channel that says what a name is.
+    ///
+    /// Counted rather than stored: a view owns nothing, and the number is a measurement (the census prints it),
+    /// not something a query needs.
+    fn len(&self) -> usize {
+        self.unit
+            .by_name
+            .values()
+            .filter(|indices| self.last_visible(indices, |event| event.unconditional).is_some())
+            .count()
+    }
+
+    /// Every definition this file sees — **one per name**, the last visible fact of the definition channel.
+    ///
+    /// One per name because that is what the map it replaced held: a name's earlier facts are shadowed, and a
+    /// consumer building a table out of these wants the definition, not the history. Emitted in no particular
+    /// order (the unit's name index is a hash map), which is what the previous implementation did too.
+    fn for_each_definition<'s>(&'s self, visit: &mut dyn FnMut(cpp_parser::DefinitionFacts<'s>)) {
+        for (name, indices) in &self.unit.by_name {
+            let Some((at, index)) = self.last_visible(indices, |event| event.unconditional) else {
+                continue;
+            };
+            let event = &self.unit.events[index as usize];
+            let (Some(function_like), Some(_)) = (event.function_like, event.body) else {
+                continue;
+            };
+            visit(cpp_parser::DefinitionFacts {
+                name,
+                at,
+                function_like,
+                parameters: event.parameters.as_ref(),
+                body_text: event.body_text.as_ref(),
+            });
+        }
+    }
+
+    fn for_each_body_in_force<'s>(&'s self, visit: &mut dyn FnMut(cpp_parser::BodyFacts<'s>)) {
+        for (name, indices) in &self.unit.by_name {
+            let Some((_, index)) = self.last_visible(indices, |event| {
+                !event.unconditional && event.body_text.is_some()
+            }) else {
+                continue;
+            };
+            let event = &self.unit.events[index as usize];
+            let Some(body) = event.body_text.as_ref() else {
+                continue;
+            };
+            visit(cpp_parser::BodyFacts {
+                name,
+                function_like: event.function_like,
+                parameters: event.parameters.as_ref(),
+                body,
+            });
+        }
     }
 }
 

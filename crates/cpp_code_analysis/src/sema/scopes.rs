@@ -65,7 +65,7 @@ enum Body {
 ///
 /// `None` means **nobody says**, never "the body is empty": a body of zero tokens is a body, and a caller that
 /// conflated the two would read every `#define POINTER_32` as an unknown name. That distinction is
-/// [`cpp_parser::MacroEnvironment::body_text_at_or_in_force`]'s, and the trait exists so that the walker does not
+/// [`cpp_parser::MacroFacts::body_text_at_or_in_force`]'s, and the trait exists so that the walker does not
 /// have to know which of the two channels answered.
 pub trait MacroBodies {
     /// What `name`'s replacement list says **at `at`**, when anything says.
@@ -85,7 +85,14 @@ impl MacroBodies for NoMacroBodies {
     }
 }
 
-impl MacroBodies for cpp_parser::MacroEnvironment {
+/// **Every macro environment in the process, whichever one it is.** The blanket implementation is what keeps this
+/// seam from being a second place environments are enumerated: `MacroFacts` already asks this question, and a
+/// second `impl` for each implementation of it would be a list to keep in step — the owned environment, a walked
+/// unit's view, and whatever comes next.
+///
+/// It reads through `&dyn MacroFacts` too, which is what the indexer hands over: a caller that has a
+/// `&dyn MacroFacts` can be a [`MacroBodies`] without knowing which implementation is behind it.
+impl<T: cpp_parser::MacroFacts + ?Sized> MacroBodies for T {
     fn body_at(&self, name: &str, at: usize) -> Option<&str> {
         self.body_text_at_or_in_force(name, at)
     }

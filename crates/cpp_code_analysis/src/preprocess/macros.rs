@@ -163,6 +163,43 @@ struct Binding {
     at: usize,
 }
 
+/// **What a cook reads its macros from** — the definitions a file starts with, asked by name and offset.
+///
+/// A trait rather than `&MacroTable` because the answer comes from three places, and they must be *asked* the
+/// same way: a file's own directives while it is being cooked, the compilation's builtins (`-dM`), and — for a
+/// file inside a walked translation unit — the unit's timeline, which materialises nothing per file.
+///
+/// # Why the answer is by offset, and why that is the whole difficulty
+///
+/// A `#define` is in force from where it was written, and "where" is a position in **the file being cooked**.
+/// One definition reaches hundreds of files from a different offset in each, which is why the shared layer
+/// cannot be a table of definitions alone: what is shared is the *definition*, and the offset is computed by
+/// whoever knows which file is asking. See `TranslationUnit::definitions` and `FileMacros`.
+///
+/// Both questions return a borrow rather than an `Arc`: the layers own their definitions, and the hot path asks
+/// this once per identifier token.
+pub trait MacroBindings {
+    /// The definition `name` is in force with at `offset`, or `None` when nothing says.
+    fn definition_at(&self, name: &str, offset: usize) -> Option<&MacroDef>;
+
+    /// The definition `name` is in force with at the end of the file.
+    ///
+    /// A question of its own rather than `definition_at(name, usize::MAX)`: a caller that has read the whole file
+    /// (a `#if` evaluated after it, a completion list) means "the last one", and a shared layer may answer it
+    /// without resolving any offset at all.
+    fn definition(&self, name: &str) -> Option<&MacroDef>;
+}
+
+impl MacroBindings for MacroTable {
+    fn definition_at(&self, name: &str, offset: usize) -> Option<&MacroDef> {
+        self.get_at(name, offset)
+    }
+
+    fn definition(&self, name: &str) -> Option<&MacroDef> {
+        self.get(name)
+    }
+}
+
 /// The macros visible at one point in a file.
 ///
 /// A `#define` is never *removed* when it is redefined or `#undef`ed — the earlier binding stays, and
@@ -175,11 +212,32 @@ struct Binding {
 #[derive(Debug, Clone, Default)]
 pub struct MacroTable {
     bindings: Vec<Binding>,
+    /// `name → the indices of its bindings`, in insertion order.
+    ///
+    /// What makes a lookup proportional to the **name's own history** instead of to the table. `binding_at` used to
+    /// scan every binding in reverse, and a cooked file's starting table holds the whole include closure's
+    /// definitions — tens of thousands of bindings — while the expander asks about a name for every identifier
+    /// token and for every name it meets inside a body. That is the same shape as the two fixes before it (the
+    /// class-head scan's window and `rollback`'s `retain`): a linear scan over state that grows with the file, in
+    /// a loop that runs per token.
+    ///
+    /// The index is **not** a second source of truth: `bindings` is the table, this only says where a name's
+    /// entries are, and every mutation of one goes through the two methods below.
+    by_name: std::collections::HashMap<Box<str>, Vec<u32>>,
 }
 
 impl MacroTable {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Remember where a name's newest binding is.
+    fn index(&mut self, name: &str) {
+        let index = (self.bindings.len() - 1) as u32;
+        self.by_name
+            .entry(Box::from(name))
+            .or_default()
+            .push(index);
     }
 
     /// Record a definition, effective from the offset it was written at.
@@ -207,8 +265,9 @@ impl MacroTable {
         self.bindings.push(Binding {
             at,
             name: definition.name.clone(),
-            definition: Some(definition),
+            definition: Some(std::sync::Arc::clone(&definition)),
         });
+        self.index(&definition.name);
     }
 
     /// Record an `#undef`, effective from the offset it was written at.
@@ -218,6 +277,7 @@ impl MacroTable {
             definition: None,
             at,
         });
+        self.index(name);
     }
 
     /// Append every binding of `other`, **sharing** its definitions and keeping each one's offset.
@@ -228,18 +288,35 @@ impl MacroTable {
     /// A census that copied the configuration into the cook's starting table this way spent 5.5 s of a 24 s run
     /// doing it, one deep clone per definition per file.
     pub fn extend_from(&mut self, other: &MacroTable) {
+        let first = self.bindings.len() as u32;
         self.bindings.extend(other.bindings.iter().map(|binding| Binding {
             name: binding.name.clone(),
             definition: binding.definition.clone(),
             at: binding.at,
         }));
+
+        // The names come along, shifted: `other`'s indices are its own, and a binding's index is what the lookup
+        // uses. A rebuild would also be correct and would throw away the names already in the map.
+        for (name, indices) in &other.by_name {
+            self.by_name
+                .entry(name.clone())
+                .or_default()
+                .extend(indices.iter().map(|index| index + first));
+        }
     }
 
     /// The binding in force at `offset`, or at the end of the file when `offset` is `None`.
+    ///
+    /// **The name's own history, not the table.** The reverse scan this replaces compared every binding in the
+    /// table against the name, once per query, and the queries come once per token — the third time this shape has
+    /// turned up in a census (see the field's note).
     fn binding_at(&self, name: &str, offset: Option<usize>) -> Option<&Binding> {
-        self.bindings.iter().rfind(|binding| {
-            &*binding.name == name && offset.is_none_or(|offset| binding.at <= offset)
-        })
+        let indices = self.by_name.get(name)?;
+        indices
+            .iter()
+            .rev()
+            .map(|index| &self.bindings[*index as usize])
+            .find(|binding| offset.is_none_or(|offset| binding.at <= offset))
     }
 
     /// What `name` means at the end of the file.
