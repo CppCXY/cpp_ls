@@ -19,6 +19,12 @@
 //!    *cause*, because the first error is the one nothing above it explains. Plus the share of those lines that
 //!    mention a macro the closure defines, which is what says whether the dominant family is "a macro the parser
 //!    does not know" or something else.
+//!
+//! …and, on the one-walk path (`--seeds --closure`), a **fourth reading** that is about the program rather than
+//! about the files: `the unit as one stream` — every file the walk reached cooked into one text in include order
+//! (`TranslationUnit::cook_the_unit`), parsed once, with each error mapped back to the file it stands in. The
+//! per-file census cannot answer "does the program read"; this can, and for the SDK corpus it says the two agree
+//! (22 errors in `sourceannotations.h` either way, 4 over 3 files on the 455 corpus).
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -845,6 +851,66 @@ standard {}",
     }
     let parsed = started.elapsed();
 
+    // **The other half of the reading: the unit as one program.**
+    //
+    // Everything above cooks *one file at a time*, which answers "does this header read on its own" and cannot
+    // answer "does the program read": a declaration in `vector` and a use in the source are two streams with
+    // nothing tying them together. This stitches the walk's own order (`TranslationUnit::cook_the_unit`) and
+    // parses the result once, so the number below is a reading of the program rather than of a pile of headers.
+    //
+    // Only on the one-walk path: the closure path has no single unit to stitch, which is exactly the difference
+    // the two paths exist to measure.
+    let unit_stream: String;
+    if let (Some(unit), Some(definitions)) = (timeline.as_ref(), unit_definitions.as_ref()) {
+        let stitching = std::time::Instant::now();
+        let stitched = unit.cook_the_unit(
+            &definition_sources,
+            definitions,
+            Some(&seed_table),
+            !without_in_force_bodies,
+        );
+        let stitching = stitching.elapsed();
+
+        let parsing = std::time::Instant::now();
+        let tree = cpp_parser::CppParser::parse_with_audit(
+            &stitched.text,
+            cpp_parser::ParserConfig::default().with_lexer_config(lexer_config),
+        );
+        let parsing = parsing.elapsed();
+
+        // **Where an error is**: the unit's map turns an offset in the stitched stream into the file it stands
+        // in, which is the only thing that makes a count of errors in a whole program useful.
+        let errors = tree.0.get_errors();
+        let mut files = std::collections::HashSet::new();
+        let mut first = None;
+        for error in errors {
+            if let Some((file, written)) = stitched.written_at(usize::from(error.range.start())) {
+                files.insert(file);
+                if first.is_none() {
+                    first = stitched
+                        .file_of(file)
+                        .map(|path| format!("{}:{written:?}", path.display()));
+                }
+            }
+        }
+        unit_stream = format!(
+            "the unit as one stream: {} tokens from {} of {} files ({} without text) | stitched {stitching:?} | \
+             parsed {parsing:?} | {} errors over {} files{}\n         ",
+            stitched.len(),
+            stitched.files_with_tokens(),
+            stitched.files.len(),
+            stitched.missing,
+            errors.len(),
+            files.len(),
+            match &first {
+                Some(where_it_is) => format!(" — first at {where_it_is}"),
+                None => String::new(),
+            },
+        );
+    } else {
+        unit_stream = "the unit as one stream: no unit — see `--seeds --closure`\n         ".to_string();
+    }
+
     // Which experiment this run is, stated in the output: "the evidence arrived and changed nothing" and "the
     // evidence was never built" look identical in the numbers, and that confusion has already cost this project
     // one vacuous census.
@@ -897,7 +963,7 @@ of rendering for {total_bytes} of text{}{}\n\
          table: left out — bodies in force without a parameter list {unusable_in_force} | function-like definitions \
 without one {unusable_function_like} | definitions without a body {unusable_without_a_body} | unreadable \
 definitions {unusable_unreadable}\n\
-         seed shapes: {}\n\
+         {unit_stream}         seed shapes: {}\n\
          decision points: {macro_questions} macro questions | {macro_question_names} name-questions, summed \
 over the files | busiest file {busiest_questions}",
         paths.len(),

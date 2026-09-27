@@ -962,6 +962,58 @@ token)。定义本身与文件无关——与文件有关的只有**绑定生效
 **下一块**:`UnitDefinitions` 目前每次 run 重读一遍(102 ms/255 语料),而它是**纯派生**——可以随 TU 一起落盘
 (L4 缓存已经有了),也可以只读"用到的那部分";再往下是 L1/L2(内容缓存 + 名字驻留)真正要服务的东西。
 
+### 整个 TU 拼成一条流(已落地):地基最后一次用在"程序"而不是"一堆头文件"上
+
+前面几轮把"一次走查 + 每文件一个视图 + 单元一份定义"做完了,于是**按 include 顺序缝熟流**这件事第一次变得
+顺手——doc 里排在第 2 位的 `TU 级拼接`。落地为:
+
+- `TranslationUnit::cook_the_unit(&dyn UnitSources, &UnitDefinitions, seed, flag) -> RenderedUnit`:
+  按 frame 的 **preorder(就是 include 顺序)** 递归缝;每个 child 的插入点是它在父文件里的
+  `from_in_parent`(那条 `#include` 结束的位置);一个文件被走到一次就出现一次(guard 决定了第二次包含本来就
+  什么也不贡献)。切分用的键是每个 token **在本文件里的位置**——`ExpandedToken::diagnostic_range()`:文件自己写
+  的 token 用它自己的 range,宏体产生的 token 用**最外层调用点**(读者看得见的那段文字)。两者在流序里单调,
+  所以一次线性扫描就能把每个 `#include` 插到正确位置。
+- `RenderedUnit { text, spans, files, missing }` + `UnitSpan { cooked, file, written }`:每个 token 一条,
+  说清它**站在哪个文件里**、以及在该文件里该指哪儿。`written_at`/`file_of`/`file_at` 是查它的入口。
+  `missing` 是"走查到了但调用方没有正文"的文件数:`None` 的正文是**洞**而不是空文件——这两者产生不同的程序。
+- `UnitSources`(`preprocess/macros.rs`)是取正文的那道缝,`HashMap<PathBuf, S: Borrow<str>>` 自动实现,
+  所以探针/Session/测试都直接可用。
+
+**实测(255/109/455,和上面同一批读数并列)**:
+
+| | 拼出来的流 | 一次解析 | 结果 |
+|---|---|---|---|
+| 255 熟读 | 517 021 token,来自 **217/255** 文件 | 2.06 s + 2.34 s | **22 errors / 1 file**,首个在 `sourceannotations.h:1424` |
+| 109 熟读 | 276 969 token,来自 95/109 文件 | 1.01 s + 1.99 s | **22 errors / 1 file**,首个同一处 |
+| 455 熟读 | 208 847 token,来自 130/170 文件 | 132 ms + 186 ms | **4 errors / 3 files** |
+
+三行分别与**逐文件读数**吻合:255/109 都只有 `sourceannotations.h` 一个文件不干净(22 条消息),455 是
+3 个文件 4 条消息。也就是说**把程序当程序读,不多出一条错误**——跨文件的声明真的接上了(否则源文件那一段会
+炸成一片)。38/14/97 个"渲染成空"的文件数与逐文件读数也一致。
+
+**这一轮顺手修掉一个真缺陷(拼接把它逼出来了)**:`origin_of` 判定"这个 token 是文件写的还是宏体里的"靠的是
+**比较 offset**——"落在调用点区间内就是源文件,落在外面就是宏体"。对**文件自己写的**定义这是对的(体的 range
+在 `#define` 里,调用点在文件里);对**从别的文件来的**定义不对:它是本 crate 用 `definition_text` **重建**出来
+的那行 `#define NAME(params) body` 解析的,所以体 token 的 range 是那个字符串里的 offset(13 字节的重建文本里
+的 7),拿它去和一个 20 000 字节头文件里的调用点比较,**有时会碰巧落进去**。结果是一个被标成 `Origin::Source`、
+range 却指向任何文件里都不存在的位置的 token——比"没有答案"更糟:诊断落在错的地方,跳转哪儿也去不了。
+
+修法是把**来源**做成事实而不是巧合:宏体的 token 由 `substitute` 明确标成"体"(`Marked::from_a_body`),
+`origin_of` 认这个标记并把调用链补上;区间比较留给其余情形(它的作用是保住**实参**token 的来源——`MAX(x, y)`
+里的 `x` 是用户的 `x`,这一点没变)。证据:夹具里 `API`(`#define API WIDTH`,定义在 api.h)展开出的 `4`,
+`diagnostic_range()` 从 offset **7**(重建文本里的位置,不属于任何文件)变成 **32**(main.cpp 里 `API` 的调用点)。
+
+**同一次修里还留了一个有名有姓的缺口**:`navigation_range()` 与 `RenderedCooked::written_at` 对"继承来的宏
+体产生的 token"仍然交出**重建文本里的位置**(调用链里内层那条 invocation 的 `name_at`/`definition` 就是重建
+文本的 range)。要修就得让定义**带文件身份**——doc 里那句 "until files are identified rather than ranged" 说的
+正是这件事:`MacroDef` 现在只有 `SourceRange`,没有"哪个文件"。它属于"LSP 的跳转要指向真实位置"那一轮,不能
+靠在这里猜一个 offset 混过去。
+
+**下一块**(更新):① 定义的**文件身份**(`MacroDef`/`MacroInvocation` 带上 frame/文件,跳转与 `written_at`
+才能给出真位置,这也是 `UnitDefinitions` 落盘的前提);② `UnitDefinitions` 随 TU 落盘或按需读取;
+③ 然后是 L1/L2 与 M4/M5。
+
+
 ### M4 —— 文件 CST 降级
 裸树只保留:无损、括号/指令结构、浅层声明扫描。此时它那侧的门禁放宽到"结构正确",不再要求 C++ 正确。
 **验收**:宽容语法里针对展开的谓词清零。

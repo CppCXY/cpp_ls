@@ -163,6 +163,24 @@ struct Binding {
     at: usize,
 }
 
+/// **Where the text of a unit's files comes from** — everything a one-walk cook needs from the world.
+///
+/// A trait rather than a path→text map because the caller decides where text comes from: a disk provider, the
+/// buffers an editor holds, a test's fixtures. `None` is an answer too, and a load-bearing one — the unit's cook
+/// **records the hole** ([`crate::RenderedUnit::missing`]) rather than cooking an empty file, because "this file
+/// is empty" and "this file was not read" are different programs.
+pub trait UnitSources {
+    /// The text of `path`, when this caller has it.
+    fn source_of(&self, path: &std::path::Path) -> Option<&str>;
+}
+
+/// Any map from a path to its text is a source of texts — the shape every caller already has.
+impl<S: std::borrow::Borrow<str>> UnitSources for std::collections::HashMap<std::path::PathBuf, S> {
+    fn source_of(&self, path: &std::path::Path) -> Option<&str> {
+        self.get(path).map(|text| text.borrow())
+    }
+}
+
 /// **What a cook reads its macros from** — the definitions a file starts with, asked by name and offset.
 ///
 /// A trait rather than `&MacroTable` because the answer comes from three places, and they must be *asked* the

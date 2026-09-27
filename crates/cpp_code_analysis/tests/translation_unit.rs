@@ -485,6 +485,130 @@ fn a_walked_unit_can_be_kept_and_read_back() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+/// **The unit cooks as one program**, not as a pile of headers.
+///
+/// Cooking one file at a time answers "does this header read on its own" — it cannot answer "does the program
+/// read", because a declaration in one file and a use in another are two streams with nothing tying them
+/// together. `cook_the_unit` is that stream: the walk's own order (which is include order) with each include
+/// spliced in where the `#include` ended, and a map that says which file every token stands in.
+#[test]
+fn the_unit_cooks_as_one_stream_in_include_order() {
+    let files = [
+        ("/p/config.h", "#define WIDTH 4\nstruct Cfg { int a; };\n"),
+        (
+            "/p/api.h",
+            "#include \"config.h\"\n#define API WIDTH\nstruct Api { Cfg c; };\n",
+        ),
+        ("/p/main.cpp", "#include \"api.h\"\nint main_use = API;\n"),
+    ];
+
+    let unit = Unit::new(&files);
+    let mut definitions = MacroDefinitions::default();
+    let timeline = unit.timeline_of("/p/main.cpp", &mut definitions);
+    let mut parsed = cpp_code_analysis::ParsedDefinitions::new();
+    let shared = timeline.definitions(&mut parsed);
+
+    let stitched = timeline.cook_the_unit(&unit.sources, &shared, None, true);
+    assert_eq!(stitched.missing, 0, "every file the unit reached has text here");
+    assert_eq!(
+        stitched.files_with_tokens(),
+        3,
+        "all three files contributed a token: {}",
+        stitched.text
+    );
+
+    // The order is the walk's: what a file includes comes before its own text, and a header's own include comes
+    // before the header's.
+    let at = |needle: &str| {
+        stitched
+            .text
+            .find(needle)
+            .unwrap_or_else(|| panic!("`{needle}` is in the stream: {}", stitched.text))
+    };
+    assert!(at("struct Cfg") < at("struct Api"), "{}", stitched.text);
+    assert!(at("struct Api") < at("main_use"), "{}", stitched.text);
+
+    // **It is a program**: `Cfg` is a type the stream declared one file earlier, `API` came from a header and
+    // expanded to a value `config.h` defines, and the whole thing parses.
+    let tree = cpp_parser::CppParser::parse(&stitched.text, cpp_parser::ParserConfig::default());
+    assert!(
+        tree.get_errors().is_empty(),
+        "the stitched unit has errors: {:?} in {}",
+        tree.get_errors(),
+        stitched.text
+    );
+    assert!(
+        stitched.text.contains("= 4 ;"),
+        "`API` expanded to `WIDTH`'s value, which is defined two files away: {}",
+        stitched.text
+    );
+
+    // **The map says which file a token stands in**, and where in that file to act: `Api` is api.h's text…
+    let api = Path::new("/p/api.h");
+    let api_text = unit.sources.get(api).expect("read");
+    let api_at = stitched.text.find("Api").expect("in the stream");
+    let (file, written) = stitched.written_at(api_at).expect("a token is there");
+    assert_eq!(stitched.file_of(file), Some(api));
+    assert_eq!(&api_text[written.start_offset..written.end_offset()], "Api");
+
+    // …and the `4`, which was written in `config.h` and pasted by a macro `api.h` defines, **stands in
+    // main.cpp**: that is where the reader can act on it, and the map points at the call site.
+    let main = Path::new("/p/main.cpp");
+    let main_text = unit.sources.get(main).expect("read");
+    let four = stitched.text.find(" 4 ").expect("the expansion is in the stream");
+    let (file, written) = stitched.written_at(four).expect("a token is there");
+    assert_eq!(
+        stitched.file_of(file),
+        Some(main),
+        "a macro's token stands in the file that invoked it"
+    );
+    assert_eq!(
+        written.start_offset,
+        main_text.find("API").expect("the invocation"),
+        "and it points at the call site, not at a body in another file"
+    );
+}
+
+/// **A file the caller has no text for is a hole, not an empty file.**
+///
+/// The two produce different programs, and a census that conflated them would report "the unit parses" about a
+/// unit it never read. The hole is counted, the files it named are still stitched (the walk reached them through
+/// it), and nothing is invented for the missing file.
+#[test]
+fn a_file_without_text_is_a_hole_in_the_unit() {
+    let files = [
+        ("/p/config.h", "#define WIDTH 4\nstruct Cfg { int a; };\n"),
+        (
+            "/p/api.h",
+            "#include \"config.h\"\nstruct Api { int a[WIDTH]; };\n",
+        ),
+        ("/p/main.cpp", "#include \"api.h\"\n"),
+    ];
+
+    let unit = Unit::new(&files);
+    let mut definitions = MacroDefinitions::default();
+    let timeline = unit.timeline_of("/p/main.cpp", &mut definitions);
+    let mut parsed = cpp_code_analysis::ParsedDefinitions::new();
+    let shared = timeline.definitions(&mut parsed);
+
+    // The same unit, with `api.h`'s text withheld — the shape of an editor whose buffer for it is not loaded.
+    let mut partial: HashMap<PathBuf, String> = unit.sources.clone();
+    partial.remove(Path::new("/p/api.h"));
+
+    let stitched = timeline.cook_the_unit(&partial, &shared, None, true);
+    assert_eq!(stitched.missing, 1, "api.h was reached and not read");
+    assert!(
+        !stitched.text.contains("Api"),
+        "nothing was invented for the missing file: {}",
+        stitched.text
+    );
+    assert!(
+        stitched.text.contains("Cfg"),
+        "and the file *it* included is still stitched, because the walk reached it through the hole: {}",
+        stitched.text
+    );
+}
+
 /// **A file cooks the same through the unit as through a table of its own.**
 ///
 /// The one-walk path stopped building a table per file: it reads the unit's definitions **once**
@@ -625,3 +749,5 @@ fn a_file_cooks_the_same_through_the_unit_as_through_a_table_of_its_own() {
         "and a name nobody defines is nobody's: the seed does not invent one"
     );
 }
+
+

@@ -1293,6 +1293,122 @@ impl TranslationUnit {
             // out — so this is the root, and offset 0 is the only answer that means anything.
             .unwrap_or(0)
     }
+
+    /// **Cook the whole unit into one stream** — every file the walk reached, in the order a compiler reads them.
+    ///
+    /// This is the other half of the readings: cooking one file at a time answers "does this header read on its
+    /// own" ([`TranslationUnit::environment_of`] is the state, `cook_with` is the cook), and this answers "does
+    /// the program read". The order is the walk's own (frames are in DFS preorder, which is include order) and the
+    /// splice points are `from_in_parent` — the offset in the parent where the `#include` that brought the child
+    /// in ended.
+    ///
+    /// `definitions` is the unit's once-read definition table ([`TranslationUnit::definitions`]) and `seed` is
+    /// what the compilation predefines; `sources` is where the *text* comes from, which is the caller's business
+    /// (a disk provider, an editor's buffers, a test's fixtures). A file the caller has no text for is a hole:
+    /// counted in [`RenderedUnit::missing`] and its includes are still stitched, because a compilation that is
+    /// missing one header still reads the ones below it.
+    pub fn cook_the_unit(
+        &self,
+        sources: &dyn crate::preprocess::macros::UnitSources,
+        definitions: &UnitDefinitions,
+        seed: Option<&crate::macros::MacroTable>,
+        use_in_force_bodies: bool,
+    ) -> RenderedUnit {
+        let mut out = RenderedUnit {
+            files: self.frames.iter().map(|frame| frame.file.clone()).collect(),
+            ..RenderedUnit::default()
+        };
+        let cook = UnitCook {
+            unit: self,
+            sources,
+            definitions,
+            seed,
+            use_in_force_bodies,
+            // Which frames each frame includes, in the order it includes them. Frames are created in preorder, so
+            // a parent's children are already in include order and pushing in index order keeps it.
+            children: {
+                let mut children: Vec<Vec<u32>> = vec![Vec::new(); self.frames.len()];
+                for (index, frame) in self.frames.iter().enumerate() {
+                    if let Some(parent) = frame.parent {
+                        children[parent as usize].push(index as u32);
+                    }
+                }
+                children
+            },
+        };
+
+        if !self.frames.is_empty() {
+            cook.stitch(0, &mut out);
+        }
+        out
+    }
+}
+
+/// One unit's cook, in progress: the invariants [`TranslationUnit::cook_the_unit`] was handed, and the include
+/// tree the stitch walks.
+///
+/// A struct rather than six arguments because the stitch is recursive and every frame needs all of them — the
+/// alternative is the same list at every call, which is how a recursion ends up disagreeing with itself.
+struct UnitCook<'unit> {
+    unit: &'unit TranslationUnit,
+    sources: &'unit dyn crate::preprocess::macros::UnitSources,
+    definitions: &'unit UnitDefinitions,
+    seed: Option<&'unit crate::macros::MacroTable>,
+    use_in_force_bodies: bool,
+    /// For each frame, the frames it includes, in include order.
+    children: Vec<Vec<u32>>,
+}
+
+impl UnitCook<'_> {
+    /// Cook one frame and splice each include's stream in where the `#include` ended.
+    fn stitch(&self, frame: u32, out: &mut RenderedUnit) {
+        let included = &self.children[frame as usize];
+
+        let Some(text) = self.sources.source_of(&self.unit.frames[frame as usize].file) else {
+            // A file nobody has the text of: the includes it names are still stitched (the walk reached them
+            // through it), and the hole is counted rather than cooked as an empty file.
+            out.missing += 1;
+            self.stitch_included(included, 0, out);
+            return;
+        };
+
+        let (tokens, _) = cpp_parser::lex(text, &cpp_parser::LexerConfig::default());
+        let cooked = crate::preprocess::cooked::cook_with(
+            text,
+            &tokens,
+            &crate::preprocess::cooked::FileMacros::new(
+                self.unit.environment_at(frame),
+                self.definitions,
+                self.seed,
+                self.use_in_force_bodies,
+            ),
+        );
+
+        let mut next = 0usize;
+        for token in &cooked.tokens {
+            // **Where the token stands in this file**, which is also what decides whether an include that has not
+            // been spliced yet comes first: the call site for an expansion (the text the reader sees) and the
+            // token's own range for text the file wrote. Both are monotone in stream order, and both are positions
+            // in *this* file — see `ExpandedToken::diagnostic_range`.
+            let at = token.diagnostic_range();
+            while next < included.len()
+                && self.unit.frames[included[next] as usize].from_in_parent <= at.start_offset
+            {
+                self.stitch(included[next], out);
+                next += 1;
+            }
+            out.push(token.text(), frame, at);
+        }
+
+        self.stitch_included(included, next, out);
+    }
+
+    /// Splice the includes from `from` on: the tail of a file's stream, and everything a file with no text has.
+    fn stitch_included(&self, included: &[u32], from: usize, out: &mut RenderedUnit) {
+        for &child in &included[from..] {
+            self.stitch(child, out);
+        }
+    }
 }
 
 /// **A unit's definitions, read once** — what [`TranslationUnit::definitions`] produces, and what every file's
@@ -1580,6 +1696,118 @@ impl cpp_parser::MacroFacts for MacroView<'_> {
                 body,
             });
         }
+    }
+}
+
+/// **A whole translation unit cooked into one stream** — what a compiler parses, and the map back to the files.
+///
+/// # Why this exists
+///
+/// Cooking one file at a time answers "does this header read on its own", and the readings it produced (254 of
+/// 255, 452 of 455) are the ones this project has been driving up. It cannot answer "does the *program* read":
+/// a declaration in `vector` and a use in the source are two different streams, and nothing in either one says
+/// they belong together. This is that stream.
+///
+/// # How it is stitched
+///
+/// The walk already knows the order — frames are in DFS preorder, which *is* include order — and each frame
+/// records `from_in_parent`: the offset in its parent where its text comes into force, which is where the
+/// `#include` that brought it in ended. So the unit's text is the root's cooked tokens, with each child's stream
+/// spliced in at its own offset, recursively. A file the walk reached **once** appears **once**, whatever number
+/// of `#include`s named it — the guard idiom means the second inclusion would contribute nothing anyway.
+///
+/// # What the map says
+///
+/// One [`UnitSpan`] per token of `text`, in order, each naming the **file it stands in** and the place in that
+/// file a consumer should act on. The two are not the same thing, and the difference is the reason the map
+/// exists: a token produced by expanding a macro *stands* in the file that invoked it, while the text it was
+/// written in is inside some `#define` — see [`UnitSpan::written`].
+#[derive(Debug, Clone, Default)]
+pub struct RenderedUnit {
+    /// The tokens of every file the unit reached, in the order a compiler would read them.
+    pub text: String,
+    /// One entry per token of `text`, in the same order.
+    pub spans: Vec<UnitSpan>,
+    /// The files the walk entered, in the order it entered them — what a span's `file` indexes.
+    pub files: Vec<std::path::PathBuf>,
+    /// How many files the unit reached that the caller had **no text** for.
+    ///
+    /// A hole rather than an empty file: the stream is missing whatever that file would have contributed, and a
+    /// consumer that needs to know whether what it read is the whole program asks this.
+    pub missing: usize,
+}
+
+/// One token's place in a unit's rendering, and where it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnitSpan {
+    /// Where the spelling is in [`RenderedUnit::text`].
+    pub cooked: cpp_parser::SourceRange,
+    /// Which file of [`RenderedUnit::files`] the token **stands in**.
+    pub file: u32,
+    /// The place in that file a consumer should act on.
+    ///
+    /// The token's own range for a token the file wrote, and the **outermost call site** for one that came out of
+    /// a macro body — the text the reader can see, rather than a line inside a `#define` three headers up. See
+    /// `ExpandedToken::diagnostic_range`, which is where that choice is documented.
+    pub written: cpp_parser::SourceRange,
+}
+
+impl RenderedUnit {
+    /// Where a token of the rendering was written, by its offset in the rendering: the file, and the range in it.
+    pub fn written_at(&self, cooked_offset: usize) -> Option<(u32, cpp_parser::SourceRange)> {
+        let index = self
+            .spans
+            .partition_point(|span| span.cooked.end_offset() <= cooked_offset);
+        self.spans.get(index).map(|span| (span.file, span.written))
+    }
+
+    /// The file a token of the rendering stands in, as a path.
+    pub fn file_at(&self, cooked_offset: usize) -> Option<&std::path::Path> {
+        let (file, _) = self.written_at(cooked_offset)?;
+        self.file_of(file)
+    }
+
+    /// The path a span's file index names.
+    pub fn file_of(&self, file: u32) -> Option<&std::path::Path> {
+        self.files.get(file as usize).map(std::path::PathBuf::as_path)
+    }
+
+    /// How many tokens the unit's stream has.
+    pub fn len(&self) -> usize {
+        self.spans.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.spans.is_empty()
+    }
+
+    /// How many files the stream actually carries a token from.
+    ///
+    /// Not [`RenderedUnit::files`]'s length: a header whose whole body is inside a branch nobody takes
+    /// contributes no token, and one nobody had text for contributes a hole.
+    pub fn files_with_tokens(&self) -> usize {
+        let mut seen = vec![false; self.files.len()];
+        for span in &self.spans {
+            if let Some(slot) = seen.get_mut(span.file as usize) {
+                *slot = true;
+            }
+        }
+        seen.into_iter().filter(|it| *it).count()
+    }
+
+    /// Append one token — the separator rule `CookedStream::render` uses, so the two renderings spell the same
+    /// text for the same tokens.
+    fn push(&mut self, text: &str, file: u32, written: cpp_parser::SourceRange) {
+        if !self.text.is_empty() {
+            self.text.push(' ');
+        }
+        let start = self.text.len();
+        self.text.push_str(text);
+        self.spans.push(UnitSpan {
+            cooked: cpp_parser::SourceRange::new(start, self.text.len() - start),
+            file,
+            written,
+        });
     }
 }
 

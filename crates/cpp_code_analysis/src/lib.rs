@@ -66,7 +66,7 @@ pub use file::token;
 pub use include::{config, graph, msvc, paths, system_headers, toolchain};
 pub use preprocess::{condition, cooked, directive, expand, guards, macros};
 pub use cooked::{FileMacros, Over, ParsedDefinitions, configuration_from_environment_and};
-pub use macros::MacroBindings;
+pub use macros::{MacroBindings, UnitSources};
 pub use sema::declarations::{build_facts, by_name, declared_type_of, scope_of};
 pub use sema::{module_info, modules, parser_symbols, scopes, symbol};
 mod tu_cache;

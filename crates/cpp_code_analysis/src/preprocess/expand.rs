@@ -358,15 +358,34 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
     /// from the source, which includes an argument: `x` in `MAX(x, y)` lies between the parentheses and is
     /// the user's own `x`, so "go to definition" on it must find their variable and not the macro.
     ///
-    /// A token outside the region came from the body, and without this it would be reported as
-    /// `Origin::Source` — because that is what a body's tokens are when they are read. They are not source
-    /// *here*: the user never wrote `((a) > (b) ? (a) : (b))` at this line.
+    /// # Why a body's tokens say so instead of being measured
+    ///
+    /// The test this used to rely on alone — "inside the region is the source, outside is the body" — compares
+    /// offsets, and offsets only compare when they are in the same text. For a definition a **file** wrote they
+    /// are: the body's ranges are in the `#define` and the call site is in the file, so a body token is outside
+    /// the region. For a definition that arrived from another file through the unit's evidence they are not: it
+    /// is parsed from the `#define` line this crate *reconstructs*
+    /// (`cpp_code_analysis::preprocess::cooked::definition_text`), so a body token's range is an offset in that
+    /// string — 7 inside a 13-byte reconstruction — and the comparison can succeed by coincidence against a call
+    /// site in a 20 000-byte header. What that produced was a token labelled `Origin::Source` carrying a range
+    /// that is a position in no file at all, which is worse than a missing answer: a diagnostic lands in the
+    /// wrong place and a "go to definition" goes nowhere.
+    ///
+    /// So a body token is **marked** as a body token ([`Marked::from_a_body`]) and this fills in the chain it
+    /// belongs to. The range test stays for everything else, where it is sound and is what keeps an argument's
+    /// own tokens labelled as the source's.
     ///
     /// `Pasted` and `Stringized` are kept as they are: a consumer asking about a joined token wants the
     /// call site it was joined at, and re-labelling it as `Expanded` would throw that away.
     fn origin_of(&self, token: &Token, region: Option<SourceRange>, fallback: &Origin) -> Origin {
         if matches!(fallback, Origin::Pasted { .. } | Origin::Stringized { .. }) {
             return fallback.clone();
+        }
+
+        if matches!(fallback, Origin::Expanded { invocations } if invocations.is_empty()) {
+            return Origin::Expanded {
+                invocations: self.invocations.clone(),
+            };
         }
 
         let Some(region) = region else {
@@ -661,6 +680,23 @@ impl From<Token> for Marked {
     }
 }
 
+impl Marked {
+    /// A token of a macro **body**, whose chain the caller fills in when it pushes it.
+    ///
+    /// `substitute` cannot say which invocation the token belongs to (it is handed one invocation, not the
+    /// chain), and saying `Source` — which is what a body's tokens look like when they are read — is *wrong* in
+    /// a way that used to be caught by comparing offsets: see [`Expander::origin_of`], where the comparison and
+    /// why it cannot be trusted for an inherited definition are documented.
+    fn from_a_body(token: Token) -> Self {
+        Marked {
+            token,
+            origin: Origin::Expanded {
+                invocations: Vec::new(),
+            },
+        }
+    }
+}
+
 impl FromIterator<Marked> for Vec<Token> {
     /// Keep the tokens and drop the origins, for the callers that only need the spelling.
     fn from_iter<T: IntoIterator<Item = Marked>>(iter: T) -> Self {
@@ -763,7 +799,7 @@ fn substitute(
         // than to what the macro expands to. Keeping it would make `VERSION` expand to `" 3\n"`.
         return significant_tokens(&definition.body.tokens)
             .into_iter()
-            .map(Marked::from)
+            .map(Marked::from_a_body)
             .collect();
     };
 
@@ -817,7 +853,7 @@ fn substitute(
                     .next()
                     .map(Marked::from)
             } else {
-                Some(Marked::from(body_tokens[right_index].clone()))
+                Some(Marked::from_a_body(body_tokens[right_index].clone()))
             };
 
             match (left, right) {
@@ -855,7 +891,7 @@ fn substitute(
             continue;
         }
 
-        out.push(Marked::from(token.clone()));
+        out.push(Marked::from_a_body(token.clone()));
         index += 1;
     }
 
