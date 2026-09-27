@@ -945,6 +945,7 @@ fn a_completion_right_after_a_change_sees_the_change() {
 
     // The burst, and then **immediately** the request: no sleep, no retry, no second request. A client that typed a
     // dot sends its edits and then asks, in this order.
+    let sent = Instant::now();
     for round in 1..=ROUNDS {
         server.notify(
             "textDocument/didChange",
@@ -954,6 +955,7 @@ fn a_completion_right_after_a_change_sees_the_change() {
             }),
         );
     }
+    let burst_written = Instant::now();
 
     let answer = server.request(
         100,
@@ -962,6 +964,16 @@ fn a_completion_right_after_a_change_sees_the_change() {
             "textDocument": { "uri": uri },
             "position": { "line": 3 + LINES, "character": 6 },
         }),
+    );
+    let served = Instant::now();
+
+    // Reported rather than asserted: how long the burst costs the request that follows it is a measurement, and it
+    // moves with the machine. What *is* asserted is the count of applications, in `context::update_queue`'s own
+    // tests — a burst of changes for one document is one piece of work, so this request waited for one.
+    println!(
+        "a {ROUNDS}-change burst sent in {:?}, then a completion answered {:?} later",
+        burst_written.elapsed(),
+        served - sent
     );
 
     let items = answer["result"]["items"]

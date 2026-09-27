@@ -80,6 +80,36 @@ pub enum UpdateEvent {
     WatchedFilesChanged(DidChangeWatchedFilesParams),
 }
 
+impl UpdateEvent {
+    /// Is `other` a **newer statement about the same thing**, so that this event has nothing left to say?
+    ///
+    /// One shape qualifies, and it is the one a client produces while typing, pasting or formatting: two
+    /// `didChange` for one document, one after the other. FULL sync is what makes it safe — every change carries
+    /// the **whole** text, so the later one replaces the earlier rather than transforming it, and what is dropped
+    /// is a text the client itself never showed (it went from the first to the second without stopping).
+    ///
+    /// Everything else is left alone, and each exclusion has its own reason:
+    ///
+    /// * `didOpen`, `didClose` and `didSave` are not only text — they move the file between "the buffer" and "the
+    ///   disk", and a save is a statement that the two now agree;
+    /// * two changes to **different** documents are two documents: last-wins across them would drop a file's whole
+    ///   edit;
+    /// * a change that is not **adjacent** to one for the same document is separated by something that changed the
+    ///   world in between — `A` edited, `B` opened, `A` edited again: merging those two would apply the second
+    ///   change to `A` before `B` was opened, which is an order the client did not send.
+    ///
+    /// (Incremental sync would break this rule outright, and that is one more reason this server advertises FULL:
+    /// a range-based change cannot be dropped without losing the edits it makes.)
+    fn absorbs(&self, other: &UpdateEvent) -> bool {
+        match (self, other) {
+            (UpdateEvent::Changed(earlier), UpdateEvent::Changed(later)) => {
+                earlier.text_document.uri == later.text_document.uri
+            }
+            _ => false,
+        }
+    }
+}
+
 /// One event and where it sits in the client's stream.
 struct QueuedUpdate {
     /// The number this event was given when it was queued, starting at `1`. See [`UpdateInbox::queued`].
@@ -92,7 +122,14 @@ pub struct UpdateInbox {
     /// Oldest first, each with its sequence number. Behind the lock rather than behind a channel, because the
     /// bound a request applies up to has to be decided by *looking* at the front of the queue: a channel hands out
     /// whatever is next, and an event that belongs to a later request cannot be put back.
+    ///
+    /// **Held only for a push or a pop** — never across the applying of an event. That is measured rather than
+    /// tidy: applying a `didChange` takes the session's write lock, which the index pump holds for a whole slice, so
+    /// a burst used to wait ~90 ms *per message* on the previous message's apply and the message loop behind it —
+    /// 24 changes cost the client **2.4 s**, and a completion asked for at the end of them waited for all of it.
     pending: Mutex<VecDeque<QueuedUpdate>>,
+    /// **The single-writer rule**: held by whoever is applying events, for as long as that takes.
+    applying: Mutex<()>,
     /// How many events have ever been queued — see [`UpdateInbox::queued`].
     queued: AtomicU64,
     /// "There is something to apply."
@@ -109,18 +146,32 @@ impl UpdateInbox {
     pub fn new() -> Self {
         UpdateInbox {
             pending: Mutex::new(VecDeque::new()),
+            applying: Mutex::new(()),
             queued: AtomicU64::new(0),
             work: Notify::new(),
         }
     }
 
     /// Queue one event, and wake whoever applies them.
+    ///
+    /// **A run of changes to one document collapses into one piece of work** — see [`UpdateEvent::absorbs`] for the
+    /// exact rule and why nothing else may collapse. The count still goes up for every message, because the count
+    /// is what a request measures its own past with, and the merged event keeps the **earliest** number of the run:
+    /// a request that was dispatched after the first change of the run is entitled to see the run, and it now sees
+    /// the run's last text — which is the only text of it that still exists.
     pub async fn push(&self, event: UpdateEvent) {
         // The number is taken **before** the lock, so that a caller reading `queued` on another task never sees a
         // count whose event is not in the queue yet: the count is only ever read by the task that sends (see the
         // module documentation), and this ordering is what makes that safe rather than lucky.
         let seq = self.queued.fetch_add(1, Ordering::SeqCst) + 1;
-        self.pending.lock().await.push_back(QueuedUpdate { seq, event });
+
+        let mut pending = self.pending.lock().await;
+        match pending.back_mut() {
+            Some(last) if last.event.absorbs(&event) => last.event = event,
+            _ => pending.push_back(QueuedUpdate { seq, event }),
+        }
+        drop(pending);
+
         self.work.notify_one();
     }
 
@@ -137,11 +188,13 @@ impl UpdateInbox {
         tokio::time::timeout(timeout, self.work.notified()).await.is_ok()
     }
 
-    /// Apply every queued event up to `upto`, in order, calling `apply` for each one **while the queue is held**.
+    /// Apply every queued event up to `upto`, in order, calling `apply` for each one.
     ///
-    /// The held lock is the single-writer rule: a request that finds the worker applying an event waits here, then
-    /// applies what is left itself — in order, and never interleaved. The alternative (take the front, drop the
-    /// lock, apply) would let `didOpen` and the `didChange` after it run at the same time.
+    /// **One applier at a time**, which is what keeps the client's order: the queue is handed out oldest-first under
+    /// `pending`, and `applying` is held for the whole run — so a request that finds the worker applying an event
+    /// waits here, then applies what is left itself, and `didOpen` can never overtake the `didChange` that followed
+    /// it. A *push* is not blocked by that, which is the point: the storage lock is taken per event and released
+    /// before the event is applied, so a client that sends a burst is not waiting for the burst.
     ///
     /// Returns how many were applied, which is what the idle worker looks at to decide whether to sleep.
     pub async fn apply_upto<F, Fut>(&self, upto: u64, mut apply: F) -> usize
@@ -149,13 +202,22 @@ impl UpdateInbox {
         F: FnMut(UpdateEvent) -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
-        let mut pending = self.pending.lock().await;
+        let _applying = self.applying.lock().await;
         let mut applied = 0;
 
-        while pending.front().is_some_and(|queued| queued.seq <= upto) {
-            let Some(queued) = pending.pop_front() else {
+        loop {
+            let next = {
+                let mut pending = self.pending.lock().await;
+                match pending.front() {
+                    Some(queued) if queued.seq <= upto => pending.pop_front(),
+                    _ => None,
+                }
+            };
+
+            let Some(queued) = next else {
                 break;
             };
+
             apply(queued.event).await;
             applied += 1;
         }
@@ -212,7 +274,10 @@ pub fn spawn_update_queue(inner: Arc<ServerContextInner>) {
 #[cfg(test)]
 mod tests {
     use super::{UpdateEvent, UpdateInbox};
-    use lsp_types::{DidCloseTextDocumentParams, DidOpenTextDocumentParams, TextDocumentIdentifier};
+    use lsp_types::{
+        DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+        TextDocumentIdentifier,
+    };
 
     fn opened(uri: &str) -> UpdateEvent {
         UpdateEvent::Opened(DidOpenTextDocumentParams {
@@ -231,6 +296,91 @@ mod tests {
                 uri: uri.parse().expect("a uri"),
             },
         })
+    }
+
+    /// A `didChange` carrying the whole text, the way FULL sync sends one.
+    fn changed(uri: &str, version: i32, text: &str) -> UpdateEvent {
+        UpdateEvent::Changed(DidChangeTextDocumentParams {
+            text_document: lsp_types::VersionedTextDocumentIdentifier {
+                uri: uri.parse().expect("a uri"),
+                version,
+            },
+            content_changes: vec![lsp_types::TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: text.to_string(),
+            }],
+        })
+    }
+
+    /// The text a queued `Changed` carries, for an assertion about which one survived.
+    fn text_of(event: &UpdateEvent) -> Option<&str> {
+        match event {
+            UpdateEvent::Changed(params) => Some(&params.content_changes.last()?.text),
+            _ => None,
+        }
+    }
+
+    /// **A run of changes to one document is one piece of work, and it is the last text of the run.**
+    ///
+    /// This is what makes the ordering guarantee affordable: a client that is typing sends a change per keystroke,
+    /// and the server used to apply every one of them — 24 parses for a user who typed 24 characters before the
+    /// completion that needed the *last* of them. What the request must see is unchanged (it still sees the run's
+    /// last text, which is the only text of the run that exists).
+    #[tokio::test]
+    async fn a_run_of_changes_to_one_document_is_one_piece_of_work() {
+        let inbox = UpdateInbox::new();
+
+        for version in 1..=24 {
+            inbox
+                .push(changed("file:///a.cpp", version, &format!("text {version}")))
+                .await;
+        }
+
+        let mut applied = Vec::new();
+        let count = inbox
+            .apply_upto(u64::MAX, |event| {
+                applied.push(text_of(&event).unwrap_or_default().to_string());
+                async {}
+            })
+            .await;
+
+        assert_eq!(count, 1, "one document's run of changes is applied once");
+        assert_eq!(applied, ["text 24"], "and the text applied is the last one");
+
+        // The count is still per **message**: that is what a request measures its own past with, so a request
+        // dispatched after the 24th change is entitled to it, and one dispatched before them is not.
+        assert_eq!(inbox.queued(), 24);
+    }
+
+    /// The three shapes that must **not** collapse, each for its own reason.
+    #[tokio::test]
+    async fn changes_that_are_not_the_same_document_in_a_row_are_left_alone() {
+        let inbox = UpdateInbox::new();
+
+        inbox.push(changed("file:///a.cpp", 1, "a1")).await;
+        // A different document: last-wins across these would drop a whole file's edit.
+        inbox.push(changed("file:///b.cpp", 1, "b1")).await;
+        // The same document again, but not adjacent: merging would apply `a2` before `b.cpp` was even opened.
+        inbox.push(changed("file:///a.cpp", 2, "a2")).await;
+        // A close and a reopen are not text: they move the file between the buffer and the disk.
+        inbox.push(closed("file:///c.cpp")).await;
+        inbox.push(opened("file:///c.cpp")).await;
+
+        let mut applied = Vec::new();
+        let count = inbox
+            .apply_upto(u64::MAX, |event| {
+                applied.push(text_of(&event).map(str::to_string));
+                async {}
+            })
+            .await;
+
+        assert_eq!(count, 5, "five messages, five applications: {applied:?}");
+        assert_eq!(
+            applied.iter().filter_map(|text| text.as_deref()).collect::<Vec<_>>(),
+            ["a1", "b1", "a2"],
+            "in the order the client sent them"
+        );
     }
 
     /// The bound is what makes the guarantee exact: a request applies what the client sent **before** it, and a
