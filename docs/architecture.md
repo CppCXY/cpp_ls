@@ -1835,6 +1835,81 @@ _Result     = const pair<_Nodeptr, bool>  (map)
 把半开区间改回闭区间 → 三条变红(下潜走进了前一个说明符 ✗,见 §8);去掉花括号那一格 → 两条变红 ✓。
 上界**整个去掉**会让 `auto x = x;` 一直问下去——这一条是推理,没有拿一个会挂死的测试去跑 ✓。
 
+### 用户报的"`std` 只有几个补全"查到了根:**环境"完整"的授权发错了人**(已落地)
+
+用户在一个**空目录**里报的(`C:\Users\zc\Desktop\cpp_project`:一个 2678 字节的 `main.cpp`,没有 `.cppls.toml`、
+没有 `compile_commands.json`、没有 CMake):`std` 只有几个补全、悬停看不到 `#include` 里来的类型。(他说的
+"函数体内的变量/参数没有补全"是另一处,已在前一轮的分派修正里落地:成员查询只要因为**别的理由**说不出来,
+后面那个装着局部变量与参数的查询根本不会被问到 ✗。)
+
+先把"是不是没读进来"排除掉:**闭包 138 个文件全读了**,`<xstring>` 的摘要也在索引里(129 条 fact),问题是
+**每条 fact 的 scope 都不对**:
+
+```text
+declarations_in("std")                              13     ← 全部来自字面写 `namespace std {` 的 C 头(crtdbg.h/stddef.h/…)
+definition("std::string"/"cin"/"cout"/"basic_string")  None
+逐个标识符问 definition                          46 个"索引里没有这个名字" + 26 个 ConditionalCompilation
+cook(<string>)                                    0 声明、0 处映射 ← 整个文件渲染成空白
+<xstring> 里 char_traits 的 scope                 _Char_traits::_WChar_traits   ✗ `std` 一次都没出现
+```
+
+根在编译器自己的头里(逐行核对过 `yvals_core.h`):
+
+```text
+   9: #ifndef _STL_COMPILER_PREPROCESSOR
+  13: #if defined(RC_INVOKED) || defined(Q_MOC_RUN) || defined(__midl)
+  14: #define _STL_COMPILER_PREPROCESSOR 0
+  16: #define _STL_COMPILER_PREPROCESSOR 1
+  20: #if _STL_COMPILER_PREPROCESSOR        ← 整个 STL 的正文都在这一行后面
+1773: #define _STD_BEGIN namespace std {
+1843: #endif
+```
+
+这三个名字**没有任何文件定义**,只有编译器定义或不定义它们。于是三值逻辑的两侧就分开了:
+
+- `Marked` **不完整**时:"`RC_INVOKED` 我不知道" → `#if` 未定 → `#else` 分支不成立 → `#define
+  _STL_COMPILER_PREPROCESSOR 1` 不进证据 → `_STD_BEGIN` 的体也不进证据(它自己就在 `#if
+  _STL_COMPILER_PREPROCESSOR` 里)→ `std` 永远不开 → **整个标准库按文件作用域读**,而且 `#include <xstring>`
+  那条边也成了"条件包含",于是 `definition` 答 `ConditionalCompilation` ✗;
+- 而"完整不完整"这一位的判据当时是**"读到了项目的 `compile_commands.json` 吗"** —— 空目录当然没有,于是
+  "我们已经问过编译器、拿到了它 58 个预定义宏"这件事**完全没被用上** ✗。
+
+修法是**换掉授权的来源**,不是放宽三值逻辑:`Session` 现在在**编译器答过**(`builtin_macros` 非空)时声明
+"这条命令行就是我们知道的全部",编译数据库降级为**一个 flag 来源**而不是授权本身(`the_compilation_is_known`,
+`session.rs`)。三条边界写在函数与调用点上:
+
+- 只有头目录、没有宏表的那种 toolchain(`system_headers` 兜底,或 `/PD` 失败)**不算答过**:那会把编译器
+  自己的五百个名字读成"未定义"(`#ifdef _MSC_VER` 在 MSVC 上为假 ✗),是错答案而不是缺答案;
+- 读不到的构建描述(一个带 `-DFOO` 的 `Makefile`)是这一位**看不见的洞**;兜底是"这种项目通常也有读不到的
+  `-I`",而 `#include` 一解析不到,`Marked::mark_incomplete` 自己就把这句话收回 ✓;
+- 这一位进了**缓存键**(`context_hash`,store.rs):同一份文本、同一份配置,在"答过"与"没答过"两种环境下读出来
+  的不是一份东西(下一个表里同一文件 129 条 / 1631 条),共用一个 key 就是拿一份读数当另一份 ✗。
+
+**实测**(`examples/workspace_probe.rs`,用户那个目录,MSVC 14.35.32215):
+
+| 问 | 改前 | 改后 |
+|---|---|---|
+| `declarations_in("std")` | 13 | **2600** |
+| `definition("std::string")` / `std::cin` / `std::cout` | `None` | 三个都答 ✓ |
+| `<xstring>` 摘要 | 129 条,38 条带 scope | **1631 条,524 条带 scope** |
+| `cook(<string>)` | 0 声明 / 0 处映射 | **1000 声明 / 2000 处映射** ✓ |
+| 逐个标识符 `definition` 无解 | 46 | **9**(一个宏 `stdout`/`stderr` 家族、一个关键字、一个局部、`npos` ×3) |
+| `std::` 处的补全 | 十几个 | **1482 个名字** ✓ |
+| 类型(悬停那一格的数据) | — | `line : std::string`、`length : std::size_t`、`message : const std::optional<std::string>` ✓ |
+
+代价是**冷读**:同一个闭包(138 文件)**3.5 s → 16.5 s**,热读 **8.5 s**(reused 137 / rebuilt 1)——以前它读的是
+空白,现在读的是四兆头文件 ✓。
+
+剩下的(下一轮的量,探针里都已可见):`std` 这个名字本身答 `Ambiguous`(25 处——一个命名空间被每个头各重开一次
+不是歧义 ✗)、重载成员(`find`/`empty`/`substr`/`size`…)答 `Ambiguous`(要发的是"这一组声明",协议侧得是个列表 ✗)、
+`type_at` 对 `std::cin`/`std::cout` 这类**对象**仍拒答(`UnknownType("std::cin")` ✗),以及 `std::` 列表第一屏是
+`FILE`/`_Add_pointer` 这类内部名(候选排序那一项)。
+
+**证据**:`cpp_code_analysis/tests/toolchain.rs` 一条(无构建系统的临时工程,照抄 MSVC 那个 `#if defined(RC_INVOKED)`
+形状:`OPEN_STD` 的体只有这一位为真时才算生效,于是 `Widget` 落在 `std` 里)、`session.rs` 单元测试一条(三种
+toolchain 形状:没 compiler / 有目录没宏表 / 答过)。**反证**:把这一位改回"读过编译数据库吗" → 两条都变红
+(集成那条答 `None` 而不是 `Some("std")`),改回即绿 ✓。
+
 ### M4 —— 文件 CST 降级
 裸树只保留:无损、括号/指令结构、浅层声明扫描。此时它那侧的门禁放宽到"结构正确",不再要求 C++ 正确。
 **验收**:宽容语法里针对展开的谓词清零。
@@ -1845,7 +1920,7 @@ _Result     = const pair<_Nodeptr, bool>  (map)
 
 ## 7. 度量与门禁
 
-每次改动后必须全绿(测试基线:**1373 个测试**、49 个 suite,实测;`cargo clippy --workspace --all-targets`
+每次改动后必须全绿(测试基线:**1375 个测试**、49 个 suite,实测;`cargo clippy --workspace --all-targets`
 零警告,`cargo doc` 零警告,`cpp_dump` 零错误):
 
 ```bash
@@ -1870,6 +1945,9 @@ std_probe <list> --seeds --closure --cooked --cooked-index --dump-raw-only <path
 cargo run --release --example semantic_probe -- <list> --limit <n>
 # `auto` 的覆盖面:语料里多少个 auto 声明推出了类型、多少拒答(还把 auto 当类型报出来的必须是 0)
 cargo run --release --example types_probe -- <list>
+# **一个真实目录的读数**:发现到的 toolchain、索引了多少文件、`std` 里有多少名字、每个标识符问 definition/type
+# 得到什么、每个 `::` 处补全给几个名字(用户报症状时用的就是这一条)
+cargo run --release --example workspace_probe -- <dir> [<file.cpp>]
 ```
 
 | 语料 | 档 | 方式 | 现状基线 |
@@ -2044,21 +2122,33 @@ cargo run --release --example types_probe -- <list>
   6 个推出、54 个拒答、0 个报 `auto`**;54 个拒答全在模板体内(依赖名 ✗ = 下一步"模板实例化"的量)。见 §6 那一节。
 - **签名帮助(本轮)**:`textDocument/signatureHelp`,**一条**签名(析出来就是一条;`Ambiguous` 不发),参数 span 指向
   标签内部、活动参数按**本层逗号**数、声明上方的文档跟着来;触发字符 `(` 与 `,`。
+- **环境"完整"的授权(本轮)**:空目录里 `std` 是空的,根在 `yvals_core.h` 用
+  `#if defined(RC_INVOKED) || defined(Q_MOC_RUN) || defined(__midl)` 定义 `_STL_COMPILER_PREPROCESSOR`,而整个 STL 的
+  正文在 `#if _STL_COMPILER_PREPROCESSOR` 里——这三个名字**只有编译器认识**。判据从"读过 `compile_commands.json` 吗"
+  换成"编译器答过预定义宏吗",同一目录实测 `declarations_in("std")` **13 → 2600**、`std::` 处补全 **→ 1482 个名字**、
+  `cook(<string>)` **0 → 1000 声明**、无解标识符 **46 → 9**;代价是冷读 3.5 s → 16.5 s(热读 8.5 s)。这一位也进了缓存键。见 §6 那一节。
 - **LSP 的能力表现在是十三项**:诊断(push + pull)、definition、hover、completion、documentSymbol、foldingRange、
   references、rename(含 `prepareRename`)、workspaceSymbol、selectionRange、inlayHint、semanticTokens、signatureHelp ✓。
 
 **下一步(按依赖排序)**(更新到本轮之后):
-1. **删形状规则(M4)**:**这一轮的账把结论改了**——不再是"看着账做",而是一句有数的话:这一族买到的是
+1. **补全/跳转的两个 `Ambiguous`(本轮量出来的,最值钱)**:`std` 这个名字本身在用户那个文件里 25 处答
+   `Ambiguous`(命名空间被每个头各重开一次,不是歧义 ✗),重载成员(`find`/`empty`/`substr`/`size`/`read`…)约 61 处
+   同理——它们要的答案是**一组声明**(协议侧:definition 发多个 location,hover 发一个列表),而不是"说不清" ✓。
+2. **`type_at` 对标准库对象仍拒答**(`UnknownType("std::cin")` 8 处、`std::cout` 5 处):名字查得到(`definition` 答
+   `Variable`),但它的 `type_of`(`istream`,一个别名)没被接着走一步 ✗——这是悬停"类型"那一格与成员补全的共同前置。
+3. **删除形状规则(M4)**:**这一轮的账把结论改了**——不再是"看着账做",而是一句有数的话:这一族买到的是
    **94 个活着的声明**(`qsort`、`bsearch`、`_itoa_s` 这一档,以及 UCRT 那些被注解过的参数名)+ 304 个死分支声明;
    丢掉它们的第一个消费者是**大纲**(它刻意读裸读),条件那 304 个连索引并集一起丢。所以在"大纲显示死分支"
    这条产品选择不变的前提下**不删**;要动它,先回答"大纲该不该读两种读数的并集"(§6 那一节末尾)。两个开关点
    的归因也已经分开量过:site 1 只买 30 个(6 个无条件),site 2 买 378 个(90 个无条件)并**遮住** 52 个。
-2. **熟读剩下的文件**:255/109 两档只剩 `sourceannotations.h`,已判定是 `/analyze` 专属语法(**非缺口**)。
-3. **L2(名字驻留)**:量过,是噪声级别(§6 L1/L2),不做;L1/L4 已完成。
-4. **带括号的声明符(§8 第 8 条)**:`void (*f(int a))(int b);` 这类声明还没进符号模型,是这一轮做提示时
+4. **候选排序**:`std::` 现在给 1482 个名字,第一屏是 `FILE`/`_Add_pointer` 这类内部名,而用户要的是 `string`/`vector`
+   (`sort_and_hide` 只做去重与遮蔽,没有"常用在前"这一格)。
+5. **熟读剩下的文件**:255/109 两档只剩 `sourceannotations.h`,已判定是 `/analyze` 专属语法(**非缺口**)。
+6. **L2(名字驻留)**:量过,是噪声级别(§6 L1/L2),不做;L1/L4 已完成。
+7. **带括号的声明符(§8 第 8 条)**:`void (*f(int a))(int b);` 这类声明还没进符号模型,是这一轮做提示时
    量出来的一个**独立**缺口;影响的是跳转/悬停/补全/改名这一整片,所以要先量影响面再动 `declared_name`。
-5. **类型推断(本轮开始,下一步最重)**:这一层到今天为止回答的是**读出来的**类型,这一轮把 `auto` 变成了
-   可计算的类型(§6 那一节),顺带证明了这条线怎么走:**先量出拒答的量,再决定下一个小步**。109 档里
-   54/60 个 `auto` 拒答,全部落在模板体内——它们要的是**模板实例化**(把 `_STy::value_type`、`_Get_value(...)`
-   这类依赖名算出来),那是下一块建模,量就摆在那里 ✓。再往后是重载解析(签名帮助里明确没做的那一半)与
-   `decltype`。协议侧的口子已经全接完(十三项 ✓),所以这条线现在是纯粹的建模工作,不再有 LSP 方法要加 ✓。
+8. **类型推断(下一步最重)**:这一层到今天为止回答的是**读出来的**类型,`auto` 已经变成可计算的类型(§6 那一节),
+   顺带证明了这条线怎么走:**先量出拒答的量,再决定下一个小步**。109 档里 54/60 个 `auto` 拒答,全部落在模板体内
+   ——它们要的是**模板实例化**(把 `_STy::value_type`、`_Get_value(...)` 这类依赖名算出来),那是下一块建模,
+   量就摆在那里 ✓。再往后是重载解析(签名帮助里明确没做的那一半)与 `decltype`。协议侧的口子已经全接完(十三项 ✓),
+   所以这条线现在是纯粹的建模工作,不再有 LSP 方法要加 ✓。

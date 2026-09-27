@@ -30,12 +30,14 @@ fn main() {
     let indexed = Instant::now();
     session.index_everything();
     println!(
-        "opened in {opening:?} | toolchain {:?} | {} include paths | indexed {} files in {:?} (pending {})",
+        "opened in {opening:?} | toolchain {:?} | {} include paths | {} project files | indexed {} files in {:?} (pending {} | stats {:?})",
         session.toolchain().and_then(|toolchain| toolchain.version.clone()),
         session.config().include_paths.len(),
         session.project_files().len(),
+        session.index().len(),
         indexed.elapsed(),
-        session.pending()
+        session.pending(),
+        session.stats()
     );
 
     // **What the index actually holds**, asked directly: whether the facts are there at all (an alias or a
@@ -125,7 +127,7 @@ fn main() {
         );
     }
     let string_header = std::path::PathBuf::from(
-        "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.35.32215\\include\\string",
+        "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.35.32215\\include\\xstring",
     );
     if let Some(summary) = session.index().summary(&string_header) {
         println!("--- what <string>''s {} declarations are called ---", summary.declarations.len());
@@ -166,6 +168,9 @@ fn main() {
 
     let mut outcomes: HashMap<String, usize> = HashMap::new();
     let mut failures: Vec<String> = Vec::new();
+    // Identifier → the type the analysis gives it, deduplicated: this is the data a hover shows.
+    let mut typed: Vec<String> = Vec::new();
+    let mut type_outcomes: HashMap<String, usize> = HashMap::new();
 
     for token in view.tree.get_tokens() {
         if token.kind != cpp_parser::CppTokenKind::Identifier {
@@ -192,6 +197,25 @@ fn main() {
                 *outcomes.entry("no name at this offset".to_string()).or_default() += 1;
             }
         }
+
+        // **The type of the name**, which is what a hover on a variable needs — and the half that was missing
+        // while the standard library was unreachable: `std::string line;` has a type only if `std::string` is in
+        // the index to be read.
+        match session.type_at(&view, offset) {
+            Known::Yes(found) => {
+                *type_outcomes.entry("a type".to_string()).or_default() += 1;
+                let entry = format!("{name} : {}", found.type_of);
+                if !typed.contains(&entry) {
+                    typed.push(entry);
+                }
+            }
+            Known::Unknown(reason) => {
+                *type_outcomes.entry(format!("unknown: {reason:?}")).or_default() += 1;
+            }
+            Known::No => {
+                *type_outcomes.entry("no type here".to_string()).or_default() += 1;
+            }
+        }
     }
 
     println!("\n--- definition, over every identifier ---");
@@ -203,6 +227,50 @@ fn main() {
     println!("--- unresolved, on code ({}) ---", failures.len());
     for failure in failures.iter().take(30) {
         println!("{failure}");
+    }
+
+    println!("\n--- the type of every identifier, deduplicated (what a hover has to show) ---");
+    let mut ranked: Vec<(String, usize)> = type_outcomes.into_iter().collect();
+    ranked.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    for (outcome, count) in &ranked {
+        println!("{count:6}  {outcome}");
+    }
+    for entry in typed.iter().take(24) {
+        println!("        {entry}");
+    }
+
+    // **The names a `::` offers** — the user's first symptom, asked generically: every qualification the file
+    // writes is a scope, and the question at it is the one a completion at the cursor asks.
+    println!("\n--- completion after every `::` in the file ---");
+    let mut at = 0usize;
+    while let Some(found) = source[at..].find("::") {
+        let after = at + found + 2;
+        at = after;
+        let cursor = after + source[after..].bytes().take_while(|byte| *byte == b' ').count();
+        let line = line_of(cursor) + 1;
+        let text = source.lines().nth(line - 1).unwrap_or_default().trim_end().to_string();
+        match session.name_completions(&view, cursor) {
+            Known::Yes(completions) => println!(
+                "{:>4}:{:<4} scope {:<28} {} names, e.g. {:?}",
+                line,
+                cursor - source[..cursor].rfind('\n').map_or(0, |at| at + 1),
+                format!("{:?}", completions.scope),
+                completions.names.len(),
+                completions
+                    .names
+                    .iter()
+                    .take(6)
+                    .map(|name| name.fact.name.as_str())
+                    .collect::<Vec<_>>()
+            ),
+            Known::Unknown(reason) => println!(
+                "{:>4}  scope NOT ANSWERED: {}  | {}",
+                line,
+                reason.describe(),
+                &text[..text.len().min(60)]
+            ),
+            Known::No => println!("{line:>4}  no name position"),
+        }
     }
 
     let mut refused: Vec<usize> = Vec::new();

@@ -768,6 +768,20 @@ impl<F: FileProvider> SummaryStore<F> {
         });
         bytes.push(0);
 
+        // **And whether the macro environment is the whole of what the compilation defines**, which is the same
+        // kind of fact as the dialect: it changes the *reading* rather than the configuration. A summary built
+        // without the claim cannot put a macro body behind a conditional in force — `_STD_BEGIN`'s
+        // `namespace std {` is written under `#if _STL_COMPILER_PREPROCESSOR` in `yvals_core.h` — so every
+        // declaration MSVC's headers contribute is filed at file scope, and with the claim made the same text under
+        // the same flags gives the scoped reading. Measured on one workspace, one file, one configuration:
+        // `<xstring>` came out with 129 facts, 38 of them scoped, and 1631 facts, 524 of them scoped. Two readings
+        // that far apart must not share a key, and the flag is not in `CompilerConfig` because it is not a flag the
+        // project was compiled with — it is what the analysis was able to find out. See
+        // [`crate::index::environment::compilation_environment`].
+        bytes.push(b'c');
+        bytes.push(u8::from(self.index.macros().is_incomplete()));
+        bytes.push(0);
+
         bytes.push(b'|');
         bytes.extend_from_slice(
             normalize_path(path.parent().unwrap_or(Path::new(".")), cfg!(windows)).as_bytes(),

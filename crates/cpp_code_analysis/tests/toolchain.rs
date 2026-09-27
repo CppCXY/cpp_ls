@@ -13,7 +13,8 @@ use std::path::Path;
 
 use cpp_code_analysis::{
     CompilerConfig, DiskCommands, DiskFiles, Environment, FileProvider, Include, IncludeForm,
-    IncludeResolver, PathInterner, Resolution, SummaryStore, discover,
+    IncludeResolver, Known, OpenDocuments, PathInterner, Resolution, Session, SessionFiles,
+    SummaryStore, WatchFilter, discover,
 };
 
 /// The discovery on this machine, or a printed reason and `None`.
@@ -264,6 +265,101 @@ fn a_file_that_includes_a_standard_header_becomes_cacheable() {
         store.stats().reused,
         1,
         "the second session read the stored summary instead of parsing again — which is the whole point"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **A project with no build system of any kind is read with the environment the compiler gives it.**
+#[test]
+fn a_project_with_no_build_system_is_read_with_the_compilers_environment() {
+    // The shape MSVC's standard library is written in, in three files that need no compiler to *parse* and one to
+    // *read*: `yvals_core.h` defines `_STL_COMPILER_PREPROCESSOR` under
+    // `#if defined(RC_INVOKED) || defined(Q_MOC_RUN) || defined(__midl)`, and every header of the library puts its
+    // whole body inside `#if _STL_COMPILER_PREPROCESSOR`. Neither name is defined by a file or by the compiler, so
+    // that condition is decidable **only** by an environment that has been told the compiler's own table is the
+    // whole of the command line — which is the claim a session makes when the compiler answered.
+    //
+    // What it costs to not make the claim is measured elsewhere (13 declarations in `std` against 2600, and the
+    // cooked reading of `<string>` rendering to nothing); what this pins is the *mechanism*: a scope that comes out
+    // of a macro body behind a condition naming a built-in.
+    let Some(toolchain) = toolchain_here() else {
+        return;
+    };
+    if toolchain.builtin_macros.is_empty() {
+        println!(
+            "this compiler did not answer with its predefined macros, so there is no environment to be complete \
+             about: {:?}",
+            toolchain.note
+        );
+        return;
+    }
+
+    let root = std::env::temp_dir().join("cppls-no-build-system");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a project directory");
+
+    std::fs::write(
+        root.join("gate.h"),
+        "#pragma once\n\
+         #if defined(RC_INVOKED) || defined(Q_MOC_RUN)\n\
+         #define OPEN_STD\n\
+         #define CLOSE_STD\n\
+         #else\n\
+         #define OPEN_STD namespace std {\n\
+         #define CLOSE_STD }\n\
+         #endif\n",
+    )
+    .expect("the fixture writes");
+    let widget = root.join("widget.h");
+    std::fs::write(
+        &widget,
+        "#include \"gate.h\"\nOPEN_STD\nstruct Widget { int size; };\nCLOSE_STD\n",
+    )
+    .expect("the fixture writes");
+    let main = root.join("main.cpp");
+    std::fs::write(&main, "#include \"widget.h\"\n").expect("the fixture writes");
+
+    // **No `compile_commands.json`, no `.cppls.toml`, no CMake cache** — which is the whole point of the test, and
+    // the state the user's own workspace is in.
+    let mut session = Session::open(
+        &root,
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+
+    if session.toolchain().is_none() {
+        println!("no toolchain was discovered for the project directory, so nothing can be claimed about it");
+        let _ = std::fs::remove_dir_all(&root);
+        return;
+    }
+
+    session.index_everything();
+
+    let scope = session
+        .index()
+        .summary(&widget)
+        .and_then(|summary| {
+            summary
+                .declarations
+                .iter()
+                .find(|fact| fact.name == "Widget")
+                .map(|fact| fact.scope.clone())
+        })
+        .expect("`Widget` is declared in the header");
+
+    assert_eq!(
+        scope.as_deref(),
+        Some("std"),
+        "`OPEN_STD`'s body is written under a condition that names two built-ins, and a session that asked the \
+         compiler knows neither is defined — so the branch is taken and the namespace it opens is real"
+    );
+    assert!(
+        matches!(
+            session.index().definition("std::Widget", &main),
+            Known::Yes(_)
+        ),
+        "and the qualified name is answerable from the file that includes it"
     );
 
     let _ = std::fs::remove_dir_all(&root);

@@ -135,11 +135,16 @@ impl<'a> MacrosHere<'a> {
 ///
 /// The flag is the difference between `Unknown` and "not defined" for every condition naming something no file
 /// defines, and it is passed in rather than assumed because it is a statement about the caller's **inputs**:
-/// [`crate::Session::open`] sets it when it read the project's own `compile_commands.json`, which is the project
-/// saying how its files are compiled — the `-D`s, the `-std=`, the include paths. Without one, the environment is
-/// what the compiler predefines and nothing else, and a project built with flags nobody wrote down would be read as
-/// if those names were undefined — which is why the unconfigured case stays [`Marked::incomplete`] and answers
-/// `Unknown`.
+/// [`crate::Session::open`] sets it when the compiler it discovered **answered with its predefined macros** — the
+/// table `-dM`/`/PD` prints, and the only place `_MSC_VER`, `__cplusplus` and five hundred more exist. A toolchain
+/// that could not be asked (or the last-resort one built from conventional header directories, whose
+/// `builtin_macros` is empty) leaves the environment [`Marked::incomplete`] and every such condition `Unknown`.
+///
+/// The project's own build description — `.cppls.toml`, `compile_commands.json`, CMake's cache — is a source of
+/// *flags* (`-D`s, `-std=`, include paths) rather than the licence for the claim: a project that wrote none down
+/// has none to miss, and a project built with flags nobody can read (a `Makefile`) is a hole this flag cannot see
+/// and the walk usually catches, because such a file names `-I` directories too and an `#include` that does not
+/// resolve takes the claim back.
 ///
 /// What the flag is *not* is a promise about the files: a walk that runs into an `#include` that did not resolve, or
 /// one nobody indexed, takes the claim back with [`Marked::mark_incomplete`] — see

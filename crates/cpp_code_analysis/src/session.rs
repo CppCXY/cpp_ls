@@ -496,22 +496,38 @@ impl<F: FileProvider + Clone> Session<F> {
                 .unwrap_or(MAX_PROJECT_FILES),
         );
 
-        // **The project's own `compile_commands.json` is what makes the environment complete**: it is the
-        // project saying how its files are compiled — the `-D`s, the `-std=`, the include paths — so with one in
-        // hand, a name nothing defines really is undefined rather than unknown, and conditions become decidable.
+        // **What makes the macro environment complete: the compiler answered.**
         //
-        // This was `false` unconditionally before, and the reason was measured: with the environment declared
-        // complete, the closure decides 440 of its 486 conditional includes instead of 85 (`condition_reach`), but
-        // two names *lost* answers they used to give — `__attribute__` and `STDMETHODCALLTYPE` went from thousands
-        // of "maybe" to "not a use" — because the walk visits a header once and the first visit was through a
-        // *conditional* include (`minwindef.h` includes `winnt.h` before `windef.h` does, and the second, certain
-        // visit was skipped). Declaring the environment complete turned honest doubt into a wrong answer, which is
-        // the one thing this layer must not do.
+        // The flag is one claim — *a name none of the witnesses mentions is not defined* — and the witnesses are
+        // the compiler's predefined names, the command line's `-D`s, and the file's own `#define`s. The second is
+        // what `discovery` reads (`.cppls.toml`, `compile_commands.json`, CMake's cache) and what
+        // `toolchain::discover_with` asks the compiler with. The **first** is the compiler's own answer and exists
+        // nowhere else: `_MSC_VER`, `__cplusplus` and five hundred more are built in, not written down. So the
+        // claim is made whenever those macros came back, and the project's build description is a *source of
+        // flags* rather than the licence for the claim.
         //
-        // `ProjectIndex::macro_candidates` now asks the graph rather than the route ("is this file certainly part
-        // of the translation unit"), so a certain path can no longer be skipped in favour of a conditional
-        // one. What that did to the two names above is measured.
-        let configured = database.is_some();
+        // What it is not: a promise that every flag of the project's build is known. A build description nobody
+        // can read — a `Makefile` with `-DFOO`, which no discovery in this crate parses — is a hole. The ordinary
+        // such project has `-I` flags in the same file, and those are *self-reporting*: `Marked::mark_incomplete`
+        // takes the claim back the moment an `#include` fails to resolve, and nothing is decided after that.
+        //
+        // **Measured on the workspace that asked for this** (`C:\Users\zc\Desktop\cpp_project`: one `main.cpp`,
+        // 2678 bytes, no build system of any kind). With the claim tied to a compile database — which is what this
+        // line said before — MSVC's whole standard library was unreachable: `declarations_in("std")` was **13**,
+        // every one of them from a C header that writes `namespace std` literally; `definition("std::string")`,
+        // `std::cin`, `std::cout`, `std::basic_string` were all `NotDeclaredHere`; 46 of the file's identifiers had
+        // no answer and 26 more were `ConditionalCompilation`; and the cooked reading of `<string>` rendered to
+        // **nothing at all** (0 declarations, 0 mapped ranges). The cause is one name: `yvals_core.h` defines
+        // `_STL_COMPILER_PREPROCESSOR` under `#if defined(RC_INVOKED) || defined(Q_MOC_RUN) || defined(__midl)`,
+        // and MSVC's headers put *everything* inside `#if _STL_COMPILER_PREPROCESSOR` — so with `RC_INVOKED`
+        // `Unknown`, nothing in the library is in force. With the claim made on the compiler's answer: **2600**
+        // declarations in `std`, the three names above resolved, `<xstring>`'s 129 facts became **1631**, the
+        // cooked reading of `<string>` 1000 declarations over 2000 ranges, and the identifiers with no answer fell
+        // to **9**: three macro names (`stdout`, `stderr` ×2), one keyword (`static_cast`), one local, one member
+        // reached through an object whose type is still unknown (`std::cin.read`), and `std::string::npos` ×3. The
+        // cost is the cold read of that closure: 3.5 s → 16.5 s (warm 8.5 s), which is the price of reading four
+        // megabytes of headers instead of whitespace.
+        let configured = the_compilation_is_known(toolchain.as_ref());
         let mut store = SummaryStore::with_provider(root.clone(), config.clone(), files.clone())
             .with_macros(crate::index::environment::compilation_environment(
                 &config,
@@ -1901,6 +1917,33 @@ fn queue_key(path: &Path) -> String {
     normalize_path(path, cfg!(windows))
 }
 
+/// **Does this session know the whole of what its compilation defines?**
+///
+/// The licence for one claim — *a name none of the witnesses mentions is not defined* — which is what turns
+/// `#ifdef NAME` from `Unknown` into a branch, and with it every conditional region in every header the project
+/// reaches. See the note at the call site ([`Session::assemble`]) for what it is worth measured.
+///
+/// # Why the compiler's own answer is the licence
+///
+/// A condition is answered against three witnesses: the compiler's predefined names, the command line's `-D`s, and
+/// the file's own `#define`s. The second and third are in files — the build description and the source — and the
+/// first exists **nowhere**: `_MSC_VER`, `__cplusplus` and five hundred more are built into the compiler, and
+/// `-dM`/`/PD` is the only way to see them. So a session that has that table knows everything there is to know
+/// about the command line *except what a build description nobody can read said*, and one that does not have it
+/// knows neither half.
+///
+/// Empty is the signal, and it is not "this compiler predefines nothing": [`Toolchain::builtin_macros`] says so —
+/// a compiler that could not be asked (no `/Zc:preprocessor`, no resources for the language it is running in) and
+/// the last-resort toolchain built from the system's conventional header directories both arrive here with an
+/// empty table and a [`Toolchain::note`] explaining it.
+///
+/// A compile database is **not** part of the test, although it was the whole of it before: it is a source of
+/// flags, not a witness to the built-ins, and tying the claim to it made every project with no build system read
+/// MSVC's standard library as if nothing in it were compiled. See [`Session::assemble`].
+fn the_compilation_is_known(toolchain: Option<&Toolchain>) -> bool {
+    toolchain.is_some_and(|found| !found.builtin_macros.is_empty())
+}
+
 /// The compile database, from where the project says it is or from the conventional place.
 /// Fold a project's configuration into the filter a session reads through.
 ///
@@ -2047,7 +2090,8 @@ fn is_a_source_file(path: &Path, extra: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{OpenDocuments, Session, SessionFiles};
-    use crate::include::config::CompilerConfig;
+    use crate::include::config::{CommandLineMacro, CompilerConfig};
+    use crate::include::toolchain::{Toolchain, ToolchainSource};
     use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
     use crate::index::watch::{FileEvent, WatchFilter};
     use crate::index::{Priority, StepOutcome};
@@ -3575,6 +3619,44 @@ mod tests {
             0,
             "the `#ifdef` is decided by the database's `-D`, so the use is a use: {:#?}",
             found.files
+        );
+    }
+
+    #[test]
+    fn the_compilation_is_known_only_when_the_compiler_answered_with_its_macros() {
+        // The licence for one claim — *a name none of the witnesses mentions is not defined* — pinned on the three
+        // shapes a session can be in. The middle one is why this is a function rather than a field read at the call
+        // site: a toolchain **exists** on a machine whose headers were found by a convention and whose compiler
+        // could not be asked, and its macro table is empty. Claiming completeness there would read all five hundred
+        // of the compiler's own names as "not defined" — `#ifdef _MSC_VER` coming out false *on MSVC* — which is a
+        // wrong answer rather than a missing one, the direction this layer must never fail in.
+        assert!(
+            !super::the_compilation_is_known(None),
+            "no compiler answered, so nothing witnesses the built-ins"
+        );
+
+        let unasked = Toolchain {
+            compiler: None,
+            version: None,
+            system_include_paths: vec![PathBuf::from("/usr/include")],
+            builtin_macros: Vec::new(),
+            dialect: None,
+            source: ToolchainSource::SystemHeaders,
+            note: Some("no compiler could be asked".to_string()),
+        };
+        assert!(
+            !super::the_compilation_is_known(Some(&unasked)),
+            "directories without a macro table are half a toolchain, and the missing half is the built-ins"
+        );
+
+        let asked = Toolchain {
+            compiler: Some(PathBuf::from("cl")),
+            builtin_macros: vec![CommandLineMacro::defined("_MSC_VER")],
+            ..unasked
+        };
+        assert!(
+            super::the_compilation_is_known(Some(&asked)),
+            "a compiler that answered is the only witness there is to the names no file defines"
         );
     }
 }
