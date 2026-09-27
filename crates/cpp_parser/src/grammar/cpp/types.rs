@@ -438,7 +438,7 @@ fn starts_a_function_type(p: &CppParser, a_name_may_be_a_type: bool) -> bool {
 ///
 /// Every token of the body has to be a specifier. That is what keeps `#define THIS_ INTERFACE *This,` — and every
 /// expression macro — out, and a name nobody has a body for is not claimed at all. The bodies come from this file's
-/// own `#define` or from the include closure, which is the channel B89 opened for exactly this kind of reading.
+/// own `#define` or from the include closure, which is the channel opened for exactly this kind of reading.
 ///
 /// **An empty body is accepted only in a type-id** (`at_a_type_id`), and that boundary is measured rather than
 /// argued: `_mingw.h:376` writes `#define _CONST_RETURN` with nothing after it (its `const` spelling is in the
@@ -531,7 +531,7 @@ fn a_specifier_follows_the_group(p: &CppParser) -> bool {
 
 /// The same question asked from the **name** `offset` tokens past the cursor.
 ///
-/// One question, two entry points, because the run of annotations is read as a run (B134): `Wat(1) Wobble(2) char*
+/// One question, two entry points, because the run of annotations is read as a run: `Wat(1) Wobble(2) char*
 /// x` has a *name* after the first group, and the name carries a group of its own — so the answer for the first
 /// group is the answer for the second. Recursing is what tells the two readings apart without a second rule:
 ///
@@ -595,7 +595,7 @@ fn a_specifier_follows_the_group_at(p: &CppParser, name_offset: usize) -> bool {
                             a_specifier_macro_at(p, after)
                                 || match p.peek_token_kind_at(after + 1..after + 2).first().copied() {
                                     // A **name with a group of its own** after the group: either the next
-                                    // annotation of the same run (B134) or the declarator's head. Asking the same
+                                    // annotation of the same run or the declarator's head. Asking the same
                                     // question from there is what tells them apart — see
                                     // [`a_specifier_follows_the_group_at`].
                                     Some(CppTokenKind::LeftParen) => {
@@ -749,7 +749,7 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
         // ```
         //
         // Read as an invocation inside the sequence rather than expanded: the file's own tokens are all that enters
-        // the tree, and the body is what says the name is a specifier. B91.
+        // the tree, and the body is what says the name is a specifier.
         if let Some(names_a_type) = a_macro_that_is_a_specifier(p, !allow_second_name) {
             let call = p.mark(CppSyntaxKind::MacroCall);
             let name = p.mark(CppSyntaxKind::NameExpr);
@@ -816,7 +816,7 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
         // this file can read — a `#define` in another file is what knows whether it is a string, a type or an
         // expression.
         //
-        // **What the evidence gate is, after the MSVC measurement (B124).** The arm used to require that **nobody**
+        // **What the evidence gate is, after the MSVC measurement.** The arm used to require that **nobody**
         // describes the name (`macro_evidence` and `macro_body_kinds_at` both `None`), and the reason is still
         // right: a name some rule can *read* belongs to that rule. But a described name is not the same as a name
         // some rule can read — the SAL annotations are the counterexample the measurement found. `<xstring>:592`
@@ -834,7 +834,7 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
         // two-files-backwards measurement was about. Asking the follower instead of the evidence keeps that line
         // where it is and lets a described annotation macro through.
         //
-        // **"Before the type", not "at the head of the sequence"** (B134). The gate was `specifiers == 0`, which
+        // **"Before the type", not "at the head of the sequence"**. The gate was `specifiers == 0`, which
         // allows exactly one annotation and only as the sequence's first token — and MSVC's UCRT writes **runs** of
         // them, so the second was read as a *type*, its group as a *declarator*, and the declaration that followed
         // came out as `expected primary expression` reported against its own first line:
@@ -864,7 +864,7 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
         // are specifiers; `CoFreeLibrary (…)` is followed by `;`, so that one is the declarator). Measured together:
         // the MSVC closure 276 → **255** messages with no file lost, `stdio.h`'s first error 400 → 609, the two
         // libstdc++ readings and every parser test unchanged.
-        // **A name the tables know to be a macro is not a type** (B136). The loop reads an unknown identifier as a
+        // **A name the tables know to be a macro is not a type**. The loop reads an unknown identifier as a
         // type name — that is how `Wat x;` works — and a macro with an **empty body** read there is
         // indistinguishable from the tokens alone: MSVC's `_NODISCARD` is `#define _NODISCARD` (in force as an
         // empty body), so with it in front of the annotation the arm refused itself ("a type has been named") and
@@ -877,7 +877,7 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
         //     (max) (const _Ty& _Left, const _Ty& _Right) noexcept(…)
         // ```
         //
-        // **Both halves are needed, and each keeps a neighbour out** (B136). The specifier in front must be a
+        // **Both halves are needed, and each keeps a neighbour out**. The specifier in front must be a
         // *macro* — the loop reads an unknown identifier as a type name, so an empty-bodied `_NODISCARD` counts as
         // one and the annotation behind it gets refused — **and** a *type keyword* must follow the group.
         //
@@ -1040,7 +1040,7 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
         // The macro is the whole type (`EXTERN_C DECLSPEC_IMPORT type STDAPICALLTYPE` in `combaseapi.h`), so the
         // three readings that could apply are all wrong: the specifier loop cannot take `WINOLEAPI_` for a type and
         // `(void)` for a declarator's parameter list — that would declare a function called `WINOLEAPI_` and leave
-        // `CoFreeLibrary` with nowhere to go — and the expression reading (B70's fallback) makes the call a
+        // `CoFreeLibrary` with nowhere to go — and the expression fallback makes the call a
         // *statement*, after which the declarator is a syntax error. What the file wrote is a name, a group, and a
         // declaration, which is what this reads.
         //
@@ -1095,7 +1095,8 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
         // version of this rule did not manage: relaxing the condition to "a type has been named" read the second
         // line as the type `int x` with a declarator named `MY_DECL_SUFFIX`, losing the variable's name and
         // producing an A0-class wrong tree instead of the silent one it was written to fix. Two existing tests
-        // caught it (`a_macro_can_stand_among_a_declarators_suffixes`, and the asm-label assertion of B71).
+        // caught it (`a_macro_can_stand_among_a_declarators_suffixes`, and the asm-label assertion of
+        // `a_using_enum_declaration_and_the_register_specifier_read`).
         //
         // Nothing else changes: with no type named yet the name is the type whatever it looks like (the branch
         // above `a_further_name_may_join` in [`name_joins_the_type`]), and `MY_API Widget *p` still joins
@@ -1796,7 +1797,7 @@ struct NamesMayJoin {
     /// MY_DECL_SUFFIX;`).
     a_further_name: bool,
     /// A **macro-shaped** name may close a **type-id**, where there is no declarator to make room for: the cast in
-    /// `return ((unsigned __LONG32) (ULONG_PTR) h);`. See [`written_like_a_macro`] and B74.
+    /// `return ((unsigned __LONG32) (ULONG_PTR) h);`. See [`written_like_a_macro`].
     a_macro_shaped_name_closes_a_type_id: bool,
 }
 
@@ -1857,7 +1858,7 @@ fn name_joins_the_type(
     // `x[2]` reported `expected ], but get integer literal`. `LuaDefine.h` in the first real C++ project is the
     // third shape, 45 diagnostics from one declaration.
     //
-    // **Asked before the "no type yet" early return below**, and that order is the whole of B75: an **anonymous**
+    // **Asked before the "no type yet" early return below**, and that order is what matters: an **anonymous**
     // definition never writes a name, so `has_type_specifier` is still false when the declarator arrives and the
     // early return took it for the type —
     //
@@ -2871,15 +2872,7 @@ fn parse_enumerator_body(p: &mut CppParser) -> ParseResult {
     Ok(m.complete(p))
 }
 
-/// Parse a name: `foo`, `ns::foo`, `::foo`, `Foo<int>`, `ns::Foo<int>::type`.
-///
-/// Template arguments are attempted speculatively, because `<` is also the less-than operator and
-/// only the matching `>` (accounting for nesting) distinguishes them.
-///
-/// Exposed for the qualifier loop, which walks a name's segments and has to hand the rest of one back to this
-/// rule: `using ns::f;` reads the first segment itself — to decide whether an `=` follows — and then asks for
-/// everything after it.
-/// Does the macro written at the cursor supply the **`::` a qualified name starts with**? (B121)
+/// Does the macro written at the cursor supply the **`::` a qualified name starts with**?
 ///
 /// The question is asked of the replacement list's **last** token, and it has to be asked of the body rather than
 /// of the name, because no spelling answers it: `_STD` is three letters that could stand for anything, and
@@ -2888,8 +2881,8 @@ fn parse_enumerator_body(p: &mut CppParser) -> ParseResult {
 /// expression and `_STD reverse_iterator<iterator>` one type, instead of two names in a row.
 ///
 /// **One predicate, two grammars**: the segment loops of [`parse_name`] here and of `parse_primary_expr` in
-/// `exprs.rs` ask the same question, and the second copy is where the exception gets forgotten (maintenance
-/// convention 14). A buffer parsed with no include closure gets `None` — nobody says — and keeps today's reading:
+/// `exprs.rs` ask the same question, and the second copy is where the exception gets forgotten. A buffer parsed with
+/// no include closure gets `None` — nobody says — and keeps today's reading:
 /// the invocation is a name of its own, and the name after it is the syntax error it looks like.
 pub(super) fn a_macro_qualifies_the_name(p: &CppParser) -> bool {
     if p.current_token() != CppTokenKind::Identifier {
@@ -2916,6 +2909,14 @@ pub(super) fn at_a_name_segment(p: &CppParser) -> bool {
     )
 }
 
+/// Parse a name: `foo`, `ns::foo`, `::foo`, `Foo<int>`, `ns::Foo<int>::type`.
+///
+/// Template arguments are attempted speculatively, because `<` is also the less-than operator and
+/// only the matching `>` (accounting for nesting) distinguishes them.
+///
+/// Exposed for the qualifier loop, which walks a name's segments and has to hand the rest of one back to this
+/// rule: `using ns::f;` reads the first segment itself — to decide whether an `=` follows — and then asks for
+/// everything after it.
 pub fn parse_name(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::NameExpr);
@@ -2972,7 +2973,7 @@ pub fn parse_name(p: &mut CppParser) -> ParseResult {
         }
 
         match p.current_token() {
-            // **A qualifier the file wrote as a macro** (B121): `_STD reverse_iterator<iterator>` with
+            // **A qualifier the file wrote as a macro**: `_STD reverse_iterator<iterator>` with
             // `#define _STD ::std::`. Read as what it is — a `MacroCall` — and then the loop comes back around to
             // read the segment it qualifies. Without this the specifier sequence took `_STD` for the type and the
             // name after it for something else: `using reverse_iterator = _STD reverse_iterator<iterator>;` came
@@ -3448,8 +3449,8 @@ fn parse_operator_name(p: &mut CppParser) -> ParseResult {
         //
         // Measured on MSVC's STL, which spells it apart: `<xstring>:1868` is
         // `_NODISCARD constexpr string_view operator"" sv(const char*, size_t) noexcept { … }`, and it is that
-        // file's **first** error — 98 errors behind it, and the file is where every `std::string` fact comes from
-        // (B132). The suffix is an identifier and nothing else can follow `""` in a name, so reading it here is the
+        // file's **first** error — 98 errors behind it, and the file is where every `std::string` fact comes from.
+        // The suffix is an identifier and nothing else can follow `""` in a name, so reading it here is the
         // whole of the rule; `operator""` followed by anything else keeps the old reading.
         CppTokenKind::StringLiteral => {
             p.bump();
@@ -4218,7 +4219,7 @@ fn a_parenthesised_declarator_with_a_name_follows(p: &CppParser) -> bool {
     // name, so `(x y)` and `(* x y)` keep the readings they had.
     //
     // The first of the two was written once before and reverted: the predicate and the reader were added and the
-    // error moved from column 16 to column 51 without the file reading (B98). What was
+    // error moved from column 16 to column 51 without the file reading. What was
     // missing is the **reader's** other half — a macro *before* the operator — which is what
     // [`parse_parenthesised_declarator`] now consumes.
     if matches!(
@@ -4702,8 +4703,8 @@ fn parse_parenthesised_declarator(p: &mut CppParser) -> ParseResult {
     //
     // Two names in a row cannot be a declarator — `NAME NAME` is not one in any grammar, so the first can only be
     // a macro and the second is the name this declarator is about. The same "the sequence is impossible" argument
-    // B72 and B73 use, one level down: there the name stood between the type and the declarator, here *inside* the
-    // parentheses, before the name.
+    // as for a macro-shaped name between a type and a declarator, one level down: there the name stood between the
+    // type and the declarator, here *inside* the parentheses, before the name.
     //
     // **A run of them**, because a calling convention can be spelled in two names and the operator can come after
     // the second: `(FAR WINAPI *FARPROC)` (`minwindef.h:223`) and
@@ -5468,8 +5469,8 @@ fn a_type_the_compiler_spells(p: &CppParser) -> bool {
 /// spelling added the declaration reads. `g++ -std=c++17` accepts the same line, which is the evidence that this
 /// is the compiler's extension rather than this parser's guess.
 ///
-/// A **spelling** test rather than a table one, and that is not the convention-without-evidence that
-/// Maintenance convention 16 warns about. Two things make it evidence: the standard reserves these names to
+/// A **spelling** test rather than a table one, and reading a spelling is not by itself evidence. Two things make
+/// it evidence here: the standard reserves these names to
 /// the implementation, so a program that `#define`s `__attribute__` is not a program this has to read; and the
 /// extension is the *compiler's*, not the file's, so no `#define` in any header is what makes it one. Both halves
 /// have to hold for a spelling test to be legitimate, and neither holds for `MY_API`.

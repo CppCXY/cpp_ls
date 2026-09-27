@@ -265,6 +265,9 @@ async fn index_in_background(context: ServerContextSnapshot) {
             .await
             .workspace_version();
         let mut first_pass = true;
+        // What the last slice left to do — see the drain below, which is the moment a file's **cooked** reading
+        // changes hands.
+        let mut was_pending = false;
 
         loop {
             // A reload bumps the version and starts a pump of its own: this one stops rather than racing it for
@@ -284,7 +287,11 @@ async fn index_in_background(context: ServerContextSnapshot) {
                 .analysis()
                 .update_session(|session| {
                     session.advance(INDEX_SLICE);
-                    session.pending()
+                    // **All the work, not just the indexing queue.** A session that has read every file still has
+                    // the files its open ones include to read *as a compiler reads them* (`Session::cook`), and this
+                    // loop is what gives that work a caller: reading the queue alone would stop the pump one step
+                    // before the declarations a reader asks about exist.
+                    session.pending_work()
                 })
                 .await
             else {
@@ -301,12 +308,13 @@ async fn index_in_background(context: ServerContextSnapshot) {
 
                 // Yield between slices: the runtime is also serving requests, and a loop that never awaits would
                 // hold the worker it runs on.
+                was_pending = true;
                 tokio::task::yield_now().await;
                 continue;
             }
 
             // Nothing to read. The first time that happens the project is loaded, and the diagnostics that were
-            // waiting for it are published — after that the loop simply waits for the next edit.
+            // waiting for it are published — after that the loop waits for the next edit.
             if first_pass {
                 first_pass = false;
                 context.status_bar().finish_progress_task(
@@ -316,11 +324,53 @@ async fn index_in_background(context: ServerContextSnapshot) {
                 log::info!("the workspace is indexed");
 
                 publish_workspace_diagnostics(&context).await;
+            } else if was_pending {
+                // **The queue drained, and that is when the answers change.** A file's cooked reading is built from
+                // the environment of a complete translation unit, and it is dropped the moment the file or anything
+                // it includes changes — so between the edit and this moment the diagnostics of an open file are read
+                // off its own text, which is the coarser reading (a macro's shape is a guess there, and a branch
+                // nobody takes is missing). Nothing else would ask again: the per-change task has already published,
+                // and a push client has no reason to re-request a file it did not touch.
+                republish_open_file_diagnostics(&context).await;
             }
+            was_pending = false;
 
             context.analysis().wait_for_work(IDLE_WAIT).await;
         }
     });
+}
+
+/// Re-ask for the diagnostics of the **open** files, once the index has settled.
+///
+/// The open ones and not the project: those are the files whose answers a user is looking at, and the only ones whose
+/// reading this pass can have changed — everything else has no cooked reading to gain and no client waiting on it.
+///
+/// Two client shapes, one moment: a pull client is told to refresh (`workspace/diagnostic/refresh`, which is what it
+/// asks its own list of files with), and a push client is given the files directly. A client that supports neither
+/// pull nor refresh gets nothing here, which is the same position it was in before the drain — the answer it holds
+/// came from the per-change pass.
+async fn republish_open_file_diagnostics(context: &ServerContextSnapshot) {
+    let open = context
+        .analysis()
+        .with_snapshot(|session| session.documents().paths())
+        .unwrap_or_default();
+
+    if open.is_empty() {
+        return;
+    }
+
+    if context.lsp_features().supports_pull_diagnostic() {
+        if context.lsp_features().supports_refresh_diagnostic() {
+            context.client().refresh_workspace_diagnostics();
+        }
+        return;
+    }
+
+    // No delay: the wait this replaces has already happened, and the whole point is that the answer changed now.
+    context
+        .file_diagnostic()
+        .add_files_diagnostic_task(open, 0)
+        .await;
 }
 
 /// The first full diagnostic pass, once the index holds something.

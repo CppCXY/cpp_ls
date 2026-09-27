@@ -661,7 +661,9 @@ fn a_macro_that_declares_a_type_declares_it_in_the_cooked_reading() {
         rendered.text
     );
 
-    let (cooked_summary, report) = indexer.index_rendering(api, &rendered, key);
+    let indexed = indexer.index_rendering(api, &rendered, key);
+    let cooked_summary = &indexed.summary;
+    let report = indexed.mapped;
     let cooked_names: Vec<&str> = cooked_summary
         .declarations
         .iter()

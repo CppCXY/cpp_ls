@@ -520,7 +520,8 @@ fn read_messages(stdout: impl Read, tx: std::sync::mpsc::Sender<Value>) {
 /// of the name it makes.
 const HANDLE_H: &str = "#define DECLARE_HANDLE(name) struct name##__ { int unused; }; \
                         typedef struct name##__ *name\n";
-const API_CPP: &str = "#include \"handle.h\"\nDECLARE_HANDLE(HWND);\nHWND h;\n";
+const API_H: &str = "#include \"handle.h\"\nDECLARE_HANDLE(HWND);\n";
+const API_CPP: &str = "#include \"api.h\"\nHWND h;\n";
 
 /// **A declaration a macro makes is a declaration this server answers for.**
 ///
@@ -537,10 +538,11 @@ const API_CPP: &str = "#include \"handle.h\"\nDECLARE_HANDLE(HWND);\nHWND h;\n";
 fn a_declaration_a_macro_makes_is_found_over_the_wire() {
     let project = Project::new("macro-declared");
     project.write("handle.h", HANDLE_H);
-    project.write("api.cpp", API_CPP);
+    project.write("api.h", API_H);
+    project.write("main.cpp", API_CPP);
 
     let mut server = Server::start(project.root());
-    let api_uri = uri_of(&project.root().join("api.cpp"));
+    let main_uri = uri_of(&project.root().join("main.cpp"));
 
     server.request(
         1,
@@ -558,18 +560,18 @@ fn a_declaration_a_macro_makes_is_found_over_the_wire() {
     server.notify(
         "textDocument/didOpen",
         json!({
-            "textDocument": { "uri": api_uri, "languageId": "cpp", "version": 1, "text": API_CPP }
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": API_CPP }
         }),
     );
 
-    // `HWND h;` is the third line, and the name starts it.
+    // `HWND h;` is the second line, and the name starts it.
     let location = server.ask_until(100, |id| {
         json!({
             "id": id,
             "method": "textDocument/definition",
             "params": {
-                "textDocument": { "uri": api_uri },
-                "position": { "line": 2, "character": 1 },
+                "textDocument": { "uri": main_uri },
+                "position": { "line": 1, "character": 1 },
             },
         })
     });
@@ -579,14 +581,84 @@ fn a_declaration_a_macro_makes_is_found_over_the_wire() {
         .as_str()
         .unwrap_or_else(|| panic!("a definition was expected, got {location}"));
     assert!(
-        found_uri.ends_with("api.cpp"),
-        "the declaration the macro made belongs to the file that invoked it: {location}"
+        found_uri.ends_with("api.h"),
+        "the declaration the macro made belongs to the file that invoked it, which nobody opened: {location}"
     );
     assert_eq!(
         found["range"]["start"]["line"],
         json!(1),
         "and it is reported at the invocation: {location}"
     );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
+/// The file whose *text* has an error in a branch the preprocessor removes: `OFF` is 0, so the unclosed class never
+/// reaches a compiler — while the bytes are right there in the buffer.
+const BRANCH_CPP: &str = "#include \"cfg.h\"\n#if OFF\nstruct Unclosed { int x;\n#endif\nint ok;\n";
+const CFG_H: &str = "#define OFF 0\n";
+
+/// **A branch nobody takes is published as clean.**
+///
+/// The two readings disagree about this file, and that disagreement is the reason the diagnostics channel reads the
+/// cooked one: the raw reading reports the unclosed class — correctly, the *text* says so — and a compiler never
+/// sees that branch. A server that published the raw answer would put a red squiggle on code that is not compiled,
+/// which is the false positive the whole second reading exists to remove.
+///
+/// The assertion is about the **last** thing the client is told, and that is deliberate: the answer for an open file
+/// can be published before the file has been cooked (a cooked reading needs its translation unit read), so the
+/// client may first hear the raw error and then, once the indexing queue drains, hear that the file is clean. A
+/// server that only published on the change would leave the first answer on screen.
+#[test]
+fn a_branch_nobody_takes_is_published_as_clean_once_the_file_is_cooked() {
+    let project = Project::new("cooked-diagnostics");
+    project.write("cfg.h", CFG_H);
+    project.write("main.cpp", BRANCH_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                // No `textDocument.diagnostic`: this client wants diagnostics **pushed**, which is the half that has
+                // no request in it — and the half a re-publish after the drain has to work for.
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": BRANCH_CPP }
+        }),
+    );
+
+    let clean = server.wait_for(|message| {
+        message["method"] == json!("textDocument/publishDiagnostics")
+            && message["params"]["uri"] == json!(main_uri)
+            && message["params"]["diagnostics"]
+                .as_array()
+                .is_some_and(|diagnostics| diagnostics.is_empty())
+    });
+    assert!(
+        clean["params"]["diagnostics"]
+            .as_array()
+            .is_some_and(|diagnostics| diagnostics.is_empty()),
+        "the branch is not compiled, so there is nothing to report: {clean}"
+    );
+
+    // **The falsification lives one layer down**, where the same fixture is read both ways:
+    // `cpp_code_analysis::session::tests::a_branch_nobody_takes_reports_nothing_once_the_file_is_cooked` asserts
+    // that this file's *raw* reading reports exactly that error and its cooked reading reports nothing. Without it
+    // this test would also pass on a file that simply has no error in it.
 
     server.request(999, "shutdown", Value::Null);
     server.notify("exit", Value::Null);

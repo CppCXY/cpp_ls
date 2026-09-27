@@ -86,8 +86,8 @@ fn condition_is_a_declaration(fragment: &str) -> bool {
 /// ```
 ///
 /// The silent one is the reason this test asserts a **shape** and not just "it parses": every file in the census
-/// was lossless and error-free on that reading, so no count could have moved. It stands as
-/// the second number of maintenance convention 29.
+/// was lossless and error-free on that reading, so no count could have moved — **a clean parse is not evidence that
+/// the reading is right**.
 ///
 /// The negative half is what the fix has to keep: a condition that *names* something without declaring it stays an
 /// expression, which is the case `parse_for_init_declaration`'s "did this name anything?" refusal exists for.
@@ -236,7 +236,7 @@ fn an_allocation_initialiser_is_not_a_parameter_list() {
 /// the `#endif` with no `;`. The fix is that a branch is an alternative: `#else`/`#elif` puts back the three things
 /// the specifier loop started with (no type named *in this branch*, the one-name allowance unspent, and the evidence
 /// window moved past the directive). `#endif` is deliberately not such a boundary — the tail after it needs what
-/// the branches agreed on. B53 keeps the wrong first diagnosis next to the right one.
+/// the branches agreed on. The wrong first diagnosis is kept next to the right one.
 ///
 /// The negative half is the reading that must not change: a branch that names no type leaves the tail's name as the
 /// type (`#else static` / `#endif` / `C f()`), and the second name of a split head without a macro is still the
@@ -389,7 +389,7 @@ fn a_class_head_may_be_written_in_pieces() {
             "class MACRO Name;",
             "struct MACRO Name\n{\n};",
             "class MACRO Name\n#ifdef X\n  : public Base\n#endif\n{ };",
-            // The parenthesised form that was already read (B46), unchanged.
+            // The parenthesised form that was already read, unchanged.
             "typedef struct DECLSPEC_ALIGN (8) Header { int i; } Header;",
             // A directive between the name and the base clause, with and without a branch on the body.
             "class Name\n#ifdef X\n  : public Base\n#endif\n{ int member; };",
@@ -506,13 +506,13 @@ fn a_functional_conversion_may_have_no_arguments() {
 /// S<3, long> x;                    `expected primary expression` against `long` — the loud half
 /// X<!C<T>, bool> f;                the argument ended at the comma with an empty right side, and the `bool`, the
 ///                                  `>`, the name and the body were rubble (bits/alloc_traits.h:530-534, which is
-///                                  where the *next* first error of that file was after B53)
+///                                  where the *next* first error of that file was)
 /// ```
 ///
 /// The **type** reading is what hid it: `array<int, 3>` and `Grid<T, 3>::fill` put the comma after a type the type
 /// reading has already accepted, so the fallback never ran for the spellings anyone would try by hand. The rule
 /// belongs to the family [`Level`] lists in `exprs.rs` — a rule that spells its own separators reads one element —
-/// and B54 records that the list said so before the code did.
+/// and the list said so before the code did.
 ///
 /// The negative half is the other direction: a comma **inside parentheses** is still the comma operator, because
 /// the parentheses are what say so, and a type argument is still read by the type reading.
@@ -837,8 +837,8 @@ fn a_conditional_may_decide_a_requirement() {
     // It does not parse here, and it does not compile either: a preprocessing directive runs to the end of its
     // line, so `};` are extra tokens after `#endif` — g++ says `warning: extra tokens at end of '#endif'
     // directive` and then `error: expected '}' at end of input`, which is the same complaint this parser makes.
-    // Pinned as a comment rather than as a test case because there is nothing to fix: convention 36 is "verify
-    // the fragment with the compiler", and this fragment is wrong.
+    // Pinned as a comment rather than as a test case because there is nothing to fix: the fragment was checked
+    // against the compiler and the compiler rejects it too.
 
     // **The shape.** A directive inside the body is a child of the requires-expression, and the requirements on
     // both sides of it are still requirements — the failure mode this guards against is the body being abandoned
@@ -893,7 +893,7 @@ fn a_failed_member_with_an_unbalanced_brace_keeps_the_members_after_it_members()
         (
             // A requirement split **mid-expression** by a directive: the `;` is in the other branch, which is
             // invalid code — and the input that leaves the `{` of the requires body unmatched when the member
-            // fails. This is the reproduction B58 was written from.
+            // fails. This is the reproduction the brace-debt rule was written from.
             "struct Probe {\n  static constexpr bool ok = requires (T t) {\n#if X\n    t.f()\n#endif\n    ;\n  };\n  int after;\n};",
             "a requires-expression whose requirement is split by a directive",
         ),
@@ -1703,7 +1703,7 @@ fn a_group_holding_a_call_is_an_expression_not_a_cast() {
 /// `#endif` only closes something, and the `#else` that ends the *first branch's whole declaration* in
 /// `parallel/algorithmfwd.h` closes one too.
 ///
-/// **The fourth reading — the list's tail per branch — was B65 and is now closed.** That file's second branch is a
+/// **The fourth reading — the list's tail per branch — is now closed.** That file's second branch is a
 /// *fragment* (`_RandomNumberGenerator&);`: the head is above the `#if`), and what reads it is the list itself: a
 /// `)` is the end of the list *in one spelling*, and when the `;` after it is followed by an `#else`/`#elif` **and**
 /// the list opened that conditional inside itself, the branch's own tail is read as the same list. The two
@@ -1720,8 +1720,8 @@ fn a_directive_may_decide_a_parameter_or_stand_between_two() {
             // …and one before the first of them.
             "void f(\n#if X\n  int a,\n#endif\n  int b);",
             // The parameter list split by a directive, with the terminator inside the branch is **not** here:
-            // `parallel/algorithmfwd.h:700` writes its second branch as a fragment, and that is B65 (pinned
-            // below).
+            // `parallel/algorithmfwd.h:700` writes its second branch as a fragment, and that is the fourth
+            // reading (pinned below).
             // A parameter written once per branch: the `#else` spells *this* parameter another way.
             "void f(int a,\n#if X\n  int b\n#else\n  long b\n#endif\n  );",
             "void f(int a,\n#if X\n  int b\n#elif Y\n  long b\n#else\n  short b\n#endif\n  );",
@@ -1759,7 +1759,7 @@ fn a_directive_may_decide_a_parameter_or_stand_between_two() {
          tree. What would be wrong is a second list, or the `long b` disappearing."
     );
 
-    // **B65's fragment reads now**, and the claim is the same one every spelling of this seam makes: one list,
+    // **The fragment reads now**, and the claim is the same one every spelling of this seam makes: one list,
     // every spelling of every parameter in it.
     assert_reads(
         Where::File,
@@ -1818,7 +1818,7 @@ fn a_directive_may_decide_a_parameter_or_stand_between_two() {
 /// The negative half is the price, and it is pinned here rather than left implicit: **a genuinely broken call is
 /// read as a macro's arguments and reported by nobody.** No shape separates the two — the arguments of a macro
 /// *are* arbitrary tokens — so the choice is between the diagnostic on `g(1 +)` and every use of every macro from
-/// every header. records it as a cost rather than as a gap.
+/// every header, and that trade is recorded as a cost rather than as a gap.
 #[test]
 fn a_macros_arguments_that_are_not_expressions_stay_tokens() {
     assert_reads(
@@ -1881,7 +1881,7 @@ fn a_macros_arguments_that_are_not_expressions_stay_tokens() {
     // later narrowing of the fallback fails here first, which is where the reason for it is written down.
     assert!(
         arguments_are_tokens("g(1 +);"),
-        "a broken call is read as a macro's arguments — the documented cost of B70"
+        "a broken call is read as a macro's arguments — the documented cost of the fallback"
     );
 }
 
@@ -1900,7 +1900,7 @@ fn a_macros_arguments_that_are_not_expressions_stay_tokens() {
 /// come from, and an entry in `can_begin_a_declaration`.
 ///
 /// The third shape below came along with the second and is pinned rather than claimed: a **GNU asm label** on a
-/// declarator (`r0 __asm__("r0")`) has no C++ grammar behind it — like the `asm` *statement* of B67 — so it is
+/// declarator (`r0 __asm__("r0")`) has no C++ grammar behind it — like the `asm` *statement* — so it is
 /// read as a `MacroCall` with every token kept. That is a tolerant reading and not a declaration of what it is;
 /// pinning it means a later node of its own fails here first, which is where the reason will be written down.
 #[test]
@@ -2000,7 +2000,7 @@ fn a_using_enum_declaration_and_the_register_specifier_read() {
 ///
 /// Relaxing that condition to "a type has been named" fixed the three shapes above and **broke the fourth** —
 /// the two are the same tokens with opposite meanings, and two existing tests caught it: the variable's name was
-/// lost (`int x MY_DECL_SUFFIX;` read as a type `int x` with a declarator named `MY_DECL_SUFFIX`) and B71's asm
+/// lost (`int x MY_DECL_SUFFIX;` read as a type `int x` with a declarator named `MY_DECL_SUFFIX`) and the asm
 /// label stopped being a macro. What separates them is the **spelling of the name that joins**: `__int64`,
 /// `HUGEP`, `MY_API` are written the way a macro is, `x` is not. See `types::written_like_a_macro` — a convention
 /// used here only to choose between two readings that both occur, which is the same last-resort role
@@ -2016,8 +2016,8 @@ fn a_macro_may_stand_between_the_type_and_the_declarator() {
             "void f(void HUGEP **ppvData);",
             "WINOLEAUTAPI SafeArrayAccessData(SAFEARRAY *psa, void HUGEP **ppvData);",
             "unsigned __int64 f(unsigned __int64 a);",
-            // A **macro invocation as the whole declaration head**, with the declarator after it (B72's second
-            // half): `WINOLEAPI_` expands to `EXTERN_C DECLSPEC_IMPORT type STDAPICALLTYPE`.
+            // A **macro invocation as the whole declaration head**, with the declarator after it (the second
+            // half of this rule): `WINOLEAPI_` expands to `EXTERN_C DECLSPEC_IMPORT type STDAPICALLTYPE`.
             "WINOLEAPI_(void) CoFreeLibrary (HINSTANCE hInst);",
             "WINOLEAPI_ (void) OleUninitialize (void);",
             "MY_API(x) int g(void);",
@@ -2025,7 +2025,7 @@ fn a_macro_may_stand_between_the_type_and_the_declarator() {
             // LPVOID *ppvObj) PURE;` (`commdlg.h:577`). Its declarator has **no name** — the name is inside the
             // macro's own argument list (`#define STDMETHOD(method) virtual HRESULT STDMETHODCALLTYPE method`) — so
             // the parameter list that follows the macro belongs to a name this layer cannot see. Reading it as a
-            // declaration would declare a function with no name; the shape is left to B72's third item.
+            // declaration would declare a function with no name; the shape is left to the declaration-head rule.
             // The shapes that were already read, which must keep reading.
             "MY_API Widget *p;",
             "MY_API Widget const w;",
@@ -2126,7 +2126,7 @@ fn a_macro_may_stand_between_the_type_and_the_declarator() {
 
 /// **The same macro-shaped name, one level down: inside a type-id, and inside a parenthesised declarator.**
 ///
-/// B72 and B73 put a macro-shaped name between a type and a declarator. The same spelling turns up in two other
+/// The rule puts a macro-shaped name between a type and a declarator. The same spelling turns up in two other
 /// places, and each has its own reason:
 ///
 /// ```cpp
@@ -2369,8 +2369,8 @@ fn a_name_after_an_anonymous_class_definition_is_the_declarator() {
 ///   declaration's first word. A block is not in that set (`g(x) { }` keeps its error);
 /// * the reading is asked for **after** the declaration reading — and when that reading *succeeds*, which it does
 ///   here (`NAME ( parameter )` is a function declaration), the `;` is what tells the two apart: a declaration has
-///   one, this macro's body supplies it. The first version asked before the declaration attempt and took B73's
-///   `WINOLEAPI_(void) f(…)` away from it.
+///   one, this macro's body supplies it. The first version asked before the declaration attempt and took the
+///   `WINOLEAPI_(void) f(…)` spelling away from it.
 #[test]
 fn a_macro_from_a_header_can_be_a_statement_of_its_own() {
     assert_reads(
@@ -2410,13 +2410,13 @@ fn a_macro_from_a_header_can_be_a_statement_of_its_own() {
         "a block after a call is the mistake the block form of this rule weighs"
     );
 
-    // **B73's shape is untouched**, which is the ordering this rule had to learn: the macro is the declaration's
-    // *specifier* there, not a statement of its own.
+    // **The macro-headed declaration is untouched**, which is the ordering this rule had to learn: the macro is
+    // the declaration's *specifier* there, not a statement of its own.
     let tree = CppParser::parse(
         "WINOLEAPI_(void) CoFreeLibrary (HINSTANCE hInst);",
         ParserConfig::default(),
     );
-    assert!(tree.get_errors().is_empty(), "B73's shape still reads");
+    assert!(tree.get_errors().is_empty(), "the macro-headed declaration still reads");
     assert!(
         tree.get_red_root().descendants().any(|node| {
             CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration
@@ -2565,7 +2565,7 @@ fn a_compound_requirement_may_hold_a_braced_temporary() {
 /// to name a base it computes rather than writes — was reported as `expected a name` against the `:`, and the whole
 /// class head went with it (13 diagnostics in `type_traits`). The argument list had a directive seam **in front of**
 /// an argument, which never sees a directive that stands after one and before the comma — so both sides of the comma
-/// need it, exactly as in the enumerator list (B77).
+/// need it, exactly as in the enumerator list.
 #[test]
 fn a_base_may_be_a_decltype_and_an_argument_list_holds_directives() {
     assert_reads(
@@ -2945,7 +2945,7 @@ fn a_macro_from_a_header_can_stand_where_a_declaration_goes() {
     );
 }
 
-/// **A macro whose body is a brace is read as that construct, whatever follows it** (B120) — and the body may
+/// **A macro whose body is a brace is read as that construct, whatever follows it** — and the body may
 /// live in an *included* header, which is the whole of MSVC's spelling of `namespace std`.
 ///
 /// The defect this pins was silent, and silence is why it needs a *shape* assertion rather than a diagnostic
@@ -3045,7 +3045,7 @@ fn a_macro_whose_body_is_a_brace_is_read_as_that_construct() {
     // **No evidence, no claim** — asked of the follower no shape rule can place, because that is the only place
     // where the answer is about *this* rule. With `struct` behind the invocation the *shape* rules claim it
     // anyway (`at_a_macro_that_stands_for_a_declaration`: an unknown name followed by a token that begins a
-    // declaration is a macro statement, B87) — which is exactly why the corpus cannot measure this rule: every
+    // declaration is a macro statement) — which is exactly why the corpus cannot measure this rule: every
     // one of the 38 `_STD_BEGIN` sites has such a follower, so both readings agree there.
     let without_evidence_or_a_shape = shape_body_of_the_file_reads(identifier_behind_it, None);
     assert_eq!(
@@ -3058,7 +3058,7 @@ fn a_macro_whose_body_is_a_brace_is_read_as_that_construct() {
         "and the invocation is not claimed by this rule: {without_evidence_or_a_shape:?}"
     );
 
-    // …and B87's *shape* half is untouched, which is what keeps the two rules from being one: the follower that
+    // …and the shape rule is untouched, which is what keeps the two rules from being one: the follower that
     // makes the shape rule fire still does, environment or not.
     assert_eq!(
         shape_body_of_the_file_reads(class_behind_it, None),
@@ -3080,7 +3080,7 @@ fn a_macro_whose_body_is_a_brace_is_read_as_that_construct() {
         );
     }
 
-    // **`extern "C" {` is an opener, and that answer changed** (B122): this test used to pin it as *refused*,
+    // **`extern "C" {` is an opener, and that answer changed**: this test used to pin it as *refused*,
     // because the rule's vocabulary was "a namespace head" and nothing else. The statement-level openers —
     // `try {`, `do {`, `extern "C" {` — are the same evidence about a different construct: the file writes an
     // invocation where a `{` belongs, and the invocation is a whole statement with the brace inside its body. So
@@ -3123,7 +3123,7 @@ fn shape_body_of_the_file_reads(source: &str, environment: Option<&MacroEnvironm
         .collect()
 }
 
-/// **A macro whose body ends at a `::` supplies a qualified name's qualifier** (B121) — `_STD`, which MSVC's
+/// **A macro whose body ends at a `::` supplies a qualified name's qualifier** — `_STD`, which MSVC's
 /// `yvals_core.h` defines as `::std::`.
 ///
 /// The shape is two names in a row (`_STD addressof(*p)`), which is not an expression in any reading, so the rule
@@ -3180,7 +3180,7 @@ fn a_macro_whose_body_ends_at_a_scope_qualifies_the_name() {
 
     // (3) The negative: **no evidence, no claim**. The *shape* is what says so, and an error count would not:
     // inside an argument list the same tokens come out as a recovered `ArgumentList` with no diagnostic at all —
-    // which is exactly why maintenance convention 13 says a successful parse is not evidence.
+    // which is exactly why a successful parse is not evidence.
     let without = CppParser::parse(expression, ParserConfig::default());
     assert!(
         !has_a_qualified_call(&without),
@@ -3712,8 +3712,8 @@ fn a_template_argument_may_be_a_call_or_a_function_type() {
 /// statement that failed after eating a `{` — a braced initialiser, a lambda's body, a nested block — therefore
 /// left the block one brace short, the recovery skipped *to* the next `}`, and that one belonged to the failed
 /// statement: the block ended there and the statements after it were left to the enclosing rule. The fix is a
-/// **brace debt** (kept by `parse_stats`, and by the class body for the member-level case
-/// B58): the failed statement is charged for the braces it consumed and never closed, and the block pays the debt
+/// **brace debt** (kept by `parse_stats`, and by the class body for the member-level case):
+/// the failed statement is charged for the braces it consumed and never closed, and the block pays the debt
 /// by reading the next `}`s as error nodes before it may end.
 #[test]
 fn a_statement_the_parser_gives_up_on_keeps_the_block_after_it() {
@@ -3760,7 +3760,7 @@ fn a_statement_the_parser_gives_up_on_keeps_the_block_after_it() {
 ///
 /// The second shape is what `parse_compound_stat` already does for a missing `}` — `emit_missing_node` plus a
 /// reported error, so completion has a node to live in and the user is still told — and the fix is to do the same
-/// thing in the suffix loop rather than let `Err` cross the statement boundary. See maintenance convention 20.
+/// thing in the suffix loop rather than let `Err` cross the statement boundary.
 #[test]
 fn a_member_access_without_a_name_keeps_the_block_after_it() {
     let source = "void f() {\n  Widget w;\n  w.\n}\nint after;\nvoid g() { }\n";
@@ -4742,7 +4742,7 @@ fn constructs_the_parser_reads() {
             "int main(argc, argv)\nint argc;\nchar *argv[];",
             "int f(a)\nint a;\nfloat b;\n{ return a; }",
             // Enumerators **with initializers**, which is where the enumerator list is really a list: a reader
-            // that takes the comma swallows the members after the first initialised one (B26), and an enum whose
+            // that takes the comma swallows the members after the first initialised one, and an enum whose
             // members have no initializers cannot see that. `enum Color { Red, Green }` was the example for years.
             "enum E { A = 0, B };",
             "enum E { A = 0, B, };",
@@ -4937,7 +4937,7 @@ fn constructs_the_parser_does_not_read_yet() {
             (
                 "NUMBER_OPTION(tab_width)\ng(x)",
                 "a call with its `;` missing and **no `#define` in the file**: the macro reading needs that \
-                 evidence, and a spelling convention is not enough for it; see B41 and `macros.rs`",
+                 evidence, and a spelling convention is not enough for it; see `macros.rs`",
             ),
             // `if (int x = g()) { }` used to be here — a condition that declares a variable. It was read as
             // `expected primary expression` against the `int`, and the block after it became rubble. The `for`
@@ -4947,8 +4947,8 @@ fn constructs_the_parser_does_not_read_yet() {
             //
             //   if (Foo* p = get())   was a `BinaryExpr` — `Foo * p = get()` — with no diagnostic at all
             //
-            // A "does it parse?" list cannot catch that one, which is the second number of maintenance
-            // convention 29 and the reason the shape assertions below exist.
+            // A "does it parse?" list cannot catch that one — a clean parse is not evidence that the reading is
+            // right — and that is the reason the shape assertions below exist.
         ],
     );
 
@@ -5675,7 +5675,7 @@ fn modern_constructs_produce_the_right_nodes() {
         "a member's `:` is still a bit-field width"
     );
 
-    // **How many enumerators an enum has.** This is the assertion the A0 defect of B26 needed and did not have.
+    // **How many enumerators an enum has.** This is the assertion the enumerator-comma defect needed and did not have.
     // With the initializer read at the comma-operator level, `enum E { A = 0, B };` came out as *one*
     // `EnumeratorDecl` whose initializer was the expression `0, B` — lossless, well formed, no diagnostic, and
     // with `B` no longer a member of the enum. Counting members is the only question that sees it, and the census
@@ -5705,7 +5705,7 @@ fn a_macro_whose_own_body_opens_a_namespace_is_its_own_statement() {
     // `_GLIBCXX_END_NAMESPACE_VERSION`, and defines both of them **in that file** as `namespace __8 {` and `}`.
     // Nothing among the file's own tokens says a namespace opened or a brace closed, so the declarations that
     // followed were read as the continuation of a declaration that never ends. The reading has to come from the
-    // macro's own `#define` body, which the directive rule records as token kinds (B87).
+    // macro's own `#define` body, which the directive rule records as token kinds.
     let source = "#define BEGIN_N namespace __8 {\n#define END_N }\ninline BEGIN_N\nint x;\nEND_N\n";
     let root = CppParser::parse(source, ParserConfig::default()).get_red_root();
 
@@ -5789,7 +5789,7 @@ fn a_directive_may_stand_on_either_side_of_a_declarations_initializer() {
     //
     // The `#` therefore stands where the *initializer* should begin, which no expression rule can read: the
     // declaration failed and the file reported `expected primary expression` against its own `#ifndef`. The seam
-    // is the one the enumerator list, the template parameter list and the parameter list already have (B23), in
+    // is the one the enumerator list, the template parameter list and the parameter list already have, in
     // the one position that was missing it.
     let source = "const int x =\n#ifndef Y\n  1;\n#else\n  2;\n#endif\n";
     assert_eq!(
@@ -6213,7 +6213,7 @@ fn a_term_of_an_expression_may_be_written_once_per_branch() {
     //
     // A `#` in operator position cannot be anything else, so the directive is read as its own node and the loop
     // looks for the operator again. The tokens of both branches end up in one chain — the branches are
-    // alternatives and one expression cannot say so — which is the documented trade (B104/B108).
+    // alternatives and one expression cannot say so — which is the documented trade.
     let source = "double f(double x) {\n\
                     double z = 1;\n\
                     z *= pow(x)\n\
@@ -6635,7 +6635,7 @@ fn a_run_of_annotations_may_stand_in_front_of_the_declaration_it_annotates() {
     // The declaration reading fails on the *second* name's group — `_Check_return_wat_ _Success_(return == 0)`
     // reads as `type name(parameters)` and `_ACRTIMP` cannot continue it — and the statement then came out an
     // `ExpressionStat` that wanted a `;` at the name it could not consume. Measured on the closure: that was the
-    // first error of **fourteen** UCRT headers (B133).
+    // first error of **fourteen** UCRT headers.
     let source = "_Check_return_wat_\n_Success_(return == 0)\n_ACRTIMP errno_t __cdecl fopen_s(FILE** _Stream);\n";
 
     // **Both channels, because the reading has to be clean in both.** With no toolchain behind it a parse has
@@ -6720,7 +6720,7 @@ fn annotations_may_stand_in_runs_before_the_type_they_annotate() {
     // (`specifiers == 0`), so the second annotation was read as a *type*, its group as that type's declarator, and
     // the declaration came out `expected primary expression` against its own first line. Which is what the closure
     // measured: `stdio.h`'s first error was `_ACRTIMP void __cdecl setbuf(`, and fourteen UCRT headers were behind
-    // it (B134).
+    // it.
     for source in [
         // Two annotations, one group each — the shape the header writes.
         "int f(_Inout_updates_opt_(BUFSIZ) _Post_readable_size_(0) char* _Buffer);\n",
@@ -6747,8 +6747,7 @@ fn annotations_may_stand_in_runs_before_the_type_they_annotate() {
     // The **mirror image is still a gap**, and this assertion is its guard rather than its fix: a *bare* annotation
     // in front of a grouped one is read as a type by the same arm's precondition (the cursor must be on a name with
     // a group), which is the remaining half of this family in `ucrt/stdio.h:612`
-    // (`_In_z_ _Printf_format_string_params_(2) char const* _Format`). It fails the day it starts working — see
-    // B134.
+    // (`_In_z_ _Printf_format_string_params_(2) char const* _Format`). It fails the day it starts working.
     assert!(
         reads("int f(Wat Wobble(2) char const* _Format);\n", Where::File).is_err(),
         "a bare annotation before a grouped one is the next shape, not this one"
@@ -6768,7 +6767,7 @@ fn a_function_may_be_spelled_with_its_name_in_parentheses_behind_an_operator() {
     //
     // The rule that reads a parenthesized declarator looked for the `(` **at the cursor** and only when the
     // specifier sequence had read no name; with `const _Ty&` in front, neither held, so the declaration fell
-    // through to the expression reading and reported ``expected `;` `` at the parameter list (B135). Those are
+    // through to the expression reading and reported ``expected `;` `` at the parameter list. Those are
     // exactly the errors that survive *real* expansion (`cl /E`) — no expander can fix them.
     for source in [
         "const Wat&(max) (const Wat& _Left);\n",
@@ -6812,7 +6811,7 @@ fn an_annotation_may_follow_a_specifier_the_loop_mistook_for_a_type() {
     // `_NODISCARD` is `#define _NODISCARD` — in force as an empty body — and the specifier loop reads an unknown
     // identifier as a **type name** (that is how `Wat x;` works), so "a type has been named" held and the
     // annotation arm refused itself: the declaration took `_Post_equal_to_` for its declarator's name and reported
-    // ``expected a parameter list or an initializer`` at the group (B136).
+    // ``expected a parameter list or an initializer`` at the group.
     //
     // What separates this from a run of annotations is the token **after the group**: a *type keyword* says a
     // declaration's type is coming, so the invocation is a specifier; an identifier says the run is the statement.
@@ -6852,7 +6851,7 @@ fn an_annotation_may_follow_a_specifier_the_loop_mistook_for_a_type() {
         assert_eq!(tree.get_errors(), [], "{source:?}");
     }
 
-    // **The negative is B133's shape**, and it is why the gate opens for a *type keyword* and not for any
+    // **The negative is the run-of-annotations shape**, and it is why the gate opens for a *type keyword* and not for any
     // specifier: `_Success_(…)` followed by an identifier is a run of invocations, one node each. Relaxing the
     // gate on "the specifier in front is a macro" was measured at 253 → 249 messages and collapsed this reading
     // into a single `Declaration` — the assertion next door caught it, and the relaxation was reverted.
@@ -6871,7 +6870,7 @@ fn a_form_feed_is_whitespace_and_not_a_character_error() {
     // `um/winnt.h:9968` is the two bytes `0C 0D` on a line of its own — a **form feed**, which the SDK writes as a
     // page break — and `um/winioctl.h:9838` the same. The standard lists five whitespace characters and this is
     // one of them, so refusing it reported `unrecognized character` eleven times over the SDK corpus for a
-    // character no compiler has ever refused outside a literal (B137).
+    // character no compiler has ever refused outside a literal.
     //
     // The test is here rather than in the lexer because the *reading* is what matters: the form feed is trivia, so
     // the declaration after it is a declaration. The first attempt at this added the character to the lexer's
@@ -6902,7 +6901,7 @@ fn a_replacement_list_is_not_cpp_text() {
     // and `shared/driverspecs.h:401` carries a `\` inside a SAL macro's replacement list. **A replacement list is
     // not C++ text**: a compiler lexes neither until the macro is *used*, so reporting the character told the
     // reader about text no compiler would refuse — 42 messages over the Windows SDK corpus, and with the cascades
-    // they caused, 64 (B137).
+    // they caused, 64.
     for source in [
         "#define API_SET_BY_ORDINAL(X,O,PO)   X @##O NONAME PRIVATE\nint x;\n",
         "#define A param\tt)\nint x;\n",
@@ -7025,7 +7024,7 @@ fn a_macro_may_supply_the_rest_of_a_template_parameter_list() {
     // and `_GLIBCXX_NOEXCEPT_PARM` is `, bool _NE` **in `bits/c++config.h`**: the list's separator and a whole
     // parameter live in a header, so nothing among this file's tokens says the list continues. What carries the
     // answer is the position — an identifier there can neither continue the parameter that was just read nor close
-    // the list, so the file is already wrong unless the name is a macro standing where the separator goes (B88).
+    // the list, so the file is already wrong unless the name is a macro standing where the separator goes.
     let source = "template<typename _Res, typename... _ArgTypes _GLIBCXX_NOEXCEPT_PARM>\nstruct S;\n";
     assert_eq!(
         reads(source, Where::File),
@@ -7066,7 +7065,7 @@ fn a_literal_operator_may_be_spelled_with_a_space_before_its_suffix() {
     // an identifier. Only the first was read after `operator`, so the suffix was left for the declarator — which
     // wanted `;` at `noexcept`, gave up, and left the file an `ExpressionStat` where a function definition was.
     // Measured: that line is `<xstring>`'s **first** error, with 98 more behind it, and `<xstring>` is where every
-    // `std::string` fact comes from (B132).
+    // `std::string` fact comes from.
     let spaced = "constexpr int operator\"\" _km(double) noexcept { return 0; }\n";
     assert_eq!(
         reads(spaced, Where::File),
@@ -7105,7 +7104,7 @@ fn a_literal_operator_may_be_spelled_with_a_space_before_its_suffix() {
     );
 }
 
-/// **The same spelling in a template declaration** — B135's other half, and the last thing the cooked reading
+/// **The same spelling in a template declaration** — the same rule's other half, and the last thing the cooked reading
 /// of MSVC's `<utility>` was failing on.
 ///
 /// `template <class _Ty> constexpr _Ty (max)(…)` is that header's `max`, and the branch that reads a

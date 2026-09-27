@@ -173,7 +173,7 @@ disk, {} not stored, {} unresolved includes)",
     //                  — the two facts are the primary template (`class vector { … }`) and the forward
     //                    declaration of the partial specialization `class vector<bool, _Alloc>;`, whose template
     //                    arguments `base_type_name` strips, so both carry the qualified name `std::vector` and the
-    //                    index has no way to tell them apart (B129). The queries are unaffected: `v.push_back`
+    //                    index has no way to tell them apart. The queries are unaffected: `v.push_back`
     //                    goes through the object's type and `member_fact`, which takes the members of both facts.
     // ```
     for name in ["std::string", "std::basic_string", "std::vector", "std::map", "std::map::find"] {

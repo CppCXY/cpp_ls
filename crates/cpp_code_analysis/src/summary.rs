@@ -642,7 +642,7 @@ pub struct ClosureEvidence {
 /// the compilation's own table — which is a lost reading rather than a wrong branch, the direction this layer must
 /// always fail in.
 struct UnitState {
-    /// What the unit has in force, as **definitions** rather than names (B95) — each carrying **where** it was
+    /// What the unit has in force, as **definitions** rather than names — each carrying **where** it was
     /// written, because a definition is only in force from its own line (see [`UnitMacros::lookup`]).
     definitions: std::collections::HashMap<Box<str>, Binding>,
 }
@@ -872,7 +872,7 @@ pub fn macros_in_force_before_the_include<'a>(
 /// Walk a file's includes — or, with `only_before`, only the ones written **before** that offset — and collect what
 /// the closure they reach defines.
 ///
-/// # Why the walk carries a state (B94)
+/// # Why the walk carries a state
 ///
 /// A condition is a question about what the translation unit had **seen** when the preprocessor reached it:
 /// `#ifdef STDMETHOD` in `commdlg.h` is false until `objbase.h` has been read, and
@@ -1210,7 +1210,7 @@ impl TranslationUnit {
     ///
     /// A definition is read out of the fact's **own** parameter list and replacement list — the two substrings the
     /// walk copied out of the file that wrote them — and lexed with their offsets shifted to where they sit:
-    /// [`TuEvent::body_range`] for the body, and the name plus its length for the parameter list. So a body
+    /// `TuEvent::body_range` for the body, and the name plus its length for the parameter list. So a body
     /// token's range is where the token is, `written_in` says which file that is
     /// ([`crate::macros::MacroFile::Frame`]), and a consumer can act on the answer instead of on an offset in a
     /// line this crate wrote. Definitions that arrive without a position ([`crate::macros::MacroFile`]'s third
@@ -1545,7 +1545,7 @@ impl UnitDefinitions {
 }
 
 /// **One file's environment, as a position in the unit's timeline** — the borrowed half of
-/// [`TranslationUnit::environment_at`].
+/// `TranslationUnit::environment_at`.
 ///
 /// A view is two words: the unit and the frame. Opening one is free, and that is the point: the census built 255
 /// environments per corpus (1.7 s of materialised maps) for callers that ask about a handful of names each, and a
@@ -1909,7 +1909,7 @@ impl RenderedUnit {
 struct Walked<'a> {
     /// `(where the name becomes visible, the fact, the file that wrote it)` in translation order, last wins.
     entries: Vec<(usize, &'a MacroFact, &'a str)>,
-    /// Bodies of definitions a condition guards that came out **in force** — the second channel (B89).
+    /// Bodies of definitions a condition guards that came out **in force** — the second channel.
     /// The body, the fact's `function_like`, and the parameter list — the two things expansion needs and reading
     /// does not. A function-like body **with** its parameters is expandable; without them it is not.
     conditional_bodies: std::collections::BTreeMap<Box<str>, ConditionalBodyValue>,
@@ -2070,7 +2070,7 @@ fn walk_one_file<'a>(
                 unit.undefine(&fact.name);
             }
 
-            // The **evidence** is still two channels (B89): definitions only from what no condition guards, and
+            // The **evidence** is still two channels: definitions only from what no condition guards, and
             // bodies from everything in force. The state above is a third, separate thing — it exists to answer
             // *conditions*, and it deliberately carries no bodies.
             if matches!(fact.guard, FactGuard::Unconditional) {
@@ -2660,6 +2660,38 @@ pub struct MapReport {
     pub placed: usize,
     /// Ranges that landed nowhere, taking their facts with them.
     pub dropped: usize,
+}
+
+/// One thing the parse of a **rendering** found, said in the file's own coordinates.
+///
+/// A rendering's offsets are not file offsets, so an error the parser reports against one describes text that does
+/// not exist. This is that error after [`crate::RenderedCooked::reported_span`] has answered for it: a position a
+/// reader can act on — the invocation when a macro produced the text, the file's own span otherwise.
+///
+/// It is a type of its own rather than the parser's [`cpp_parser::CppParseError`] with a shifted range, because the
+/// message and the range are no longer the same claim: the parser said "here, in this text", and this says "there,
+/// in that file" — the two have different owners, and a consumer that published the first as if it were the second
+/// would point at a line inside a `#define` three headers up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CookedDiagnostic {
+    /// Where to point the reader, **in the file** the rendering was cooked from.
+    pub range: cpp_parser::SourceRange,
+    pub message: String,
+}
+
+/// What indexing one file's rendering produced — see [`crate::FileIndexer::index_rendering`].
+#[derive(Debug, Clone)]
+pub struct IndexedRendering {
+    /// The file's facts **as a compiler reads them**, with every range mapped back into the file.
+    pub summary: FileSummary,
+    /// How the mapping went: ranges placed, ranges that landed nowhere.
+    pub mapped: MapReport,
+    /// The parse errors of the rendering, placed in the file.
+    pub diagnostics: Vec<CookedDiagnostic>,
+    /// Errors the map could not place **in this file** — a grammar error inside another file's macro body, or in a
+    /// token whose spelling exists nowhere (a paste). Counted rather than dropped in silence: the rendering is not
+    /// clean, and a consumer that reports "no errors" while this is non-zero is claiming more than it knows.
+    pub unplaced: usize,
 }
 
 impl DeclKind {

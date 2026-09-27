@@ -20,7 +20,7 @@
 //!
 //! So that the loop that reads from the client never waits for a parse. The notification handlers return as soon as
 //! the message is queued, which keeps `$/cancelRequest` — and every other notification — answerable while a project
-//! is being indexed. has the two paths end to end.
+//! is being indexed. `tests/handshake.rs` has the two paths end to end.
 
 use std::sync::Arc;
 

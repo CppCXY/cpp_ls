@@ -735,12 +735,11 @@ fn a_sole_name_in(text: &str) -> Option<&str> {
 /// Does this token kind **head a braced block** — a construct whose body is a `{ … }` this file may not write?
 ///
 /// The list is the keywords that can stand in front of a brace: a namespace or a class-like definition, a linkage
-/// block, and the statements that own a body. It is a *closed* grammatical set, like `can_begin_a_declaration`
-///: every entry says "a `{` may follow me", which is a different claim from
-/// "this token may begin a statement".
+/// block, and the statements that own a body. It is a *closed* grammatical set, the way `can_begin_a_declaration` is:
+/// every entry says "a `{` may follow me", which is a different claim from "this token may begin a statement".
 ///
 /// **Measured before it was written**: the corpus writes `namespace X {` (`_STD_BEGIN`) and `try {` (`_TRY_BEGIN`,
-/// reached through `_TRY_IO_BEGIN`), the second one only once the alias chain of B122 was followed. The statement
+/// reached through `_TRY_IO_BEGIN`), the second one only once the alias chain behind it was followed. The statement
 /// keywords are here because they are the same shape one construct along — `_CATCH_ALL` is `catch (…) {`, and
 /// `do {`, `else {`, `if (…) {` are each written as a macro somewhere — and because a list that had to be extended
 /// every time a header spelled one would be extended by whoever hit it next.
@@ -799,7 +798,7 @@ pub enum BodyShape {
     /// A statement-level opener: `iosfwd`'s `_TRY_IO_BEGIN` (through `_TRY_BEGIN`) is `try {`, and `<xstring>`
     /// writes `_TRY_IO_BEGIN` / `if (…) { … }` / `_CATCH_IO_END` as one statement. Reading the invocation as
     /// anything else put the `if` where the expression rule expected a `;`, and the recovery ate a brace — the
-    /// class body of `basic_string` never closed and every `std::string` lookup went with it (B122).
+    /// class body of `basic_string` never closed and every `std::string` lookup went with it.
     ///
     /// Nothing is *named*, so a consumer opens no scope for it; what it does is keep a brace's worth of balance,
     /// which is what a statement-level reader needs.
@@ -811,8 +810,7 @@ pub enum BodyShape {
     /// MSVC's STL spells `std::` nowhere: `<vector>` writes `_STD addressof(*_Ptr)` and `yvals_core.h` says
     /// `#define _STD ::std::`. Two names in a row are not an expression in any reading, so without this the
     /// invocation ends the expression and the token after it is a syntax error — which is how one `return`
-    /// statement inside a ternary swallowed the remaining 3 800 lines of `<vector>` (
-    /// B121).
+    /// statement inside a ternary swallowed the remaining 3 800 lines of `<vector>`.
     QualifiesAName,
 
     /// Anything else, the empty body included.
@@ -943,7 +941,7 @@ pub fn shape_of_a_body(text: &str) -> BodyShape {
     if kinds.first() != Some(&CppTokenKind::NamespaceKeyword) {
         // …and a body that ends at a `{` without naming a namespace **opens a block**: `try {`, `do {`,
         // `switch (x) {`, `extern "C" {`. Nothing is named, and a statement-level reader needs exactly that much —
-        // the brace's balance (B122).
+        // the brace's balance.
         return if heads_a_braced_block(kinds.first().copied()) {
             BodyShape::OpensABlock
         } else {
@@ -1174,7 +1172,7 @@ mod tests {
             );
         }
 
-        // **A statement-level opener is a third shape** (B122): it names nothing, and it braces something. Read
+        // **A statement-level opener is a third shape**: it names nothing, and it braces something. Read
         // from the same list of block heads, so the two vocabularies (`symbols.rs` here and the parser's
         // `body_shapes_the_braces`) cannot disagree about which bodies are openers.
         for opener in ["try {", "do {", "switch (x) {", "if (a) {", "extern \"C\" {"] {
@@ -1196,7 +1194,7 @@ mod tests {
         assert!(shape_of_a_body("namespace std").namespace_segments().is_none());
     }
 
-    /// **A body that is another macro's name is followed** (B122), because one hop is what a header writes and one
+    /// **A body that is another macro's name is followed**, because one hop is what a header writes and one
     /// hop is the difference between "nothing structural" and `try {`.
     ///
     /// Both spellings the corpus has: a plain alias (`_TRY_IO_BEGIN` → `_TRY_BEGIN`) and one with a trailing

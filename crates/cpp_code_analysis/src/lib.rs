@@ -75,11 +75,11 @@ pub use tu_cache::{TRANSLATION_UNITS_DIRECTORY, TranslationUnitCache};
 
 pub use summary::ConditionalBody;
 pub use summary::{
-    ConditionAt, ConditionalRegion, DeclFact, DeclKind, FactGuard, FileSummary, GuardBranch,
-    IncludeFact, MacroFact, MacroKind, MacroView, MapReport, SummaryGuards, TranslationUnit,
-    UnitDefinitions, macros_from_direct_includes, macros_from_direct_includes_with_bodies,
-    macros_from_the_closure_with_bodies, ClosureEvidence, macros_in_force_before_the_include,
-    MacroDefinitions, RenderedUnit, UnitSpan,
+    ConditionAt, ConditionalRegion, CookedDiagnostic, DeclFact, DeclKind, FactGuard, FileSummary,
+    GuardBranch, IncludeFact, IndexedRendering, MacroFact, MacroKind, MacroView, MapReport,
+    SummaryGuards, TranslationUnit, UnitDefinitions, macros_from_direct_includes,
+    macros_from_direct_includes_with_bodies, macros_from_the_closure_with_bodies, ClosureEvidence,
+    macros_in_force_before_the_include, MacroDefinitions, RenderedUnit, UnitSpan,
 };
 // `guard` is the exception: `preprocess::guard` and `preprocess::guards` differ by one letter, which is exactly
 // the hazard the folders are meant to remove, so the *analysis* keeps the plural name and the types are reached
@@ -119,9 +119,9 @@ pub use toolchain::{
 // reader benefits from. `index::summary` is not here — the *shape* of a summary is `summary`, and one type with
 // two paths is worse than a longer import.
 pub use index::{
-    ChangeBatch, EventKind, FileEvent, FileIndexer, FileReferences, IncludeBudget, IncludeIndex,
-    IncludeVisibility, MacroReferences, MemberCompletions, MemberList, NameCompletions, NotIndexed,
-    NotIndexedReason, OfferedName, PathPattern, Priority, ProjectDefinition, ProjectIndex,
+    ChangeBatch, CookedFile, EventKind, FileEvent, FileIndexer, FileReferences, IncludeBudget,
+    IncludeIndex, IncludeVisibility, MacroReferences, MemberCompletions, MemberList, NameCompletions,
+    NotIndexed, NotIndexedReason, OfferedName, PathPattern, Priority, ProjectDefinition, ProjectIndex,
     ProjectMacro, ProjectMember, Reference, ReferenceBudget, ReferenceKind, Rename, Response, Step,
     StepOutcome, StoreStats, SummaryReadError, SummaryStore, UnlistedBase, UnresolvedEdge,
     VisibleDeclaration, WatchFilter, Worklist, definition_across_files, macro_across_files,
@@ -153,7 +153,10 @@ pub use scopes::{MacroBodies, NoMacroBodies, build_scopes, declared_module_names
 // The driver sits above the folders rather than in one of them: it is the join of all four — the toolchain, the
 // include configuration, the summaries and the queries — and putting it inside any one of them would make that
 // folder the owner of the others.
-pub use session::{OpenDocuments, Session, SessionFiles};
+pub use session::{
+    CookedReading, DiagnosticReading, FileDiagnostic, FileDiagnostics, OpenDocuments, Session,
+    SessionFiles,
+};
 // The *file* layer's two public faces: a view is one file parsed (what a cursor query is answered against), and a
 // VFS is the set of files being held (their text, and the line index of that text). They live in `file` rather
 // than next to the session because they are about files, not about a project.

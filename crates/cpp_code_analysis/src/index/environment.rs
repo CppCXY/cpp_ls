@@ -350,7 +350,7 @@ mod tests {
 
     #[test]
     fn a_conditional_define_is_in_force_only_when_its_branch_was_taken() {
-        // The question the evidence layer asks before it lets a conditional `#define` be read at all (B89). Three
+        // The question the evidence layer asks before it lets a conditional `#define` be read at all. Three
         // answers, and the third is the one nothing may be guessed at: an unanswered condition keeps the fact out,
         // because this layer can lose evidence but must not invent it.
         let source = "#if FOO\n#define X 1\n#endif\n#if BAR\n#define Y 2\n#endif\n";

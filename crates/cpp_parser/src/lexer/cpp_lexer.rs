@@ -147,7 +147,7 @@ impl<'a> CppLexer<'a> {
         match self.reader.current_char() {
             // Whitespace
             '\n' | '\r' => self.lex_newline(),
-            // **A form feed and a vertical tab are whitespace too** (B137). The standard lists five whitespace
+            // **A form feed and a vertical tab are whitespace too**. The standard lists five whitespace
             // characters (`space`, horizontal tab, newline, vertical tab, form feed) and the Windows SDK writes a
             // form feed as a *page break*: `um/winnt.h:9968` is the two bytes `0C 0D` on a line of its own, and
             // `um/winioctl.h:9838` the same — eleven messages of `unrecognized character` over the SDK corpus, for
@@ -524,7 +524,7 @@ fn is_trivia_whitespace(ch: char) -> bool {
     /// first real C++ project put in front of this parser). It is also the zero-width no-break space, so the same
     /// character in the middle of a file is trivia for the same reason.
     fn lex_whitespace(&mut self) -> CppTokenKind {
-        // **The same set the dispatch matches** (B137). The two ran apart for exactly one character's worth of
+        // **The same set the dispatch matches**. The two ran apart for exactly one character's worth of
         // time: adding `\u{c}` to the dispatch arm above without adding it *here* made this loop consume nothing
         // and the lexer hand back a zero-length `Whitespace` token at the same offset, for ever — every file with a
         // form feed in it hung, and the token vector grew until the process died with

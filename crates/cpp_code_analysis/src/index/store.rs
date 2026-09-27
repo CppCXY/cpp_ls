@@ -517,7 +517,7 @@ impl<F: FileProvider> SummaryStore<F> {
         // be the files being re-read; and the walk that builds one candidate's evidence reaches whatever that
         // candidate includes, handing out `&str` for each (see `summary::macros_from_the_closure_with_bodies`).
         // Restricting the map to the candidates is what left the driver at **0/9** on MSVC's STL while the same
-        // index built by [`SummaryStore::index_includes_from`] answered 9/9 (B131).
+        // index built by [`SummaryStore::index_includes_from`] answered 9/9.
         //
         // Keyed by the **normalized** spelling, which is the spelling the walk asks with: a resolved `#include` is
         // normalized (`c:/users/…`) while a summary filed by a session is keyed by the path the caller spelled
@@ -561,7 +561,7 @@ impl<F: FileProvider> SummaryStore<F> {
         }
 
         // One cache of parsed `#define`s for the whole pass: a definition does not depend on which file is being
-        // read, so the feed costs one parse per definition rather than one per definition per file (B95).
+        // read, so the feed costs one parse per definition rather than one per definition per file.
         let mut definitions = crate::summary::MacroDefinitions::default();
         let mut re_read = 0usize;
 

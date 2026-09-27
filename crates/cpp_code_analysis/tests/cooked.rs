@@ -276,7 +276,7 @@ fn the_raw_reading_reads_every_branch_and_the_cooked_one_reads_the_compiled_bran
 
 #[test]
 fn the_annotation_families_read_the_same_way_cooked_as_they_do_raw() {
-    // The families the shape rules (B133/B134/B136) were written for. All four read in the *raw* tree today,
+    // The families the shape rules were written for. All four read in the *raw* tree today,
     // because those rules work — so this asserts **parity**: cooking must not read worse than the rules do,
     // and it must read them without knowing a single macro name. When the level-2 census shows the rules are
     // no longer needed, this test is what says cooking still covers them.

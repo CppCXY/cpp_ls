@@ -43,10 +43,10 @@ pub mod worklist;
 pub use environment::{MacrosHere, visibility_at};
 
 pub use project::{
-    IncludeVisibility, MemberCompletions, MemberList, NameCompletions, OfferedName, ProjectDefinition,
-    ProjectIndex, ProjectMacro, ProjectMember, UnlistedBase, VisibleDeclaration,
-    definition_across_files, macro_across_files, member_across_files, member_completions_at, members_of,
-    name_completions_at,
+    CookedFile, IncludeVisibility, MemberCompletions, MemberList, NameCompletions, OfferedName,
+    ProjectDefinition, ProjectIndex, ProjectMacro, ProjectMember, UnlistedBase, VisibleDeclaration,
+    definition_across_files, macro_across_files, member_across_files, member_completions_at,
+    members_of, name_completions_at,
 };
 pub use references::{
     FileReferences, MacroReferences, Reference, ReferenceBudget, ReferenceKind, Rename,
@@ -86,7 +86,7 @@ pub struct FileIndexer<'a, F: FileProvider> {
     ///
     /// **Two consumers, one value**, and that is why the type is the parser's `MacroEnvironment` rather than a
     /// trait object: the *parse* reads it through `ParserConfig::with_macros_from_includes` (which is what lets a
-    /// rule take `_STD addressof(*p)` as one qualified name when `_STD` is `::std::`, B121), and the *scope walk*
+    /// rule take `_STD addressof(*p)` as one qualified name when `_STD` is `::std::`), and the *scope walk*
     /// reads it through [`crate::sema::scopes::MacroBodies`] (which is what opens `std` from `_STD_BEGIN`'s
     /// `namespace std {`). A second value for either would be a second answer to the same question.
     bodies: Option<&'a cpp_parser::MacroEnvironment>,
@@ -131,7 +131,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         //
         // …and **with the include closure's macro bodies when the caller has them**: a rule that takes
         // `_STD addressof(*p)` for one qualified name needs to know that `_STD` is `::std::`, and that body is in
-        // a header (B121). Without them the parse is the shape-only reading, which is what a buffer on its own
+        // a header. Without them the parse is the shape-only reading, which is what a buffer on its own
         // gets and all it can get.
         let mut config =
             ParserConfig::default().with_dialect(self.config.dialect());
@@ -160,12 +160,22 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
     ///
     /// The rendering is the caller's because the caller cooked the stream: what to define before it, and which
     /// file's environment to use, are compilation decisions this type has no way to make.
+    ///
+    /// # The errors come back too, and placed
+    ///
+    /// A rendering is the text a compiler parses, so what the parser says *about it* is the honest answer to "does
+    /// this file compile" — and it is a strictly better answer than the file's own text gives, because a shape the
+    /// file writes as a macro call stops being a guess once the macro is expanded, and a declaration in a branch
+    /// nobody takes is not there at all. So the errors are not discarded here: each one is asked of the same map
+    /// every fact's range goes through ([`crate::RenderedCooked::reported_span`], whose answer is always a place in
+    /// this file — the invocation when a macro produced the text), and a rendering error that **cannot** be placed
+    /// here is counted rather than reported against a text the reader cannot see.
     pub fn index_rendering(
         &self,
         path: &Path,
         rendered: &crate::preprocess::cooked::RenderedCooked,
         key: SummaryKey,
-    ) -> (FileSummary, crate::MapReport) {
+    ) -> crate::IndexedRendering {
         let mut config = ParserConfig::default().with_dialect(self.config.dialect());
         if let Some(bodies) = self.bodies {
             config = config.with_macros_from_includes(bodies);
@@ -174,7 +184,32 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         let tree = CppParser::parse(&rendered.text, config);
         let mut summary = self.index_tree(path, &rendered.text, &tree, key);
         let report = summary.map_into_the_file(rendered);
-        (summary, report)
+
+        // The tree's errors, each asked of the map. `reported_span` answers for a node's whole range — from the first
+        // token it covers to the last — and `reported_at` for the span an offset falls in, which is the fallback for
+        // an error with no token of its own (the parser can report a range that covers nothing).
+        let mut diagnostics = Vec::new();
+        let mut unplaced = 0usize;
+        for error in tree.get_errors() {
+            let range = cpp_parser::source_range(error.range);
+            let placed = rendered
+                .reported_span(range)
+                .or_else(|| rendered.reported_at(range.start_offset));
+            match placed {
+                Some(range) => diagnostics.push(crate::CookedDiagnostic {
+                    range,
+                    message: error.message.clone(),
+                }),
+                None => unplaced += 1,
+            }
+        }
+
+        crate::IndexedRendering {
+            summary,
+            mapped: report,
+            diagnostics,
+            unplaced,
+        }
     }
 
     /// [`FileIndexer::index`] for a caller that already has the tree.

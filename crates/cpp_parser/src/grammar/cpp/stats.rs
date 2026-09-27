@@ -63,7 +63,7 @@ pub(crate) fn parse_compound_stat(p: &mut CppParser) -> ParseResult {
 /// Parse statements until a token that cannot start one.
 pub fn parse_stats(p: &mut CppParser) {
     // **How many `}` this block owes to statements it gave up on** — the statement-level half of the brace debt
-    // the class body keeps (`grammar/cpp/decls.rs`, and B58). A statement that failed after
+    // the class body keeps (`grammar/cpp/decls.rs`). A statement that failed after
     // consuming a `{` — an initialiser, a lambda's body, a nested block — leaves the block one brace short, and the
     // recovery below skips *to* the next `}`, which belongs to the failed statement: the block ends there and every
     // statement after it is left to the enclosing rule.
@@ -216,7 +216,7 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
             super::decls::parse_declaration(p)
         }
 
-        // **A macro whose body is a brace, asked first** (B120): `#define _STD_BEGIN namespace std {`,
+        // **A macro whose body is a brace, asked first**: `#define _STD_BEGIN namespace std {`,
         // `#define _STD_END }`, and libstdc++'s `_GLIBCXX_BEGIN_NAMESPACE_VERSION`. The body is the strongest
         // evidence there is about what stands here — stronger than any shape test below, because it *says* what
         // the tokens do not — so it is asked before the rules that read the invocation as a declaration head, a
@@ -237,7 +237,7 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
         // Claimed here, before the declaration/expression question is even asked, and only for a name this file
         // **`#define`s** — evidence rather than a convention. See [`at_a_macro_call_statement`].
         //
-        // **A macro that is a declaration head comes first** (B90): `STDMETHOD(QueryInterface) (…) PURE;` is also
+        // **A macro that is a declaration head comes first**: `STDMETHOD(QueryInterface) (…) PURE;` is also
         // "a name this file defines, invoked", and claiming it as a whole statement is what takes the rest of the
         // line away from the declaration reading. The body is what tells the two apart — see
         // [`a_macro_head_with_a_parameter_list`].
@@ -634,7 +634,7 @@ fn parse_a_declaration_head_macro(p: &mut CppParser) -> ParseResult {
 /// Two shapes, and the difference is not cosmetic. A macro whose body is a statement or a whole definition
 /// (`TEST(A, B) { … }`) can be followed by a block and a `;`, which [`parse_macro_call`] reads. One whose body
 /// is a **brace** — `namespace __8 {`, `}` — is the whole of what the file wrote: no group, no block, no `;`,
-/// and the group-reading rule refuses a bare name outright (B87).
+/// and the group-reading rule refuses a bare name outright.
 fn parse_a_macro_invocation_statement(p: &mut CppParser, start: usize) -> ParseResult {
     // **No group, no [`parse_macro_call`]**: that reader's first act is to read the argument list, and the two
     // shapes without one — a body that shapes the braces, and a bare invocation — are read by the rule that reads
@@ -666,7 +666,7 @@ fn parse_a_macro_invocation_statement(p: &mut CppParser, start: usize) -> ParseR
 /// that is `}` closes the innermost brace. `namespace` must be the **first** token: `_GLIBCXX_MATH_NS` is `__8`
 /// (a namespace *name*, not a head) and belongs to the declarator rules, not this one.
 ///
-/// # Why the body is asked for **by position**, and not only in this file (B120)
+/// # Why the body is asked for **by position**, and not only in this file
 ///
 /// MSVC writes the same construct the other way round: `<vector>` has no `namespace std` anywhere in it, only
 /// `_STD_BEGIN` on a line of its own, and the body — `namespace std {` — is in `yvals_core.h`, an **included**
@@ -1145,7 +1145,7 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
 
     // `inline _GLIBCXX_BEGIN_NAMESPACE_VERSION`: the `inline` is the file's own token and everything the
     // declaration would say after it belongs to a macro whose own body is `namespace __8 {` — so the statement
-    // **is** that invocation, and there is no `;` to expect because the body supplies the `{` (B87). Asked
+    // **is** that invocation, and there is no `;` to expect because the body supplies the `{`. Asked
     // before the declaration pass, which reads `inline NAME` as a declaration and then reports a missing `;`
     // at the directive that follows.
     if p.current_token() == CppTokenKind::InlineKeyword {
@@ -1160,7 +1160,7 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
         }
     }
 
-    // **A macro that is the declaration's head** (B90) — the second route to the same shape: a file that does not
+    // **A macro that is the declaration's head** — the second route to the same shape: a file that does not
     // `#define` the name itself never reaches [`parse_stat`]'s macro-statement branch, and the declaration reading
     // gets no further than the invocation's own group before it reports the `(…)` it cannot place.
     if a_macro_head_with_a_parameter_list(p) {
@@ -1201,7 +1201,7 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
             if a_macro_invocation_starts_at(p, start) {
                 return parse_a_macro_invocation_statement(p, start);
             }
-            // **A run of annotations in front of the declaration they annotate** (B133). One invocation per
+            // **A run of annotations in front of the declaration they annotate**. One invocation per
             // statement: the next statement begins at the next name of the run and this same decision is asked
             // again, so `_Check_return_wat_` / `_Success_(…)` / the declaration come out as two invocations and
             // the declaration — which is what the file wrote. See
@@ -1282,7 +1282,7 @@ pub(super) fn parse_preprocessor_directive(p: &mut CppParser) -> ParseResult {
     }
 
     // A `#define` body is read as token kinds too, so a later reading can ask what the macro stands
-    // for without parsing its body a second time (B87). Neither the name nor a parameter list that
+    // for without parsing its body a second time. Neither the name nor a parameter list that
     // touches it names a token of the body, so neither is recorded.
     struct BodyRecording {
         name: Box<str>,
@@ -1373,7 +1373,7 @@ pub(super) fn parse_preprocessor_directive(p: &mut CppParser) -> ParseResult {
         p.record_macro_body(&recording.name, recording.kinds);
     }
 
-    // **A replacement list is not C++ text** (B137). `shared/apiset.h:64` is
+    // **A replacement list is not C++ text**. `shared/apiset.h:64` is
     // `#define API_SET_BY_ORDINAL(X,O,PO)   X @##O NONAME PRIVATE` inside `#ifdef _API_SET_HOST` — apiset-tool
     // syntax in a branch no compiler takes — and `shared/driverspecs.h:401` carries a `\` in a SAL macro's body.
     // A compiler lexes neither until the macro is *used*, so the character diagnostics that landed inside this
@@ -1438,7 +1438,7 @@ fn parse_expression_statement(p: &mut CppParser) -> ParseResult {
     // **The tokens stay, so the node gets its end event.** `close_marks_above` would detach it instead, and an
     // unpaired `NodeStart` is balanced by the tree builder at the end of the stream — so this statement would
     // swallow everything after it, including the `}` of its own block. That is exactly what a macro written
-    // without its `;` costs (`bits/stl_map.h:530`, and with it `std::map::find`): see maintenance convention 34.
+    // without its `;` costs (`bits/stl_map.h:530`, and with it `std::map::find`).
     p.emit_missing_node();
     p.end_marks_to(base);
     Err(CppParseError::syntax_error_from(
@@ -1487,7 +1487,7 @@ fn parse_if_statement(p: &mut CppParser) -> ParseResult {
     //
     // Accepted by shape rather than by table, and the shape is decisive: `if` is followed by a `(` in every
     // program C++ accepts, so an identifier in between takes no valid program away. That is the fallback side of
-    // maintenance convention 16 — where a table cannot answer because the `#define` is
+    // the rule — where a table cannot answer because the `#define` is
     // in an *included* header (`bits/c++config.h`), and where both readings of the tokens are wrong if the macro
     // is not one. It is *not* evidence-free in the way `MY_API` was: nothing legal is being re-read.
     //
@@ -1922,8 +1922,8 @@ fn parse_switch_statement(p: &mut CppParser) -> ParseResult {
 ///
 /// # Why the spelling, and not a table
 ///
-/// The same reasoning as the compiler's attribute spellings (`__attribute__`, `__declspec`):
-/// maintenance convention 24, with the same two conditions satisfied: the names are
+/// The same reasoning as the compiler's attribute spellings (`__attribute__`, `__declspec`), and it takes the same
+/// two conditions to be satisfied: the names are
 /// **reserved to the implementation** (a double underscore, so no conforming program may define them), and the
 /// `#define` that gives them meaning is the *implementation's*, not the file's — no header a project writes can
 /// turn `__try` into something else. Both matter: the rule that reads a macro from a header
@@ -1999,8 +1999,8 @@ fn parse_try_statement(p: &mut CppParser) -> ParseResult {
     // block was not the try's block at all, so the statement ended there and the `catch` became a statement with
     // no statement before it — reported as `expected }` against the `catch`.
     //
-    // Read as the nodes they are, exactly as B23, B24 and the three other places records
-    // for the same argument; a `#` anywhere it cannot be a directive is still an error.
+    // Read as the nodes they are, exactly as the other places that read one inside a construct record, for the
+    // same argument; a `#` anywhere it cannot be a directive is still an error.
     if let Err(err) = eat_preprocessor_directives(p) {
         p.close_marks_above(base);
         return Err(err);
@@ -2050,8 +2050,8 @@ fn parse_try_statement(p: &mut CppParser) -> ParseResult {
 
 /// Read the preprocessor directives at the cursor as nodes, and stop at the first thing that is not one.
 ///
-/// For the constructs whose parts a conditional can separate — see [`parse_try_statement`], and B23/B24 in
-/// the same reading applies in an initializer, in a string-literal run, and between a
+/// For the constructs whose parts a conditional can separate — see [`parse_try_statement`] — the same
+/// reading applies in an initializer, in a string-literal run, and between a
 /// function's head and its body. The directives stay in the tree, so nothing is lost and a consumer can see
 /// which branch each one guards.
 fn eat_preprocessor_directives(p: &mut CppParser) -> ParseResult {

@@ -144,6 +144,56 @@ pub fn macro_across_files(
     }
 }
 
+/// **One file's cooked reading, as the index keeps it** — what a compiler sees written there, and what the parse of
+/// that text complained about.
+///
+/// The two travel together because they are one reading of one rendering: a caller that handed over the declarations
+/// and dropped the errors would make the index answer "nothing is wrong with this file" for a rendering the parser
+/// had something to say about, and a caller that replaced the declarations without replacing the errors would
+/// publish the *old* file's errors beside the new file's names.
+#[derive(Debug, Clone, Default)]
+pub struct CookedFile {
+    /// The declarations the rendering read as, every range mapped back into the file.
+    pub declarations: Vec<DeclFact>,
+    /// The rendering's parse errors, placed in the file — see [`crate::CookedDiagnostic`].
+    pub diagnostics: Vec<crate::CookedDiagnostic>,
+    /// Errors the parse of the rendering reported that **this file cannot show**, because the text they are about is
+    /// not written here.
+    ///
+    /// Kept with the reading rather than with the caller, because it is what makes "no errors" honest: an empty
+    /// [`CookedFile::diagnostics`] beside a non-zero count here means the rendering was not clean and the reader
+    /// simply cannot be shown where.
+    pub unplaced: usize,
+}
+
+impl CookedFile {
+    /// A reading that found declarations and nothing to report.
+    ///
+    /// For a caller with facts and no parse of its own — a test that built a rendering by hand, or a future
+    /// producer that reads the declarations back from a cache.
+    pub fn declarations(declarations: Vec<DeclFact>) -> Self {
+        CookedFile {
+            declarations,
+            diagnostics: Vec::new(),
+            unplaced: 0,
+        }
+    }
+}
+
+impl From<crate::IndexedRendering> for CookedFile {
+    /// What the index keeps of a rendering's reading: the declarations, the errors this file can show, and the count
+    /// of the ones it cannot — and **not** the summary they came out of, because a rendering's summary describes text
+    /// this crate spelled out: its directives and includes are empty, and keeping it would invite a reader to believe
+    /// them (see the `cooked` field).
+    fn from(indexed: crate::IndexedRendering) -> Self {
+        CookedFile {
+            declarations: indexed.summary.declarations,
+            diagnostics: indexed.diagnostics,
+            unplaced: indexed.unplaced,
+        }
+    }
+}
+
 /// A project's summaries, and the queries that need more than one of them.
 ///
 /// Built incrementally: [`ProjectIndex::insert`] takes a summary that some other layer produced, which is what
@@ -166,19 +216,20 @@ pub struct ProjectIndex {
     /// still does for a caller that builds an index by hand. See [`crate::index::environment`] for what the field
     /// is complete about and what it deliberately is not.
     macros: Marked,
-    /// **The declarations the cooked reading found**, by normalized path — the ones a compiler sees.
+    /// **What the cooked reading found**, by normalized path — the declarations a compiler sees, and the errors the
+    /// parse of the rendering reported.
     ///
-    /// A second reading beside the first, and only the *declarations* of it, for two reasons that are both about
-    /// not lying: a rendering has no directives, so a cooked summary says `includes: []`, `macros: []`,
-    /// `guards: []` — a reader that took those at face value would conclude the file includes nothing and defines
-    /// nothing — and the one thing a rendering knows that the file's own text does not is what it **declares**:
-    /// the type a macro declared (`DECLARE_HANDLE(HWND)` declares `HWND__` and `HWND`), and the *scope* a
-    /// namespace-opening macro put it in (MSVC's `_STD_BEGIN` is `namespace std {`, so every declaration in
-    /// `<string>` is `std::`-qualified here and at file scope in the raw reading).
+    /// A second reading beside the first, and only these two things of it, for reasons that are all about not
+    /// lying: a rendering has no directives, so a cooked summary says `includes: []`, `macros: []`, `guards: []` — a
+    /// reader that took those at face value would conclude the file includes nothing and defines nothing — and the
+    /// two things a rendering knows that the file's own text does not are what it **declares** (the type a macro
+    /// declared, `DECLARE_HANDLE(HWND)` declares `HWND__` and `HWND`; the *scope* a namespace-opening macro put it
+    /// in, MSVC's `_STD_BEGIN` being `namespace std {`) and what the **parser said about it** — an error against
+    /// text no branch, macro or conditional, keeps out of the compiler's sight.
     ///
     /// **Sparse on purpose**: cooking needs the translation unit's environment, so a caller has this for the files
     /// it actually read rather than for the whole project, and a file with no entry here is one nobody cooked.
-    cooked: HashMap<String, Vec<DeclFact>>,
+    cooked: HashMap<String, CookedFile>,
     /// What the **condition** on a guarded `#include` was last answered, by `(file, region)`.
     ///
     /// A memo, not a fact: it is cleared whenever a summary is inserted, because that is the only thing that can
@@ -1895,7 +1946,7 @@ fn lookup_names(bases: &[String]) -> Vec<String> {
 /// even if there were one. Both base walks used to look for the spelling exactly as written, and MSVC's `<map>`
 /// inherits from `_Tree`, declared in `<xtree>` inside `_STD_BEGIN` (= `namespace std {`): the member list reported
 /// `UnlistedBase { "_Tree", NotDeclaredHere }` while `std::_Tree` sat in the index with 126 members, four of them
-/// `find` — which is what the last two queries of `examples/std_query.rs` were failing on (measured, B128).
+/// `find` — which is what the last two queries of `examples/std_query.rs` were failing on (measured).
 ///
 /// The enclosing scopes are tried innermost first and **the spelling as written is the last candidate**, which is
 /// what the rule says (the global name space is the outermost scope) and also what keeps a base named at file
@@ -2080,6 +2131,16 @@ impl ProjectIndex {
                     includers.remove(&path);
                 }
             }
+
+            // **The cooked reading describes the text that was there when it was built**, so a summary whose
+            // *content* differs from the one it replaces takes it with it. `forget` already drops both together, and
+            // that is the ordinary path — an edit, a watched file, a close. This one covers the path that has no
+            // `forget` in it (a re-read that found different bytes, a cache entry replaced by a fresh index): the
+            // file's own declarations would be replaced and its cooked ones would go on answering for text nobody
+            // has any more, which is a wrong answer rather than a missing one.
+            if previous.key.content_hash != summary.key.content_hash {
+                self.cooked.remove(&path);
+            }
         } else {
             self.order.push(path.clone());
         }
@@ -2150,8 +2211,8 @@ impl ProjectIndex {
             .unwrap_or_default()
     }
 
-    /// **Add the declarations a file's cooked reading found** — see the `cooked` field for what they are and why
-    /// only declarations.
+    /// **Add what a file's cooked reading found** — see the `cooked` field for what it is and why only declarations
+    /// and diagnostics.
     ///
     /// The file must already be in the index ([`ProjectIndex::insert`]): a cooked reading is a *second* answer
     /// about a file the index knows, and its visibility is the file's own — working that out again per query would
@@ -2159,7 +2220,7 @@ impl ProjectIndex {
     ///
     /// Inserting **replaces** what was there: a file that was cooked again (its text changed, or its environment
     /// did) must not keep the old reading's declarations beside the new one's.
-    pub fn insert_cooked(&mut self, path: &Path, declarations: Vec<DeclFact>) {
+    pub fn insert_cooked(&mut self, path: &Path, reading: CookedFile) {
         let path = normalize(path);
         // The memo keyed by `(file, region)` is cleared for the same reason `insert` clears it: an answer about
         // visibility can only change when what the index holds changes.
@@ -2167,12 +2228,36 @@ impl ProjectIndex {
             .lock()
             .expect("the visibility memo is not poisoned")
             .clear();
-        self.cooked.insert(path, declarations);
+        self.cooked.insert(path, reading);
     }
 
     /// The declarations the file at `path` was **cooked** into, when it was cooked at all.
     pub fn cooked_declarations(&self, path: &Path) -> Option<&[DeclFact]> {
-        self.cooked.get(&normalize(path)).map(Vec::as_slice)
+        Some(self.cooked_reading(path)?.declarations.as_slice())
+    }
+
+    /// **The whole cooked reading** of the file at `path`: what a compiler sees declared there, what the parse of
+    /// that text reported, and how much of it this file cannot show — see [`crate::CookedFile`].
+    ///
+    /// `None` when the file has no cooked reading, which is not the same as "nothing to say": it means *this
+    /// reading* has not been made, and a caller that needs an answer falls back to the file's own text
+    /// ([`crate::Session::diagnostics`] does exactly that).
+    pub fn cooked_reading(&self, path: &Path) -> Option<&CookedFile> {
+        self.cooked.get(&normalize(path))
+    }
+
+    /// Forget what a file **was read as**, keeping its summary.
+    ///
+    /// The invalidation a cooked reading needs and a summary does not: a file's summary is a reading of its own text
+    /// (so it changes when the text does — [`ProjectIndex::forget`]), while its cooked reading is a reading of its
+    /// text **and of its environment**, so it also changes when something the file includes changes — and nothing
+    /// about this file's text says so.
+    ///
+    /// Dropping rather than marking: between the change and the next cook, a query that found the old declarations
+    /// would answer with a declaration whose range points into text that no longer describes it. Not found is the
+    /// honest answer there, and the reading comes back one drain later.
+    pub fn forget_cooked(&mut self, path: &Path) {
+        self.cooked.remove(&normalize(path));
     }
 
     /// The files in which `name` is visible, in insertion order.
@@ -2260,7 +2345,7 @@ impl ProjectIndex {
                 .cooked
                 .get(&key)
                 .into_iter()
-                .flatten()
+                .flat_map(|cooked| cooked.declarations.iter())
                 .filter(|fact| accepts(fact))
             {
                 if raw.binary_search(&(fact.name.as_str(), fact.kind)).is_ok() {
@@ -2314,7 +2399,7 @@ impl ProjectIndex {
                 };
                 let next = normalize(resolved);
 
-                // **A guarded `#include` stays `Conditional` here, and the reason is now cost** (B125/B127).
+                // **A guarded `#include` stays `Conditional` here, and the reason is now cost**.
                 //
                 // The conditions *are* answerable — `crate::index::environment::visibility_at` answers
                 // `#if _STL_COMPILER_PREPROCESSOR` correctly once its two upstream bugs are fixed (`own_guard` not
@@ -2329,7 +2414,7 @@ impl ProjectIndex {
                 // until then this line stays, because a query that takes minutes is not an answer.
                 let step = match include.guard {
                     FactGuard::Unconditional => so_far,
-                    // **The condition is asked, and the answer is remembered** (B125/B127). Asking costs the file's
+                    // **The condition is asked, and the answer is remembered**. Asking costs the file's
                     // whole closure state; the same question is asked by every query and every walk over hundreds of
                     // edges, and the answer cannot change until a summary is inserted — so it is memoised on the
                     // index (`visibility_answers`), which `insert_at` clears.
@@ -2567,7 +2652,7 @@ impl ProjectIndex {
     /// The files this query reaches through **unguarded includes only** — no `#if` anywhere on the way.
     ///
     /// This is the answer to "is this file part of the translation unit whatever the macros are", and it is asked
-    /// once per walk instead of being inferred from the route the walk happened to take (B131): `visited` enters a
+    /// once per walk instead of being inferred from the route the walk happened to take: `visited` enters a
     /// file once, so the first route to reach it decides how everything it defines is filed, and that first route
     /// can be a conditional include while an unguarded one exists elsewhere in the same translation unit.
     ///
@@ -2628,9 +2713,9 @@ impl ProjectIndex {
     ///
     /// A file's `#define`s and its `#include`s are read **in offset order**, and the state in `state` is brought up
     /// to each point before anything is asked about that point. That is not an implementation detail: it is what
-    /// makes `#ifdef X` decidable in a header whose *includer* defined `X`, which is the whole of what
-    /// 's second half is about. Two lists walked separately would decide every condition
-    /// against the environment as it was before the file was read.
+    /// makes `#ifdef X` decidable in a header whose *includer* defined `X`, and it is why the file's own directives
+    /// and the ones its includes bring in are **one** stream rather than two lists. Two lists walked separately
+    /// would decide every condition against the environment as it was before the file was read.
     ///
     /// # What the state is allowed to take from a fact
     ///
@@ -2648,7 +2733,7 @@ impl ProjectIndex {
     /// it has — so the name is defined and its value stays unknown.
     ///
     /// The first line used to read "the whole **path** is unconditional", where the path meant the route this walk
-    /// took — see `certain` and B131.
+    /// took — see `certain`.
     #[allow(clippy::too_many_arguments)]
     fn macro_candidates(
         &self,
@@ -2667,7 +2752,7 @@ impl ProjectIndex {
         }
 
         // **A file this query reaches unconditionally is certainly part of the translation unit**, whatever route
-        // this particular walk took to get here (B131). The flag above is about *this* path — `visited` means a file
+        // this particular walk took to get here. The flag above is about *this* path — `visited` means a file
         // is entered once, so the first route to reach it decided everything below — and the first route can be a
         // conditional include while an unconditional one exists elsewhere in the same translation unit. Asking the
         // graph instead of the route is what lets the certain path be used: `windef.h` includes `winnt.h`
@@ -2788,7 +2873,7 @@ impl ProjectIndex {
             return Visibility::Active;
         };
 
-        // **The file's own include guard is not a condition** (B125). `#ifndef _STRING_ / #define _STRING_`
+        // **The file's own include guard is not a condition**. `#ifndef _STRING_ / #define _STRING_`
         // followed by the file's includes is how every header is written, and by the time the walk reaches an
         // include the name has been defined *by the line above it* — so evaluating that region says "not taken"
         // and the walk skips **every include of the file**. The visible consequence was MSVC's whole library:
@@ -2827,7 +2912,7 @@ impl ProjectIndex {
             match holds {
                 Some(true) => {}
                 Some(false) => {
-                    // **An `#else` is taken precisely when the condition is *not*** (B126). The verdict above
+                    // **An `#else` is taken precisely when the condition is *not***. The verdict above
                     // answers "did this region's `#if` hold", which is the right question for the branch the
                     // condition guards and the wrong one for the `#else`, whose whole meaning is "nothing before me
                     // was taken". One of those decides MSVC's entire STL: `yvals_core.h` writes
@@ -3467,9 +3552,9 @@ mod tests {
         let provider = crate::MemoryFiles::new();
         let config = crate::CompilerConfig::default();
         let indexer = crate::FileIndexer::new(&provider, &config);
-        let (cooked, report) = indexer.index_rendering(api, &rendered, SummaryKey::new(0, 0));
-        assert_eq!(report.dropped, 0, "every range landed in the file");
-        index.insert_cooked(api, cooked.declarations);
+        let indexed = indexer.index_rendering(api, &rendered, SummaryKey::new(0, 0));
+        assert_eq!(indexed.mapped.dropped, 0, "every range landed in the file");
+        index.insert_cooked(api, indexed.into());
 
         // Now it can: the struct the macro declared, and the typedef beside it.
         let after = index.definition("HWND__", api);
@@ -3501,13 +3586,61 @@ mod tests {
         let provider = crate::MemoryFiles::new();
         let config = crate::CompilerConfig::default();
         let indexer = crate::FileIndexer::new(&provider, &config);
-        let (cooked, report) =
-            indexer.index_rendering(Path::new("/p/a.h"), &rendered, SummaryKey::new(0, 0));
-        assert_eq!(report.dropped, 0);
-        index.insert_cooked(Path::new("/p/a.h"), cooked.declarations);
+        let indexed = indexer.index_rendering(Path::new("/p/a.h"), &rendered, SummaryKey::new(0, 0));
+        assert_eq!(indexed.mapped.dropped, 0);
+        index.insert_cooked(Path::new("/p/a.h"), indexed.into());
 
         let found = index.definition("Plain", Path::new("/p/a.h"));
         assert!(matches!(found, Known::Yes(_)), "one candidate: {found:?}");
+    }
+
+    /// A cooked reading of `source`, as [`crate::Session::cook`] builds one: the rendering indexed and mapped back.
+    fn cooked_reading_of(source: &str) -> crate::CookedFile {
+        let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+        let rendered = crate::preprocess::cooked::cook(source, &tokens).render();
+        let provider = crate::MemoryFiles::new();
+        let config = crate::CompilerConfig::default();
+        let indexer = crate::FileIndexer::new(&provider, &config);
+        indexer
+            .index_rendering(Path::new("/p/a.h"), &rendered, SummaryKey::new(0, 0))
+            .into()
+    }
+
+    /// **Re-indexing a file with *different* text takes its cooked reading with it.**
+    ///
+    /// The ordinary invalidation drops both together ([`ProjectIndex::forget`] — an edit, a close, a watched file all
+    /// go through it), and this is the path with no `forget` in it: the file was read again and the bytes differ, so
+    /// its own declarations are replaced by that insert. A cooked reading left over from the old text would go on
+    /// answering for words nobody wrote any more, at offsets into them — a wrong answer rather than a missing one.
+    ///
+    /// The second half is the guard that keeps this from being a cache defeat: the *same* text re-read (a cache hit,
+    /// a re-index of an unchanged file) is not a change, and the reading stays.
+    #[test]
+    fn re_indexing_different_text_takes_the_cooked_reading_with_it() {
+        let source = "struct Plain { int size; };\n";
+        let mut index = index(&[("/p/a.h", source)]);
+        index.insert_cooked(Path::new("/p/a.h"), cooked_reading_of(source));
+        assert!(index.cooked_declarations(Path::new("/p/a.h")).is_some());
+
+        // The same text, read again: the content hash matches, so the reading describes what is still there.
+        let same = summarize(Path::new("/p/a.h"), source, SummaryKey::new(0, 0));
+        index.insert(same);
+        assert!(
+            index.cooked_declarations(Path::new("/p/a.h")).is_some(),
+            "an unchanged file keeps its reading"
+        );
+
+        // Different text: the reading described the old bytes, so it goes.
+        let changed = summarize(
+            Path::new("/p/a.h"),
+            "struct Other { int size; };\n",
+            SummaryKey::new(0, 0),
+        );
+        index.insert(changed);
+        assert!(
+            index.cooked_reading(Path::new("/p/a.h")).is_none(),
+            "the reading goes with the text it was built from"
+        );
     }
 
     #[test]

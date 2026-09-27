@@ -593,7 +593,7 @@ pub fn configuration_from_environment_and(
 /// 1. the **in-force channel** — a body a condition settled, in force from offset 0, and the newest layer, so it
 ///    wins outright when it is usable (see `Configuration::in_force_without_a_parameter_list`);
 /// 2. the **definition channel** — the unit's own `#define`s, in force from the offset the fact came into force
-///    at *in this file*, which is what [`crate::MacroView::visible_binding`] resolves;
+///    at *in this file*, which is what `MacroView::visible_binding` resolves;
 /// 3. the **seed** — what the compiler predefines, the oldest layer, so a header that redefines a builtin is in
 ///    force over it.
 ///

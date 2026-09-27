@@ -319,7 +319,7 @@ fn main() {
                 // **Every** member the query offers, not only the ones written in the class itself: what a
                 // completion after `m.` must list includes the inherited ones, and on MSVC's STL that is the
                 // difference between 7 and 9 here — `std::map` declares none of `find`/`begin`, `std::_Tree` does
-                // (the base walk, B128). Filtering on `own()` is what a reader of this probe
+                // (the base walk). Filtering on `own()` is what a reader of this probe
                 // sees as "the type has no such member" while the type does.
                 let hit = found
                     .members
@@ -371,7 +371,7 @@ fn main() {
 /// database is the project's claim about how its files are built, and the point of this probe is to make that claim
 /// and then see what the driver does with it. Written as a literal it would pin the probe to whichever compiler
 /// happens to be on `PATH` by that name, and the case this probe most needs to cover — MSVC's STL, whose `std` is
-/// opened by a *macro body* rather than a written `namespace std` — would be unreachable here (B131).
+/// opened by a *macro body* rather than a written `namespace std` — would be unreachable here.
 fn write_compile_database(root: &Path, compiler: Option<&Path>) {
     let spelled = root.to_string_lossy().replace('\\', "/");
     let program = compiler

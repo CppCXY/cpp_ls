@@ -215,7 +215,7 @@ impl WatchFilter {
     ///
     /// A name rather than a path: the cache lives under the project root or it is not the project's cache, and the
     /// rule that keeps a watcher from re-indexing the index's own writes has to be the same one the store writes
-    /// under. gives the reason the cache is inside the checkout at all.
+    /// under. The module documentation gives the reason the cache is inside the checkout at all.
     pub fn with_cache_directory(mut self, name: &str) -> Self {
         if !name.is_empty() {
             self.cache = self

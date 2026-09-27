@@ -332,7 +332,7 @@ pub fn parse_template_parameter_list(p: &mut CppParser) -> ParseResult {
             // ```
             //
             // and that macro is `, bool _NE` in `bits/c++config.h` — the **separator and a parameter** live in a
-            // header, so nothing among this file's tokens says the list continues (B88). The position carries as
+            // header, so nothing among this file's tokens says the list continues. The position carries as
             // much of the answer as the evidence does: an identifier here can neither continue the parameter that
             // was just read nor close the list, so the file is already wrong unless this name is a macro standing
             // where the separator goes. Read as an invocation, then let the loop continue: the body may supply
@@ -1308,7 +1308,7 @@ pub fn parse_init_declarator(p: &mut CppParser) -> ParseResult {
     // the whole statement rather than from the parentheses alone: the loop runs because the declarator has a
     // name — `Widget w(…)` — or because the arguments look like declarators at file scope, and never for the
     // single-name shape a call has.
-    // **The operators may come first** (B135). `int &(f)(void)` and `const _Ty&(max) (…)` are the same
+    // **The operators may come first**. `int &(f)(void)` and `const _Ty&(max) (…)` are the same
     // declarations as `int (&f)(void)` and `const _Ty&(max)`: the standard's `ptr-declarator` is `ptr-operator
     // ptr-declarator`, and a parenthesized declarator is one of the things that second `ptr-declarator` can be.
     // MSVC's `<utility>` writes `max` and `min` that way, and the branch below only looked for the `(` **at the
@@ -1578,9 +1578,8 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
             //
             // What the three attempts agree on is that the `;` of the last branch is the *declaration's* `;` and
             // the three readers that share this machinery do not agree on who owns it. That is a design question
-            // about `parse_a_definition_per_branch` rather than a missing rule, and it is written up in
-            // B77 with the numbers — the enumerator seam beside it, which shares nothing with
-            // it, landed.
+            // about `parse_a_definition_per_branch` rather than a missing rule, and the enumerator seam beside
+            // it, which shares nothing with it, landed.
             let init = p.mark(CppSyntaxKind::Initializer);
 
             // **A directive between the `=` and the initializer it introduces.** The last seam of a family the
@@ -1667,7 +1666,7 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
             //
             // `#else`/`#elif` is what says another value follows — after `#endif` the declaration simply continues
             // — so the loop reads a value for each branch it opens, and the `;` at the end is still the
-            // declaration's own. **That is the part B77 could not do**: routing the value through
+            // declaration's own. **That is the part the enumerator seam could not do**: routing the value through
             // `parse_a_definition_per_branch` made the *branch* the owner of the `;`, and three attempts to say
             // otherwise broke five files each time. Here the branches own nothing but their values, which is what
             // the file wrote.
@@ -2009,7 +2008,7 @@ fn at_an_operator_led_parenthesized_declarator(p: &CppParser) -> bool {
 
     // **With no operator anywhere, the group must hold a bare name.** `T (max)(T a)` is the same declaration as
     // `T max(T a)` — the standard's declarator may be parenthesized — and the declaration before it is what a
-    // **template** writes (`template <class _Ty> constexpr _Ty (max)(…)`, the other half of B135): there the
+    // **template** writes (`template <class _Ty> constexpr _Ty (max)(…)`, the same rule's other half): there the
     // specifier sequence has read a real type name, so the second half of the branch below is closed, and only
     // this shape can open the first.
     //
@@ -4090,8 +4089,8 @@ fn at_a_call_shaped_macro_member(p: &CppParser) -> bool {
 /// After a declarator, an identifier has exactly **two** readings in C++, and both are known: a contextual
 /// keyword, or a macro. Everything else that may legally stand in this position is a keyword or punctuation —
 /// `{`, `;`, `=`, `,`, `:`, `[[`, `->`, `noexcept`, `const`. So a name here costs no valid program, and the
-/// alternative is an error; that is maintenance convention 16's fallback side of the rule, the same footing as
-/// `eat_namespace_head_macros`.
+/// alternative is an error; that is the fallback side of the rule — where no table can answer, the shape decides —
+/// the same footing as `eat_namespace_head_macros`.
 ///
 /// The three names that would be a *better* reading as something else are refused by spelling, which is the same
 /// test the function-suffix loop already makes for `override` and `final`: `override` and `final` are read by
@@ -4162,7 +4161,7 @@ fn parse_class_body_members(p: &mut CppParser) -> ParseResult {
     // `}` — a requires-expression's body, a function body, a block — leaves the body's own brace counting one
     // short, and the next `}` (which belongs to the *failed member*) would be taken for the end of the class:
     // every member after it lands at file scope, and the file's only diagnostic appears on the leftover brace at
-    // the end. That is `bits/alloc_traits.h` before B57 and B58.
+    // the end. That is `bits/alloc_traits.h` before the brace debt was paid.
     //
     // The debt is paid **before** the body is allowed to end, and the brace that pays it is read as an error node
     // — it is a token no rule claimed, which is what an error node is for. Closing the failed member's markers
@@ -5087,8 +5086,7 @@ pub fn parse_namespace_declaration(p: &mut CppParser) -> ParseResult {
 /// file's includes — where that connection is called out as the expensive layer it is.
 /// What *is* knowable here is the shape, and the shape settles it: **no valid C++ has anything between a
 /// namespace's name and its `{`** — the two readings are `namespace std {` and an error — so accepting a macro
-/// costs nothing, which is maintenance convention 16's fallback side of the rule ("both readings are wrong, pick
-/// the cheaper one").
+/// costs nothing, which is the fallback side of the rule: both readings are wrong, so pick the cheaper one.
 ///
 /// # What it does not accept
 ///
@@ -5175,7 +5173,7 @@ pub fn parse_linkage_block(p: &mut CppParser) -> ParseResult {
     // container that reads declarations until a `}`, and the third time this file pays for the same thing. A
     // declaration that fails after consuming a `{` leaves the block one brace short, and the next `}` (which
     // closes *that declaration*) would end the linkage block instead. See `parse_class_body_members` for the whole
-    // argument and B58 for the measurements.
+    // argument.
     let mut unclosed_braces = 0isize;
 
     while p.current_token() != CppTokenKind::RightBrace || unclosed_braces > 0 {
@@ -5227,8 +5225,8 @@ pub fn parse_linkage_block(p: &mut CppParser) -> ParseResult {
         let before = p.current_token_index();
         let before_events = p.current_event_count();
         if parse_declaration(p).is_err() {
-            // **With their end events**, for the third time in this file's history (see `end_marks_to` and
-            // maintenance convention 34): a declaration that fails *after* consuming tokens — and inside a linkage
+            // **With their end events**, for the third time in this file's history (see `end_marks_to`): a
+            // declaration that fails *after* consuming tokens — and inside a linkage
             // block there are hundreds of them — would otherwise leave an unpaired `NodeStart` that the tree
             // builder balances at the **end of the stream**. The price is not one declaration: the failed one
             // swallows every declaration after it, which swallows the `}` that closes the linkage block, which

@@ -522,7 +522,7 @@ fn an_included_macro_decides_a_reading_only_from_its_own_offset() {
 
 
 /// **A macro whose body is a specifier** stands where a specifier goes — `wchar.h:1461`, and the boundary that
-/// keeps the reading narrow (B91).
+/// keeps the reading narrow.
 ///
 /// The line is `return (_CONST_RETURN wchar_t *)(_S);`, and `_mingw.h:376` writes `#define _CONST_RETURN` with
 /// **nothing** after it — the `const` spelling is in the branch that is not in force — so what the cast needs is
@@ -576,7 +576,7 @@ fn a_macro_that_is_a_specifier_reads_where_a_specifier_goes() {
 }
 
 /// **A declaration head whose name is the macro's own argument** — `commdlg.h:577`, and the consumer of the *body*
-/// channel (B90, landed once the evidence arrived in B97).
+/// channel.
 ///
 /// `combaseapi.h` writes, in the branch the condition layer puts in force for a C++ compilation:
 ///

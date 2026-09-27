@@ -892,8 +892,8 @@ impl<'a> CppParser<'a> {
     /// but it cannot un-consume the *tokens*: a member that failed after eating a `{` — a requires-expression's
     /// body, a function body, a block — leaves a brace behind that the enclosing body then spends its own `}` on.
     /// The class body ends early, every member after it is read at file scope, and the only diagnostic in the file
-    /// lands on the leftover brace at the end (which is exactly what `bits/alloc_traits.h` did before B57, and
-    /// what B58 is about).
+    /// lands on the leftover brace at the end (which is exactly what `bits/alloc_traits.h` did before the brace
+    /// debt was paid).
     ///
     /// Counted from the **events**, not the token stream: a rollback truncates the events, so a token read, thrown
     /// away and read again counts once — the same reason [`CppParser::events_contain_any`] reads them.
@@ -1229,7 +1229,7 @@ impl<'a> CppParser<'a> {
         let environment = self.parse_config.macros_from_includes()?;
 
         // What the includes say, **following a body that is another macro's name**: `_TRY_IO_BEGIN` is
-        // `_TRY_BEGIN`, and `_TRY_BEGIN` is `try {` (B122). One hop is what a rule that reads a body needs, and the
+        // `_TRY_BEGIN`, and `_TRY_BEGIN` is `try {`. One hop is what a rule that reads a body needs, and the
         // chain is the difference between "nothing structural" and the block opener a statement needed.
         if let Some(text) = environment.body_text_resolved(name, at) {
             return Some(kinds_of_a_body_text(text, &self.parse_config));
@@ -1803,7 +1803,7 @@ impl<'a> CppParser<'a> {
     /// Forget the "unrecognised character" diagnostics that fall inside `from..to`.
     ///
     /// The one caller is the directive rule, and the rule it implements is that **a replacement list is not C++
-    /// text** (B137): `shared/apiset.h:64` writes `#define API_SET_BY_ORDINAL(X,O,PO) X @##O NONAME PRIVATE`,
+    /// text**: `shared/apiset.h:64` writes `#define API_SET_BY_ORDINAL(X,O,PO) X @##O NONAME PRIVATE`,
     /// inside `#ifdef _API_SET_HOST` — a branch only Microsoft's apiset tooling takes — and the `@` is that tool's
     /// syntax rather than C++'s. A compiler never lexes the branch, and never lexes a replacement list until the
     /// macro is *used*; reporting the character anyway cost 42 messages over the Windows SDK corpus and told the
@@ -1935,7 +1935,7 @@ impl<'a> CppParser<'a> {
     /// it — including the `}` that closes its own block. That is what `bits/stl_map.h` pays for:
     /// `__glibcxx_function_requires(…)` is a macro written without its `;`, the expression statement failed, and
     /// the `ExpressionStat` left behind then took the rest of `operator[]`'s body *and* the rest of `class map`
-    /// with it (`std::map` had no `find`). See maintenance convention 34.
+    /// with it (`std::map` had no `find`).
     pub fn recover_to_level(&mut self, base: usize) {
         if self.open_marks.len() > base {
             self.emit_missing_node();

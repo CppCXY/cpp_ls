@@ -263,15 +263,15 @@ pub fn parse_argument(p: &mut CppParser) -> ParseResult {
 ///
 /// # The criterion, and what it costs
 ///
-/// The **preference comes first and its failure is what is handled** — the same shape as B62, B66 and B68 in
-///: arguments are expressions until that reading fails, and only then are they tokens.
+/// The **preference comes first and its failure is what is handled**: arguments are expressions until that
+/// reading fails, and only then are they tokens.
 /// Nothing about the callee is consulted, because nothing about it is knowable: the macro's `#define` is in
 /// another file.
 ///
 /// The cost is real, and it is why this is a fallback and not a rule: `f(1 +)`, a genuinely broken call, is read
 /// as a macro's arguments and reported by nobody. No shape separates the two cases — the arguments of a macro
 /// *are* arbitrary tokens — so the choice is between the diagnostic on the broken call and every use of the
-/// macro. records the measurement behind taking the second.
+/// macro, and the census measurement is what settled it on the second.
 pub fn parse_call_arguments(p: &mut CppParser) -> ParseResult {
     expect_token(p, CppTokenKind::LeftParen)?;
 
@@ -388,8 +388,8 @@ pub fn parse_expr_without_pack_expansion(p: &mut CppParser) -> ParseResult {
 ///
 /// Each row claims something a test cannot see — that a *specific* rule calls the reader it names — so the table
 /// has to be checkable by hand, and it was, row by row, when the last row turned out to be wrong: the template
-/// argument's expression fallback still called [`parse_expr`] while this table said it read one element (B54 in
-/// `S<3, 4>` was one argument, with no diagnostic). The check is a grep of the rule for
+/// argument's expression fallback still called [`parse_expr`] while this table said it read one element
+/// (`S<3, 4>` was one argument, with no diagnostic). The check is a grep of the rule for
 /// the reader it calls, and the rows that pass it are: the call arm ([`parse_argument`]), `parse_expression_list`,
 /// `parse_initializer_clause`, [`parse_capture`], the bit-field arm of `finish_init_declarator`, the
 /// default-argument arm of `parse_template_parameter`, and `parse_template_argument` — all
@@ -620,7 +620,7 @@ fn parse_binary_expr_with_precedence(p: &mut CppParser, min_prec: u8) -> ParseRe
     // reading has no way to say so, because an expression is one tree and the two operands are two. It is
     // lossless, it is silent, and it attaches every token to the construct that owns it; the alternative is a
     // file that does not parse at all, which is what this file did (the first error was ``expected `;` after
-    // expression`` against the `#if`). The same trade is documented for B70's macro arguments.
+    // expression`` against the `#if`). The same trade is documented for a macro's arguments.
     loop {
         // Read the directives **only when they are this expression's**. Two things can follow them, and each is a
         // different owner:
@@ -1626,7 +1626,6 @@ fn parse_postfix_suffixes(
                     // access is complete, its object and operator are in the tree for a cursor to be resolved
                     // against, and the user is told what is missing. It is the pattern `parse_compound_stat` uses
                     // for a missing `}`, for the same reason — a position being edited is not a failed construct.
-                    // See maintenance convention 20.
                     p.emit_missing_node();
                     p.push_error(CppParseError::syntax_error_from(
                         &t!("expected identifier after member access operator"),
@@ -1921,7 +1920,7 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {   
 
                 match p.current_token() {
                     CppTokenKind::Identifier if super::types::a_macro_qualifies_the_name(p) => {
-                        // **A name whose `::` the macro supplies** (B121) — `_STD addressof(*_Ptr)`, with
+                        // **A name whose `::` the macro supplies** — `_STD addressof(*_Ptr)`, with
                         // `#define _STD ::std::`. The invocation is kept as what it is (`MacroCall(NameExpr)`,
                         // nothing dressed up), and the loop **continues** to the name it qualifies: the `::`
                         // between them is in the replacement list, so there is no token here to consume and none

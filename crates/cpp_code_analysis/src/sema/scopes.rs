@@ -289,7 +289,7 @@ impl ScopeWalker<'_> {
             // namespace around it.
             cpp_parser::BodyShape::OpensABlock => Some(OpenedByBody::OpensABrace { name, range }),
             // A qualifier (`_STD` = `::std::`) is not a construct: it changes how a *name* is read, which is the
-            // parser's business (`exprs.rs`/`types.rs`, B121), and it opens and closes nothing. Listed rather than
+            // parser's business (`exprs.rs`/`types.rs`), and it opens and closes nothing. Listed rather than
             // caught by `_` so that a new shape cannot be added without this match being looked at.
             cpp_parser::BodyShape::QualifiesAName | cpp_parser::BodyShape::Other => None,
         }

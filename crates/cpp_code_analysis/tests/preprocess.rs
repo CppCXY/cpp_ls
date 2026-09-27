@@ -666,7 +666,7 @@ fn a_numeric_macro_evaluates_to_its_value() {
 /// The second half is the case that dominates real code: `_MSC_VER` on a machine that is not MSVC is not "0", it is
 /// "not knowable here", and answering `false` would grey out the Windows branch on every other platform.
 ///
-/// The first half is what used to be wrong (B97): a body that is not a **single integer literal** was `Unknown`, so
+/// The first half is what used to be wrong: a body that is not a **single integer literal** was `Unknown`, so
 /// `#define _MSC_VER (1900 + 1)` — an expression, a name, an operator — answered nothing. The Windows and libstdc++
 /// headers are full of those bodies, and `#if WINAPI_FAMILY_PARTITION (…)` could never be decided because of it.
 #[test]

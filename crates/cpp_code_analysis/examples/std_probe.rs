@@ -218,7 +218,8 @@ standard {}",
         );
     }
 
-    // One cache of parsed #defines for the whole run: a definition does not depend on which file is being seeded, so the feed costs one parse per definition rather than one per definition per file (B95).
+    // One cache of parsed #defines for the whole run: a definition does not depend on which file is being seeded, so
+    // the feed costs one parse per definition rather than one per definition per file.
     let mut macro_definitions = cpp_code_analysis::MacroDefinitions::default();
 
     let started = std::time::Instant::now();
@@ -363,10 +364,12 @@ standard {}",
     let mut lost = 0usize;
     let mut cooked_mapped = 0usize;
     let mut cooked_dropped = 0usize;
+    let mut cooked_errors_placed = 0usize;
+    let mut cooked_errors_unplaced = 0usize;
     let mut gained_examples: Vec<String> = Vec::new();
     let mut shown_cooked_index_samples = 0usize;
     let mut gained_names: Vec<String> = Vec::new();
-    let mut cooked_by_file: Vec<(PathBuf, Vec<cpp_code_analysis::DeclFact>)> = Vec::new();
+    let mut cooked_by_file: Vec<(PathBuf, cpp_code_analysis::CookedFile)> = Vec::new();
 
     // **The translation unit, walked once** — the census's whole cost model changed when this replaced the
     // per-file closure walk, and the printed numbers say by how much: building every file's environment by walking
@@ -715,11 +718,18 @@ standard {}",
                 // own text does not say, and which it does not see because their branch is not taken.
                 if cooked_index {
                     let indexing = std::time::Instant::now();
-                    let (cooked_summary, report) =
-                        indexer.index_rendering(path, rendered, key);
+                    let indexed = indexer.index_rendering(path, rendered, key);
+                    let cooked_summary = &indexed.summary;
+                    let report = indexed.mapped;
                     cooked_index_time += indexing.elapsed();
                     cooked_mapped += report.placed;
                     cooked_dropped += report.dropped;
+                    // **Where the errors land** — the question the diagnostics channel asks of this layer: the
+                    // rendering is what a compiler parses, so its errors are the honest answer, and they are only
+                    // publishable for the ones the map can place in *this* file. A count of "clean files" cannot
+                    // tell "nothing was wrong" from "something was wrong and could not be shown here".
+                    cooked_errors_placed += indexed.diagnostics.len();
+                    cooked_errors_unplaced += indexed.unplaced;
 
                     if let Some(raw) = summaries.get(path) {
                         let names = |facts: &[cpp_code_analysis::DeclFact]| -> HashSet<String> {
@@ -731,7 +741,10 @@ standard {}",
                         declarations_cooked += cooked_names.len();
                         gained += cooked_names.difference(&raw_names).count();
                         lost += raw_names.difference(&cooked_names).count();
-                        if let Some(example) = cooked_names.difference(&raw_names).next() {
+                        // The **smallest** name of the difference rather than whichever the hash order offered
+                        // first: the examples are printed beside the counts, and an example that changes between
+                        // two runs of the same build invites reading a difference into the sample.
+                        if let Some(example) = cooked_names.difference(&raw_names).min() {
                             gained_examples.push(example.clone());
                         }
 
@@ -743,22 +756,38 @@ standard {}",
                         if shown_cooked_index_samples < 4 {
                             shown_cooked_index_samples += 1;
                             println!("{}", path.display());
-                            for name in cooked_names.difference(&raw_names).take(6) {
+                            let mut only_cooked: Vec<&String> =
+                                cooked_names.difference(&raw_names).collect();
+                            let mut only_raw: Vec<&String> =
+                                raw_names.difference(&cooked_names).collect();
+                            only_cooked.sort();
+                            only_raw.sort();
+                            for name in only_cooked.into_iter().take(6) {
                                 println!("   only after expansion: {name}");
                             }
-                            for name in raw_names.difference(&cooked_names).take(6) {
+                            for name in only_raw.into_iter().take(6) {
                                 println!("   only in the raw reading: {name}");
                             }
                         }
 
-                        // Kept for the **query** the index is asked after the loop: a handful of names only the
-                        // cooked reading declares, and what each file was cooked into.
-                        for name in cooked_names.difference(&raw_names).take(2) {
-                            if gained_names.len() < 40 {
-                                gained_names.push(name.clone());
-                            }
-                        }
-                        cooked_by_file.push((path.clone(), cooked_summary.declarations.clone()));
+                        // Kept for the **query** the index is asked after the loop: every name only the cooked
+                        // reading declares, and what each file was cooked into.
+                        //
+                        // **All of them, not a first few** — and the sample below is taken from the *sorted* list.
+                        // It used to take two per file off a `HashSet` difference, which is not a stable set: two
+                        // runs of the same build sampled different names, so "the index answers for 4 of 40" and
+                        // "6 of 40" were two samples rather than two builds, and an A/B against that number would
+                        // have read its own sampling noise as a regression. A sorted sample of a fixed size is the
+                        // same 200 names whenever the two builds agree, which is what makes it a gate.
+                        gained_names.extend(cooked_names.difference(&raw_names).cloned());
+                        cooked_by_file.push((
+                            path.clone(),
+                            cpp_code_analysis::CookedFile {
+                                declarations: cooked_summary.declarations.clone(),
+                                diagnostics: indexed.diagnostics.clone(),
+                                unplaced: indexed.unplaced,
+                            },
+                        ));
                     }
                 }
 
@@ -955,9 +984,16 @@ standard {}",
     // declarations added — so the difference is the reading and nothing else.
     let mut resolved_before = 0usize;
     let mut resolved_after = 0usize;
+    let mut sampled = 0usize;
     if cooked_index && !gained_names.is_empty() && !paths.is_empty() {
+        // The sample, in a **fixed order** — see where the names are collected: a `HashSet`'s order is not stable
+        // between runs, and a gate whose sample moves cannot be compared with itself.
+        gained_names.sort();
+        gained_names.dedup();
+        sampled = gained_names.len().min(200);
+
         let answered = |index: &cpp_code_analysis::ProjectIndex| {
-            gained_names
+            gained_names[..sampled]
                 .iter()
                 .filter(|name| {
                     // **"Can the index answer at all"**, not "is the answer unambiguous": a name two visible
@@ -979,8 +1015,8 @@ standard {}",
         }
         resolved_before = answered(&index);
 
-        for (path, declarations) in cooked_by_file.drain(..) {
-            index.insert_cooked(&path, declarations);
+        for (path, reading) in cooked_by_file.drain(..) {
+            index.insert_cooked(&path, reading);
         }
         resolved_after = answered(&index);
     }
@@ -1099,9 +1135,10 @@ standard {}",
             "the cooked index: declarations {declarations_raw} raw / {declarations_cooked} cooked | \
              +{gained} only after expansion | -{lost} only in the raw reading | \
              {cooked_mapped} ranges mapped back, {cooked_dropped} dropped | indexed in {cooked_index_time:?} | \
-             the index answers for {resolved_before} of {} of those names before and {resolved_after} after | \
+             the errors it found: {cooked_errors_placed} of {} placed in their own file | \
+             the index answers for {resolved_before} of {sampled} of those names before and {resolved_after} after | \
              for example {}\n         ",
-            gained_names.len(),
+            cooked_errors_placed + cooked_errors_unplaced,
             if examples.is_empty() {
                 "(none)".to_string()
             } else {
