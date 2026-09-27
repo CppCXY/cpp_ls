@@ -99,6 +99,13 @@ fn main() {
     // census's other numbers do not need it: an instrument that pays for every experiment it can run is an
     // instrument nobody runs.
     let cooked_index = std::env::args().any(|argument| argument == "--cooked-index");
+    // `--session`: the same corpus through the **session**, which is the layer the product uses. Everything the
+    // census does above is this probe's own loop over the list; this drives a `Session` with the same list —
+    // `add_project_files` then `index_everything` — and splits the time into "indexed" and "cooked", because those
+    // are the two things a language server does to a project and the second one is the round's subject. The two
+    // measurements should agree in magnitude; where they do not, the difference is the session's own work (a unit
+    // walk per file, the second pass that re-reads a file a later header decided, and the queues).
+    let session_mode = std::env::args().any(|argument| argument == "--session");
     // The **one** lexical setting this probe uses, computed once and handed to every lexer below.
     //
     // It is the product's own default (`LexerConfig::default()`) and there is deliberately no flag to move it:
@@ -1131,19 +1138,95 @@ standard {}",
         examples.sort_unstable();
         examples.dedup();
         examples.truncate(6);
+
+        // **What one edit would cost**, from the same index: the session drops the cooked reading of every file a
+        // changed file can be seen from (`ProjectIndex::dependents_of`), so the widest dependent cone in a corpus is
+        // the number of files a single keystroke in that header would have to cook again. The cone of every file is
+        // one breadth-first walk each — quadratic in the corpus and measured anyway, because the alternative is a
+        // number nobody has: an edit to a header that most of the project includes is the case that decides whether
+        // cooking the whole project is affordable, and "how wide is it" is not answerable by reading the code.
+        let mut widest = (0usize, String::new());
+        let mut cones: Vec<usize> = Vec::new();
+        // The graph the session has: the same summaries, indexed for their include edges. `dependents_of` is the
+        // reverse walk, and what it needs is exactly what a summary carries.
+        let mut graph = cpp_code_analysis::ProjectIndex::new();
+        for summary in summaries.values() {
+            graph.insert(summary.clone());
+        }
+        for summary in graph.summaries() {
+            let dependents = graph.dependents_of(&summary.path).len();
+            cones.push(dependents);
+            if dependents > widest.0 {
+                widest = (dependents, summary.path.to_string_lossy().to_string());
+            }
+        }
+        cones.sort_unstable();
+
         format!(
             "the cooked index: declarations {declarations_raw} raw / {declarations_cooked} cooked | \
              +{gained} only after expansion | -{lost} only in the raw reading | \
              {cooked_mapped} ranges mapped back, {cooked_dropped} dropped | indexed in {cooked_index_time:?} | \
              the errors it found: {cooked_errors_placed} of {} placed in their own file | \
              the index answers for {resolved_before} of {sampled} of those names before and {resolved_after} after | \
+             the dependent cone: widest {} files ({}), median {} | \
              for example {}\n         ",
             cooked_errors_placed + cooked_errors_unplaced,
+            widest.0,
+            widest.1,
+            cones.get(cones.len() / 2).copied().unwrap_or(0),
             if examples.is_empty() {
                 "(none)".to_string()
             } else {
                 examples.join(", ")
             }
+        )
+    } else {
+        String::new()
+    };
+
+    // **`--session`: the corpus through the layer the product uses.** `indexed` is "every file's summary is in the
+    // index", `cooked` is "and every file has a reading of what a compiler sees" — the two moments the session
+    // distinguishes ([`Session::is_idle`] and [`Session::pending_work`]), and the second one is what the round is
+    // about: the diagnostic channel publishes an answer for every indexed file, so a file with no reading is a file
+    // answered from its own text.
+    let session_line = if session_mode {
+        let root = paths
+            .first()
+            .and_then(|path| path.parent())
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+        let documents = cpp_code_analysis::OpenDocuments::new();
+        let providers = cpp_code_analysis::SessionFiles::new(documents, cpp_code_analysis::DiskFiles);
+        let filter = cpp_code_analysis::WatchFilter::new(&root);
+        let mut session = cpp_code_analysis::Session::with_config(
+            &root,
+            providers,
+            filter,
+            cpp_code_analysis::CompilerConfig::default(),
+        );
+
+        let added = session.add_project_files(paths.iter().cloned());
+        let started = std::time::Instant::now();
+        while !session.is_idle() {
+            session.advance(64);
+        }
+        let indexed = started.elapsed();
+        while session.pending_work() > 0 {
+            session.advance(64);
+        }
+        let cooked = started.elapsed();
+
+        let with_a_reading = paths
+            .iter()
+            .filter(|path| session.index().cooked_declarations(path).is_some())
+            .count();
+
+        format!(
+            "the session: {added} project files | indexed in {indexed:?} | cooked in {cooked:?} (total) | \
+             {with_a_reading} of {} have a reading | left: {} to read, {} to cook\n         ",
+            paths.len(),
+            session.pending(),
+            session.pending_cooking(),
         )
     } else {
         String::new()
@@ -1168,7 +1251,7 @@ of rendering for {total_bytes} of text{}{}\n\
          table: left out — bodies in force without a parameter list {unusable_in_force} | function-like definitions \
 without one {unusable_function_like} | definitions without a body {unusable_without_a_body} | unreadable \
 definitions {unusable_unreadable}\n\
-         {unit_stream}         {cooked_index_line}seed shapes: {}\n\
+         {unit_stream}         {cooked_index_line}{session_line}seed shapes: {}\n\
          decision points: {macro_questions} macro questions | {macro_question_names} name-questions, summed \
 over the files | busiest file {busiest_questions}",
         paths.len(),

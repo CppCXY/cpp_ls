@@ -687,7 +687,11 @@ impl UnitState {
 /// 455 files in this corpus, which is the difference between seconds and minutes.
 #[derive(Default)]
 pub struct MacroDefinitions {
-    parsed: std::collections::HashMap<(std::path::PathBuf, Box<str>), Option<std::sync::Arc<MacroDef>>>,
+    /// Keyed by **where the definition is written** rather than by its name, and that is not a detail: a file may
+    /// define the same name twice (`#define WIDTH 80` above an `#undef` and a second `#define WIDTH 120`), and a
+    /// cache keyed by the name would hand the second fact the first one's definition — a wrong expansion rather than
+    /// a missing one. A fact is identified by the range its name is written at, which is unique in its file.
+    parsed: std::collections::HashMap<(std::path::PathBuf, usize), Option<std::sync::Arc<MacroDef>>>,
 }
 
 impl MacroDefinitions {
@@ -703,7 +707,7 @@ impl MacroDefinitions {
         source: &str,
         fact: &MacroFact,
     ) -> Option<std::sync::Arc<MacroDef>> {
-        let key = (path.to_path_buf(), Box::from(&*fact.name));
+        let key = (path.to_path_buf(), fact.range.start_offset);
 
         if let Some(known) = self.parsed.get(&key) {
             return known.clone();
@@ -713,6 +717,25 @@ impl MacroDefinitions {
         self.parsed.insert(key, definition.clone());
 
         definition
+    }
+
+    /// Forget everything read out of a file whose text changed.
+    ///
+    /// Necessary rather than tidy: the keys are **offsets in that file**, so after an edit an old entry can be
+    /// reached by a *different* fact that happens to start where the old one did — the cache would then hand back a
+    /// definition nobody wrote. The whole file's entries go, not only the edited definition's: every offset after
+    /// the edit moved.
+    pub fn forget(&mut self, path: &std::path::Path) {
+        self.parsed.retain(|(held, _), _| held != path);
+    }
+
+    /// How many distinct definitions have been read back — the number a caller watches to see the cache work.
+    pub fn len(&self) -> usize {
+        self.parsed.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.parsed.is_empty()
     }
 
     fn get_or_read(

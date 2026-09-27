@@ -32,7 +32,7 @@
 //! **guarded** include is reported as [`Known::Unknown`] rather than as visible or invisible — the same rule the
 //! rest of the crate follows, and the reason [`IncludeFact`](crate::summary::IncludeFact) carries a guard at all.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use crate::guard::Visibility;
@@ -2132,13 +2132,17 @@ impl ProjectIndex {
                 }
             }
 
-            // **The cooked reading describes the text that was there when it was built**, so a summary whose
-            // *content* differs from the one it replaces takes it with it. `forget` already drops both together, and
-            // that is the ordinary path — an edit, a watched file, a close. This one covers the path that has no
-            // `forget` in it (a re-read that found different bytes, a cache entry replaced by a fresh index): the
-            // file's own declarations would be replaced and its cooked ones would go on answering for text nobody
-            // has any more, which is a wrong answer rather than a missing one.
-            if previous.key.content_hash != summary.key.content_hash {
+            // **The cooked reading describes the file *under the key it was built with***, so a summary filed under
+            // a different key takes it with it. Both halves of the key are the reason: a different content hash means
+            // the text changed, and a different context hash means the *compilation* did — the configuration or the
+            // directory a relative include resolves against — and a rendering is a function of both.
+            //
+            // `forget` already drops the summary and the reading together, and that is the ordinary path (an edit, a
+            // watched file, a close). This one covers the paths that have no `forget` in them: a re-read that found
+            // different bytes, a cache entry replaced by a fresh index, and the whole-project re-read a changed
+            // `compile_commands.json` causes. Leaving the reading there would answer for a file nobody has any more,
+            // at offsets into words that are gone — a wrong answer rather than a missing one.
+            if previous.key != summary.key {
                 self.cooked.remove(&path);
             }
         } else {
@@ -2369,6 +2373,47 @@ impl ProjectIndex {
     /// one walk serves a whole query — measured on a closure of 308 files, that turned a 573 ms completion into a
     /// 3 ms one, and every cross-file query over declarations goes through it.
     ///
+    /// **Every file that can see `path`** — its transitive includers, nearest first.
+    ///
+    /// The reverse of [`ProjectIndex::visible_files`], and the question a *change* to a file asks: whose reading was
+    /// built while this file said what it used to say? A cooked reading is a reading of its environment as well as of
+    /// its text, so a file that defines a macro is read differently by everything that includes it, at any depth.
+    ///
+    /// Breadth-first over the reverse edges, deduplicated and bounded by the same depth the forward walk uses: an
+    /// include graph is not a tree — every header guard makes it a diamond — so "included by, transitively, without
+    /// asking about a file twice" is the whole job. The order is the walk's, which is deterministic because the
+    /// reverse edges are a `BTreeSet`.
+    ///
+    /// The **file itself is not in the answer**: a caller dropping that file's own reading has its own reason to, and
+    /// one list that means two things is how a caller ends up dropping something twice or not at all.
+    pub fn dependents_of(&self, path: &Path) -> Vec<PathBuf> {
+        let start = normalize(path);
+
+        let mut seen: HashSet<String> = HashSet::from([start.clone()]);
+        let mut pending: VecDeque<(String, usize)> = VecDeque::from([(start, 0)]);
+        let mut dependents = Vec::new();
+
+        while let Some((current, depth)) = pending.pop_front() {
+            if depth >= MAX_VISIBILITY_DEPTH {
+                continue;
+            }
+
+            let Some(includers) = self.included_by.get(&current) else {
+                continue;
+            };
+
+            for includer in includers {
+                if !seen.insert(includer.clone()) {
+                    continue;
+                }
+                dependents.push(PathBuf::from(includer));
+                pending.push_back((includer.clone(), depth + 1));
+            }
+        }
+
+        dependents
+    }
+
     /// The visibility recorded is the **best** one found: a file reached both unconditionally and through a
     /// guarded `#include` is unconditional, because the unconditional path is the one that is always there. That
     /// is why a file may be relaxed rather than only visited — the first path found is not necessarily the best,
