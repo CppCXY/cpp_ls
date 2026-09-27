@@ -140,7 +140,7 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// *check* rather than trust — see [`crate::summary::MacroScopeReading`]. Only [`CODEC_VERSION`] moves: the key is
 /// still the text and the compilation context, so an entry written before this field existed is unreachable rather
 /// than wrong, and `cache.rs`'s rule about the macro environment stands.
-pub const CODEC_VERSION: u32 = 14;
+pub const CODEC_VERSION: u32 = 15;
 
 /// Write a summary as bytes.
 ///
@@ -329,6 +329,17 @@ pub fn encode_translation_unit(unit: &TranslationUnit, closure: &[(std::path::Pa
         }
         put_opt_str(&mut out, event.body_text.as_deref());
         put_opt_str(&mut out, event.parameters.as_deref());
+        // **Where the replacement list is in the file that wrote it** — a range, not text: it is what makes a
+        // definition the decoder rebuilds carry real positions (`MacroDef::written_in`). `None` for an `#undef`
+        // and for a `#define` with an empty replacement list, which is the same distinction the text keeps.
+        match event.body_range {
+            Some(range) => {
+                put_u8(&mut out, 1);
+                put_u64(&mut out, range.start_offset as u64);
+                put_u64(&mut out, range.length as u64);
+            }
+            None => put_u8(&mut out, 0),
+        }
         put_u32(&mut out, event.frame);
         put_u64(&mut out, event.at as u64);
         put_u8(&mut out, u8::from(event.unconditional));
@@ -399,6 +410,14 @@ pub fn decode_translation_unit(
         };
         let body_text = reader.optional_string()?.map(std::sync::Arc::from);
         let parameters = reader.optional_string()?.map(std::sync::Arc::from);
+        let body_range = match reader.u8()? {
+            0 => None,
+            1 => Some(cpp_parser::SourceRange::new(
+                reader.u64()? as usize,
+                reader.u64()? as usize,
+            )),
+            _ => return Err(DecodeError::BadDiscriminant),
+        };
         let frame = reader.u32()?;
         let at = reader.u64()? as usize;
         let unconditional = match reader.u8()? {
@@ -419,6 +438,7 @@ pub fn decode_translation_unit(
             body,
             body_text,
             parameters,
+            body_range,
             frame,
             at,
             unconditional,

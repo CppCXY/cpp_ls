@@ -383,8 +383,10 @@ fn navigation_reaches_the_macro_and_a_diagnostic_reaches_the_call_site() {
         .find(|token| token.is_expanded())
         .expect("an expanded token");
 
-    // Navigation lands on the name, in the `#define`, and the name is exactly `VERSION`.
-    let name_range = expanded.navigation_range();
+    // Navigation lands on the name, in the `#define`, and the name is exactly `VERSION` — and it says which file
+    // that is, because a definition can come from another one.
+    let (name_file, name_range) = expanded.navigation_at().expect("a definition in a file");
+    assert_eq!(name_file, cpp_code_analysis::macros::MacroFile::Here);
     assert_eq!(
         &defines[name_range.start_offset..name_range.end_offset()],
         "VERSION"
@@ -413,7 +415,10 @@ fn navigation_finds_the_name_however_the_head_is_spelled() {
         "#define\tVERSION 3\n",
     ] {
         let expansion = expand_use(defines, "VERSION");
-        let range = expansion.tokens[0].navigation_range();
+        let (file, range) = expansion.tokens[0]
+            .navigation_at()
+            .expect("a definition in a file");
+        assert_eq!(file, cpp_code_analysis::macros::MacroFile::Here);
 
         assert_eq!(
             &defines[range.start_offset..range.end_offset()],
@@ -616,7 +621,7 @@ fn expansion_never_panics() {
         // Touch the results so the walk is part of what is being tested.
         for token in &expansion.tokens {
             let _ = token.diagnostic_range();
-            let _ = token.navigation_range();
+            let _ = token.navigation_at();
         }
     }
 }

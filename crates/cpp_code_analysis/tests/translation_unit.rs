@@ -505,8 +505,7 @@ fn the_unit_cooks_as_one_stream_in_include_order() {
     let unit = Unit::new(&files);
     let mut definitions = MacroDefinitions::default();
     let timeline = unit.timeline_of("/p/main.cpp", &mut definitions);
-    let mut parsed = cpp_code_analysis::ParsedDefinitions::new();
-    let shared = timeline.definitions(&mut parsed);
+    let shared = timeline.definitions();
 
     let stitched = timeline.cook_the_unit(&unit.sources, &shared, None, true);
     assert_eq!(stitched.missing, 0, "every file the unit reached has text here");
@@ -588,8 +587,7 @@ fn a_file_without_text_is_a_hole_in_the_unit() {
     let unit = Unit::new(&files);
     let mut definitions = MacroDefinitions::default();
     let timeline = unit.timeline_of("/p/main.cpp", &mut definitions);
-    let mut parsed = cpp_code_analysis::ParsedDefinitions::new();
-    let shared = timeline.definitions(&mut parsed);
+    let shared = timeline.definitions();
 
     // The same unit, with `api.h`'s text withheld — the shape of an editor whose buffer for it is not loaded.
     let mut partial: HashMap<PathBuf, String> = unit.sources.clone();
@@ -606,6 +604,122 @@ fn a_file_without_text_is_a_hole_in_the_unit() {
         stitched.text.contains("Cfg"),
         "and the file *it* included is still stitched, because the walk reached it through the hole: {}",
         stitched.text
+    );
+}
+
+/// **A definition knows which file it was written in.**
+///
+/// A `MacroDef` used to be ranges and nothing else, which is a lie in two of the three places a definition can
+/// come from: one read from a file is in that file, one that arrived from another file of a walked unit is in
+/// *that* file, and one reconstructed from text alone is in no file at all. The map back to files is what made
+/// the difference visible — a body token of an inherited macro was reported at its offset in the
+/// reconstruction, a position in no file, which a consumer then slices into the file it has.
+///
+/// This test walks the whole path: the unit reads a definition out of `config.h`, `api.h` invokes it, the source
+/// file invokes *that*, and the token the reader ends up with says where each hop was written.
+#[test]
+fn a_definition_says_which_file_it_was_written_in() {
+    let files = [
+        ("/p/config.h", "#define WIDTH 4\n"),
+        ("/p/api.h", "#include \"config.h\"\n#define API WIDTH\n"),
+        ("/p/main.cpp", "#include \"api.h\"\nint v = API;\n"),
+    ];
+
+    let unit = Unit::new(&files);
+    let mut definitions = MacroDefinitions::default();
+    let timeline = unit.timeline_of("/p/main.cpp", &mut definitions);
+    let shared = timeline.definitions();
+
+    let main = Path::new("/p/main.cpp");
+    let text = unit.sources.get(main).expect("read");
+    let (tokens, _) = cpp_parser::lex(text, &cpp_parser::LexerConfig::default());
+    let macros = cpp_code_analysis::FileMacros::new(
+        timeline.environment_of(main).expect("the unit reaches main.cpp"),
+        &shared,
+        None,
+        true,
+    );
+    let cooked = cpp_code_analysis::cook_with(text, &tokens, &macros);
+    let rendered = cooked.render();
+
+    // The `4`: written in `config.h`'s `#define WIDTH 4`, pasted by `api.h`'s `#define API WIDTH`, invoked in
+    // main.cpp.
+    let four = cooked
+        .tokens
+        .iter()
+        .find(|token| token.text() == "4")
+        .expect("the expansion is in the stream");
+    let at = rendered.text.find(" 4 ").expect("the expansion is in the rendering");
+
+    // **Where it was written is not this file**, and the map says so rather than handing over an offset that
+    // belongs to a reconstruction.
+    assert_eq!(
+        rendered.written_at(at + 1),
+        None,
+        "the spelling of `4` is in config.h, not in main.cpp"
+    );
+    // **Where to report it is this file**: the invocation the reader can see.
+    let reported = rendered.reported_at(at + 1).expect("a place to report");
+    assert_eq!(
+        &text[reported.start_offset..reported.end_offset()],
+        "API",
+        "a diagnostic lands on the call site"
+    );
+
+    // **Navigation lands in the right file**: the innermost definition that can be pointed at is `WIDTH`, and it
+    // is in `config.h` — a consumer turns the frame into a path and opens it.
+    let (file, name_at) = four.navigation_at().expect("a definition in a file");
+    let config = Path::new("/p/config.h");
+    let cpp_code_analysis::macros::MacroFile::Frame(frame) = file else {
+        panic!("`WIDTH` was not written in the file being cooked: {file:?}");
+    };
+    assert_eq!(
+        timeline.frame_file(frame),
+        Some(config),
+        "the frame names config.h"
+    );
+    let config_text = unit.sources.get(config).expect("read");
+    assert_eq!(
+        &config_text[name_at.start_offset..name_at.end_offset()],
+        "WIDTH",
+        "and the range is the macro's name, in that file"
+    );
+
+    // **A macro the file itself wrote is in the file itself**: the other side of the same question, on one
+    // fixture, so that "the map says another file" cannot pass by saying it everywhere.
+    let local = [
+        ("/p/local.cpp", "#define HERE 7\nint v = HERE;\n"),
+    ];
+    let unit = Unit::new(&local);
+    let mut definitions = MacroDefinitions::default();
+    let timeline = unit.timeline_of("/p/local.cpp", &mut definitions);
+    let shared = timeline.definitions();
+    let path = Path::new("/p/local.cpp");
+    let text = unit.sources.get(path).expect("read");
+    let (tokens, _) = cpp_parser::lex(text, &cpp_parser::LexerConfig::default());
+    let macros = cpp_code_analysis::FileMacros::new(
+        timeline.environment_of(path).expect("reached"),
+        &shared,
+        None,
+        true,
+    );
+    let cooked = cpp_code_analysis::cook_with(text, &tokens, &macros);
+    let rendered = cooked.render();
+    let seven = cooked
+        .tokens
+        .iter()
+        .find(|token| token.text() == "7")
+        .expect("the expansion");
+    let at = rendered.text.find(" 7 ").expect("in the rendering") + 1;
+    let written = rendered.written_at(at).expect("written in this file");
+    assert_eq!(
+        &text[written.start_offset..written.end_offset()],
+        "7",
+        "a body token of a file's own macro is at the body, in this file"
+    );
+    assert_eq!(
+        seven.navigation_at().expect("a definition in a file").0,
+        cpp_code_analysis::macros::MacroFile::Here
     );
 }
 
@@ -659,8 +773,7 @@ fn a_file_cooks_the_same_through_the_unit_as_through_a_table_of_its_own() {
     let timeline = unit.timeline_of("/p/main.cpp", &mut definitions);
 
     // The unit's definitions, read once — what replaced the per-file table build.
-    let mut parsed = cpp_code_analysis::ParsedDefinitions::new();
-    let shared = timeline.definitions(&mut parsed);
+    let shared = timeline.definitions();
 
     let mut rendered_something_the_reading_can_be_told_apart_by = false;
 

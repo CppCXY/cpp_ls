@@ -308,6 +308,76 @@ fn parameters_before(source: &str, body_start: usize) -> Option<&str> {
 /// list when the file it came from had one, and the replacement list.
 pub type ConditionalBody = (Box<str>, bool, Option<Box<str>>, Box<str>);
 
+/// **One event read as the `#define` it was, at the place it was written.**
+///
+/// The pieces are the three the walk copied out of the writing file — the name, the parameter list and the
+/// replacement list — and each is lexed where it sits, so the definition's ranges are **positions in that file**
+/// rather than offsets in a line this crate wrote. That is what
+/// [`crate::macros::MacroDef::written_in`] promises, and what makes "go to definition" on an inherited macro land
+/// in the header instead of nowhere.
+///
+/// The layout is the one the file has, and it is why the offsets are exact rather than searched for: a
+/// function-like macro's parameter list follows its name **immediately** (that is the whole difference between
+/// `#define A(x) …` and `#define A (x) …`), and the replacement list is the substring `body_range` names. One
+/// separator token is inserted between the two, because [`MacroBody`] keeps whitespace and a body's first token
+/// must stay separated from the `)` — the same thing `definition_text` spells as a space.
+///
+/// `None` when the replacement list does not read as a definition, which is the `unreadable` count.
+fn definition_written_at(event: &TuEvent, body: &str) -> Option<crate::macros::MacroDef> {
+    let mut tokens: Vec<crate::token::Token> = Vec::new();
+    let name_at = cpp_parser::SourceRange::new(event.at, event.name.len());
+    tokens.push(crate::token::Token::new(
+        cpp_parser::CppTokenKind::Identifier,
+        &*event.name,
+        name_at,
+    ));
+
+    if let Some(parameters) = event.parameters.as_deref() {
+        // Where the file has it: right after the name. See the note on why that is exact.
+        let at = event.at + event.name.len();
+        tokens.extend(lex_in_place(parameters, at));
+    }
+
+    let body_range = event.body_range?;
+    tokens.push(crate::token::Token::new(
+        cpp_parser::CppTokenKind::Whitespace,
+        " ",
+        cpp_parser::SourceRange::new(body_range.start_offset, 0),
+    ));
+    tokens.extend(lex_in_place(body, body_range.start_offset));
+
+    // The macro's own text in that file: its name and its replacement list. Not the whole directive — the
+    // `#define` head is not part of what a fact records — which is what "reveal this macro" wants anyway.
+    let range = cpp_parser::SourceRange::new(
+        event.at,
+        body_range.end_offset().saturating_sub(event.at),
+    );
+
+    let mut definition = crate::macros::parse_define(&tokens, range)?;
+    definition.written_in = Some(crate::macros::MacroFile::Frame(event.frame));
+    Some(definition)
+}
+
+/// Lex a piece of a file's text **as if it were at `at`**: the tokens' ranges are shifted to where they are.
+///
+/// The piece is a substring the walk copied, so the shift is exact rather than a guess — see
+/// [`definition_written_at`], which is the only caller.
+fn lex_in_place(text: &str, at: usize) -> Vec<crate::token::Token> {
+    let (tokens, _) = cpp_parser::lex(text, &cpp_parser::LexerConfig::default());
+    tokens
+        .iter()
+        .map(|token| {
+            crate::token::Token::new(
+                token.kind,
+                &text[token.range.start_offset..token.range.end_offset()],
+                cpp_parser::SourceRange::new(
+                    at + token.range.start_offset,
+                    token.range.length,
+                ),
+            )
+        })
+        .collect()
+}
 /// The same three things while the walk is still collecting them, before the name is prepended.
 type ConditionalBodyValue = (bool, Option<Box<str>>, Box<str>);
 
@@ -933,6 +1003,13 @@ pub(crate) struct TuEvent {
     /// The replacement list as text — **shared**, see [`cpp_parser::IncludedMacro::body_text`].
     pub(crate) body_text: Option<std::sync::Arc<str>>,
     pub(crate) parameters: Option<std::sync::Arc<str>>,
+    /// Where the **replacement list** is, in the file that wrote it.
+    ///
+    /// Kept so that a definition this unit hands to the cooker can carry **real positions**: the body's text is
+    /// already here, and with its range the tokens lexed from it land where they were written instead of inside a
+    /// line this crate reconstructed ([`crate::macros::MacroDef::written_in`]). `None` for an `#undef` and for a
+    /// `#define` whose replacement list is empty — there is nothing to place.
+    pub(crate) body_range: Option<cpp_parser::SourceRange>,
     pub(crate) frame: u32,
     /// The offset **inside the file that wrote it**.
     pub(crate) at: usize,
@@ -999,6 +1076,7 @@ impl TimelineBuilder {
             body: fact.kind.is_definition().then_some(fact.body),
             body_text,
             parameters,
+            body_range: fact.body_range,
             frame,
             at: fact.range.start_offset,
             unconditional,
@@ -1114,20 +1192,30 @@ impl TranslationUnit {
         self.events.len()
     }
 
-    /// **Read every definition this unit carries, once**, through the run's parse cache.
+    /// **Read every definition this unit carries, once** — with the positions it was written at.
     ///
     /// This is what replaced the per-file configuration build. Cooking a file used to walk its whole environment
-    /// — every name the unit knows — parse each definition through [`crate::preprocess::cooked::ParsedDefinitions`] and copy the result into
-    /// a table of that file's own, which the census measured at **4.1 s** for 255 files of the SDK corpus, on top
-    /// of the map the environment itself built (1.7 s). The definitions are the *same* definitions every time: a
-    /// fact's identity is its name, its parameters and its body, and none of those depend on which file is
-    /// asking. Only the **offset** does, and the offset is resolved per query by [`MacroView`].
+    /// — every name the unit knows — parse each definition and copy the result into a table of that file's own,
+    /// which the census measured at **4.1 s** for 255 files of the SDK corpus, on top of the map the environment
+    /// itself built (1.7 s). The definitions are the *same* definitions every time: a fact's identity is its name,
+    /// its parameters and its body, and none of those depend on which file is asking. Only the **offset** does,
+    /// and the offset is resolved per query by [`MacroView`].
     ///
-    /// So a run reads the unit once and every file's cook is a lookup. Nothing here is per file, and the
-    /// counters below are therefore counted **once for the unit** rather than once per file: they say how much of
-    /// the unit's vocabulary expansion cannot use, where the per-file version counted each unusable fact once per
-    /// file that could see it (`without_a_body` × 200 is not a measurement of the corpus).
-    pub fn definitions(&self, parsed: &mut crate::preprocess::cooked::ParsedDefinitions) -> UnitDefinitions {
+    /// So a run reads the unit once and every file's cook is a lookup. Nothing here is per file, and the counters
+    /// below are therefore counted **once for the unit** rather than once per file: they say how much of the
+    /// unit's vocabulary expansion cannot use, where the per-file version counted each unusable fact once per file
+    /// that could see it (`without_a_body` × 200 is not a measurement of the corpus).
+    ///
+    /// # The positions are the file's, not a reconstruction's
+    ///
+    /// A definition is read out of the fact's **own** parameter list and replacement list — the two substrings the
+    /// walk copied out of the file that wrote them — and lexed with their offsets shifted to where they sit:
+    /// [`TuEvent::body_range`] for the body, and the name plus its length for the parameter list. So a body
+    /// token's range is where the token is, `written_in` says which file that is
+    /// ([`crate::macros::MacroFile::Frame`]), and a consumer can act on the answer instead of on an offset in a
+    /// line this crate wrote. Definitions that arrive without a position ([`crate::macros::MacroFile`]'s third
+    /// case) still exist — the closure path's `MacroEnvironment` carries text only — and they say so.
+    pub fn definitions(&self) -> UnitDefinitions {
         let mut by_event: Vec<Option<std::sync::Arc<crate::macros::MacroDef>>> =
             vec![None; self.events.len()];
         let mut counted = UnitDefinitions::default();
@@ -1166,13 +1254,18 @@ impl TranslationUnit {
                 }
             }
 
-            match parsed.definition(&event.name, event.parameters.as_ref(), body) {
-                Some(definition) => by_event[index] = Some(definition),
+            match definition_written_at(event, body) {
+                Some(definition) => by_event[index] = Some(std::sync::Arc::new(definition)),
                 None => counted.unreadable += 1,
             }
         }
 
         UnitDefinitions { by_event, ..counted }
+    }
+
+    /// The path of a frame — how a [`crate::macros::MacroFile::Frame`] becomes something a consumer can open.
+    pub fn frame_file(&self, frame: u32) -> Option<&std::path::Path> {
+        self.frames.get(frame as usize).map(|frame| frame.file.as_path())
     }
 
     /// How many of those facts carry a **replacement list**, and how many are in the **in-force** channel.

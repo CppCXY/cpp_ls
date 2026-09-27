@@ -110,6 +110,7 @@ impl CookedStream {
             spans.push(RenderedSpan {
                 cooked: SourceRange::new(start, text.len() - start),
                 written: written_at(cooked),
+                reported: cooked.diagnostic_range(),
                 origin: cooked.origin.clone(),
             });
         }
@@ -118,19 +119,31 @@ impl CookedStream {
     }
 }
 
-/// Where a cooked token was written in the file.
+/// Where a cooked token was written **in this file**, when it was written in it at all.
 ///
 /// * a token the file wrote: its own range;
-/// * a token out of a macro body: the body token's range, which is inside the `#define`. That is the
-///   **spelling** location — where the text actually is — and it is the answer to "where did this come from";
-///   a consumer that wants the place a reader can act on (a diagnostic) takes the *call site* from the span's
-///   `origin` instead, which is why the span carries both;
+/// * a token out of a macro body the file itself wrote: the body token's range, which is inside that `#define`
+///   — the **spelling** location, and the answer to "where did this come from";
+/// * a token out of a macro body that came from **another file** (or from a definition reconstructed out of text
+///   alone): `None`. The spelling is not in this file, this map is of one file, and the honest answer is that
+///   nobody here can say — the caller that wants it follows the span's `origin`, whose invocations now carry
+///   [`crate::macros::MacroFile`];
 /// * a token `##` or `#` produced: the **call site**, because its spelling exists nowhere in the file and the
 ///   origin is the only thing that knows where the operator ran.
+///
+/// A position that is not in this file is never returned, and that is the fix rather than a nicety: a body token of
+/// an inherited macro used to be reported at its offset in the *reconstruction* — 7 inside a 13-byte line — which a
+/// consumer slices into the file it has, printing whatever happens to be there.
 fn written_at(cooked: &ExpandedToken) -> Option<SourceRange> {
     match &cooked.origin {
         Origin::Pasted { call_site } | Origin::Stringized { call_site } => Some(*call_site),
-        Origin::Source | Origin::Expanded { .. } => Some(cooked.token.range),
+        Origin::Source => Some(cooked.token.range),
+        Origin::Expanded { invocations } => match invocations.first().map(|it| it.written_in) {
+            // The outermost invocation is the call the reader can see, and it is in this file; the *spelling* is
+            // in the body's file, and it is the body's file that decides whether this map can name it.
+            Some(Some(crate::macros::MacroFile::Here)) => Some(cooked.token.range),
+            _ => None,
+        },
     }
 }
 
@@ -155,34 +168,62 @@ pub struct RenderedCooked {
     pub spans: Vec<RenderedSpan>,
 }
 
-/// One token's place in the rendering, and the place it was written.
+/// One token's place in the rendering, the place it was written, and the place to act on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderedSpan {
     /// Where the spelling is in [`RenderedCooked::text`].
     pub cooked: SourceRange,
-    /// Where it was written in the file, when that is known. `None` for a token whose origin says nothing — a
-    /// level-2 stream will also produce `None` for a token that came out of another file, until files are
-    /// identified rather than ranged.
+    /// Where it was **written in this file**, when it was written in this file at all.
+    ///
+    /// `None` for a token whose spelling is not here: one that came out of a macro body belonging to another file,
+    /// or out of a definition this crate reconstructed from text that carried no position. The span's `origin` is
+    /// what says where it really is — its invocations carry [`crate::macros::MacroFile`] — and this map answers for
+    /// *this* file only, which is why it stops at `None` rather than handing over an offset from somewhere else.
     pub written: Option<SourceRange>,
+    /// Where to **report** this token: always a position in this file.
+    ///
+    /// The token's own range when the file wrote it, and the outermost call site when a macro produced it — the
+    /// text the reader can see, rather than a line inside a `#define` three headers up. A diagnostic wants this
+    /// one and a "where did this text come from" question wants [`RenderedSpan::written`]; the two are different
+    /// questions and a single field answered both badly (see `written_at`, where the body offset of an inherited
+    /// macro used to be handed out as a position in this file).
+    pub reported: SourceRange,
     pub origin: Origin,
 }
 
 impl RenderedCooked {
-    /// The place a token of the rendering was written, by its offset in the rendering.
+    /// The place a token of the rendering was written **in this file**, by its offset in the rendering.
     ///
-    /// A diagnostic inside the rendered tree is reported at *this* range — the file the reader can open —
-    /// which is the whole reason the map exists.
+    /// `None` when the spelling is elsewhere — another file's macro body, or a reconstruction nobody can open.
+    /// [`RenderedCooked::reported_at`] is the other question ("where do I point a diagnostic"), and it is the one
+    /// a consumer that has a tree offset and an error wants.
     pub fn written_at(&self, cooked_offset: usize) -> Option<SourceRange> {
+        self.span_at(cooked_offset)?.written
+    }
+
+    /// The place a token of the rendering should be **reported**, by its offset in the rendering.
+    ///
+    /// Always a position in this file: the call site for a token a macro produced, the token's own range
+    /// otherwise. `None` only when the offset is past the last span.
+    pub fn reported_at(&self, cooked_offset: usize) -> Option<SourceRange> {
+        Some(self.span_at(cooked_offset)?.reported)
+    }
+
+    /// The span covering an offset of the rendering — the separator between two tokens belongs to the token after
+    /// it, which is what makes an offset that landed on whitespace still answer.
+    fn span_at(&self, cooked_offset: usize) -> Option<&RenderedSpan> {
         let index = self
             .spans
             .partition_point(|span| span.cooked.end_offset() <= cooked_offset);
-        self.spans.get(index).and_then(|span| span.written)
+        self.spans.get(index)
     }
 
     /// The file span a **node** of the rendered tree came from: from the first token it covers to the last.
     ///
     /// `None` when the node covers no token (an empty node is a real thing in a tolerant tree) or when none of
-    /// its tokens has a known place.
+    /// its tokens has a known place — which is now a real state rather than a corner: a node built out of tokens
+    /// that came from another file's macro bodies has no place **in this file**, and the caller that needs one
+    /// asks the tokens' origins.
     pub fn written_span(&self, cooked: SourceRange) -> Option<SourceRange> {
         let first = self
             .spans
@@ -353,6 +394,11 @@ impl ParsedDefinitions {
 
 /// `#define NAME(params) body` → the definition it spells: the same reader the directive layer uses, so a
 /// definition means the same thing wherever it came from.
+///
+/// **The ranges are the reconstruction's, and the answer says so** ([`MacroFile`]): this text was written out by
+/// [`definition_text`] from a name, a parameter list and a body that arrived as *text*, so an offset in it is an
+/// offset in no file. `parse_define` answers [`MacroFile::Here`] because the tokens a *file* wrote are positions
+/// in that file; a caller that reconstructs has to say so itself, and this is the one caller that reconstructs.
 fn parse_a_definition(text: &str) -> Option<crate::macros::MacroDef> {
     let (tokens, _) = cpp_parser::lex(text, &cpp_parser::LexerConfig::default());
     let range = SourceRange::new(0, text.len());
@@ -367,7 +413,9 @@ fn parse_a_definition(text: &str) -> Option<crate::macros::MacroDef> {
         })
         .collect();
 
-    crate::macros::parse_define(&tokens, range)
+    let mut definition = crate::macros::parse_define(&tokens, range)?;
+    definition.written_in = None;
+    Some(definition)
 }
 
 /// Build the table a level-2 cook starts from, out of what the includes contribute.

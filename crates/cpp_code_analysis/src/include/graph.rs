@@ -1125,6 +1125,11 @@ impl Marked {
                     },
                     range: fact.range,
                     name_range: fact.range,
+                    // A definition a **summary** describes: the fact has a range in the file the summary is of,
+                    // and the caller that asked for this state is walking that file — see [`MacroFile::Here`].
+                    // (What is *not* here is the file's identity: a `Marked` is one file's state, and the ranges
+                    // are positions in it.)
+                    written_in: Some(crate::macros::MacroFile::Here),
                 }),
                 None => self.define_name(&fact.name),
             },

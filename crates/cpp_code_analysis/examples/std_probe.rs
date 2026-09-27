@@ -418,7 +418,7 @@ standard {}",
     let mut definitions_time = std::time::Duration::ZERO;
     let unit_definitions = timeline.as_ref().map(|unit| {
         let reading = std::time::Instant::now();
-        let definitions = unit.definitions(&mut parsed_definitions);
+        let definitions = unit.definitions();
         definitions_time += reading.elapsed();
         definitions
     });
@@ -743,25 +743,42 @@ standard {}",
 
         // In cooked mode the errors are offsets into the **rendering** — the same one written above, and the same
         // one that was parsed — so neither the line index nor the text window below can be read against the file.
-        // The map is what turns one into the other, and this is its first consumer: `written_at` is where the
-        // cooked offset was written, `written_span` where the node came from. Without it a cooked failure would be
-        // a message with no address at all.
+        // The map is what turns one into the other, and this is its first consumer: `reported_at` is the place to
+        // point a reader at (the call site when a macro produced the text), `written_at` is where the spelling is
+        // *when it is in this file*, and `written_span` where a node came from. Without the map a cooked failure
+        // would be a message with no address at all.
         let (line, column, window) = match &rendered {
             Some(rendered) => {
                 let at = usize::from(errors[0].range.start());
                 let cooked = &rendered.text[at.saturating_sub(60).min(rendered.text.len())
                     ..at.saturating_add(60).min(rendered.text.len())];
+                // **The reported place, not the written one**: a token a macro produced was written in the
+                // header that defines it (or in a reconstruction, which is nowhere), and what the reader can act
+                // on is the invocation in *this* file. `reported_at` is always a position in this file;
+                // `written_at` is `None` for everything that came from elsewhere, which is why it is printed
+                // beside the window rather than used as the address.
+                let reported = rendered.reported_at(at);
                 let written = rendered.written_at(at);
-                // The file position of whatever the rendering put there, as line and column — counted here
-                // rather than through the line index because the offset came from the map and not from the file.
-                let offset = written.map_or(0, |range| range.start_offset).min(source.len());
+                // The file position, as line and column — counted here rather than through the line index
+                // because the offset came from the map and not from the file.
+                let offset = reported.map_or(0, |range| range.start_offset).min(source.len());
                 let before = &source[..offset];
                 let line = before.lines().count();
                 let column = before.len() - before.rfind('\n').map_or(0, |at| at + 1);
                 (
                     line,
                     column,
-                    format!("RENDERED …{cooked}…"),
+                    format!(
+                        // The marker goes **first** because the printed window is cut to 70 characters — a note
+                        // at the end of it is a note nobody reads. It says whether the text the error is about was
+                        // written in this file or pasted in from a header, which decides whether the line printed
+                        // beside it is the line to fix.
+                        "RENDERED[{}] …{cooked}…",
+                        match written {
+                            Some(_) => "here",
+                            None => "elsewhere",
+                        }
+                    ),
                 )
             }
             None => {
@@ -943,8 +960,16 @@ standard {}",
         }
     );
 
-    // How many definitions the run actually parsed — the number that used to be "files × definitions in force".
-    let distinct_definitions = parsed_definitions.len();
+    // How many definitions the run actually read — the number that used to be "files × definitions in force".
+    //
+    // **Two paths, two caches.** The closure path parses through the run's `ParsedDefinitions` (keyed by the
+    // definition's text, because the text is all it has). The one-walk path reads the unit's definitions once and
+    // keeps them **with the positions they were written at**, so each is parsed once per unit and the count is the
+    // unit's own vocabulary — see `TranslationUnit::definitions`.
+    let distinct_definitions = match unit_definitions.as_ref() {
+        Some(definitions) => definitions.len(),
+        None => parsed_definitions.len(),
+    };
 
     println!(
         "files {} | clean {} | failing {} | {} KB | {} lines\n\
@@ -956,7 +981,7 @@ built in {seeding_time:?}\n\
          conditional facts met {conditional_asked} | branches in force {conditional_taken} | bodies in force \
 {bodies_in_force} (no toolchain means none can be answered)\n\
          read inside an includer {files_with_context} files (the translation unit's half of the environment)\n\
-         cooked: definitions {definitions_time:?} ({distinct_definitions} distinct) | evidence {evidence_time:?} | \
+         cooked: definitions {definitions_time:?} ({distinct_definitions} read) | evidence {evidence_time:?} | \
 macro table {table_time:?} | expansion {cook_time:?} | view {view_time:?} | parse {parse_time:?}\n\
          rendering: {rendered_to_nothing} of {} files rendered to nothing (whitespace only) | {rendered_bytes} bytes \
 of rendering for {total_bytes} of text{}{}\n\

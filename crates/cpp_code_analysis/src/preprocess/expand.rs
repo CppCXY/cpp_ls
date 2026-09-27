@@ -71,7 +71,7 @@ pub enum Origin {
     /// A *chain*, not one call, because an expansion can be nested: `#define A 1` / `#define B A` used as
     /// `B` produces a `1` that was written in `A`'s body, reached through `B`'s. Which of the two a
     /// consumer wants depends on what it is doing — see [`ExpandedToken::diagnostic_range`] and
-    /// [`ExpandedToken::navigation_range`] — so both are here rather than one being chosen here.
+    /// [`ExpandedToken::navigation_at`] — so both are here rather than one being chosen here.
     ///
     /// Outermost first, so that "the first call the reader can see" is a scan from the front.
     Expanded { invocations: Vec<MacroInvocation> },
@@ -95,8 +95,17 @@ pub struct MacroInvocation {
     /// cursor *on the name* so that a second jump goes wherever the name leads. A range covering the whole
     /// `#define` would put the cursor on the `#`.
     pub name_at: SourceRange,
-    /// Where it was called: the name, and the argument list when there is one.
+    /// Where it was called: the name, and the argument list where there is one.
     pub call_site: SourceRange,
+    /// **Which file `definition` and `name_at` are positions in** — see [`crate::macros::MacroFile`].
+    ///
+    /// `Some(Here)` when the macro is defined in the file being cooked, `Some(Frame(f))` when it came from
+    /// another file of a walked unit (the unit turns `f` into a path), and `None` when the definition was
+    /// reconstructed from text that carried no position — where `definition`/`name_at` are offsets in that
+    /// reconstruction and a consumer must not show them.
+    ///
+    /// `call_site` is **always** in the file being cooked: an invocation is written where the reader is.
+    pub written_in: Option<crate::macros::MacroFile>,
 }
 
 /// A token in an expanded stream.
@@ -189,22 +198,35 @@ impl ExpandedToken {
         }
     }
 
-    /// Where to *navigate* from this token: the macro's name.
+    /// Where to *navigate* from this token: the macro's name, **and which file that name is in**.
     ///
-    /// **The innermost macro**, which is the one whose body the token was actually written in — and so the
-    /// one whose text the token is. Deliberately the opposite end of the chain from
-    /// [`diagnostic_range`](Self::diagnostic_range): a reader following a link wants the definition, and a
-    /// reader fixing a problem wants their own code.
+    /// **The innermost macro** whose definition is a position in a file, which is the one whose body the token
+    /// was actually written in — and so the one whose text the token is. Deliberately the opposite end of the
+    /// chain from [`diagnostic_range`](Self::diagnostic_range): a reader following a link wants the definition,
+    /// and a reader fixing a problem wants their own code.
     ///
-    /// The *name* rather than the whole directive, so that the cursor lands somewhere a second jump can
-    /// start from. See [`MacroInvocation::name_at`].
-    pub fn navigation_range(&self) -> SourceRange {
+    /// The *name* rather than the whole directive, so that the cursor lands somewhere a second jump can start
+    /// from. See [`MacroInvocation::name_at`].
+    ///
+    /// # Why the answer is a pair, and why it can be `None`
+    ///
+    /// A definition that came from another file of a walked unit has real positions, in that file
+    /// ([`crate::macros::MacroFile::Frame`]) — the unit turns the frame into a path, and a consumer that jumped to the range
+    /// alone would open the *wrong* file. And a definition reconstructed from text that carried no position has
+    /// no file at all (`written_in: None`): `None` here is "there is nowhere to go", which is what the caller
+    /// must show, rather than a range that happens to be inside the reconstruction.
+    ///
+    /// The chain is scanned from the inside out, so a token an inherited macro pasted is navigated to the
+    /// *innermost definition that can be pointed at* rather than to a hop with no file.
+    pub fn navigation_at(&self) -> Option<(crate::macros::MacroFile, SourceRange)> {
         match &self.origin {
-            Origin::Expanded { invocations } => invocations
-                .last()
-                .map(|invocation| invocation.name_at)
-                .unwrap_or(self.token.range),
-            _ => self.token.range,
+            Origin::Expanded { invocations } => invocations.iter().rev().find_map(|invocation| {
+                invocation
+                    .written_in
+                    .map(|file| (file, invocation.name_at))
+            }),
+            // A token the file wrote: its own name is where a reader would look, in the file they are reading.
+            _ => Some((crate::macros::MacroFile::Here, self.token.range)),
         }
     }
 
@@ -519,6 +541,7 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
                         definition: definition.range,
                         name_at: definition.name_range,
                         call_site: token.range,
+                        written_in: definition.written_in,
                     };
                     self.expand_body(&definition, &[], tokens, invocation);
                     index += 1;
@@ -575,6 +598,7 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
                         definition: definition.range,
                         name_at: definition.name_range,
                         call_site,
+                        written_in: definition.written_in,
                     };
 
                     self.expand_body(&definition, &arguments.groups, tokens, invocation);

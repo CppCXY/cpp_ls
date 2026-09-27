@@ -1013,6 +1013,51 @@ range 却指向任何文件里都不存在的位置的 token——比"没有答�
 才能给出真位置,这也是 `UnitDefinitions` 落盘的前提);② `UnitDefinitions` 随 TU 落盘或按需读取;
 ③ 然后是 L1/L2 与 M4/M5。
 
+### 定义带上文件身份(`MacroFile`):位置不再撒谎(已落地)
+
+上一节列的第①条做完了。doc 里那句 "until files are identified rather than ranged" 说的就是这件事:一个
+`MacroDef` 原来**只有 range**,而 range 在"定义从哪来"的三种情形里只有一种是真位置:
+
+| 来源 | range 是什么 | 现在怎么标 |
+|---|---|---|
+| 文件自己写的 `#define`(level 0/1) | 那个文件里的位置 | `Some(MacroFile::Here)` |
+| 走查到的**别的文件**的定义(单元) | **那个文件里**的真位置 | `Some(MacroFile::Frame(f))`,`f` 经 `TranslationUnit::frame_file` 变成路径 |
+| 只有文本、被本 crate 重建出来的定义(闭包路径) | 重建串里的 offset,**任何文件里都不存在** | `None` |
+
+落地为五件事:
+
+1. `TuEvent` 记住 `body_range`(替换列表在**写出它的文件**里的位置;`#undef`/空体为 `None`),codec v14 → v15;
+2. `TranslationUnit::definitions()` 不再把定义拼成一行再解析,而是**按原位读**:名字用 `at` + 名字长度、
+   参数表接在名字后(函数宏的参数表紧跟名字,这就是它与 `#define A (x)` 的全部区别)、体用 `body_range` 的
+   起点,各自 lex 后偏移搬到它们真正所在的地方(`definition_written_at` / `lex_in_place`)。于是 body token 的
+   range 就是它在文件里的位置,`written_in` 说清是哪个文件。顺带少了一次 `format!` 重建(89 ms / 42 065 条,
+   比上一轮的 105 ms 略快),`UnitDefinitions` 也因此**不再需要** run 级文本缓存:每个 event 只解析一次,
+   而"同文本不同位置"本来就是**两个**定义;
+3. `MacroInvocation` 带上 `written_in`(从它展开的那个 `MacroDef` 复制),所以调用链里每一跳都知道自己在哪个
+   文件;`ExpandedToken::navigation_range()` 换成 **`navigation_at() -> Option<(MacroFile, SourceRange)>`**:
+   从内向外找**第一个能指的定义**,`None` 表示"哪儿也去不了"(重建的定义),而不是交出一个重建里的 offset;
+4. `RenderedSpan` 现在**两个答案分开**:`written`(拼写在哪,**只在本文件里才算**,否则 `None`)与
+   `reported`(该往哪儿报,永远是本文件里的位置——宏产生的就是**最外层调用点**)。`written_at` 保留语义,
+   新增 `reported_at`。这就是那个真缺陷的收尾:以前继承来的宏体 token 的 `written` 是重建串里的 offset,
+   消费者拿它去切**自己的文件**,切出来的是别的东西;
+5. 探针的失败窗口改用 `reported_at`(可行动的位置),并把"这段文字写在本文件 / 写在别的文件"直接印在窗口
+   开头:`RENDERED[here] …` / `RENDERED[elsewhere] …`(放开头是因为窗口被截到 70 字符,放结尾等于没放)。
+
+**证据**(`tests/translation_unit.rs` 新增一例,走完整条路):`config.h` 定义 `WIDTH 4`,`api.h` 定义
+`API WIDTH`,`main.cpp` 用 `API` —— 那个 `4` 的 `written_at` 是 **`None`**(拼写在 config.h),`reported_at`
+是 main.cpp 里 `API` 的调用点,`navigation_at()` 给出 **`Frame(f)` 且 `frame_file(f) == config.h`**、range 切出
+的正是 `"WIDTH"`;同一夹具的反面:文件自己写的宏仍是 `written_at = Some("7")` + `Here`。
+
+**读数**(255/109/455 熟读、255 裸读):**全部不变**(254/108/452/213);拼出来的单元流也一字不差
+(517 021 / 276 969 / 208 847 token,22/22/4 条错误,首个错误仍在 `sourceannotations.h:1424`)。
+唯一变的是定义计数**换了个意思**:单次走查路径印的是"读了**多少条**定义"(42 065),闭合路径仍是"多少条
+**不同文本**"——两个数都不是噪声,只是回答的问题不同,探针现在用 `read` 标出来。
+
+**还没做的**:想要"拼写在**另一个文件**里的位置"的消费者,现在得自己顺 `origin` 里的调用链读 `written_in`
+(接口已经有了:`MacroFile` + `frame_file`);等 LSP 真的开始熟读,那条链就是跳转/展开视图要用的东西。
+`UnitDefinitions` 的落盘也终于只是"省 89 ms 的重新解析",不再是正确性的前提——它是 events 的纯函数。
+
+
 
 ### M4 —— 文件 CST 降级
 裸树只保留:无损、括号/指令结构、浅层声明扫描。此时它那侧的门禁放宽到"结构正确",不再要求 C++ 正确。

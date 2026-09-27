@@ -102,6 +102,31 @@ pub struct MacroDef {
     /// a second implementation of the same rule, free to disagree with the one that assigned the name.
     /// A go-to-definition puts the cursor here, not at the `#`.
     pub name_range: SourceRange,
+
+    /// **Which file `range`, `name_range` and every body token's range are positions in** — see [`MacroFile`].
+    ///
+    /// A `MacroDef` used to be ranges and nothing else, and that was a lie in two of the three cases a
+    /// definition can be in. A `#define` read from the text in front of the reader is in that file
+    /// ([`MacroFile::Here`]); one that arrived from another file of a walked unit is in *that* file
+    /// ([`MacroFile::Frame`]); and one reconstructed from evidence that carried text and nothing else is in no
+    /// file at all (`None`) — its ranges are offsets in the reconstruction, and showing them points nowhere.
+    pub written_in: Option<MacroFile>,
+}
+
+/// **Which file a definition's positions are in.**
+///
+/// The question every consumer of a range is really asking once definitions cross files, and the one a bare
+/// [`SourceRange`] cannot answer: two files' offsets are both "just numbers". `None` (on the types that carry
+/// this) is the third answer — **no file**: the definition was reconstructed from text, so there is nothing to
+/// open, and a consumer that showed the range anyway would send the reader to a line that is not the one they
+/// meant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MacroFile {
+    /// The file being read or cooked — the caller already has it.
+    Here,
+    /// Frame `file` of the translation unit that produced the definition. The unit turns it into a path
+    /// (`TranslationUnit::frame_file`), and the frame numbers are its own.
+    Frame(u32),
 }
 
 impl MacroDef {
@@ -167,7 +192,7 @@ struct Binding {
 ///
 /// A trait rather than a path→text map because the caller decides where text comes from: a disk provider, the
 /// buffers an editor holds, a test's fixtures. `None` is an answer too, and a load-bearing one — the unit's cook
-/// **records the hole** ([`crate::RenderedUnit::missing`]) rather than cooking an empty file, because "this file
+/// **records the hole** ([`crate::summary::RenderedUnit::missing`]) rather than cooking an empty file, because "this file
 /// is empty" and "this file was not read" are different programs.
 pub trait UnitSources {
     /// The text of `path`, when this caller has it.
@@ -409,6 +434,10 @@ impl MacroTable {
 ///
 /// So the name is any token that could be spelled as an identifier: an identifier, or a keyword. What
 /// it cannot be is punctuation — `#define 1 2` is malformed, and `#define +` likewise.
+///
+/// The ranges are the **tokens' own**, so the answer is [`MacroFile::Here`]: a caller that hands over tokens it
+/// reconstructed rather than read must say so itself — see `parse_a_definition`
+/// (`preprocess::cooked`), which is the one caller that does.
 pub fn parse_define(tokens: &[Token], range: SourceRange) -> Option<MacroDef> {
     let mut index = 0;
 
@@ -431,6 +460,7 @@ pub fn parse_define(tokens: &[Token], range: SourceRange) -> Option<MacroDef> {
         body,
         range,
         name_range,
+        written_in: Some(MacroFile::Here),
     })
 }
 

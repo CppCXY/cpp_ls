@@ -245,7 +245,8 @@ fn an_expanded_token_keeps_its_origin_through_the_file_api() {
     assert_eq!(expanded.text(), "3");
 
     // Navigation reaches the macro's *name*, so that a second jump starts from it.
-    let name_range = expanded.navigation_range();
+    let (name_file, name_range) = expanded.navigation_at().expect("a definition in a file");
+    assert_eq!(name_file, cpp_code_analysis::macros::MacroFile::Here);
     assert_eq!(
         &source[name_range.start_offset..name_range.end_offset()],
         "VERSION"
