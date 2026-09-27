@@ -225,6 +225,29 @@ impl RenderedCooked {
     /// that came from another file's macro bodies has no place **in this file**, and the caller that needs one
     /// asks the tokens' origins.
     pub fn written_span(&self, cooked: SourceRange) -> Option<SourceRange> {
+        self.span_covering(cooked, |span| span.written)
+    }
+
+    /// **Where to report a node** of the rendered tree: the places its tokens should be acted on, from the first
+    /// to the last — always a span **in this file**.
+    ///
+    /// The counterpart of [`RenderedCooked::written_span`], and the one a consumer that keeps facts wants: a
+    /// declaration whose text was pasted in from a header is *reported* at the invocation the reader can see,
+    /// while `written_span` has nothing to say about it at all (the spelling is in another file). When the file
+    /// wrote the tokens itself the two answers are the same span.
+    pub fn reported_span(&self, cooked: SourceRange) -> Option<SourceRange> {
+        self.span_covering(cooked, |span| Some(span.reported))
+    }
+
+    /// The span from the first to the last token of `cooked`, each token contributing `place(span)`.
+    ///
+    /// Shared by the two questions above because they differ only in which place they read out of a span — the
+    /// *shape* of the answer (the extent of the node, `None` when no token has one) is the same question.
+    fn span_covering(
+        &self,
+        cooked: SourceRange,
+        place: impl Fn(&RenderedSpan) -> Option<SourceRange>,
+    ) -> Option<SourceRange> {
         let first = self
             .spans
             .partition_point(|span| span.cooked.end_offset() <= cooked.start_offset);
@@ -234,7 +257,7 @@ impl RenderedCooked {
 
         let chosen = self.spans[first..last]
             .iter()
-            .filter_map(|span| span.written)
+            .filter_map(&place)
             .collect::<Vec<_>>();
         let start = chosen.iter().map(|range| range.start_offset).min()?;
         let end = chosen.iter().map(|range| range.end_offset()).max()?;

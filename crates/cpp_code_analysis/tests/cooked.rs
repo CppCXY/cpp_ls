@@ -514,7 +514,6 @@ fn an_object_like_body_in_force_is_used_by_default_and_can_be_turned_off() {
 }
 
 /// **A cook over two layers answers like a cook over the two merged.**
-///
 /// The layered starting state (`Over`, and `FileMacros` behind it) replaced a per-file table build and a per-file
 /// `extend_from`: the bindings are the same objects either way, and only the *order* decides what wins. That order
 /// is the one the flat table had by construction — the newer layer was inserted later, and the lookup takes the
@@ -542,5 +541,36 @@ fn a_cook_over_two_layers_answers_like_the_two_merged() {
         "3 + 2 + seed_1",
         "the newer layer's `MY_API` wins, the seed answers for what the newer layer never mentions, and both \
          directions expand"
+    );
+}
+/// **A fact whose range is in no file is dropped and counted, never left pointing into a rendering.**
+///
+/// The mapping answers for the *file*, and a fact it cannot place has to go: a declaration whose range is an
+/// offset in the rendering is a declaration that hover, a diagnostic and a jump would all put in the wrong place
+/// — with nothing to report the mistake, because the number is a plausible number. So the fact is dropped, the
+/// drop is counted, and the caller can say how much of a reading it could use.
+#[test]
+fn a_fact_that_cannot_be_placed_is_dropped_and_counted() {
+    let source = "int declared_here;\n";
+    let mut summary = cpp_code_analysis::summarize(
+        std::path::Path::new("/p/a.h"),
+        source,
+        cpp_code_analysis::SummaryKey::new(0, 0),
+    );
+    assert_eq!(summary.declarations.len(), 1, "the fixture declares one thing");
+
+    // A rendering with **no tokens at all**: every range in the summary is unplaceable, which is what a rendering
+    // whose stream is empty looks like from the map's side.
+    let empty = cpp_code_analysis::RenderedCooked::default();
+    let report = summary.map_into_the_file(&empty);
+
+    assert!(
+        summary.declarations.is_empty(),
+        "nothing is left pointing into a rendering"
+    );
+    assert_eq!(report.placed, 0);
+    assert_eq!(
+        report.dropped, 2,
+        "the declaration's range and its name's range: the report counts ranges"
     );
 }

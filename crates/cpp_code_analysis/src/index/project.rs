@@ -166,6 +166,19 @@ pub struct ProjectIndex {
     /// still does for a caller that builds an index by hand. See [`crate::index::environment`] for what the field
     /// is complete about and what it deliberately is not.
     macros: Marked,
+    /// **The declarations the cooked reading found**, by normalized path — the ones a compiler sees.
+    ///
+    /// A second reading beside the first, and only the *declarations* of it, for two reasons that are both about
+    /// not lying: a rendering has no directives, so a cooked summary says `includes: []`, `macros: []`,
+    /// `guards: []` — a reader that took those at face value would conclude the file includes nothing and defines
+    /// nothing — and the one thing a rendering knows that the file's own text does not is what it **declares**:
+    /// the type a macro declared (`DECLARE_HANDLE(HWND)` declares `HWND__` and `HWND`), and the *scope* a
+    /// namespace-opening macro put it in (MSVC's `_STD_BEGIN` is `namespace std {`, so every declaration in
+    /// `<string>` is `std::`-qualified here and at file scope in the raw reading).
+    ///
+    /// **Sparse on purpose**: cooking needs the translation unit's environment, so a caller has this for the files
+    /// it actually read rather than for the whole project, and a file with no entry here is one nobody cooked.
+    cooked: HashMap<String, Vec<DeclFact>>,
     /// What the **condition** on a guarded `#include` was last answered, by `(file, region)`.
     ///
     /// A memo, not a fact: it is cleared whenever a summary is inserted, because that is the only thing that can
@@ -2103,6 +2116,10 @@ impl ProjectIndex {
             }
         }
         self.order.retain(|held| held != &path);
+        // **The cooked reading goes with it.** A file that is no longer indexed must not keep answering
+        // declaration queries out of a rendering nobody has any more — the same rule as the summary, for the
+        // same reason: an answer about a file that is gone is worse than no answer.
+        self.cooked.remove(&path);
 
         true
     }
@@ -2131,6 +2148,31 @@ impl ProjectIndex {
             .get(&normalize(path))
             .map(|includers| includers.iter().map(PathBuf::from).collect())
             .unwrap_or_default()
+    }
+
+    /// **Add the declarations a file's cooked reading found** — see the `cooked` field for what they are and why
+    /// only declarations.
+    ///
+    /// The file must already be in the index ([`ProjectIndex::insert`]): a cooked reading is a *second* answer
+    /// about a file the index knows, and its visibility is the file's own — working that out again per query would
+    /// be a second include-graph walk for an answer already computed.
+    ///
+    /// Inserting **replaces** what was there: a file that was cooked again (its text changed, or its environment
+    /// did) must not keep the old reading's declarations beside the new one's.
+    pub fn insert_cooked(&mut self, path: &Path, declarations: Vec<DeclFact>) {
+        let path = normalize(path);
+        // The memo keyed by `(file, region)` is cleared for the same reason `insert` clears it: an answer about
+        // visibility can only change when what the index holds changes.
+        self.visibility_answers
+            .lock()
+            .expect("the visibility memo is not poisoned")
+            .clear();
+        self.cooked.insert(path, declarations);
+    }
+
+    /// The declarations the file at `path` was **cooked** into, when it was cooked at all.
+    pub fn cooked_declarations(&self, path: &Path) -> Option<&[DeclFact]> {
+        self.cooked.get(&normalize(path)).map(Vec::as_slice)
     }
 
     /// The files in which `name` is visible, in insertion order.
@@ -2163,6 +2205,16 @@ impl ProjectIndex {
     /// which is a jump to something it cannot compile against. `includers_of` and [`ProjectIndex::visible_files`]
     /// are the graph; this is the graph applied to a question.
     ///
+    /// # Two readings, one candidate list
+    ///
+    /// Each visible file contributes its **raw** declarations and, when it has been cooked, its **cooked** ones
+    /// (see the `cooked` field). They are unioned rather than chosen between, and the reason is that the query
+    /// already carries the discriminator: a caller asking for `std::to_string` cannot be answered by the raw
+    /// reading's file-scope `to_string`, and one asking for `to_string` gets both — which is honestly *ambiguous*,
+    /// because which one it means depends on the scope the caller is in. What the union must not do is count the
+    /// same declaration twice: a declaration both readings found (`(qualified name, kind)`) is one candidate, or
+    /// every ordinary declaration would come back as two and every lookup would answer `Ambiguous`.
+    ///
     /// # Why the graph is walked once, and not once per file
     ///
     /// This used to ask `visibility_of` for **each summary** in the index, and each of those answers walked the
@@ -2182,11 +2234,38 @@ impl ProjectIndex {
         let mut found = Vec::new();
 
         for summary in self.summaries() {
-            let Some(visibility) = visible.get(&normalize(&summary.path)) else {
+            let key = normalize(&summary.path);
+            let Some(visibility) = visible.get(&key) else {
                 continue;
             };
 
             for fact in summary.declarations.iter().filter(|fact| accepts(fact)) {
+                found.push(VisibleDeclaration {
+                    file: summary.path.clone(),
+                    fact,
+                    visibility: *visibility,
+                });
+            }
+
+            // …and what the file was **cooked** into, minus what the raw reading already said. `(name, kind)` is
+            // the identity a candidate is deduplicated by — see the method's note.
+            let mut raw: Vec<(&str, crate::DeclKind)> = summary
+                .declarations
+                .iter()
+                .filter(|fact| accepts(fact))
+                .map(|fact| (fact.name.as_str(), fact.kind))
+                .collect();
+            raw.sort_unstable();
+            for fact in self
+                .cooked
+                .get(&key)
+                .into_iter()
+                .flatten()
+                .filter(|fact| accepts(fact))
+            {
+                if raw.binary_search(&(fact.name.as_str(), fact.kind)).is_ok() {
+                    continue;
+                }
                 found.push(VisibleDeclaration {
                     file: summary.path.clone(),
                     fact,
@@ -3318,6 +3397,117 @@ mod tests {
 
         assert_eq!(definition.file, Path::new("/p/widget.h"));
         assert_eq!(definition.fact.name, "Widget");
+    }
+
+    /// **A name only a compiler can see is a name the index answers for — once the file is cooked.**
+    ///
+    /// `DECLARE_HANDLE(HWND)` declares `HWND__` and `HWND` to a compiler and nothing to a reader of the file's
+    /// own text, because the declaration is inside the macro's replacement list. So the raw index cannot find
+    /// either name, and the cooked reading — indexed and mapped back by `FileIndexer::index_rendering` — can.
+    /// This is the whole reason the index holds a second reading.
+    #[test]
+    fn a_declaration_a_macro_makes_is_found_once_the_file_is_cooked() {
+        let files = [
+            (
+                "/p/decl.h",
+                "#define DECLARE_HANDLE(name) struct name##__ { int unused; }; \
+                 typedef struct name##__ *name\n",
+            ),
+            ("/p/api.h", "#include \"decl.h\"\nDECLARE_HANDLE(HWND);\n"),
+        ];
+
+        let mut index = ProjectIndex::new();
+        let mut definitions = crate::MacroDefinitions::default();
+        for (path, source) in files {
+            let mut summary = summarize(Path::new(path), source, SummaryKey::new(0, 0));
+            for include in &mut summary.includes {
+                include.resolved = Some(std::path::PathBuf::from(format!("/p/{}", include.spelling)));
+            }
+            let _ = source;
+            index.insert(summary);
+        }
+
+        let api = Path::new("/p/api.h");
+        let source = files[1].1;
+        let before = index.definition("HWND__", api);
+        assert!(
+            matches!(before, Known::Unknown(_)),
+            "the raw reading cannot see a declaration inside a macro body: {before:?}"
+        );
+
+        // Cook the file **through a unit** — its environment is what makes the macro expand — and hand the index
+        // what came out of it.
+        let text_of = |wanted: &Path| {
+            files
+                .iter()
+                .find(|(path, _)| Path::new(path) == wanted)
+                .map(|(_, source)| *source)
+                .unwrap_or("")
+        };
+        let unit = crate::TranslationUnit::walk(
+            index.summary(api).expect("indexed"),
+            |wanted| {
+                index
+                    .summary(wanted)
+                    .map(|summary| (summary, text_of(wanted)))
+            },
+            &crate::Marked::default(),
+            &mut definitions,
+        );
+        let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+        let unit_definitions = unit.definitions();
+        let macros = crate::preprocess::cooked::FileMacros::new(
+            unit.environment_of(api).expect("the unit reaches api.h"),
+            &unit_definitions,
+            None,
+            true,
+        );
+        let rendered = crate::preprocess::cooked::cook_with(source, &tokens, &macros).render();
+
+        let provider = crate::MemoryFiles::new();
+        let config = crate::CompilerConfig::default();
+        let indexer = crate::FileIndexer::new(&provider, &config);
+        let (cooked, report) = indexer.index_rendering(api, &rendered, SummaryKey::new(0, 0));
+        assert_eq!(report.dropped, 0, "every range landed in the file");
+        index.insert_cooked(api, cooked.declarations);
+
+        // Now it can: the struct the macro declared, and the typedef beside it.
+        let after = index.definition("HWND__", api);
+        let Known::Yes(definition) = after else {
+            panic!("the cooked reading declares it: {after:?}");
+        };
+        assert_eq!(definition.file, api);
+        let written = &source[definition.fact.range.start_offset..definition.fact.range.end_offset()];
+        assert!(
+            written.contains("DECLARE_HANDLE"),
+            "the declaration is reported at the invocation: {written:?}"
+        );
+        assert!(
+            matches!(index.definition("HWND", api), Known::Yes(_)),
+            "and the typedef with it: {:?}",
+            index.definition("HWND", api)
+        );
+    }
+
+    /// **The two readings do not double-count**: an ordinary declaration is in both, and a candidate list that
+    /// held it twice would answer `Ambiguous` for every name in the project.
+    #[test]
+    fn a_declaration_both_readings_found_is_one_candidate() {
+        let source = "struct Plain { int size; };\n";
+        let mut index = index(&[("/p/a.h", source)]);
+
+        let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+        let rendered = crate::preprocess::cooked::cook(source, &tokens).render();
+        let provider = crate::MemoryFiles::new();
+        let config = crate::CompilerConfig::default();
+        let indexer = crate::FileIndexer::new(&provider, &config);
+        let (cooked, report) =
+            indexer.index_rendering(Path::new("/p/a.h"), &rendered, SummaryKey::new(0, 0));
+        assert_eq!(report.dropped, 0);
+        index.insert_cooked(Path::new("/p/a.h"), cooked.declarations);
+
+        let found = index.definition("Plain", Path::new("/p/a.h"));
+        assert!(matches!(found, Known::Yes(_)), "one candidate: {found:?}");
     }
 
     #[test]

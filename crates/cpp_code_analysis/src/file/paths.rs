@@ -91,6 +91,142 @@ impl FileProvider for DiskFiles {
     }
 }
 
+/// **One read of each file per run** — the layer every other layer's text comes from.
+///
+/// # Why this exists, and why it is not merely a speed-up
+///
+/// The walk, the index and the cooker have to see the **same bytes**. Read a file twice and an edit in between
+/// makes them disagree — and a disagreement about macro state is not a diagnostic, it is every rule downstream
+/// answering about a header that is not on disk. That is the failure clang's deps scanner hit when it tried to
+/// share a `FileManager` across builds
+/// ([b00de4d](https://github.com/llvm/llvm-project/commit/b00de4dd4156874fd5c163e9cecd69a54e45e083)), and the
+/// answer is the one this layer takes: cache **content**, ask a question whose answer cannot go stale, and make
+/// invalidation the caller's explicit act.
+///
+/// # What it is not
+///
+/// It is **not** a cache across runs — it is *this* run's snapshot, and the caches that do cross runs
+/// ([`crate::SummaryStore`], [`crate::TranslationUnitCache`]) are keyed by **content hashes** for the same
+/// reason. Nothing here looks at a timestamp: a file whose content changed while its mtime stood still is not a
+/// case this layer can get wrong, because it never asks one. A caller that knows a file changed — an editor's
+/// `didChange`, a watcher's event — says so with [`CachedFiles::reload`].
+///
+/// The text is shared as `Arc<str>`, which is what the layers above want anyway: a definition's body, a file's
+/// source and a summary's slice are all substrings of the same bytes, and handing out a fresh `String` per reader
+/// is an allocation per reader.
+#[derive(Debug)]
+pub struct CachedFiles<F: FileProvider = DiskFiles> {
+    inner: F,
+    /// `path → its text`, by normalized key. `None` is remembered too: a file that is not there is asked for
+    /// **once** per run rather than once per `#include` that names it — an include search that keeps missing is
+    /// the common case in a project whose configuration is not finished.
+    contents: std::sync::Mutex<HashMap<String, Option<std::sync::Arc<str>>>>,
+    /// How many times the provider **under** this one was asked, and for how many distinct paths.
+    ///
+    /// A measurement, and the only way to answer "is this layer doing its job": a run that reads each file once
+    /// and a run that reads each file three times produce the same *answers*, so no assertion about a result can
+    /// tell them apart.
+    reads: std::sync::atomic::AtomicUsize,
+    paths_read: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+impl<F: FileProvider> CachedFiles<F> {
+    pub fn new(inner: F) -> Self {
+        CachedFiles {
+            inner,
+            contents: std::sync::Mutex::new(HashMap::new()),
+            reads: std::sync::atomic::AtomicUsize::new(0),
+            paths_read: std::sync::Mutex::new(std::collections::HashSet::new()),
+        }
+    }
+
+    /// The provider underneath — for a caller that needs to ask it something this layer does not cache.
+    pub fn inner(&self) -> &F {
+        &self.inner
+    }
+
+    /// The text of a file, read **at most once** per run.
+    ///
+    /// The shared `Arc` rather than a fresh `String`: every layer above keeps a *slice* of this text, and the
+    /// second asker should pay a refcount bump rather than a copy of the file.
+    pub fn text(&self, path: &Path) -> Option<std::sync::Arc<str>> {
+        let key = normalize_path(path, self.inner.is_case_insensitive());
+        let mut contents = self
+            .contents
+            .lock()
+            .expect("the content cache is not poisoned");
+
+        if let Some(known) = contents.get(&key) {
+            return known.clone();
+        }
+
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.paths_read
+            .lock()
+            .expect("the read log is not poisoned")
+            .insert(key.clone());
+
+        let text = self
+            .inner
+            .read(path)
+            .map(|text| std::sync::Arc::from(text.as_str()));
+        contents.insert(key, text.clone());
+        text
+    }
+
+    /// Forget what this layer holds for a path, so the next read asks the provider again.
+    ///
+    /// What an editor calls when a buffer changes, and the only way this cache can be wrong — which is the point:
+    /// invalidation is a statement the *caller* makes, not a guess this layer takes.
+    pub fn reload(&self, path: &Path) {
+        let key = normalize_path(path, self.inner.is_case_insensitive());
+        self.contents
+            .lock()
+            .expect("the content cache is not poisoned")
+            .remove(&key);
+    }
+
+    /// How many times the provider underneath has been asked — one per path per run, when this layer is used.
+    pub fn reads(&self) -> usize {
+        self.reads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How many **distinct** paths were read.
+    ///
+    /// Beside [`CachedFiles::reads`] because the two answer different questions: "did anything read a file more
+    /// than once" is the first number against the second, and a run that reads 255 files once each and one that
+    /// reads 3 files 255 times are the same number of reads and different worlds.
+    pub fn paths_read(&self) -> usize {
+        self.paths_read
+            .lock()
+            .expect("the read log is not poisoned")
+            .len()
+    }
+}
+
+impl<F: FileProvider> FileProvider for CachedFiles<F> {
+    /// The cached text, as an owned `String` — the trait's shape, not this layer's preference: a caller that
+    /// wants to avoid the copy asks [`CachedFiles::text`].
+    fn read(&self, path: &Path) -> Option<String> {
+        self.text(path).map(|text| text.to_string())
+    }
+
+    /// **Not cached**: existence is a `stat`, and a run that starts before a file is written should see it appear.
+    /// The hazard this layer exists for is two *contents* disagreeing, and there is no content here to disagree.
+    fn exists(&self, path: &Path) -> bool {
+        self.inner.exists(path)
+    }
+
+    fn is_case_insensitive(&self) -> bool {
+        self.inner.is_case_insensitive()
+    }
+
+    fn is_open_buffer(&self, path: &Path) -> bool {
+        self.inner.is_open_buffer(path)
+    }
+}
+
 /// Files held in memory.
 ///
 /// The test double, and also the shape an editor needs: an unsaved buffer's include must resolve to the
@@ -525,6 +661,72 @@ mod tests {
         let overlay = OverlayFiles::new(memory, disk);
 
         assert_eq!(overlay.read(Path::new("b.h")).as_deref(), Some("from disk"));
+    }
+
+    /// **The second asker pays a refcount bump and not a read.**
+    ///
+    /// The count is the assertion because the *answers* are the same either way: a layer that reads a file once
+    /// and a layer that reads it three times produce identical analyses, and only the provider knows which
+    /// happened.
+    #[test]
+    fn a_content_cache_reads_each_file_once() {
+        let inner = MemoryFiles::new().with_file("a.h", "contents").with_file("b.h", "other");
+        let files = CachedFiles::new(inner);
+
+        let first = files.text(Path::new("a.h")).expect("read");
+        let second = files.text(Path::new("a.h")).expect("read");
+        assert_eq!(&*first, "contents");
+        assert_eq!(first.as_ptr(), second.as_ptr(), "the same text, not a copy");
+        assert_eq!(files.reads(), 1, "one read for two asks");
+        assert_eq!(files.paths_read(), 1);
+
+        // A `FileProvider` caller gets the trait's `String`, and that does not read again either.
+        assert_eq!(files.read(Path::new("a.h")).as_deref(), Some("contents"));
+        assert_eq!(files.reads(), 1);
+
+        // **A file that is not there is remembered as missing.** An include search that keeps missing is the
+        // common case while a project's configuration is unfinished, and one `stat`-and-fail per `#include` is
+        // the difference between a completion list that appears and one that does not.
+        assert_eq!(files.text(Path::new("missing.h")), None);
+        assert_eq!(files.text(Path::new("missing.h")), None);
+        assert_eq!(files.reads(), 2, "a.h once and missing.h once");
+
+        // The other file is a read of its own — one per path, not one per run.
+        assert_eq!(files.text(Path::new("b.h")).as_deref(), Some("other"));
+        assert_eq!(files.paths_read(), 3);
+    }
+
+    /// **Invalidation is the caller's act**, and that is the whole validity argument for this layer.
+    ///
+    /// Nothing here looks at a timestamp: a file whose content changed while its mtime stood still is not a case
+    /// it can get wrong, because it never asks. What it *can* get wrong is being told nothing — so an editor's
+    /// `didChange` is a `reload`, and the next read sees the new text.
+    #[test]
+    fn a_content_cache_forgets_a_file_when_it_is_told_to() {
+        let inner = MemoryFiles::new().with_file("a.h", "before");
+        let files = CachedFiles::new(inner);
+        assert_eq!(files.text(Path::new("a.h")).as_deref(), Some("before"));
+
+        // The provider underneath is where a change would come from; this layer holds `a.h` until it is told.
+        files.reload(Path::new("a.h"));
+        assert_eq!(
+            files.text(Path::new("a.h")).as_deref(),
+            Some("before"),
+            "the text is re-read, and the provider still says what it said"
+        );
+        assert_eq!(files.reads(), 2, "the second ask went to the provider");
+    }
+
+    /// Existence is **not** cached: it is a `stat`, and a run that starts before a file is written should see it
+    /// appear. The hazard this layer exists for is two *contents* disagreeing, and there is no content here.
+    #[test]
+    fn a_content_cache_does_not_cache_existence() {
+        let inner = MemoryFiles::new().with_file("a.h", "contents");
+        let files = CachedFiles::new(inner);
+
+        assert!(files.exists(Path::new("a.h")));
+        assert!(!files.exists(Path::new("b.h")));
+        assert_eq!(files.reads(), 0, "existence is the provider's question, not the cache's");
     }
 }
 

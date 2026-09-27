@@ -607,6 +607,91 @@ fn a_file_without_text_is_a_hole_in_the_unit() {
     );
 }
 
+/// **A macro that declares a type is a declaration in the cooked reading, and points at the invocation.**
+///
+/// This is the whole reason the index reads the cooked stream: `DECLARE_HANDLE(HWND)` declares `HWND__` and
+/// `HWND` to a compiler and *nothing* to a reader of the file's own text, because the declaration is inside the
+/// macro's replacement list. The same measurement on the SDK corpus (255 files, `std_probe --cooked-index`) is
+/// 3 250 declaration names that exist only after expansion — `DECLARE_HANDLE`'s generated structs and members,
+/// and — the larger half — the *scopes*: every declaration between `_STD_BEGIN` and `_STD_END` is `std::`-qualified
+/// in the cooked reading and at file scope in the raw one, which is the difference between a lookup that finds
+/// `std::to_string` and one that does not.
+#[test]
+fn a_macro_that_declares_a_type_declares_it_in_the_cooked_reading() {
+    let declaration = "#define DECLARE_HANDLE(name) struct name##__ { int unused; }; \
+                       typedef struct name##__ *name\n";
+    let files = [
+        ("/p/decl.h", declaration),
+        ("/p/api.h", "#include \"decl.h\"\nDECLARE_HANDLE(HWND);\n"),
+    ];
+
+    let unit = Unit::new(&files);
+    let mut definitions = MacroDefinitions::default();
+    let timeline = unit.timeline_of("/p/api.h", &mut definitions);
+    let shared = timeline.definitions();
+    let config = CompilerConfig::default();
+    let indexer = FileIndexer::new(&unit.files, &config);
+    let key = SummaryKey::new(0, 0);
+
+    let api = Path::new("/p/api.h");
+    let source = unit.sources.get(api).expect("read");
+
+    // **The raw reading**: the file's own text. `DECLARE_HANDLE(HWND);` is an invocation, and the declaration it
+    // stands for is inside `decl.h`'s `#define`, where nothing this file declares lives.
+    let raw = indexer.index(api, source, key);
+    let raw_names: Vec<&str> = raw.declarations.iter().map(|fact| &*fact.name).collect();
+    assert!(
+        !raw_names.contains(&"HWND__") && !raw_names.contains(&"HWND"),
+        "the raw reading cannot see a declaration that is inside a macro body: {raw_names:?}"
+    );
+
+    // **The cooked reading**: the program a compiler sees, indexed and mapped back into the file.
+    let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+    let macros = cpp_code_analysis::FileMacros::new(
+        timeline.environment_of(api).expect("the unit reaches api.h"),
+        &shared,
+        None,
+        true,
+    );
+    let cooked = cpp_code_analysis::cook_with(source, &tokens, &macros);
+    let rendered = cooked.render();
+    assert!(
+        rendered.text.contains("HWND__"),
+        "the rendering has the declaration: {}",
+        rendered.text
+    );
+
+    let (cooked_summary, report) = indexer.index_rendering(api, &rendered, key);
+    let cooked_names: Vec<&str> = cooked_summary
+        .declarations
+        .iter()
+        .map(|fact| &*fact.name)
+        .collect();
+    assert!(
+        cooked_names.contains(&"HWND__"),
+        "the struct the macro declares is a declaration here: {cooked_names:?}"
+    );
+    assert!(
+        cooked_names.contains(&"HWND"),
+        "…and the typedef beside it: {cooked_names:?}"
+    );
+    assert_eq!(report.dropped, 0, "every range landed in the file");
+    assert!(report.placed > 0);
+
+    // **And the range points at the invocation**, which is the only place in this file a reader can act on: the
+    // declaration's text is in `decl.h`, and `map_into_the_file` reports the call site for exactly that reason.
+    let hwnd = cooked_summary
+        .declarations
+        .iter()
+        .find(|fact| fact.name == "HWND__")
+        .expect("declared");
+    let written = &source[hwnd.range.start_offset..hwnd.range.end_offset()];
+    assert!(
+        written.contains("DECLARE_HANDLE"),
+        "the declaration is reported at the invocation: {written:?}"
+    );
+}
+
 /// **A definition knows which file it was written in.**
 ///
 /// A `MacroDef` used to be ranges and nothing else, which is a lie in two of the three places a definition can

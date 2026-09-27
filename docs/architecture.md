@@ -1057,6 +1057,114 @@ range 却指向任何文件里都不存在的位置的 token——比"没有答�
 (接口已经有了:`MacroFile` + `frame_file`);等 LSP 真的开始熟读,那条链就是跳转/展开视图要用的东西。
 `UnitDefinitions` 的落盘也终于只是"省 89 ms 的重新解析",不再是正确性的前提——它是 events 的纯函数。
 
+### L1 —— 内容缓存(已落地):一次运行里每个文件只读一次
+
+`CachedFiles<F: FileProvider>`(`file/paths.rs`,`include::paths` 就是它):`path → Arc<str>`,`None` 也记住
+(一个读不到的 include 在一次运行里只问一次,而不是每个 `#include` 问一次),`reload(path)` 是**调用方**的
+动作,`reads()` / `paths_read()` 是量出来的两个数。
+
+**为什么它不只是"提速"**:走查、索引、熟读必须看见**同一批字节**。读两次,中间文件改了,两层就会不一致——而
+宏状态上的不一致**不报诊断**,它让下游每条规则都回答一个不在盘上的头。这就是 clang 的 deps 扫描器当年
+**取消**跨构建共享 `FileManager` 的原因([b00de4d](https://github.com/llvm/llvm-project/commit/b00de4dd4156874fd5c163e9cecd69a54e45e083));
+这里的答案和那里一样:**缓存内容**,问一个不会过期的问题,**让失效成为调用方的显式动作**。所以这一层:
+不看时间戳(内容变了 mtime 没变的文件不是它能答错的,因为它从不问 mtime);不跨运行(跨运行的两层
+`SummaryStore` / `TranslationUnitCache` 都是**内容哈希**做键);`exists` **不缓存**(它是 `stat`,而且是"运行
+开始时文件还没写出来"要能看见的那种问题,不是内容不一致)。
+
+**实测**(255 熟读,`content:` 一行是探针新印的):
+
+| | 读次数 | 每个文件 | |
+|---|---|---|---|
+| 冷跑(索引 + 走查) | 255 | 1.00 | 一次运行一次 |
+| 命中 TU 缓存(还要校验闭包 255 个文件) | **255** | **1.00** | 校验那 255 次读**全部命中缓存**;改动前是 255 + 255 = 510 |
+
+读数不变(254 干净),`the unit as one stream` 一字不差。这一层的收益**不在秒数上**(13 MB 重读在页面缓存里
+是几十毫秒),在于:同一次运行只有一份**快照**;`Arc<str>` 共享而不是每个读者一份 `String`;以及"这个文件被读了
+几次"这个问题从此有答案——探针每次都印出来。
+
+**剩下的 L2(名字驻留)** 服务的还是这条路的下一段:同一个宏名在几百个文件里出现,驻留之后比较名字是比指针、
+而不是比字节。
+
+### 索引吃熟读(第一步已落地):宏声明的符号第一次进了索引
+
+计划里的第 2 项,先落"能力 + 读数"这一半:
+
+- `RenderedCooked::reported_span(node)`:`written_span` 的**可行动**对偶——一个节点的 token 该在**本文件**的哪儿
+  被处理(宏产生的就是最外层调用点)。两者共用 `span_covering`,只是从 span 里读的字段不同。
+- `FileSummary::map_into_the_file(&RenderedCooked) -> MapReport`:把**从渲染建出来的** summary 变成**文件的**
+  summary——它带的每一个 range 都由 `reported_span` 回答,回答不了的**整条 fact 丢掉并计数**(带一半文件坐标、
+  一半渲染坐标的 fact 不是"少一点",是**错的**,而且不会有任何东西报错)。
+- `FileIndexer::index_rendering(path, &rendered, key)`:解析渲染、建 summary、映射回来,一步到位。
+- 探针 `--cooked-index`:每文件把熟读的渲染**也索引一遍**,印出两种读数的声明数与差集、映射/丢弃数,以及
+  **前 4 个文件的差集样本**(数字要能被人看,否则它只是个数字)。
+
+**实测**(255 / 109 熟读,与其它读数同一批):
+
+| | 声明数(裸读 / 熟读) | **只在展开后存在** | 只在裸读里 | 映射/丢弃 | 第二遍索引耗时 |
+|---|---|---|---|---|---|
+| 255 | 4 820 / 4 062 | **+3 250** | −4 008 | 16 882 / **0** | 3.98 s |
+| 109 | 3 224 / 2 896 | **+2 537** | −2 865 | 14 208 / **0** | 3.69 s |
+
+**样本比数字更重要**,因为"只差在名字上"和"差在作用域上"是两件事:
+
+```text
+<string>  只在展开后: std::stold, std::stoull, std::stoll, std::to_wstring, std::_Integral_to_string, std
+          只在裸读里:  stold, stoull, stoll, to_string, stoi, getline
+winnt 系  只在展开后: CO_MTA_USAGE_COOKIE__, DPI_AWARENESS_CONTEXT__, PWIM_PROVIDER_SUSPEND_OVERLAY_INPUT,
+                     HRESULT_FROM_WIN32, LPFD_SET, PM_CLOSE_PROC
+```
+
+两件事实:①`DECLARE_HANDLE(NAME)` 生成的 `struct NAME##__ { int unused; }` 只在熟读里是**声明**(裸读看到的是
+一次调用);②更要紧的是**作用域**——MSVC STL 的每个声明都夹在 `_STD_BEGIN`/`_STD_END` 之间,而这对宏就是
+`namespace std {` / `}`(在 `yvals_core.h`)。**裸读把 `std::to_string` 记成文件作用域的 `to_string`**,所以
+`std::` 补全在裸读上是找不到东西的;熟读给出的是**限定名**。这一条比 +3 250 那个数字更能说明为什么要吃熟读。
+
+**还没做的**(第 2 项的另一半):①**缓存键**:熟读的 summary 描述的是**渲染**,不是文件,拿文件的内容哈希当键
+是错的——它需要自己的键(渲染的哈希 + 环境的身份),这也是"熟读的 summary 能不能落盘"的前提;②**哪半回答哪个
+问题**要按功能定下来(两种读数的名字相差 3~4 千,取并集不是自动正确的:裸读独有的在没人取的分支和宏体里,
+熟读独有的既有宏声明的、也有**作用域正确**的);③LSP 侧真的用它(开一个文件建两种读数,凡是问"编译到了什么"
+的走熟读)。
+
+### 索引里的第二种读数(已落地):候选集合并,答案由问的名字决定
+
+接上一节:①**键的问题其实已经解决**——`index_rendering` 走 `index_tree`,而它算的是
+`content_hash(source)`,这里的 `source` **就是渲染文本**。环境变了渲染就变,哈希就变,所以熟读的 summary 有
+一个**自校验**的键,不需要第二个字段,也不会和文件的键混起来。②**"哪半回答哪个问题"落成了一个明确的规则**:
+
+- `ProjectIndex` 多一张 `cooked: HashMap<normalized path, Vec<DeclFact>>`,**只放声明**,理由是"不能撒谎":
+  渲染里没有指令,所以熟读 summary 的 `includes`/`macros`/`guards` 全是空的——谁把它当真,谁就会得出"这个文件
+  不包含任何东西、也不定义任何宏"。渲染**知道**而文件不知道自己说的,恰好就是**声明了哪些名字**(宏声明的类型、
+  以及开名字空间的宏给它的**作用域**)。
+- `insert_cooked(path, declarations)` / `cooked_declarations(path)`;`forget` 把两边一起清掉(文件都不在索引里
+  了,还从一份没人在看的渲染里回答声明查询,比没有答案更糟)。
+- **所有声明查询**(`files_declaring`/`declarations_in`/补全/成员)只在**一个地方**取候选:每个可见文件贡献裸读
+  的声明,再贡献熟读的**减去裸读已经说过的**。去重键是 `(名字, kind)`——不去重的话每条普通声明都会出现两次,
+  于是每一次查找都会答 `Ambiguous`。**并集而不是二选一**,因为问题本身带着判别式:问 `std::to_string` 的人,
+  裸读那条文件作用域的 `to_string` 答不了他;而问 `to_string` 的人拿到两条——那是**诚实的歧义**,到底指哪一个取决
+  于提问者所在的**作用域**,索引不该替它猜。
+- 稀疏是**故意**的:熟读要 TU 的环境,所以只有"真的被读过"的文件有这一份,索引里没有条目 = 没人熟读过它。
+
+**实测**(255 熟读,`std_probe --cooked-index`):
+
+```text
+the cooked index: declarations 4820 raw / 4062 cooked | +3250 only after expansion | -4008 only in the raw reading
+| 16882 ranges mapped back, 0 dropped | indexed in 4.12s
+| the index answers for 4 of 40 of those names before and 40 after
+| for example CO_DEVICE_CATALOG_COOKIE, DPI_AWARENESS_CONTEXT, HRESULT_FROM_WIN32, PCSV_QUERY_REDIRECT_STATE, PFD_SET, PM_CLOSE_PROC
+```
+
+最后一行是**问出来的**,不是从 summary 里数出来的:同样一个 `ProjectIndex`、同样一批"只有展开后才存在"的名字,
+`definition(name, root)` 在只装裸读 summary 时只答得出 **4/40**(那 4 个是别的文件的裸读里同名的声明),把每个
+文件的熟读声明 `insert_cooked` 进去之后 **40/40**。测试:`src/index/project.rs` 自己那一组 ——
+`DECLARE_HANDLE` 的故事(裸读答不出 `HWND__`,熟读答得出且 range 指向调用点)、以及"两种读数都找到的声明是
+**一个**候选而不是两个"。
+
+**下一次**(第 2 项收尾 + 第 3 项):把 `index_rendering` 接进 LSP 的会话(开一个文件:建 TU → 熟读本文 →
+`insert_cooked`,文件改动时 `forget`/重来),以及 M4(裸 CST 降级)。
+
+
+
+
 
 
 ### M4 —— 文件 CST 降级

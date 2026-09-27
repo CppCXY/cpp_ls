@@ -53,7 +53,7 @@ fn main() {
     // The full summaries as well, because the positional second pass needs each file's **includes** and each
     // included file's macro facts — that is what `macros_from_direct_includes` turns into parser evidence.
     let mut summaries: HashMap<PathBuf, cpp_code_analysis::FileSummary> = HashMap::new();
-    let mut definition_sources: HashMap<PathBuf, String> = HashMap::new();
+    let mut definition_sources: HashMap<PathBuf, std::sync::Arc<str>> = HashMap::new();
     let seeded = std::env::args().any(|argument| argument == "--seeds");
     // `--closure` walks each direct include's **own** closure rather than stopping one hop down. The two answer
     // different questions — one hop is what the file literally includes, the closure is what the preprocessor
@@ -91,6 +91,14 @@ fn main() {
     // is worth a sentence: after the library's default changed, the probe kept pinning the *old* side of the
     // switch, so every census went on measuring a mode the product no longer used.
     let without_in_force_bodies = std::env::args().any(|argument| argument == "--no-in-force-bodies");
+    // `--cooked-index`: also **index** the cooked reading of every file and map it back into the file, then report
+    // what the two readings declare — the number that says what indexing the cooked stream is worth (a symbol a
+    // macro declares exists only there, and a symbol in a branch nobody takes exists only in the raw reading).
+    //
+    // Off by default because it is a second indexing pass over the whole corpus (scopes + facts per file) and the
+    // census's other numbers do not need it: an instrument that pays for every experiment it can run is an
+    // instrument nobody runs.
+    let cooked_index = std::env::args().any(|argument| argument == "--cooked-index");
     // The **one** lexical setting this probe uses, computed once and handed to every lexer below.
     //
     // It is the product's own default (`LexerConfig::default()`) and there is deliberately no flag to move it:
@@ -124,7 +132,11 @@ fn main() {
     // The corpus *is* the search path: every directory a listed file lives in, offered for both forms of
     // `#include`. That is an approximation of what the compiler searched (no `-I` order, no `#include_next`
     // subtleties), and the seed count is what says how far it got.
-    let files = cpp_code_analysis::DiskFiles;
+    // **One read of each file per run** (L1): the census reads every file to index it, and the TU cache reads
+    // every file again to check that its entry is still valid — the same bytes, twice, and two readers can
+    // disagree if the file moves between them. `CachedFiles` makes it one read, and the count is printed rather
+    // than asserted: a cache nobody uses looks exactly like one that works.
+    let files = cpp_code_analysis::CachedFiles::new(cpp_code_analysis::DiskFiles);
     let mut config = cpp_code_analysis::CompilerConfig::default();
     // **Sorted, and that is not tidiness**: the order of the search path decides which file an `#include` that
     // several directories can satisfy resolves to, and every number this probe prints is downstream of the
@@ -211,7 +223,9 @@ standard {}",
 
     let started = std::time::Instant::now();
     for path in &paths {
-        let Ok(source) = std::fs::read_to_string(path) else {
+        // Through the **content cache**, so that the TU cache's validity check below (which reads every file of
+        // the closure) costs a hash rather than a second read of the disk.
+        let Some(source) = files.text(path) else {
             continue;
         };
         let summary = indexer.index(path, &source, key);
@@ -341,6 +355,18 @@ standard {}",
     let mut parsed_definitions = cpp_code_analysis::ParsedDefinitions::new();
     let mut view_time = std::time::Duration::ZERO;
     let mut parse_time = std::time::Duration::ZERO;
+    // `--cooked-index`: the second indexing pass, and what the two readings declare — see the flag's note.
+    let mut cooked_index_time = std::time::Duration::ZERO;
+    let mut declarations_raw = 0usize;
+    let mut declarations_cooked = 0usize;
+    let mut gained = 0usize;
+    let mut lost = 0usize;
+    let mut cooked_mapped = 0usize;
+    let mut cooked_dropped = 0usize;
+    let mut gained_examples: Vec<String> = Vec::new();
+    let mut shown_cooked_index_samples = 0usize;
+    let mut gained_names: Vec<String> = Vec::new();
+    let mut cooked_by_file: Vec<(PathBuf, Vec<cpp_code_analysis::DeclFact>)> = Vec::new();
 
     // **The translation unit, walked once** — the census's whole cost model changed when this replaced the
     // per-file closure walk, and the printed numbers say by how much: building every file's environment by walking
@@ -373,8 +399,8 @@ standard {}",
             )
             .as_bytes(),
         );
-        let files = cpp_code_analysis::DiskFiles;
-
+        // The **same** content cache the census read through: the cache's validity check reads every file of the
+        // closure, and those bytes are the ones the census already has — see where `files` is built.
         if let Some(cache) = tu_cache.as_ref()
             && let Some(unit) = cache.get(&root, key, &files)
         {
@@ -387,7 +413,7 @@ standard {}",
             summaries.get(&root).expect("the list's first file was indexed"),
             |wanted| {
                 summaries.get(wanted).map(|summary| {
-                    (summary, definition_sources.get(wanted).map(String::as_str).unwrap_or(""))
+                    (summary, definition_sources.get(wanted).map(|text| &**text).unwrap_or(""))
                 })
             },
             &seed,
@@ -494,7 +520,7 @@ standard {}",
                 let (seeds, bodies) = if closure {
                 let look_up = |wanted: &std::path::Path| {
                     summaries.get(wanted).map(|summary| {
-                        (summary, definition_sources.get(wanted).map(String::as_str).unwrap_or(""))
+                        (summary, definition_sources.get(wanted).map(|text| &**text).unwrap_or(""))
                     })
                 };
                 let evidence =
@@ -537,7 +563,7 @@ standard {}",
                 (
                     cpp_code_analysis::macros_from_direct_includes_with_bodies(summary, |wanted| {
                         summaries.get(wanted).map(|summary| {
-                            (summary, definition_sources.get(wanted).map(String::as_str).unwrap_or(""))
+                            (summary, definition_sources.get(wanted).map(|text| &**text).unwrap_or(""))
                         })
                     }),
                     Vec::new(),
@@ -682,6 +708,60 @@ standard {}",
                 }
                 let tree = cpp_parser::CppParser::parse_with_audit(&rendered.text, parser_config());
                 parse_time += parsing.elapsed();
+
+                // **`--cooked-index`**: the same rendering, indexed as a file of its own and mapped back. The
+                // question is not whether the plumbing holds (the level-0 probe answered that: every fact range
+                // maps) but **what the reading is worth** — which declarations a compiler sees that the file's
+                // own text does not say, and which it does not see because their branch is not taken.
+                if cooked_index {
+                    let indexing = std::time::Instant::now();
+                    let (cooked_summary, report) =
+                        indexer.index_rendering(path, rendered, key);
+                    cooked_index_time += indexing.elapsed();
+                    cooked_mapped += report.placed;
+                    cooked_dropped += report.dropped;
+
+                    if let Some(raw) = summaries.get(path) {
+                        let names = |facts: &[cpp_code_analysis::DeclFact]| -> HashSet<String> {
+                            facts.iter().map(|fact| fact.qualified_name()).collect()
+                        };
+                        let raw_names = names(&raw.declarations);
+                        let cooked_names = names(&cooked_summary.declarations);
+                        declarations_raw += raw_names.len();
+                        declarations_cooked += cooked_names.len();
+                        gained += cooked_names.difference(&raw_names).count();
+                        lost += raw_names.difference(&cooked_names).count();
+                        if let Some(example) = cooked_names.difference(&raw_names).next() {
+                            gained_examples.push(example.clone());
+                        }
+
+                        // **The names themselves, for a few files.** A count of names that appear only after
+                        // expansion is a claim about the reading, and a claim about a reading is exactly the kind
+                        // that turns out to be an artefact — so the sample is printed, and what it should look
+                        // like is `DECLARE_HANDLE`'s generated struct and its `unused` member, a typedef out of a
+                        // macro, a function pointer type a macro declares.
+                        if shown_cooked_index_samples < 4 {
+                            shown_cooked_index_samples += 1;
+                            println!("{}", path.display());
+                            for name in cooked_names.difference(&raw_names).take(6) {
+                                println!("   only after expansion: {name}");
+                            }
+                            for name in raw_names.difference(&cooked_names).take(6) {
+                                println!("   only in the raw reading: {name}");
+                            }
+                        }
+
+                        // Kept for the **query** the index is asked after the loop: a handful of names only the
+                        // cooked reading declares, and what each file was cooked into.
+                        for name in cooked_names.difference(&raw_names).take(2) {
+                            if gained_names.len() < 40 {
+                                gained_names.push(name.clone());
+                            }
+                        }
+                        cooked_by_file.push((path.clone(), cooked_summary.declarations.clone()));
+                    }
+                }
+
                 tree
             }
             None => cpp_parser::CppParser::parse_with_audit(&source, raw_config),
@@ -868,6 +948,43 @@ standard {}",
     }
     let parsed = started.elapsed();
 
+    // **The query the index is asked**: can it answer for a name only the cooked reading declares?
+    //
+    // The counts above are about the *summaries*; this is about the **index**, which is what a feature asks. The
+    // same project index, the same names, asked twice — once with only the raw summaries and once with the cooked
+    // declarations added — so the difference is the reading and nothing else.
+    let mut resolved_before = 0usize;
+    let mut resolved_after = 0usize;
+    if cooked_index && !gained_names.is_empty() && !paths.is_empty() {
+        let answered = |index: &cpp_code_analysis::ProjectIndex| {
+            gained_names
+                .iter()
+                .filter(|name| {
+                    // **"Can the index answer at all"**, not "is the answer unambiguous": a name two visible
+                    // headers declare is `Ambiguous`, which is an answer about the project rather than a miss, and
+                    // counting it as a miss would hide exactly what this line is measuring.
+                    !matches!(
+                        index.definition(name, &paths[0]),
+                        cpp_code_analysis::Known::Unknown(
+                            cpp_code_analysis::UnknownReason::NotDeclaredHere(_)
+                        )
+                    )
+                })
+                .count()
+        };
+
+        let mut index = cpp_code_analysis::ProjectIndex::new();
+        for summary in summaries.values() {
+            index.insert(summary.clone());
+        }
+        resolved_before = answered(&index);
+
+        for (path, declarations) in cooked_by_file.drain(..) {
+            index.insert_cooked(&path, declarations);
+        }
+        resolved_after = answered(&index);
+    }
+
     // **The other half of the reading: the unit as one program.**
     //
     // Everything above cooks *one file at a time*, which answers "does this header read on its own" and cannot
@@ -971,9 +1088,35 @@ standard {}",
         None => parsed_definitions.len(),
     };
 
+    // The **cooked index** line — what each reading declares, and what the cooked one buys. Only on
+    // `--cooked-index`, because it is a second indexing pass over the corpus.
+    let cooked_index_line = if cooked_index {
+        let mut examples = gained_examples.clone();
+        examples.sort_unstable();
+        examples.dedup();
+        examples.truncate(6);
+        format!(
+            "the cooked index: declarations {declarations_raw} raw / {declarations_cooked} cooked | \
+             +{gained} only after expansion | -{lost} only in the raw reading | \
+             {cooked_mapped} ranges mapped back, {cooked_dropped} dropped | indexed in {cooked_index_time:?} | \
+             the index answers for {resolved_before} of {} of those names before and {resolved_after} after | \
+             for example {}\n         ",
+            gained_names.len(),
+            if examples.is_empty() {
+                "(none)".to_string()
+            } else {
+                examples.join(", ")
+            }
+        )
+    } else {
+        String::new()
+    };
+
     println!(
         "files {} | clean {} | failing {} | {} KB | {} lines\n\
          index (parse + scopes + facts) {:?} | parse alone {:?}\n\
+         content: {} reads for {} files ({:.2} per file) — one read per file per run, shared with the TU cache's \
+validity check\n\
          {failing} failures: first error on a line mentioning a macro this file defines {explained_by_own} \
          ({:.0}%), any macro the closure defines {explained_by_closure} ({:.0}%)\n\
          positional macro evidence: {total_seeds} seeds over {files_with_seeds} files ({bodies_with_text} with body text), \
@@ -988,7 +1131,7 @@ of rendering for {total_bytes} of text{}{}\n\
          table: left out — bodies in force without a parameter list {unusable_in_force} | function-like definitions \
 without one {unusable_function_like} | definitions without a body {unusable_without_a_body} | unreadable \
 definitions {unusable_unreadable}\n\
-         {unit_stream}         seed shapes: {}\n\
+         {unit_stream}         {cooked_index_line}seed shapes: {}\n\
          decision points: {macro_questions} macro questions | {macro_question_names} name-questions, summed \
 over the files | busiest file {busiest_questions}",
         paths.len(),
@@ -998,6 +1141,9 @@ over the files | busiest file {busiest_questions}",
         total_lines,
         indexed,
         parsed,
+        files.reads(),
+        files.paths_read(),
+        files.reads() as f64 / files.paths_read().max(1) as f64,
         explained_by_own as f64 * 100.0 / failing.max(1) as f64,
         explained_by_closure as f64 * 100.0 / failing.max(1) as f64,
         paths.len(),

@@ -143,6 +143,40 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         self.index_tree(path, source, &tree, key)
     }
 
+    /// **Index a file through its cooked stream** — the reading a compiler would parse, with every range turned
+    /// back into a position in the file.
+    ///
+    /// The tree is built from `rendered.text` (a rendering, whose offsets are not file offsets), so this indexes
+    /// the rendering and then answers for every range through
+    /// [`FileSummary::map_into_the_file`](crate::FileSummary::map_into_the_file). What comes out is a summary of
+    /// the same *shape* as one from the file's own text, describing the program a compiler sees instead of the
+    /// text the file says: `DECLARE_HANDLE(HWND)` declares `HWND` here and declares nothing there, and a name
+    /// inside a branch nobody takes is declared there and not here.
+    ///
+    /// Two readings rather than one replacement, and that is the architecture's split rather than a limitation:
+    /// the raw summary answers "what is written in this file" (every branch, every macro body — what a reader
+    /// editing the file sees) and this answers "what is compiled" (what the editor's *other* features must agree
+    /// with). See `examples/cooked_index.rs` for the measurement of how far apart they are.
+    ///
+    /// The rendering is the caller's because the caller cooked the stream: what to define before it, and which
+    /// file's environment to use, are compilation decisions this type has no way to make.
+    pub fn index_rendering(
+        &self,
+        path: &Path,
+        rendered: &crate::preprocess::cooked::RenderedCooked,
+        key: SummaryKey,
+    ) -> (FileSummary, crate::MapReport) {
+        let mut config = ParserConfig::default().with_dialect(self.config.dialect());
+        if let Some(bodies) = self.bodies {
+            config = config.with_macros_from_includes(bodies);
+        }
+
+        let tree = CppParser::parse(&rendered.text, config);
+        let mut summary = self.index_tree(path, &rendered.text, &tree, key);
+        let report = summary.map_into_the_file(rendered);
+        (summary, report)
+    }
+
     /// [`FileIndexer::index`] for a caller that already has the tree.
     ///
     /// Parsing twice is the most expensive thing this layer can be asked to do, and an editor usually has the tree

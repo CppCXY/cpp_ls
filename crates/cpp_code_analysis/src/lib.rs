@@ -76,10 +76,10 @@ pub use tu_cache::{TRANSLATION_UNITS_DIRECTORY, TranslationUnitCache};
 pub use summary::ConditionalBody;
 pub use summary::{
     ConditionAt, ConditionalRegion, DeclFact, DeclKind, FactGuard, FileSummary, GuardBranch,
-    IncludeFact, MacroFact, MacroKind, MacroView, SummaryGuards, TranslationUnit, UnitDefinitions,
-    macros_from_direct_includes, macros_from_direct_includes_with_bodies,
+    IncludeFact, MacroFact, MacroKind, MacroView, MapReport, SummaryGuards, TranslationUnit,
+    UnitDefinitions, macros_from_direct_includes, macros_from_direct_includes_with_bodies,
     macros_from_the_closure_with_bodies, ClosureEvidence, macros_in_force_before_the_include,
-    MacroDefinitions,
+    MacroDefinitions, RenderedUnit, UnitSpan,
 };
 // `guard` is the exception: `preprocess::guard` and `preprocess::guards` differ by one letter, which is exactly
 // the hazard the folders are meant to remove, so the *analysis* keeps the plural name and the types are reached
@@ -135,8 +135,8 @@ pub use modules::{
     scan_imports,
 };
 pub use paths::{
-    DiskFiles, FileId, FileProvider, MemoryFiles, OverlayFiles, PathInterner, join_normalized,
-    normalize_path, parent_normalized,
+    CachedFiles, DiskFiles, FileId, FileProvider, MemoryFiles, OverlayFiles, PathInterner,
+    join_normalized, normalize_path, parent_normalized,
 };
 pub use preprocess::{FilePreprocessing, PositionalMacros, preprocess};
 pub use cooked::{

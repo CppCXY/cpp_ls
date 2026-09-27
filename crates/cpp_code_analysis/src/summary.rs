@@ -261,7 +261,7 @@ impl DeclFact {
 /// A **smaller** vocabulary than [`crate::BindingKind`] on purpose: this is what a summary stores, and a stored
 /// value is read by consumers that were written before it. `Other` is not a failure — it is "a declaration is here,
 /// and its kind is not one the index distinguishes", which still answers "jump to the definition".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DeclKind {
     Type,
     Function,
@@ -2563,6 +2563,103 @@ impl FileSummary {
             }
         }
     }
+
+    /// **Turn a summary built from a rendering back into a summary of the file.**
+    ///
+    /// A rendering's offsets are not file offsets — they are positions in text this crate spelled out — so a
+    /// summary built by parsing one describes a file that does not exist. This is what makes it usable: every
+    /// range it carries is answered for by [`crate::RenderedCooked::reported_span`], which is the place in the file a
+    /// reader can act on (the invocation when a macro produced the text, the file's own span otherwise), and the
+    /// facts whose ranges cannot be placed at all are **dropped and counted** rather than left pointing into a
+    /// rendering.
+    ///
+    /// # What is in a rendering's summary
+    ///
+    /// Only declarations, and that is a property of what a rendering is: the directives are gone, so there are no
+    /// macros, no includes and no conditional regions to place. The other fields are mapped anyway — the function
+    /// is about the *type*, and a caller that hands it a summary from something directive-bearing should get
+    /// answers for every range rather than silent rendering offsets in one field.
+    ///
+    /// Dropping is the honest answer for a fact whose range cannot be placed: an empty node covers no token, and a
+    /// declaration the parser recovered out of nothing has nothing to point at. It is counted so that a caller can
+    /// say how much of a reading it could use — see [`MapReport`].
+    pub fn map_into_the_file(&mut self, rendered: &crate::preprocess::cooked::RenderedCooked) -> MapReport {
+        let mut report = MapReport::default();
+        let place = |range: cpp_parser::SourceRange, report: &mut MapReport| {
+            match rendered.reported_span(range) {
+                Some(mapped) => {
+                    report.placed += 1;
+                    Some(mapped)
+                }
+                None => {
+                    report.dropped += 1;
+                    None
+                }
+            }
+        };
+
+        self.declarations.retain_mut(|fact| {
+            let (Some(range), Some(name_range)) =
+                (place(fact.range, &mut report), place(fact.name_range, &mut report))
+            else {
+                // One of the two did not place, and a declaration is kept **whole or not at all**: half of it in
+                // the file and half of it in a rendering is not a smaller answer, it is a wrong one.
+                return false;
+            };
+            fact.range = range;
+            fact.name_range = name_range;
+            true
+        });
+
+        self.macros.retain_mut(|fact| {
+            let Some(range) = place(fact.range, &mut report) else {
+                return false;
+            };
+            fact.range = range;
+            fact.body_range = fact.body_range.and_then(|body| place(body, &mut report));
+            true
+        });
+
+        self.includes.retain_mut(|fact| {
+            let Some(range) = place(fact.range, &mut report) else {
+                return false;
+            };
+            fact.range = range;
+            true
+        });
+
+        self.macro_readings.retain_mut(|reading| {
+            let Some(range) = place(reading.range, &mut report) else {
+                return false;
+            };
+            reading.range = range;
+            true
+        });
+
+        // Regions are mapped **in place or not at all**: a fact's guard is an *index* into this list, so dropping
+        // one would renumber the guards of every fact after it — a silently wrong summary rather than a smaller
+        // one. A rendering has none of them (see the note), which is why this can be this simple.
+        for region in &mut self.guards.regions {
+            if let Some(mapped) = place(*region, &mut report) {
+                *region = mapped;
+            }
+        }
+
+        report
+    }
+}
+
+/// How a summary's ranges mapped back into a file — see [`FileSummary::map_into_the_file`].
+///
+/// Both numbers count **ranges**, which is what the mapping answers for: a fact with two ranges contributes two
+/// answers, and a fact one of whose ranges fails is dropped whole — so [`MapReport::dropped`] is what was *lost*,
+/// not what was kept.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MapReport {
+    /// Ranges that landed in the file.
+    pub placed: usize,
+    /// Ranges that landed nowhere, taking their facts with them.
+    pub dropped: usize,
 }
 
 impl DeclKind {
