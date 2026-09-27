@@ -163,7 +163,7 @@ where
 /// (`void (*f(int a))(int b)`) has two in the same declaration. The declarator the name is a name *of* is the one
 /// whose list says what the name's parameters are, and it is found the way the scope builder finds a declaration's
 /// name (`sema::scopes::declared_name`) — the same relationship, read from the other end.
-fn parameter_list_of(view: &FileView, offset: usize) -> Option<CppSyntaxNode> {
+pub(crate) fn parameter_list_of(view: &FileView, offset: usize) -> Option<CppSyntaxNode> {
     let token = cpp_parser::token_at(&view.root, offset)?;
 
     let declarator = token
@@ -184,7 +184,7 @@ fn parameter_list_of(view: &FileView, offset: usize) -> Option<CppSyntaxNode> {
 /// macro's arguments, which the parser keeps as a balanced token group in an `ArgumentList` child. There is no
 /// expression there to put a name against, and a hint on a raw token would be a guess about where an argument
 /// begins.
-fn arguments_of(call: &CppSyntaxNode) -> Option<Vec<CppSyntaxNode>> {
+pub(crate) fn arguments_of(call: &CppSyntaxNode) -> Option<Vec<CppSyntaxNode>> {
     let mut children = call.children();
     children.next()?; // the callee
 

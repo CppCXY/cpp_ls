@@ -1495,6 +1495,265 @@ fn the_outline_shows_the_file_and_not_the_compiler() {
     server.notify("exit", Value::Null);
 }
 
+/// The semantic-token fixture: a macro, a namespace, a class with a method, and a parameter.
+const COLOURS_CPP: &str = "\
+#define LIMIT 8
+namespace shapes {
+struct Widget {
+    int size;
+    int scaled(int factor) const;
+};
+}
+";
+
+/// **Semantic colours: each name is drawn as what declares it**, over the wire.
+///
+/// The answer is the protocol's delta walk — five numbers per token, the first two relative to the token before —
+/// so the test decodes it back into absolute positions the way a client does, and asserts that a specific name is
+/// drawn as a *specific legend entry*. That last part is the one a unit test cannot check: the numbers only mean
+/// something against the legend the server advertised in `initialize`, and a legend that disagreed with the
+/// encoding would colour every name as whatever sits at that index.
+#[test]
+fn semantic_colours_are_the_kinds_the_declarations_have() {
+    let project = Project::new("semantic-tokens");
+    project.write("main.cpp", COLOURS_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    let capabilities = server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+                "textDocument": {
+                    "semanticTokens": {
+                        "requests": { "full": true },
+                        "tokenTypes": ["namespace", "type", "typeParameter", "enumMember", "function",
+                                       "method", "variable", "parameter", "macro"],
+                        "tokenModifiers": ["declaration"],
+                        "formats": ["relative"],
+                    },
+                },
+            },
+        }),
+    );
+    let legend = capabilities["result"]["capabilities"]["semanticTokensProvider"]["legend"].clone();
+    let index_of = |name: &str| -> u64 {
+        legend["tokenTypes"]
+            .as_array()
+            .expect("a legend")
+            .iter()
+            .position(|kind| kind == name)
+            .unwrap_or_else(|| panic!("the legend has no `{name}`: {legend}")) as u64
+    };
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": COLOURS_CPP }
+        }),
+    );
+
+    let answer = server.ask_until(100, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/semanticTokens/full",
+            "params": { "textDocument": { "uri": main_uri } },
+        })
+    });
+
+    let data = answer["result"]["data"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a token array was expected, got {answer}"));
+    let numbers: Vec<u64> = data
+        .iter()
+        .map(|value| value.as_u64().expect("the encoding is numbers"))
+        .collect();
+    assert_eq!(numbers.len() % 5, 0, "five numbers per token: {numbers:?}");
+
+    // The client's own reconstruction: absolute line and character, then the length and the kind.
+    let mut line = 0u64;
+    let mut character = 0u64;
+    let mut tokens: Vec<(u64, u64, u64, u64, u64)> = Vec::new();
+    for token in numbers.chunks(5) {
+        if token[0] == 0 {
+            character += token[1];
+        } else {
+            line += token[0];
+            character = token[1];
+        }
+        tokens.push((line, character, token[2], token[3], token[4]));
+    }
+
+    let at = |needle: &str| -> (u64, u64) {
+        let line = COLOURS_CPP
+            .lines()
+            .position(|text| text.contains(needle))
+            .expect("the fixture writes it") as u64;
+        let character = COLOURS_CPP
+            .lines()
+            .nth(line as usize)
+            .and_then(|text| text.find(needle))
+            .expect("the fixture writes it") as u64;
+        (line, character)
+    };
+
+    let coloured = |needle: &str| -> Option<(u64, u64, u64)> {
+        let (line, character) = at(needle);
+        tokens
+            .iter()
+            .find(|token| token.0 == line && token.1 == character)
+            .map(|token| (token.2, token.3, token.4))
+    };
+
+    assert_eq!(
+        coloured("LIMIT").map(|(_, kind, _)| kind),
+        Some(index_of("macro")),
+        "a macro this file defines: {tokens:?}"
+    );
+    assert_eq!(
+        coloured("shapes").map(|(_, kind, _)| kind),
+        Some(index_of("namespace")),
+        "{tokens:?}"
+    );
+    assert_eq!(
+        coloured("Widget").map(|(_, kind, _)| kind),
+        Some(index_of("type")),
+        "a class is a type here: {tokens:?}"
+    );
+    assert_eq!(
+        coloured("size").map(|(_, kind, _)| kind),
+        Some(index_of("variable")),
+        "a field is a variable: {tokens:?}"
+    );
+    assert_eq!(
+        coloured("scaled").map(|(_, kind, _)| kind),
+        Some(index_of("method")),
+        "a function in a class is a method: {tokens:?}"
+    );
+    assert_eq!(
+        coloured("factor").map(|(_, kind, _)| kind),
+        Some(index_of("parameter")),
+        "and a parameter is not a variable: {tokens:?}"
+    );
+
+    // The length is the name's own, and the modifier says it is where the name is declared.
+    let (length, _, modifiers) = coloured("LIMIT").expect("the macro is coloured");
+    assert_eq!(length, "LIMIT".len() as u64);
+    assert_eq!(modifiers, 1, "the declaration modifier: {tokens:?}");
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
+/// The signature fixture: a documented declaration, and a call being typed into.
+const SIGNATURE_CPP: &str = "\
+/// Scales a count.
+/// @param count the count
+int scale(int count, double factor);
+
+int f() {
+    return scale(1, );
+}
+";
+
+/// **The signature popup, while the second argument is being typed.**
+///
+/// The cursor sits right after the comma — the state a signature exists for — and what has to come back is the
+/// declaration's own text, the two parameter spans *inside that label*, the second one active, and the
+/// documentation the file wrote above the declaration. A client bolds the active parameter by slicing the label
+/// with the span, which is what this test does with it.
+#[test]
+fn a_signature_is_shown_while_the_arguments_are_typed() {
+    let project = Project::new("signature-help");
+    project.write("main.cpp", SIGNATURE_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": SIGNATURE_CPP }
+        }),
+    );
+
+    let call_line = SIGNATURE_CPP
+        .lines()
+        .position(|line| line.contains("scale(1, )"))
+        .expect("the fixture writes the call") as u64;
+    let after_the_comma = SIGNATURE_CPP
+        .lines()
+        .nth(call_line as usize)
+        .and_then(|line| line.find("scale(1, "))
+        .expect("the fixture writes the call")
+        + "scale(1, ".len();
+
+    let answer = server.ask_until(100, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/signatureHelp",
+            "params": {
+                "textDocument": { "uri": main_uri },
+                "position": { "line": call_line, "character": after_the_comma },
+            },
+        })
+    });
+
+    let signature = &answer["result"]["signatures"][0];
+    assert_eq!(
+        signature["label"], "scale(int count, double factor)",
+        "the declaration's own text: {answer}"
+    );
+    assert_eq!(answer["result"]["activeSignature"], json!(0));
+    assert_eq!(
+        answer["result"]["activeParameter"],
+        json!(1),
+        "the cursor is past the first comma, so the second parameter is active: {answer}"
+    );
+
+    // The parameter spans are offsets into the label — the client's own use of them, done here.
+    let label = signature["label"].as_str().expect("a label");
+    let spans: Vec<&str> = signature["parameters"]
+        .as_array()
+        .expect("the parameters are sent")
+        .iter()
+        .map(|parameter| {
+            let offsets = parameter["label"].as_array().expect("offsets");
+            let start = offsets[0].as_u64().expect("a start") as usize;
+            let end = offsets[1].as_u64().expect("an end") as usize;
+            &label[start..end]
+        })
+        .collect();
+    assert_eq!(spans, vec!["int count", "double factor"]);
+
+    let documentation = signature["documentation"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the documentation above the declaration: {answer}"));
+    assert!(documentation.contains("Scales a count."), "{documentation}");
+    assert!(documentation.contains("@param count"), "{documentation}");
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
 /// The hover fixture: a documented function, one with a plain comment above it, and a `this` in a member function.
 const HOVER_CPP: &str = "\
 /// Adds two counts.

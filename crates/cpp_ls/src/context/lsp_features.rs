@@ -22,6 +22,20 @@ impl LspFeatures {
             .unwrap_or_default()
     }
 
+    /// **The token types the client says it can draw** — `None` when it does not do semantic tokens at all.
+    ///
+    /// The server's legend is fixed (the numbers in an answer are indices into it), so this is a *filter* rather
+    /// than a legend: a kind the client cannot draw is left out of the answer instead of being sent as a number it
+    /// maps to nothing. An empty list is treated as "said nothing" by the caller, because a client that asks for
+    /// tokens without naming any type is one this server cannot filter for.
+    pub fn semantic_token_types(&self) -> Option<Vec<lsp_types::SemanticTokenType>> {
+        self.client_capabilities
+            .text_document
+            .as_ref()
+            .and_then(|text_document| text_document.semantic_tokens.as_ref())
+            .map(|semantic_tokens| semantic_tokens.token_types.clone())
+    }
+
     pub fn supports_config_request(&self) -> bool {
         self.client_capabilities
             .workspace

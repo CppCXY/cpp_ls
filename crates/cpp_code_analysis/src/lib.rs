@@ -47,7 +47,9 @@ pub mod inlay;
 pub mod preprocess;
 pub mod project;
 pub mod sema;
+pub mod semantic;
 pub mod session;
+pub mod signature;
 pub mod summary;
 pub mod summary_codec;
 

@@ -1531,6 +1531,21 @@ impl<F: FileProvider + Clone> Session<F> {
         crate::inlay::parameter_hints(self.store.index(), view, range, |path| self.view(path))
     }
 
+    /// **What each name in this file is** — the classification a semantic highlighter draws colours from.
+    ///
+    /// Read from the file's own bindings and macro directives, and from the index for a spelling the file does not
+    /// declare itself; a name nothing can be said about is left out rather than guessed at. See
+    /// [`crate::semantic`] for the four questions, in the order they are asked, and for the measurement behind
+    /// asking the index **once per spelling** rather than once per identifier.
+    ///
+    /// Nothing here is a position question, so the answer does not depend on a cursor — but it does depend on the
+    /// index, and a file whose includes have not been read yet answers with **fewer** classifications rather than
+    /// with different ones. A caller that publishes these should therefore publish them again once
+    /// [`Session::pending`] reaches zero.
+    pub fn classified_names(&self, view: &FileView) -> Vec<crate::semantic::Name> {
+        crate::semantic::classified_names(self.store.index(), view)
+    }
+
     /// **The file's foldable regions** — see [`crate::folding`].
     ///
     /// Read from the **buffer's own tokens and directives**, which is the same source the outline uses and for the
@@ -1539,6 +1554,25 @@ impl<F: FileProvider + Clone> Session<F> {
     /// cooked reading, or any other file — a fold is a fact about this text.
     pub fn folding_ranges(&self, view: &FileView) -> Vec<crate::folding::Fold> {
         crate::folding::folding_ranges(&view.source, view.tree.get_tokens())
+    }
+
+    /// **The signature of the call the cursor is inside** — see [`crate::signature`].
+    ///
+    /// The parameters come from the *callee's* declaration, so a call into a header parses that header for this
+    /// answer (once — the file being edited is already parsed). What the analysis resolves is **one** declaration:
+    /// a name with several of them is either resolved to one or answered with nothing, and neither is a guess
+    /// about which overload a half-typed argument list means.
+    ///
+    /// The documentation above the declaration is read here rather than by the caller: it is the same declaration
+    /// the signature came from, and asking twice would be two lookups for one popup.
+    pub fn signature_at(&self, view: &FileView, offset: usize) -> Option<crate::signature::CallSignature> {
+        let mut signature =
+            crate::signature::signature_at(self.store.index(), view, offset, |path| self.view(path))?;
+
+        signature.documentation =
+            self.documentation(view, &signature.declared_in, signature.declared_at);
+
+        Some(signature)
     }
 
     /// The members of a type, as a file's own scopes and the index together know them.

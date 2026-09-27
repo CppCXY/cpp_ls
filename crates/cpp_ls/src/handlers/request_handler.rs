@@ -25,6 +25,8 @@ use lsp_types::request::{
     Completion, DocumentDiagnosticRequest, DocumentSymbolRequest, FoldingRangeRequest,
     GotoDefinition, HoverRequest, InlayHintRequest, PrepareRenameRequest, References, Rename,
     Request as LspRequest, SelectionRangeRequest,
+    SemanticTokensFullRequest,
+    SignatureHelpRequest,
     WorkspaceSymbolRequest,
 };
 
@@ -40,6 +42,8 @@ use super::{
     inlay_hint::on_inlay_hint,
     references::on_references,
     selection_range::on_selection_range,
+    semantic_token::on_semantic_tokens,
+    signature_help::on_signature_help,
     rename::{on_prepare_rename, on_rename},
     workspace_symbol::on_workspace_symbol,
 };
@@ -88,6 +92,8 @@ pub async fn on_request_handler(
         InlayHintRequest => on_inlay_hint,
         References => on_references,
         SelectionRangeRequest => on_selection_range,
+        SemanticTokensFullRequest => on_semantic_tokens,
+        SignatureHelpRequest => on_signature_help,
         PrepareRenameRequest => on_prepare_rename,
         Rename => on_rename,
         WorkspaceSymbolRequest => on_workspace_symbol,

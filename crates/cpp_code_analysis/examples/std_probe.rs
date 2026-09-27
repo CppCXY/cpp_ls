@@ -99,6 +99,17 @@ fn main() {
     // census's other numbers do not need it: an instrument that pays for every experiment it can run is an
     // instrument nobody runs.
     let cooked_index = std::env::args().any(|argument| argument == "--cooked-index");
+    // `--dump-raw-only <path>`: write **every** name the raw reading declares and the cooked reading does not,
+    // one line each, with what kind of declaration it is, whether it is inside a conditional block, and where it
+    // is. The counts `--cooked-index` prints answer "how many"; this answers "**which**", which is the question a
+    // decision about a raw-reading-only rule needs: a name that exists in a branch nobody takes is a different
+    // cost from a name the file declares unconditionally.
+    //
+    // Sorted, and one record per line, so that two runs — with and without the rule — can be diffed as text.
+    let dump_raw_only: Option<PathBuf> = std::env::args()
+        .position(|argument| argument == "--dump-raw-only")
+        .and_then(|at| std::env::args().nth(at + 1))
+        .map(PathBuf::from);
     // `--session`: the same corpus through the **session**, which is the layer the product uses. Everything the
     // census does above is this probe's own loop over the list; this drives a `Session` with the same list —
     // `add_project_files` then `index_everything` — and splits the time into "indexed" and "cooked", because those
@@ -377,6 +388,10 @@ standard {}",
     let mut shown_cooked_index_samples = 0usize;
     let mut gained_names: Vec<String> = Vec::new();
     let mut cooked_by_file: Vec<(PathBuf, cpp_code_analysis::CookedFile)> = Vec::new();
+    // Every name only the raw reading declares, as a line of the `--dump-raw-only` file: the name, what kind of
+    // declaration it is, whether it is conditional, and where it is. The name is first so that a `sort` of the whole
+    // file groups a name with every file that declares it.
+    let mut raw_only_records: Vec<String> = Vec::new();
 
     // **The translation unit, walked once** — the census's whole cost model changed when this replaced the
     // per-file closure walk, and the printed numbers say by how much: building every file's environment by walking
@@ -787,6 +802,30 @@ standard {}",
                         // have read its own sampling noise as a regression. A sorted sample of a fixed size is the
                         // same 200 names whenever the two builds agree, which is what makes it a gate.
                         gained_names.extend(cooked_names.difference(&raw_names).cloned());
+                        // The **records**, for the question the counts cannot answer. A fact's guard says whether
+                        // the declaration is inside a conditional block, which is the difference between "this name
+                        // is in a branch nobody compiles" and "this name is in the file's own unconditional text" —
+                        // and it is the first thing a reader of the dump needs to know.
+                        if dump_raw_only.is_some() {
+                            for fact in &raw.declarations {
+                                let name = fact.qualified_name();
+                                if cooked_names.contains(&name) {
+                                    continue;
+                                }
+
+                                raw_only_records.push(format!(
+                                    "{}\t{:?}\t{}\t{}\t{}",
+                                    name,
+                                    fact.kind,
+                                    match &fact.guard {
+                                        cpp_code_analysis::FactGuard::Unconditional => "unconditional",
+                                        cpp_code_analysis::FactGuard::Region(_) => "conditional",
+                                    },
+                                    path.display(),
+                                    fact.name_range.start_offset,
+                                ));
+                            }
+                        }
                         cooked_by_file.push((
                             path.clone(),
                             cpp_code_analysis::CookedFile {
@@ -1303,8 +1342,28 @@ over the files | busiest file {busiest_questions}",
         },
     );
 
-    let mut ranked: Vec<(&String, &usize)> = by_message.iter().collect();
-    ranked.sort_by(|one, other| other.1.cmp(one.1));
+    // **The raw-only names, written where two runs can be diffed** — see `--dump-raw-only`. Sorted, so a `diff` of
+    // two runs shows what a rule change moved rather than what order the walk happened to visit files in.
+    if let Some(target) = &dump_raw_only {
+        raw_only_records.sort();
+        let unconditional = raw_only_records
+            .iter()
+            .filter(|record| record.split('\t').nth(2) == Some("unconditional"))
+            .count();
+
+        std::fs::write(target, raw_only_records.join("\n") + "\n")
+            .unwrap_or_else(|error| panic!("cannot write {}: {error}", target.display()));
+
+        println!(
+            "\n--- raw-only declarations: {} records, {} unconditional, {} conditional (written to {}) ---",
+            raw_only_records.len(),
+            unconditional,
+            raw_only_records.len() - unconditional,
+            target.display()
+        );
+    }
+
+    let mut ranked: Vec<(&String, &usize)> = by_message.iter().collect();    ranked.sort_by(|one, other| other.1.cmp(one.1));
     // **The total is printed, not just the top of the list**: the list is truncated, so "add up what you see" is
     // not the number — and every number in `docs/` that came from this probe is a total. (Found the hard way:
     // 15 lines summed to 920 while the file really had 941 messages, because the tail beyond the top 15 is real.)

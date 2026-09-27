@@ -33,6 +33,8 @@ mod notification_handler;
 mod references;
 mod rename;
 mod selection_range;
+mod signature_help;
+mod semantic_token;
 mod request_handler;
 mod response_handler;
 mod text_document;
@@ -94,6 +96,8 @@ capabilities!(modules: {
     references => ReferencesCapabilities,
     rename => RenameCapabilities,
     selection_range => SelectionRangeCapabilities,
+signature_help => SignatureHelpCapabilities,
+semantic_token => SemanticTokenCapabilities,
     workspace_symbol => WorkspaceSymbolCapabilities,
     diagnostic => DiagnosticCapabilities,
     configuration => ConfigurationCapabilities,

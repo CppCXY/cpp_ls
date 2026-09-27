@@ -35,6 +35,7 @@ use cpp_code_analysis::{
     DeclFact, DeclKind, DiskFiles, FactGuard, FileView, Known, ProjectDefinition, ProjectMacro,
     Session,
 };
+use cpp_parser::CppDocComment;
 use lsp_types::{
     ClientCapabilities, Hover, HoverContents, HoverParams, HoverProviderCapability, MarkupContent,
     MarkupKind, ServerCapabilities,
@@ -230,8 +231,14 @@ fn documentation_markdown(
     file: &std::path::Path,
     offset: usize,
 ) -> Option<String> {
-    let comment = session.documentation(view, file, offset)?;
+    documentation_text(&session.documentation(view, file, offset)?)
+}
 
+/// The comment as markdown — `None` when it is not written as documentation, or says nothing.
+///
+/// Shared with signature help, which shows the same comment beside the parameter being typed: one rendering, so
+/// that two popups about one declaration cannot disagree about what it says.
+pub(crate) fn documentation_text(comment: &CppDocComment) -> Option<String> {
     if !comment.is_documentation() {
         return None;
     }
