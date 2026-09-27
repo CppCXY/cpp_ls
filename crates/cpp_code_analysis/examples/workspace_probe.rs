@@ -54,7 +54,7 @@ fn main() {
         index.declarations_in("std", &file).len(),
         session.project_files().len()
     );
-    for header in ["string", "optional", "iostream"] {
+    for header in ["string", "optional", "iostream", "istream", "ostream", "xstring"] {
         let path = std::path::PathBuf::from(format!(
             "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.35.32215\\include\\{header}"
         ));
@@ -116,6 +116,23 @@ fn main() {
             session.index().definition(name, &file).value().map(|found| found.fact.qualified_name())
         );
     }
+    // **The classes a member access needs**, and the members themselves: a name whose *type* resolves is only half
+    // the answer — `std::cin.read` also needs `read` to be in the class the type names.
+    for class in ["std::basic_istream", "std::basic_ostream", "std::basic_string"] {
+        let members = session.index().declarations_in(class, &file);
+        println!(
+            "   members of {class} = {} (has `read`: {} | has `size`: {})",
+            members.len(),
+            members.iter().any(|member| member.fact.name == "read"),
+            members.iter().any(|member| member.fact.name == "size")
+        );
+    }
+    for name in ["std::istream", "std::cin", "std::basic_istream", "basic_istream", "std::basic_ostream"] {
+        println!(
+            "   definition({name:?}) = {:?}",
+            session.index().definition(name, &file).value().map(|found| (found.fact.qualified_name(), found.fact.type_of.clone()))
+        );
+    }
     for name in ["std::string", "string", "std::optional", "std::cin", "std::getline"] {
         println!(
             "  after cooking: index.definition({name:?}) = {:?}",
@@ -125,12 +142,59 @@ fn main() {
                 .value()
                 .map(|found| (found.fact.qualified_name(), found.fact.kind))
         );
+        // **And every candidate**, when the answer is not one: `Ambiguous` has several causes that read the same
+        // from the answer alone, and a name two *readings* of one file both found is a different defect from a name
+        // two files declare.
+        let candidates = session.index().files_declaring(name, &file);
+        for found in candidates.iter().take(6) {
+            println!(
+                "        candidate: {} name={:?} scope={:?} kind={:?} type_of={:?} local={} {:?}",
+                found.file.file_name().unwrap_or_default().to_string_lossy(),
+                found.fact.name,
+                found.fact.scope,
+                found.fact.kind,
+                found.fact.type_of,
+                found.fact.local,
+                found.visibility
+            );
+        }
+        // **Which reading produced them**: the raw facts of the declaring file, and what it was cooked into. Two
+        // candidates that are the same declaration mean one of the two lists has it twice — or that the other one
+        // has it under a different kind, which the union keeps.
+        if candidates.len() > 1 {
+            for found in candidates.iter().take(1) {
+                let path = found.file.clone();
+                let short = name.rsplit("::").next().unwrap_or(name);
+                let raw = session
+                    .index()
+                    .summary(&path)
+                    .map(|summary| {
+                        summary
+                            .declarations
+                            .iter()
+                            .filter(|fact| fact.name == short)
+                            .map(|fact| format!("{:?}@{:?}", fact.kind, fact.scope))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let cooked = session
+                    .index()
+                    .cooked_declarations(&path)
+                    .map(|facts| {
+                        facts
+                            .iter()
+                            .filter(|fact| fact.name == short)
+                            .map(|fact| format!("{:?}@{:?}", fact.kind, fact.scope))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                println!("        {short}: raw {raw:?} | cooked {cooked:?}");
+            }
+        }
     }
     let string_header = std::path::PathBuf::from(
         "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.35.32215\\include\\xstring",
-    );
-    if let Some(summary) = session.index().summary(&string_header) {
-        println!("--- what <string>''s {} declarations are called ---", summary.declarations.len());
+    );    if let Some(summary) = session.index().summary(&string_header) {        println!("--- what <string>''s {} declarations are called ---", summary.declarations.len());
         for fact in summary.declarations.iter().take(400) {
             if matches!(fact.name.as_str(), "string" | "basic_string" | "allocator" | "char_traits" | "size_t") {
                 println!("   name={:<16} qualified={:<28} scope={:?} kind={:?}", fact.name, fact.qualified_name(), fact.scope, fact.kind);
@@ -138,6 +202,31 @@ fn main() {
         }
         let scoped = summary.declarations.iter().filter(|fact| fact.scope.is_some()).count();
         println!("   of {} declarations, {scoped} carry a scope", summary.declarations.len());
+    }
+
+    // **A header whose class never arrived.** `<istream>` is indexed and its `basic_istream` is asked for by name
+    // everywhere, so what its summary actually holds is the difference between "the facts are filed wrong" and
+    // "the file's body was never read": the names, in source order, with the scope each was filed under.
+    let istream_header = std::path::PathBuf::from(
+        "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.35.32215\\include\\istream",
+    );
+    if let Some(summary) = session.index().summary(&istream_header) {
+        let text = std::fs::read_to_string(&istream_header).unwrap_or_default();
+        let line_of = |offset: usize| text[..offset.min(text.len())].matches('\n').count() + 1;
+        let scoped = summary.declarations.iter().filter(|fact| fact.scope.is_some()).count();
+        println!(
+            "\n--- <istream>: {} declarations, {scoped} of them scoped ---",
+            summary.declarations.len()
+        );
+        for fact in summary.declarations.iter().take(30) {
+            println!(
+                "   {:>5}  {:<24} {:<24} {:?}",
+                line_of(fact.range.start_offset),
+                fact.name,
+                fact.scope.as_deref().unwrap_or("<file scope>"),
+                fact.kind
+            );
+        }
     }
 
     // **The cooked reading of one STL header, asked for directly.** This is the measurement that decides the fix:

@@ -125,7 +125,7 @@ pub fn declared_type_of(root: &CppSyntaxNode, binding: &Binding) -> Option<Strin
             .children()
             .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq)
         {
-            found = Some(specifiers.text().to_string());
+            found = Some(specifiers);
         }
         // The declarator, whose own text holds the operators the specifiers do not — see below. The **innermost**
         // one on the path wins, because the path follows the name: for a parameter the outermost declarator is
@@ -151,7 +151,7 @@ pub fn declared_type_of(root: &CppSyntaxNode, binding: &Binding) -> Option<Strin
         }
     }
 
-    let spelling = strip_declaration_specifiers(found.as_deref()?);
+    let spelling = strip_declaration_specifiers(&type_spelling_of(&found?));
     let Some(declarator) = declarator else {
         return (!spelling.is_empty()).then_some(spelling);
     };
@@ -564,6 +564,33 @@ const DECLARATION_SPECIFIERS: &[&str] = &[
     "const",
     "volatile",
 ];
+
+/// The type a specifier sequence spells: its own text, or — when it holds **several names** — from the last one on.
+///
+/// A macro standing where a declaration specifier goes is an ordinary name to the grammar, so
+/// `_EXPORT_STD extern "C++" __PURE_APPDOMAIN_GLOBAL _CRTDATA2_IMPORT istream cin;` holds **three** names in one
+/// specifier sequence and the type is the last of them. No C++ type is spelled as two unqualified names in a row —
+/// `unsigned long` is two *keywords*, and a keyword is not a `NameExpr` — so the count is the whole rule, and it is
+/// the shape the name reader already documents: a reader that took the first name bound `_CRTDATA2_IMPORT`.
+///
+/// Measured, and it is what made `std::cin` unanswerable: MSVC's `<iostream>` declares `cin` twice, and the second
+/// declaration recorded the type as `__PURE_APPDOMAIN_GLOBAL _CRTDATA2_IMPORT istream` where the cooked reading of
+/// the same line recorded `istream`. A name query answers `Ambiguous` for two declarations of one variable, and the
+/// type query that is supposed to settle it could not: the two spellings disagreed, so `std::cin`, `std::cin.read`
+/// and a completion after `std::cin.` all had nothing to say.
+fn type_spelling_of(specifiers: &CppSyntaxNode) -> String {
+    let names: Vec<CppSyntaxNode> = specifiers
+        .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr)
+        .collect();
+
+    let Some(last) = names.last().filter(|_| names.len() > 1) else {
+        return specifiers.text().to_string();
+    };
+
+    let from = usize::from(last.text_range().start()) - usize::from(specifiers.text_range().start());
+    specifiers.text().to_string()[from..].to_string()
+}
 
 /// Remove declaration specifiers from the front of a type spelling, and trim what is left.
 fn strip_declaration_specifiers(spelling: &str) -> String {

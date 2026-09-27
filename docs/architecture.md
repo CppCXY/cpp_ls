@@ -1910,6 +1910,76 @@ cook(<string>)                                    0 声明、0 处映射 ← 整
 toolchain 形状:没 compiler / 有目录没宏表 / 答过)。**反证**:把这一位改回"读过编译数据库吗" → 两条都变红
 (集成那条答 `None` 而不是 `Some("std")`),改回即绿 ✓。
 
+### 追 `std::cin` 追出三处(已落地):限定名不是名字、`extern "C++"` 后面的声明不见了、类型拼写带着宏
+
+环境这一位修好之后,用户那个文件里剩下的拒答集中在三处,每一处都是独立缺陷(而它们一起挡住了同一个问句
+"`std::cin` 是什么"):
+
+```text
+type_at("std::cin")   UnknownType   8 处   ← ① ② ④ 三条一起挡住它
+type_at("std::cout")  UnknownType   5 处
+definition("std::cin")  Ambiguous   3 处   ← 两个候选,type_of 一个 "istream"、一个 "__PURE_APPDOMAIN_GLOBAL _CRTDATA2_IMPORT istream"
+members of std::basic_istream   0          ← 42 个成员(含 read)全在 `extern "C++"` 后面不见了
+```
+
+**① 限定名不是名字。** `type_of_expression` 认名字的判据是"每个字符都是字母数字或 `_`",于是 `lib::global`、
+`std::cin`、`ns::make()` 全都不是名字,直接落到最后那个 `UnknownType` ✗。语言里限定名就是**一个**名字(链是它的
+拼写,不是包着它的表达式),判据因此换成 `writes_a_name`:裸标识符,或 `::` 串起来的链。
+
+**② 问名字的 offset 在链尾。** `definition_at` 是按**光标**读链的:光标在 `a::b::c` 的 `a` 上,问的是 `a::b`。
+而一个表达式节点是**整条链**(用户指的是那个实体),所以问题要问在链尾。这里踩了一个行内坑,值得记下来:节点
+range **含尾随 trivia**(`int w = 1;` 里 `w` 的 `NameExpr` 结束在空格**之后**),`end - 1` 落在名字外面,
+`UnparsableName` 让**所有**普通名字同时失去类型 ✗(四条测试一起变红才看见);正确写法是"最后一个 Identifier
+token 的起点"。
+
+**③ `extern "C++"` 后面的声明全不见了。** MSVC 的 iostream 整套都是这个形状:
+
+```cpp
+_EXPORT_STD extern "C++" template <class _Elem, class _Traits>
+class basic_istream : virtual public basic_ios<_Elem, _Traits> { … };
+```
+
+解析器为它建的是"一个 `Declaration`,说明符里是 `ExternSpec`,**孩子**是它修饰的那个 `Declaration`"(见
+`parse_linkage_specification`)。而作用域走查在 `declaration_parts` 开头有一条"没有名字的声明什么也不声明"的
+保护(`f(x);` 那种最恼人的解析),链接规范正好没有名字 → **直接 return** ✗:类、它的全部成员、以及所有继承它的
+东西都不进索引。实测 `<istream>`:`class basic_istream` 在第 **24** 行,而摘要里第一条 fact 在第 **715** 行
+(全文 935 行)。修法是把链接规范认出来,把它盖住的东西**在同一个作用域里**走一遍(链接不是作用域:名字属于外围
+名字空间);判据必须是**那个字符串字面量**而不是 `extern` 关键字——按关键字判会把 `extern Widget global;` 也
+当成链接规范,实测这一条让两条类型测试变红 ✓。
+
+**④ 类型的拼写带着宏。** `__PURE_APPDOMAIN_GLOBAL extern _CRTDATA2_IMPORT istream cin;` 里两个宏在语法上就是
+两个 `NameExpr`,于是"取说明符序列原文"得到的类型是 `__PURE_APPDOMAIN_GLOBAL _CRTDATA2_IMPORT istream`,而同
+一行**熟读**之后是 `istream`——同一份声明两个拼写。没有 C++ 类型是"两个裸名字并排"(`unsigned long` 是两个
+**关键字**,不是 `NameExpr`),所以规则是树形的而不是名字表:**说明符序列里有不止一个 `NameExpr` 时,类型从最后
+一个开始**。
+
+**它们怎么合起来解决 `std::cin`**:类型层拿到 `std::cin` → 索引给出**两个**候选(`<iostream>` 第 21 行和第 39
+行各一份,这是头文件真实的写法)→ 名字查询答 `Ambiguous` → 而**类型查询能答**:两份声明的类型在 ④ 之后都是
+`istream` ✓,于是新增的规矩是"候选**一致**时类型不是歧义"(不一致、或候选是函数——函数没有"作为名字的类型"——
+仍然 `Unknown`)。
+
+**实测**(用户那个目录,MSVC 14.35.32215,`workspace_probe`):
+
+| 问 | 修前 | 修后 |
+|---|---|---|
+| 有类型的标识符 | 65(上一轮 47) | **75** |
+| `type_at("std::cin")` / `("std::cout")` | 8 + 5 处拒答 | **0** ✓ |
+| `members of std::basic_istream` | 0 | **42(含 `read`)** ✓ |
+| `std::` 处补全 | 1482 | **1517** ✓ |
+| `<istream>` 摘要的第一条 fact | 第 715 行 | 第 24 行起 ✓ |
+
+**没解决的,以及为什么不是顺手能做**:`definition("std::cin")` 仍是 `Ambiguous`——两份声明**都是真的**,C++ 说
+它们是同一个实体,把它答成第一条是"跳转取第一个"的规矩(`direct_member` 已经这么做),而**名字**查询现在答
+`Ambiguous`,用户看到的是"跳不到"。真要修是**协议层的列表答案**(`definition` 可以发多个 location),那是下一轮;
+同理 `std::getline` 的四个重载、以及 `std::char_traits<char>::length` 这类**链中间带模板实参**的写法(要去掉实参
+再查,属于实例化那一片)。
+
+**证据**:`tests/types.rs` 六条(限定名在本文件、在头文件、成员穿过它、链接规范里的类有成员、同名两份声明**一致**时
+仍然有类型、**不一致**时仍然拒答)、`tests/scopes.rs` 两条(链接规范声明了什么、`extern` 变量仍然是声明)。**反证**:
+链尾 offset 改回 `end - 1` → 四条变红;链接规范的判据改回 `extern` 关键字 → 两条变红;把"候选一致"那条规则关掉 →
+一条变红(另一条本来就是负例)✓;去掉类型拼写那条规则 → `std::cin` 的两个候选又不一致(`istream` 对
+`__PURE_APPDOMAIN_GLOBAL _CRTDATA2_IMPORT istream`,探针实测),类型那一格重新拒答 ✓。
+
 ### M4 —— 文件 CST 降级
 裸树只保留:无损、括号/指令结构、浅层声明扫描。此时它那侧的门禁放宽到"结构正确",不再要求 C++ 正确。
 **验收**:宽容语法里针对展开的谓词清零。
@@ -1920,7 +1990,7 @@ toolchain 形状:没 compiler / 有目录没宏表 / 答过)。**反证**:把这
 
 ## 7. 度量与门禁
 
-每次改动后必须全绿(测试基线:**1375 个测试**、49 个 suite,实测;`cargo clippy --workspace --all-targets`
+每次改动后必须全绿(测试基线:**1382 个测试**、49 个 suite,实测;`cargo clippy --workspace --all-targets`
 零警告,`cargo doc` 零警告,`cpp_dump` 零错误):
 
 ```bash
@@ -2127,28 +2197,32 @@ cargo run --release --example workspace_probe -- <dir> [<file.cpp>]
   正文在 `#if _STL_COMPILER_PREPROCESSOR` 里——这三个名字**只有编译器认识**。判据从"读过 `compile_commands.json` 吗"
   换成"编译器答过预定义宏吗",同一目录实测 `declarations_in("std")` **13 → 2600**、`std::` 处补全 **→ 1482 个名字**、
   `cook(<string>)` **0 → 1000 声明**、无解标识符 **46 → 9**;代价是冷读 3.5 s → 16.5 s(热读 8.5 s)。这一位也进了缓存键。见 §6 那一节。
+- **限定名/链接规范/类型拼写(本轮)**:追 `std::cin` 追出来的三处——限定名在那层不算名字 ✗、`extern "C++"`
+  后面的声明整个没进索引(实测 `<istream>` 第一条 fact 在第 715 行,而类在第 24 行)✗、类型的拼写带着
+  `__PURE_APPDOMAIN_GLOBAL` 这类宏 ✗。修完:有类型的标识符 65 → **75**、`std::cin`/`std::cout` 的 13 处拒答归零、
+  `std::basic_istream` 的成员 0 → **42**、`std::` 补全 1482 → **1517**。见 §6 那一节。
 - **LSP 的能力表现在是十三项**:诊断(push + pull)、definition、hover、completion、documentSymbol、foldingRange、
   references、rename(含 `prepareRename`)、workspaceSymbol、selectionRange、inlayHint、semanticTokens、signatureHelp ✓。
 
 **下一步(按依赖排序)**(更新到本轮之后):
-1. **补全/跳转的两个 `Ambiguous`(本轮量出来的,最值钱)**:`std` 这个名字本身在用户那个文件里 25 处答
-   `Ambiguous`(命名空间被每个头各重开一次,不是歧义 ✗),重载成员(`find`/`empty`/`substr`/`size`/`read`…)约 61 处
-   同理——它们要的答案是**一组声明**(协议侧:definition 发多个 location,hover 发一个列表),而不是"说不清" ✓。
-2. **`type_at` 对标准库对象仍拒答**(`UnknownType("std::cin")` 8 处、`std::cout` 5 处):名字查得到(`definition` 答
-   `Variable`),但它的 `type_of`(`istream`,一个别名)没被接着走一步 ✗——这是悬停"类型"那一格与成员补全的共同前置。
-3. **删除形状规则(M4)**:**这一轮的账把结论改了**——不再是"看着账做",而是一句有数的话:这一族买到的是
+1. **`definition` 的列表答案(本轮把它顶到第一位)**:`std::cin` 在 `<iostream>` 里声明**两次**(第 21/39 行),
+   `std::getline` 有四个重载,`std` 这个名字被三十个头各重开一次——现在这三种都答 `Ambiguous`,而用户看到的是
+   "跳不过去" ✗。类型那一格已经能靠"候选一致"救回来(§6 本轮 ④),**名字**那一格救不回来:协议允许 `definition`
+   发**多个 location**,所以要改的是答案的形状,而不是再加一条偏好规则。
+2. **链中间带模板实参的限定名**(`std::char_traits<char>::length`):去掉实参再查是实例化那一片的第一小步,
+   量在探针里(用户那个文件 3 处);`std::string::npos`(9 处)是同一族的别名版本——限定名要穿过
+   `std::string` → `basic_string` 这一步别名。
+3. **类型推断的下一块:模板实例化**。`auto` 那条线量过:109 档语料 54/60 个 `auto` 拒答全在模板体内,要算出
+   `_STy::value_type`、`_Get_value(...)` 这类依赖名就得做实例化;`type_at` 现在对普通对象、限定名、指针/解引用/
+   下标/调用都能答(本轮 ④ 之后 `std::cin` 也答了),剩下的拒答基本都指向这一块。
+4. **删除形状规则(M4)**:**这一轮的账把结论改了**——不再是"看着账做",而是一句有数的话:这一族买到的是
    **94 个活着的声明**(`qsort`、`bsearch`、`_itoa_s` 这一档,以及 UCRT 那些被注解过的参数名)+ 304 个死分支声明;
    丢掉它们的第一个消费者是**大纲**(它刻意读裸读),条件那 304 个连索引并集一起丢。所以在"大纲显示死分支"
    这条产品选择不变的前提下**不删**;要动它,先回答"大纲该不该读两种读数的并集"(§6 那一节末尾)。两个开关点
    的归因也已经分开量过:site 1 只买 30 个(6 个无条件),site 2 买 378 个(90 个无条件)并**遮住** 52 个。
-4. **候选排序**:`std::` 现在给 1482 个名字,第一屏是 `FILE`/`_Add_pointer` 这类内部名,而用户要的是 `string`/`vector`
+5. **候选排序**:`std::` 现在给 1517 个名字,第一屏是 `FILE`/`_Add_pointer` 这类内部名,而用户要的是 `string`/`vector`
    (`sort_and_hide` 只做去重与遮蔽,没有"常用在前"这一格)。
-5. **熟读剩下的文件**:255/109 两档只剩 `sourceannotations.h`,已判定是 `/analyze` 专属语法(**非缺口**)。
-6. **L2(名字驻留)**:量过,是噪声级别(§6 L1/L2),不做;L1/L4 已完成。
-7. **带括号的声明符(§8 第 8 条)**:`void (*f(int a))(int b);` 这类声明还没进符号模型,是这一轮做提示时
-   量出来的一个**独立**缺口;影响的是跳转/悬停/补全/改名这一整片,所以要先量影响面再动 `declared_name`。
-8. **类型推断(下一步最重)**:这一层到今天为止回答的是**读出来的**类型,`auto` 已经变成可计算的类型(§6 那一节),
-   顺带证明了这条线怎么走:**先量出拒答的量,再决定下一个小步**。109 档里 54/60 个 `auto` 拒答,全部落在模板体内
-   ——它们要的是**模板实例化**(把 `_STy::value_type`、`_Get_value(...)` 这类依赖名算出来),那是下一块建模,
-   量就摆在那里 ✓。再往后是重载解析(签名帮助里明确没做的那一半)与 `decltype`。协议侧的口子已经全接完(十三项 ✓),
-   所以这条线现在是纯粹的建模工作,不再有 LSP 方法要加 ✓。
+6. **熟读剩下的文件**:255/109 两档只剩 `sourceannotations.h`,已判定是 `/analyze` 专属语法(**非缺口**)。
+7. **L2(名字驻留)**:量过,是噪声级别(§6 L1/L2),不做;L1/L4 已完成。
+8. **带括号的声明符(§8 第 8 条)**:`void (*f(int a))(int b);` 这类声明还没进符号模型,是做提示那一轮量出来的
+   一个**独立**缺口;影响的是跳转/悬停/补全/改名这一整片,所以要先量影响面再动 `declared_name`。

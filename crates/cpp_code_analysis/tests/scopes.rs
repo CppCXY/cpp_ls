@@ -1634,3 +1634,51 @@ fn the_file_scope_has_no_qualified_name() {
     assert_eq!(table.scope(root).expect("the scope").name, None);
     assert_eq!(table.qualified_name_of(root), None);
 }
+
+/// **A linkage specification declares what it covers**, in the scope it was written in.
+///
+/// Both spellings are one construct (`parse_linkage_specification`): a `Declaration` whose specifiers say
+/// `extern "C"`/`extern "C++"` and whose *child* is what the linkage applies to — a nested declaration, or a
+/// block. Neither declares a name of its own, and neither is a scope: a linkage is a property of the
+/// declarations inside, and their names belong to the enclosing namespace.
+///
+/// This is MSVC's shape for the whole iostream hierarchy —
+/// `_EXPORT_STD extern "C++" template <class _Elem, class _Traits> class basic_istream : … { … };` — and while
+/// the walk stopped at the unnamed outer declaration, `<istream>`'s first indexed fact was at line **715** of
+/// 935 with `class basic_istream` at line 24: no class, no members, and nothing inheriting from them.
+#[test]
+fn a_linkage_specification_declares_what_it_covers() {
+    let source = "\
+namespace std {
+extern \"C++\" template <class _Elem, class _Traits>
+class basic_istream {
+public:
+    void read(int n);
+    int member;
+};
+extern \"C\" { void c_function(int); }
+}
+";
+    let table = scopes(source);
+
+    assert_eq!(
+        shape(&table),
+        // `basic_istream` and `c_function` are both names of `std` — the class from the nested declaration, the C
+        // function from the block — and `_Elem`/`_Traits` are in a parameter scope **inside** `std` while the
+        // class's own name is not: the template's parameters are visible in the class and the class is visible
+        // outside it.
+        "File{std}(Ns{basic_istream,c_function}(Params{_Elem,_Traits}(Class{member,read}(Fn{n})) Fn))",
+        "the class and the C function are both declared, in `std`"
+    );
+}
+
+/// …and an ordinary `extern` variable is still a declaration: the **string literal** is the difference.
+///
+/// `extern Widget global;` carries the same `ExternSpec` node as `extern "C"`, and reading the keyword as the
+/// whole test stopped it being declared at all — measured, this fixture's name disappearing from the file.
+#[test]
+fn an_extern_variable_is_a_declaration() {
+    let table = scopes("struct Widget { int size; };\nextern Widget global;\n");
+
+    assert_eq!(shape(&table), "File{Widget,global}(Class{size})");
+}

@@ -1167,7 +1167,12 @@ pub(crate) fn type_of_expression(
 
     // A name: its declaration says what type it has. The file being edited is asked first, because a buffer that
     // has never been saved has no summary — the two-layer split the name query uses, for the same reason.
-    if !written.is_empty() && written.chars().all(|c| c.is_alphanumeric() || c == '_') {
+    //
+    // **Qualified or bare is the same case**, and that is C++'s rule rather than a convenience: `lib::global` is one
+    // entity, and the chain is part of its *spelling* — a scope to descend through, not an expression around a name.
+    // Read the other way (a bare name only) every qualified name in every file was `UnknownType`: `lib::global`,
+    // `std::cin`, `ns::make()` — measured, `a_qualified_name_in_this_file_has_the_type_its_declaration_wrote`.
+    if writes_a_name(written) {
         return match declaration_of_expression(index, scopes, root, path, expression) {
             Known::Yes(named) => match declared_type(index, scopes, root, path, &named, depth) {
                 Known::Yes(type_of) => Known::Yes((type_of, named.file(path))),
@@ -1266,7 +1271,7 @@ pub(crate) fn type_of_expression(
 
     // A member access: the type of the member, which is a fact on its declaration.
     if let Some(inner) = crate::sema::resolve::member_access_of(expression) {
-        let Known::Yes((inner_type, _)) =
+        let Known::Yes((inner_type, declared_in)) =
             type_of_expression(index, scopes, root, path, &inner.object, depth + 1)
         else {
             let Known::Unknown(reason) =
@@ -1282,7 +1287,25 @@ pub(crate) fn type_of_expression(
             return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
         }
 
+        // **The class as the declaration spelled it, and then as the name that spelling resolves to.** A type
+        // written inside a namespace is spelled there *without* its qualifier — MSVC's `<iostream>` writes
+        // `extern istream cin;` inside `std` — so a member lookup for `std::cin.read` is handed `istream` while the
+        // class it needs is `std::istream`. C++ resolves that spelling in the scope the declaration is in; this
+        // asks the index for the **name** from the file the declaration is in, which is the same lookup whenever
+        // that file sees exactly one such name — and no answer at all (with the first reason kept) when it sees
+        // several, which is the direction this layer fails in.
         let found = member_fact(index, scopes, root, path, class, &inner.member);
+        let found = match found {
+            Known::Yes(found) => Known::Yes(found),
+            Known::Unknown(reason) => match declared_class(index, &declared_in, class) {
+                Some(qualified) => match member_fact(index, scopes, root, path, &qualified, &inner.member) {
+                    Known::Yes(found) => Known::Yes(found),
+                    Known::Unknown(_) | Known::No => Known::Unknown(reason),
+                },
+                None => Known::Unknown(reason),
+            },
+            Known::No => Known::No,
+        };
         let Known::Yes((fact, file)) = found else {
             let Known::Unknown(reason) = found else {
                 unreachable!("the first match established that this is an `Unknown`")
@@ -1297,6 +1320,60 @@ pub(crate) fn type_of_expression(
     }
 
     Known::Unknown(UnknownReason::UnknownType(Box::from(written)))
+}
+
+/// The type **every** visible declaration of `name` agrees on — the declaration to read it from, and its file.
+///
+/// The one question a type query can still answer when a *name* query cannot: `Ambiguous` means several
+/// declarations are visible, and "which one is it" has no answer, while "what type does it have" does whenever
+/// they all say the same thing — which redeclarations do by construction
+/// (`extern istream cin;` written twice in MSVC's `<iostream>`, once of them under `extern "C++"`).
+///
+/// `None` when there is nothing visible, when any candidate is a function or a class (neither has a type *as a
+/// name* — see [`DeclFact::returns`]), or when two candidates spell the type differently. A disagreement is
+/// exactly what `Ambiguous` was about, so it is not resolved here.
+fn agreeing_type(
+    index: &ProjectIndex,
+    path: &Path,
+    name: &str,
+) -> Option<(DeclFact, PathBuf)> {
+    let candidates = index.files_declaring(name, path);
+    let mut agreeing: Option<(DeclFact, PathBuf)> = None;
+
+    for found in &candidates {
+        let type_of = found.fact.type_of.as_deref()?;
+        match &agreeing {
+            None => agreeing = Some((found.fact.clone(), found.file.clone())),
+            Some((first, _)) if first.type_of.as_deref() == Some(type_of) => {}
+            Some(_) => return None,
+        }
+    }
+
+    agreeing
+}
+
+/// The longer spelling a bare type name resolves to **where it was declared** — `Widget` → `lib::Widget`.
+///
+/// `None` in the three cases where the spelling as written is all this layer has: it is already qualified (a claim
+/// about where the name lives, so there is nothing to look up), nothing declares it, or **more than one**
+/// declaration is visible from the declaring file — where the honest answer is the caller's first reason rather
+/// than one of the candidates.
+///
+/// The same one step of the same rule [`resolved_in_the_enclosing_scopes`] applies to a base clause, and the same
+/// reason it exists: a name written inside a namespace is spelled without that namespace, and a lookup that stopped
+/// at the spelling found `std::_Tree` neither as a base of `std::map` nor as the class of `std::cin`.
+fn declared_class(index: &ProjectIndex, declaring: &Path, class: &str) -> Option<String> {
+    if class.contains("::") {
+        return None;
+    }
+
+    match index.definition(class, declaring) {
+        Known::Yes(found) => {
+            let qualified = found.fact.qualified_name();
+            (qualified != class).then_some(qualified)
+        }
+        Known::Unknown(_) | Known::No => None,
+    }
 }
 
 /// The operand of the unary expression this node is, when its operator is `operator`.
@@ -1765,6 +1842,52 @@ fn what_a_call_has_in(fact: &DeclFact) -> Option<String> {
 }
 
 /// The declaration an expression names, or why it names none. See [`NamedDeclaration`].
+/// Is this spelling **a name** — a bare identifier, or a `::`-qualified chain of them (`::Widget` included)?
+///
+/// The test the type layer asks before it treats an expression as a name, and it is deliberately about the
+/// *spelling* rather than about the node's kind: a qualified name and a member access are different nodes and
+/// different questions — the second is an object and a member of it, the first is one entity with a scope.
+fn writes_a_name(written: &str) -> bool {
+    let spelling = written.strip_prefix("::").unwrap_or(written);
+
+    !spelling.is_empty() && spelling.split("::").all(is_an_identifier)
+}
+
+/// Is this segment a name a declaration could carry?
+fn is_an_identifier(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment
+            .chars()
+            .all(|character| character.is_alphanumeric() || character == '_')
+}
+
+/// **The offset at which "which name is this" is asked**: the expression's **last identifier**.
+///
+/// The offset decides the question, because [`crate::sema::resolve::definition_at`] builds a name's spelling by
+/// walking its chain *up to the cursor* — a cursor on `a` in `a::b::c` asks about `a::b`, and one on `c` asks about
+/// the whole of it. An expression node is the **whole** chain: the user pointed at an entity, and what identifies
+/// that entity is all of it (`std::cin`, not the namespace `std`). So the question is asked at the far end, which
+/// for a bare name is the offset it always was.
+///
+/// The last **identifier** rather than the node's end offset, and the difference is a bug this had for one revision:
+/// a node's range covers its trailing trivia (`NameExpr` for `w` in `int w = 1;` ends after the space), so the end
+/// offset lands *past* the name and the lookup answers `UnparsableName` — every plain name in the file losing its
+/// type at once.
+fn end_of_the_written_name(expression: &cpp_parser::CppSyntaxNode) -> usize {
+    let mut last = None;
+
+    for element in expression.descendants_with_tokens() {
+        let Some(token) = element.into_token() else {
+            continue;
+        };
+        if cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::Identifier {
+            last = Some(usize::from(token.text_range().start()));
+        }
+    }
+
+    last.unwrap_or_else(|| usize::from(expression.text_range().start()))
+}
+
 fn declaration_of_expression(
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
@@ -1772,7 +1895,7 @@ fn declaration_of_expression(
     path: &Path,
     expression: &cpp_parser::CppSyntaxNode,
 ) -> Known<NamedDeclaration> {
-    let offset = usize::from(expression.text_range().start());
+    let offset = end_of_the_written_name(expression);
     let written = expression.text().to_string();
     let written = written.trim();
 
@@ -1780,6 +1903,18 @@ fn declaration_of_expression(
         Known::Yes(binding) => Known::Yes(NamedDeclaration::Here(binding)),
         Known::Unknown(UnknownReason::NotDeclaredHere(name)) => match index.definition(&name, path) {
             Known::Yes(found) => Known::Yes(NamedDeclaration::Indexed(found.fact, found.file)),
+            // **Several declarations of one name, and one type between them.** A name query answers `Ambiguous`
+            // when more than one declaration is visible, and that is right for "where is this declared" — but the
+            // question here is *what type it has*, and a type is not ambiguous when every declaration spells it the
+            // same way. MSVC's `<iostream>` declares `cin` twice (once plain, once as
+            // `_EXPORT_STD extern "C++" … istream cin;`), so `std::cin` was `Ambiguous` and every use of it lost its
+            // type: `std::cin.read(…)`, `std::cin.eof()`, a completion after `std::cin.` — measured, 8 offsets in
+            // one file. Candidates that **disagree**, and functions (which have no type as a name), keep the
+            // `Unknown` that the name query gave.
+            Known::Unknown(UnknownReason::Ambiguous(_)) => match agreeing_type(index, path, &name) {
+                Some(found) => Known::Yes(NamedDeclaration::Indexed(found.0, found.1)),
+                None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+            },
             // The declaration is nowhere this analysis can see, so there is no type to read. Reporting the *name*
             // reason would say "the owner is missing" where what is missing is the type of an expression — a
             // different answer for a consumer deciding what to tell the user.
@@ -2453,9 +2588,11 @@ impl ProjectIndex {
     ///
     /// The second is what makes `#ifndef NT_INCLUDED / #include <winnt.h> / #endif` decide itself, and it is a
     /// claim about the **inputs**: the caller is saying "these are the compilation's own definitions, and every
-    /// `#include` that matters resolved and was indexed". [`crate::Session`] says it only when it read the
-    /// project's own compile database — see `compilation_environment` there — and a walk that runs into an
-    /// `#include` it cannot read takes the claim back ([`Marked::mark_incomplete`]).
+    /// `#include` that matters resolved and was indexed". [`crate::Session`] says it when the compiler it discovered
+    /// **answered with its predefined macros** — the table `-dM`/`/PD` prints, and the only place the compiler's own
+    /// names exist — and a walk that runs into an `#include` it cannot read takes the claim back
+    /// ([`Marked::mark_incomplete`]). See `Session::assemble` for what tying the claim to a compile database instead
+    /// cost (MSVC's whole standard library, measured).
     ///
     /// A name a *conditional* might define is a smaller doubt and is handled per name: the walk records it with
     /// [`Marked::mark_uncertain`], so `#ifdef` on it is `Unknown` even in a complete environment.

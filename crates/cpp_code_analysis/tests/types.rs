@@ -237,3 +237,113 @@ fn a_declaration_that_names_its_type_keeps_it() {
         Some("Widget *")
     );
 }
+
+/// **The class behind a linkage specification has its members.**
+///
+/// MSVC writes its whole iostream hierarchy as `_EXPORT_STD extern "C++" template <…> class basic_istream : …`,
+/// and while the scope walk stopped at the unnamed outer declaration, the class and every member of it were
+/// missing from the index — which is what `std::cin.read` and a completion after `std::cin.` had to answer from.
+#[test]
+fn a_member_of_a_class_behind_a_linkage_specification_resolves() {
+    let source = "\
+namespace lib {
+extern \"C++\" template <class _Elem>
+class Stream {
+public:
+    int member;
+};
+extern Stream<char> input;
+}
+int f() { return lib::input.member; }
+";
+    assert_eq!(type_of_use(source, "member").as_deref(), Some("int"));
+}
+
+/// **Two declarations of one name, one type between them.**
+///
+/// A name query answers `Ambiguous` when several declarations are visible, which is right for "where is this
+/// declared" — and the question here is the *type*, which a redeclaration does not make ambiguous. MSVC's
+/// `<iostream>` writes `cin` twice (once plain, once as `_EXPORT_STD extern "C++" … istream cin;`), and while the
+/// type query could not settle it, every use of `std::cin` lost its type: measured, 8 offsets in one file.
+#[test]
+fn a_name_declared_twice_with_one_type_still_has_that_type() {
+    let header = "struct Widget { int size; };\nextern Widget shared;\nextern Widget shared;\n";
+    let source = "#include \"lib.h\"\nint f() { return shared.size; }\n";
+    let session = session_with(&[("/p/a.cpp", source), ("/p/lib.h", header)]);
+
+    assert_eq!(
+        type_of_use_in(&session, "/p/a.cpp", source, "shared").as_deref(),
+        Some("Widget"),
+        "the two declarations agree, so the type is not the ambiguous part"
+    );
+    assert_eq!(
+        type_of_use_in(&session, "/p/a.cpp", source, "size").as_deref(),
+        Some("int"),
+        "and the member access through it works"
+    );
+}
+
+/// …but declarations that **disagree** about the type keep the `Unknown`: that is exactly what `Ambiguous` was
+/// about, and picking one of them would be a guess.
+#[test]
+fn two_declarations_that_disagree_about_the_type_are_still_unknown() {
+    let header = "struct One { int a; };\nstruct Two { int b; };\nextern One shared;\nextern Two shared;\n";
+    let source = "#include \"lib.h\"\nint f() { return shared.a; }\n";
+    let session = session_with(&[("/p/a.cpp", source), ("/p/lib.h", header)]);
+
+    assert_eq!(type_of_use_in(&session, "/p/a.cpp", source, "shared"), None);
+}
+
+/// The type of the use of a name **in a session the caller built** — the two-file fixtures' way in.
+fn type_of_use_in(session: &Session<MemoryFiles>, path: &str, source: &str, spelling: &str) -> Option<String> {
+    let view = session.view(path).expect("the file is held");
+    let offset = last_word(source, spelling);
+
+    match session.type_at(&view, offset) {
+        cpp_code_analysis::Known::Yes(found) => Some(found.type_of),
+        _ => None,
+    }
+}
+
+/// **A qualified name is a name.** `lib::global` is one entity, and "what type is it" has to be asked about the
+/// whole chain rather than about the segment the expression happens to *start* at.
+///
+/// That offset is the whole subject of this test: the expression's node begins at `lib`, and a lookup at that
+/// offset asks about the **namespace** — which has no type, so the answer used to be `UnknownType("lib::global")`
+/// for every qualified name in every file.
+#[test]
+fn a_qualified_name_in_this_file_has_the_type_its_declaration_wrote() {
+    let source = "\
+namespace lib {
+struct Widget { int size; };
+extern Widget global;
+}
+int f() { return lib::global.size; }
+";
+    assert_eq!(type_of_use(source, "global").as_deref(), Some("Widget"));
+    assert_eq!(
+        type_of_use(source, "size").as_deref(),
+        Some("int"),
+        "and a member access through it reads the member's type"
+    );
+}
+
+/// The same question through the **index**: the chain is declared in a header, so this file's own scopes cannot
+/// answer it, and the whole qualified spelling is what the index has to be asked about.
+#[test]
+fn a_qualified_name_declared_in_a_header_has_its_type() {
+    let header = "namespace lib { struct Widget { int size; }; extern Widget shared; }\n";
+    let source = "#include \"lib.h\"\nint f() { return lib::shared.size; }\n";
+    let session = session_with(&[("/p/a.cpp", source), ("/p/lib.h", header)]);
+
+    assert_eq!(
+        type_of_use_in(&session, "/p/a.cpp", source, "shared").as_deref(),
+        Some("Widget"),
+        "the declaration is in the header, so the answer comes from the index"
+    );
+    assert_eq!(
+        type_of_use_in(&session, "/p/a.cpp", source, "size").as_deref(),
+        Some("int"),
+        "and the member access through it reads the member"
+    );
+}

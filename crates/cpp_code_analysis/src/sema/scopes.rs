@@ -710,6 +710,23 @@ impl ScopeWalker<'_> {
     /// construct, and reading names only from declarators would leave every forward declaration and every
     /// scoped enum undeclared — which in a real header is most of the class names in the file.
     fn declaration(&mut self, node: &CppSyntaxNode, scope: ScopeId) {
+        // **A linkage specification declares nothing itself and holds what it applies to.** `extern "C++" …` is a
+        // `Declaration` whose specifier sequence says which linkage and whose *child* is what it covers — a nested
+        // `Declaration` for `extern "C" void f();`, a `CompoundStat` for `extern "C" { … }` (see the parser's
+        // `parse_linkage_specification`). Neither declares a name, which is why the "an unnamed declaration declares
+        // nothing" guard in `declaration_parts` used to return here; neither opens a scope either, because a linkage
+        // is a property of the declarations rather than a place names live — C++ puts the names in the enclosing
+        // namespace. So the contents are walked **in this scope**.
+        //
+        // Measured, on MSVC's `<istream>`: the whole iostream hierarchy is written this way
+        // (`_EXPORT_STD extern "C++" template <class _Elem, class _Traits> class basic_istream : … { … };`), so
+        // `std::basic_istream`, its forty members and everything inheriting from them were absent from the index —
+        // the file's first fact was at line **715** of 935 while `class basic_istream` is at line 24, and
+        // `std::cin.read`, `std::cout.flush()` and a completion after `std::cin.` all had nothing to answer with.
+        if self.linkage(node, scope) {
+            return;
+        }
+
         // A templated declaration has its parameter list in a **sibling** node rather than around the
         // declaration, so it is intercepted here: the parameters open a scope, and the declaration's contents
         // are walked inside it. Missing this leaves `T` unbound and a template's class declared in the wrong
@@ -720,6 +737,52 @@ impl ScopeWalker<'_> {
         }
 
         self.declaration_parts(node, scope, scope);
+    }
+
+    /// Walk the contents of a **linkage specification**, and say whether this node was one.
+    ///
+    /// `extern "C" void f();` and `extern "C" { void f(); }` are the two spellings, and both declare `f` in the
+    /// scope the linkage was written in.
+    ///
+    /// The test is the **string literal**, which is the same one the parser dispatches on
+    /// (`starts_a_linkage_specification`): `extern int x;` carries the very same `ExternSpec` and is an ordinary
+    /// declaration with a declarator, so a walk that keyed on the keyword alone silently stopped declaring every
+    /// `extern` variable — measured, `extern Widget global;` in a fixture, which turned two type tests red. A node
+    /// with neither a nested declaration nor a block is not walked here at all: it is left to the ordinary
+    /// declaration path, which is where a malformed one belongs.
+    fn linkage(&mut self, node: &CppSyntaxNode, scope: ScopeId) -> bool {
+        let is_linkage = first_child(node, CppSyntaxKind::DeclSpecifierSeq)
+            .and_then(|specifiers| first_child(&specifiers, CppSyntaxKind::ExternSpec))
+            .is_some_and(|specification| {
+                specification
+                    .children_with_tokens()
+                    .filter_map(|child| child.into_token())
+                    .any(|token| CppTokenKind::from(token.kind()) == CppTokenKind::StringLiteral)
+            });
+        if !is_linkage {
+            return false;
+        }
+
+        let mut walked = false;
+
+        for child in node.children() {
+            match CppSyntaxKind::from(child.kind()) {
+                // The declaration the linkage applies to: `extern "C++" template <…> class C { … };`.
+                CppSyntaxKind::Declaration => {
+                    self.declaration(&child, scope);
+                    walked = true;
+                }
+                // The braced form. A container rather than a scope: `extern "C" { void f(); }` is one name in the
+                // enclosing namespace, and putting it in a block of its own would hide it from everything outside.
+                CppSyntaxKind::CompoundStat => {
+                    self.items(&child, scope);
+                    walked = true;
+                }
+                _ => {}
+            }
+        }
+
+        walked
     }
 
     /// A declaration whose `template <...>` header was found.
