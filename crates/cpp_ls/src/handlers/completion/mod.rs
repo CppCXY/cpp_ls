@@ -29,7 +29,7 @@
 //! files to read, a name may be missing for the only reason that its file has not been read yet, so the client is
 //! told to ask again as the user types rather than caching an empty list as the truth.
 
-use cpp_code_analysis::{DiskFiles, Known, MemberCompletions, NameCompletions, Session, UnknownReason};
+use cpp_code_analysis::{DiskFiles, Known, MemberCompletions, NameCompletions, Session};
 use lsp_types::{
     ClientCapabilities, CompletionItem, CompletionOptions, CompletionParams, CompletionResponse,
     Documentation, MarkupContent, MarkupKind, ServerCapabilities, TextEdit,
@@ -75,6 +75,16 @@ pub fn completions(
 ) -> CompletionResponse {
     // The member question first — see the module documentation for why the *answer* decides and not the spelling
     // in front of the cursor.
+    //
+    // # Why the fall-through is a question about the *shape*, not about the reason
+    //
+    // The name query is what lists the file's own locals, its parameters and everything its includes declare, so
+    // reaching it is the difference between a working completion and an empty popup. This dispatch used to fall
+    // through only when the member query answered **exactly** `Unknown(UnparsableName)`, and to stop on every other
+    // negative — which loses the name list for any cursor the member query declines for a reason of its own. The
+    // reasons cannot carry this decision: `UnparsableName` means "not a member access" for one shape and "the
+    // object's type cannot be read" for another. What the decision actually needs is the question the member query
+    // started with — **is the cursor in a member access at all** — and that is a fact about the tree.
     match session.member_completions(view, offset) {
         Known::Yes(found) => {
             let items = members(&found, view).collect();
@@ -83,15 +93,30 @@ pub fn completions(
                 items,
             });
         }
-        Known::Unknown(UnknownReason::UnparsableName) => {}
-        // A member access whose type this analysis cannot work out, or an answer it cannot give yet: nothing is
-        // offered, because a name that cannot follow the `.` is worse than an empty popup.
-        Known::No | Known::Unknown(_) => {
+        _ if is_a_member_position(view, offset) => {
+            // It is a member access whose members this analysis cannot list (the object's type is unknown, and a
+            // name that cannot follow the `.` is worse than an empty popup). Nothing is offered, and the client is
+            // told the list is not the truth.
             return CompletionResponse::List(lsp_types::CompletionList {
                 is_incomplete: true,
                 items: Vec::new(),
             });
         }
+        // **Every other negative falls through**, because "not a member access" is the ordinary state of a cursor
+        // inside a body — and that is where the file's own locals, its parameters and everything its includes
+        // declare are offered. Keying this on the `Unknown` *reason* instead loses the name list for any cursor the
+        // member query declines for a reason of its own: `UnparsableName` means "not a member access" for one shape
+        // and "the object's type cannot be read" for another.
+        _ => {}
+    }
+
+    /// Is the cursor in a member access at all — the question the member query starts with?
+    ///
+    /// Asked here rather than inferred from the answer, because the dispatch has to tell "nothing to say about
+    /// this member access" from "this is not a member access": the first must offer nothing, the second must fall
+    /// through to the names in scope.
+    fn is_a_member_position(view: &cpp_code_analysis::FileView, offset: usize) -> bool {
+        cpp_code_analysis::sema::resolve::member_access_at(&view.root, offset).is_some()
     }
 
     let Known::Yes(found) = session.name_completions(view, offset) else {

@@ -273,8 +273,35 @@ pub struct NamePosition {
 }
 
 /// Is the cursor at or inside the names being written at `offset`?
+///
+/// # A cursor where nothing is written *yet*
+///
+/// The answer for a position no name starts at — after `return `, after `=`, at the start of a line — is the
+/// **default** position rather than `None`: no qualifier (so every visible name), an empty spelling, and an empty
+/// replacement range at the cursor. That is the position completion exists for, and refusing it was the one thing
+/// that made a client's keystroke answer nothing at all — see `name_completions_at`, which is this function's only
+/// caller.
+///
+/// A cursor inside a **comment or a literal** is still `None`: a name there is not code, and a list offered into
+/// prose is noise the user cannot act on.
 pub fn name_position_at(root: &CppSyntaxNode, offset: usize) -> Option<NamePosition> {
-    let node = name_node_around(root, offset)?;
+    let Some(node) = name_node_around(root, offset) else {
+        // **A member access owns its own position**: after `w.` the question is which members the object has, and
+        // that is `member_access_at`'s — the same division `name_node_around` documents. Answering "every visible
+        // name" there would be a second, wrong answer to a question another query already answers.
+        if member_access_at(root, offset).is_some() {
+            return None;
+        }
+
+        return match cpp_parser::token_at(root, offset) {
+            Some(token) if inside_a_comment_or_a_literal(&token) => None,
+            _ => Some(NamePosition {
+                scope: String::new(),
+                written: String::new(),
+                range: SourceRange::new(offset, 0),
+            }),
+        };
+    };
 
     let mut segments: Vec<String> = Vec::new();
     let mut written = String::new();
@@ -295,6 +322,16 @@ pub fn name_position_at(root: &CppSyntaxNode, offset: usize) -> Option<NamePosit
         // has the closing `}` inside the same node, and a reader that walked past it would report a name that is
         // not there.
         if token_range.start_offset >= offset {
+            // **The cursor sits exactly at the start of a name**, which is a position a client does ask about —
+            // the user puts the cursor on `Widget` and presses the completion key. Nothing of it is written, so
+            // nothing filters, but the chosen name has to **replace** it: an answer that only inserted would turn
+            // `Widget` into `WidgetWidget`. That is this type's `Wid|` rule, one keystroke earlier.
+            if token_range.start_offset == offset
+                && cpp_parser::CppTokenKind::from(token.kind())
+                    == cpp_parser::CppTokenKind::Identifier
+            {
+                range = Some(token_range);
+            }
             break;
         }
 
@@ -333,6 +370,27 @@ pub fn name_position_at(root: &CppSyntaxNode, offset: usize) -> Option<NamePosit
             start_offset: offset,
             length: 0,
         }),
+    })
+}
+
+/// Is this token — or the comment it belongs to — prose rather than code?
+///
+/// A **comment is a node** in this tree, and its text is re-lexed into finer tokens by the documentation layer, so
+/// a cursor inside `/// a note` is not on a `LineComment` token at all: the question is asked of the ancestors, and
+/// the token check stays for the brace of the block form and for the literals, which are single tokens.
+fn inside_a_comment_or_a_literal(token: &cpp_parser::CppSyntaxToken) -> bool {
+    if matches!(
+        cpp_parser::CppTokenKind::from(token.kind()),
+        cpp_parser::CppTokenKind::LineComment
+            | cpp_parser::CppTokenKind::BlockComment
+            | cpp_parser::CppTokenKind::StringLiteral
+            | cpp_parser::CppTokenKind::CharLiteral
+    ) {
+        return true;
+    }
+
+    token.parent_ancestors().any(|node| {
+        cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::DocComment
     })
 }
 

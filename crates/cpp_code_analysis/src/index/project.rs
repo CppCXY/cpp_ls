@@ -104,6 +104,13 @@ pub fn definition_across_files(
         Known::Unknown(UnknownReason::NotDeclaredHere(name)) => {
             // The single-file layer has already established the spelling, so the project layer is asked about
             // exactly that name rather than re-reading the cursor.
+            //
+            // **A qualified spelling was tried here and removed**: asking the index for what the cursor wrote
+            // (`std::string`) before the segment it ended with (`string`) changed *nothing* on a real file — the
+            // facts for the standard library are missing from the index rather than keyed differently (measured:
+            // `definition("std::optional")` and `definition("std::string")` both answer nothing, while
+            // `definition("optional")` answers a fact whose scope is `None`, and `declarations_in("std", …)` holds
+            // 13 declarations of the thousands the STL has). The lookup was never the broken half.
             return index.definition(&name, path);
         }
         Known::Unknown(reason) => return Known::Unknown(reason),
@@ -6630,13 +6637,37 @@ mod tests {
     }
 
     #[test]
-    fn a_cursor_that_is_not_in_a_name_offers_nothing() {
+    fn a_cursor_where_a_name_can_be_written_offers_the_visible_names() {
+        // **The entry condition, which used to be the whole bug.** A cursor with no name written yet — at the start
+        // of a declaration, after `return `, at the beginning of a line — is the position completion exists for.
+        // This test used to assert the opposite ("the cursor is on a declaration's name, which is not a name being
+        // written"), and a language server that answers nothing when a client asks at a blank position is one a
+        // user reports as "it has no completion for local variables" — which is what happened.
+        //
+        // The replacement range is the *whole* identifier the cursor is on, so choosing a name replaces it rather
+        // than inserting beside it.
+        // The cursor is just past the name `Widget` — the position a client reports when the user puts the cursor
+        // on the identifier and presses the completion key.
         let source = "struct Widget { int size; };\nvoid f() {\n  Widget w;\n}\n";
-        let found = names_at(&[], "/p/a.cpp", source, "Widget w;");
+        let found = names_at(&[], "/p/a.cpp", source, "Widget");
 
+        let Known::Yes(found) = found else {
+            panic!("a name can be written here: {found:?}");
+        };
+        let names: Vec<&str> = found
+            .names
+            .iter()
+            .map(|offered| offered.fact.name.as_str())
+            .collect();
         assert!(
-            matches!(found, Known::Unknown(UnknownReason::UnparsableName)),
-            "the cursor is on a declaration's name, which is not a name being written: {found:?}"
+            names.contains(&"Widget") && names.contains(&"f"),
+            "the names in scope: {names:?}"
+        );
+        assert_eq!(found.prefix, "Widget", "what is written filters the list");
+        assert_eq!(
+            found.name_range.length,
+            "Widget".len(),
+            "and the chosen name replaces it rather than being inserted beside it"
         );
     }
 
