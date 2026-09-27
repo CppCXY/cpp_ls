@@ -152,3 +152,71 @@ fn a_member_position_is_not_a_name_position() {
         "with the members of the object's type"
     );
 }
+
+/// **The names the implementation owns are not offered**, and the user's own underscored names still are.
+///
+/// The standard's three rules (`__name`, `_Name`, `_name` in the global name space), applied where a *suggestion*
+/// is made rather than where a question is answered: a jump, a hover and a rename still find a reserved name. This
+/// is the rule that took `_ALLOC_MASK`, `_Alty` and `_Apply_annotation` off a `std::string`'s member list — half of
+/// its 202 entries — and 601 names off one real file's list at a blank line in a function body.
+#[test]
+fn the_implementations_names_are_not_offered_but_the_users_are() {
+    const FIXTURE: &str = "\
+struct Widget { int size; int _mine; };
+int _global_underscored;
+int __mine_anywhere;
+int _Upper_anywhere;
+int f() {
+    int _local_underscored = 1;
+    Widget w;
+    w.
+}
+";
+    let memory = MemoryFiles::new().with_file("/p/a.cpp", FIXTURE);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session =
+        Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    session.load("/p/a.cpp");
+    let view = session.view("/p/a.cpp").expect("the file is held");
+
+    // The **name** list, asked inside the body: the user's local is there, the reserved globals are not.
+    let known = match session.name_completions(&view, FIXTURE.find("w.").expect("the fixture")) {
+        Known::Yes(found) => found
+            .names
+            .iter()
+            .map(|offered| offered.fact.name.clone())
+            .collect::<Vec<_>>(),
+        other => panic!("a blank cursor in a body is answerable: {other:?}"),
+    };
+
+    for reserved in ["__mine_anywhere", "_Upper_anywhere", "_global_underscored"] {
+        assert!(
+            !known.contains(&reserved.to_string()),
+            "`{reserved}` is reserved to the implementation: {known:?}"
+        );
+    }
+    assert!(
+        known.contains(&"_local_underscored".to_string()),
+        "a local `_name` is the user's own — only the *global* name space reserves it: {known:?}"
+    );
+
+    // The **member** list of a class the user wrote: `_mine` is the user's own member and is offered, while the
+    // rule still takes MSVC's `_Alty`/`_ALLOC_MASK` off a `std::string`.
+    let Known::Yes(members) = session.member_completions(
+        &view,
+        FIXTURE.find("w.").expect("the fixture") + 2,
+    ) else {
+        panic!("a member access is answerable");
+    };
+    let names: Vec<&str> = members
+        .members
+        .members
+        .iter()
+        .map(|member| member.fact.name.as_str())
+        .collect();
+    assert!(names.contains(&"size"), "the ordinary member: {names:?}");
+    assert!(
+        names.contains(&"_mine"),
+        "and the user's own underscored member: {names:?}"
+    );
+}

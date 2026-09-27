@@ -1682,3 +1682,30 @@ fn an_extern_variable_is_a_declaration() {
 
     assert_eq!(shape(&table), "File{Widget,global}(Class{size})");
 }
+
+/// **A local whose type is a qualified name is a local**, and it is bound in the body it was written in.
+///
+/// The shape is what every real file starts with — `std::size_t length = 0;` — and the question is whether the
+/// *declarator* is read or the qualified type swallows it. Measured on a user's file, `length` was the one local of
+/// nine unresolved names: every other name in that body resolved, so this is not "locals do not work" but one
+/// spelling of one declaration.
+#[test]
+fn a_local_declared_with_a_qualified_type_is_bound() {
+    let table = scopes(
+        "namespace std { using size_t = unsigned long; }\n\
+         void f() {\n\
+         \x20   std::size_t length = 0;\n\
+         \x20   std::string line;\n\
+         }\n",
+    );
+
+    let body = shape(&table);
+    assert!(
+        body.contains("length"),
+        "the declaration is the declarator's, wherever its type came from: {body}"
+    );
+    assert!(
+        body.contains("line"),
+        "and so is the next one: {body}"
+    );
+}

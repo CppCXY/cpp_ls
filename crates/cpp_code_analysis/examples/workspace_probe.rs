@@ -429,6 +429,29 @@ fn main() {
         );
     }
 
+    // **What the completion list is made of**: how many files the cursor's file can see, and how many of them are
+    // reachable only through an `#include` inside an `#if` — which is where a *plausible* list turns into a payload,
+    // measured at the shell: 14351 items, 4.5 MB of JSON, for a blank line in a 78-line file.
+    let visible = session.index().visible_files(&file);
+    let unconditional = visible
+        .iter()
+        .filter(|(_, visibility)| *visibility == cpp_code_analysis::IncludeVisibility::Unconditional)
+        .count();
+    println!(
+        "\n--- what the cursor's file can see: {} files, {unconditional} unconditionally ---",
+        visible.len()
+    );
+    for wanted in ["arm_neon.h", "arm64_neon.h", "zmmintrin.h", "immintrin.h"] {
+        for (path, visibility) in &visible {
+            if std::path::Path::new(path)
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy() == wanted)
+            {
+                println!("   {wanted:<16} {visibility:?}");
+            }
+        }
+    }
+
     // **What the plural query answers**, over the same identifiers: this is the number that says whether
     // `textDocument/definition` can answer where the single-answer form said `Ambiguous`.
     println!("\n--- every identifier, through the plural query ---");

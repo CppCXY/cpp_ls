@@ -824,12 +824,20 @@ pub fn member_completions_at(
     }
 
     match members_of(index, scopes, root, path, class) {
-        Known::Yes(members) => Known::Yes(MemberCompletions {
-            class: class.to_string(),
-            members,
-            member_range: access.member_range,
-            prefix: written_before_the_cursor(&access, offset),
-        }),
+        Known::Yes(mut members) => {
+            // **The names the implementation owns are not offered**, the same rule the name completion applies —
+            // and this is where a user meets them first: `line.` on a `std::string` listed 202 members of MSVC's
+            // `basic_string`, half of them `_Alty`, `_ALLOC_MASK`, `_Apply_annotation`. See
+            // [`is_reserved_to_the_implementation`].
+            members.members.retain(|member| !is_reserved_to_the_implementation(&member.fact));
+
+            Known::Yes(MemberCompletions {
+                class: class.to_string(),
+                members,
+                member_range: access.member_range,
+                prefix: written_before_the_cursor(&access, offset),
+            })
+        }
         Known::Unknown(reason) => Known::Unknown(reason),
         // `members_of` reports a name nothing declares as `Unknown(NotDeclaredHere)` rather than `No`, so this arm
         // is for totality and says the same thing it would.
@@ -1026,9 +1034,16 @@ fn visible_names(
             continue;
         }
 
-        // Anything else in the chain is a body, a block or a lambda: its own bindings, which the tree has.
+        // Anything else in the chain is a body, a block or a lambda: its own bindings, which the tree has — and a
+        // **namespace**, whose bindings are neither: the kind is what decides, and it is also what decides whether
+        // a name beginning with an underscore belongs to the user (a body) or to the global name space (a `_name`
+        // at file scope is the implementation's, one inside a function is not).
+        let body = matches!(
+            data.kind,
+            crate::ScopeKind::Block | crate::ScopeKind::Function | crate::ScopeKind::Lambda
+        );
         names.extend(offered(
-            bindings_of(root, path, &data.bindings, None),
+            bindings_of(root, path, &data.bindings, None, body),
             depth,
         ));
 
@@ -1102,8 +1117,11 @@ fn names_in_a_scope(
         // A namespace can be reopened, so the buffer's names and the project's are both part of the answer.
         Some(_) => {
             if let Some(data) = in_the_tree.and_then(|id| scopes.scope(id)) {
+                // `false`: a namespace is not a body, so a `_name` in it is not a local — the reservation that
+                // applies to a name beginning with an underscore is the *global* name space's, and the spelling
+                // here is the namespace's own.
                 names.extend(offered(
-                    bindings_of(root, path, &data.bindings, Some(spelling)),
+                    bindings_of(root, path, &data.bindings, Some(spelling), false),
                     0,
                 ));
             }
@@ -1135,22 +1153,28 @@ fn names_in_a_scope(
 /// its body — and `None` for a scope that has none: a function body, a block, a lambda. The distinction is the one
 /// [`DeclFact::scope`] documents, and it is passed rather than derived because the caller is the one that knows
 /// *why* it is listing these bindings.
+///
+/// `local` is the other half of that and it is **not** derivable from `scope`, which is why it is a parameter:
+/// `None` is passed by two callers with different meanings — the **file scope** (whose names are the global name
+/// space's) and a **body** (whose names are the user's locals) — and the difference decides what may be offered.
+/// A `_name` at file scope is reserved to the implementation; the same spelling inside a function is the user's own
+/// and is offered. Filling this in wrong is not visible anywhere else: the fact's `local` field is only read by
+/// [`is_reserved_to_the_implementation`] on this path, and a local marked global silently disappears from the list.
 fn bindings_of(
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     bindings: &[crate::Binding],
     scope: Option<&str>,
+    local: bool,
 ) -> Vec<(PathBuf, DeclFact, usize)> {
     let spelling = scope.unwrap_or_default();
 
     bindings
         .iter()
         .map(|binding| {
-            (
-                path.to_path_buf(),
-                fact_from_binding(root, spelling, binding),
-                0,
-            )
+            let mut fact = fact_from_binding(root, spelling, binding);
+            fact.local = local;
+            (path.to_path_buf(), fact, 0)
         })
         .collect()
 }
@@ -1165,7 +1189,9 @@ fn global_names(
     let mut names: Vec<(PathBuf, DeclFact, usize)> = scopes
         .root()
         .and_then(|root_scope| scopes.scope(root_scope))
-        .map(|data| bindings_of(root, path, &data.bindings, None))
+        // `false`: this **is** the global name space — the one scope where a name beginning with an underscore is
+        // reserved to the implementation, which is why `Session::name_completions` does not offer `_Arg` or `_cprintf`.
+        .map(|data| bindings_of(root, path, &data.bindings, None, false))
         .unwrap_or_default();
 
     names.extend(declarations_in_scope(index, path, None));
@@ -1225,7 +1251,7 @@ fn names_of_a_class(
     }
 }
 /// Wrap `(file, fact, steps)` as offers, adding the depth of the scope they were found in and dropping the
-/// declarations that have no name to type.
+/// declarations that have no name to type — and the names the implementation owns.
 ///
 /// `steps` is how far *inside* one answer the name was — a base class's members are one step further than the
 /// class's own — and the two are added because they mean the same thing to a consumer: how far the lookup had to
@@ -1234,12 +1260,57 @@ fn offered(found: Vec<(PathBuf, DeclFact, usize)>, depth: usize) -> Vec<OfferedN
     found
         .into_iter()
         .filter(|(_, fact, _)| !fact.name.is_empty())
+        .filter(|(_, fact, _)| !is_reserved_to_the_implementation(fact))
         .map(|(file, fact, steps)| OfferedName {
             file,
             fact,
             depth: depth.saturating_add(steps),
         })
         .collect()
+}
+
+/// Is this name **reserved to the implementation**, and therefore not something a completion should offer?
+///
+/// The standard's own three rules, and nothing else:
+///
+/// ```text
+/// __name    reserved everywhere                `__crt_…`, `__imp_…`
+/// _Name     reserved everywhere                `_ALLOC_MASK`, `_Alty`, `FILE`? no — `FILE` is not reserved
+/// _name     reserved **in the global namespace**   `_Arg`, `_Address`, `_cprintf`
+/// ```
+///
+/// The third is why this is asked of a **fact** rather than of a spelling: `_Address` at file scope is the
+/// implementation's, while `Widget::_count` is the user's own member and a local `_i` is theirs too — and a
+/// `DeclFact` says which it is (`local`, and `scope: None` for the global name space).
+///
+/// # What it is worth, measured
+///
+/// A completion is a suggestion list, and these are names the user may not use. On one real file, of the **1903**
+/// names visible at a blank line inside a function body, **601** were reserved this way (`_Arg`, `_Arg1`,
+/// `__crt_…`) — and the same rule takes `_ALLOC_MASK`, `_Alty` and `_Apply_annotation` off `basic_string`'s
+/// member list, which is where a user completing `line.` meets them first.
+///
+/// # What it is *not*
+///
+/// Not a rule about what the analysis will answer: hover, a jump and a rename still find a reserved name — a reader
+/// who points at `_Arg` in a header wants to know what it is — this only decides what to **offer**.
+fn is_reserved_to_the_implementation(fact: &DeclFact) -> bool {
+    let name = fact.name.as_str();
+    let mut characters = name.chars();
+
+    if characters.next() != Some('_') {
+        return false;
+    }
+
+    match characters.next() {
+        // `__name`, and a lone `_`.
+        Some('_') | None => true,
+        // `_Name`.
+        Some(second) if second.is_uppercase() => true,
+        // `_name`: the implementation's only in the global name space — and not for a local, whose scope is `None`
+        // for the reason `DeclFact::scope` documents (a body contributes no segment to a qualified name).
+        Some(_) => fact.scope.is_none() && !fact.local,
+    }
 }
 
 /// Put the offers in the order a completion shows them: nearest scope first, then by name; and drop every name an
@@ -3207,11 +3278,9 @@ impl ProjectIndex {
                     // edges, and the answer cannot change until a summary is inserted — so it is memoised on the
                     // index (`visibility_answers`), which `insert_at` clears.
                     //
-                    // Only `Active` is *used*: a condition that holds makes the include unconditional, and anything
-                    // else leaves the answer exactly where it was (`Conditional`). Dropping the edge on `Inactive` is
-                    // what the three-valued vocabulary invites, and it was measured twice and reverted twice — the
-                    // evaluator's "not taken" was wrong on both corpora in this session (an unrecognised own guard,
-                    // a fact in an `#else`, both since fixed). One-directional, this rule can only add facts.
+                    // Only `Active` is *used*: a condition that holds makes the include unconditional, and one
+                    // nobody can decide leaves the answer exactly where it was (`Conditional`). What `Inactive`
+                    // does — dropping the edge — is decided below, where the visibility is turned into a step.
                     FactGuard::Region(region) => {
                         let key = (current.clone(), region);
                         let answer = match self
@@ -3237,9 +3306,23 @@ impl ProjectIndex {
 
                         match answer {
                             crate::Visibility::Active => so_far,
-                            crate::Visibility::Inactive | crate::Visibility::Unknown => {
-                                IncludeVisibility::Conditional
-                            }
+                            // **A condition that was decided, and not taken**: the file is not part of this
+                            // translation unit at all, so nothing in it is visible — the edge is dropped rather
+                            // than downgraded, and so is everything only reachable through it.
+                            //
+                            // This rule was written twice and reverted twice, and the comment that stood here said
+                            // why: the *evaluator* was wrong on two corpora (an unrecognised own guard, a fact in an
+                            // `#else`), and a rule that can only add facts is the safe direction while that is true.
+                            // Both bugs are fixed, so it was re-measured, and the number it is worth is large:
+                            // measured on one real file, `#include <arm_neon.h>` and `#include <zmmintrin.h>` —
+                            // ARM and AVX-512 intrinsics, gated on `_M_ARM64`/`_M_AVX512`, both decidable and both
+                            // **false** for this compilation — were in the visibility list as `Conditional`, and
+                            // their names were **8 of every 10 completion items**: 14351 items, 4.5 MB of JSON, for
+                            // a cursor in a 78-line file (`zmmintrin.h` 5256, `arm64_neon.h` 2852, `arm_neon.h` 2117).
+                            crate::Visibility::Inactive => continue,
+                            // A condition nobody can decide: the file may or may not be there, which is exactly what
+                            // `Conditional` means to every consumer.
+                            crate::Visibility::Unknown => IncludeVisibility::Conditional,
                         }
                     }
                 };
@@ -4833,6 +4916,33 @@ mod tests {
         assert_eq!(
             found.conditional, 1,
             "and the one that might also be there is counted, so the answer does not claim there is nothing else"
+        );
+    }
+
+    #[test]
+    fn an_include_inside_a_condition_that_is_decided_and_false_is_not_visible() {
+        // The rule that turned a 14351-item completion list into a 692-item one. MSVC's `<intrin.h>` includes
+        // `<arm_neon.h>`/`<arm64_neon.h>` under `#if defined(_M_ARM64)`, and `<immintrin.h>` pulls in
+        // `zmmintrin.h` for AVX-512 — all of them **decided, and false**, for a file compiled for x64. While an
+        // `Inactive` edge was downgraded to `Conditional` instead of dropped, every ARM and AVX-512 intrinsic was
+        // "visible" from a hello-world file, and therefore offered to the user: 8 of every 10 completion items.
+        //
+        // `#if 0` is the same shape with nothing to evaluate: decided, false, and no macro knowledge needed.
+        let index = index(&[
+            ("/p/arm.h", "int arm_intrinsic;\n"),
+            (
+                "/p/main.cpp",
+                "#if 0\n#include \"arm.h\"\n#endif\nvoid f() { }\n",
+            ),
+        ]);
+
+        let found = index.definition("arm_intrinsic", Path::new("/p/main.cpp"));
+        assert!(
+            matches!(
+                found,
+                Known::Unknown(UnknownReason::NotDeclaredHere(_))
+            ),
+            "the branch was not taken, so the file is not in this translation unit at all: {found:?}"
         );
     }
 
