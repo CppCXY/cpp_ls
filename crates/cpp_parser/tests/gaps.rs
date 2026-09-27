@@ -4963,6 +4963,22 @@ fn constructs_the_parser_does_not_read_yet() {
         )],
     );
 
+    // Found while writing the attribute rule below, and left as a record rather than fixed: the `inline` of a
+    // **nested** namespace definition. C++20 writes it after the enclosing specifier
+    // (`nested-namespace-definition: enclosing-namespace-specifier :: inline(opt) identifier`), so
+    // `namespace a::b::inline c { }` is valid — and `parse_name` wants an identifier where the `inline` is, giving
+    // ``expected a name``. Nothing in the three toolchains on this machine writes it (searched the MSVC STL, the
+    // Windows SDK, and libstdc++ 15), so it is a gap with no corpus bill attached — the entry is here so that the
+    // next person to wonder does not have to search for it again.
+    assert_does_not_read_yet(
+        Where::File,
+        &[(
+            "namespace a::b::inline c { }",
+            "an `inline` inside a nested-namespace-specifier: `parse_name` stops at the keyword. No corpus on \
+             this machine writes it, so the fix would be an unmeasured arm",
+        )],
+    );
+
     // `decltype` in **type position** used to be here, and the record of what it looked like is worth keeping
     // because the symptom pointed at the wrong thing entirely:
     //
@@ -7176,6 +7192,295 @@ fn a_template_argument_may_be_an_expression_whose_left_operand_is_a_type() {
             "S<A<B>> y;\n",
             // …and a comparison written where no template-id is involved is still a comparison.
             "bool b = n < 0 || n > 100000;\n",
+        ],
+    );
+}
+
+/// **A calling convention inside the abstract declarator of a `using` alias** —
+/// `using new_handler = void (__cdecl *)();`.
+///
+/// The `typedef` spelling was fixed in the *declarator* path; an alias writes the same type through a **type-id**,
+/// where the group is an **abstract** declarator, and that predicate did not recognize `( MACRO operator )` —
+/// so the alias failed with ``expected a type specifier`` at its own `(` while the typedef read.
+///
+/// The **follower** is what keeps the case honest, and it was measured the hard way: `(_Rng&&)` is a *parameter
+/// list* holding one parameter whose name happens to be written the way an implementation macro is, and claiming
+/// it turned three libstdc++ headers into rubble (`template<borrowed_range _Rng> subrange(_Rng&&)`) — 128 clean
+/// files became 125 with three ``expected ), but get identifier`` messages. A calling convention decorates
+/// something, so its group is always followed by the parameter list of what it decorates.
+#[test]
+fn a_calling_convention_may_decorate_an_abstract_declarator_in_an_alias() {
+    assert_reads(
+        Where::File,
+        &[
+            "using h = void (__cdecl *)();\n",
+            "using h = void (__cdecl *)(void);\n",
+            "using h = void (__stdcall *)(int);\n",
+            "typedef void (__cdecl *)(void);\n",
+            // …and the parameter lists that must keep their reading, which is what the follower requirement is for.
+            "template <borrowed_range _Rng> void f(_Rng&&);\n",
+            "void g(_Rng&&);\n",
+            "template <class T> void h(T&& t);\n",
+        ],
+    );
+}
+
+/// **A namespace definition may carry an attribute between its keyword and its name** —
+/// `namespace [[deprecated("…")]] tr1 { }`.
+///
+/// The slot is in the grammar (`namespace attribute-specifier-seq(opt) identifier { … }`, C++17), and MSVC's STL
+/// uses it in **twelve** headers: `cstdint`, `array`, `functional`, `ios`, `memory`, `random`, `regex`, `tuple`,
+/// `type_traits`, `unordered_map`, `unordered_set`, `utility` all open their TR1 block with
+/// `namespace _DEPRECATE_TR1_NAMESPACE tr1 {`, and that macro is `[[deprecated("warning STL4002: …")]]`
+/// (`yvals_core.h:908`).
+///
+/// The **cooked** reading is where it bites, and that is why the file's own text hid it for so long: uncooked,
+/// `_DEPRECATE_TR1_NAMESPACE` is an ordinary identifier, so `parse_name` reads it as the namespace's name and the
+/// macro-shaped head swallows `tr1` — the shape reads by accident. Expanded, the same declaration is
+/// `namespace [[deprecated(…)]] tr1 {`, the `[` is not a name, and the rule reported ``expected primary
+/// expression`` at it — `cstdint` and `tuple` failing on their own TR1 block rather than anything to do with
+/// `std::tr1`.
+///
+/// `at_an_attribute` is what keeps the neighbours honest, and they are asserted for that reason: an ordinary name
+/// is not an attribute, a `[` that is not doubled is not one, and `namespace std _GLIBCXX_VISIBILITY(default) {`
+/// — the head of every libstdc++ header — still reads through the macro-shaped rule it was written for.
+#[test]
+fn a_namespace_definition_may_carry_an_attribute_before_its_name() {
+    assert_reads(
+        Where::File,
+        &[
+            "namespace [[deprecated]] tr1 { }\n",
+            "namespace [[deprecated(\"warning STL4002: gone\")]] tr1 { }\n",
+            "inline namespace [[deprecated(\"v1 is old\")]] v1 { }\n",
+            "namespace [[deprecated]] { int hidden; }\n",
+            "namespace [[deprecated]] a::b { }\n",
+            "namespace [[gnu::visibility(\"default\")]] c { }\n",
+            // The neighbours: the plain spellings, the macro-shaped head, and an alias.
+            "namespace plain { }\n",
+            "namespace std _GLIBCXX_VISIBILITY(default) { }\n",
+            "namespace fs = std::filesystem;\n",
+            "namespace a::b { }\n",
+        ],
+    );
+
+    // The attribute has to come out as one, and *inside* the namespace declaration — a rule that read the
+    // brackets as an expression and then recovered would pass the check above on a well-formed tree of the wrong
+    // shape, which is the blind spot `the shape of every statement` was written for.
+    let attributed = "namespace [[deprecated(\"x\")]] tr1 { }\n";
+    assert_eq!(count_of(attributed, CppSyntaxKind::NamespaceDecl), 1);
+    assert_eq!(count_of(attributed, CppSyntaxKind::AttributeList), 1);
+}
+
+/// **An unexpanded macro standing in the pointer operator, before the declarator's name** —
+/// `typedef struct … { … } KCRM_MARSHAL_HEADER, *PKCRM_MARSHAL_HEADER, *RESTRICTED_POINTER PRKCRM_MARSHAL_HEADER;`
+/// (`shared/ktmtypes.h:188`, and the same header writes the shape eleven times).
+///
+/// `RESTRICTED_POINTER` is `winnt.h:110`: `#define RESTRICTED_POINTER __restrict` on the one target that wants
+/// the qualifier and an **empty** definition everywhere else. So the name stands where a type qualifier stands —
+/// which is the arm above it, `__restrict` — except that it is a *macro*, so whether it is expanded depends on
+/// the reading: the file's own text leaves it as a bare name, and so does a cook that has no definition in the
+/// environment.
+///
+/// # What the raw reading was doing, which is the part worth keeping
+///
+/// It read **clean** — no error, no `ErrorNode`, no missing node — and read two names wrong: the declarator took
+/// `RESTRICTED_POINTER` as its own name, the typedef ended without its `;` (a declaration simply *ended*, and
+/// `PRKCRM_MARSHAL_HEADER;` became a declaration of its own). That is why the second half of this test asserts
+/// *which* tokens came out as names rather than that the file parsed: a "does it parse?" check passes on both
+/// readings, and the wrong one is the one nobody would look at.
+///
+/// Over the cooked stream the same tokens report ``expected `;` `` instead — there the invented `;` is not
+/// available — which is how this was found at all.
+///
+/// # The follower, and what it costs
+///
+/// `*MACRO name` is told from `*name` by the second name and by nothing else, so that is the condition. The
+/// ordinary declarators are asserted below to keep it that way. The cost is stated rather than hidden: a typo
+/// shaped `*A B` — an all-capitals name where a declarator's name should be — reads as a pointer to `B` with `A`
+/// as the macro, the same bounded cost every `written_like_a_macro` rule in this grammar pays, and it is paid in
+/// the direction that keeps a header a compiler accepts readable.
+#[test]
+fn a_pointer_operator_may_carry_an_unexpanded_macro_before_the_name() {
+    assert_reads(
+        Where::File,
+        &[
+            "typedef struct S { int a; } S, *PS, *RESTRICTED_POINTER PRS;\n",
+            "typedef struct S { int a; } S, *HUGEP PS;\n",
+            "typedef struct S { int a; } S, *_SAL_ANNOTATION PS;\n",
+            "void f(int *RESTRICTED_POINTER p);\n",
+            "struct S { int *RESTRICTED_POINTER member; };\n",
+            // The neighbours, which must keep their own readings: one name after the `*`, qualifiers, two
+            // operators, and the calling-convention spelling that already had an arm here.
+            "int *p;\n",
+            "int * const q = 0;\n",
+            "char **argv;\n",
+            "int *__cdecl _errno(void);\n",
+            "typedef void (__cdecl *)(void);\n",
+            "int * *pp;\n",
+        ],
+    );
+
+    let names = |source: &str| -> Vec<String> {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        tree.get_red_root()
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr)
+            .map(|node| node.text().to_string().trim().to_string())
+            .collect()
+    };
+
+    let read = names("typedef struct S { int a; } S, *PS, *RESTRICTED_POINTER PRS;\n");
+    assert!(
+        read.contains(&"PRS".to_string()),
+        "the declarator is named `PRS`: {read:?}"
+    );
+    assert!(
+        !read.contains(&"RESTRICTED_POINTER".to_string()),
+        "the macro is not a declarator's name: {read:?}"
+    );
+
+    // …and the ordinary pointer declarator still names what it always named.
+    let plain = names("int * p;\n");
+    assert_eq!(plain, vec!["p".to_string()]);
+}
+
+/// **A parameter whose type is spelled the way an implementation macro is** — `void C::g(C& r)`, `(T& r)`,
+/// `(_Container_base12& _Right)`.
+///
+/// The parenthesised-declarator predicate has an arm for `(MACRO & name)` — a declarator group with a macro
+/// around its operator, the sibling of `(*MACRO name)` — and its guard is `written_like_a_macro` on the first
+/// name. That test is a **spelling**, and every one of the most ordinary parameter types passes it: `C`, `T`,
+/// `M`, `X` are single capitals and `looks_like_a_macro_name` accepts any all-capitals name, while
+/// `_Container_base12` and `_Ty` start with `_`.
+///
+/// So `void C::g(C& r) { }` had its parameter list claimed as a declarator group: `C` became the macro, `& r`
+/// what it decorated, and the whole definition came out as an **expression statement** with ``expected primary
+/// expression`` at its own `void` — which is why the cause looked like it had nothing to do with the parameters.
+/// It was the last failure in MSVC's STL that was not a real gap: `xmemory`'s
+/// `_Container_base12::_Swap_proxy_and_iterators_unlocked(_Container_base12& _Right)`.
+///
+/// The **follower** is the whole fix, and it is the same one the neighbouring arms use: a declarator group is
+/// followed by the suffix of what it decorates (`(WINAPI PM_OPEN_PROC)(LPWSTR)`), while a parameter list is
+/// followed by `)`, `,`, a qualifier or a body. `peek_token_kind_at(5..6) == [LeftParen]` is that requirement,
+/// and the list below is the two sides of it.
+#[test]
+fn a_parameter_type_may_be_spelled_like_an_implementation_macro() {
+    assert_reads(
+        Where::File,
+        &[
+            // The measured failure, its one-letter form, and the STL's spelling of the same thing.
+            "struct C { }; void C::g(C& r) { }\n",
+            "struct C { }; void C::g(T& r) { }\n",
+            "struct C { }; void C::g(_Container_base12& _Right) noexcept { }\n",
+            "struct C { }; void C::g(C& r, C& s) { }\n",
+            "struct C { }; void C::g(C* r) { }\n",
+            "struct C { }; void C::g(C&);\n",
+            "template <class T> void f(T& x) { }\n",
+            "void h(_Ty& value);\n",
+            // The neighbours: the ordinary parameter lists, and the declarator groups the arm exists for.
+            "void i(int& r) { }\n",
+            "void j(const C& r) { }\n",
+            "void k(C&) { }\n",
+            "typedef DWORD (WINAPI PM_OPEN_PROC)(LPWSTR);\n",
+            "typedef void (*OldCallback)(int);\n",
+            "typedef int (C::*fp)(int);\n",
+        ],
+    );
+}
+
+/// **The class-head scan must not run out of window**: a partial specialisation whose base clause is long.
+///
+/// `a_body_follows_the_class_head` is asked from the **class keyword** — "does this head open a body at all?" —
+/// and it looks ahead for a `{` that no `;` or `}` intervenes. What it looked *through* was a fixed window of 64
+/// tokens, which is a bound on how long a class head may be, and a bound is not a property that rule is entitled
+/// to. `tuple`'s `_Tuple_cat2` partial specialisation is the case that reached it:
+///
+/// ```cpp
+/// template <class _Ty, size_t... _Kx, size_t... _Ix, size_t _Ix_next, size_t... _Kx_next, class... _Rest>
+/// struct _Tuple_cat2<_Ty, index_sequence<_Kx...>, …, _Rest...>
+///     : _Tuple_cat2<_Ty, index_sequence<_Kx..., _Kx_next...>, …> {};
+/// ```
+///
+/// Six template parameters and five base arguments put the `{` three tokens past the end of the window, so the
+/// head was read as **body-less**: the base clause was never entered, the declaration ended where the head did,
+/// and the diagnostic landed on the head's own `:` — ``expected `;` `` against a token that is perfectly good
+/// C++. The scan now ends on the token that decides it and on nothing else.
+///
+/// The list below asserts both sides: a head long enough to have failed, and the short ones that must keep their
+/// reading (including the head that *has* no body, where the answer is `false` and the class keyword is a
+/// template parameter's `class`).
+#[test]
+fn a_class_head_may_be_longer_than_a_lookahead_window() {
+    assert_reads(
+        Where::File,
+        &[
+            // The measured case, with the identifiers the STL uses…
+            "template <class _Ty, size_t... _Kx, size_t... _Ix, size_t _Ix_next, size_t... _Kx_next, class... _Rest>\n\
+             struct _Tuple_cat2<_Ty, index_sequence<_Kx...>, index_sequence<_Ix...>, _Ix_next, \
+             index_sequence<_Kx_next...>, _Rest...>\n\
+             \x20   : _Tuple_cat2<_Ty, index_sequence<_Kx..., _Kx_next...>,\n\
+             \x20         index_sequence<_Ix..., (_Ix_next + 0 * _Kx_next)...>,\n\
+             \x20         _Ix_next + 1, _Rest...> {};\n",
+            // …and the same shape in one line, which is what a formatter produces.
+            "template <class T, int... K, int... I, int N, int... KN, class... R>\n\
+             struct S<T, I2<K...>, I2<I...>, N, I2<KN...>, R...>\n\
+             \x20   : S<T, I2<K..., KN...>, I2<I..., (N + 0 * KN)...>, N + 1, R...> {};\n",
+            // The neighbours: the short head, the long head with a short base clause, and a head with no body.
+            "template <class T> struct S<T> : B<C<1>, C<2>> { };\n",
+            "template <class T, class... R> struct S<T, R...> : B<C<T>, C<R...>> { };\n",
+            "template <class T, int N> struct S;\n",
+            "template <class T> struct S { using type = T; };\n",
+            "struct Plain : Base { };\n",
+        ],
+    );
+}
+
+/// **A calling convention in front of a pointer-to-member's class name** — `(__cdecl A::*)`.
+///
+/// MSVC's `type_traits` writes every member-pointer predicate through a macro whose first argument is the calling
+/// convention (`_IS_MEMFUNPTR(CALL_OPT, CV_OPT, REF_OPT, NOEXCEPT_OPT)`, `type_traits:406`), so the group arrives
+/// as `( __cdecl A :: * )`: the class name stands one token further along than the `(C::*h)` group the rule already
+/// read, and neither the predicate nor the reader had an arm for it.
+///
+/// **It took better evidence to see it at all**, which is why the record is here rather than in a bug list: in the
+/// per-file reading the macro chain was not expanded, so the tokens were the ordinary names `CALL_OPT A :: *` and
+/// the shape was never reached. The one-walk `TranslationUnit` expands what the compiler expands, and
+/// `type_traits:409` then became that file's first error.
+///
+/// Two of the four spellings are read — a parameter and a typedef — and the two that are not are pinned in
+/// `constructs_the_parser_does_not_read_yet`: what separates them is a **ref-qualifier after the parameter list,
+/// in a type-id**.
+#[test]
+fn a_calling_convention_may_precede_a_pointer_to_members_class_name() {
+    assert_reads(
+        Where::File,
+        &[
+            "void h(int (__cdecl A::*)(int));\n",
+            "typedef int (__cdecl A::*fp)(int);\n",
+            "void h(int (__stdcall A::*)(int));\n",
+            "template <class R, class A, class... T> struct X<R (__cdecl A::*)(T...)> { };\n",
+            // The neighbours, which must keep their readings: without the macro, and the plain pointer forms.
+            "void h(int (C::*)(int));\n",
+            "typedef int (C::*fp)(int);\n",
+            "typedef int (C::*fp)(int) const;\n",
+            "void h(int (C::*p)(int));\n",
+        ],
+    );
+
+    assert_does_not_read_yet(
+        Where::File,
+        &[
+            (
+                "template <class R, class A, class... T> struct X<R (__cdecl A::*)(T...) &> { };",
+                "a calling convention **and** a ref-qualifier on a member-pointer type in a template argument — \
+                 MSVC's `_IS_MEMFUNPTR` with `REF_OPT` = `&` (`type_traits:409`). Without the macro the same \
+                 argument reads, so the missing piece is the interaction of the two, not the ref-qualifier",
+            ),
+            (
+                "using m = void (__cdecl A::*)() &;",
+                "the same pair in an alias's type-id: the parenthesised-declarator rule is reached with a macro \
+                 where it wants a name, and reports ``expected a name``",
+            ),
         ],
     );
 }

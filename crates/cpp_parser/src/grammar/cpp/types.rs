@@ -2639,7 +2639,27 @@ fn a_body_follows_the_class_head(p: &CppParser) -> bool {
     // starts at the head's own `:`, which cannot end a template-name, so that is what it starts as.
     let mut previous = CppTokenKind::Colon;
 
-    for kind in p.peek_token_kind_at(0..64) {
+    // **No fixed window.** What stood here was `p.peek_token_kind_at(0..64)` — a bound on how long a class head
+    // may be, which is not a property this rule is entitled to, and the bound was reached: `tuple`'s
+    // `_Tuple_cat2` partial specialisation writes a six-parameter head and a five-argument base clause, and the
+    // caller that asks from the **`struct` keyword** (rather than from the `:` it is looking for) ran out three
+    // tokens before the `{`. The base clause was therefore never read, and the diagnostic landed on the head's
+    // own `:` — ``expected `;` `` at a token that is perfectly good C++.
+    //
+    // The scan ends on the token that decides it and on nothing else: a `{`, a `;`, a `}`, an EOF — and the
+    // padding `peek_token_kind_at` appends at end of input is the same EOF answer.
+    let mut offset = 0usize;
+
+    loop {
+        let Some(kind) = p
+            .peek_token_kind_at(offset..offset + 1)
+            .first()
+            .copied()
+            .filter(|kind| *kind != CppTokenKind::None)
+        else {
+            return false;
+        };
+
         if after_a_directive && is_class_like_keyword(kind) {
             return false;
         }
@@ -2661,8 +2681,8 @@ fn a_body_follows_the_class_head(p: &CppParser) -> bool {
         }
 
         previous = kind;
+        offset += 1;
     }
-    false
 }
 
 /// Parse a base clause: `: public B, virtual private C<T>`.
@@ -3553,6 +3573,87 @@ pub fn parse_abstract_declarator_with(
             // out empty and the declaration failed — the form an out-of-line member-pointer *typedef* is written
             // in.
 
+            // **A calling convention before the operator** — the abstract declarator's half of the rule that
+            // reads `int *__cdecl _errno(void)` and `(__cdecl * _onexit_t)`: `(__cdecl *)` writes the keyword
+            // *before* the `*`, and without this arm the loop broke on the name and the parentheses came out
+            // empty. The keyword is `Bare` — it says nothing about the type or the name, so it stays the token it
+            // was written as — and the loop continues, which is what lets the `*` after it still be read.
+            //
+            // A directive is what it looks like; a *name written like a macro* is the only thing this accepts,
+            // so `(x *)` keeps the reading it had.
+            CppTokenKind::Identifier
+                if matches!(an_implementation_keyword(p), Some(ImplementationKeyword::Bare)) =>
+            {
+                let _ = container!();
+                p.bump();
+            }
+            // **An unexpanded macro standing in the pointer operator, before the declarator's name** —
+            // `*RESTRICTED_POINTER PRKCRM_MARSHAL_HEADER`, which `shared/ktmtypes.h` writes eleven times in one
+            // typedef after another.
+            //
+            // What the name is: `winnt.h:110` defines it as `__restrict` on the one target that wants the
+            // qualifier and as *nothing at all* everywhere else (`#else` → `#define RESTRICTED_POINTER`). So it
+            // stands where a **type qualifier** stands, exactly as `__restrict` does in the arm above — and it is
+            // a *macro*, not a keyword, so which of the two it is depends on the closure: a reading that does not
+            // expand it (the file's own text) or cannot (nobody said what it is) meets a bare name here.
+            //
+            // The follower is what makes the arm safe, and it is the same requirement the calling-convention
+            // rule above documents: `*MACRO name` is told from `*name` by the second name and by nothing else.
+            // The ordinary pointer declarator has one name (`int *p;`) and is untouched; `*x y` in broken code
+            // stays an error, because `x` is not written the way a macro is.
+            //
+            // Measured: `ktmtypes.h` reads clean in the file's own text **by accident** — the declarator takes
+            // `RESTRICTED_POINTER` as its name, the typedef ends without its `;`, and `PRKCRM_MARSHAL_HEADER ;`
+            // is read as a declaration of its own: well formed, lossless, no diagnostic, and two names wrong.
+            // Over the cooked stream the same tokens report ``expected `;` `` instead, because there the
+            // invented `;` is not available.
+            //
+            // **An operator has to have been read** (`container.is_some()`), and that is not a formality: the
+            // pair this arm fires on is `MACRO name`, which is also the pair inside a parenthesised declarator —
+            // `(WINAPI PM_OPEN_PROC)(LPWSTR)`, where `WINAPI` is a `MacroCall` and `PM_OPEN_PROC` is the name.
+            // Without the gate this arm claimed the group's first name before that rule could see it, and the
+            // assertion that pins the calling-convention shape failed: the `MacroCall` was gone. Here the arm is
+            // only reachable *after* a `*`, `&`, `&&` or `::*`, which is the position the macro actually
+            // decorates.
+            CppTokenKind::Identifier
+                if container.is_some()
+                    && written_like_a_macro(p.current_token_text())
+                    && p.peek_token_kind_at(1..2) == [CppTokenKind::Identifier] =>
+            {
+                let _ = container!();
+                p.bump();
+            }
+            // …and the **mirror of it**: the macro written *before* the operator, as the old Windows memory-model
+            // spelling does — `} MMTIME , * PMMTIME , NEAR * NPMMTIME , FAR * LPMMTIME ;` (`um/mmsyscom.h:138`,
+            // and `um/mciapi.h`, `um/mmiscapi.h` and `shared/rpcdcep.h` write the same). `NEAR` and `FAR` come
+            // from `minwindef.h:150` (`#define NEAR near`), and `near`/`far` are themselves empty macros two
+            // definitions above it — so the compiler reads `* NPMMTIME` and this reading has to as well.
+            //
+            // The two arms are one concept at two positions, and both need the follower: here it is the **`*`**
+            // that must come next, which is what keeps a name that merely *looks* like a macro from being taken —
+            // the pair `MACRO *` occurs in no valid declarator, so the only readings are this one and an error.
+            CppTokenKind::Identifier
+                if written_like_a_macro(p.current_token_text())
+                    && matches!(
+                        p.peek_token_kind_at(1..2).as_slice(),
+                        [CppTokenKind::Star | CppTokenKind::Ampersand | CppTokenKind::LogicalAnd]
+                    ) =>
+            {
+                let _ = container!();
+                p.bump();
+            }
+            // …and a **calling convention in front of the class name** — `(__cdecl A::*)`, which is the group
+            // `a_parenthesised_abstract_declarator_follows` claims for MSVC's `_IS_MEMFUNPTR` (see its note).
+            // The macro decorates the pointer-to-member operator exactly as `__cdecl` decorates a plain `*`
+            // (`(void (__cdecl *)(void))`), so it is read the same way — as a token that says nothing about the
+            // type — and the loop then reads the `A::*` through the arm below.
+            CppTokenKind::Identifier
+                if written_like_a_macro(p.current_token_text())
+                    && pointer_to_member_operator_length(p, 1).is_some() =>
+            {
+                let _ = container!();
+                p.bump();
+            }
             CppTokenKind::Identifier if pointer_to_member_operator_length(p, 0).is_some() => {
                 let _ = container!();
                 let op = p.mark(CppSyntaxKind::PointerType);
@@ -3910,8 +4011,7 @@ fn eat_cv_qualifiers(p: &mut CppParser) {
 /// wrapped in them without a name, since a declarator's parentheses have to *hold* a declarator. `int (int)`
 /// reaches this with a type keyword inside, is refused here, and stays a parameter list; `int (x)` reaches it
 /// with a name, is refused for the same reason, and stays a name.
-fn a_parenthesised_abstract_declarator_follows(p: &CppParser) -> bool {
-    matches!(
+fn a_parenthesised_abstract_declarator_follows(p: &CppParser) -> bool {    matches!(
         p.peek_token_kind_at(1..2).first(),
         Some(&CppTokenKind::Star)
             | Some(&CppTokenKind::Ampersand)
@@ -3923,6 +4023,25 @@ fn a_parenthesised_abstract_declarator_follows(p: &CppParser) -> bool {
     // of member-pointer-to-function type, `void h(int (C::*)(int));`. The named spelling `(C::*h)` never reaches
     // here — [`a_parenthesised_declarator_with_a_name_follows`] claims it first.
     || pointer_to_member_operator_length(p, 1).is_some()
+    // …and a **calling convention in front of the operator**, with no name after it: `( __cdecl * )`. That is the
+    // abstract spelling of `int (__cdecl * _onexit_t)(void)`, which a `using` alias writes —
+    // `using new_handler = void (__cdecl *)();` (`new:111`), and the same type in `type_traits`. The named
+    // spelling reaches [`a_parenthesised_declarator_with_a_name_follows`] instead; here the group has no name,
+    // and the macro's **spelling** is what keeps an ordinary `(x *)` out, exactly as it does there.
+    // The **follower** is required, and it is not decoration: `(_Rng&&)` is a *parameter list* holding one
+    // parameter whose name happens to be written the way an implementation macro is (`_Rng`), and claiming it
+    // turned three libstdc++ headers into rubble — `template<borrowed_range _Rng> subrange(_Rng&&)` reported
+    // ``expected ), but get identifier``. A calling convention decorates something, so the group it stands in is
+    // always followed by the parameter list of what it decorates.
+    || (matches!(
+        p.peek_token_kind_at(1..4).as_slice(),
+        [
+            CppTokenKind::Identifier,
+            CppTokenKind::Star | CppTokenKind::Ampersand | CppTokenKind::LogicalAnd,
+            CppTokenKind::RightParen
+        ]
+    ) && p.peek_token_kind_at(4..5) == [CppTokenKind::LeftParen]
+        && written_like_a_macro(p.peek_token_text_at(1)))
 }
 
 /// Does the `(` at the cursor wrap a declarator that has a **name** in it: `(*f)(int)`, `(&f)(int)`?
@@ -4053,6 +4172,27 @@ fn a_parenthesised_declarator_with_a_name_follows(p: &CppParser) -> bool {
         return true;
     }
 
+    // `(MACRO & name)` — the same shape with a reference operator — and it needs the **follower** for a reason
+    // the operator arms above did not have to face: `(IDENT & IDENT)` is not a rare declarator group, it is the
+    // single most ordinary *parameter list* there is.
+    //
+    // ```cpp
+    // void _Container_base12::_Swap_proxy_and_iterators_unlocked(_Container_base12& _Right) noexcept { … }
+    // void C::g(C& r) { }
+    // void C::g(T& r) { }
+    // ```
+    //
+    // `written_like_a_macro` is a *spelling* test — a leading underscore, or all capitals — and every one of
+    // those parameter types passes it: `_Container_base12` starts with `_`, and `C`, `T`, `M`, `X` are single
+    // capitals, which `looks_like_a_macro_name` accepts. So the group was claimed as a declarator, `C` was read
+    // as the macro, `& r` as what it decorates, and the declaration fell apart: measured on `xmemory` (the only
+    // remaining failure in MSVC's STL that was not a real gap) and reproduced in isolation by
+    // `struct C { }; void C::g(C& r) { }` — which is what the test below pins.
+    //
+    // What separates the two readings is what follows the group, exactly as it does two arms up: a declarator
+    // group is followed by the declarator's own suffix — the parameter list of what it decorates — and a
+    // parameter list is followed by `)`, `,`, a qualifier or a body. So the `(` is required, and the parameter
+    // list keeps its reading.
     if matches!(
         p.peek_token_kind_at(1..4).as_slice(),
         [
@@ -4061,9 +4201,80 @@ fn a_parenthesised_declarator_with_a_name_follows(p: &CppParser) -> bool {
             CppTokenKind::Identifier
         ]
     ) && p.peek_token_kind_at(4..5) == [CppTokenKind::RightParen]
+        && p.peek_token_kind_at(5..6) == [CppTokenKind::LeftParen]
         && written_like_a_macro(p.peek_token_text_at(1))
     {
         return true;
+    }
+
+    // `(FAR WINAPI *FARPROC)`, `(__RPC_STUB __RPC_FAR * RPC_DISPATCH_FUNCTION)` — the same calling-convention
+    // group with **two names before the operator**, which every arm above is one name short of: the abstract arm
+    // wants `(MACRO *)`, the named ones want a single name on either side of the `*`.
+    //
+    // ```cpp
+    // typedef INT_PTR (FAR WINAPI *FARPROC)();                                          // minwindef.h:223
+    // typedef void (__RPC_STUB __RPC_FAR * RPC_DISPATCH_FUNCTION) (IN OUT PRPC_MESSAGE); // rpcdcep.h:183
+    // ```
+    //
+    // The **shape alone** decides it here, and that is a deliberate difference from the arms above: their
+    // `written_like_a_macro` gate exists to protect a reading that is otherwise *valid* — `(T& r)` is a parameter
+    // list, and a spelling test is the only thing that can tell it from `(MACRO& name)`. Two names and then an
+    // operator and then a name cannot be a parameter list at all: a parameter is a type and a declarator, so the
+    // second name would have to start a declarator, and no declarator begins with a name. There is therefore
+    // nothing to protect, and requiring the spelling would refuse `far winapi`-style spellings that no compiler
+    // refuses.
+    if matches!(
+        p.peek_token_kind_at(1..5).as_slice(),
+        [
+            CppTokenKind::Identifier,
+            CppTokenKind::Identifier,
+            CppTokenKind::Star | CppTokenKind::Ampersand | CppTokenKind::LogicalAnd,
+            CppTokenKind::Identifier
+        ]
+    ) && p.peek_token_kind_at(5..6) == [CppTokenKind::RightParen]
+    {
+        return true;
+    }
+
+    // …and the same group with a **calling convention in front of the class name**, which is how MSVC's
+    // `type_traits` writes every member-pointer predicate:
+    //
+    // ```cpp
+    // #define _IS_MEMFUNPTR(CALL_OPT, CV_OPT, REF_OPT, NOEXCEPT_OPT)                       \
+    //     template <class _Ret, class _Arg0, class... _Types>                               \
+    //     struct _Is_memfunptr<_Ret (CALL_OPT _Arg0::*)(_Types...) CV_OPT REF_OPT …>        \
+    //         : _Arg_types<CV_OPT _Arg0*, _Types...> { … }                                  // type_traits:406
+    // ```
+    //
+    // `CALL_OPT` is `__cdecl`/`__stdcall`/empty, so the tokens are `( __cdecl A :: * )` and the class name stands
+    // one token further along than the arm below looks. Read as anything else the group is an expression the
+    // argument reader cannot parse, and the whole specialisation is reported as ``expected a template argument``.
+    //
+    // **Before** the `let … else` below, and that is not tidiness: that binding returns `false` for a group whose
+    // first token is not the class name, so an arm placed after it is unreachable — which is exactly how the first
+    // version of this was written and why it changed nothing.
+    //
+    // It took better evidence to see this one at all: the macro chain that produces the spelling was not expanded
+    // in the per-file reading, so the tokens arrived as `CALL_OPT A :: *` — an ordinary name — and the shape was
+    // never reached. Same story as every other gap this corpus has exposed.
+    if p.peek_token_kind_at(1..2) == [CppTokenKind::Identifier]
+        && written_like_a_macro(p.peek_token_text_at(1))
+        && let Some(length) = pointer_to_member_operator_length(p, 2)
+    {
+        let after = 2 + length;
+        let follower = p.peek_token_kind_at(after..after + 2);
+
+        // **Named or nameless**, which the arm below has to keep apart and this one does not: there it is the
+        // *name* that tells a declarator group from a parameter (`(C::*h)` against `(C::*)(int)`), and here the
+        // macro before the operator has already done that — a parameter cannot begin with one. Both spellings
+        // occur:
+        //
+        // ```cpp
+        // struct _Is_memfunptr<_Ret (__cdecl _Arg0::*)(_Types...) &> : …     // named, in the specialisation
+        // using member = void (__cdecl _Arg0::*)();                           // nameless, in an alias
+        // ```
+        return follower.first() == Some(&CppTokenKind::RightParen)
+            || follower.as_slice() == [CppTokenKind::Identifier, CppTokenKind::RightParen];
     }
 
     // `(C::*h)`, `(A::B::*h)` — a **pointer to member**, whose class name stands where the operator would, and
@@ -4082,8 +4293,31 @@ fn a_parenthesised_declarator_with_a_name_follows(p: &CppParser) -> bool {
     // **With a name**, which is the group this rule owns. The nameless `(C::*)` is the abstract spelling and
     // belongs to [`parse_abstract_declarator`] — claiming it here would take it to a rule that requires a name
     // and fail on a parameter that is perfectly good: `void h(int (C::*)(int));`.
-    p.peek_token_kind_at(after..after + 2).as_slice()
+    if p.peek_token_kind_at(after..after + 2).as_slice()
         == [CppTokenKind::Identifier, CppTokenKind::RightParen]
+    {
+        return true;
+    }
+
+    // …and the same group with a **calling convention in front of the class name**, which is how MSVC's
+    // `type_traits` writes every member-pointer predicate:
+    //
+    // ```cpp
+    // #define _IS_MEMFUNPTR(CALL_OPT, CV_OPT, REF_OPT, NOEXCEPT_OPT)                       \
+    //     template <class _Ret, class _Arg0, class... _Types>                               \
+    //     struct _Is_memfunptr<_Ret (CALL_OPT _Arg0::*)(_Types...) CV_OPT REF_OPT …>        \
+    //         : _Arg_types<CV_OPT _Arg0*, _Types...> { … }                                  // type_traits:406
+    // ```
+    //
+    // `CALL_OPT` is `__cdecl`/`__stdcall`/empty, so the tokens are `( __cdecl A :: * )` and the class name stands
+    // one token further along than the arm above looks. Read as anything else, the group is an expression the
+    // argument reader cannot parse and the whole specialisation is reported as ``expected a template argument``.
+    //
+    // It took better evidence to see this one: the macro chain that produces the spelling was not expanded in the
+    // per-file reading, so the tokens arrived as `CALL_OPT A :: *` — an ordinary name — and the shape was never
+    // reached. That is the same story as every other gap this corpus has exposed, and the reason the measurement
+    // is the *reading* and not the file.
+    false
 }
 
 /// Parse the suffixes that bind to a declarator: parameter lists and array bounds, in any order.
@@ -4409,17 +4643,40 @@ fn parse_parenthesised_declarator(p: &mut CppParser) -> ParseResult {
     // B72 and B73 use, one level down: there the name stood between the type and the declarator, here *inside* the
     // parentheses, before the name.
     //
+    // **A run of them**, because a calling convention can be spelled in two names and the operator can come after
+    // the second: `(FAR WINAPI *FARPROC)` (`minwindef.h:223`) and
+    // `(__RPC_STUB __RPC_FAR * RPC_DISPATCH_FUNCTION)` (`rpcdcep.h:183`). What tells the run's *last* name from
+    // the declarator's own is what follows it: a name followed by a name or by an operator is still part of the
+    // run, and the name the group is about is the one the `)` closes on. The single-name case is the same test
+    // with one iteration.
+    //
     // `written_like_a_macro` keeps it from firing on a pair that is merely broken code: `(x y)` is still read the
     // way it was, and only a name spelled the way a macro is spelled takes this reading.
-    if p.current_token() == CppTokenKind::Identifier
-        && p.peek_next_token() == CppTokenKind::Identifier
+    while p.current_token() == CppTokenKind::Identifier
         && written_like_a_macro(p.current_token_text())
+        && matches!(
+            p.peek_next_token(),
+            CppTokenKind::Identifier
+                | CppTokenKind::Star
+                | CppTokenKind::Ampersand
+                | CppTokenKind::LogicalAnd
+        )
     {
         let m = p.mark(CppSyntaxKind::MacroCall);
         let name = p.mark(CppSyntaxKind::NameExpr);
         p.bump();
         name.complete(p);
         m.complete(p);
+    }
+
+    // …and the operator the run stood in front of, which is an ordinary abstract declarator from there on:
+    // `(FAR WINAPI *FARPROC)` reaches this point with `* FARPROC` left, and the reading that already owns `*`
+    // takes it — the same call the single-macro arm above makes.
+    if matches!(
+        p.current_token(),
+        CppTokenKind::Star | CppTokenKind::Ampersand | CppTokenKind::LogicalAnd
+    ) {
+        parse_abstract_declarator(p, false)?;
     }
 
     // A group with **no name at all** is the abstract spelling of the shape the fourth case in

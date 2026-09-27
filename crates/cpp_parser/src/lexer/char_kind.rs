@@ -6,7 +6,7 @@
 //!
 //! On top of the standard properties the lexer accepts two widely implemented extensions:
 //!
-//! * `$` in identifiers (GCC, Clang, MSVC all accept it), gated by
+//! * `$` in identifiers (GCC, Clang, MSVC all accept it), on unless a caller turns it off —
 //!   [`LexerConfig::dollar_in_identifier`](crate::lexer::LexerConfig::dollar_in_identifier).
 //! * Universal character names (`\uXXXX`, `\UXXXXXXXX`) inside identifiers, which is standard but
 //!   almost always forgotten. These need the raw source, so they are handled in the lexer rather

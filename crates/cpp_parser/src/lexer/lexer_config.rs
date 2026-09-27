@@ -12,8 +12,18 @@ pub struct LexerConfig {
 
     /// Accept `$` in identifiers.
     ///
-    /// Not standard C++, but GCC, Clang and MSVC all accept it, so it appears in real code
-    /// (particularly generated code). Off by default because a strict parser should report it.
+    /// Not standard C++, but GCC, Clang and MSVC all accept it in their default modes, so real code
+    /// contains it — and not only generated code: the Windows SDK's own SAL headers spell macro
+    /// names as `__$allowed_on_return` (`specstrings_strict.h`), so a lexer that refuses `$` does
+    /// not merely report one character, it **loses the definition** and every use of it.
+    ///
+    /// **On by default**, which is the whole of the trade-off: the standard's answer is that `$` is
+    /// not a name character, and the two readings differ visibly — refusing it yields
+    /// `unrecognized character` at the `$` and splits `__$allowed_on_return` into `__`, `$`,
+    /// `allowed_on_return`, three tokens that no macro table can match. A file that compiles is the
+    /// file we were asked to read, so the permissive reading is the default and the strict one is
+    /// one call away ([`LexerConfig::with_dollar_in_identifier`]`(false)`), exactly as a caller
+    /// reaches for `-fno-dollars-in-identifiers`.
     pub dollar_in_identifier: bool,
 
     /// Recognise `R"(...)"` raw string literals and the `u8`/`u`/`U`/`L` encoding prefixes.
@@ -27,7 +37,9 @@ impl LexerConfig {
     pub fn new(language_level: CppLanguageLevel) -> Self {
         LexerConfig {
             language_level,
-            dollar_in_identifier: false,
+            // See the field: every mainstream compiler accepts it in its default mode, and a corpus
+            // that *uses* it is the argument. The strict reading is `with_dollar_in_identifier(false)`.
+            dollar_in_identifier: true,
             string_prefixes: language_level >= CppLanguageLevel::Cpp11,
         }
     }

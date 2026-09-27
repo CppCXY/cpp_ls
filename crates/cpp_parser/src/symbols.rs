@@ -125,14 +125,19 @@ pub struct IncludedMacro {
     /// the macro's own argument. See the expansion section.
     ///
     /// `None` is the ordinary answer — an `#undef`, a body nobody stored, or a caller that only had shapes.
-    pub body_text: Option<Box<str>>,
+    ///
+    /// **`Arc<str>` rather than `Box<str>`, and the reason is sharing**: one translation unit's walk produces each
+    /// definition **once**, and every file that has it in force gets a reference to that same text instead of a
+    /// copy of it. An owned `Box<str>` makes the walk's result unshareable — which is what the per-file census
+    /// measured: 2 489 142 entries materialised for 255 files, the same bodies over and over.
+    pub body_text: Option<std::sync::Arc<str>>,
     /// The **parameter list as written**, parentheses included — `"(a, b)"`, `"()"` — when the caller has it.
     ///
     /// What expansion needs and a shape cannot imply: a function-like macro is substituted *by parameter*, so a
     /// body without its parameter list cannot be substituted into. `None` for an object-like macro and for a
     /// caller that did not carry it; [`IncludedMacro::defined_with_body`] leaves it `None`, which the cooker reads
     /// as "not usable for expansion" rather than as "no parameters".
-    pub parameters: Option<Box<str>>,
+    pub parameters: Option<std::sync::Arc<str>>,
 }
 
 impl IncludedMacro {
@@ -168,7 +173,7 @@ impl IncludedMacro {
                 function_like,
                 body,
             }),
-            body_text: body_text.map(Box::from),
+            body_text: body_text.map(std::sync::Arc::from),
             parameters: None,
         }
     }
@@ -184,8 +189,33 @@ impl IncludedMacro {
         parameters: Option<&str>,
     ) -> Self {
         Self {
-            parameters: parameters.map(Box::from),
+            parameters: parameters.map(std::sync::Arc::from),
             ..Self::defined_with_body(from_offset, name, function_like, body, body_text)
+        }
+    }
+
+    /// [`IncludedMacro::defined_with_body_and_parameters`] for a caller that already holds the text **shared** —
+    /// a translation unit's walk, whose bodies are read once and handed to every file that has them in force.
+    ///
+    /// The clone is a refcount bump and not a copy of the string, which is the whole point of the `Arc`: the same
+    /// body reaches hundreds of environments in one corpus.
+    pub fn defined_with_shared_body(
+        from_offset: usize,
+        name: &str,
+        function_like: bool,
+        body: MacroBody,
+        body_text: Option<std::sync::Arc<str>>,
+        parameters: Option<std::sync::Arc<str>>,
+    ) -> Self {
+        Self {
+            from_offset,
+            name: name.into(),
+            definition: Some(SymbolKind::Macro {
+                function_like,
+                body,
+            }),
+            body_text,
+            parameters,
         }
     }
 
@@ -204,7 +234,11 @@ impl IncludedMacro {
 ///
 /// A named shape rather than a tuple inline, because "is this macro function-like, and does anybody know its
 /// parameters" is the question expansion asks of every entry and a four-element tuple makes it a puzzle.
-type InForceEntry = (Option<bool>, Option<Box<str>>, Box<str>);
+type InForceEntry = (
+    Option<bool>,
+    Option<std::sync::Arc<str>>,
+    std::sync::Arc<str>,
+);
 
 /// One body a caller contributes to the **in-force** channel of a [`MacroEnvironment`].
 ///
@@ -217,8 +251,27 @@ pub struct InForceBody {
     pub function_like: Option<bool>,
     /// The parameter list, when the caller has it — see [`IncludedMacro::parameters`]. A function-like body
     /// **with** its parameters is usable; without them it is not.
-    pub parameters: Option<Box<str>>,
-    pub body: Box<str>,
+    pub parameters: Option<std::sync::Arc<str>>,
+    /// Shared for the same reason [`IncludedMacro::body_text`] is: a walk produces the text once.
+    pub body: std::sync::Arc<str>,
+}
+
+impl InForceBody {
+    /// The body a caller already holds **shared** — a translation unit's walk, handing the same text to every
+    /// file that has it in force.
+    pub fn shared(
+        name: Box<str>,
+        function_like: Option<bool>,
+        parameters: Option<std::sync::Arc<str>>,
+        body: std::sync::Arc<str>,
+    ) -> Self {
+        InForceBody {
+            name,
+            function_like,
+            parameters,
+            body,
+        }
+    }
 }
 
 impl From<(Box<str>, Box<str>)> for InForceBody {
@@ -227,7 +280,7 @@ impl From<(Box<str>, Box<str>)> for InForceBody {
             name,
             function_like: None,
             parameters: None,
-            body,
+            body: std::sync::Arc::from(body),
         }
     }
 }
@@ -239,8 +292,8 @@ impl From<(Box<str>, bool, Option<Box<str>>, Box<str>)> for InForceBody {
         InForceBody {
             name,
             function_like: Some(function_like),
-            parameters,
-            body,
+            parameters: parameters.map(std::sync::Arc::from),
+            body: std::sync::Arc::from(body),
         }
     }
 }
@@ -251,7 +304,7 @@ impl From<(Box<str>, Option<bool>, Box<str>)> for InForceBody {
             name,
             function_like,
             parameters: None,
-            body,
+            body: std::sync::Arc::from(body),
         }
     }
 }
@@ -262,7 +315,7 @@ impl From<(Box<str>, bool, Box<str>)> for InForceBody {
             name,
             function_like: Some(function_like),
             parameters: None,
-            body,
+            body: std::sync::Arc::from(body),
         }
     }
 }
@@ -284,10 +337,13 @@ pub struct MacroEnvironment {
     by_name: std::collections::HashMap<Box<str>, Vec<(usize, Option<SymbolKind>)>>,
     /// The replacement list per `(offset, name)`, kept beside the history rather than inside it so that the
     /// common lookup — "is this a macro here" — stays a binary search over a slice of small values.
-    body_texts: std::collections::HashMap<(usize, Box<str>), Box<str>>,
+    ///
+    /// Shared (`Arc<str>`) like [`IncludedMacro::body_text`]: one walk produces a body once, and every file that
+    /// has it in force refers to it.
+    body_texts: std::collections::HashMap<(usize, Box<str>), std::sync::Arc<str>>,
     /// The parameter list per `(offset, name)`, beside the body and for the same reason: expansion substitutes
     /// *by parameter*, so a body without its parameters cannot be substituted into.
-    parameters: std::collections::HashMap<(usize, Box<str>), Box<str>>,
+    parameters: std::collections::HashMap<(usize, Box<str>), std::sync::Arc<str>>,
     /// The replacement lists of macros whose definition is **conditional but in force** — read for *what they say*,
     /// never for *whether the name is a macro*.
     ///
@@ -427,7 +483,7 @@ impl MacroEnvironment {
                 let Some(SymbolKind::Macro { function_like, .. }) = definition else {
                     return None;
                 };
-                let body = bodies.get(&(*offset, name.clone())).map(Box::as_ref);
+                let body = bodies.get(&(*offset, name.clone())).map(std::sync::Arc::as_ref);
                 Some((&**name, *offset, *function_like, body))
             })
         })
@@ -454,7 +510,7 @@ impl MacroEnvironment {
         let in_force = history[..history.partition_point(|(from, _)| *from <= offset)].last()?;
         self.body_texts
             .get(&(in_force.0, name.into()))
-            .map(Box::as_ref)
+            .map(std::sync::Arc::as_ref)
     }
 
     /// The **parameter list** of `name` at `offset`, when the caller stored one. See [`IncludedMacro::parameters`].
@@ -463,7 +519,7 @@ impl MacroEnvironment {
         let in_force = history[..history.partition_point(|(from, _)| *from <= offset)].last()?;
         self.parameters
             .get(&(in_force.0, name.into()))
-            .map(Box::as_ref)
+            .map(std::sync::Arc::as_ref)
     }
 
     /// Is `name` a macro at `offset`? The question almost every caller asks.

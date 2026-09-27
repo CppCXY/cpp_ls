@@ -5010,11 +5010,29 @@ pub fn parse_static_assert(p: &mut CppParser) -> ParseResult {
 }
 
 /// Parse a namespace definition: `namespace a::b { ... }` or `namespace a = b;`.
+///
+/// # The attribute between the keyword and the name
+///
+/// C++17 spells a namespace definition as `namespace attribute-specifier-seq(opt) identifier { … }`, and MSVC's
+/// own STL uses the slot: `cstdint:55` is `namespace _DEPRECATE_TR1_NAMESPACE tr1 {`, where the macro is
+/// `[[deprecated("warning STL4002: …")]]` (`yvals_core.h:908`). Read against the **cooked** stream — which is
+/// what the compiler sees and what the `cstdint` line actually means — the declaration arrives as
+/// `namespace [[deprecated(…)]] tr1 {`, so a rule that does not read the attribute reports
+/// `expected primary expression` at the first `[`, and everything after it in the header is an error node.
+///
+/// It is also spellable in the file's own text (`namespace [[deprecated]] a { }`), which is the shape the test
+/// asserts — a gap that only the cooked reading shows is still a gap, but a gap that *only* shows there is much
+/// easier to lose.
 pub fn parse_namespace_declaration(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::NamespaceDecl);
 
     expect_token(p, CppTokenKind::NamespaceKeyword)?;
+
+    // `at_an_attribute` is the guard that makes this safe: an ordinary name is not an attribute, so the name and
+    // the `_GLIBCXX_VISIBILITY(default)` head below are untouched by it — only `[[…]]`, `__attribute__((…))` and
+    // `__declspec(…)` are read, and all three are attributes at exactly this position.
+    let _ = super::types::parse_attribute_specifiers(p);
 
     // A namespace alias: `namespace fs = std::filesystem;`
     if p.current_token() == CppTokenKind::Identifier && p.peek_next_token() == CppTokenKind::Assign

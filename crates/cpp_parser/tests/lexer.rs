@@ -25,9 +25,9 @@ fn tokens(source: &str) -> Vec<(CppTokenKind, String)> {
         .collect()
 }
 
-/// Like [`tokens`], but with `$` accepted in identifiers.
-fn tokens_with_dollar(source: &str) -> Vec<(CppTokenKind, String)> {
-    let config = LexerConfig::new(CppLanguageLevel::Cpp23).with_dollar_in_identifier(true);
+/// Like [`tokens`], but with `$` **refused** — the standard's reading, which the default does not take.
+fn tokens_without_dollar(source: &str) -> Vec<(CppTokenKind, String)> {
+    let config = LexerConfig::new(CppLanguageLevel::Cpp23).with_dollar_in_identifier(false);
     let mut errors = Vec::new();
     let lexed = CppLexer::new(source, config, &mut errors).tokenize();
 
@@ -324,12 +324,31 @@ fn emoji_is_not_an_identifier() {
 }
 
 #[test]
-fn dollar_is_gated_by_config() {
+fn dollar_is_read_unless_the_caller_refuses_it() {
+    // The default reading, and the corpus is why: `__$allowed_on_return` is a macro the Windows SDK's
+    // `specstrings_strict.h` really defines, and refusing `$` splits it into three tokens — so the
+    // definition is not merely mis-spelled, it is *lost*, along with every use of it.
     assert_eq!(
-        tokens_with_dollar("$foo")[0],
-        (CppTokenKind::Identifier, "$foo".to_string())
+        tokens("__$allowed_on_return")[0],
+        (CppTokenKind::Identifier, "__$allowed_on_return".to_string())
     );
-    assert_ne!(tokens("$foo")[0].0, CppTokenKind::Identifier);
+    // The standard's answer, still available: `$` is not a name character, so the same spelling is
+    // three tokens — and the middle one is reported rather than silently absorbed.
+    assert_eq!(
+        tokens_without_dollar("__$allowed_on_return")
+            .iter()
+            .map(|(kind, text)| (*kind, text.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (CppTokenKind::Identifier, "__"),
+            (CppTokenKind::Unknown, "$"),
+            (CppTokenKind::Identifier, "allowed_on_return"),
+        ]
+    );
+    assert_ne!(
+        tokens_without_dollar("$foo")[0].0,
+        CppTokenKind::Identifier
+    );
 }
 
 #[test]

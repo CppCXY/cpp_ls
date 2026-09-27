@@ -75,9 +75,31 @@ fn main() {
     // instead of the file's own text. Message *counts* are the comparable thing; the positions are offsets
     // into the rendering (`CookedStream::render`), not into the file, so the first-error list is not.
     let cooked_mode = std::env::args().any(|argument| argument == "--cooked");
-    // `--in-force-bodies`: let the cooker use the bodies of macros whose definition is conditional but in force
-    // (where MSVC's `_ACRTIMP` arrives from). Off by default — see `configuration_from_environment_with`.
-    let in_force_bodies = std::env::args().any(|argument| argument == "--in-force-bodies");
+    // `--no-in-force-bodies`: ask the cooker for the **conservative** reading (a body is not a definition, so
+    // nothing from the in-force channel is used). The default follows the library's own default, which is the
+    // in-force channel — see `configuration_from_environment`. The flag used to be the other way round, and that
+    // is worth a sentence: after the library's default changed, the probe kept pinning the *old* side of the
+    // switch, so every census went on measuring a mode the product no longer used.
+    let without_in_force_bodies = std::env::args().any(|argument| argument == "--no-in-force-bodies");
+    // The **one** lexical setting this probe uses, computed once and handed to every lexer below.
+    //
+    // It is the product's own default (`LexerConfig::default()`) and there is deliberately no flag to move it:
+    // *the definition names the cooker expands come from the index*, which lexes with the library's reading, so a
+    // flag here could only change half the lexing and would then measure a mixture of two readings rather than
+    // either one. A reading is compared by changing it and running the corpus twice, which is what the `$` entry
+    // in the architecture document records. Deriving this per call site is how the `$` family went unnoticed for a
+    // round: `__$allowed_on_return` is a macro MSVC's SAL headers really define, and the parser refused the
+    // character it is spelled with, so the definition arrived as three tokens and was lost — a property of the
+    // *configuration*, invisible in the file, and one that only shows up if every layer reads the same way.
+    let lexer_config = cpp_parser::LexerConfig::default();
+    // `--render-to <dir>`: write the cooked rendering of every **failing** file into `dir`. The excerpt printed
+    // below is 120 characters and the question a failure asks is "what did the expansion produce here, and what
+    // should it have produced" — which needs the whole rendering, not a window. Written rather than printed so
+    // that it can be read beside the file's own text in an editor.
+    let render_to: Option<PathBuf> = std::env::args()
+        .position(|argument| argument == "--render-to")
+        .and_then(|at| std::env::args().nth(at + 1))
+        .map(PathBuf::from);
 
     // **A real indexer, not the convenience `summarize`**: that one resolves no includes at all (`NoFiles`), so a
     // probe built on it seeds nothing and the whole positional experiment would be a silent no-op — which the
@@ -190,30 +212,42 @@ standard {}",
     }
     let indexed = started.elapsed();
 
-    // **Who includes each file**, and where — the translation unit's half of the environment. Read off the include
-    // facts of the indexed files, first includer wins: a header may be reached from several places, and any one of
-    // them is a real translation unit it belongs to (the compile database would name the intended one).
+    // **Who includes each file — along the chain the seed translation unit actually takes.**
     //
-    // **"First" is by path order, not by iteration order**, and that is a measurement fix rather than tidiness:
-    // `summaries` is a `HashMap`, so "the first includer met" changed from run to run, and with it the *context*
-    // half of every header's environment. Measured on one binary, three runs of the same 455-file census:
-    // 1 375 119 / 1 454 838 / 1 481 724 seeds — an 8% swing that looks exactly like a change to the reading, and
-    // is not. The error counts were stable throughout (455 clean), which is why the noise went unnoticed until a
-    // number was compared across builds. A probe whose numbers move on their own cannot measure anything.
+    // The corpus **is** the closure of one translation unit (the list's first entry), so the honest context of a
+    // header is the file that reaches it along *that* TU's includes: the macro state a header sees is the state its
+    // real includer had at the `#include`. What stood here was "the alphabetically first indexed file that
+    // includes it", which is a different translation unit's state — and it cost a round of conclusions: the six
+    // headers that appeared to be *broken* by the in-force switch (`cstdint`, `utility`, `tuple`, `new`,
+    // `type_traits`) read **cleanly with no messages at all** when each was run on its own, so what the table said
+    // was a property of the files was a property of the context the probe picked for them.
+    //
+    // The walk is breadth-first over each file's includes **in source order**, and first-reached wins — the same
+    // determinism the previous rule was written for, for the same reason: a probe whose numbers move on their own
+    // cannot measure anything (three runs of one binary once differed by 8% in seed count).
+    //
+    // A file the seed cannot reach gets **no context**, which is the honest answer rather than a worse one: nothing
+    // in this translation unit includes it, so nothing here says what it sees.
     let mut includers: HashMap<PathBuf, (PathBuf, usize)> = HashMap::new();
-    let mut indexed_paths: Vec<&PathBuf> = summaries.keys().collect();
-    indexed_paths.sort();
+    if let Some(seed) = paths.first().cloned() {
+        let mut queue: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::new();
+        let mut reached: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        reached.insert(seed.clone());
+        queue.push_back(seed);
 
-    for path in indexed_paths {
-        let summary = &summaries[path];
-        for include in &summary.includes {
-            let Some(resolved) = include.resolved.as_ref() else {
+        while let Some(path) = queue.pop_front() {
+            let Some(summary) = summaries.get(&path) else {
                 continue;
             };
-            if summaries.contains_key(resolved) {
-                includers
-                    .entry(resolved.clone())
-                    .or_insert_with(|| (path.clone(), include.range.start_offset));
+            for include in &summary.includes {
+                let Some(resolved) = include.resolved.as_ref() else {
+                    continue;
+                };
+                if !summaries.contains_key(resolved) || !reached.insert(resolved.clone()) {
+                    continue;
+                }
+                includers.insert(resolved.clone(), (path.clone(), include.range.start_offset));
+                queue.push_back(resolved.clone());
             }
         }
     }
@@ -256,9 +290,55 @@ standard {}",
     let mut seeds_by_shape: HashMap<&'static str, usize> = HashMap::new();
     let mut total_bytes = 0usize;
     let mut total_lines = 0usize;
+    // **How much of the corpus the rendering actually contains.** A cook that decides a file's whole body is
+    // inside an inactive branch renders *nothing*, and an empty file has no errors — so a census that counts only
+    // "clean" counts such a file as read when it was dropped. Measured, which is why this exists: an A/B of one
+    // cooker decision gave 249 clean / 49 messages against 248 / 70, and the *better-looking* side was the one
+    // rendering **158 of 255 files to nothing** (the other side, 103) — the numbers said "one file worse" about a
+    // change that made 55 more files readable at all.
+    let mut rendered_to_nothing = 0usize;
+    let mut rendered_bytes = 0usize;
+    // Why a definition the evidence *has* did not make it into the table, summed over the corpus — see the four
+    // fields of `cpp_code_analysis::Configuration`.
+    let mut unusable_in_force = 0usize;
+    let mut unusable_function_like = 0usize;
+    let mut unusable_without_a_body = 0usize;
+    let mut unusable_unreadable = 0usize;
+
+    // **The translation unit, walked once** — the census's whole cost model changed when this replaced the
+    // per-file closure walk, and the printed numbers say by how much: building every file's environment by walking
+    // its own closure measured 147 s of a 174 s run, 2 489 142 macro entries and 17 618 794 condition evaluations
+    // for 255 files. One walk answers every file's environment as a view, and a condition is evaluated once.
+    //
+    // `--closure` selects it, so the two readings stay comparable — the old path is still there, and the day it is
+    // deleted is the day the two censuses agree.
+    let timeline = (seeded && closure).then(|| {
+        let started = std::time::Instant::now();
+        let unit = cpp_code_analysis::TranslationUnit::walk(
+            summaries.get(&paths[0]).expect("the list's first file was indexed"),
+            |wanted| {
+                summaries.get(wanted).map(|summary| {
+                    (summary, definition_sources.get(wanted).map(String::as_str).unwrap_or(""))
+                })
+            },
+            &seed,
+            &mut macro_definitions,
+        );
+        seeding_time += started.elapsed();
+        unit
+    });
+    if let Some(unit) = timeline.as_ref() {
+        conditional_asked += unit.conditional_facts;
+        conditional_taken += unit.facts_in_force;
+        total_seeds += unit.len();
+        files_with_seeds += unit.files().count();
+        let (with_a_body, in_force) = unit.bodies();
+        bodies_with_text += with_a_body;
+        bodies_in_force += in_force;
+    }
 
     let started = std::time::Instant::now();
-    for path in &paths {
+    for (position, path) in paths.iter().enumerate() {
         let Ok(source) = std::fs::read_to_string(path) else {
             continue;
         };
@@ -270,11 +350,23 @@ standard {}",
         let Some(summary) = summaries.get(path) else {
             continue;
         };
-        // What the **includer** contributed, for the `--macro` line below: whether the translation unit's half of the
-        // environment was built at all, and whether it carries the name being watched.
-        let mut context_seeds = 0usize;
-        let mut context_carries_the_watched_name = false;
-        let environment = seeded.then(|| {
+        // What the unit contributed, for the `--macro` line below: whether the file is **in** the walked
+        // translation unit at all, and whether what it sees carries the name being watched.
+        let mut in_the_unit = false;
+        let mut the_view_carries_the_watched_name = false;
+        let environment = if !seeded {
+            None
+        } else if let Some(unit) = timeline.as_ref() {
+            let view = unit.environment_of(path);
+            in_the_unit = view.is_some();
+            if view.is_some() {
+                files_with_context += 1;
+            }
+            the_view_carries_the_watched_name = view
+                .as_ref()
+                .is_some_and(|view| watched.iter().any(|name| view.knows(name)));
+            view
+        } else {
             // Building the evidence is itself a measurement: the closure version reads the whole include graph of
             // every direct include, so its cost is the thing that decides whether this layer can be per-file.
             let started = std::time::Instant::now();
@@ -292,8 +384,7 @@ standard {}",
                 // **This file as part of the translation unit that includes it**: the includer's own macros up to
                 // the point of its `#include`, seeded at offset 0 because another file's offsets mean nothing here.
                 // That is the only way a header sees a name none of its own includes define — `commdlg.h` and
-                // `STDMETHOD`, whose definition is in a file its own include list does not mention
-                //.
+                // `STDMETHOD`, whose definition is in a file its own include list does not mention.
                 let context = includers.get(path).map(|(includer, at)| {
                     let summary = summaries.get(includer).expect("an includer is indexed");
                     cpp_code_analysis::macros_in_force_before_the_include(summary, *at, look_up, &seed, &mut macro_definitions)
@@ -302,8 +393,7 @@ standard {}",
                     files_with_context += 1;
                 }
                 if let Some(context) = context.as_ref() {
-                    context_seeds = context.macros.len() + context.conditional_bodies.len();
-                    context_carries_the_watched_name = watched.iter().any(|name| {
+                    the_view_carries_the_watched_name = watched.iter().any(|name| {
                         context.macros.iter().any(|entry| &*entry.name == name)
                             || context
                                 .conditional_bodies
@@ -355,12 +445,17 @@ standard {}",
                     *seeds_by_shape.entry(shape).or_default() += 1;
                 }
             }
-            cpp_parser::MacroEnvironment::from_included_macros(seeds).with_bodies_in_force(bodies)
-        });
+            Some(cpp_parser::MacroEnvironment::from_included_macros(seeds).with_bodies_in_force(bodies))
+        };
 
+        // Both parses take the **same** lexical reading — see `lexer_config`. A probe whose two arms read
+        // differently cannot compare them, and the failure mode is silent: the numbers still print.
+        let parser_config = || {
+            cpp_parser::ParserConfig::default().with_lexer_config(lexer_config)
+        };
         let raw_config = match &environment {
-            Some(environment) => cpp_parser::ParserConfig::default().with_macros_from_includes(environment),
-            None => cpp_parser::ParserConfig::default(),
+            Some(environment) => parser_config().with_macros_from_includes(environment),
+            None => parser_config(),
         };
 
         if let Some(environment) = environment.as_ref() {
@@ -373,8 +468,8 @@ standard {}",
                     text.map(|text| text.trim().chars().take(48).collect::<String>())
                 };
                 println!(
-                    "MACRO {name} in {:<24} evidence {:<5} | positional body {:?} | in-force body {:?} | context \
-{context_seeds} seeds, carries it {context_carries_the_watched_name}",
+                    "MACRO {name} in {:<24} evidence {:<5} | positional body {:?} | in-force body {:?} | in the unit \
+{in_the_unit}, the view carries it {the_view_carries_the_watched_name}",
                     path.file_name().unwrap_or_default().to_string_lossy(),
                     environment.kind_of(name, at).is_some(),
                     trim(environment.body_text_of(name, at)),
@@ -382,17 +477,63 @@ standard {}",
                 );
             }
         }
-        let (tree, audit) = if cooked_mode {
-            let (tokens, _) = cpp_parser::lex(&source, &cpp_parser::LexerConfig::default());
+        // The rendering, when this run is a cooked one: parsed below, and written out when `--render-to` asked.
+        //
+        // **Cooked once**, and that is a repair rather than a tidy-up: this value used to be produced a second
+        // time in the failure branch to find the error's window, which doubled the cost of every failing file and
+        // — worse — left two recipes for the same stream, so an edit to one of them would have made the printed
+        // window describe a stream the parser never saw.
+        let rendered = if cooked_mode {
+            let (tokens, _) = cpp_parser::lex(&source, &lexer_config);
             let configuration = match &environment {
-                Some(environment) => cpp_code_analysis::configuration_from_environment_with(environment, in_force_bodies),
+                Some(environment) => cpp_code_analysis::configuration_from_environment_with(environment, !without_in_force_bodies),
                 None => cpp_code_analysis::Configuration::default(),
             };
-            let rendered =
-                cpp_code_analysis::cook_with(&source, &tokens, &configuration.table).render();
-            cpp_parser::CppParser::parse_with_audit(&rendered.text, cpp_parser::ParserConfig::default())
+            // **What the compilation starts with, then what the closure adds** — and the first half was missing.
+            //
+            // The seed (`Marked`) is what every `#ifdef` in the *walk* is answered against, and it holds the
+            // compiler's own predefined names (`-dM`: `__cplusplus`, `_MSC_VER`, `_WIN32`, …) plus what the
+            // configuration decides (`predefined_macros_of`). The cook was handed **only** the closure's
+            // definitions, so its own condition evaluator met `#ifdef __cplusplus` with no table entry and applied
+            // C's rule — "a name nobody defines is 0" — and therefore took the **C branch of every C++ header that
+            // asks**. Measured on `codeanalysis/sourceannotations.h`, whose `#ifdef __cplusplus` chooses between
+            // `#define SA(id) id` and `#define SA(id) SA_##id`: the rendering came out with `SA_All` where the
+            // compiler sees `All`, which is the C spelling of a header compiled as C++.
+            //
+            // The order is the one that makes the closure win: the builtins are defined **first**, at offset 0,
+            // and a definition the closure carries shadows them for the same name — a header that redefines a
+            // builtin is in force over it.
+            let mut initial = cpp_code_analysis::MacroTable::new();
+            for name in seed.defined_names() {
+                if let Some(definition) = seed.get(&name) {
+                    initial.define(definition.clone());
+                }
+            }
+            for definition in configuration.table.iter() {
+                initial.define(definition.clone());
+            }
+            // What the table **could not** take from the evidence, summed over the corpus. These are the reasons a
+            // name stayed a name, and without them a census can only say "the macro did not expand" — which is the
+            // same sentence for "the evidence has no body", "the body has no parameter list" and "the evidence was
+            // never built at all", three different pieces of work.
+            unusable_in_force += configuration.in_force_without_a_parameter_list;
+            unusable_function_like += configuration.function_like_without_parameters;
+            unusable_without_a_body += configuration.without_a_body;
+            unusable_unreadable += configuration.unreadable;
+            Some(cpp_code_analysis::cook_with(&source, &tokens, &initial).render())
         } else {
-            cpp_parser::CppParser::parse_with_audit(&source, raw_config)
+            None
+        };
+
+        let (tree, audit) = match &rendered {
+            Some(rendered) => {
+                rendered_bytes += rendered.text.len();
+                if rendered.text.trim().is_empty() {
+                    rendered_to_nothing += 1;
+                }
+                cpp_parser::CppParser::parse_with_audit(&rendered.text, parser_config())
+            }
+            None => cpp_parser::CppParser::parse_with_audit(&source, raw_config),
         };
         macro_questions += audit.macro_questions;
         if audit.macro_question_names > macro_question_names {
@@ -402,6 +543,28 @@ standard {}",
             busiest_questions = audit.macro_questions;
         }
         let errors = tree.get_errors();
+
+        // **`--render-to <dir>`: write the rendering out — every file, before the census decides which ones
+        // failed.** A 120-character excerpt is enough to see *that* a failure is in expanded text and not enough to
+        // see what the expansion should have been; the rendering is the product's own output, so writing it beside
+        // the census is inspection rather than a second implementation of it. Every file, not only the failing
+        // ones, because the question a reading change asks is **comparative** — "what did this file's expansion
+        // become" — and the files it *fixed* answer it as much as the ones it broke. (The first version of this
+        // wrote only the failures, and could not answer the question it was added for.) The name carries the list
+        // index because basenames repeat across the SDK's `um\` and `shared\` — `winnt.h` is both.
+        if let (Some(directory), Some(rendered)) = (render_to.as_ref(), rendered.as_ref())
+            && let Some(name) = path.file_name()
+        {
+            let _ = std::fs::create_dir_all(directory);
+            let _ = std::fs::write(
+                directory.join(format!(
+                    "{:04}_{}.rendered",
+                    position,
+                    name.to_string_lossy()
+                )),
+                &rendered.text,
+            );
+        }
 
         if errors.is_empty() {
             clean += 1;
@@ -427,21 +590,11 @@ standard {}",
             *by_message.entry(error.message.clone()).or_default() += 1;
         }
 
-        // In cooked mode the errors are offsets into the **rendering**, so neither the line index nor the text
-        // window below can be read against the file. The map is what turns one into the other — and this is its
-        // first consumer: `written_at` is where the cooked offset was written, `written_span` where the
-        // node came from. Without it a cooked failure would be a message with no address at all.
-        let rendered = if cooked_mode {
-            let (tokens, _) = cpp_parser::lex(&source, &cpp_parser::LexerConfig::default());
-            let configuration = match &environment {
-                Some(environment) => cpp_code_analysis::configuration_from_environment_with(environment, in_force_bodies),
-                None => cpp_code_analysis::Configuration::default(),
-            };
-            Some(cpp_code_analysis::cook_with(&source, &tokens, &configuration.table).render())
-        } else {
-            None
-        };
-
+        // In cooked mode the errors are offsets into the **rendering** — the same one written above, and the same
+        // one that was parsed — so neither the line index nor the text window below can be read against the file.
+        // The map is what turns one into the other, and this is its first consumer: `written_at` is where the
+        // cooked offset was written, `written_span` where the node came from. Without it a cooked failure would be
+        // a message with no address at all.
         let (line, column, window) = match &rendered {
             Some(rendered) => {
                 let at = usize::from(errors[0].range.start());
@@ -462,12 +615,34 @@ standard {}",
             }
             None => {
                 let index = cpp_parser::LineIndex::parse(&source);
-                let Some((line, column)) = index.get_line_col(errors[0].range.start(), &source) else {
-                    continue;
-                };
+                // **A file whose first error has no position still gets a line here.** What stood here was a
+                // `continue`, which drops the file from the list while leaving it in the failure count — a silent
+                // hole in the only view of a failure's *cause*. It was investigated on a suspicion that turned out
+                // to be wrong (the 255-file SDK corpus reads 37 files as failing, and all 37 are printed; the
+                // "eleven missing" were my own grep refusing a four-digit line number), and it is kept anyway:
+                // silence is the wrong answer at a position the index refuses, and saying so costs one `match`.
+                let (line, column, refused) =
+                    match index.position_of(usize::from(errors[0].range.start()), &source) {
+                        Some((line, column)) => (line, column, false),
+                        None => (source.lines().count(), 0, true),
+                    };
                 let window: Vec<&str> =
                     source.lines().skip(line.saturating_sub(2)).take(3).collect();
-                (line, column, window.join(" "))
+                let joined = window.join(" ");
+                (
+                    line,
+                    column,
+                    if refused {
+                        format!(
+                            "NO POSITION FOR OFFSET {} (past the end of {} bytes) {}",
+                            usize::from(errors[0].range.start()),
+                            source.len(),
+                            joined
+                        )
+                    } else {
+                        joined
+                    },
+                )
             }
         };
         let window = [window.as_str()];
@@ -540,6 +715,23 @@ standard {}",
     }
 
 
+    // The **lexical** reading, on its own line, because it is a reading a run can be wrong about: with `$` refused
+    // the MSVC SAL headers lose every `__$allowed_*` definition, and the numbers below then describe the lexer
+    // rather than the parser. Stated rather than assumed.
+    println!(
+        "reading: {} | `$` {}",
+        if cooked_mode {
+            "the cooked rendering"
+        } else {
+            "the file's own text"
+        },
+        if lexer_config.dollar_in_identifier {
+            "accepted in identifiers (the product's default)"
+        } else {
+            "refused (the standard's answer)"
+        }
+    );
+
     println!(
         "files {} | clean {} | failing {} | {} KB | {} lines\n\
          index (parse + scopes + facts) {:?} | parse alone {:?}\n\
@@ -550,6 +742,11 @@ built in {seeding_time:?}\n\
          conditional facts met {conditional_asked} | branches in force {conditional_taken} | bodies in force \
 {bodies_in_force} (no toolchain means none can be answered)\n\
          read inside an includer {files_with_context} files (the translation unit's half of the environment)\n\
+         rendering: {rendered_to_nothing} of {} files rendered to nothing (whitespace only) | {rendered_bytes} bytes \
+of rendering for {total_bytes} of text{}\n\
+         table: left out — bodies in force without a parameter list {unusable_in_force} | function-like definitions \
+without one {unusable_function_like} | definitions without a body {unusable_without_a_body} | unreadable \
+definitions {unusable_unreadable}\n\
          seed shapes: {}\n\
          decision points: {macro_questions} macro questions | {macro_question_names} name-questions, summed \
 over the files | busiest file {busiest_questions}",
@@ -562,6 +759,14 @@ over the files | busiest file {busiest_questions}",
         parsed,
         explained_by_own as f64 * 100.0 / failing.max(1) as f64,
         explained_by_closure as f64 * 100.0 / failing.max(1) as f64,
+        paths.len(),
+        // A **clean** file whose rendering is empty was not read at all, and the two readings of the same corpus
+        // are told apart by this and by nothing else — see `rendered_to_nothing`.
+        if cooked_mode && rendered_to_nothing > 0 {
+            "  ← an empty rendering has no errors: those files were dropped, not read"
+        } else {
+            ""
+        },
         {
             let mut pairs: Vec<(&str, usize)> = seeds_by_shape.iter().map(|(k, v)| (*k, *v)).collect();
             pairs.sort_by_key(|(_, count)| std::cmp::Reverse(*count));

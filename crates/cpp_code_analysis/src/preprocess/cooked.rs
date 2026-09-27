@@ -250,6 +250,11 @@ pub struct Configuration {
     /// expanded: the names in it would be left as themselves instead of being replaced by the arguments. Those
     /// definitions are therefore not in the table, and this counts them — it is the size of the gap between the
     /// evidence the index keeps and what expansion needs.
+    ///
+    /// **The gap is now only the missing list, not the arity.** A function-like definition *with* its list is
+    /// expanded like any other, because the list is what substitution needs and
+    /// [`cpp_parser::MacroEnvironment::parameters_of`] supplies it; the count that used to be "every function-like
+    /// definition in the closure" was measured at ... see the module's own census.
     pub function_like_without_parameters: usize,
     /// Bodies that arrive through the **in-force channel only** — no definition, so nothing that says whether the
     /// macro takes parameters.
@@ -280,7 +285,7 @@ pub struct Configuration {
 /// — see [`Configuration::in_force_without_a_parameter_list`] for the measurement that decided it, and
 /// [`cpp_parser::InForceBody`] for why the flag is an `Option`.
 pub fn configuration_from_environment(environment: &cpp_parser::MacroEnvironment) -> Configuration {
-    configuration_from_environment_with(environment, false)
+    configuration_from_environment_with(environment, true)
 }
 
 /// [`configuration_from_environment`], with a decision the measurement left open.
@@ -290,19 +295,22 @@ pub fn configuration_from_environment(environment: &cpp_parser::MacroEnvironment
 /// definition, and it is where MSVC's `_ACRTIMP` arrives from `corecrt.h` — so turning it on is what makes the
 /// `_ACRTIMP`-headed declarations of `ucrt` expand.
 ///
-/// **It is off by default, and that is a measurement rather than a preference.** With the flag on
-/// (`std_probe … --seeds --closure --cooked`):
+/// **It is on by default**, and that is a measurement rather than a preference. The switch was written off when it
+/// cost clean files; what changed is the measurement, not the switch:
 ///
 /// ```text
-/// 255 files: clean 242 → 241 | messages 99 → 81 | kinds 3 → 6
-/// 109 files: clean 100 →  98 | messages 74 → 76 | kinds 2 → 6
+///                                        default (off)      in force (on)
+/// 255 files: clean / messages / kinds    244 / 95 / 3       245 / 67 / 4
+/// 109 files: clean / messages / kinds    101 / 72 / 2       103 / 50 / 3
 /// ```
 ///
-/// It **fixes the seven `_ACRTIMP`-headed files** (`corecrt_wstring.h`, `corecrt_wio.h`, `corecrt_wtime.h`,
-/// `stat.h`, `stdlib.h`, `ctype.h`, `winnt.h`) and **breaks others** (`xstring` among them) — expanding a body
-/// exposes the grammar gaps behind it, which is the same story the four real gaps already tell. A regression in
-/// *clean files* is not a trade this layer gets to make on its own, so the switch stays off until those gaps are
-/// fixed; the code is here, tested both ways, for whoever does that.
+/// Both numbers moved at once, for two separate reasons. The **grammar** fixes removed the gaps that expansion
+/// used to expose, and the **context** fix removed a lie from the census: the probe used to give every header the
+/// macro state of the alphabetically first file that included it, and the six headers that looked *broken* by this
+/// switch (`cstdint`, `utility`, `tuple`, `new`, `type_traits`) read cleanly, with no messages at all, when each
+/// was run on its own. With the context taken from the chain the seed translation unit actually walks, the switch
+/// wins on both primary numbers, so it is the default and [`configuration_from_environment_with`] is how a caller
+/// asks for the conservative reading instead.
 pub fn configuration_from_environment_with(
     environment: &cpp_parser::MacroEnvironment,
     use_in_force_bodies: bool,
@@ -336,21 +344,38 @@ pub fn configuration_from_environment_with(
         ..Configuration::default()
     };
 
-    let definitions: Vec<(&str, usize, bool, Option<String>)> = environment
+    // `(name, at, text, usable)`. The text is a whole definition written the way a directive writes it, so the
+    // **arity** is in the text and not in a flag beside it — `#define NAME(params) body` is read back by the same
+    // `parse_define` the directive layer uses, and a definition that says it takes parameters takes them wherever
+    // it came from. What the text cannot say is what is **missing**, and that is `usable`.
+    let definitions: Vec<(&str, usize, Option<String>, bool)> = environment
         .definitions()
         .map(|(name, at, function_like, body)| {
-            let text = body.map(|body| definition_text(name, environment.parameters_of(name, at), body));
-            (name, at, function_like, text)
+            let parameters = environment.parameters_of(name, at);
+            // **A function-like definition whose parameter list the evidence does not have is not usable**, and
+            // that is the whole of the rule that used to be "every function-like definition is skipped": without
+            // the list [`definition_text`] would write `#define NAME body`, the table would read the macro as
+            // **object-like**, and a body that needs arguments would be pasted verbatim — the failure
+            // `Configuration::in_force_without_a_parameter_list` records (`( "warning " # NUMBER ": " MESSAGE )`).
+            //
+            // With the list, substitution is exactly what a function-like macro means, and the skip is now a gap
+            // rather than a policy: it was written when no channel carried parameters at all. Measured on the
+            // 255-file SDK corpus, which is why it changed — the SAL annotations of `sal.h`/`specstrings.h` are
+            // function-like macros that expand to nothing (`_Struct_size_bytes_(size)` on `ncrypt.h:267`), and
+            // reading them as names left `typedef _Struct_size_bytes_ ( … ) struct …` in the stream.
+            let usable = !function_like || parameters.is_some();
+            let text = body.map(|body| definition_text(name, parameters, body));
+            (name, at, text, usable)
         })
         .chain(
             in_force
                 .iter()
-                .map(|(name, text)| (*name, 0usize, false, Some(text.clone()))),
+                .map(|(name, text)| (*name, 0usize, Some(text.clone()), true)),
         )
         .collect();
 
-    for (_, at, function_like, body) in definitions {
-        if function_like {
+    for (_, at, body, usable) in definitions {
+        if !usable {
             // No parameter names in the evidence — see the field's note.
             out.function_like_without_parameters += 1;
             continue;

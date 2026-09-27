@@ -474,7 +474,7 @@ fn a_definition_with_no_body_stored_is_counted_separately() {
 }
 
 #[test]
-fn an_object_like_body_in_force_can_be_used_when_the_caller_asks_for_it() {
+fn an_object_like_body_in_force_is_used_by_default_and_can_be_turned_off() {
     // The in-force channel is where MSVC's `_ACRTIMP` arrives from (`corecrt.h` defines it inside a conditional
     // region), so a body there is unusable only because nobody said whether the macro takes parameters. A caller
     // that knows — the index does, from `MacroFact::function_like` — can hand it over as object-like, and then
@@ -493,20 +493,22 @@ fn an_object_like_body_in_force_can_be_used_when_the_caller_asks_for_it() {
     let source = "_ACRTIMP int f(void);\n";
     let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
 
-    // Off: nothing from the in-force channel is used, and the count says how many were left.
-    let conservative = cpp_code_analysis::configuration_from_environment(&environment);
-    assert_eq!(conservative.in_force_without_a_parameter_list, 3);
-    let rendered =
-        cpp_code_analysis::cook_with(source, &tokens, &conservative.table).render();
-    assert!(rendered.text.starts_with("_ACRTIMP"), "{:?}", rendered.text);
-
-    // On: the object-like one is used, the function-like one and the unclassified one are not.
-    let asked = cpp_code_analysis::configuration_from_environment_with(&environment, true);
-    assert_eq!(asked.in_force_without_a_parameter_list, 2);
-    let rendered = cpp_code_analysis::cook_with(source, &tokens, &asked.table).render();
+    // **By default the object-like one is used** — the switch is level 2, and the measurement that made it the
+    // default is on [`configuration_from_environment_with`]. The function-like one and the unclassified one are
+    // not: the count says how many were left behind.
+    let default = cpp_code_analysis::configuration_from_environment(&environment);
+    assert_eq!(default.in_force_without_a_parameter_list, 2);
+    let rendered = cpp_code_analysis::cook_with(source, &tokens, &default.table).render();
     assert!(
         rendered.text.starts_with("__declspec ( dllimport ) int f"),
         "{:?}",
         rendered.text
     );
+
+    // …and the conservative reading — "a body is not a definition", so nothing from that channel is used — is
+    // asked for explicitly.
+    let conservative = cpp_code_analysis::configuration_from_environment_with(&environment, false);
+    assert_eq!(conservative.in_force_without_a_parameter_list, 3);
+    let rendered = cpp_code_analysis::cook_with(source, &tokens, &conservative.table).render();
+    assert!(rendered.text.starts_with("_ACRTIMP"), "{:?}", rendered.text);
 }

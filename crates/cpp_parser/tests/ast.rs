@@ -754,6 +754,12 @@ fn attribute_lists_consume_both_closing_brackets() {
         "template <typename T> [[nodiscard]] T p();\n",
         // On an enumerator.
         "enum class F { A [[deprecated]] = 1, B };\n",
+        // Between a `namespace` keyword and its name — the last position that did not parse, and the one the
+        // standard's `namespace attribute-specifier-seq(opt) identifier` grammar writes. See
+        // `known_unparsed_attribute_positions`, which listed it until it started working.
+        "namespace [[deprecated]] n { int x; }\n",
+        "namespace [[deprecated(\"STL4002\")]] tr1 { int x; }\n",
+        "inline namespace [[deprecated]] v1 { int x; }\n",
     ];
 
     for source in sources {
@@ -786,21 +792,18 @@ fn attribute_lists_consume_both_closing_brackets() {
 
 /// Attribute positions that do **not** parse yet, recorded so the gap is visible rather than rediscovered.
 ///
-/// One position is left, and it is the odd one out: between the `namespace` keyword and its name. Every other
-/// position this test used to list is read now — after the declarator, on an alias, between a template head and
-/// the declaration it wraps, on a parameter, on an enumerator — and they moved into
-/// `attribute_lists_consume_both_closing_brackets` above.
+/// **Empty, and that is the point of keeping it.** Every position this test listed is read now — after the
+/// declarator, on an alias, between a template head and the declaration it wraps, on a parameter, on an
+/// enumerator, and last the one between the `namespace` keyword and its name — and they all moved into
+/// `attribute_lists_consume_both_closing_brackets` above, which is where the edit the list's own message asks for
+/// was made.
 ///
-/// The test asserts the *current* behaviour so that fixing the gap is a deliberate edit here rather than a
-/// silent change, which is the same reason the parser's other limitation lists exist.
+/// The list stays rather than being deleted with its last entry, because the next gap found has a home and
+/// because "there are none" is itself a measurement that a future reader should be able to check: an empty list
+/// passes, and adding a line to it is how the next position gets recorded.
 #[test]
 fn known_unparsed_attribute_positions() {
-    let still_broken = [
-        // Attribute between the `namespace` keyword and its name. The namespace rule reads `namespace` and then
-        // a name, and the attribute sits in between; unlike the other positions, there is no declarator and no
-        // specifier sequence here to hang it on.
-        "namespace [[deprecated]] n { int x; }\n",
-    ];
+    let still_broken: [&str; 0] = [];
 
     for source in still_broken {
         let (_, tree) = unit(source);

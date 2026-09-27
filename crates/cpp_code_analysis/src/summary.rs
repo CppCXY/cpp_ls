@@ -847,6 +847,8 @@ fn walk_the_translation_unit<'a>(
         walk_one_file(
             root,
             from_offset,
+            None,
+            0,
             &mut seen,
             &mut look_up,
             seed,
@@ -859,7 +861,359 @@ fn walk_the_translation_unit<'a>(
     walked.into_evidence()
 }
 
-/// Everything one walk collects, in the order it was walked.
+/// **A translation unit walked once, kept as a timeline any file inside it can be read from.**
+///
+/// # The problem this exists for
+///
+/// The per-file reading — "walk *this* file's include closure and hand it the result" — costs one full walk of the
+/// closure **per file**, and the census says what that is: 255 files of the Windows SDK corpus, 2 489 142 macro
+/// entries materialised, **17 618 794 conditional facts evaluated**, 147 s of a 174 s run. Every header's `#if`s
+/// are answered ~255 times, because each file's environment is built as if it were the only one.
+///
+/// # What a preprocessor does instead
+///
+/// It walks the unit **once** and keeps, per identifier, the history of its macro directives — each carrying the
+/// **location** (file + offset) it was written at (clang: `IdentifierInfo`'s directive chain, whose entries hold a
+/// `SourceLocation`; a query is "walk the chain and stop at this location"). Every later question is a *position*
+/// in that one walk: a header's macro state is the state at the point it was included, not a separate walk.
+///
+/// This type is that timeline. `events` is the whole unit's macro history in walk order; `frames` records where
+/// each file was entered, so a file's view is its **inherited prefix** (`entry_seq`), its **own facts**, and the
+/// facts of the files it includes (visible from the offset the `#include` ended at). No walk is repeated, no body
+/// is copied, and a condition is evaluated once for the whole corpus instead of once per file.
+///
+/// # Frames, and why the subtree is an interval
+///
+/// Frames are created in **DFS preorder** — a file's dependencies are walked before the next sibling — so the
+/// subtree of frame `f` is exactly the frame indices `f..tout[f]`, and "is this event visible from that file" is
+/// an integer comparison rather than a walk up the parent chain.
+pub struct TranslationUnit {
+    events: Vec<TuEvent>,
+    frames: Vec<TuFrame>,
+    /// The frame a file was entered as, the **first** time the walk reached it. A file included twice is walked
+    /// once (see `walk_one_file`), so a second entry has no frame of its own.
+    entered: std::collections::HashMap<std::path::PathBuf, u32>,
+    /// The same two counters [`ClosureEvidence`] reports, for the same reason: they say whether the corpus was
+    /// conditional at all and whether the environment could answer.
+    pub conditional_facts: usize,
+    pub facts_in_force: usize,
+}
+
+/// One macro fact of the unit, with **where** it was written and **which frame** it belongs to.
+struct TuEvent {
+    name: Box<str>,
+    /// `None` for an `#undef`.
+    function_like: Option<bool>,
+    /// The shape of the replacement list, as the parser reads it.
+    body: Option<cpp_parser::MacroBody>,
+    /// The replacement list as text — **shared**, see [`cpp_parser::IncludedMacro::body_text`].
+    body_text: Option<std::sync::Arc<str>>,
+    parameters: Option<std::sync::Arc<str>>,
+    frame: u32,
+    /// The offset **inside the file that wrote it**.
+    at: usize,
+    /// Was the fact unconditional? The two channels of [`ClosureEvidence`], which is a measured distinction and
+    /// not this type's to collapse.
+    unconditional: bool,
+}
+
+/// Where one file was entered, and how much of the timeline was already behind it.
+struct TuFrame {
+    file: std::path::PathBuf,
+    parent: Option<u32>,
+    /// Where this file's text comes into force **in its parent**: the end of the `#include` that brought it in.
+    from_in_parent: usize,
+    /// How many events the walk had emitted when this frame was entered — everything before it is in force from
+    /// offset 0 of this file, which is what a header's own first line sees.
+    entry_seq: u32,
+    /// The end of this frame's subtree, as a frame index (see the type's note on preorder).
+    tout: u32,
+}
+
+/// The timeline under construction — the sink [`Walked`] records into while the one walk runs.
+#[derive(Default)]
+struct TimelineBuilder {
+    events: Vec<TuEvent>,
+    frames: Vec<TuFrame>,
+    entered: std::collections::HashMap<std::path::PathBuf, u32>,
+}
+
+impl TimelineBuilder {
+    /// Open a frame for a file the walk is about to read, and return its id.
+    fn enter(&mut self, file: &std::path::Path, parent: Option<u32>, from_in_parent: usize) -> u32 {
+        let id = self.frames.len() as u32;
+        self.frames.push(TuFrame {
+            file: file.to_path_buf(),
+            parent,
+            from_in_parent,
+            entry_seq: self.events.len() as u32,
+            // Closed by `leave`; a frame that is never left is the last one, and its subtree runs to the end.
+            tout: u32::MAX,
+        });
+        self.entered.entry(file.to_path_buf()).or_insert(id);
+        id
+    }
+
+    fn leave(&mut self, frame: u32) {
+        self.frames[frame as usize].tout = self.frames.len() as u32;
+    }
+
+    /// Record one fact the walk put in force.
+    fn record(&mut self, frame: u32, fact: &MacroFact, source: &str, unconditional: bool) {
+        let body_text = fact
+            .body_range
+            .and_then(|range| source.get(range.start_offset..range.start_offset + range.length))
+            .map(std::sync::Arc::from);
+        let parameters = fact
+            .body_range
+            .and_then(|range| parameters_before(source, range.start_offset))
+            .map(std::sync::Arc::from);
+
+        self.events.push(TuEvent {
+            name: Box::from(&*fact.name),
+            function_like: fact.kind.is_definition().then_some(fact.function_like),
+            body: fact.kind.is_definition().then_some(fact.body),
+            body_text,
+            parameters,
+            frame,
+            at: fact.range.start_offset,
+            unconditional,
+        });
+    }
+}
+
+impl TranslationUnit {
+    /// Walk a translation unit **once**, from the file that starts it.
+    ///
+    /// `look_up` answers for a path with the file's summary and its text, the same contract the per-file walks
+    /// take; a file it cannot answer for is outside the analysis and defines nothing (see `walk_one_file`).
+    pub fn walk<'a>(
+        root: &'a FileSummary,
+        mut look_up: impl FnMut(&std::path::Path) -> Option<(&'a FileSummary, &'a str)>,
+        seed: &Marked,
+        definitions_of: &mut MacroDefinitions,
+    ) -> Self {
+        let mut walked = Walked {
+            timeline: Some(TimelineBuilder::default()),
+            ..Walked::default()
+        };
+        let mut unit = UnitState {
+            definitions: std::collections::HashMap::new(),
+        };
+        let mut seen: std::collections::HashSet<&std::path::Path> = std::collections::HashSet::new();
+
+        // The root is walked by the same function every included file is: it *is* a file of the unit, and a
+        // second entry point for it would be a second place for the include order to be got wrong.
+        walk_one_file(
+            &root.path,
+            0,
+            None,
+            0,
+            &mut seen,
+            &mut look_up,
+            seed,
+            definitions_of,
+            &mut unit,
+            &mut walked,
+        );
+
+        let timeline = walked.timeline.take().expect("just built");
+        TranslationUnit {
+            events: timeline.events,
+            frames: timeline.frames,
+            entered: timeline.entered,
+            conditional_facts: walked.conditional_facts,
+            facts_in_force: walked.facts_in_force,
+        }
+    }
+
+    /// How many macro facts the unit's walk put in force — the size of the timeline.
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    /// How many of those facts carry a **replacement list**, and how many are in the **in-force** channel.
+    ///
+    /// The two numbers the census prints beside the entry count, because "the evidence arrived" and "the evidence
+    /// arrived with bodies" are different states of the world and the second is what expansion needs. They are
+    /// answered here rather than left to a caller to re-derive: a caller that counted them itself would be a
+    /// second implementation of what an event is.
+    pub fn bodies(&self) -> (usize, usize) {
+        let with_a_body = self
+            .events
+            .iter()
+            .filter(|event| {
+                event
+                    .body_text
+                    .as_deref()
+                    .is_some_and(|text| !text.trim().is_empty())
+            })
+            .count();
+        let in_force = self.events.iter().filter(|event| !event.unconditional).count();
+        (with_a_body, in_force)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
+    /// The files the walk entered, in the order it entered them.
+    pub fn files(&self) -> impl Iterator<Item = &std::path::Path> {
+        self.frames.iter().map(|frame| frame.file.as_path())
+    }
+
+    /// Every macro fact the unit put in force **in one file**, in walk order, as `(name, offset in that file)`.
+    ///
+    /// The timeline itself rather than a view of it, and the difference is the whole contract of
+    /// [`TranslationUnit::environment_of`]: this is what the file **wrote**, that is what the file **sees**. A
+    /// caller asking "what does this header define" wants this one; a caller asking "is this name a macro here"
+    /// wants the environment. Both are real questions about one record, which is why the record keeps the file and
+    /// the offset of every fact rather than only the ones a view happens to use.
+    pub fn facts_of<'unit>(
+        &'unit self,
+        path: &'unit std::path::Path,
+    ) -> impl Iterator<Item = (&'unit str, usize)> {
+        let frame = self
+            .frames
+            .iter()
+            .position(|frame| frame.file == path)
+            .map(|index| index as u32);
+
+        self.events
+            .iter()
+            .filter(move |event| Some(event.frame) == frame)
+            .map(|event| (&*event.name, event.at))
+    }
+
+    /// The environment of a file **as this unit sees it**, or `None` when the unit never reaches it.
+    ///
+    /// `None` is the honest answer for a file nothing includes: nothing in this translation unit says what it
+    /// sees, and inventing a context for it is what the earlier per-file census did with a heuristic.
+    pub fn environment_of(&self, path: &std::path::Path) -> Option<cpp_parser::MacroEnvironment> {
+        let &frame = self.entered.get(path)?;
+        Some(self.environment_at(frame))
+    }
+
+    /// The environment of the file the unit starts with.
+    pub fn root_environment(&self) -> cpp_parser::MacroEnvironment {
+        self.environment_at(0)
+    }
+
+    /// Build one file's environment out of the timeline — **no walk, no copy of the bodies**.
+    ///
+    /// The three kinds of event a file's environment is made of, and the offset each is in force from:
+    ///
+    /// * the facts of the files it **includes**, from the offset the `#include` ended at — `offset_in` resolves
+    ///   that through the frame chain, because a definition three includes down is in force in this file from the
+    ///   outermost `#include` on the path;
+    /// * everything the walk had already emitted when this file was entered (the **inherited prefix**), from
+    ///   offset 0 — the state a header's first line sees, which is what the old one-hop includer lookup was
+    ///   approximating and what the real translation unit knows exactly;
+    /// * and **not** the file's own facts.
+    ///
+    /// The exclusion is the caller's contract and not an optimisation: a file's own `#define`s are what *it* says,
+    /// and the parser reads them itself out of the text it is parsing (that is what `MacroNames` is). Handing them
+    /// back as "the includes contributed this" would double-count them, and — worse — would say a name is a macro
+    /// from its own `#define` line in a branch the reader cannot evaluate. What the environment is *for* is what
+    /// the file cannot see by looking at itself.
+    fn environment_at(&self, frame: u32) -> cpp_parser::MacroEnvironment {
+        let entry_seq = self.frames[frame as usize].entry_seq;
+        let tout = self.frames[frame as usize].tout;
+
+        // Per name, the entry in force — last wins in walk order, exactly as `Walked::into_evidence` collapses.
+        // The second map's value is [`ConditionalBodyValue`]'s shape with shared bodies: the arity, the parameter
+        // list, the body — named here rather than spelled out, since the type is the interface between the walk
+        // and the environment and a four-element tuple makes it a puzzle (the same reason the alias exists).
+        type InForce = (Option<bool>, Option<std::sync::Arc<str>>, std::sync::Arc<str>);
+        let mut definitions: std::collections::HashMap<&str, (usize, &TuEvent)> =
+            std::collections::HashMap::new();
+        let mut conditional: std::collections::HashMap<&str, InForce> =
+            std::collections::HashMap::new();
+        // `frame → the offset in **this** file the frame's text becomes live at`, resolved on demand: the same
+        // nested header is reached through one path in a well-formed unit, and the chain is short.
+        let mut offsets: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+
+        for (index, event) in self.events.iter().enumerate() {
+            let from = if event.frame == frame {
+                // The file's own text — see the method's note.
+                continue;
+            } else if event.frame > frame && event.frame < tout {
+                self.offset_in(event.frame, frame, &mut offsets)
+            } else if (index as u32) < entry_seq {
+                0
+            } else {
+                continue;
+            };
+
+            if event.unconditional {
+                definitions.insert(&event.name, (from, event));
+            } else if let Some(body) = event.body_text.clone() {
+                conditional.insert(&event.name, (event.function_like, event.parameters.clone(), body));
+            }
+        }
+
+        let macros = definitions.into_iter().map(|(name, (from, event))| {
+            match (event.function_like, event.body) {
+                (Some(function_like), Some(body)) => cpp_parser::IncludedMacro::defined_with_shared_body(
+                    from,
+                    name,
+                    function_like,
+                    body,
+                    event.body_text.clone(),
+                    event.parameters.clone(),
+                ),
+                // An `#undef`, or a definition whose shape the index could not read: the name is a fact, the
+                // shape is not.
+                _ => cpp_parser::IncludedMacro::undefined_at(from, name),
+            }
+        });
+
+        cpp_parser::MacroEnvironment::from_included_macros(macros).with_bodies_in_force(
+            conditional
+                .into_iter()
+                .map(|(name, (function_like, parameters, body))| {
+                    cpp_parser::InForceBody::shared(Box::from(name), function_like, parameters, body)
+                }),
+        )
+    }
+
+    /// The offset in `consumer` at which `frame`'s text becomes live: the `#include` end of the **outermost**
+    /// frame on the path from `consumer` to `frame`.
+    fn offset_in(
+        &self,
+        frame: u32,
+        consumer: u32,
+        memo: &mut std::collections::HashMap<u32, usize>,
+    ) -> usize {
+        if let Some(&known) = memo.get(&frame) {
+            return known;
+        }
+
+        let mut passed = Vec::new();
+        let mut current = frame;
+        let from = loop {
+            let reached = &self.frames[current as usize];
+            match reached.parent {
+                Some(parent) if parent == consumer => break reached.from_in_parent,
+                Some(parent) => {
+                    passed.push(current);
+                    current = parent;
+                }
+                // A frame outside the consumer's subtree never gets here — the caller's interval test is what
+                // keeps it out — so this is the root, and offset 0 is the only answer that means anything.
+                None => break 0,
+            }
+        };
+
+        memo.insert(frame, from);
+        for id in passed {
+            memo.insert(id, from);
+        }
+        from
+    }
+}
+
+/// What one walk collects, in the order it was walked.
 #[derive(Default)]
 struct Walked<'a> {
     /// `(where the name becomes visible, the fact, the file that wrote it)` in translation order, last wins.
@@ -870,6 +1224,14 @@ struct Walked<'a> {
     conditional_bodies: std::collections::BTreeMap<Box<str>, ConditionalBodyValue>,
     conditional_facts: usize,
     facts_in_force: usize,
+    /// **The timeline, when this walk is building one** — every fact the walk puts in force is also recorded
+    /// there, with the file and offset it was written at and the frame it belongs to. `None` for the per-file
+    /// walks, which collapse their result into one file's evidence and throw the order away.
+    ///
+    /// A field on this struct rather than a second walk, because the rules that decide *what is in force* — the
+    /// include order, the merge of macros and includes by offset, the guard evaluation — are the expensive and
+    /// error-prone part, and a second copy of them is where the next exception gets missed.
+    timeline: Option<TimelineBuilder>,
 }
 
 impl<'a> Walked<'a> {
@@ -931,6 +1293,8 @@ impl<'a> Walked<'a> {
 fn walk_one_file<'a>(
     path: &'a std::path::Path,
     from_offset: usize,
+    parent: Option<u32>,
+    from_in_parent: usize,
     seen: &mut std::collections::HashSet<&'a std::path::Path>,
     look_up: &mut impl FnMut(&std::path::Path) -> Option<(&'a FileSummary, &'a str)>,
     seed: &Marked,
@@ -956,6 +1320,14 @@ fn walk_one_file<'a>(
         // whole unit's evidence.
         return;
     };
+
+    // The frame this file occupies in the unit's timeline, when the walk is building one. Entered **after** the
+    // two early returns above, so a file that is skipped leaves no frame behind — and closed at the end of this
+    // function, which is after every file it includes has been walked, so the frame's subtree is an interval.
+    let frame = walked
+        .timeline
+        .as_mut()
+        .map(|timeline| timeline.enter(path, parent, from_in_parent));
 
     let mut macros = file.macros.iter().peekable();
     let mut includes = file.includes.iter().peekable();
@@ -1027,6 +1399,14 @@ fn walk_one_file<'a>(
                 );
             }
 
+            // …and the **timeline**, when there is one: every fact in force, both channels, with the file and the
+            // offset it was written at. This is the record a file's environment is later read out of, so it must
+            // hold what the per-file walk would have collected — including the conditional-but-in-force bodies the
+            // second channel carries.
+            if let (Some(frame), Some(timeline)) = (frame, walked.timeline.as_mut()) {
+                timeline.record(frame, fact, source, matches!(fact.guard, FactGuard::Unconditional));
+            }
+
             continue;
         }
 
@@ -1038,6 +1418,8 @@ fn walk_one_file<'a>(
             walk_one_file(
                 nested,
                 from_offset,
+                frame,
+                include.range.start_offset + include.range.length,
                 seen,
                 look_up,
                 seed,
@@ -1046,6 +1428,10 @@ fn walk_one_file<'a>(
                 walked,
             );
         }
+    }
+
+    if let (Some(frame), Some(timeline)) = (frame, walked.timeline.as_mut()) {
+        timeline.leave(frame);
     }
 }
 
