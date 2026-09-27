@@ -1511,6 +1511,7 @@ impl<F: FileProvider + Clone> Session<F> {
             &view.root,
             &view.path,
             &expression,
+            0,
         ) {
             Known::Yes((type_of, file)) => Known::Yes(ExpressionType {
                 expression: written,

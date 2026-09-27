@@ -24,7 +24,7 @@ use lsp_server::{Request, Response};
 use lsp_types::request::{
     Completion, DocumentDiagnosticRequest, DocumentSymbolRequest, FoldingRangeRequest,
     GotoDefinition, HoverRequest, InlayHintRequest, PrepareRenameRequest, References, Rename,
-    Request as LspRequest, SelectionRangeRequest,
+    Request as LspRequest, ResolveCompletionItem, SelectionRangeRequest,
     SemanticTokensFullRequest,
     SignatureHelpRequest,
     WorkspaceSymbolRequest,
@@ -33,7 +33,7 @@ use lsp_types::request::{
 use crate::context::ServerContext;
 
 use super::{
-    completion::on_completion,
+    completion::{on_completion, on_completion_resolve},
     definition::on_goto_definition_handler,
     diagnostic::on_pull_document_diagnostic,
     document_symbol::on_document_symbol,
@@ -87,6 +87,7 @@ pub async fn on_request_handler(
         GotoDefinition => on_goto_definition_handler,
         HoverRequest => on_hover,
         Completion => on_completion,
+        ResolveCompletionItem => on_completion_resolve,
         DocumentSymbolRequest => on_document_symbol,
         FoldingRangeRequest => on_folding_range,
         InlayHintRequest => on_inlay_hint,

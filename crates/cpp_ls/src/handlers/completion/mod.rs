@@ -37,6 +37,7 @@ use lsp_types::{
 use tokio_util::sync::CancellationToken;
 
 use super::RegisterCapabilities;
+use crate::handlers::hover::documentation_text;
 use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
 use crate::util::{completion_kind, offset_at_position, position_in, uri_to_file_path};
 
@@ -114,7 +115,7 @@ fn members<'a>(
     view: &'a cpp_code_analysis::FileView,
 ) -> impl Iterator<Item = CompletionItem> + 'a {
     found.members.members.iter().map(move |member| {
-        let mut item = item_for(&member.fact, member.depth, view, found.member_range);
+        let mut item = item_for(&member.fact, &member.file, member.depth, view, found.member_range);
 
         // **Which class declares it**, for a member that is inherited — the one thing a reader cannot see from the
         // name, since the derived class body does not mention it.
@@ -148,7 +149,7 @@ fn names<'a>(
     found
         .names
         .iter()
-        .map(move |offered| item_for(&offered.fact, offered.depth, view, found.name_range))
+        .map(move |offered| item_for(&offered.fact, &offered.file, offered.depth, view, found.name_range))
 }
 
 /// One name, as a completion item that **replaces the range the analysis gave**.
@@ -157,6 +158,7 @@ fn names<'a>(
 /// cursor is in, then each enclosing scope, then the files it includes — instead of the alphabet.
 fn item_for(
     fact: &cpp_code_analysis::DeclFact,
+    file: &std::path::Path,
     depth: usize,
     view: &cpp_code_analysis::FileView,
     replace: cpp_parser::SourceRange,
@@ -164,6 +166,8 @@ fn item_for(
     CompletionItem {
         label: name_of(fact).to_string(),
         kind: Some(completion_kind(fact.kind)),
+        // **Where the declaration is**, for `completionItem/resolve` to find it again — see `identity_of`.
+        data: identity_of(fact, file),
         // Where the name lives, when the scope says something the label does not: a member of `ns::Widget` offers
         // `size` with `ns::Widget` beside it.
         detail: fact.scope.clone(),
@@ -206,6 +210,76 @@ fn name_of(fact: &cpp_code_analysis::DeclFact) -> &str {
     &fact.name
 }
 
+/// **Where a declaration is**, as the `data` a client echoes back to `completionItem/resolve`.
+///
+/// The item's own identity, not its rendering: the file and the offset of the declared **name**, which is what
+/// every documentation question in this server is asked with (`Session::documentation`). Putting the comment itself
+/// in the item would be answering a question the user has not asked yet — for every name in the list ✓.
+///
+/// `None` when the path cannot be spelled as a string, which leaves an item the client simply does not resolve: an
+/// item without documentation is a smaller loss than an item whose documentation is another declaration's.
+fn identity_of(fact: &cpp_code_analysis::DeclFact, file: &std::path::Path) -> Option<lsp_types::LSPAny> {
+    Some(serde_json::json!({
+        "file": file.to_str()?,
+        "offset": fact.name_range.start_offset,
+    }))
+}
+
+/// **`completionItem/resolve`**: the documentation for the one item a client is showing.
+///
+/// The declaration is found again from the item's own `data` — the file and the name's offset — and its comment is
+/// read through the session, exactly as the hover reads it: the same question, the same reading, the same rendering
+/// ([`documentation_text`] is shared with the hover and with signature help, so three popups about one declaration
+/// cannot disagree about what it says).
+///
+/// An item this layer cannot re-find (a client that strips `data`, a file deleted since the list was built) comes
+/// back **unchanged** rather than as an error: the protocol's own note says a resolve must not fail, and an item
+/// without documentation is exactly what the client already has.
+pub async fn on_completion_resolve(
+    context: ServerContextSnapshot,
+    mut item: CompletionItem,
+    cancel_token: CancellationToken,
+) -> RequestOutcome<CompletionItem> {
+    let identity = item.data.clone();
+    let file = identity
+        .as_ref()
+        .and_then(|identity| identity.get("file"))
+        .and_then(|value| value.as_str())
+        .map(std::path::PathBuf::from);
+    let offset = identity
+        .as_ref()
+        .and_then(|identity| identity.get("offset"))
+        .and_then(|value| value.as_u64())
+        .map(|value| value as usize);
+
+    // An item with no identity — a client that strips `data`, a hand-written request — is answered with itself:
+    // the protocol says a resolve must not fail, and an item without documentation is what the client already has.
+    let (Some(file), Some(offset)) = (file, offset) else {
+        return RequestOutcome::Ready(item);
+    };
+
+    context.analysis().prepare(&file).await;
+
+    let resolved = snapshot_query(context.analysis(), cancel_token, move |session| {
+        // The view is of the **declaring** file, which is what makes the lookup below one walk for a declaration in
+        // the file being edited and one parse for the first name that comes from a header.
+        let view = session.view(&file)?;
+        let comment = session.documentation(&view, &file, offset)?;
+
+        Some(documentation_text(&comment))
+    })
+    .await;
+
+    if let RequestOutcome::Ready(Some(text)) = resolved {
+        item.documentation = Some(Documentation::MarkupContent(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: text,
+        }));
+    }
+
+    RequestOutcome::Ready(item)
+}
+
 pub struct CompletionCapabilities;
 
 impl RegisterCapabilities for CompletionCapabilities {
@@ -215,12 +289,11 @@ impl RegisterCapabilities for CompletionCapabilities {
             // operators and the start of a qualified name. `:` alone is enough for `::` — the client sends one
             // request per trigger character, and the second `:` finds the list already asked for.
             trigger_characters: Some(vec![".".to_string(), ">".to_string(), ":".to_string()]),
-            // No `completionItem/resolve`: everything a client needs is in the item, and a resolve round trip
-            // would exist to fetch documentation this layer does not read *here*. The analysis can answer it now
-            // (`Session::documentation`, the hover section of §6), but attaching it would be one documentation
-            // lookup per offered name — a hundred tree walks for a list the user is about to filter by typing — so
-            // what a client shows is what this layer already knows: an inherited-from note and an ambiguity note.
-            resolve_provider: Some(false),
+            // **`completionItem/resolve` is on**, and the round trip is what keeps the list cheap: attaching the
+            // documentation to every item would be one lookup per offered name — a hundred tree walks (and, for a
+            // name from a header nobody has read, a parse) for a list the user is about to filter by typing —
+            // while a resolve asks about the *one* item the client is showing. See `on_completion_resolve`.
+            resolve_provider: Some(true),
             ..CompletionOptions::default()
         });
     }
@@ -230,4 +303,31 @@ impl RegisterCapabilities for CompletionCapabilities {
 mod tests {
     // The kind mapping has its own tests where it lives now (`crate::util::kind`), beside the outline's — one
     // question, one place, so that the two vocabularies can be read together and cannot drift apart.
+
+    use super::*;
+
+    /// **What a resolve is asked with is the declaration's *place*, not its rendering**: the file and the offset
+    /// of the name. That is the whole reason the round trip is cheap — the comment is fetched for the one item a
+    /// client shows, rather than for every name in the list.
+    #[test]
+    fn an_item_carries_where_its_declaration_is() {
+        let fact = cpp_code_analysis::DeclFact {
+            name: "size".to_string(),
+            scope: None,
+            local: false,
+            kind: cpp_code_analysis::DeclKind::Variable,
+            type_of: Some("int".to_string()),
+            returns: None,
+            bases: Vec::new(),
+            range: cpp_parser::SourceRange::new(120, 4),
+            name_range: cpp_parser::SourceRange::new(120, 4),
+            clean: true,
+            guard: cpp_code_analysis::FactGuard::Unconditional,
+        };
+
+        let identity = identity_of(&fact, std::path::Path::new("/p/widget.h")).expect("a path spells");
+
+        assert_eq!(identity["file"], serde_json::json!("/p/widget.h"));
+        assert_eq!(identity["offset"], serde_json::json!(120));
+    }
 }

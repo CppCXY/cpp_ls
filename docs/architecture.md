@@ -1462,6 +1462,19 @@ DECLARE_HANDLE(HWND);          不在大纲里:文件写下的是一次调用,�
 另一条 `a_members_members_are_offered_over_the_wire`(`one::Widget w; w.` → `size`)测的是**分派**而不是第二读数
 ——它的注释写明了这一点,因为"开名字空间的宏裸读也读得对"是前面量过的事实 ✓。
 
+**补全补完的那一格**:**`completionItem/resolve` 开了**——它以前是明确关掉的,理由写着"这一层还不读文档注释",
+而那个理由在悬停那一轮就不成立了 ✗。做法是协议自己给的那条路,正好也是唯一便宜的那条:
+
+- 列表里的每个 item 只带**声明的位置**(`data` = 文件 + 名字的偏移,`identity_of`);
+- 客户端把用户高亮的那**一个** item 回给服务端,那次 resolve 才去读注释——`Session::documentation` 走
+  `session.view(声明所在文件)`:同一个文件是一次树走查,跨文件第一次要解析那个头 ✓;
+- 渲染与悬停、签名帮助**共用同一个函数**(`documentation_text`)✓ 三处弹窗不可能对同一条注释各说各话;
+- `data` 缺失或认不出来(客户端剥了它、文件已删)时**原样把 item 还回去**,不报错:协议说 resolve 不该失败,
+  而"没有文档的 item"正是客户端手上已有的东西 ✓。
+
+**证据**:`handshake.rs::a_completion_item_resolves_to_its_declarations_documentation` —— 先补全,断言列出来的
+item **带着** `data` 且**没有**文档,再用它回一次 resolve,拿到成员自己的注释 ✓。
+
 ### 诊断也走熟读(已落地):发布的是"编译器看到的那份文本"报的错
 
 删形状规则的门禁是"诊断也走熟读",这一轮做了它。**改之前**:`diagnose_file` 走 `session.view(path)`,也就是
@@ -1750,10 +1763,66 @@ auto n = count();  →  auto n: int = count();          ✗ 类型:分析层没�
 `handshake.rs::a_signature_is_shown_while_the_arguments_are_typed`(标签、`activeParameter=1`、两个 span 切出来的
 文本、`@param` 跟着来)。
 
+### 类型推断的第一步:`auto` 不再是一个"类型"(已落地)
+
+到这一轮为止,`type_of_expression` 回答的是**读出来的**类型:一个名字的声明写了什么,就是什么。它对每一种
+"写法就是类型"的声明都对,对唯一一种**占位符**全错——而那个占位符是现代 C++ 的默认写法:
+
+```text
+auto n = count();        ← 这一层以前答 "auto"   ✗ 那不是类型,于是每个消费者要么特判、要么放弃
+auto w = Widget{};  w.   ← 补全列表是空的        ✗ 因为对象的"类型"是 auto
+const auto& r = base;    ← 悬停/提示说不出 r 是什么 ✗
+```
+
+这一轮做的是**语言自己的那条规则**,从声明写出来的东西读:
+
+```text
+auto n = count();      初始化式的类型                              int
+const auto& r = base;  在那个类型上补回 auto 周围写的东西           const int&
+auto p = &base;        初始化式是 &base,于是                     int*
+auto q = Widget{};     花括号初始化式指出了它造的那个类型           Widget
+auto second = first;   链式:再问一次 first 是谁(深度有上界)      int
+```
+
+- **`declared_type_of` 剥掉说明符**,这对"按名字查类型"是对的(`static const Widget` 的名字是 `Widget`),
+  对**给人看的类型**是错的:`const auto& r = x;` 必须推成 `const int&`,而那个 `const` 正是被剥掉的那一半 ✗。
+  所以推导时**按声明原文重建**拼写:说明符序列(`const auto`)+ 声明符自己的算子(`&`),再替换 `auto` ✓;
+- **四条拒答,每条都是语言的规则而不是省事**:`auto&&`(推成 `T&` 还是 `T&&` 取决于初始化式的值类别,声明
+  的拼写里没有这个信息 ✗)、`auto* p = x;` 而 `x` 不是指针(声明本身不合法,编一个指针类型就把错误藏了 ✗)、
+  **声明在别的文件**(初始化式写在声明那边,而这一层只有一棵树;索引里记的 `auto` 不是类型 ✗)、
+  以及**没有初始化式**(`auto n;` 不合法 ✓);
+- **递归有了上界**(`MAX_TYPE_DEPTH`):`auto x = x;` 是合法可解析的非法 C++,而这一层的每一臂都会把同一个
+  问题问给更小的表达式、其中一条问给**另一个声明**——没有上界就是一个环 ✗。到界答 `Unknown`,和读不懂的
+  类型同一个答案 ✓;
+- **顺带补的一格**:`Widget{}` 这种花括号初始化式现在回答"它造的那个类型"(第一子节点确实**指名**一个类型时 ✓;
+  `{1, 2}` 指不出名字,而 C++ 把它推成 `std::initializer_list`,那是库类型不是语言类型 ✗)。
+
+**它买到什么**:所有问"这个表达式的类型是什么"的功能一起动了——`auto w = Widget{}; w.` 的**成员补全**
+(此前空列表)、悬停的表达式分支、以及 InlayHint 那一轮明说做不到的**类型提示**(现在对 `auto` 这一档是
+做得到的 ✓,下一轮接出去)。
+
+**实测**(`examples/types_probe.rs`,109 档 STL 语料):**60 个 `auto` 声明,6 个推出类型、54 个拒答、
+0 个还把 `auto` 当类型报出来** ✓。其中推出来的长这样:
+
+```text
+_UVal_trunc = _UTy                        (string)
+_Result     = const pair<_Nodeptr, bool>  (map)
+```
+
+54 个拒答集中在**模板体内部**:那些初始化式的类型是**依赖名**(`_STy::value_type`、`_Get_value(...)`),
+要算出它们得先做**模板实例化**——也就是这条线的下一步,而且这一步的量就摆在 109 档的这 54 个上 ✓。
+"0 个还把 `auto` 当类型"是这一轮真正的不变量:占位符再也不会被当成一个类型报给用户 ✓。
+
+**证据**:`cpp_code_analysis/tests/types.rs` 十一条(五种推出形状、链式、写出来的修饰被保留、`auto&&` 拒答、
+指针不匹配拒答、自引用不循环、没有初始化式拒答、跨文件拒答且绝不报 `auto`、成员补全的收益、普通声明一字不变)。
+**反证**(四条,逐条单独打断、按内容哈希恢复):去掉"按原文重建"(改回用剥过说明符的拼写)→ 三条变红
+(`const auto&` 那条答成 `int&`);把深度上界改成立刻触发 → 四条变红 ✓(链式那条真的走递归:上界一收紧它就没了);
+把半开区间改回闭区间 → 三条变红(下潜走进了前一个说明符 ✗,见 §8);去掉花括号那一格 → 两条变红 ✓。
+上界**整个去掉**会让 `auto x = x;` 一直问下去——这一条是推理,没有拿一个会挂死的测试去跑 ✓。
+
 ### M4 —— 文件 CST 降级
 裸树只保留:无损、括号/指令结构、浅层声明扫描。此时它那侧的门禁放宽到"结构正确",不再要求 C++ 正确。
 **验收**:宽容语法里针对展开的谓词清零。
-
 ### M5 —— 双向映射 + 作用域入口
 补全/悬停/跳转改走 §2.6 的路径;文件 offset 的直达路径只留给不需要语法的功能。
 
@@ -1761,7 +1830,7 @@ auto n = count();  →  auto n: int = count();          ✗ 类型:分析层没�
 
 ## 7. 度量与门禁
 
-每次改动后必须全绿(测试基线:**1357 个测试**、47 个 suite,实测;`cargo clippy --workspace --all-targets`
+每次改动后必须全绿(测试基线:**1369 个测试**、48 个 suite,实测;`cargo clippy --workspace --all-targets`
 零警告,`cargo doc` 零警告,`cpp_dump` 零错误):
 
 ```bash
@@ -1784,6 +1853,8 @@ std_probe <list> --seeds --closure
 std_probe <list> --seeds --closure --cooked --cooked-index --dump-raw-only <path.tsv>
 # 语义高亮的代价:出货路径(`Session::classified_names`)每个文件多少分类、多少毫秒,并断言 token 有序不重叠
 cargo run --release --example semantic_probe -- <list> --limit <n>
+# `auto` 的覆盖面:语料里多少个 auto 声明推出了类型、多少拒答(还把 auto 当类型报出来的必须是 0)
+cargo run --release --example types_probe -- <list>
 ```
 
 | 语料 | 档 | 方式 | 现状基线 |
@@ -1862,6 +1933,14 @@ cargo run --release --example semantic_probe -- <list> --limit <n>
    报出来的红是假的(恢复之后仍然红 ✓,把人引向"源码里还有补丁"的错误结论)。症状很干净:同一个源文件、
    同一条命令,先绿后红,而 `git diff` 里没有任何补丁痕迹。定论:恢复之后 `Touch` 一次,或者用 `cargo test`
    的强制重编;反证的**红**是可信的(改坏会让文件变新 → 一定会重编 ✓),**绿**才是需要确认的那一侧。
+10. **树的范围是半开的,而"包含"写错一次就会走错孩子。** 类型推断这一轮踩了两个相邻的坑,都发生在"从根往下
+   走到某个绑定指的那个节点"这一步:①把 **token** 也当成下潜候选(偏移落在标识符上时,标识符的 token 同样
+   包含它),`into_node()` 给出 `None`,整条下潜**提前结束**;②包含判断写成 `offset <= end`,而 rowan 的 `end`
+   是**开**区间——于是正好落在两个兄弟边界上的偏移(标识符的起点,恰好是前一个说明符序列的终点)被**前一个**
+   孩子接走,下潜进了说明符,同样答 `None`。症状是"同一个函数对 `& r = n` 成立、对 `n = count()` 返回 `None`",
+   而 `declared_type_of` 里早就有正确的写法(`element.as_node().is_some_and(...)`)✓。规则:**下潜只认节点,
+   包含一律半开**;这类坏味道的代价是"看起来像规则没生效",而不是崩溃 ✓。顺带一个仪器教训:那两次插桩
+   `eprintln!` 之所以什么都没打印,是 `String.Replace` **没命中却没说**(先验证 `Contains` 再跑,一行的事)✓。
 
 ---
 
@@ -1943,6 +2022,11 @@ cargo run --release --example semantic_probe -- <list> --limit <n>
 - **语义高亮(本轮)**:`textDocument/semanticTokens/full`,九种 kind(含"参数不是变量""成员函数是 method")、
   一个 `declaration` modifier、固定词表 + 按客户端能力过滤;分类不问位置:**本文件绑定 → 本文件宏 → 按拼写查
   本文件 → 索引(一个拼写问一次)→ 都不答就不发**。出货路径实测 `sal.h`(10987 个标识符)**36 ms**。
+- **补全补完(本轮)**:`completionItem/resolve` 打开,item 只带声明的位置(`data`),文档在那一次 resolve 里读,
+  与悬停/签名帮助共用同一个渲染 ✓。见 §6 那一节。
+- **类型推断的第一步**:`auto` 不再被当成类型——从**初始化式**推出类型,并补回声明写在 `auto` 周围的
+  修饰;`auto&&`/指针不匹配/跨文件/无初始化式四条拒答,递归有上界。109 与 255 两档语料:**60 个 `auto`、
+  6 个推出、54 个拒答、0 个报 `auto`**;54 个拒答全在模板体内(依赖名 ✗ = 下一步"模板实例化"的量)。见 §6 那一节。
 - **签名帮助(本轮)**:`textDocument/signatureHelp`,**一条**签名(析出来就是一条;`Ambiguous` 不发),参数 span 指向
   标签内部、活动参数按**本层逗号**数、声明上方的文档跟着来;触发字符 `(` 与 `,`。
 - **LSP 的能力表现在是十三项**:诊断(push + pull)、definition、hover、completion、documentSymbol、foldingRange、
@@ -1958,10 +2042,8 @@ cargo run --release --example semantic_probe -- <list> --limit <n>
 3. **L2(名字驻留)**:量过,是噪声级别(§6 L1/L2),不做;L1/L4 已完成。
 4. **带括号的声明符(§8 第 8 条)**:`void (*f(int a))(int b);` 这类声明还没进符号模型,是这一轮做提示时
    量出来的一个**独立**缺口;影响的是跳转/悬停/补全/改名这一整片,所以要先量影响面再动 `declared_name`。
-5. **M5 余下**:**协议里不需要类型的那几项都接完了**——definition / hover / completion / documentSymbol /
-   foldingRange / references / rename / workspaceSymbol / selectionRange / inlayHint / semanticTokens /
-   signatureHelp ✓。这一轮的两项原本都判定"越过了类型那条线",实际做下来各自只越了一点点:语义高亮要的是
-   "这个名字是哪一类",而 `BindingKind` 比索引的 `DeclKind` 细,答案一直就在库里 ✓;签名帮助要的是"正在调哪个
-   函数、光标在第几个参数",也就是定义查询加一份形参表,重载那一半**明确不发**而不是猜 ✓。剩下真正需要类型系统的
-   仍然只有**类型推断**本身(给出表达式的类型、`auto` 的推导、模板实例化)——那不是一个 LSP 方法,而是另一层
-   建模;`type_of_expression` 已经把边界写在文档里(名字/`this`/调用/解引用/下标,其余 `Unknown`)。
+5. **类型推断(本轮开始,下一步最重)**:这一层到今天为止回答的是**读出来的**类型,这一轮把 `auto` 变成了
+   可计算的类型(§6 那一节),顺带证明了这条线怎么走:**先量出拒答的量,再决定下一个小步**。109 档里
+   54/60 个 `auto` 拒答,全部落在模板体内——它们要的是**模板实例化**(把 `_STy::value_type`、`_Get_value(...)`
+   这类依赖名算出来),那是下一块建模,量就摆在那里 ✓。再往后是重载解析(签名帮助里明确没做的那一半)与
+   `decltype`。协议侧的口子已经全接完(十三项 ✓),所以这条线现在是纯粹的建模工作,不再有 LSP 方法要加 ✓。

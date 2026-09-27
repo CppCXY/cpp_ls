@@ -286,10 +286,10 @@ pub fn member_across_files(
     }
 
     // The type of the object, which is what decides which class the member is looked for in.
-    let Known::Yes((written, _)) = type_of_expression(index, scopes, root, path, &access.object)
+    let Known::Yes((written, _)) = type_of_expression(index, scopes, root, path, &access.object, 0)
     else {
         let Known::Unknown(reason) =
-            type_of_expression(index, scopes, root, path, &access.object)
+            type_of_expression(index, scopes, root, path, &access.object, 0)
         else {
             unreachable!("the first match established that this is an `Unknown`")
         };
@@ -650,7 +650,7 @@ pub fn member_completions_at(
         return Known::Unknown(UnknownReason::UnparsableName);
     };
 
-    let written = match type_of_expression(index, scopes, root, path, &access.object) {
+    let written = match type_of_expression(index, scopes, root, path, &access.object, 0) {
         Known::Yes((written, _)) => written,
         Known::Unknown(reason) => return Known::Unknown(reason),
         // The only `No` the type layer produces is "nothing says what this is", which is the same answer as an
@@ -1105,6 +1105,11 @@ fn sort_and_hide(names: &mut Vec<OfferedName>) {
     names.retain(|name| seen.insert(name.fact.name.clone()));
 }
 
+/// How deep the type question may ask itself before it gives up.
+///
+/// See the guard in [`type_of_expression`]: this is a bound on an ill-formed file's recursion, not a statement
+/// about how complex a type may be.
+const MAX_TYPE_DEPTH: usize = 8;
 /// The type of an expression, as far as this layer can tell, and the file that declared it.
 ///
 /// The core of the `infer` layer, and it is **recursive** because that is what an expression is: `a.b.size` is a
@@ -1129,9 +1134,19 @@ pub(crate) fn type_of_expression(
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     expression: &cpp_parser::CppSyntaxNode,
+    depth: usize,
 ) -> Known<(String, PathBuf)> {
     let text = expression.text().to_string();
     let written = text.trim();
+
+    // **A bound on the recursion, not a policy about types.** Every arm below can ask the same question about a
+    // *smaller* expression, and one of them asks it about a *different declaration* — which is what makes a file
+    // like `auto a = *b; auto b = *a;` a loop rather than a walk. Nobody writes that, and a language server meets
+    // whatever is written: past this depth the answer carries the spelling and no type, which is the same answer
+    // this layer gives everything it cannot read.
+    if depth > MAX_TYPE_DEPTH {
+        return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
+    }
 
     // `this` is the enclosing class, and no inference is involved: the scope chain already knows which class this
     // is, and it is the same answer inside every member function of it.
@@ -1147,14 +1162,37 @@ pub(crate) fn type_of_expression(
     // has never been saved has no summary — the two-layer split the name query uses, for the same reason.
     if !written.is_empty() && written.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return match declaration_of_expression(index, scopes, root, path, expression) {
-            Known::Yes(named) => match named.type_of(root) {
-                Some(type_of) => Known::Yes((type_of, named.file(path))),
+            Known::Yes(named) => match declared_type(index, scopes, root, path, &named, depth) {
+                Known::Yes(type_of) => Known::Yes((type_of, named.file(path))),
+                Known::Unknown(reason) => Known::Unknown(reason),
                 // The declaration is a function, a class or an alias: none of them has a type *as a name*, which
                 // is the distinction `DeclFact::returns` exists for.
-                None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+                Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
             },
             Known::Unknown(reason) => Known::Unknown(reason),
             Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+        };
+    }
+
+    // A **braced initializer**: `Widget{…}` is a temporary of the class it names, which is what makes
+    // `auto w = Widget{}` a declaration of a `Widget`. Only the first child is read, and only when it *names* a
+    // type: `{1, 2}` names nothing, and a braced list of values is a different thing that this layer does not
+    // deduce (C++ deduces it as `std::initializer_list`, which is a library type, not a language one).
+    if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::InitListExpr {
+        let Some(first) = expression.children().next() else {
+            return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
+        };
+
+        return match type_of_expression(index, scopes, root, path, &first, depth + 1) {
+            // The named type is a class, and a class has no `type_of` of its own — so the *spelling* is the answer,
+            // which is what the initializer wrote.
+            Known::Yes((type_of, file)) => Known::Yes((type_of, file)),
+            _ => match declaration_of_expression(index, scopes, root, path, &first) {
+                Known::Yes(named) if named.type_of(root).is_none() => {
+                    Known::Yes((first.text().to_string().trim().to_string(), named.file(path)))
+                }
+                _ => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+            },
         };
     }
 
@@ -1168,7 +1206,7 @@ pub(crate) fn type_of_expression(
     // stop one level above the answer — which is exactly where it used to stop.
     if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::ParenExpr {
         return match expression.children().next() {
-            Some(inner) => type_of_expression(index, scopes, root, path, &inner),
+            Some(inner) => type_of_expression(index, scopes, root, path, &inner, depth + 1),
             None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
         };
     }
@@ -1176,7 +1214,7 @@ pub(crate) fn type_of_expression(
     // A **dereference**: `*p` has the type `p` points at. Nothing is looked up — the pointer's own declaration
     // already spells the pointee, and the `*` is arithmetic on that spelling.
     if let Some(operand) = unary_operand_with(expression, "*") {
-        let operand_type = type_of_expression(index, scopes, root, path, &operand);
+        let operand_type = type_of_expression(index, scopes, root, path, &operand, depth + 1);
         return match operand_type {
             Known::Yes((type_of, file)) => match pointee_type_name(&type_of) {
                 Some(pointee) => Known::Yes((pointee, file)),
@@ -1193,7 +1231,7 @@ pub(crate) fn type_of_expression(
     // so that the two operators are one rule rather than one rule and one hole: `(&r)->size` is a member access
     // whose object is this, and the `->` already knows what to do with a pointer.
     if let Some(operand) = unary_operand_with(expression, "&") {
-        let operand_type = type_of_expression(index, scopes, root, path, &operand);
+        let operand_type = type_of_expression(index, scopes, root, path, &operand, depth + 1);
         return match operand_type {
             Known::Yes((type_of, file)) => {
                 let pointed_at = pointee_type_name(&type_of).unwrap_or(type_of);
@@ -1208,7 +1246,7 @@ pub(crate) fn type_of_expression(
     // with an `operator[]` — `v[0]` on a `std::vector` — needs the template instantiated, and this answers
     // `Unknown` for the same reason it does everywhere else: see [`element_type_name`].
     if let Some(base) = subscript_base(expression) {
-        let base_type = type_of_expression(index, scopes, root, path, &base);
+        let base_type = type_of_expression(index, scopes, root, path, &base, depth + 1);
         return match base_type {
             Known::Yes((type_of, file)) => match element_type_name(&type_of) {
                 Some(element) => Known::Yes((element, file)),
@@ -1222,10 +1260,10 @@ pub(crate) fn type_of_expression(
     // A member access: the type of the member, which is a fact on its declaration.
     if let Some(inner) = crate::sema::resolve::member_access_of(expression) {
         let Known::Yes((inner_type, _)) =
-            type_of_expression(index, scopes, root, path, &inner.object)
+            type_of_expression(index, scopes, root, path, &inner.object, depth + 1)
         else {
             let Known::Unknown(reason) =
-                type_of_expression(index, scopes, root, path, &inner.object)
+                type_of_expression(index, scopes, root, path, &inner.object, depth + 1)
             else {
                 unreachable!("the first match established that this is an `Unknown`")
             };
@@ -1451,7 +1489,265 @@ impl NamedDeclaration {
     }
 }
 
-/// [`NamedDeclaration::what_a_call_has`] for a declaration the index (or a member lookup) produced.
+/// The type a declaration was written with — or, where it wrote `auto`, the type its **initializer** has.
+///
+/// # What `auto` means here
+///
+/// `auto n = count();` declares `n` with the type of `count()`, and until this existed the answer to "what is `n`"
+/// was the word `auto` — which is not a type, and which every consumer then had to special-case or give up on:
+/// `auto w = Widget{}; w.` listed nothing, hover said `auto`, and the parameter hints could not say what an
+/// argument was. The deduction is the language's own rule read off the declaration the file wrote:
+///
+/// ```text
+/// auto n = count();          the initializer's type                          `int`
+/// const auto& r = n;         that type with what was written around `auto`    `const int&`
+/// auto p = &r;               the initializer is `&r`, so `const int*`         `const int*`
+/// auto q = Widget{};         a braced initializer names the type it makes     `Widget`
+/// ```
+///
+/// # What it refuses, and why that is the rule rather than a shortcut
+///
+/// * **`auto&&`** — the language deduces a reference *or* a value depending on the initializer's value category
+///   (`T&` for an lvalue, `T&&` for an rvalue), and nothing in a declaration's spelling says which. Reporting what
+///   was written around `auto` would be wrong half the time, so the answer is `Unknown`.
+/// * **a `*` the initializer does not have** — `auto* p = x;` where `x` is not a pointer is ill-formed; a type
+///   invented to make the declaration work would hide that.
+/// * **a declaration in another file** — `auto` at namespace scope in a header is deduced from that header's
+///   syntax, and this layer holds one file's tree. The spelling in the index (`auto`) is not a type, so the answer
+///   is `Unknown` rather than a guess.
+/// * **a chain longer than [`MAX_TYPE_DEPTH`]** — see the guard in [`type_of_expression`].
+fn declared_type(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    named: &NamedDeclaration,
+    depth: usize,
+) -> Known<String> {
+    let Some(written) = named.type_of(root) else {
+        return Known::No;
+    };
+
+    if !writes_auto(&written) {
+        return Known::Yes(written);
+    }
+
+    let unknown = || Known::Unknown(UnknownReason::UnknownType(Box::from(written.trim())));
+
+    // The **written** spelling, rebuilt from the declaration's syntax rather than taken from the recorded type:
+    // the recorded one has already dropped the declaration's specifiers, and `const auto& r = x;` has to deduce a
+    // `const` type — see `deduction_inputs`.
+    let Some((as_written, _)) = deduction_inputs(root, named) else {
+        return unknown();
+    };
+    if !writes_auto(&as_written) {
+        return unknown();
+    }
+
+    let Known::Yes((deduced, _)) = initializer_type(index, scopes, root, path, named, depth + 1) else {
+        return unknown();
+    };
+
+    match auto_substituted(&as_written, &deduced) {
+        Some(type_of) => Known::Yes(type_of),
+        None => unknown(),
+    }
+}
+
+/// Does this spelling use the `auto` placeholder? A word, not a substring: `automatic` is a name.
+fn writes_auto(written: &str) -> bool {
+    written
+        .split(|character: char| !character.is_alphanumeric() && character != '_')
+        .any(|word| word == "auto")
+}
+
+/// The type of what the declaration is initialized with.
+///
+/// The declaration's own syntax, found by **descending to the binding's range**: a binding's range is its
+/// declarator (`n = count()` is the `InitDeclarator`), and the initializer is one of that node's children — the
+/// shape the parser gives every initialized declaration, `int x = 0;` and `auto x = f();` alike.
+fn initializer_type(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    named: &NamedDeclaration,
+    depth: usize,
+) -> Known<(String, PathBuf)> {
+    let Some((_, expression)) = deduction_inputs(root, named) else {
+        // Either the declaration is in another file — the initializer is written where the declaration is, and this
+        // layer holds one file's syntax — or it has none at all (`auto n;` is ill-formed, and saying so is the
+        // honest answer).
+        return Known::Unknown(UnknownReason::UnknownType(Box::from("auto")));
+    };
+
+    type_of_expression(index, scopes, root, path, &expression, depth)
+}
+
+/// The spelling `auto` stands for, and the expression that decides it.
+///
+/// # Why the spelling is rebuilt rather than taken from the declaration's recorded type
+///
+/// [`crate::declared_type_of`] strips declaration **specifiers**, which is right for a lookup by name (`static
+/// const Widget` names `Widget`) and wrong for a type a reader is shown: `const auto& r = x;` has to deduce
+/// `const int&`, and the `const` is a specifier the recorded spelling has already dropped. So the two halves are
+/// read from the syntax instead — the specifier sequence (`const auto`) and the declarator's own operators (`&`) —
+/// and put back together the way the file would have spelled the type it let `auto` stand for.
+///
+/// The declarator's operators are its text with the name taken out: `& r ` is `&`, `* p ` is `*`, `p ` is nothing.
+fn deduction_inputs(
+    root: &cpp_parser::CppSyntaxNode,
+    named: &NamedDeclaration,
+) -> Option<(String, cpp_parser::CppSyntaxNode)> {
+    let NamedDeclaration::Here(binding) = named else {
+        return None;
+    };
+
+    let declarator = node_covering(root, binding.name_range.start_offset, binding.range)?;
+    let initializer = declarator.children().find(|child| {
+        cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::Initializer
+    })?;
+    let expression = initializer.children().next()?;
+
+    // The specifiers are a sibling of the declarator's parent — `Declaration > [DeclSpecifierSeq, InitDeclarator]`
+    // — and they are where the `auto` and its qualifiers are written.
+    let specifiers = declarator
+        .ancestors()
+        .find_map(|node| {
+            node.children().find(|child| {
+                cpp_parser::CppSyntaxKind::from(child.kind())
+                    == cpp_parser::CppSyntaxKind::DeclSpecifierSeq
+            })
+        })
+        .map(|node| node.text().to_string())
+        .unwrap_or_default();
+
+    // The name's own text, taken from the file: the declarator's text minus the name is what was written *around*
+    // it — the half the recorded type keeps and the specifiers do not. The **declarator** rather than the node the
+    // binding ranges over, because that node is the whole `InitDeclarator` (`& r = x`) and its text holds the
+    // initializer too.
+    let name_range = binding.name_range;
+    let name = root
+        .text()
+        .to_string()
+        .get(name_range.start_offset..name_range.end_offset())
+        .unwrap_or_default()
+        .to_string();
+    let operators: String = declarator
+        .children()
+        .find(|child| {
+            cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::Declarator
+        })
+        .map(|node| node.text().to_string())
+        .unwrap_or_default()
+        .replace(&name, "")
+        .split_whitespace()
+        .collect();
+
+    Some((
+        format!("{} {}", specifiers.trim(), operators)
+            .trim()
+            .to_string(),
+        expression,
+    ))
+}
+
+/// The node whose span is exactly `range`, found along the path to `offset`.
+///
+/// A binding records a range, and the node it names can be several levels down; walking from the root along the
+/// child that contains the offset costs the depth of the tree rather than a search of it.
+fn node_covering(
+    root: &cpp_parser::CppSyntaxNode,
+    offset: usize,
+    range: cpp_parser::SourceRange,
+) -> Option<cpp_parser::CppSyntaxNode> {
+    let matches = |node: &cpp_parser::CppSyntaxNode| {
+        usize::from(node.text_range().start()) == range.start_offset
+            && usize::from(node.text_range().end()) == range.end_offset()
+    };
+
+    let mut node = root.clone();
+    loop {
+        if matches(&node) {
+            return Some(node);
+        }
+
+        // **Nodes only, and half-open.** The descent follows the child that contains the offset, and two details
+        // decide whether it arrives: a token contains the offset just as its node does (taking it would end the
+        // walk one level early), and a node's `end` is *exclusive* — so an offset at the boundary between two
+        // children belongs to the one that starts there. Both were wrong once: `auto n = …` answered `None`
+        // because the name's offset is exactly where the specifier sequence before it ends.
+        let next = node
+            .children_with_tokens()
+            .find(|element| {
+                element.as_node().is_some_and(|child| {
+                    let start = usize::from(child.text_range().start());
+                    let end = usize::from(child.text_range().end());
+                    offset >= start && offset < end
+                })
+            })
+            .and_then(|element| element.into_node())?;
+
+        node = next;
+    }
+}
+
+/// The written spelling with the initializer's type substituted for `auto`.
+///
+/// What was written *around* `auto` is what a reader sees and what the language applies: the qualifiers in front
+/// (`const`), and the declarator's operators behind (`&`, `*`). The `&&` case is refused here — see
+/// [`declared_type`] — and each `*` has to match a pointer in the deduced type, because a `*` that does not is a
+/// declaration that does not compile rather than a type to report.
+fn auto_substituted(written: &str, deduced: &str) -> Option<String> {
+    // The `auto` **word**, by position: a spelling can hold those four letters inside a longer name
+    // (`automatic`), and splitting on words is what keeps the two apart.
+    let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let bytes = written.as_bytes();
+    let mut at = 0usize;
+    let mut found = None;
+
+    while at < bytes.len() {
+        if !is_word(bytes[at]) {
+            at += 1;
+            continue;
+        }
+        let start = at;
+        while at < bytes.len() && is_word(bytes[at]) {
+            at += 1;
+        }
+        if &written[start..at] == "auto" {
+            found = Some((start, at));
+            break;
+        }
+    }
+
+    let (start, end) = found?;
+    let prefix = written[..start].trim();
+    let suffix = written[end..].trim();
+
+    if suffix.contains("&&") {
+        return None;
+    }
+
+    let mut base = deduced.trim().to_string();
+    for _ in 0..suffix.matches('*').count() {
+        base = pointee_type_name(&base)?.to_string();
+    }
+
+    let mut type_of = String::new();
+    if !prefix.is_empty() {
+        type_of.push_str(prefix);
+        type_of.push(' ');
+    }
+    type_of.push_str(base.trim());
+    // A `*` and a `&` are glued to what they apply to (`const int*`, `int&`) — the way the file would have spelled
+    // the type it let `auto` stand for.
+    type_of.push_str(&suffix.replace(' ', ""));
+
+    Some(type_of)
+}
+
+
 fn what_a_call_has_in(fact: &DeclFact) -> Option<String> {
     match fact.kind {
         // `Widget()` is a temporary of `Widget`, so a call of a class has the class. `DeclKind::Type` is exactly
@@ -1552,7 +1848,7 @@ fn declaration_of_a_callee(
 ) -> Known<NamedDeclaration> {
     // A member call: the object's type, then the member's declaration.
     if let Some(access) = crate::sema::resolve::member_access_of(callee) {
-        let object = match type_of_expression(index, scopes, root, path, &access.object) {
+        let object = match type_of_expression(index, scopes, root, path, &access.object, 0) {
             Known::Yes((type_of, _)) => type_of,
             Known::Unknown(reason) => return Known::Unknown(reason),
             Known::No => return Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
@@ -3427,7 +3723,8 @@ impl MacroCandidate {
     }
 }
 
-/// A declaration found in another file, with how the file that asked reaches it.#[derive(Debug, Clone, PartialEq, Eq)]
+/// A declaration found in another file, with how the file that asked reaches it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VisibleDeclaration<'a> {
     pub file: PathBuf,
     pub fact: &'a DeclFact,

@@ -1754,6 +1754,129 @@ fn a_signature_is_shown_while_the_arguments_are_typed() {
     server.request(999, "shutdown", Value::Null);
     server.notify("exit", Value::Null);
 }
+/// The completion-resolve fixture: a documented member, offered through a member access.
+const RESOLVE_CPP: &str = "\
+struct Widget {
+    /// The widget's size in cells.
+    int size;
+};
+int f() {
+    Widget w;
+    w.
+}
+";
+
+/// **`completionItem/resolve` fetches the documentation for the one item a client is showing.**
+///
+/// The list itself carries no comments — that is the point of the round trip, and why the list stays cheap for a
+/// hundred names — so this test asks the two questions a client asks, in order: complete, then resolve the item the
+/// user highlighted. What comes back is the declaration's own comment, rendered by the same function the hover and
+/// the signature help use.
+#[test]
+fn a_completion_item_resolves_to_its_declarations_documentation() {
+    let project = Project::new("completion-resolve");
+    project.write("main.cpp", RESOLVE_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": RESOLVE_CPP }
+        }),
+    );
+
+    let line = RESOLVE_CPP
+        .lines()
+        .position(|text| text.trim() == "w.")
+        .expect("the fixture writes the access") as u64;
+    let character = RESOLVE_CPP
+        .lines()
+        .nth(line as usize)
+        .and_then(|text| text.find("w."))
+        .expect("the fixture writes the access")
+        + 2;
+
+    let listed = server.ask_until_it(
+        100,
+        |id| {
+            json!({
+                "id": id,
+                "method": "textDocument/completion",
+                "params": {
+                    "textDocument": { "uri": main_uri },
+                    "position": { "line": line, "character": character },
+                },
+            })
+        },
+        |answer| {
+            answer["result"]["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["label"] == json!("size")))
+        },
+    );
+
+    let item = listed["result"]["items"]
+        .as_array()
+        .expect("an item list")
+        .iter()
+        .find(|item| item["label"] == json!("size"))
+        .expect("the member is offered")
+        .clone();
+
+    // The item carries **where the declaration is** — the file and the name's offset — which is what a resolve is
+    // asked with. A client echoes `data` back untouched; this test does the same.
+    assert!(
+        item["data"]["file"].is_string() && item["data"]["offset"].is_number(),
+        "the item carries its declaration's identity: {item}"
+    );
+    assert!(
+        item["documentation"].is_null(),
+        "the list itself carries no comments: {item}"
+    );
+
+    let resolved = server.ask_until_it(
+        200,
+        |id| {
+            json!({
+                "id": id,
+                "method": "completionItem/resolve",
+                "params": item.clone(),
+            })
+        },
+        |answer| !answer["result"]["documentation"].is_null(),
+    );
+
+    let documentation = resolved["result"]["documentation"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("markdown documentation was expected, got {resolved}"));
+    assert!(
+        documentation.contains("The widget's size in cells."),
+        "the member's own comment: {documentation}"
+    );
+    assert_eq!(
+        resolved["result"]["label"], "size",
+        "and the item is the one that was asked about: {resolved}"
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
 /// The hover fixture: a documented function, one with a plain comment above it, and a `this` in a member function.
 const HOVER_CPP: &str = "\
 /// Adds two counts.
