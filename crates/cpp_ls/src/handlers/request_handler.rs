@@ -22,12 +22,13 @@ use std::error::Error;
 use log::error;
 use lsp_server::{Request, Response};
 use lsp_types::request::{
-    DocumentDiagnosticRequest, GotoDefinition, HoverRequest, Request as LspRequest,
+    Completion, DocumentDiagnosticRequest, GotoDefinition, HoverRequest, Request as LspRequest,
 };
 
 use crate::context::ServerContext;
 
 use super::{
+    completion::on_completion,
     definition::on_goto_definition_handler,
     diagnostic::on_pull_document_diagnostic,
     hover::on_hover,
@@ -67,10 +68,11 @@ pub async fn on_request_handler(
     server_context: &mut ServerContext,
 ) -> Result<(), Box<dyn Error + Sync + Send>> {
     dispatch_request!(req, server_context, {
-        // The first three are the ones the C++ analysis answers today: a location, a type, and a file's
-        // diagnostics. The rest of the table is a one-line row each
+        // The first four are the ones the C++ analysis answers today: a location, a type, the names that can be
+        // written at a cursor, and a file's diagnostics. The rest of the table is a one-line row each
         GotoDefinition => on_goto_definition_handler,
         HoverRequest => on_hover,
+        Completion => on_completion,
         DocumentDiagnosticRequest => on_pull_document_diagnostic,
     });
 

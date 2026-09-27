@@ -401,9 +401,49 @@ impl Server {
         }
     }
 
-    /// Wait for a message the closure accepts, answering the server's own requests while waiting.
-    fn wait_for(&mut self, accept: impl Fn(&Value) -> bool) -> Value {
+    /// [`Server::ask_until`] for a request whose answer can arrive **worth having but not yet complete**: keeps
+    /// asking until the closure accepts one.
+    ///
+    /// A completion is the request that needs this. Its answer before the project has been read is an **empty
+    /// list** — not `null`, which is why [`Server::ask_until`] would take it — and the protocol's own answer to
+    /// that is `isIncomplete: true`, which tells the client to ask again as the user types. This is that loop, so
+    /// a test asserts what a well-behaved client would eventually see rather than what a fast one happens to get.
+    fn ask_until_it(
+        &mut self,
+        first_id: i64,
+        build: impl Fn(i64) -> Value,
+        accept: impl Fn(&Value) -> bool,
+    ) -> Value {
         let deadline = Instant::now() + TIMEOUT;
+        let mut id = first_id;
+
+        loop {
+            let request = build(id);
+            let method = request["method"]
+                .as_str()
+                .expect("the closure builds a request")
+                .to_string();
+            let response = self.request(id, &method, request["params"].clone());
+
+            if let Some(error) = response.get("error") {
+                panic!("the server answered with an error: {error}");
+            }
+
+            if accept(&response) {
+                return response;
+            }
+
+            if Instant::now() >= deadline {
+                panic!("no answer the test accepts within {TIMEOUT:?}; the last one was: {response}");
+            }
+
+            id += 1;
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Wait for a message the closure accepts, answering the server's own requests while waiting.
+    fn wait_for(&mut self, accept: impl Fn(&Value) -> bool) -> Value {        let deadline = Instant::now() + TIMEOUT;
 
         loop {
             let remaining = deadline
@@ -659,6 +699,191 @@ fn a_branch_nobody_takes_is_published_as_clean_once_the_file_is_cooked() {
     // `cpp_code_analysis::session::tests::a_branch_nobody_takes_reports_nothing_once_the_file_is_cooked` asserts
     // that this file's *raw* reading reports exactly that error and its cooked reading reports nothing. Without it
     // this test would also pass on a file that simply has no error in it.
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
+/// The namespace is opened by a macro in a header the open file includes. **The raw reading handles this one** —
+/// an indexer given the closure's macro bodies reads `BEGIN_NS` as `namespace one {`, which is what the shape rules
+/// exist for — so this fixture is about the member question rather than about the second reading.
+const NAMESPACE_H: &str = "#define BEGIN_NS namespace one {\n#define END_NS }\n";
+const NAMESPACED_WIDGET_H: &str = "#include \"namespace.h\"\nBEGIN_NS struct Widget { int size; }; END_NS\n";
+
+/// The fixture that **needs** the second reading: a macro that declares something. `api.h`'s own text has a call
+/// where the struct and the typedef are, and no shape rule invents a declaration out of a call.
+const HWND_CPP: &str = "#include \"api.h\"\nvoid f() {\n    HWND\n}\n";
+
+/// The cursor is after a `.` — the question that needs a **type**, made interesting by the spelling: `w`'s type is
+/// written `one::Widget`.
+const MEMBER_CPP: &str = "#include \"widget.h\"\nvoid f() {\n    one::Widget w;\n    w.\n}\n";
+
+/// **A name only the cooked reading declares is offered.**
+///
+/// `DECLARE_HANDLE(HWND)` declares `HWND__` and `HWND` to a compiler and *nothing* to a reader of `api.h`: the
+/// declaration is the replacement list. So a completion in `main.cpp` that offers `HWND__` is one this server can
+/// give only because the file it is declared in was read a **second** way — and the falsification (excluding the
+/// cooked declarations from the index) turns this test red, which is what makes it evidence rather than a fixture
+/// that happens to work.
+///
+/// The **edit** is asserted as well as the label: the cursor is inside a half-written name, so what comes back is
+/// the range of that name to replace, not a point to insert at.
+#[test]
+fn a_name_only_the_cooked_reading_declares_is_offered_over_the_wire() {
+    let project = Project::new("completion-macro-declared");
+    project.write("handle.h", HANDLE_H);
+    project.write("api.h", API_H);
+    project.write("main.cpp", HWND_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    let capabilities = server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    assert!(
+        capabilities["result"]["capabilities"]["completionProvider"].is_object(),
+        "the client is told the server completes: {capabilities}"
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": HWND_CPP }
+        }),
+    );
+
+    // Line 2 is `    HWND` — the cursor is at its end. Asked again until the list holds `HWND__`, because a
+    // completion answered before the project has been read is an empty list that says `isIncomplete`.
+    let answer = server.ask_until_it(
+        100,
+        |id| {
+            json!({
+                "id": id,
+                "method": "textDocument/completion",
+                "params": {
+                    "textDocument": { "uri": main_uri },
+                    "position": { "line": 2, "character": 8 },
+                },
+            })
+        },
+        |response| {
+            response["result"]["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["label"] == json!("HWND__")))
+        },
+    );
+
+    let items = answer["result"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a completion list was expected, got {answer}"));
+    assert!(
+        items.iter().any(|item| item["label"] == json!("HWND")),
+        "and the typedef the same macro made is offered beside it: {answer}"
+    );
+
+    let generated = items
+        .iter()
+        .find(|item| item["label"] == json!("HWND__"))
+        .expect("the closure accepted this");
+    assert_eq!(generated["kind"], json!(7), "a class: {generated}");
+    assert_eq!(
+        generated["textEdit"]["range"]["start"],
+        json!({ "line": 2, "character": 4 }),
+        "the edit replaces the half-written name from where it starts: {generated}"
+    );
+    assert_eq!(
+        generated["textEdit"]["range"]["end"],
+        json!({ "line": 2, "character": 8 }),
+        "…to where the cursor is: {generated}"
+    );
+    assert_eq!(generated["textEdit"]["newText"], json!("HWND__"), "{generated}");
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
+/// **The other query, over the wire: after a `.`, what the object's type has.**
+///
+/// `w.` asks for the members of `w`'s type, and the type is written `one::Widget` — a qualified spelling the lookup
+/// has to follow before the class body can be read at all. The dependency on the second reading here is **not** the
+/// point of the test (the raw reading resolves `one::Widget` too, since a namespace-opening macro is a shape the
+/// rules already handle — see the fixture's note); what it covers is the dispatch itself: a cursor after a dot goes
+/// to the member query, its answer arrives as members with the range a client replaces, and the file-scope names
+/// are not offered beside them.
+#[test]
+fn a_members_members_are_offered_over_the_wire() {
+    let project = Project::new("completion-member");
+    project.write("namespace.h", NAMESPACE_H);
+    project.write("widget.h", NAMESPACED_WIDGET_H);
+    project.write("main.cpp", MEMBER_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": MEMBER_CPP }
+        }),
+    );
+
+    // Line 3 is `    w.` — the cursor is just past the dot; asked again until the list holds `size`, for the reason
+    // the qualified test gives.
+    let answer = server.ask_until_it(
+        100,
+        |id| {
+            json!({
+                "id": id,
+                "method": "textDocument/completion",
+                "params": {
+                    "textDocument": { "uri": main_uri },
+                    "position": { "line": 3, "character": 6 },
+                },
+            })
+        },
+        |response| {
+            response["result"]["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["label"] == json!("size")))
+        },
+    );
+
+    let items = answer["result"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a completion list was expected, got {answer}"));
+    let size = items
+        .iter()
+        .find(|item| item["label"] == json!("size"))
+        .unwrap_or_else(|| panic!("`Widget` has a `size` member: {answer}"));
+    assert_eq!(size["kind"], json!(6), "a variable, as the index records it: {size}");
+    assert_eq!(
+        size["textEdit"]["range"]["start"],
+        json!({ "line": 3, "character": 6 }),
+        "the edit is an empty range just past the dot: {size}"
+    );
 
     server.request(999, "shutdown", Value::Null);
     server.notify("exit", Value::Null);

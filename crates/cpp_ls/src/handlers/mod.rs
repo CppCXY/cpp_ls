@@ -16,8 +16,9 @@
 //!
 //! The table below is deliberately short: it is the set of capabilities this server answers *today*. Adding
 //! one is three edits — the module, the dispatch row, the capability row — and the modules that were removed
-//! from the Lua skeleton (`completion`, `semantic_token`, `rename`, …) come back the same way.
+//! from the Lua skeleton (`semantic_token`, `rename`, …) come back the same way. `completion` came back that way.
 
+mod completion;
 mod configuration;
 mod definition;
 mod diagnostic;
@@ -76,6 +77,7 @@ capabilities!(modules: {
     // The capabilities the C++ analysis can already answer, or is being built to answer first.
     definition => DefinitionCapabilities,
     hover => HoverCapabilities,
+    completion => CompletionCapabilities,
     diagnostic => DiagnosticCapabilities,
     configuration => ConfigurationCapabilities,
 });

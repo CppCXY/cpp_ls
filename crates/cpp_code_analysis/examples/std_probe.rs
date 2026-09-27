@@ -1190,11 +1190,15 @@ standard {}",
     // about: the diagnostic channel publishes an answer for every indexed file, so a file with no reading is a file
     // answered from its own text.
     let session_line = if session_mode {
-        let root = paths
-            .first()
-            .and_then(|path| path.parent())
-            .unwrap_or_else(|| std::path::Path::new("."))
-            .to_path_buf();
+        // **An empty root, created here.** `Session::with_config` scans its root for sources, so pointing it at the
+        // corpus's own directory measures the *neighbourhood* rather than the list: with the root set to the first
+        // file's directory this probe once indexed 31 unrelated scratch files from that directory — among them a
+        // 160 KB single-line file that costs 36 s to parse — and reported "indexed in 88 s" for a corpus the census
+        // reads in three. Nothing here is resolved through the root (a quoted include resolves against the including
+        // file's directory), so an empty one is the honest setting: the corpus is the list and nothing else. The
+        // index size is printed below so that "the corpus grew" cannot be invisible again.
+        let root = std::env::temp_dir().join("stdprobe-session-root");
+        let _ = std::fs::create_dir_all(&root);
         let documents = cpp_code_analysis::OpenDocuments::new();
         let providers = cpp_code_analysis::SessionFiles::new(documents, cpp_code_analysis::DiskFiles);
         let filter = cpp_code_analysis::WatchFilter::new(&root);
@@ -1223,7 +1227,8 @@ standard {}",
 
         format!(
             "the session: {added} project files | indexed in {indexed:?} | cooked in {cooked:?} (total) | \
-             {with_a_reading} of {} have a reading | left: {} to read, {} to cook\n         ",
+             the index holds {} files | {with_a_reading} of {} have a reading | left: {} to read, {} to cook\n         ",
+            session.index().len(),
             paths.len(),
             session.pending(),
             session.pending_cooking(),
