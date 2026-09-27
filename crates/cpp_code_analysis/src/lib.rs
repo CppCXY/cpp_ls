@@ -40,6 +40,7 @@
 
 pub mod cache;
 pub mod file;
+pub mod folding;
 pub mod include;
 pub mod index;
 pub mod preprocess;

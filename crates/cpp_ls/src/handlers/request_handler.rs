@@ -22,8 +22,8 @@ use std::error::Error;
 use log::error;
 use lsp_server::{Request, Response};
 use lsp_types::request::{
-    Completion, DocumentDiagnosticRequest, DocumentSymbolRequest, GotoDefinition, HoverRequest,
-    Request as LspRequest,
+    Completion, DocumentDiagnosticRequest, DocumentSymbolRequest, FoldingRangeRequest,
+    GotoDefinition, HoverRequest, PrepareRenameRequest, References, Rename, Request as LspRequest,
 };
 
 use crate::context::ServerContext;
@@ -33,7 +33,10 @@ use super::{
     definition::on_goto_definition_handler,
     diagnostic::on_pull_document_diagnostic,
     document_symbol::on_document_symbol,
+    folding_range::on_folding_range,
     hover::on_hover,
+    references::on_references,
+    rename::{on_prepare_rename, on_rename},
 };
 
 macro_rules! dispatch_request {
@@ -76,6 +79,10 @@ pub async fn on_request_handler(
         HoverRequest => on_hover,
         Completion => on_completion,
         DocumentSymbolRequest => on_document_symbol,
+        FoldingRangeRequest => on_folding_range,
+        References => on_references,
+        PrepareRenameRequest => on_prepare_rename,
+        Rename => on_rename,
         DocumentDiagnosticRequest => on_pull_document_diagnostic,
     });
 

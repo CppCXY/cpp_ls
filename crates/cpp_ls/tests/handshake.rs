@@ -889,8 +889,304 @@ fn a_members_members_are_offered_over_the_wire() {
     server.notify("exit", Value::Null);
 }
 
-/// The outline fixture: a class in a branch nobody takes, a class the file writes, and a macro that **declares**
-/// something the file never mentions.
+/// A macro defined in one header and used in two files — the shape a rename has to get right, and the shape a
+/// *reference list* has to walk: the definition, and the uses that can see it.
+const LIMITS_H: &str = "#define MAX_ITEMS 64\n";
+const ITEMS_H: &str = "#include \"limits.h\"\nint items[MAX_ITEMS];\n";
+const ITEMS_CPP: &str = "#include \"api.h\"\nvoid f() {\n    int more[MAX_ITEMS];\n}\n";
+
+/// **References and rename: the macro is renamed everywhere, the ordinary name is refused.**
+///
+/// Two features in one test because they are one question asked twice — "where is this name written" — and because
+/// the second half is the one that must **not** happen: a rename of an ordinary name would have to decide, for every
+/// candidate file, whether the name at that offset resolves to the same declaration, which needs each candidate's
+/// scopes and therefore a parse per candidate. So the handler refuses (`null`), and this test pins the refusal next
+/// to the success, because "renamed half of the uses" is the one outcome an editor must never produce.
+///
+/// And a macro's rename *is* exact: its name is a textual thing, one table in the preprocessor, replaced wherever it
+/// appears — so every edit below is a place the analysis read as that macro, in the files that can see its
+/// definition.
+#[test]
+fn a_macro_is_renamed_everywhere_and_an_ordinary_name_is_refused() {
+    let project = Project::new("rename");
+    project.write("limits.h", LIMITS_H);
+    project.write("api.h", ITEMS_H);
+    project.write("main.cpp", ITEMS_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    let capabilities = server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    let capabilities = &capabilities["result"]["capabilities"];
+    assert_eq!(capabilities["referencesProvider"], json!(true), "{capabilities}");
+    assert_eq!(
+        capabilities["renameProvider"]["prepareProvider"],
+        json!(true),
+        "the rename box is offered only where a rename can happen: {capabilities}"
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": ITEMS_CPP }
+        }),
+    );
+
+    // The use in `main.cpp` is on line 2 at columns 13..22 (`    int more[MAX_ITEMS];`).
+    let at_the_use = json!({ "line": 2, "character": 16 });
+
+    // --- references, with and without the definition ------------------------------------------------
+    // `ask_until` is what a client does with the answer this server gives while the index still has work: `null`,
+    // because a reference list assembled from a partially read index is a false claim rather than a smaller truth
+    // (the protocol gives this response no `isIncomplete`, unlike a completion list). The loop below is therefore
+    // part of the behaviour under test, not test scaffolding.
+    let mut references = |include_declaration: bool| {
+        server.ask_until(100, |id| {
+            json!({
+                "id": id,
+                "method": "textDocument/references",
+                "params": {
+                    "textDocument": { "uri": main_uri },
+                    "position": at_the_use,
+                    "context": { "includeDeclaration": include_declaration },
+                },
+            })
+        })
+    };
+
+    let with_the_definition = references(true);
+    let locations = with_the_definition["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a location list was expected, got {with_the_definition}"));
+    assert_eq!(
+        locations.len(),
+        3,
+        "the `#define` and both uses: {with_the_definition}"
+    );
+    let files: Vec<&str> = locations
+        .iter()
+        .filter_map(|location| location["uri"].as_str())
+        .collect();
+    assert!(
+        files.iter().any(|file| file.ends_with("limits.h")),
+        "including the file that defines it, which nobody opened: {with_the_definition}"
+    );
+    assert!(
+        files.iter().any(|file| file.ends_with("api.h")),
+        "and the header that uses it: {with_the_definition}"
+    );
+
+    let without = references(false);
+    assert_eq!(
+        without["result"].as_array().map(Vec::len),
+        Some(2),
+        "`includeDeclaration: false` leaves the `#define` out: {without}"
+    );
+
+    // --- the rename box, and the rename --------------------------------------------------------------
+    let prepared = server.request(
+        200,
+        "textDocument/prepareRename",
+        json!({ "textDocument": { "uri": main_uri }, "position": at_the_use }),
+    );
+    assert_eq!(
+        prepared["result"]["start"],
+        json!({ "line": 2, "character": 13 }),
+        "the box starts around the name itself: {prepared}"
+    );
+    assert_eq!(prepared["result"]["end"], json!({ "line": 2, "character": 22 }), "{prepared}");
+
+    let renamed = server.request(
+        300,
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": main_uri },
+            "position": at_the_use,
+            "newName": "MAX_ENTRIES",
+        }),
+    );
+    let changes = renamed["result"]["changes"]
+        .as_object()
+        .unwrap_or_else(|| panic!("a workspace edit was expected, got {renamed}"));
+    assert_eq!(changes.len(), 3, "three files are edited: {renamed}");
+
+    let edits: Vec<&Value> = changes
+        .values()
+        .flat_map(|edits| edits.as_array().into_iter().flatten())
+        .collect();
+    assert_eq!(edits.len(), 3, "and one edit in each: {renamed}");
+    assert!(
+        edits.iter().all(|edit| edit["newText"] == json!("MAX_ENTRIES")),
+        "every edit writes the new name: {renamed}"
+    );
+    let definition_edit = changes
+        .iter()
+        .find(|(uri, _)| uri.ends_with("limits.h"))
+        .map(|(_, edits)| &edits[0])
+        .unwrap_or_else(|| panic!("the `#define` itself is edited: {renamed}"));
+    assert_eq!(
+        definition_edit["range"],
+        json!({
+            "start": { "line": 0, "character": 8 },
+            "end": { "line": 0, "character": 17 },
+        }),
+        "and the definition's edit covers its name: {definition_edit}"
+    );
+
+    // --- the refusal, which is the other half of the feature -----------------------------------------
+    // A cursor on an ordinary name: `more` is a local variable in this file, its type is not what is being asked
+    // about, and its *uses* would need a parse of every candidate file. Both requests answer `null` — no rename box,
+    // and no edit — rather than renaming the occurrences that happen to be visible in this file.
+    let on_a_local = json!({ "line": 2, "character": 9 });
+
+    let refused = server.request(
+        400,
+        "textDocument/prepareRename",
+        json!({ "textDocument": { "uri": main_uri }, "position": on_a_local }),
+    );
+    assert!(
+        refused["result"].is_null(),
+        "an ordinary name has no rename box: {refused}"
+    );
+
+    let refused = server.request(
+        500,
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": main_uri },
+            "position": on_a_local,
+            "newName": "renamed",
+        }),
+    );
+    assert!(
+        refused["result"].is_null(),
+        "and renaming it edits nothing rather than half of it: {refused}"
+    );
+
+    // A rename to something that is not a name is refused too — two identifiers, a literal, nothing at all.
+    for not_a_name in ["two words", "\"quoted\"", ""] {
+        let refused = server.request(
+            600,
+            "textDocument/rename",
+            json!({
+                "textDocument": { "uri": main_uri },
+                "position": at_the_use,
+                "newName": not_a_name,
+            }),
+        );
+        assert!(
+            refused["result"].is_null(),
+            "{not_a_name:?} is not a name: {refused}"
+        );
+    }
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
+/// The folding fixture: an include run, a comment block, a class, and a conditional — one of each kind the protocol
+/// names, in an order where the lines are easy to count.
+const FOLDS_CPP: &str = "#include <string>\n\
+                         #include <vector>\n\
+                         \n\
+                         // a note\n\
+                         // and another\n\
+                         \n\
+                         struct Widget {\n\
+                             int size;\n\
+                         };\n\
+                         \n\
+                         #if defined(_WIN32)\n\
+                         int win;\n\
+                         #endif\n";
+
+/// **Folding is about the file, and the lines are the client's.**
+///
+/// Four regions, one of each kind the protocol names, and each one's line range is asserted exactly — because the
+/// two ways this can be wrong are both off-by-one: an end taken past the region hides the line after it, and a
+/// region whose ends land on one line hides nothing at all. The analysis answers in offsets and refuses the second
+/// kind; the conversion to lines happens here, which is why this test goes over the wire rather than against the
+/// analysis's own tests.
+#[test]
+fn the_folds_of_a_file_are_the_regions_a_reader_hides() {
+    let project = Project::new("folding");
+    project.write("main.cpp", FOLDS_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    let capabilities = server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    assert_eq!(
+        capabilities["result"]["capabilities"]["foldingRangeProvider"],
+        json!(true),
+        "the client is told the server folds: {capabilities}"
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": FOLDS_CPP }
+        }),
+    );
+
+    let answer = server.ask_until(100, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/foldingRange",
+            "params": { "textDocument": { "uri": main_uri } },
+        })
+    });
+
+    let ranges = answer["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a folding range list was expected, got {answer}"));
+    let seen: Vec<(u64, u64, Option<&str>)> = ranges
+        .iter()
+        .map(|range| {
+            (
+                range["startLine"].as_u64().unwrap_or_default(),
+                range["endLine"].as_u64().unwrap_or_default(),
+                range["kind"].as_str(),
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        seen,
+        vec![
+            (0, 1, Some("imports")),
+            (3, 4, Some("comment")),
+            (6, 8, None),
+            (10, 12, Some("region")),
+        ],
+        "the include run, the comment block, the class (no kind: the protocol calls that code), the conditional"
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
 const OUTLINE_CPP: &str = "#include \"cfg.h\"\n\
                            #include \"handle.h\"\n\
                            #if OFF\n\

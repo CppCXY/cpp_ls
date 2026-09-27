@@ -16,16 +16,20 @@
 //!
 //! The table below is deliberately short: it is the set of capabilities this server answers *today*. Adding
 //! one is three edits — the module, the dispatch row, the capability row — and the modules that were removed
-//! from the Lua skeleton (`semantic_token`, `rename`, …) come back the same way. `completion` came back that way.
+//! from the Lua skeleton (`semantic_token`, `inlay_hint`, …) come back the same way: `completion`, `document_symbol`,
+//! `folding_range`, `references` and `rename` all came back that way.
 
 mod completion;
 mod configuration;
 mod definition;
 mod diagnostic;
 mod document_symbol;
+mod folding_range;
 mod hover;
 mod initialized;
 mod notification_handler;
+mod references;
+mod rename;
 mod request_handler;
 mod response_handler;
 mod text_document;
@@ -80,6 +84,9 @@ capabilities!(modules: {
     hover => HoverCapabilities,
     completion => CompletionCapabilities,
     document_symbol => DocumentSymbolCapabilities,
+    folding_range => FoldingRangeCapabilities,
+    references => ReferencesCapabilities,
+    rename => RenameCapabilities,
     diagnostic => DiagnosticCapabilities,
     configuration => ConfigurationCapabilities,
 });

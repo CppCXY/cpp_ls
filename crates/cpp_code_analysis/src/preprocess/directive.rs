@@ -278,6 +278,17 @@ impl Directive {
 pub struct SpannedDirective {
     pub directive: Directive,
     pub range: SourceRange,
+    /// The directive's **own logical line** — [`SpannedDirective::range`] without the trivia it rides.
+    ///
+    /// The difference matters to a consumer that draws **regions** rather than text: `range` runs through the
+    /// newline after the directive, and through any comment that follows it (a comment is trivia, so "up to the
+    /// next token that is not trivia" walks over whole comment blocks). A fold built from `range` would therefore
+    /// end on the line below — or, after an `#include` run with a comment block beneath it, several lines below.
+    ///
+    /// Derived here rather than by each consumer, because "where does this directive end" is the same question as
+    /// "where does it begin" and this function is the one that knows it. A `\`-continued directive keeps its line:
+    /// the splice is not a newline, which is what `scan_directives` already measures by.
+    pub line: SourceRange,
     /// Nesting depth of the conditional regions this directive sits inside.
     ///
     /// `0` at file scope. A consumer drawing a file's structure — folding, an outline, the "which
@@ -325,6 +336,17 @@ pub fn scan_directives(source: &str, tokens: &[CppTokenData]) -> Vec<SpannedDire
             .map_or(source.len(), |token| token.range.start_offset);
         let range = SourceRange::new(start_offset, end_offset.saturating_sub(start_offset));
 
+        // Where the directive's **own** text ends: back over the trivia that sits between its last real token and
+        // the newline. That trivia is whitespace or a comment — neither is the directive, and both ride in `range`.
+        let mut own = end;
+        while own > index && is_trivia(tokens[own - 1].kind) {
+            own -= 1;
+        }
+        let own_end = tokens
+            .get(own.saturating_sub(1))
+            .map_or(start_offset, |token| token.range.end_offset());
+        let line = SourceRange::new(start_offset, own_end.saturating_sub(start_offset));
+
         let directive =
             parse_directive_tokens(&to_tokens(source, &tokens[index..after]), range);
         let kind = directive.kind();
@@ -338,6 +360,7 @@ pub fn scan_directives(source: &str, tokens: &[CppTokenData]) -> Vec<SpannedDire
             out.push(SpannedDirective {
                 directive,
                 range,
+                line,
                 // The depth it was written at, which is the one it closes.
                 condition_depth: depth.saturating_sub(1),
             });
@@ -349,6 +372,7 @@ pub fn scan_directives(source: &str, tokens: &[CppTokenData]) -> Vec<SpannedDire
         out.push(SpannedDirective {
             directive,
             range,
+            line,
             condition_depth: depth,
         });
 

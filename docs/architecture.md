@@ -1285,6 +1285,65 @@ the cooked index: declarations 4820 raw / 4062 cooked | +3250 only after expansi
 并且把"索引里有多少文件"印在同一行——"语料变大了"从此不可能再隐形 ✓。同一个计时器也顺便量清楚了:
 那个第二遍在这份语料上是 **37–53 ms** ✓,不是成本项。
 
+### 折叠范围接出去了(已落地):读的还是**文件自己**,而且顺手修了一个"同一条规则两处实现"
+
+`textDocument/foldingRange` 是这一串接线里最简单的一个:它**只读这个文件**——不看索引、不看熟读、不看别的文件 ✓。
+四类区域,每类都在它该在的地方读:
+
+```text
+Code     不同行的一对 `{` … `}`        token 流(每个花括号都在里面,连解析器恢复过的文件也一样 ✓)
+Comment  一段连续注释、或一个多行注释  token 流(注释在这是**一个** token ✓)
+Region   `#if` … `#endif`              指令表(条件区就在那里 ✓)
+Imports  连续几行 `#include`           指令表 ✓
+```
+
+- **"跨不跨行"是问文本,不是问行号索引**:每个规则都只要"这段文字里有没有换行" ✓——一次切片,和客户端从同样字节
+  得出的答案必然一致 ✓,所以这一层不持有行号,也不可能和行号打架 ✓。偏移往上走,**行号是 LSP 那一层的事** ✓。
+- **容忍的那一半**:正在打字的文件有没配平的花括号、没闭合的 `#if`,而诚实的答案是**不折**——一个没闭合的 `{` 不是
+  "一直到文件末尾的区域",而是一个还没写完的区域 ✗;折到最后一行会把用户正在写的东西全藏起来 ✗。**反证**:把
+  "未闭合的 `{` 折到文件末尾"这个诱人的错误答案装回去 → `an_unbalanced_brace_folds_nothing` 立刻红 ✓✓。
+- **协议那三个 kind**:`Code` 发 `None`(协议说没有 kind 的就是代码 ✓,给最常见的那种硬编一个值是在替客户端下结论 ✗)、
+  `Comment`/`Region`/`Imports` 照发 ✓。
+
+**证据**:`cpp_code_analysis/tests/folding.rs` 五条(花括号配对与嵌套 ✓、未配平不折 ✓、注释段与空行断开 ✓、
+条件区与 include 段 ✓、四类混在一起仍是**源序** ✓)+ `cpp_ls/tests/handshake.rs::the_folds_of_a_file_are_the_regions_a_reader_hides`
+(端到端:`(0,1,imports)`、`(3,4,comment)`、`(6,8,无 kind)`、`(10,12,region)` **逐行断言** ✓——这一层能错的只有
+off-by-one:结束行多一行就把下一行也藏了 ✗)。
+**这条测试当场抓到一个真 bug**:`#include` 段折成了 `(0,4)` ✗——因为**注释也是 trivia**,而指令的 span 是"一直到下一个
+不是 trivia 的 token",于是第二个 `#include` 的 span 一路吃掉了空行**和下面那段注释** ✗✗。修法不是在这一层绕过去,
+而是让**知道这条规则的地方**把它说出来:`SpannedDirective` 多一个 `line` 字段(指令自己的逻辑行,`range` 去掉它搭载的
+trivia ✓),折叠改用它 ✓——"这条指令到哪儿结束"和"从哪儿开始"本来是同一条规则,两处实现迟早会不一致 ✓。
+
+### 引用与重命名接出去了(已落地):答案说不全的时候,就**不回答**
+
+宏的引用是这个项目里**唯一**能真正回答"这个名字还在哪儿出现过"的问题,因为它问的是文本而不是名字:预处理器只有
+一张名字表,名字出现即替换 ✓。所以这一轮接出去的是三件事:`textDocument/references`、`textDocument/prepareRename`
+和 `textDocument/rename`。
+
+- **普通名字是明确拒绝的**,不是"暂不支持":两次出现是不是同一个 `Widget` 是作用域问题,回答它要**每个候选文件一次
+  解析**。所以 `prepareRename` 答 `null`(客户端连重命名框都不给 ✓),`rename` 也答 `null`——**改一半**是往用户的文件里
+  写一个编译不过的状态,那是编辑器唯一不能产出的东西 ✓。
+- **协议没有"这份引用不全"这个说法**,而引用列表是一句关于**整个项目**的断言 ✓:所以索引还有活没干时(刚编辑过、
+  摘要已丢、还没重读 ✗),答案是 **`null`** 而不是一份少了几处的列表 ✓。补全那边有 `isIncomplete` 可以"不完整但有用"
+  ✓,引用这边没有,于是诚实的做法只剩拒绝 ✓。`rename` 用同一个条件 ✓——它买到的正是"不写一半" ✓。
+- **新名字用词法器判**(`is_one_identifier`):"这是不是一个名字"是词法器的问题 ✓,手写字符判断是第二个、更差的答案 ✓。
+  `Widget` ✓、`_STD_BEGIN` ✓、`Widget ` ✓(两侧 trivia 不算);`two words` ✗、`1abc` ✗、`std::string` ✗、`a;` ✗。
+- **不确定的引用照出来、绝不改**:经过条件 `#include` 或 `#if` 到达的用法,"是不是这个宏"说不准 ✓。
+  `MacroReferences::rename` **按设计**跳过它们(改用户没问过的代码比漏改更糟 ✓),而列表照常把它们列出来(它们确实是
+  文本里的一次出现 ✓)。协议没地方写这句警告,所以改名时把条数**记进日志** ✓——静默跳过两处,是用户无法核对的一句话 ✓。
+- **宏声明的名字也算引用**:`#ifdef` 下的 `#undef`(`ReferenceKind::Undefinition`)进列表也进改名范围 ✓——那是这个名字
+  的历史,改名必须同步 ✓。
+
+**证据**:`cpp_ls/tests/handshake.rs::a_macro_is_renamed_everywhere_and_an_ordinary_name_is_refused` —— 一个宏在
+`limits.h` 里定义、被 `api.h` 和 `main.cpp` 使用:引用列表 **3 处**(含没人打开过的 `limits.h` ✓)、
+`includeDeclaration: false` 时 2 处 ✓、`prepareRename` 给出名字那 13~22 列 ✓、`rename` 得到**三个文件各一条编辑** ✓,
+其中 `#define` 那条的范围正是第 0 行第 8~17 列 ✓;同一个测试里,光标落在普通名字/局部变量上时两个请求都答 `null` ✓,
+`"two words"`/`"\"quoted\""`/`""` 也被拒绝 ✓。
+**两个确定性反证**(都不是碰运气等时机 ✓):`references::tests::a_reference_list_is_refused_while_the_index_has_work`
+和 `rename::tests::a_rename_is_refused_while_the_index_has_work` —— 测试**造出**那个状态(项目文件在队列里、
+一个文件已持有但索引还没读 ✓),先断言此时是 `None`,再 `index_everything()` 后断言同一次调用给出 2 处 / 2 个文件 ✓。
+把那个条件关掉(本次真的这么做了)→ 前者立刻变成 `Some([])`,也就是"没有引用"这个**假**答案 ✓✓。
+
 ### 大纲接出去了(已落地):**唯一**一个刻意读裸读的功能
 
 `textDocument/documentSymbol` 是第一个需求与其它功能**相反**的读数,两个方向都要说清楚:
@@ -1406,11 +1465,14 @@ DECLARE_HANDLE(HWND);          不在大纲里:文件写下的是一次调用,�
 
 **覆盖问题也问清了,而且是问代码**:声明查询只有**一个漏斗**——`ProjectIndex::visible_declarations`,它的候选
 文件集就是 `visible_files(visible_from)`(被问的文件 + 它的传递 include)。会话熟读"每个打开文件的闭包",所以
-**从一个打开的文件发出的任何查询**,能贡献候选的每个文件都已经有熟读。而今天真的接出去、会问声明的只有
-`definition`/`hover`/`completion`/`documentSymbol`(`crates/cpp_ls/src/handlers/` 下现在就是这几个:completion、
-configuration、definition、diagnostic、document_symbol、hover、initialized、text_document),前三个都是"某个**打开**
-文档里的位置",因此都落在这个覆盖率里;`documentSymbol` 是**按文件**问的,而且它根本不查可见性(它读的是这个文件自己
-的声明 ✓),所以闭包这件事与它无关 ✓。缺口只有两个,
+**从一个打开的文件发出的任何查询**,能贡献候选的每个文件都已经有熟读。而今天真的接出去、会问声明的有
+`definition`/`hover`/`completion`/`documentSymbol`/`references`/`rename`(`crates/cpp_ls/src/handlers/` 下就是这几个:
+completion、configuration、definition、diagnostic、document_symbol、hover、initialized、references、rename、
+request/notification/response、text_document)。前三个是"某个**打开**文档里的位置",因此都落在这个覆盖率里 ✓;
+`documentSymbol` 是**按文件**问的,而且它根本不查可见性(读的是这个文件自己的声明 ✓),所以闭包与它无关 ✓;
+`foldingRange` 更进一步:**它只读这个文件的 token 和指令** ✓(连摘要都不读 ✓),既不查可见性也不查索引 ✓;
+`references`/`rename` 走的是**另一条候选规则**(定义者 + 传递包含它的文件 ✓),它关心的是整个索引读完没有——
+这两个查询在索引还有活时**拒绝回答**(§6 那一节)✓,而不是给一份不全的列表 ✓。缺口只有两个,
 都不是"查询能到达的文件":①客户端没打开的文件发出的查询(今天没有这样的查询);②熟读的欠账还没排到的那个 drain。
 
 **实测(255,把注解那一族整个关掉再量,同一个二进制同一批文件)**:
@@ -1456,7 +1518,7 @@ configuration、definition、diagnostic、document_symbol、hover、initialized�
 
 ## 7. 度量与门禁
 
-每次改动后必须全绿(测试基线:**1268 个测试**、41 个 suite,实测;`cargo clippy --workspace --all-targets`
+每次改动后必须全绿(测试基线:**1279 个测试**、42 个 suite,实测;`cargo clippy --workspace --all-targets`
 零警告,`cargo doc` 零警告,`cpp_dump` 零错误):
 
 ```bash
@@ -1598,9 +1660,14 @@ std_probe <list> --seeds --closure
   见 §6 的那一节(那里也记着这个仪器自己出过一次错:根目录不干净,读数差了 20 倍 ✗)。
 - **熟读的读数必须和"渲染里还剩多少内容"一起看**:空渲染没有错误,只数"干净"会把没读过的文件算成读过了
   (实测差 55 个文件),`std_probe --cooked` 现在把这一行和宏表的四个计数一起印出来(§7)。
-- **两个查询接成了功能(本轮)**:补全(成员 / 名字,替换范围 + 深度排序 + `isIncomplete` 跟着会话)和大纲
+- **两个查询接成了功能**:补全(成员 / 名字,替换范围 + 深度排序 + `isIncomplete` 跟着会话)和大纲
   (`documentSymbol`,树、两个范围,而且**刻意读裸读**——死分支在里面、宏声明的名字不在里面)。见 §6 的两节。
-- **LSP 的能力表现在是五项**:诊断(push + pull)、definition、hover、completion、documentSymbol ✓。
+- **引用与重命名(本轮)**:宏的引用列表、`prepareRename`、`rename`;普通名字**明确拒绝**而不是改一半;索引还有活时
+  引用与改名都答 `null`(协议没有"不全"这个说法)✓。见 §6 那一节。
+- **折叠范围**:四类区域(花括号对、注释段、`#if`、`include` 段),只读这个文件的 token 与指令;容忍未配平(不折 ✗),
+  `Code` 发 `None` 而不是硬编一个 kind ✓。见 §6 那一节。
+- **LSP 的能力表现在是八项**:诊断(push + pull)、definition、hover、completion、documentSymbol、foldingRange、
+  references、rename(含 `prepareRename`)✓。
 
 **下一步(按依赖排序)**(更新到本轮之后):
 1. **删形状规则(M4)**:覆盖率这一关过了(每个会被发布的文件都有熟读),大纲也接出来了——于是这一步现在是
@@ -1610,6 +1677,6 @@ std_probe <list> --seeds --closure
    关掉它,跑四个语料 + 大纲的两条测试,把差异按文件列出来,再决定要不要留一半(比如只留"注解"那一支)。
 2. **熟读剩下的文件**:255/109 两档只剩 `sourceannotations.h`,已判定是 `/analyze` 专属语法(**非缺口**)。
 3. **L2(名字驻留)**:量过,是噪声级别(§6 L1/L2),不做;L1/L4 已完成。
-4. **M5 余下**:双向映射接进其余功能。已接的是 definition / hover / completion / documentSymbol ✓;
-   下一个自然是**引用与重命名**(`index/references.rs` 里宏的引用与重命名早就写好了,而且它的四级阶梯——
-   候选集 → 文本预筛 → 词法 → 宏环境——正好是"接出去就能用"的形状 ✓),之后是签名帮助(需要类型,是另一条线 ✗)。
+4. **M5 余下**:已接 definition / hover / completion / documentSymbol / foldingRange / references / rename ✓。
+   再往后是 **workspace/symbol**(索引里所有文件的声明 ✓,同一个 `DeclFact` 词汇 ✓)、**选择范围**
+   (`selectionRange`,要的是每个声明一条作用域链 ✗ 比前几个贵)和**签名帮助**(那需要类型,是另一条线 ✗)。

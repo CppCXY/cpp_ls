@@ -1441,6 +1441,16 @@ impl<F: FileProvider + Clone> Session<F> {
         )
     }
 
+    /// **The file's foldable regions** — see [`crate::folding`].
+    ///
+    /// Read from the **buffer's own tokens and directives**, which is the same source the outline uses and for the
+    /// same reason: folding is about the file in front of the reader, so an unsaved edit is folded as it is typed,
+    /// and a declaration in a branch nobody takes is a region like any other. Nothing here consults the index, the
+    /// cooked reading, or any other file — a fold is a fact about this text.
+    pub fn folding_ranges(&self, view: &FileView) -> Vec<crate::folding::Fold> {
+        crate::folding::folding_ranges(&view.source, view.tree.get_tokens())
+    }
+
     /// The members of a type, as a file's own scopes and the index together know them.
     ///
     /// `written_type` is a spelling — `Widget`, `ns::Widget`, `const Widget&` — and following it to a class is the
