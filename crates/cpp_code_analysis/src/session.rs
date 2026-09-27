@@ -80,7 +80,8 @@ use crate::file::paths::{DiskFiles, FileProvider, OverlayFiles, normalize_path};
 use crate::include::toolchain::{self, DiskCommands, Environment, Toolchain};
 use crate::file::view::FileView;
 use crate::index::project::{
-    MemberCompletions, MemberList, NameCompletions, ProjectDefinition, ProjectIndex, ProjectMacro,
+    MemberCompletions, MemberList, NameCompletions, ProjectDefinition, ProjectDefinitions,
+    ProjectIndex, ProjectMacro,
 };
 use crate::index::references::{MacroReferences, ReferenceBudget, macro_references};
 use crate::inlay::ParameterHint;
@@ -90,7 +91,8 @@ use crate::summary::OutlineSymbol;
 use crate::index::watch::{ChangeBatch, FileEvent, Response, WatchFilter};
 use crate::index::worklist::{Priority, Step, outcome_of};
 use crate::index::{
-    FileIndexer, definition_across_files, macro_across_files, member_completions_at, members_of,
+    FileIndexer, definition_across_files, definitions_across_files, macro_across_files,
+    member_completions_at, members_of,
     name_completions_at,
 };
 use crate::macros::MacroTable;
@@ -1389,8 +1391,27 @@ impl<F: FileProvider + Clone> Session<F> {
     }
 
     /// Which declaration the name at `offset` means, using this file's scopes and then the index.
+    ///
+    /// The *one* projection of [`Session::definitions`]: `Yes` only when the answer is a single declaration, so a
+    /// consumer that can show only one location gets nothing rather than an arbitrary one. A client that can show a
+    /// list — `textDocument/definition` — should ask that instead.
     pub fn definition(&self, view: &FileView, offset: usize) -> Known<ProjectDefinition> {
         definition_across_files(
+            self.store.index(),
+            &view.scopes,
+            &view.root,
+            &view.path,
+            offset,
+        )
+    }
+
+    /// **Every declaration the name at `offset` refers to** — an overload set, a redeclaration, or one entity.
+    ///
+    /// See [`crate::ProjectIndex::definitions`] for what the list means and why one namespace collapses to one
+    /// entry. This is the query behind `textDocument/definition`: measured on one real file, **46** identifiers
+    /// answered `Ambiguous` through the single-answer form, and every one of them had a usable list behind it.
+    pub fn definitions(&self, view: &FileView, offset: usize) -> Known<ProjectDefinitions> {
+        definitions_across_files(
             self.store.index(),
             &view.scopes,
             &view.root,

@@ -4,17 +4,29 @@
 //! `RequestOutcome`.
 //!
 //! ```text
-//! uri + position ──> path + offset ──> session.view(path) ──> session.definition(&view, offset)
+//! uri + position ──> path + offset ──> session.view(path) ──> session.definitions(&view, offset)
 //!                          │                                        │
-//!                          │                                        └─ Known<ProjectDefinition> { file, fact }
+//!                          │                                        └─ Known<ProjectDefinitions> { found, conditional }
 //!                          └─ util::offset_at_position                    │
-//!                                                                        └─ Yes → Location { uri, range of the name }
+//!                                                                        └─ Yes → one location, or **all of them**
 //!                                                                           No / Unknown → Missing (null)
 //! ```
 //!
 //! **`Known` is why this handler does not guess.** `No` means "there is no such declaration" and `Unknown` means
 //! "the index cannot say yet" — both answer `null`, because a client that jumps to a wrong location is worse off
 //! than one that gets no location at all.
+//!
+//! # Why several locations, and when
+//!
+//! One name can cover several declarations, and the protocol has a shape for that: `Location[]` is what a client
+//! shows as a peek list. `find` in `std::basic_string` is one **overload set** (seventeen declarations in MSVC's
+//! library), `std::cin` is written twice in `<iostream>`, and neither is an ambiguity a reader wants to be told
+//! about — they are the answer. The analysis side says which lists are worth sending
+//! ([`cpp_code_analysis::ProjectIndex::definitions`]): one namespace collapses to one entry, because a namespace
+//! is one entity however many files reopen it, and `std` alone has fifty-eight declarations in the index.
+//!
+//! A single declaration is still sent as `Scalar`, which is the shape every client has handled since before lists
+//! existed — and the shape this handler sent before it could answer with more than one.
 //!
 //! # The range is the name, in the *declaring* file
 //!
@@ -54,14 +66,24 @@ pub async fn on_goto_definition_handler(
         let view = session.view(&path)?;
         let offset = offset_at_position(&view, position)?;
 
-        let Known::Yes(found) = session.definition(&view, offset) else {
+        let Known::Yes(found) = session.definitions(&view, offset) else {
             return None;
         };
 
-        let uri = path_to_uri(&found.file)?;
-        let range = name_range(session, &found.file, &found.fact).unwrap_or_default();
+        let mut locations: Vec<Location> = Vec::new();
+        for declaration in &found.found {
+            let Some(uri) = path_to_uri(&declaration.file) else {
+                continue;
+            };
+            let range = name_range(session, &declaration.file, &declaration.fact).unwrap_or_default();
+            locations.push(Location { uri, range });
+        }
 
-        Some(GotoDefinitionResponse::Scalar(Location { uri, range }))
+        match locations.len() {
+            0 => None,
+            1 => Some(GotoDefinitionResponse::Scalar(locations.remove(0))),
+            _ => Some(GotoDefinitionResponse::Array(locations)),
+        }
     })
     .await
 }

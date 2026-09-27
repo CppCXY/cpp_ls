@@ -26,9 +26,9 @@ pub async fn on_did_change_watched_files(
     context: ServerContextSnapshot,
     params: DidChangeWatchedFilesParams,
 ) -> Option<()> {
-    let _ = context
-        .update_tx()
-        .send(UpdateEvent::WatchedFilesChanged(params));
+    context
+        .enqueue(UpdateEvent::WatchedFilesChanged(params))
+        .await;
     Some(())
 }
 

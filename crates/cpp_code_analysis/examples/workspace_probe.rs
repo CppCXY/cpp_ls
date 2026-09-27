@@ -127,8 +127,14 @@ fn main() {
             members.iter().any(|member| member.fact.name == "size")
         );
     }
-    for name in ["std::istream", "std::cin", "std::basic_istream", "basic_istream", "std::basic_ostream"] {
-        println!(
+    for name in [
+        "std::istream",
+        "istream",
+        "std::cin",
+        "std::basic_istream",
+        "basic_istream",
+        "std::basic_ostream",
+    ] {        println!(
             "   definition({name:?}) = {:?}",
             session.index().definition(name, &file).value().map(|found| (found.fact.qualified_name(), found.fact.type_of.clone()))
         );
@@ -257,9 +263,16 @@ fn main() {
 
     let mut outcomes: HashMap<String, usize> = HashMap::new();
     let mut failures: Vec<String> = Vec::new();
+    // **What the `Ambiguous` answers would be as a list**: how many declarations each one has, and how many of
+    // them are unconditionally visible. This is the measurement a plural answer is designed from — a name with two
+    // declarations and a name with thirty are different problems for a client that shows them all.
+    let mut candidate_sizes: Vec<(String, usize, usize)> = Vec::new();
     // Identifier → the type the analysis gives it, deduplicated: this is the data a hover shows.
     let mut typed: Vec<String> = Vec::new();
     let mut type_outcomes: HashMap<String, usize> = HashMap::new();
+    // The plural query's own tally: one declaration, a list of N, or nothing — per identifier.
+    let mut list_outcomes: HashMap<String, usize> = HashMap::new();
+    let mut lists: Vec<(String, usize, usize, String)> = Vec::new();
 
     for token in view.tree.get_tokens() {
         if token.kind != cpp_parser::CppTokenKind::Identifier {
@@ -280,10 +293,52 @@ fn main() {
                 failures.push(format!("{line:>4}  {name:<26} the index has no such name  | {}", &text[..text.len().min(50)]));
             }
             Known::Unknown(reason) => {
+                if let UnknownReason::Ambiguous(name) = &reason {
+                    let found = session.index().files_declaring(name, &file);
+                    let certain = found
+                        .iter()
+                        .filter(|found| {
+                            found.visibility == cpp_code_analysis::IncludeVisibility::Unconditional
+                        })
+                        .count();
+                    candidate_sizes.push((name.to_string(), found.len(), certain));
+                }
                 *outcomes.entry(format!("unknown: {reason:?}")).or_default() += 1;
             }
             Known::No => {
                 *outcomes.entry("no name at this offset".to_string()).or_default() += 1;
+            }
+        }
+
+        // **The same cursor through the plural query**, which is what a client that can show a list asks. This is
+        // the measurement the list answer is judged by: a list of two is a redeclaration, seventeen is an overload
+        // set, and the question is whether they are usable.
+        match session.definitions(&view, offset) {
+            Known::Yes(found) if found.is_one() => {
+                *list_outcomes.entry("one declaration".to_string()).or_default() += 1;
+            }
+            Known::Yes(found) => {
+                *list_outcomes
+                    .entry(format!("a list of {}", found.found.len()))
+                    .or_default() += 1;
+                lists.push((
+                    name.to_string(),
+                    found.found.len(),
+                    found.conditional,
+                    found
+                        .found
+                        .first()
+                        .map(|found| found.fact.qualified_name())
+                        .unwrap_or_default(),
+                ));
+            }
+            Known::Unknown(reason) => {
+                *list_outcomes
+                    .entry(format!("unknown: {reason:?}"))
+                    .or_default() += 1;
+            }
+            Known::No => {
+                *list_outcomes.entry("no name here".to_string()).or_default() += 1;
             }
         }
 
@@ -318,14 +373,79 @@ fn main() {
         println!("{failure}");
     }
 
-    println!("\n--- the type of every identifier, deduplicated (what a hover has to show) ---");
-    let mut ranked: Vec<(String, usize)> = type_outcomes.into_iter().collect();
+    // **The candidate lists behind the `Ambiguous` answers.** By name, with how many the index holds and how many
+    // of those are reachable without asking about a macro — a plural answer is only useful if its lists are short
+    // enough to show and certain enough to jump to.
+    if !candidate_sizes.is_empty() {
+        let mut by_name: HashMap<&str, (usize, usize, usize)> = HashMap::new();
+        for (name, all, certain) in &candidate_sizes {
+            let entry = by_name.entry(name.as_str()).or_insert((0, *all, *certain));
+            entry.0 += 1;
+        }
+        let mut ranked: Vec<(&str, (usize, usize, usize))> = by_name.into_iter().collect();
+        ranked.sort_by_key(|(_, (asked, all, _))| (std::cmp::Reverse(*asked), *all));
+        println!("\n--- the candidate lists behind `Ambiguous` ({} identifiers) ---", candidate_sizes.len());
+        for (name, (asked, all, certain)) in ranked.iter().take(24) {
+            println!("{asked:6} × {name:<28} {all} declaration(s), {certain} unconditional");
+        }
+        let sizes: Vec<usize> = candidate_sizes.iter().map(|(_, all, _)| *all).collect();
+        let one = sizes.iter().filter(|size| **size == 1).count();
+        let few = sizes.iter().filter(|size| (2..=5).contains(*size)).count();
+        let many = sizes.iter().filter(|size| **size > 5).count();
+        println!(
+            "  sizes: {one} with one candidate, {few} with 2–5, {many} with more than 5 \
+             (largest {})",
+            sizes.iter().max().copied().unwrap_or(0)
+        );
+    }
+
+    println!("\n--- the type of every identifier, deduplicated (what a hover has to show) ---");    let mut ranked: Vec<(String, usize)> = type_outcomes.into_iter().collect();
     ranked.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
     for (outcome, count) in &ranked {
         println!("{count:6}  {outcome}");
     }
     for entry in typed.iter().take(24) {
         println!("        {entry}");
+    }
+
+    // **The member list of a type spelled as an alias**, which is the question `std::cin.eof()` asks: the object's
+    // type is written `istream` (inside `std`), and `istream` is `basic_istream<char, char_traits<char>>`.
+    for written in ["istream", "std::istream", "std::basic_istream"] {
+        let members = session.members_of(&view, written).value();
+        println!(
+            "   members_of({written:?}) = {:?}, has `eof`: {}, unlisted bases: {:?}",
+            members.as_ref().map(|list| list.members.len()),
+            members
+                .as_ref()
+                .is_some_and(|list| list.members.iter().any(|member| member.fact.name == "eof")),
+            members
+                .as_ref()
+                .map(|list| {
+                    list.unlisted
+                        .iter()
+                        .map(|base| base.spelling.clone())
+                        .collect::<Vec<_>>()
+                })
+        );
+    }
+
+    // **What the plural query answers**, over the same identifiers: this is the number that says whether
+    // `textDocument/definition` can answer where the single-answer form said `Ambiguous`.
+    println!("\n--- every identifier, through the plural query ---");
+    let mut ranked: Vec<(String, usize)> = list_outcomes.into_iter().collect();
+    ranked.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    for (outcome, count) in &ranked {
+        println!("{count:6}  {outcome}");
+    }
+    let mut by_name: HashMap<&str, (usize, usize, usize)> = HashMap::new();
+    for (name, all, conditional, _) in &lists {
+        let entry = by_name.entry(name.as_str()).or_insert((0, *all, *conditional));
+        entry.0 += 1;
+    }
+    let mut ranked: Vec<(&str, (usize, usize, usize))> = by_name.into_iter().collect();
+    ranked.sort_by_key(|(_, (asked, all, _))| (std::cmp::Reverse(*asked), *all));
+    for (name, (asked, all, conditional)) in ranked.iter().take(16) {
+        println!("{asked:6} × {name:<24} a list of {all} ({conditional} conditional)");
     }
 
     // **The names a `::` offers** — the user's first symptom, asked generically: every qualification the file

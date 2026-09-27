@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::context::{UpdateEvent, lsp_features::LspFeatures};
+use crate::context::{UpdateEvent, UpdateInbox, lsp_features::LspFeatures};
 
 use super::{
     AnalysisState, RequestManager, client::ClientProxy, diagnostic_service::DiagnosticService,
@@ -46,8 +46,17 @@ impl ServerContextSnapshot {
         &self.inner.request_manager
     }
 
-    pub fn update_tx(&self) -> &tokio::sync::mpsc::UnboundedSender<UpdateEvent> {
-        &self.inner.update_tx
+    /// **The client's pending notifications** — the queue a request applies before it reads the analysis.
+    pub fn inbox(&self) -> &UpdateInbox {
+        &self.inner.inbox
+    }
+
+    /// Queue one notification for the analysis, and wake whoever applies them.
+    ///
+    /// The only way a client's document event gets in: sending here is what gives it a sequence number, and the
+    /// sequence number is what lets a request say "everything up to *here*" — see [`crate::context::update_queue`].
+    pub async fn enqueue(&self, event: UpdateEvent) {
+        self.inner.inbox.push(event).await;
     }
 }
 
@@ -59,5 +68,6 @@ pub struct ServerContextInner {
     pub status_bar: Arc<StatusBar>,
     pub lsp_features: Arc<LspFeatures>,
     pub request_manager: Arc<RequestManager>,
-    pub update_tx: tokio::sync::mpsc::UnboundedSender<UpdateEvent>,
+    /// The client's pending notifications. See [`ServerContextSnapshot::enqueue`].
+    pub inbox: UpdateInbox,
 }

@@ -82,6 +82,135 @@ pub fn definition_across_files(
     path: &Path,
     offset: usize,
 ) -> Known<ProjectDefinition> {
+    match definitions_across_files(index, scopes, root, path, offset) {
+        Known::Yes(mut found) if found.found.len() == 1 => Known::Yes(found.found.remove(0)),
+        Known::Yes(_) => Known::Unknown(UnknownReason::Ambiguous(Box::from(
+            // The spelling the cursor wrote, read back from the tree rather than taken from the list: a reader
+            // asking "which `find` is this" wants the name they pointed at, not the qualified name of whichever
+            // overload happens to sort first.
+            crate::sema::resolve::qualified_name_at(root, offset)
+                .map(|(written, _)| written)
+                .unwrap_or_default(),
+        ))),
+        Known::Unknown(reason) => Known::Unknown(reason),
+        Known::No => Known::No,
+    }
+}
+
+/// **[`member_across_files`] as a list** — every declaration of the member, in the class the object's type names.
+///
+/// # Why this is a different question from "where is this name declared"
+///
+/// A member written after a `.` is not looked up among the names in scope: it is looked up **in the type of the
+/// object**, and the difference is measured on one real file — `line.empty()` asked by name answers with **twelve**
+/// declarations of `empty` (every `empty` in the standard library, from classes the reader never mentioned) while
+/// asked of the object's type it is `basic_string`'s two. The name query is a heuristic that happens to work often
+/// enough to be worth keeping as a fallback; this is the reading.
+///
+/// The set is [`members_of`]'s, filtered by name: that walk already follows bases and already hides what a nearer
+/// level hides, which is exactly the set of declarations a name in this position can refer to — and it is the same
+/// walk the completion after `.` shows, so a jump and the list a reader was just looking at cannot disagree.
+pub fn member_definitions_across_files(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    offset: usize,
+) -> Known<ProjectDefinitions> {
+    let Some(access) = crate::sema::resolve::member_access_at(root, offset) else {
+        return Known::Unknown(UnknownReason::UnparsableName);
+    };
+
+    if access.member.is_empty() {
+        return Known::Unknown(UnknownReason::UnparsableName);
+    }
+
+    let Known::Yes((written, _)) = type_of_expression(index, scopes, root, path, &access.object, 0)
+    else {
+        let Known::Unknown(reason) =
+            type_of_expression(index, scopes, root, path, &access.object, 0)
+        else {
+            unreachable!("the first match established that this is an `Unknown`")
+        };
+        return Known::Unknown(reason);
+    };
+
+    let class = base_type_name(&written);
+    if class.is_empty() {
+        return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
+    }
+
+    let members = match members_of(index, scopes, root, path, class) {
+        Known::Yes(members) => members,
+        Known::Unknown(reason) => return Known::Unknown(reason),
+        Known::No => return Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+    };
+
+    let found: Vec<ProjectDefinition> = members
+        .members
+        .iter()
+        .filter(|member| member.fact.name == access.member)
+        .map(|member| ProjectDefinition {
+            file: member.file.clone(),
+            fact: member.fact.clone(),
+        })
+        .collect();
+
+    if found.is_empty() {
+        // **Not a definite no**: the class may be a template this layer does not instantiate, or inherit from one
+        // it could not open — [`MemberList::unlisted`] is the same gap, and it is why this is `Unknown`.
+        return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(format!(
+            "{class}::{}",
+            access.member
+        ))));
+    }
+
+    Known::Yes(ProjectDefinitions {
+        found,
+        // A member behind a conditional `#if` inside a class body is a fact of its file like any other, and
+        // `members_of` offers what it found; the count is about *includes*, which is a question this path never
+        // asks. Zero rather than a guess.
+        conditional: 0,
+    })
+}
+
+/// **[`definition_across_files`] as a list** — see [`ProjectIndex::definitions`] for what the list is.
+///
+/// The two answers are one query: this one, and the single-answer form restricted to the names that have exactly
+/// one declaration. A consumer that can show several locations should ask this one, because "ambiguous" is not an
+/// answer a client can use.
+pub fn definitions_across_files(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    offset: usize,
+) -> Known<ProjectDefinitions> {
+    // **A cursor on a member asks about the object's type, not about the name.** `line.empty()` is
+    // `std::basic_string::empty`, and asking by name instead reaches every `empty` in the library — measured, 12
+    // declarations against `basic_string`'s 2. So the member question goes first, and the name query answers only
+    // when the member question *cannot be asked*:
+    //
+    // * the object's type is unknown — a heuristic answer beats a dead end, and this is what answered before the
+    //   member path existed;
+    // * a type that **is** known and does not have the member is not that case: answering with another class's
+    //   member of the same name would be a jump to a place the language does not name, which the handler's own
+    //   rule ("a wrong location is worse than none") forbids.
+    if crate::sema::resolve::member_access_at(root, offset).is_some() {
+        match member_definitions_across_files(index, scopes, root, path, offset) {
+            Known::Yes(found) => return Known::Yes(found),
+            // The member question could not be asked (the object's type is unknown) **or** was answered with
+            // nothing, and both fall through to the name query — which is what answered before the member path
+            // existed. The second case is a deliberate trade rather than an oversight: a member list is never a
+            // claim of completeness ([`MemberList::unlisted`]), so "this class does not have that member" and "this
+            // class's bases could not be read" arrive here looking the same, and a name-based list is a jump that
+            // usually lands right rather than no jump at all. Measured: `std::cin.eof()` is inherited through
+            // `basic_ios`, and while `std::basic_istream` is declared three times the base walk cannot open it —
+            // the name query still has `eof` among its candidates.
+            Known::Unknown(_) | Known::No => {}
+        }
+    }
+
     match crate::sema::resolve::definition_at(scopes, root, offset) {
         Known::Yes(binding) => {
             // The scope the answer was reached *through*, when the cursor wrote one: `ns` for `ns::Widget`. A bare
@@ -99,19 +228,15 @@ pub fn definition_across_files(
             // reachable elsewhere. Asked before the binding is moved, and from the tree that can answer it.
             let local = scopes.declares_a_local(binding.scope);
 
-            return Known::Yes(ProjectDefinition::from_binding(path, binding, scope, local));
+            return Known::Yes(ProjectDefinitions::one(ProjectDefinition::from_binding(
+                path, binding, scope, local,
+            )));
         }
         Known::Unknown(UnknownReason::NotDeclaredHere(name)) => {
             // The single-file layer has already established the spelling, so the project layer is asked about
-            // exactly that name rather than re-reading the cursor.
-            //
-            // **A qualified spelling was tried here and removed**: asking the index for what the cursor wrote
-            // (`std::string`) before the segment it ended with (`string`) changed *nothing* on a real file — the
-            // facts for the standard library are missing from the index rather than keyed differently (measured:
-            // `definition("std::optional")` and `definition("std::string")` both answer nothing, while
-            // `definition("optional")` answers a fact whose scope is `None`, and `declarations_in("std", …)` holds
-            // 13 declarations of the thousands the STL has). The lookup was never the broken half.
-            return index.definition(&name, path);
+            // exactly that name rather than re-reading the cursor — and it answers with the list, which is the
+            // whole point of this function.
+            return index.definitions(&name, path);
         }
         Known::Unknown(reason) => return Known::Unknown(reason),
         Known::No => {}
@@ -382,7 +507,15 @@ pub fn members_of(
     // `DeclFact.type_of` hands over what the file wrote — `const Widget&`, `::Widget`, `Base<int>` — and every one
     // of those parts is about the type's shape rather than about which class declares the members. Normalizing
     // here also means `declared_in` is a qualified spelling from the first level on, and levels cannot disagree.
-    let class = base_type_name(class);
+    //
+    // **And aliases are followed here as well as one level down**, which the measurement is why for: `direct_members`
+    // and `direct_member` resolve the spelling before looking anything up, but the *base walk* below asks `bases_of`
+    // about the class as it was written — and an alias has no bases, so `members_of("istream")` walked no bases,
+    // recorded no gap, and answered 42 members with `unlisted` **empty**, while the resolved spelling
+    // (`std::basic_istream`) answered the same 42 and *named* the gap. Two spellings of one type, one of them
+    // claiming a completeness it does not have.
+    let class = resolve_aliases(index, scopes, root, path, base_type_name(class));
+    let class = &*class;
 
     let own = match direct_members(index, scopes, root, path, class) {
         Known::Yes(members) => members,
@@ -419,12 +552,28 @@ pub fn members_of(
     //
     // Each base is carried with **the class whose base-clause wrote it**, because that is what decides which scope
     // an unqualified base name is looked up in: see `resolved_in_the_enclosing_scopes`.
-    let mut level: Vec<(String, String)> = bases_of(index, scopes, root, path, class)
-        .value()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|base| (base, class.to_string()))
-        .collect();
+    //
+    // The class's **own** base list is the one case the walk below cannot report, and it is reported here instead,
+    // exactly as a base's is: a class whose bases cannot be read is a truncated list, not a class with no bases.
+    // Measured, and it is why the two look different from outside: MSVC's `<istream>` declares `std::basic_istream`
+    // **three** times (the class, then `template class _CRTIMP2_PURE_IMPORT basic_istream<char, …>;` twice under
+    // `#if defined(_DLL_CPPLIB)`), an ambiguous name answers no base list, and the members inherited from
+    // `basic_ios` — `eof`, `fail`, `clear`, … — vanished from the list while `unlisted` stayed **empty**, so the
+    // answer did not say it was incomplete.
+    let mut level: Vec<(String, String)> = match bases_of(index, scopes, root, path, class) {
+        Known::Yes(bases) => bases
+            .into_iter()
+            .map(|base| (base, class.to_string()))
+            .collect(),
+        Known::Unknown(reason) => {
+            list.unlisted.push(UnlistedBase {
+                spelling: class.to_string(),
+                reason,
+            });
+            Vec::new()
+        }
+        Known::No => Vec::new(),
+    };
     let mut depth = 1;
 
     while !level.is_empty() {
@@ -3127,8 +3276,49 @@ impl ProjectIndex {
     ///   name declared in two headers the file includes, a bare name declared in two namespaces.
     /// * `Unknown(ConditionalCompilation)` — the only match is reached through an `#include` inside an `#if`, so
     ///   whether it is in scope depends on macros this layer does not have.
+    ///
+    /// # It is the *one* projection of a plural answer
+    ///
+    /// [`ProjectIndex::definitions`] is the query; this is the same answer restricted to the names that have
+    /// exactly one declaration. A consumer that can show a list — `textDocument/definition` is one — should ask
+    /// that instead, because `Ambiguous` is a dead end there: measured on one real file, **46** of its identifiers
+    /// answered `Ambiguous`, and every one of them had a perfectly good list behind it (an overload set, a
+    /// redeclaration, a namespace).
     pub fn definition(&self, name: &str, visible_from: &Path) -> Known<ProjectDefinition> {
-        let candidates = self.files_declaring(name, visible_from);
+        match self.definitions(name, visible_from) {
+            Known::Yes(mut found) if found.found.len() == 1 => Known::Yes(found.found.remove(0)),
+            Known::Yes(_) => Known::Unknown(UnknownReason::Ambiguous(Box::from(name))),
+            Known::Unknown(reason) => Known::Unknown(reason),
+            Known::No => Known::No,
+        }
+    }
+
+    /// **Every declaration a name refers to** — the plural answer, for a consumer that can show a list.
+    ///
+    /// # Why a list, and why it is not a preference
+    ///
+    /// One name covering several entities is ordinary C++, and the language says what they are: `find` in
+    /// `std::basic_string` is one **overload set** (seventeen declarations in MSVC's library, every one of them an
+    /// answer to "where is this declared"), `std::char_traits` is a class template and its specializations, and
+    /// `cin` is written twice in `<iostream>` — one variable, declared twice, which the language calls the same
+    /// entity. `Ambiguous` is the honest answer to *which one*, and it is a dead end for a client; the protocol
+    /// has a shape for the honest answer, so this is it.
+    ///
+    /// # The one case that is collapsed, and why that is not taste
+    ///
+    /// When **every** candidate is a namespace, there is exactly one entity: a namespace is reopened by every file
+    /// that writes `namespace std { … }`, and the language says all of those are the same namespace. Measured on
+    /// the file that motivated this query: `std` has **58** declarations in the index, so a peek list of
+    /// fifty-eight entries answers a question nobody asked — while `size`'s seventeen and `cin`'s two are exactly
+    /// what a reader wants to see. The collapse is therefore about the *kind* of entity, not about the count.
+    ///
+    /// # The order, which is part of the answer
+    ///
+    /// Unconditional first, then by file and offset. Imposed rather than inherited: `summaries()` is a map, so
+    /// leaving the order alone would make the list depend on hashing, and a client's peek list would reorder
+    /// itself between two identical requests.
+    pub fn definitions(&self, name: &str, visible_from: &Path) -> Known<ProjectDefinitions> {
+        let mut candidates = self.files_declaring(name, visible_from);
 
         if candidates.is_empty() {
             return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(name)));
@@ -3136,44 +3326,62 @@ impl ProjectIndex {
 
         // A declaration the file itself writes wins over one it includes, and is the one a reader means: a
         // header's `Widget` and this file's `Widget` are different entities, and C++ resolves to the local one.
+        // Overloads of one name written *here* are still several declarations, and they are all answers.
         let own = normalize(visible_from);
-        if let Some(local) = candidates.iter().find(|found| normalize(&found.file) == own) {
-            return Known::Yes(ProjectDefinition {
-                file: local.file.clone(),
-                fact: local.fact.clone(),
-            });
+        if candidates
+            .iter()
+            .any(|found| normalize(&found.file) == own)
+        {
+            candidates.retain(|found| normalize(&found.file) == own);
         }
 
-        // Prefer the unambiguous ones: a declaration reachable without any conditional include is visible
-        // whatever the macros are, so it is a better answer than one that might not be there.
-        let unconditional: Vec<&VisibleDeclaration<'_>> = candidates
+        // What is reachable only through a conditional `#include` is counted rather than offered: whether it is in
+        // scope depends on macros this layer does not have, and a jump to a declaration that may not be there is a
+        // wrong answer rather than a missing one. The count is what keeps the answer from claiming there is
+        // nothing else — "one declaration, and two that might be" is not "one declaration".
+        let conditional = candidates
+            .iter()
+            .filter(|found| found.visibility == IncludeVisibility::Conditional)
+            .count();
+
+        let mut certain: Vec<&VisibleDeclaration<'_>> = candidates
             .iter()
             .filter(|found| found.visibility == IncludeVisibility::Unconditional)
             .collect();
-        let guarded: Vec<&VisibleDeclaration<'_>> = candidates
+
+        if certain.is_empty() {
+            return Known::Unknown(UnknownReason::ConditionalCompilation);
+        }
+
+        certain.sort_by(|one, other| {
+            one.file
+                .cmp(&other.file)
+                .then_with(|| {
+                    one.fact
+                        .name_range
+                        .start_offset
+                        .cmp(&other.fact.name_range.start_offset)
+                })
+        });
+
+        // See the note above: one namespace, however many declarations spell it.
+        if certain
             .iter()
-            .filter(|found| found.visibility == IncludeVisibility::Conditional)
-            .collect();
-
-        if unconditional.len() == 1 {
-            let found = unconditional[0];
-            return Known::Yes(ProjectDefinition {
-                file: found.file.clone(),
-                fact: found.fact.clone(),
-            });
-        }
-        if !unconditional.is_empty() {
-            return Known::Unknown(UnknownReason::Ambiguous(Box::from(name)));
+            .all(|found| found.fact.kind == crate::DeclKind::Namespace)
+        {
+            certain.truncate(1);
         }
 
-        if guarded.is_empty() {
-            // Reachable only through a missing file, which `visibility_of` reports as not visible — so this arm
-            // is unreachable in practice and exists so that a future visibility answer has to be handled here
-            // rather than silently falling through to `Yes`.
-            return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(name)));
-        }
-
-        Known::Unknown(UnknownReason::ConditionalCompilation)
+        Known::Yes(ProjectDefinitions {
+            found: certain
+                .into_iter()
+                .map(|found| ProjectDefinition {
+                    file: found.file.clone(),
+                    fact: found.fact.clone(),
+                })
+                .collect(),
+            conditional,
+        })
     }
 
     /// What the macro name `name` is at `offset` in the file at `visible_from`.
@@ -3884,6 +4092,46 @@ pub struct ProjectDefinition {
     pub fact: DeclFact,
 }
 
+/// **Every declaration a name refers to** — the plural answer to "where is this declared".
+///
+/// See [`ProjectIndex::definitions`] for what the list means, why one namespace is collapsed to one entry, and
+/// what the order is. This type exists because the answer is genuinely plural: an overload set is several
+/// declarations, and a client that can show a list should be given all of them rather than told "ambiguous".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectDefinitions {
+    /// The declarations to answer with, in the order [`ProjectIndex::definitions`] documents. One entry for the
+    /// ordinary case, several for an overload set or a name declared in more than one place.
+    ///
+    /// Never empty: a name nothing declares is [`UnknownReason::NotDeclaredHere`] rather than an empty list, and a
+    /// name whose only declarations are behind a conditional `#include` is
+    /// [`UnknownReason::ConditionalCompilation`]. An empty list would be an answer that looks like "here they are"
+    /// and says nothing.
+    pub found: Vec<ProjectDefinition>,
+    /// How many declarations of the same name the index holds that are reachable **only** through a conditional
+    /// `#include`, and are therefore not in [`ProjectDefinitions::found`]: whether they are in scope depends on
+    /// macros this layer does not have.
+    ///
+    /// Counted rather than dropped, because "one declaration" and "one declaration and two that might also be
+    /// there" are different answers, and a consumer that shows the first without the second is claiming more than
+    /// this layer knows.
+    pub conditional: usize,
+}
+
+impl ProjectDefinitions {
+    /// An answer of one declaration — the shape the single-file layer's own resolution produces.
+    pub fn one(found: ProjectDefinition) -> Self {
+        ProjectDefinitions {
+            found: vec![found],
+            conditional: 0,
+        }
+    }
+
+    /// Does this name refer to exactly one declaration?
+    pub fn is_one(&self) -> bool {
+        self.found.len() == 1
+    }
+}
+
 /// A type's members, as [`members_of`] lists them.
 ///
 /// # The order is part of the answer
@@ -4501,8 +4749,95 @@ mod tests {
     }
 
     #[test]
-    fn a_qualified_name_prefers_the_declaration_that_matches_it() {
+    fn two_declarations_of_one_name_are_a_list_for_a_consumer_that_shows_one() {
+        // The fixture above, through the plural query: `Ambiguous` is the honest answer to "which one", and a
+        // client that can show a peek list never has to be told it — both of these are real answers.
         let index = index(&[
+            ("/p/one.h", "int count;\n"),
+            ("/p/two.h", "int count;\n"),
+            (
+                "/p/main.cpp",
+                "#include \"one.h\"\n#include \"two.h\"\nvoid f() { count = 1; }\n",
+            ),
+        ]);
+
+        let Known::Yes(found) = index.definitions("count", Path::new("/p/main.cpp")) else {
+            panic!("two declarations, both of them answers");
+        };
+
+        assert_eq!(found.found.len(), 2);
+        assert_eq!(found.conditional, 0);
+        assert_eq!(
+            found.found[0].file,
+            Path::new("/p/one.h"),
+            "the order is imposed (by file, then offset), so a client's peek list cannot reorder itself between \
+             two identical requests"
+        );
+        assert_eq!(found.found[1].file, Path::new("/p/two.h"));
+    }
+
+    #[test]
+    fn an_overload_set_is_a_list_and_a_namespace_is_one_entity() {
+        // The two shapes the measurement on a real file produced — 46 identifiers answered `Ambiguous` there, and
+        // the lists behind them were 2, 3, 4 … 17 declarations. `find` in `std::basic_string` is seventeen of them,
+        // every one an answer; `std` is **58**, all of them the *same* namespace, which the language reopens
+        // rather than redeclares. So the list is not simply "what the index found".
+        let index = index(&[
+            (
+                "/p/lib.h",
+                "namespace ns {\n  void f(int);\n  void f(double);\n}\n",
+            ),
+            ("/p/other.h", "namespace ns {\n  void f(char);\n}\n"),
+            (
+                "/p/main.cpp",
+                "#include \"lib.h\"\n#include \"other.h\"\nvoid h() { ns::f(1); }\n",
+            ),
+        ]);
+
+        let Known::Yes(found) = index.definitions("ns::f", Path::new("/p/main.cpp")) else {
+            panic!("an overload set is three declarations, not an ambiguity");
+        };
+        assert_eq!(found.found.len(), 3);
+
+        let Known::Yes(found) = index.definitions("ns", Path::new("/p/main.cpp")) else {
+            panic!("the namespace is declared in both headers");
+        };
+        assert_eq!(
+            found.found.len(),
+            1,
+            "one namespace, however many files reopen it: a peek list of fifty-eight entries answers a question \
+             nobody asked"
+        );
+    }
+
+    #[test]
+    fn a_declaration_behind_a_conditional_include_is_counted_not_offered() {
+        // Whether a name reached through an `#if` is in scope depends on macros this layer does not have, so it is
+        // not offered as a jump target — and it is not dropped either: "one declaration" and "one declaration and
+        // one that might also be there" are different answers.
+        let index = index(&[
+            ("/p/one.h", "int count;\n"),
+            ("/p/two.h", "int count;\n"),
+            (
+                "/p/main.cpp",
+                "#include \"one.h\"\n#ifdef FEATURE\n#include \"two.h\"\n#endif\nvoid f() { count = 1; }\n",
+            ),
+        ]);
+
+        let Known::Yes(found) = index.definitions("count", Path::new("/p/main.cpp")) else {
+            panic!("the unguarded header declares it");
+        };
+
+        assert_eq!(found.found.len(), 1);
+        assert_eq!(found.found[0].file, Path::new("/p/one.h"));
+        assert_eq!(
+            found.conditional, 1,
+            "and the one that might also be there is counted, so the answer does not claim there is nothing else"
+        );
+    }
+
+    #[test]
+    fn a_qualified_name_prefers_the_declaration_that_matches_it() {        let index = index(&[
             ("/p/a.h", "namespace a {\n  struct Widget { int x; };\n}\n"),
             ("/p/b.h", "namespace b {\n  struct Widget { int y; };\n}\n"),
             (
@@ -5698,6 +6033,37 @@ mod tests {
             .iter()
             .map(|member| member.fact.name.as_str())
             .collect()
+    }
+
+    #[test]
+    fn a_class_declared_more_than_once_reports_the_bases_it_could_not_read() {
+        // MSVC's `<istream>`, in miniature: the class, and an explicit instantiation of it. The base walk asks for
+        // **one** declaration — an ambiguous name answers no base list — so the members inherited from `Base` are
+        // missing, and the list has to say so instead of looking complete.
+        //
+        // Measured on the real header: `std::basic_istream` is declared three times (the class and two
+        // `template class _CRTIMP2_PURE_IMPORT basic_istream<char, …>;` lines), `members_of` answered its 42 own
+        // members, and `eof` — inherited from `basic_ios` — was absent while `unlisted` stayed **empty**.
+        let source = "template <class E>\nstruct Stream : Base {\n  int read;\n};\ntemplate struct Stream<char>;\n";
+        let found = members_of_class(
+            &[("/p/base.h", "struct Base { int eof; };\n")],
+            "/p/a.cpp",
+            source,
+            "Stream",
+        );
+
+        let Known::Yes(list) = found else {
+            panic!("`Stream` is declared here: {found:?}");
+        };
+        assert_eq!(names(&list), ["read"], "its own member is listed");
+        assert_eq!(
+            list.unlisted
+                .iter()
+                .map(|base| base.spelling.as_str())
+                .collect::<Vec<_>>(),
+            ["Stream"],
+            "and the class whose bases could not be read is named, so the list does not claim completeness"
+        );
     }
 
     #[test]

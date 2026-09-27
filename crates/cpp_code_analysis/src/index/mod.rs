@@ -44,9 +44,10 @@ pub use environment::{MacrosHere, visibility_at};
 
 pub use project::{
     CookedFile, IncludeVisibility, MemberCompletions, MemberList, NameCompletions, OfferedName,
-    ProjectDefinition, ProjectIndex, ProjectMacro, ProjectMember, ProjectSymbol, UnlistedBase, VisibleDeclaration,
-    definition_across_files, macro_across_files, member_across_files, member_completions_at,
-    members_of, name_completions_at,
+    ProjectDefinition, ProjectDefinitions, ProjectIndex, ProjectMacro, ProjectMember, ProjectSymbol,
+    UnlistedBase, VisibleDeclaration, definition_across_files, definitions_across_files,
+    macro_across_files, member_across_files, member_completions_at,
+    member_definitions_across_files, members_of, name_completions_at,
 };
 pub use references::{
     FileReferences, MacroReferences, Reference, ReferenceBudget, ReferenceKind, Rename,

@@ -889,6 +889,94 @@ fn a_members_members_are_offered_over_the_wire() {
     server.notify("exit", Value::Null);
 }
 
+/// **A completion asked for right after a change sees the change.**
+///
+/// A client sends `didChange` and then, without waiting for anything, asks for a completion at a position that only
+/// exists in the **new** text — which is what typing is: the request follows the keystroke that caused it. The
+/// server queues notifications so that its message loop never waits for a parse, and the queue must not be visible
+/// to a request: while it was, the analysis still held older text, the cursor was past the end of that line, no
+/// node was there, and the answer was `null` — a completion that simply does not appear.
+///
+/// The burst is what makes it a test rather than a coin toss: with one change the queue may well be applied before
+/// the request is served (measured: the same assertion failed on 1 run in 4), so the fixture sends a **stream** of
+/// changes the way a client that is typing, pasting or formatting does, and only the last of them has the `w.` the
+/// request is about. Any staleness at all therefore fails: an older text has that line blank.
+#[test]
+fn a_completion_right_after_a_change_sees_the_change() {
+    /// Long enough that applying one change is real work — the queue has to be behind for the race to exist.
+    const LINES: usize = 1200;
+    /// The burst. Each round is a different text, so each is a change a client could have sent.
+    const ROUNDS: usize = 24;
+
+    let text = |round: usize, dot: bool| {
+        let mut text = String::from("struct Widget { int size; int weight; };\nvoid f() {\n    Widget w;\n");
+        for index in 0..LINES {
+            text.push_str(&format!("    w.size = {};\n", index + round));
+        }
+        text.push_str(if dot { "    w.\n}\n" } else { "    \n}\n" });
+        text
+    };
+
+    let project = Project::new("completion-after-change");
+    project.write("main.cpp", &text(0, false));
+
+    let mut server = Server::start(project.root());
+    let uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "cpp", "version": 1, "text": text(0, false) }
+        }),
+    );
+
+    // The burst, and then **immediately** the request: no sleep, no retry, no second request. A client that typed a
+    // dot sends its edits and then asks, in this order.
+    for round in 1..=ROUNDS {
+        server.notify(
+            "textDocument/didChange",
+            json!({
+                "textDocument": { "uri": uri, "version": round + 1 },
+                "contentChanges": [{ "text": text(round, round == ROUNDS) }],
+            }),
+        );
+    }
+
+    let answer = server.request(
+        100,
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 3 + LINES, "character": 6 },
+        }),
+    );
+
+    let items = answer["result"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("`w.` in the changed text must complete, got {answer}"));
+
+    assert!(
+        items.iter().any(|item| item["label"] == json!("weight")),
+        "and the list is the *changed* class's members — `weight` is the member the change added: {answer}"
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
 /// A macro defined in one header and used in two files — the shape a rename has to get right, and the shape a
 /// *reference list* has to walk: the definition, and the uses that can see it.
 const LIMITS_H: &str = "#define MAX_ITEMS 64\n";
@@ -2114,6 +2202,102 @@ fn parameter_names_are_drawn_at_the_arguments() {
     );
     assert_eq!(factor["paddingRight"], json!(true), "{factor}");
     assert_eq!(factor["kind"], json!(2), "a parameter hint: {factor}");
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
+/// An overloaded name answers with **every** location, which is the shape a client shows as a peek list.
+///
+/// One name covering several declarations is ordinary C++ — `find` in `std::basic_string` is seventeen of them in
+/// MSVC's library — and `null` for all of them is a dead end for the reader. What must *not* happen is the other
+/// mistake: a name with one declaration still answers `Scalar`, so nothing about the common case changes.
+#[test]
+fn an_overload_set_answers_with_every_location() {
+    const OVERLOADS_H: &str = "int parse(int value);\nint parse(const char* text);\nint parse(double value);\n";
+    const OVERLOADS_CPP: &str = "#include \"overloads.h\"\nint f() { return parse(1); }\n";
+
+    let project = Project::new("definition-overloads");
+    project.write("overloads.h", OVERLOADS_H);
+    project.write("main.cpp", OVERLOADS_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+    let header_uri = uri_of(&project.root().join("overloads.h"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": OVERLOADS_CPP }
+        }),
+    );
+
+    // The cursor is inside `parse` on line 1 — `int f() { return parse(1); }` — and the request is repeated until
+    // the header has been read, for the reason every query here is: the index is lazy on purpose.
+    let answer = server.ask_until_it(
+        100,
+        |id| {
+            json!({
+                "id": id,
+                "method": "textDocument/definition",
+                "params": {
+                    "textDocument": { "uri": main_uri },
+                    "position": { "line": 1, "character": 20 },
+                },
+            })
+        },
+        |response| {
+            response["result"]
+                .as_array()
+                .is_some_and(|locations| locations.len() == 3)
+        },
+    );
+
+    let locations = answer["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("three declarations, three locations: {answer}"));
+
+    assert_eq!(locations.len(), 3);
+    for (index, location) in locations.iter().enumerate() {
+        assert_eq!(
+            location["uri"],
+            json!(header_uri),
+            "all three are in the header: {location}"
+        );
+        assert_eq!(
+            location["range"]["start"]["line"],
+            json!(index),
+            "one per line, in the order the header writes them: {answer}"
+        );
+    }
+
+    // A name with **one** declaration is still `Scalar`: the common case does not change shape, which is what lets
+    // a client that predates lists keep working.
+    let single = server.request(
+        200,
+        "textDocument/definition",
+        json!({
+            "textDocument": { "uri": main_uri },
+            "position": { "line": 1, "character": 4 },
+        }),
+    );
+    assert!(
+        single["result"]["uri"].is_string(),
+        "`f` is declared on this line, and one declaration is one location: {single}"
+    );
 
     server.request(999, "shutdown", Value::Null);
     server.notify("exit", Value::Null);

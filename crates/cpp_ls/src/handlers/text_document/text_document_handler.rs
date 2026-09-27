@@ -36,7 +36,7 @@ pub async fn on_did_open_text_document(
     context: ServerContextSnapshot,
     params: DidOpenTextDocumentParams,
 ) -> Option<()> {
-    let _ = context.update_tx().send(UpdateEvent::Opened(params));
+    context.enqueue(UpdateEvent::Opened(params)).await;
     Some(())
 }
 
@@ -65,7 +65,7 @@ pub async fn on_did_change_text_document(
     params: DidChangeTextDocumentParams,
 ) -> Option<()> {
     // Only enqueue: the worker reads these in order, and the loop that reads from the client must not wait here.
-    let _ = context.update_tx().send(UpdateEvent::Changed(params));
+    context.enqueue(UpdateEvent::Changed(params)).await;
     Some(())
 }
 
@@ -94,7 +94,7 @@ pub async fn on_did_save_text_document(
     context: ServerContextSnapshot,
     params: DidSaveTextDocumentParams,
 ) -> Option<()> {
-    let _ = context.update_tx().send(UpdateEvent::Saved(params));
+    context.enqueue(UpdateEvent::Saved(params)).await;
     Some(())
 }
 
@@ -125,7 +125,7 @@ pub async fn on_did_close_document(
     context: ServerContextSnapshot,
     params: DidCloseTextDocumentParams,
 ) -> Option<()> {
-    let _ = context.update_tx().send(UpdateEvent::Closed(params));
+    context.enqueue(UpdateEvent::Closed(params)).await;
     Some(())
 }
 

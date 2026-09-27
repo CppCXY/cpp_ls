@@ -26,7 +26,7 @@ pub use status_bar::StatusBar;
 use std::{collections::HashMap, future::Future, sync::Arc};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-pub use update_queue::{UpdateEvent, spawn_update_queue};
+pub use update_queue::{UpdateEvent, UpdateInbox, catch_up_upto, spawn_update_queue};
 pub use workspace_manager::WorkspaceManager;
 
 use crate::context::snapshot::ServerContextInner;
@@ -56,7 +56,6 @@ impl ServerContext {
             file_diagnostic.clone(),
         )));
 
-        let (update_tx, update_rx) = tokio::sync::mpsc::unbounded_channel();
         let inner = Arc::new(ServerContextInner {
             analysis,
             client,
@@ -65,10 +64,9 @@ impl ServerContext {
             status_bar,
             lsp_features,
             request_manager: Arc::new(RequestManager::new()),
-            update_tx,
+            inbox: UpdateInbox::new(),
         });
-        spawn_update_queue(inner.clone(), update_rx);
-
+        spawn_update_queue(inner.clone());
         ServerContext {
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             inner,
