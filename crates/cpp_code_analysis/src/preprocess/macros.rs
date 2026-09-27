@@ -153,7 +153,12 @@ impl MacroDef {
 struct Binding {
     name: Box<str>,
     /// `None` is an explicit `#undef`, which shadows an earlier definition rather than deleting it.
-    definition: Option<MacroDef>,
+    ///
+    /// **Shared**, because one definition reaches many tables: the corpus's own definitions are handed to the
+    /// cooker once per file, and an owned `MacroDef` made each of those a deep clone of its parameter list and its
+    /// body tokens. With an `Arc` the second table to see a definition pays a refcount bump — see
+    /// `ParsedDefinitions`, which parses each definition's text exactly once for a whole run.
+    definition: Option<std::sync::Arc<MacroDef>>,
     /// The offset the directive was written at, so a query can ask about a position.
     at: usize,
 }
@@ -179,8 +184,28 @@ impl MacroTable {
 
     /// Record a definition, effective from the offset it was written at.
     pub fn define(&mut self, definition: MacroDef) {
+        self.define_shared(std::sync::Arc::new(definition));
+    }
+
+    /// [`MacroTable::define`] for a caller that already holds the definition **shared** — the second and every
+    /// later table to see the same `#define` pays a refcount bump instead of a clone of its tokens.
+    pub fn define_shared(&mut self, definition: std::sync::Arc<MacroDef>) {
+        let at = definition.range.start_offset;
+        self.define_shared_at(definition, at);
+    }
+
+    /// [`MacroTable::define_shared`] with the offset the caller wants the binding in force **from**.
+    ///
+    /// The offset is the *binding's*, which is a different thing from the definition's own range: one `#define` is
+    /// in force from a different place in every file that sees it, while the definition itself — its name, its
+    /// parameters, its body tokens — is the same text everywhere. Separating the two is what lets a run parse each
+    /// distinct definition **once** and hand the same `Arc` to hundreds of tables; the range inside the shared
+    /// definition is the reconstructed `#define` line of whichever file parsed it first, which is what it already
+    /// was before it was shared (`configuration_from_environment_with` builds that line rather than pointing into
+    /// a file), so no consumer loses a position it had.
+    pub fn define_shared_at(&mut self, definition: std::sync::Arc<MacroDef>, at: usize) {
         self.bindings.push(Binding {
-            at: definition.range.start_offset,
+            at,
             name: definition.name.clone(),
             definition: Some(definition),
         });
@@ -195,6 +220,21 @@ impl MacroTable {
         });
     }
 
+    /// Append every binding of `other`, **sharing** its definitions and keeping each one's offset.
+    ///
+    /// What a caller building a table out of another one wants (`initial` = the compiler's builtins, then the
+    /// environment's definitions): the definitions are the same text in both tables, so copying them is work with
+    /// no purpose — and it is measurable work, because a `MacroDef` owns its parameter list and its body tokens.
+    /// A census that copied the configuration into the cook's starting table this way spent 5.5 s of a 24 s run
+    /// doing it, one deep clone per definition per file.
+    pub fn extend_from(&mut self, other: &MacroTable) {
+        self.bindings.extend(other.bindings.iter().map(|binding| Binding {
+            name: binding.name.clone(),
+            definition: binding.definition.clone(),
+            at: binding.at,
+        }));
+    }
+
     /// The binding in force at `offset`, or at the end of the file when `offset` is `None`.
     fn binding_at(&self, name: &str, offset: Option<usize>) -> Option<&Binding> {
         self.bindings.iter().rfind(|binding| {
@@ -204,12 +244,12 @@ impl MacroTable {
 
     /// What `name` means at the end of the file.
     pub fn get(&self, name: &str) -> Option<&MacroDef> {
-        self.binding_at(name, None)?.definition.as_ref()
+        self.binding_at(name, None)?.definition.as_deref()
     }
 
     /// What `name` means at `offset`.
     pub fn get_at(&self, name: &str, offset: usize) -> Option<&MacroDef> {
-        self.binding_at(name, Some(offset))?.definition.as_ref()
+        self.binding_at(name, Some(offset))?.definition.as_deref()
     }
 
     /// Is `name` defined at the end of the file?
@@ -229,7 +269,7 @@ impl MacroTable {
         self.bindings
             .iter()
             .rev()
-            .filter_map(|binding| binding.definition.as_ref())
+            .filter_map(|binding| binding.definition.as_deref())
     }
 
     /// The names currently defined, sorted, with each name appearing once.

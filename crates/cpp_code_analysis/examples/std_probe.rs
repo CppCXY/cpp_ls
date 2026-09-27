@@ -319,6 +319,10 @@ standard {}",
     // the parse of the rendering costs. `parse alone` is one number over all four, and a number that size cannot
     // say which of them to work on.
     let mut evidence_time = std::time::Duration::ZERO;
+    // **One definition cache for the whole corpus.** Every file's configuration is built from definitions the
+    // timeline already produced, and the same `#define` reaches hundreds of files: without this the run re-lexes
+    // and re-parses each one once per file (2.5 million times for 42 939 definitions, 12.2 s of a 40 s census).
+    let mut parsed_definitions = cpp_code_analysis::ParsedDefinitions::new();
     let mut view_time = std::time::Duration::ZERO;
     let mut parse_time = std::time::Duration::ZERO;
 
@@ -542,7 +546,11 @@ standard {}",
             let (tokens, _) = cpp_parser::lex(&source, &lexer_config);
             let converting = std::time::Instant::now();
             let configuration = match &environment {
-                Some(environment) => cpp_code_analysis::configuration_from_environment_with(environment, !without_in_force_bodies),
+                Some(environment) => cpp_code_analysis::configuration_from_environment_and(
+                    environment,
+                    !without_in_force_bodies,
+                    &mut parsed_definitions,
+                ),
                 None => cpp_code_analysis::Configuration::default(),
             };
             evidence_time += converting.elapsed();
@@ -570,9 +578,10 @@ standard {}",
                     initial.define(definition.clone());
                 }
             }
-            for definition in configuration.table.iter() {
-                initial.define(definition.clone());
-            }
+            // **Shared, not copied**: a `MacroDef` owns its parameter list and its body tokens, and the same
+            // definitions are in both tables — the loop this replaces deep-cloned every one of them, once per file
+            // (5.5 s of a 24 s census, measured).
+            initial.extend_from(&configuration.table);
             let built_the_table = building_the_table.elapsed();
 
             // What the table **could not** take from the evidence, summed over the corpus. These are the reasons a
@@ -802,6 +811,9 @@ standard {}",
         }
     );
 
+    // How many definitions the run actually parsed — the number that used to be "files × definitions in force".
+    let distinct_definitions = parsed_definitions.len();
+
     println!(
         "files {} | clean {} | failing {} | {} KB | {} lines\n\
          index (parse + scopes + facts) {:?} | parse alone {:?}\n\
@@ -812,7 +824,7 @@ built in {seeding_time:?}\n\
          conditional facts met {conditional_asked} | branches in force {conditional_taken} | bodies in force \
 {bodies_in_force} (no toolchain means none can be answered)\n\
          read inside an includer {files_with_context} files (the translation unit's half of the environment)\n\
-         cooked: evidence {evidence_time:?} | macro table {table_time:?} | expansion {cook_time:?} | view {view_time:?} | parse {parse_time:?}\n\
+         cooked: evidence {evidence_time:?} ({distinct_definitions} distinct definitions) | macro table {table_time:?} | expansion {cook_time:?} | view {view_time:?} | parse {parse_time:?}\n\
          rendering: {rendered_to_nothing} of {} files rendered to nothing (whitespace only) | {rendered_bytes} bytes \
 of rendering for {total_bytes} of text{}{}\n\
          table: left out — bodies in force without a parameter list {unusable_in_force} | function-like definitions \

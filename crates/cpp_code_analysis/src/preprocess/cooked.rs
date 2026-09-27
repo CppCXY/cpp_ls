@@ -223,6 +223,22 @@ pub fn cook(source: &str, tokens: &[CppTokenData]) -> CookedStream {
     cook_with(source, tokens, &MacroTable::new())
 }
 
+/// One definition the evidence contributes, on its way into the cook's starting table.
+///
+/// `(name, the binding's offset, the parameter list, the replacement list, whether it may be used at all)` — a
+/// named shape because five positional fields in a `Vec` is a puzzle at the loop below, and because the two
+/// `None`s mean different things: no parameters is an object-like macro, no body is a definition this cook cannot
+/// expand and counts instead.
+type Definition<'a> = (
+    &'a str,
+    usize,
+    Option<std::sync::Arc<str>>,
+    Option<std::sync::Arc<str>>,
+    bool,
+);
+
+/// A body that only the **in-force** channel carries: its name, its parameter list, its text.
+type InForceDefinition<'a> = (&'a str, Option<std::sync::Arc<str>>, std::sync::Arc<str>);
 /// A definition written the way a directive writes it: `NAME(params) body`.
 ///
 /// The parameter list is what makes a function-like definition expandable — substitution is by parameter, and a
@@ -274,6 +290,93 @@ pub struct Configuration {
     pub unreadable: usize,
 }
 
+/// A `#define`, parsed **once per run** rather than once per file that sees it.
+///
+/// # The measurement this exists for
+///
+/// A cooked census of the 255-file SDK corpus spent **12.2 s** of its 40 s in
+/// [`configuration_from_environment_with`] and another **3.9 s** copying what came out of it into the table the
+/// expansion starts from — for 42 939 distinct macro events handed to 255 files, which is 2.5 million `format!`
+/// calls, 2.5 million `lex` calls and 2.5 million `parse_define` calls, each producing the *same* definition as
+/// the file before it. The definition does not depend on the file: only the **offset the binding is in force
+/// from** does, and that lives on the table's binding rather than in the definition.
+///
+/// So a run holds one of these, and the second file to see a definition pays a hash lookup and a refcount bump.
+#[derive(Default)]
+pub struct ParsedDefinitions {
+    /// Keyed by what identifies a definition: its name, its parameter list and its body. `Arc<str>` hashes by
+    /// its contents, so the key is the text — the same thing [`definition_text`] would have built, without
+    /// building it to find out whether it is already known.
+    parsed: std::collections::HashMap<DefinitionKey, Option<std::sync::Arc<crate::macros::MacroDef>>>,
+}
+
+/// What identifies a definition: exactly what [`definition_text`] writes, in the three pieces it writes it from.
+type DefinitionKey = (Box<str>, Option<std::sync::Arc<str>>, std::sync::Arc<str>);
+
+
+
+impl ParsedDefinitions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// How many distinct definitions have been parsed — the number that used to be the number of *files* times
+    /// the number of definitions, and is now the corpus's own vocabulary.
+    pub fn len(&self) -> usize {
+        self.parsed.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.parsed.is_empty()
+    }
+
+    /// The definition `name`/`parameters`/`body` spells, parsed on the first ask and remembered afterwards.
+    ///
+    /// `None` is "this text is not a definition this reader can put back together" — a fact about the text, so it
+    /// is remembered too: a body that does not read once does not read on the two hundredth file either.
+    fn definition(
+        &mut self,
+        name: &str,
+        parameters: Option<&std::sync::Arc<str>>,
+        body: &std::sync::Arc<str>,
+    ) -> Option<std::sync::Arc<crate::macros::MacroDef>> {
+        let key: DefinitionKey = (Box::from(name), parameters.cloned(), std::sync::Arc::clone(body));
+
+        if let Some(known) = self.parsed.get(&key) {
+            return known.clone();
+        }
+
+        let definition = parse_a_definition(&definition_text(
+            name,
+            parameters.map(|list| &**list),
+            body,
+        ))
+        .map(std::sync::Arc::new);
+
+        self.parsed.insert(key, definition.clone());
+        definition
+    }
+}
+
+/// `#define NAME(params) body` → the definition it spells: the same reader the directive layer uses, so a
+/// definition means the same thing wherever it came from.
+fn parse_a_definition(text: &str) -> Option<crate::macros::MacroDef> {
+    let (tokens, _) = cpp_parser::lex(text, &cpp_parser::LexerConfig::default());
+    let range = SourceRange::new(0, text.len());
+    let tokens: Vec<crate::token::Token> = tokens
+        .iter()
+        .map(|token| {
+            crate::token::Token::new(
+                token.kind,
+                &text[token.range.start_offset..token.range.end_offset()],
+                token.range,
+            )
+        })
+        .collect();
+
+    crate::macros::parse_define(&tokens, range)
+}
+
 /// Build the table a level-2 cook starts from, out of what the includes contribute.
 ///
 /// The environment's offsets are positions in **this** file ("from the end of the `#include` that brought it
@@ -315,6 +418,26 @@ pub fn configuration_from_environment_with(
     environment: &cpp_parser::MacroEnvironment,
     use_in_force_bodies: bool,
 ) -> Configuration {
+    // A cache of one file's definitions: what a caller that has no run to share gets, and the honest default for
+    // an API whose other entry point takes the cache a run keeps. See `ParsedDefinitions`.
+    configuration_from_environment_and(
+        environment,
+        use_in_force_bodies,
+        &mut ParsedDefinitions::new(),
+    )
+}
+
+/// [`configuration_from_environment_with`], with the **run's** definition cache.
+///
+/// The difference is the whole 12.2 s measured on the 255-file corpus: without a shared cache, every file re-reads
+/// every definition it has in force — 2.5 million lex-and-parse calls for 42 939 distinct definitions — and then
+/// copies the result into its own table. A caller that cooks more than one file (a census, an editor's session,
+/// an index build) passes the same cache each time.
+pub fn configuration_from_environment_and(
+    environment: &cpp_parser::MacroEnvironment,
+    use_in_force_bodies: bool,
+    parsed: &mut ParsedDefinitions,
+) -> Configuration {
     // A body in force is used **only when the caller said the macro is object-like** — and only when this
     // function was asked for it. One whose parameters are unknown cannot be substituted into (`None` is not
     // "object-like"), and one the caller says takes parameters must not be pasted. Everything left is counted:
@@ -327,12 +450,16 @@ pub fn configuration_from_environment_with(
         Some(true) => parameters.is_some(),
         None => false,
     };
-    let in_force: Vec<(&str, String)> = if use_in_force_bodies {
+    let in_force: Vec<InForceDefinition<'_>> = if use_in_force_bodies {
         environment
             .bodies_in_force()
             .filter(|(_, function_like, parameters, _)| usable(*function_like, *parameters))
             .map(|(name, _, parameters, body)| {
-                (name, definition_text(name, parameters, body))
+                (
+                    name,
+                    parameters.map(std::sync::Arc::from),
+                    std::sync::Arc::from(body),
+                )
             })
             .collect()
     } else {
@@ -348,10 +475,13 @@ pub fn configuration_from_environment_with(
     // **arity** is in the text and not in a flag beside it — `#define NAME(params) body` is read back by the same
     // `parse_define` the directive layer uses, and a definition that says it takes parameters takes them wherever
     // it came from. What the text cannot say is what is **missing**, and that is `usable`.
-    let definitions: Vec<(&str, usize, Option<String>, bool)> = environment
+    // `(name, at, parameters, body, usable)`. The **text** is no longer built here: it is what the cache below
+    // keys on, and building it for every entry of every file was one of the two costs this function's own
+    // measurement named (2.5 million `format!` calls for 42 939 distinct definitions).
+    let definitions: Vec<Definition<'_>> = environment
         .definitions()
         .map(|(name, at, function_like, body)| {
-            let parameters = environment.parameters_of(name, at);
+            let parameters = environment.parameters_of(name, at).map(std::sync::Arc::from);
             // **A function-like definition whose parameter list the evidence does not have is not usable**, and
             // that is the whole of the rule that used to be "every function-like definition is skipped": without
             // the list [`definition_text`] would write `#define NAME body`, the table would read the macro as
@@ -364,46 +494,36 @@ pub fn configuration_from_environment_with(
             // function-like macros that expand to nothing (`_Struct_size_bytes_(size)` on `ncrypt.h:267`), and
             // reading them as names left `typedef _Struct_size_bytes_ ( … ) struct …` in the stream.
             let usable = !function_like || parameters.is_some();
-            let text = body.map(|body| definition_text(name, parameters, body));
-            (name, at, text, usable)
+            (name, at, parameters, body.map(std::sync::Arc::from), usable)
         })
-        .chain(
-            in_force
-                .iter()
-                .map(|(name, text)| (*name, 0usize, Some(text.clone()), true)),
-        )
+        .chain(in_force.iter().map(|(name, parameters, body)| {
+            (
+                *name,
+                0usize,
+                parameters.clone(),
+                Some(std::sync::Arc::clone(body)),
+                true,
+            )
+        }))
         .collect();
 
-    for (_, at, body, usable) in definitions {
+    for (name, at, parameters, body, usable) in definitions {
         if !usable {
             // No parameter names in the evidence — see the field's note.
             out.function_like_without_parameters += 1;
             continue;
         }
 
-        let Some(text) = body else {
+        // A definition the evidence carries **without a body** is counted rather than parsed: there is nothing to
+        // expand, and the count is what says how much of the corpus is in that state.
+        let Some(body) = body else {
             out.without_a_body += 1;
             continue;
         };
 
-        // `parse_define` reads a definition written the way a directive writes it: the name, an optional
-        // parameter list, then the replacement list. That is what `definition_text` builds — the same reader the
-        // directive layer uses, so a definition means the same thing wherever it comes from.
-        let (tokens, _) = cpp_parser::lex(&text, &cpp_parser::LexerConfig::default());
-        let range = SourceRange::new(at, text.len());
-        let tokens: Vec<crate::token::Token> = tokens
-            .iter()
-            .map(|token| {
-                crate::token::Token::new(
-                    token.kind,
-                    &text[token.range.start_offset..token.range.end_offset()],
-                    token.range,
-                )
-            })
-            .collect();
-
-        match crate::macros::parse_define(&tokens, range) {
-            Some(definition) => out.table.define(definition),
+        match parsed.definition(name, parameters.as_ref(), &body) {
+            // The **binding's** offset, not the definition's: see `MacroTable::define_shared_at`.
+            Some(definition) => out.table.define_shared_at(definition, at),
             None => out.unreadable += 1,
         }
     }
