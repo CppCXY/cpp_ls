@@ -1095,6 +1095,93 @@ fn a_macro_is_renamed_everywhere_and_an_ordinary_name_is_refused() {
     server.notify("exit", Value::Null);
 }
 
+/// The selection fixture: one expression nested in a statement, a body and a function.
+const SELECTION_CPP: &str = "int f() {\n    return w.size;\n}\n";
+
+/// **Expanding a selection walks a chain**, and the chain is the answer's *shape* rather than a list.
+///
+/// A client walks it outward: the word under the cursor, then each construct containing it, out to the file — and
+/// every step has to be strictly larger, or the keystroke does nothing. Over the wire that is a nested object, each
+/// range pointing at its parent, which is the part a client cannot reconstruct and therefore the part worth pinning.
+#[test]
+fn a_selection_expands_one_rung_at_a_time() {
+    let project = Project::new("selection-range");
+    project.write("main.cpp", SELECTION_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    let capabilities = server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    assert_eq!(
+        capabilities["result"]["capabilities"]["selectionRangeProvider"],
+        json!(true),
+        "the client is told the server can expand a selection: {capabilities}"
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": SELECTION_CPP }
+        }),
+    );
+
+    // Line 1 is `    return w.size;` — the cursor is inside `size`, at the `i`.
+    let answer = server.ask_until(100, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/selectionRange",
+            "params": {
+                "textDocument": { "uri": main_uri },
+                "positions": [{ "line": 1, "character": 13 }],
+            },
+        })
+    });
+
+    let answers = answer["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("one answer per position was expected, got {answer}"));
+    assert_eq!(answers.len(), 1, "one position, one chain: {answer}");
+
+    // Walk the parent chain the way a client does, and record each rung's text by line and column.
+    let mut rungs = Vec::new();
+    let mut current = Some(&answers[0]);
+    while let Some(range) = current {
+        rungs.push((
+            range["range"]["start"]["line"].as_u64().unwrap_or_default(),
+            range["range"]["start"]["character"].as_u64().unwrap_or_default(),
+            range["range"]["end"]["line"].as_u64().unwrap_or_default(),
+            range["range"]["end"]["character"].as_u64().unwrap_or_default(),
+        ));
+        current = range.get("parent").filter(|parent| !parent.is_null());
+    }
+
+    assert_eq!(
+        rungs,
+        vec![
+            (1, 13, 1, 17), // `size`
+            (1, 11, 1, 17), // `w.size`
+            (1, 4, 2, 0),   // `return w.size;`
+            (0, 8, 3, 0),   // the function body
+            (0, 0, 3, 0),   // the function definition
+        ],
+        "the chain, innermost first: {answer}"
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
 /// The workspace-symbol fixture: a class in a namespace, in a header — and the client opens only the `.cpp`.
 const SEARCH_H: &str = "namespace ns {\nstruct Widget { int size; };\n}\nstruct WidgetRegistry { int count; };\n";
 const SEARCH_CPP: &str = "#include \"search.h\"\nvoid f() { ns::Widget w; }\n";

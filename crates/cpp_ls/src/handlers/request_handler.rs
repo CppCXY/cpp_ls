@@ -24,6 +24,7 @@ use lsp_server::{Request, Response};
 use lsp_types::request::{
     Completion, DocumentDiagnosticRequest, DocumentSymbolRequest, FoldingRangeRequest,
     GotoDefinition, HoverRequest, PrepareRenameRequest, References, Rename, Request as LspRequest,
+    SelectionRangeRequest,
     WorkspaceSymbolRequest,
 };
 
@@ -37,6 +38,7 @@ use super::{
     folding_range::on_folding_range,
     hover::on_hover,
     references::on_references,
+    selection_range::on_selection_range,
     rename::{on_prepare_rename, on_rename},
     workspace_symbol::on_workspace_symbol,
 };
@@ -83,6 +85,7 @@ pub async fn on_request_handler(
         DocumentSymbolRequest => on_document_symbol,
         FoldingRangeRequest => on_folding_range,
         References => on_references,
+        SelectionRangeRequest => on_selection_range,
         PrepareRenameRequest => on_prepare_rename,
         Rename => on_rename,
         WorkspaceSymbolRequest => on_workspace_symbol,

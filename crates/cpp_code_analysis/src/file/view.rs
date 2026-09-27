@@ -101,6 +101,79 @@ impl FileView {
         self.tree.get_errors()
     }
 
+    /// **The ranges to select at `offset`, innermost first** — the chain an editor walks when the user expands a
+    /// selection.
+    ///
+    /// # The ladder
+    ///
+    /// ```text
+    /// the token under the cursor   `size` in `w.size`          a word before anything larger, which is what every
+    ///                                                          editor selects first and what a node walk would skip:
+    ///                                                          a token is not a node
+    /// then each node that contains it, from the innermost out   the member access, the expression, the statement,
+    ///                                                          the body, the function, the class, …  the file
+    /// ```
+    ///
+    /// # The two things that make it a *chain* rather than a dump of ranges
+    ///
+    /// * **Strictly growing**: a recovered tree has nodes whose range equals their parent's (a wrapper around the
+    ///   same tokens), and expanding the selection to the same range twice is a keystroke that does nothing. Only a
+    ///   range that **strictly contains** the one before it is added.
+    /// * **Every range contains the cursor**: an ancestor's range always does, by construction — but a range that
+    ///   does not is dropped anyway, because the client is being asked to *select* it, and selecting something else
+    ///   than what the user is looking at is worse than not expanding.
+    ///
+    /// A cursor in whitespace starts the chain at the enclosing node rather than with the whitespace token: there is
+    /// no word under the cursor to select, and the next useful thing is what surrounds it.
+    pub fn selection_chain(&self, offset: usize) -> Vec<cpp_parser::SourceRange> {
+        let mut chain: Vec<cpp_parser::SourceRange> = Vec::new();
+        let add = |range: cpp_parser::SourceRange, chain: &mut Vec<cpp_parser::SourceRange>| {
+            if range.length == 0 {
+                return;
+            }
+            // Inside the cursor, and strictly inside the previous range — see the note above.
+            if offset < range.start_offset || offset >= range.end_offset() {
+                return;
+            }
+            // Strictly inside the previous range — see the note above. A range that merely *equals* the previous
+            // one adds nothing: expanding the selection to the same text twice is a keystroke that does nothing.
+            let already_covered = chain.last().is_some_and(|previous| {
+                range.start_offset >= previous.start_offset
+                    && range.end_offset() <= previous.end_offset()
+            });
+            if !already_covered {
+                chain.push(range);
+            }
+        };
+
+        let token = cpp_parser::token_at(&self.root, offset);
+
+        let ancestors = match &token {
+            Some(token) => {
+                if !cpp_parser::is_trivia(token.kind().into()) {
+                    add(cpp_parser::source_range(token.text_range()), &mut chain);
+                }
+                token
+                    .parent_ancestors()
+                    .map(|node| cpp_parser::source_range(node.text_range()))
+                    .collect::<Vec<_>>()
+            }
+            // No token at that offset (past the end of the file): the node walk still answers, and the root is
+            // always a range.
+            None => self
+                .root
+                .ancestors()
+                .map(|node| cpp_parser::source_range(node.text_range()))
+                .collect(),
+        };
+
+        for range in ancestors {
+            add(range, &mut chain);
+        }
+
+        chain
+    }
+
     /// A byte offset from a **line and column**, both counted from zero.
     ///
     /// The mapping a client's positions need, and the one place LSP's own rule is *not* implemented: the columns

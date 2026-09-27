@@ -17,7 +17,7 @@
 //! The table below is deliberately short: it is the set of capabilities this server answers *today*. Adding
 //! one is three edits — the module, the dispatch row, the capability row — and the modules that were removed
 //! from the Lua skeleton (`semantic_token`, `inlay_hint`, …) come back the same way: `completion`, `document_symbol`,
-//! `folding_range`, `references`, `rename` and `workspace_symbol` all came back that way.
+//! `folding_range`, `references`, `rename`, `selection_range` and `workspace_symbol` all came back that way.
 
 mod completion;
 mod configuration;
@@ -30,6 +30,7 @@ mod initialized;
 mod notification_handler;
 mod references;
 mod rename;
+mod selection_range;
 mod request_handler;
 mod response_handler;
 mod text_document;
@@ -88,6 +89,7 @@ capabilities!(modules: {
     folding_range => FoldingRangeCapabilities,
     references => ReferencesCapabilities,
     rename => RenameCapabilities,
+    selection_range => SelectionRangeCapabilities,
     workspace_symbol => WorkspaceSymbolCapabilities,
     diagnostic => DiagnosticCapabilities,
     configuration => ConfigurationCapabilities,

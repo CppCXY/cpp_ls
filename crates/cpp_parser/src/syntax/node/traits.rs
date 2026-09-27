@@ -280,6 +280,20 @@ pub fn significant_children(node: &CppSyntaxNode) -> impl Iterator<Item = CppSyn
         .filter(|token| !is_trivia(token.kind().into()))
 }
 
+/// The token at a **byte offset**, if any: the one that starts there, or the one after it.
+///
+/// A helper rather than an expression at each call site, and the reason is the type: the tree's own offsets are
+/// `TextSize`, which is `rowan`'s, so a caller outside this crate would have to depend on `rowan` to ask this
+/// question at all. Asking "what token is under this byte" is a question about the tree, and the tree is here.
+///
+/// `None` past the last token. At a boundary between two tokens the one that *follows* is the answer, which is what
+/// an editor wants: a cursor at the end of a word is at the start of whatever comes next, and the word it just left
+/// is the one the user can see.
+pub fn token_at(node: &CppSyntaxNode, offset: usize) -> Option<CppSyntaxToken> {
+    let at = TextSize::from(u32::try_from(offset).ok()?);
+    node.token_at_offset(at).right_biased()
+}
+
 /// The byte range covered by a run of tokens, or `None` for an empty run.
 pub fn tokens_range(tokens: &[CppSyntaxToken]) -> Option<TextRange> {
     let first = tokens.first()?.text_range();

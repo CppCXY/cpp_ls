@@ -1285,6 +1285,31 @@ the cooked index: declarations 4820 raw / 4062 cooked | +3250 only after expansi
 并且把"索引里有多少文件"印在同一行——"语料变大了"从此不可能再隐形 ✓。同一个计时器也顺便量清楚了:
 那个第二遍在这份语料上是 **37–53 ms** ✓,不是成本项。
 
+### 选择范围接出去了(已落地):链子就是**树的祖先路径**,但有两条规矩
+
+`textDocument/selectionRange`(编辑器里"逐步扩大选区"那一下)一次问多个光标 ✓,每个答案是一条**链**:光标下的词 →
+包着它的每一个结构 → 整个文件 ✓。这一条几乎没有新机制——链子就是**树的祖先路径** ✓——真正要定的是两条规矩:
+
+- **严格变大**:从恢复中读出来的树里**真的有**范围和父节点完全相同的节点 ✓(反证里那条链上同一个
+  `struct Widget {…}` 出现了三次 ✗✗),而把选区"扩大"到同一段文字是**一次什么也没发生的按键** ✗。所以只有
+  **严格包含**前一档的范围才进链 ✓。
+- **每一档都必须包含光标**:祖先按构造总是包含 ✓,但**从恢复里读出**的范围不一定 ✗——而客户端是要拿它去**选中**的 ✗,
+  选中一段用户没在看的东西比不扩大更糟 ✓。
+
+光标落在空白里时,链从**包着它的那个节点**开始(空白 token 不是可选的东西 ✓)。
+
+**实现上的分工**:`token_at`(字节偏移 → token)放在 `cpp_parser` ✓——那是**树自己的问题**,而且树自己的偏移是
+`rowan` 的 `TextSize`,放在别处就得为了一句话去依赖 `rowan` ✓;`FileView::selection_chain` 把 token 和祖先路径读成
+偏移 ✓;handler 折成协议那个"每个范围指自己的父亲"的嵌套结构——**从外往里建**(最外面那一档没有父亲 ✓),
+而不是从里往外挂孩子 ✓。
+
+**证据**:`cpp_code_analysis/tests/selection.rs` 三条——六级阶梯逐级断言 ✓;**对文件里每一个偏移**都断言"链非空、
+每一档都含光标、严格变大"(这一条只有穷举才敢说 ✓,游标会落在空白、标点、文件末尾上 ✓)、以及空白里的光标 ✓;
+`cpp_ls::handlers::selection_range::tests::a_chain_becomes_nested_ranges`(嵌套形状 + 父含子 + 空链不成答案 ✓);
+端到端 `handshake.rs::a_selection_expands_one_rung_at_a_time`(`size` → `w.size` → `return w.size;` → 函数体 →
+函数定义,逐列断言 ✓)。
+**反证**:把"严格变大"那条去掉 → 穷举那条立刻红,链上出现三个一模一样的范围 ✓✓。
+
 ### 项目符号搜索接出去了(已落地):**匹配规则**就是功能本身
 
 `workspace/symbol` 是这里第一个**不问某个文件**的查询:它在索引里搜**每一份摘要**的声明,而且**不走可见性**
@@ -1550,7 +1575,7 @@ request/notification/response、text_document)。前三个是"某个**打开**�
 
 ## 7. 度量与门禁
 
-每次改动后必须全绿(测试基线:**1282 个测试**、42 个 suite,实测;`cargo clippy --workspace --all-targets`
+每次改动后必须全绿(测试基线:**1287 个测试**、43 个 suite,实测;`cargo clippy --workspace --all-targets`
 零警告,`cargo doc` 零警告,`cpp_dump` 零错误):
 
 ```bash
@@ -1698,10 +1723,12 @@ std_probe <list> --seeds --closure
   引用与改名都答 `null`(协议没有"不全"这个说法)✓。见 §6 那一节。
 - **折叠范围**:四类区域(花括号对、注释段、`#if`、`include` 段),只读这个文件的 token 与指令;容忍未配平(不折 ✗),
   `Code` 发 `None` 而不是硬编一个 kind ✓。见 §6 那一节。
-- **项目符号搜索(本轮)**:索引里每一份摘要的声明(两种读数、不去查可见性、局部不进)✓;匹配规则是"裸词看名字、
+- **项目符号搜索**:索引里每一份摘要的声明(两种读数、不去查可见性、局部不进)✓;匹配规则是"裸词看名字、
   带 `::` 看限定名的尾部" ✓;上限不是拒绝、不完整才是 ✓。见 §6 那一节。
-- **LSP 的能力表现在是九项**:诊断(push + pull)、definition、hover、completion、documentSymbol、foldingRange、
-  references、rename(含 `prepareRename`)、workspaceSymbol ✓。
+- **选择范围(本轮)**:链子就是树的祖先路径 + 两条规矩(严格变大、每档含光标);`token_at` 落在 parser 里,
+  免得分析层为了一句话依赖 `rowan` ✓。见 §6 那一节。
+- **LSP 的能力表现在是十项**:诊断(push + pull)、definition、hover、completion、documentSymbol、foldingRange、
+  references、rename(含 `prepareRename`)、workspaceSymbol、selectionRange ✓。
 
 **下一步(按依赖排序)**(更新到本轮之后):
 1. **删形状规则(M4)**:覆盖率这一关过了(每个会被发布的文件都有熟读),大纲也接出来了——于是这一步现在是
@@ -1712,5 +1739,7 @@ std_probe <list> --seeds --closure
 2. **熟读剩下的文件**:255/109 两档只剩 `sourceannotations.h`,已判定是 `/analyze` 专属语法(**非缺口**)。
 3. **L2(名字驻留)**:量过,是噪声级别(§6 L1/L2),不做;L1/L4 已完成。
 4. **M5 余下**:已接 definition / hover / completion / documentSymbol / foldingRange / references / rename /
-   workspaceSymbol ✓。再往后是**选择范围**(`selectionRange`,每个声明要一条作用域链 ✗ 比前几个贵)和**签名帮助**
-   (那需要类型,是另一条线 ✗)。
+   workspaceSymbol / selectionRange ✓——**协议里不需要类型的那几项都接完了**。剩下两项都越过了这条线:
+   **签名帮助**(要重载解析和参数类型 ✗)和**语义高亮**(要"这个名字在这里是类型还是函数" ✗,而索引只记
+   `DeclKind` ✓——它其实是这几项里最近的一个,因为 `BindingKind` 比 `DeclKind` 细 ✓,
+   缺的是把细的那一层暴露出来)。再往后的 A/B 大项仍然是 M4 那次删规则的判断(第 1 条)。
