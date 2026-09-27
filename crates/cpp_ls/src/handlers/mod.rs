@@ -22,6 +22,7 @@ mod completion;
 mod configuration;
 mod definition;
 mod diagnostic;
+mod document_symbol;
 mod hover;
 mod initialized;
 mod notification_handler;
@@ -78,6 +79,7 @@ capabilities!(modules: {
     definition => DefinitionCapabilities,
     hover => HoverCapabilities,
     completion => CompletionCapabilities,
+    document_symbol => DocumentSymbolCapabilities,
     diagnostic => DiagnosticCapabilities,
     configuration => ConfigurationCapabilities,
 });

@@ -77,9 +77,10 @@ pub use summary::ConditionalBody;
 pub use summary::{
     ConditionAt, ConditionalRegion, CookedDiagnostic, DeclFact, DeclKind, FactGuard, FileSummary,
     GuardBranch, IncludeFact, IndexedRendering, MacroFact, MacroKind, MacroView, MapReport,
+    OutlineSymbol,
     SummaryGuards, TranslationUnit, UnitDefinitions, macros_from_direct_includes,
     macros_from_direct_includes_with_bodies, macros_from_the_closure_with_bodies, ClosureEvidence,
-    macros_in_force_before_the_include, MacroDefinitions, RenderedUnit, UnitSpan,
+    macros_in_force_before_the_include, MacroDefinitions, RenderedUnit, UnitSpan, outline_of,
 };
 // `guard` is the exception: `preprocess::guard` and `preprocess::guards` differ by one letter, which is exactly
 // the hazard the folders are meant to remove, so the *analysis* keeps the plural name and the types are reached

@@ -888,3 +888,111 @@ fn a_members_members_are_offered_over_the_wire() {
     server.request(999, "shutdown", Value::Null);
     server.notify("exit", Value::Null);
 }
+
+/// The outline fixture: a class in a branch nobody takes, a class the file writes, and a macro that **declares**
+/// something the file never mentions.
+const OUTLINE_CPP: &str = "#include \"cfg.h\"\n\
+                           #include \"handle.h\"\n\
+                           #if OFF\n\
+                           struct Dead { int x; };\n\
+                           #endif\n\
+                           struct Live { int y; };\n\
+                           DECLARE_HANDLE(HWND);\n";
+
+/// **The outline shows the file, not the compiler** — both halves of that, in one fixture.
+///
+/// `#if OFF` is false once the header says so, so a compiler never sees `Dead` — and a reader editing that branch
+/// very much does, which is why an outline is built from the file's **own** declarations rather than from the
+/// cooked reading every other feature uses. The other direction is `DECLARE_HANDLE(HWND)`: the file writes a call,
+/// so `HWND__` and `HWND` are in the index and in completions and are *not* here — an outline listing a name the
+/// file never writes would be claiming something about the file that is not true.
+#[test]
+fn the_outline_shows_the_file_and_not_the_compiler() {
+    let project = Project::new("outline");
+    project.write("cfg.h", CFG_H);
+    project.write("handle.h", HANDLE_H);
+    project.write("main.cpp", OUTLINE_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    let capabilities = server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    assert_eq!(
+        capabilities["result"]["capabilities"]["documentSymbolProvider"],
+        json!(true),
+        "the client is told the server outlines: {capabilities}"
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": OUTLINE_CPP }
+        }),
+    );
+
+    let answer = server.ask_until(100, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/documentSymbol",
+            "params": { "textDocument": { "uri": main_uri } },
+        })
+    });
+
+    let symbols = answer["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a nested outline was expected, got {answer}"));
+
+    // Every name in the tree, however deep, for the assertions about what is *not* there.
+    fn all_names(symbols: &[Value], into: &mut Vec<String>) {
+        for symbol in symbols {
+            into.push(symbol["name"].as_str().unwrap_or_default().to_string());
+            if let Some(children) = symbol["children"].as_array() {
+                all_names(children, into);
+            }
+        }
+    }
+
+    let mut names = Vec::new();
+    all_names(symbols, &mut names);
+    assert_eq!(
+        names,
+        vec!["Dead", "x", "Live", "y"],
+        "the branch nobody takes is in the outline, the file's own class, and nothing else: {answer}"
+    );
+
+    assert_eq!(symbols[0]["kind"], json!(5), "a class: {}", symbols[0]);
+    assert_eq!(
+        symbols[0]["children"][0]["kind"],
+        json!(13),
+        "a variable: {}",
+        symbols[0]
+    );
+
+    // The pair of ranges: the name is what a client selects, and it is inside the declaration it folds.
+    assert_eq!(
+        symbols[0]["selectionRange"],
+        json!({ "start": { "line": 3, "character": 7 }, "end": { "line": 3, "character": 11 } }),
+        "`Dead` is selected by its own name: {}",
+        symbols[0]
+    );
+    assert_eq!(
+        symbols[0]["range"]["start"]["line"],
+        json!(3),
+        "and the declaration starts on the same line: {}",
+        symbols[0]
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}

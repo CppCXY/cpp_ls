@@ -29,18 +29,16 @@
 //! files to read, a name may be missing for the only reason that its file has not been read yet, so the client is
 //! told to ask again as the user types rather than caching an empty list as the truth.
 
-use cpp_code_analysis::{
-    DeclKind, DiskFiles, Known, MemberCompletions, NameCompletions, Session, UnknownReason,
-};
+use cpp_code_analysis::{DiskFiles, Known, MemberCompletions, NameCompletions, Session, UnknownReason};
 use lsp_types::{
-    ClientCapabilities, CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams,
-    CompletionResponse, Documentation, MarkupContent, MarkupKind, ServerCapabilities, TextEdit,
+    ClientCapabilities, CompletionItem, CompletionOptions, CompletionParams, CompletionResponse,
+    Documentation, MarkupContent, MarkupKind, ServerCapabilities, TextEdit,
 };
 use tokio_util::sync::CancellationToken;
 
 use super::RegisterCapabilities;
 use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
-use crate::util::{offset_at_position, position_in, uri_to_file_path};
+use crate::util::{completion_kind, offset_at_position, position_in, uri_to_file_path};
 
 pub async fn on_completion(
     context: ServerContextSnapshot,
@@ -165,7 +163,7 @@ fn item_for(
 ) -> CompletionItem {
     CompletionItem {
         label: name_of(fact).to_string(),
-        kind: Some(item_kind(fact.kind)),
+        kind: Some(completion_kind(fact.kind)),
         // Where the name lives, when the scope says something the label does not: a member of `ns::Widget` offers
         // `size` with `ns::Widget` beside it.
         detail: fact.scope.clone(),
@@ -208,23 +206,6 @@ fn name_of(fact: &cpp_code_analysis::DeclFact) -> &str {
     &fact.name
 }
 
-/// The analysis's kind for a declaration, as the protocol's.
-///
-/// The two vocabularies are not the same size and the mapping is deliberately **coarse**: `DeclKind` says what the
-/// index distinguishes, and a client's icon is a hint rather than a claim. `Type` becomes `Class` rather than
-/// `Struct`/`Enum`/`Interface` because the index does not know which of those it is — a fact records `typedef`,
-/// `class` and `enum` alike as `Type`.
-fn item_kind(kind: DeclKind) -> CompletionItemKind {
-    match kind {
-        DeclKind::Type => CompletionItemKind::CLASS,
-        DeclKind::Function => CompletionItemKind::FUNCTION,
-        DeclKind::Variable => CompletionItemKind::VARIABLE,
-        DeclKind::Namespace => CompletionItemKind::MODULE,
-        DeclKind::MacroLike => CompletionItemKind::CONSTANT,
-        DeclKind::Other => CompletionItemKind::TEXT,
-    }
-}
-
 pub struct CompletionCapabilities;
 
 impl RegisterCapabilities for CompletionCapabilities {
@@ -244,20 +225,6 @@ impl RegisterCapabilities for CompletionCapabilities {
 
 #[cfg(test)]
 mod tests {
-    use super::item_kind;
-    use cpp_code_analysis::DeclKind;
-    use lsp_types::CompletionItemKind;
-
-    /// **Every kind the index stores has an icon**, and the mapping is one-way by design: a client's icon is a
-    /// hint, and the index's vocabulary is what it knows. A kind added to `DeclKind` without a row here would not
-    /// compile — which is the point of matching exhaustively rather than with a `_` arm.
-    #[test]
-    fn every_declaration_kind_has_a_completion_kind() {
-        assert_eq!(item_kind(DeclKind::Type), CompletionItemKind::CLASS);
-        assert_eq!(item_kind(DeclKind::Function), CompletionItemKind::FUNCTION);
-        assert_eq!(item_kind(DeclKind::Variable), CompletionItemKind::VARIABLE);
-        assert_eq!(item_kind(DeclKind::Namespace), CompletionItemKind::MODULE);
-        assert_eq!(item_kind(DeclKind::MacroLike), CompletionItemKind::CONSTANT);
-        assert_eq!(item_kind(DeclKind::Other), CompletionItemKind::TEXT);
-    }
+    // The kind mapping has its own tests where it lives now (`crate::util::kind`), beside the outline's — one
+    // question, one place, so that the two vocabularies can be read together and cannot drift apart.
 }

@@ -22,7 +22,8 @@ use std::error::Error;
 use log::error;
 use lsp_server::{Request, Response};
 use lsp_types::request::{
-    Completion, DocumentDiagnosticRequest, GotoDefinition, HoverRequest, Request as LspRequest,
+    Completion, DocumentDiagnosticRequest, DocumentSymbolRequest, GotoDefinition, HoverRequest,
+    Request as LspRequest,
 };
 
 use crate::context::ServerContext;
@@ -31,6 +32,7 @@ use super::{
     completion::on_completion,
     definition::on_goto_definition_handler,
     diagnostic::on_pull_document_diagnostic,
+    document_symbol::on_document_symbol,
     hover::on_hover,
 };
 
@@ -73,6 +75,7 @@ pub async fn on_request_handler(
         GotoDefinition => on_goto_definition_handler,
         HoverRequest => on_hover,
         Completion => on_completion,
+        DocumentSymbolRequest => on_document_symbol,
         DocumentDiagnosticRequest => on_pull_document_diagnostic,
     });
 

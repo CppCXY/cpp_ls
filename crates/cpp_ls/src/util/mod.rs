@@ -3,7 +3,8 @@
 //! Each file here is one concept used from more than one layer, which is the only reason a `util` module earns
 //! its place: `catch_unwind` is the panic boundary every handler call goes through, `uri` is the one place a URI
 //! becomes a path, `position` is the one place a client's line and UTF-16 column becomes a byte offset (and back),
-//! and `time_cancel_token` is the timeout-plus-cancellation combinator the indexing progress uses.
+//! `kind` is the one place a declaration's kind becomes the protocol's icon, and `time_cancel_token` is the
+//! timeout-plus-cancellation combinator the indexing progress uses.
 //!
 //! Two files the Lua skeleton had are **gone on purpose**: `desc.rs` (parsing `---@param` doc strings) and
 //! `module_name_convert.rs` (`require` module paths) — both are Lua's language, not this server's. The C++
@@ -11,11 +12,13 @@
 //! starts;
 
 mod catch_unwind;
+mod kind;
 mod position;
 mod time_cancel_token;
 mod uri;
 
 pub use catch_unwind::catch_unwind;
+pub use kind::{completion_kind, symbol_kind};
 pub use position::{offset_at_position, position_in, position_in_file};
 // `position_in_file` is the one a handler wants (a file the VFS is holding); `position_in` is the piece it is built
 // from, and what a handler with a view's own text and line index uses.

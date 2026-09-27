@@ -85,6 +85,7 @@ use crate::index::project::{
 use crate::index::references::{MacroReferences, ReferenceBudget, macro_references};
 use crate::index::store::{StoreStats, SummaryStore};
 use crate::index::worklist::StepOutcome;
+use crate::summary::OutlineSymbol;
 use crate::index::watch::{ChangeBatch, FileEvent, Response, WatchFilter};
 use crate::index::worklist::{Priority, Step, outcome_of};
 use crate::index::{
@@ -1452,6 +1453,43 @@ impl<F: FileProvider + Clone> Session<F> {
             &view.path,
             written_type,
         )
+    }
+
+    /// **The file's declarations as a tree** — what an outline, a breadcrumb bar or a folding range is drawn from.
+    ///
+    /// # Two sources, and why the second one exists
+    ///
+    /// The index's summary when it has one, and **the buffer's own parse when it does not**. That second state is
+    /// ordinary rather than exotic: a file's summary is dropped the moment it is edited and read again one drain
+    /// later, and an outline is refreshed *as the user types* — so "the summary is gone" must not mean "the outline
+    /// is empty". Between two keystrokes the panel would blink, and what it would blink to is a file whose
+    /// declarations are still right there in the text in front of the reader.
+    ///
+    /// The two readings differ in exactly one way, and it is worth knowing which: a summary was built **with the
+    /// closure's macro bodies**, so a namespace a macro opens (`BEGIN_NS` is `namespace one {`) is a scope in it and
+    /// not in a buffer that has only this file's tokens. The fallback therefore nests what the file writes
+    /// literally — the honest reading of the text on screen — and it lasts one drain.
+    ///
+    /// # Which reading of the *two* this is
+    ///
+    /// Neither: an outline is about the **file**, so it is built from the raw facts in both cases (see
+    /// [`crate::FileSummary::outline`]) — a declaration in a branch nobody takes belongs in an outline, and a type
+    /// a macro declares does not. That is the opposite choice from every other query here, and deliberately so.
+    pub fn outline(&self, view: &FileView) -> Vec<OutlineSymbol> {
+        if let Some(summary) = self.store.index().summary(&view.path) {
+            return summary.outline();
+        }
+
+        let preprocessing = crate::preprocess(&view.source, view.tree.get_tokens());
+        let errors: Vec<cpp_parser::SourceRange> = view
+            .tree
+            .get_errors()
+            .iter()
+            .map(|error| cpp_parser::source_range(error.range))
+            .collect();
+        let (facts, _guards) = crate::build_facts(&view.scopes, &preprocessing, &view.root, &errors);
+
+        crate::outline_of(&facts)
     }
 }
 

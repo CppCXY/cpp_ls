@@ -225,6 +225,112 @@ impl MacroScopeReading {
     }
 }
 
+/// One entry in a file's **outline**: a declaration the file writes, and the declarations written inside it.
+///
+/// The fact travels whole rather than as a copy of the three fields a consumer happens to need today: an outline
+/// entry is a declaration, and a caller that then asks "what kind", "where is the name", "what are its bases" is
+/// asking about the same thing it is looking at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutlineSymbol {
+    /// The declaration, with both ranges a consumer needs: [`DeclFact::range`] is the whole declaration (what a
+    /// client folds or highlights) and [`DeclFact::name_range`] is the name (what it selects).
+    pub fact: DeclFact,
+    /// The declarations written **inside** this one, in source order.
+    pub children: Vec<OutlineSymbol>,
+}
+
+impl FileSummary {
+    /// **The file's declarations as a tree**, in source order — what an outline, a breadcrumb bar or a folding
+    /// range is drawn from.
+    ///
+    /// # Which reading this is, and why it is not the cooked one
+    ///
+    /// The **raw** reading, deliberately. Every other query in this crate answers from the cooked one where it can,
+    /// because a compiler's reading is the truth about what a name means — an outline is a claim about the **file**,
+    /// and the two differ in both directions:
+    ///
+    /// * a declaration in a branch nobody takes is in an outline and was never compiled ✓ (this is the one reading
+    ///   that *wants* the dead branches — a reader editing them is looking at them);
+    /// * a type a macro declares is not: `DECLARE_HANDLE(HWND)`'s `HWND__` is in the index and in completions, and
+    ///   an outline of `api.h` that listed it would be listing a name the file never writes.
+    ///
+    /// # The tree, from the facts themselves
+    ///
+    /// A declaration's [`DeclFact::scope`] is the **qualified name** of the scope it was written in, so a member's
+    /// parent is the fact whose [`DeclFact::qualified_name`] equals it — one map lookup per fact, and a fact whose
+    /// parent is not in this file is a root (`Widget`'s members are in `widget.h`, not in the file that includes
+    /// it). Source order comes from [`DeclFact::range`]: a parent begins before everything written inside it, so one
+    /// sorted pass places every fact under a parent that is already placed.
+    ///
+    /// Two facts of one qualified name — an overload — keep one entry in the map, so the second one's children (if
+    /// it had any) would attach to the first: an overload writes no children of its own, and a name *is* what a
+    /// scope's children are keyed by.
+    ///
+    /// # What is not in it
+    ///
+    /// **Locals** ([`DeclFact::local`]). An outline is the file's structure and not the inside of every function —
+    /// and a summary cannot place a local in the function it belongs to anyway, since a local's scope is `None` by
+    /// construction (see [`DeclFact::scope`]). A consumer that wants them has the file's own scope tree, which is
+    /// what [`crate::FileView::scopes`] is for.
+    pub fn outline(&self) -> Vec<OutlineSymbol> {
+        outline_of(&self.declarations)
+    }
+}
+
+/// **A list of declarations as a tree**, in source order — the builder behind [`FileSummary::outline`].
+///
+/// A free function because the facts do not have to come from a summary: the buffer's own parse produces the same
+/// kind of list, and the session reaches for it when a file has just been edited and its summary is gone
+/// (`Session::outline`). One builder, so the two readings cannot disagree about what a tree is.
+pub fn outline_of(facts: &[DeclFact]) -> Vec<OutlineSymbol> {
+    let mut facts: Vec<&DeclFact> = facts.iter().filter(|fact| !fact.local).collect();
+    facts.sort_by_key(|fact| (fact.range.start_offset, fact.range.end_offset()));
+
+    let mut roots: Vec<OutlineSymbol> = Vec::new();
+    // Where each placed symbol is, by qualified name: the path of child indices from the root. A path rather
+    // than a search, so that placing a fact is a walk down a few indices instead of a scan of the tree.
+    let mut placed: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+
+    for fact in facts {
+        let qualified = fact.qualified_name();
+        let symbol = OutlineSymbol {
+            fact: fact.clone(),
+            children: Vec::new(),
+        };
+
+        let path = match fact.scope.as_ref().and_then(|scope| placed.get(scope)) {
+            Some(parent) => {
+                let parent = parent.clone();
+                let mut path = parent.clone();
+                path.push(symbol_at(&mut roots, &parent).children.len());
+                symbol_at(&mut roots, &parent).children.push(symbol);
+                path
+            }
+            None => {
+                roots.push(symbol);
+                vec![roots.len() - 1]
+            }
+        };
+
+        placed.insert(qualified, path);
+    }
+
+    roots
+}
+
+/// The symbol a path of child indices names — `[2, 0]` is the first child of the third root.
+fn symbol_at<'a>(roots: &'a mut [OutlineSymbol], path: &[usize]) -> &'a mut OutlineSymbol {
+    let (first, rest) = path.split_first().expect("a path has at least one index");
+    let mut node = &mut roots[*first];
+
+    for index in rest {
+        node = &mut node.children[*index];
+    }
+
+    node
+}
+
 impl DeclFact {
     /// The declaration's full name, qualified by the scope it was written in.
     ///
