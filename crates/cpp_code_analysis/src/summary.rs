@@ -888,8 +888,8 @@ fn walk_the_translation_unit<'a>(
 /// subtree of frame `f` is exactly the frame indices `f..tout[f]`, and "is this event visible from that file" is
 /// an integer comparison rather than a walk up the parent chain.
 pub struct TranslationUnit {
-    events: Vec<TuEvent>,
-    frames: Vec<TuFrame>,
+    pub(crate) events: Vec<TuEvent>,
+    pub(crate) frames: Vec<TuFrame>,
     /// The frame a file was entered as, the **first** time the walk reached it. A file included twice is walked
     /// once (see `walk_one_file`), so a second entry has no frame of its own.
     entered: std::collections::HashMap<std::path::PathBuf, u32>,
@@ -900,34 +900,37 @@ pub struct TranslationUnit {
 }
 
 /// One macro fact of the unit, with **where** it was written and **which frame** it belongs to.
-struct TuEvent {
-    name: Box<str>,
+///
+/// `pub(crate)` for the codec, which writes these records to the cache: the type is the unit's own shape, and the
+/// alternative — a second struct in the codec that mirrors it — is a second place for a field to be forgotten.
+pub(crate) struct TuEvent {
+    pub(crate) name: Box<str>,
     /// `None` for an `#undef`.
-    function_like: Option<bool>,
+    pub(crate) function_like: Option<bool>,
     /// The shape of the replacement list, as the parser reads it.
-    body: Option<cpp_parser::MacroBody>,
+    pub(crate) body: Option<cpp_parser::MacroBody>,
     /// The replacement list as text — **shared**, see [`cpp_parser::IncludedMacro::body_text`].
-    body_text: Option<std::sync::Arc<str>>,
-    parameters: Option<std::sync::Arc<str>>,
-    frame: u32,
+    pub(crate) body_text: Option<std::sync::Arc<str>>,
+    pub(crate) parameters: Option<std::sync::Arc<str>>,
+    pub(crate) frame: u32,
     /// The offset **inside the file that wrote it**.
-    at: usize,
+    pub(crate) at: usize,
     /// Was the fact unconditional? The two channels of [`ClosureEvidence`], which is a measured distinction and
     /// not this type's to collapse.
-    unconditional: bool,
+    pub(crate) unconditional: bool,
 }
 
 /// Where one file was entered, and how much of the timeline was already behind it.
-struct TuFrame {
-    file: std::path::PathBuf,
-    parent: Option<u32>,
+pub(crate) struct TuFrame {
+    pub(crate) file: std::path::PathBuf,
+    pub(crate) parent: Option<u32>,
     /// Where this file's text comes into force **in its parent**: the end of the `#include` that brought it in.
-    from_in_parent: usize,
+    pub(crate) from_in_parent: usize,
     /// How many events the walk had emitted when this frame was entered — everything before it is in force from
     /// offset 0 of this file, which is what a header's own first line sees.
-    entry_seq: u32,
+    pub(crate) entry_seq: u32,
     /// The end of this frame's subtree, as a frame index (see the type's note on preorder).
-    tout: u32,
+    pub(crate) tout: u32,
 }
 
 /// The timeline under construction — the sink [`Walked`] records into while the one walk runs.
@@ -1024,6 +1027,31 @@ impl TranslationUnit {
             entered: timeline.entered,
             conditional_facts: walked.conditional_facts,
             facts_in_force: walked.facts_in_force,
+        }
+    }
+
+    /// Rebuild a timeline from its parts — the decoder's constructor, and the only caller that may hand this type
+    /// a `frames` vector it did not build itself.
+    ///
+    /// `entered` is recomputed here rather than stored: it *is* "the frame each file was first entered as", which
+    /// the frames already say, and a second copy in the file would be a second thing to keep in step.
+    pub(crate) fn from_parts(
+        events: Vec<TuEvent>,
+        frames: Vec<TuFrame>,
+        conditional_facts: usize,
+        facts_in_force: usize,
+    ) -> Self {
+        let mut entered: std::collections::HashMap<std::path::PathBuf, u32> = std::collections::HashMap::new();
+        for (index, frame) in frames.iter().enumerate() {
+            entered.entry(frame.file.clone()).or_insert(index as u32);
+        }
+
+        TranslationUnit {
+            events,
+            frames,
+            entered,
+            conditional_facts,
+            facts_in_force,
         }
     }
 

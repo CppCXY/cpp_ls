@@ -24,13 +24,17 @@ use std::path::{Path, PathBuf};
 
 use cpp_code_analysis::graph::Marked;
 use cpp_code_analysis::{
-    CompilerConfig, FileIndexer, FileSummary, MacroDefinitions, MemoryFiles, SummaryKey, TranslationUnit,
+    CompilerConfig, FileIndexer, FileSummary, MacroDefinitions, MemoryFiles, SummaryKey,
+    TranslationUnit, TranslationUnitCache,
 };
 
 /// A file set in memory, indexed once, with the two ways of asking for a file's environment.
 struct Unit {
     summaries: HashMap<PathBuf, FileSummary>,
     sources: HashMap<PathBuf, String>,
+    /// The provider the set came from — kept because the cache validates against **files**, not against a
+    /// summary map, and a test that hands it one must hand it the same texts the walk read.
+    files: MemoryFiles,
     seed: Marked,
 }
 
@@ -63,6 +67,7 @@ impl Unit {
         Unit {
             summaries,
             sources,
+            files: provider,
             // A seed with the two names every corpus asks about, so a `#ifdef` in the fixtures is answerable.
             seed: {
                 let mut marked = Marked::default();
@@ -384,4 +389,93 @@ fn the_unit_walks_its_files_once() {
         );
     }
     assert_eq!(timeline.files().count(), 4, "four files, one walk");
+}
+
+/// **A unit can be kept and read back** — the cache layer's acceptance, on a fixture rather than a corpus.
+///
+/// Three properties, and the second is the one that makes it usable rather than merely fast:
+///
+/// 1. an entry written by one run is served to the next;
+/// 2. what is served **answers exactly like what was walked** — a cache of macro state that decodes into a
+///    slightly different timeline produces a *reading*, not a diagnostic, and every rule downstream would then
+///    answer about a header nobody has;
+/// 3. a file in the closure whose contents moved **refuses** the entry, which is the whole validity key.
+#[test]
+fn a_walked_unit_can_be_kept_and_read_back() {
+    let files = [
+        ("/p/config.h", "#ifndef _CONFIG_H_\n#define _CONFIG_H_\n#define SA(id) id\n#endif\n"),
+        ("/p/api.h", "#include \"config.h\"\n#define API_CALL __cdecl\nAPI_CALL void f(SA(int) value);\n"),
+        ("/p/main.cpp", "#include \"api.h\"\nint before = API_CALL;\n"),
+    ];
+
+    let unit = Unit::new(&files);
+    let mut definitions = MacroDefinitions::default();
+    let walked = unit.timeline_of("/p/main.cpp", &mut definitions);
+
+    let directory = std::env::temp_dir().join(format!(
+        "cppls-tu-kept-{}-{}",
+        std::process::id(),
+        cpp_code_analysis::fnv1a64(b"a_walked_unit_can_be_kept_and_read_back")
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    let cache = TranslationUnitCache::new(&directory);
+
+    let root = Path::new("/p/main.cpp");
+    cache
+        .put(root, 11, &walked, &unit.files)
+        .expect("the entry writes");
+    let served = cache
+        .get(root, 11, &unit.files)
+        .expect("the entry is served while the closure is unchanged");
+
+    assert_eq!(
+        served.len(),
+        walked.len(),
+        "every fact came back, so the views below are answering about the same timeline"
+    );
+    assert_eq!(
+        served.files().count(),
+        walked.files().count(),
+        "…and every frame"
+    );
+    assert_eq!(
+        (served.conditional_facts, served.facts_in_force),
+        (walked.conditional_facts, walked.facts_in_force),
+        "the two counters the census prints came back too"
+    );
+
+    // The answers, question by question, on the file whose environment is the point of the exercise.
+    let source = unit.sources.get(Path::new("/p/api.h")).expect("read");
+    let from_disk = served
+        .environment_of(Path::new("/p/api.h"))
+        .expect("the served unit reaches api.h");
+    let from_the_walk = walked
+        .environment_of(Path::new("/p/api.h"))
+        .expect("the walked unit reaches api.h");
+    for name in ["SA", "API_CALL", "_CONFIG_H_", "f", "value"] {
+        for offset in (0..source.len()).step_by(5) {
+            assert_eq!(
+                answers(&from_disk, name, offset),
+                answers(&from_the_walk, name, offset),
+                "`{name}` at offset {offset}: the decoded unit answers differently from the walked one"
+            );
+        }
+    }
+
+    // **A header in the closure changes** — the entry is refused, not served with the old macros.
+    let mut changed = MemoryFiles::new();
+    for (path, text) in &files {
+        let text = if *path == "/p/config.h" {
+            "#ifndef _CONFIG_H_\n#define _CONFIG_H_\n#define SA(id) SA_##id\n#endif\n"
+        } else {
+            *text
+        };
+        changed.insert(path, text);
+    }
+    assert!(
+        cache.get(root, 11, &changed).is_none(),
+        "an edited header in the closure refuses the entry"
+    );
+
+    let _ = std::fs::remove_dir_all(&directory);
 }

@@ -31,7 +31,7 @@ use crate::cache::SummaryKey;
 use crate::preprocess::directive::IncludeForm;
 use crate::summary::{
     ConditionalRegion, DeclFact, DeclKind, FactGuard, FileSummary, GuardBranch, IncludeFact,
-    MacroFact, MacroKind, MacroScopeReading, SummaryGuards,
+    MacroFact, MacroKind, MacroScopeReading, SummaryGuards, TranslationUnit, TuEvent, TuFrame,
 };
 
 /// The eight bytes a summary file starts with.
@@ -262,6 +262,178 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
 /// Every failure is a [`DecodeError`] and not a partially built summary: the contract in the module
 /// documentation is that bytes which do not parse are rejected, and the way to keep that contract is to have no
 /// path that returns `Ok` with a field left at its default.
+/// Write a **translation unit's timeline** as bytes.
+///
+/// The second format in this module, and it lives here rather than beside its type because the two share the
+/// magic number, the codec version and every reader and writer below: two cache files with two private readers is
+/// two places for a length to be written one way and read another.
+///
+/// What is here is the whole walk — every macro fact in translation order with the frame it was written in, and
+/// every frame with where it was entered and what it contains — because that is what makes a file's environment
+/// answerable without walking anything. `entered` is **not** written: it is the first frame per file, which the
+/// frames already say.
+///
+/// A caller does not encode a timeline it has not validated: see [`crate::index::store`], where the entry carries
+/// the closure's content hashes and is refused when one of them moved.
+pub fn encode_translation_unit(unit: &TranslationUnit, closure: &[(std::path::PathBuf, u64)]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(64 + unit.events.len() * 24);
+
+    out.extend_from_slice(MAGIC);
+    put_u32(&mut out, CODEC_VERSION);
+    put_u32(&mut out, crate::FORMAT_VERSION);
+    put_u64(&mut out, crate::READING_FINGERPRINT);
+    // **The closure, and the content hash of every file in it.** This is what makes an entry checkable: a decode
+    // is only as good as the claim that these files still say what they said, and the caller re-checks that claim
+    // against the filesystem — see `crate::tu_cache`. Without it a cache would serve the macros of a header
+    // somebody has edited, which is the failure mode clang's dependency scanner removed a shared `FileManager`
+    // over.
+    put_u32(&mut out, closure.len() as u32);
+    for (path, hash) in closure {
+        put_path(&mut out, path);
+        put_u64(&mut out, *hash);
+    }
+
+    put_u32(&mut out, unit.conditional_facts as u32);
+    put_u32(&mut out, unit.facts_in_force as u32);
+
+    put_u32(&mut out, unit.frames.len() as u32);
+    for frame in &unit.frames {
+        put_path(&mut out, &frame.file);
+        match frame.parent {
+            Some(parent) => {
+                put_u8(&mut out, 1);
+                put_u32(&mut out, parent);
+            }
+            None => put_u8(&mut out, 0),
+        }
+        put_u64(&mut out, frame.from_in_parent as u64);
+        put_u32(&mut out, frame.entry_seq);
+        put_u32(&mut out, frame.tout);
+    }
+
+    put_u32(&mut out, unit.events.len() as u32);
+    for event in &unit.events {
+        put_str(&mut out, &event.name);
+        // Three states, not two: an `#undef` has no arity, and "nobody said" is not "object-like".
+        match event.function_like {
+            None => put_u8(&mut out, 0),
+            Some(false) => put_u8(&mut out, 1),
+            Some(true) => put_u8(&mut out, 2),
+        }
+        match event.body {
+            Some(body) => {
+                put_u8(&mut out, 1);
+                put_u8(&mut out, macro_body_code(body));
+            }
+            None => put_u8(&mut out, 0),
+        }
+        put_opt_str(&mut out, event.body_text.as_deref());
+        put_opt_str(&mut out, event.parameters.as_deref());
+        put_u32(&mut out, event.frame);
+        put_u64(&mut out, event.at as u64);
+        put_u8(&mut out, u8::from(event.unconditional));
+    }
+
+    out
+}
+
+/// Read a timeline written by [`encode_translation_unit`].
+pub fn decode_translation_unit(
+    bytes: &[u8],
+) -> Result<(TranslationUnit, Vec<(std::path::PathBuf, u64)>), DecodeError> {
+    let mut reader = Reader::new(bytes);
+    if reader.take(MAGIC.len())? != MAGIC {
+        return Err(DecodeError::NotASummary);
+    }
+    if reader.u32()? != CODEC_VERSION {
+        return Err(DecodeError::UnsupportedVersion);
+    }
+    if reader.u32()? != crate::FORMAT_VERSION {
+        return Err(DecodeError::UnsupportedVersion);
+    }
+    if reader.u64()? != crate::READING_FINGERPRINT {
+        return Err(DecodeError::UnsupportedVersion);
+    }
+
+    let mut closure = Vec::new();
+    for _ in 0..reader.count()? {
+        let path = reader.path()?;
+        closure.push((path, reader.u64()?));
+    }
+
+    let conditional_facts = reader.u32()? as usize;
+    let facts_in_force = reader.u32()? as usize;
+
+    let frame_count = reader.count()?;
+    let mut frames = Vec::with_capacity(frame_count);
+    for _ in 0..frame_count {
+        let file = reader.path()?;
+        let parent = match reader.u8()? {
+            0 => None,
+            1 => Some(reader.u32()?),
+            _ => return Err(DecodeError::BadDiscriminant),
+        };
+        frames.push(TuFrame {
+            file,
+            parent,
+            from_in_parent: reader.u64()? as usize,
+            entry_seq: reader.u32()?,
+            tout: reader.u32()?,
+        });
+    }
+
+    let event_count = reader.count()?;
+    let mut events = Vec::with_capacity(event_count);
+    for _ in 0..event_count {
+        let name: Box<str> = reader.string()?.into_boxed_str();
+        let function_like = match reader.u8()? {
+            0 => None,
+            1 => Some(false),
+            2 => Some(true),
+            _ => return Err(DecodeError::BadDiscriminant),
+        };
+        let body = match reader.u8()? {
+            0 => None,
+            1 => Some(macro_body_from(reader.u8()?)?),
+            _ => return Err(DecodeError::BadDiscriminant),
+        };
+        let body_text = reader.optional_string()?.map(std::sync::Arc::from);
+        let parameters = reader.optional_string()?.map(std::sync::Arc::from);
+        let frame = reader.u32()?;
+        let at = reader.u64()? as usize;
+        let unconditional = match reader.u8()? {
+            0 => false,
+            1 => true,
+            _ => return Err(DecodeError::BadDiscriminant),
+        };
+
+        // A frame id is an index into `frames`, and an event that names one that is not there is a corrupt file
+        // rather than an event to be dropped: every later view of this unit would index out of bounds.
+        if frame as usize >= frames.len() {
+            return Err(DecodeError::BadDiscriminant);
+        }
+
+        events.push(TuEvent {
+            name,
+            function_like,
+            body,
+            body_text,
+            parameters,
+            frame,
+            at,
+            unconditional,
+        });
+    }
+
+    if !reader.is_empty() {
+        return Err(DecodeError::TrailingBytes);
+    }
+
+    Ok((
+        TranslationUnit::from_parts(events, frames, conditional_facts, facts_in_force),
+        closure,
+    ))
+}
 pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
     let mut reader = Reader::new(bytes);
 

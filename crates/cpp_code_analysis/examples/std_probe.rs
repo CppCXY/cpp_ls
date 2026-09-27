@@ -100,6 +100,12 @@ fn main() {
         .position(|argument| argument == "--render-to")
         .and_then(|at| std::env::args().nth(at + 1))
         .map(PathBuf::from);
+    // `--tu-cache <dir>`: keep the translation unit's walk between runs, and reuse it while the closure is
+    // byte-for-byte the same (see `cpp_code_analysis::TranslationUnitCache` for the key and why it is the content).
+    let tu_cache: Option<cpp_code_analysis::TranslationUnitCache> = std::env::args()
+        .position(|argument| argument == "--tu-cache")
+        .and_then(|at| std::env::args().nth(at + 1))
+        .map(cpp_code_analysis::TranslationUnitCache::new);
 
     // **A real indexer, not the convenience `summarize`**: that one resolves no includes at all (`NoFiles`), so a
     // probe built on it seeds nothing and the whole positional experiment would be a silent no-op — which the
@@ -304,6 +310,17 @@ standard {}",
     let mut unusable_function_like = 0usize;
     let mut unusable_without_a_body = 0usize;
     let mut unusable_unreadable = 0usize;
+    // Where the cooked half of a census actually goes, split at the one boundary that matters: building the macro
+    // table out of the evidence, and cooking with it. `parse alone` covers both plus the walk, so without this
+    // split "the parse is slow" and "the table is slow" are the same sentence.
+    let mut table_time = std::time::Duration::ZERO;
+    let mut cook_time = std::time::Duration::ZERO;
+    // …and the other two halves of the same total: what it costs to *build a file's view* of the unit, and what
+    // the parse of the rendering costs. `parse alone` is one number over all four, and a number that size cannot
+    // say which of them to work on.
+    let mut evidence_time = std::time::Duration::ZERO;
+    let mut view_time = std::time::Duration::ZERO;
+    let mut parse_time = std::time::Duration::ZERO;
 
     // **The translation unit, walked once** — the census's whole cost model changed when this replaced the
     // per-file closure walk, and the printed numbers say by how much: building every file's environment by walking
@@ -312,10 +329,42 @@ standard {}",
     //
     // `--closure` selects it, so the two readings stay comparable — the old path is still there, and the day it is
     // deleted is the day the two censuses agree.
+    //
+    // **`--tu-cache <dir>` keeps it between runs** (see `cpp_code_analysis::TranslationUnitCache`): the entry is
+    // served while every file the walk entered still hashes the same, and the census prints which of the two
+    // happened — "the numbers are the same because nothing was re-walked" and "the numbers are the same because
+    // the walk agrees" are otherwise the same sentence.
+    let mut the_unit_came_from_the_cache = false;
     let timeline = (seeded && closure).then(|| {
         let started = std::time::Instant::now();
+        let root = paths[0].clone();
+        // The key is the **compilation**: the list the corpus was read from, the standard, and the directories that
+        // were searched. A different key is a different unit, and the two entries never overwrite each other.
+        let key = cpp_code_analysis::fnv1a64(
+            format!(
+                "{}|{}|{}",
+                root.display(),
+                standard.as_deref().unwrap_or(""),
+                directories
+                    .iter()
+                    .map(|directory| directory.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(";")
+            )
+            .as_bytes(),
+        );
+        let files = cpp_code_analysis::DiskFiles;
+
+        if let Some(cache) = tu_cache.as_ref()
+            && let Some(unit) = cache.get(&root, key, &files)
+        {
+            seeding_time += started.elapsed();
+            the_unit_came_from_the_cache = true;
+            return unit;
+        }
+
         let unit = cpp_code_analysis::TranslationUnit::walk(
-            summaries.get(&paths[0]).expect("the list's first file was indexed"),
+            summaries.get(&root).expect("the list's first file was indexed"),
             |wanted| {
                 summaries.get(wanted).map(|summary| {
                     (summary, definition_sources.get(wanted).map(String::as_str).unwrap_or(""))
@@ -325,6 +374,10 @@ standard {}",
             &mut macro_definitions,
         );
         seeding_time += started.elapsed();
+
+        if let Some(cache) = tu_cache.as_ref() {
+            let _ = cache.put(&root, key, &unit, &files);
+        }
         unit
     });
     if let Some(unit) = timeline.as_ref() {
@@ -357,7 +410,9 @@ standard {}",
         let environment = if !seeded {
             None
         } else if let Some(unit) = timeline.as_ref() {
+            let building_the_view = std::time::Instant::now();
             let view = unit.environment_of(path);
+            view_time += building_the_view.elapsed();
             in_the_unit = view.is_some();
             if view.is_some() {
                 files_with_context += 1;
@@ -485,10 +540,12 @@ standard {}",
         // window describe a stream the parser never saw.
         let rendered = if cooked_mode {
             let (tokens, _) = cpp_parser::lex(&source, &lexer_config);
+            let converting = std::time::Instant::now();
             let configuration = match &environment {
                 Some(environment) => cpp_code_analysis::configuration_from_environment_with(environment, !without_in_force_bodies),
                 None => cpp_code_analysis::Configuration::default(),
             };
+            evidence_time += converting.elapsed();
             // **What the compilation starts with, then what the closure adds** — and the first half was missing.
             //
             // The seed (`Marked`) is what every `#ifdef` in the *walk* is answered against, and it holds the
@@ -503,6 +560,10 @@ standard {}",
             // The order is the one that makes the closure win: the builtins are defined **first**, at offset 0,
             // and a definition the closure carries shadows them for the same name — a header that redefines a
             // builtin is in force over it.
+            // A timer of its own: the loop's `started` is the whole run, and reusing it here measured the run
+            // rather than the table (296 s of "table building" inside a 7 s census — the number was impossible,
+            // which is the only reason the mistake was visible at all).
+            let building_the_table = std::time::Instant::now();
             let mut initial = cpp_code_analysis::MacroTable::new();
             for name in seed.defined_names() {
                 if let Some(definition) = seed.get(&name) {
@@ -512,6 +573,8 @@ standard {}",
             for definition in configuration.table.iter() {
                 initial.define(definition.clone());
             }
+            let built_the_table = building_the_table.elapsed();
+
             // What the table **could not** take from the evidence, summed over the corpus. These are the reasons a
             // name stayed a name, and without them a census can only say "the macro did not expand" — which is the
             // same sentence for "the evidence has no body", "the body has no parameter list" and "the evidence was
@@ -520,18 +583,25 @@ standard {}",
             unusable_function_like += configuration.function_like_without_parameters;
             unusable_without_a_body += configuration.without_a_body;
             unusable_unreadable += configuration.unreadable;
-            Some(cpp_code_analysis::cook_with(&source, &tokens, &initial).render())
+
+            let rendering = cpp_code_analysis::cook_with(&source, &tokens, &initial).render();
+            table_time += built_the_table;
+            cook_time += building_the_table.elapsed() - built_the_table;
+            Some(rendering)
         } else {
             None
         };
 
         let (tree, audit) = match &rendered {
             Some(rendered) => {
+                let parsing = std::time::Instant::now();
                 rendered_bytes += rendered.text.len();
                 if rendered.text.trim().is_empty() {
                     rendered_to_nothing += 1;
                 }
-                cpp_parser::CppParser::parse_with_audit(&rendered.text, parser_config())
+                let tree = cpp_parser::CppParser::parse_with_audit(&rendered.text, parser_config());
+                parse_time += parsing.elapsed();
+                tree
             }
             None => cpp_parser::CppParser::parse_with_audit(&source, raw_config),
         };
@@ -742,8 +812,9 @@ built in {seeding_time:?}\n\
          conditional facts met {conditional_asked} | branches in force {conditional_taken} | bodies in force \
 {bodies_in_force} (no toolchain means none can be answered)\n\
          read inside an includer {files_with_context} files (the translation unit's half of the environment)\n\
+         cooked: evidence {evidence_time:?} | macro table {table_time:?} | expansion {cook_time:?} | view {view_time:?} | parse {parse_time:?}\n\
          rendering: {rendered_to_nothing} of {} files rendered to nothing (whitespace only) | {rendered_bytes} bytes \
-of rendering for {total_bytes} of text{}\n\
+of rendering for {total_bytes} of text{}{}\n\
          table: left out — bodies in force without a parameter list {unusable_in_force} | function-like definitions \
 without one {unusable_function_like} | definitions without a body {unusable_without_a_body} | unreadable \
 definitions {unusable_unreadable}\n\
@@ -764,6 +835,19 @@ over the files | busiest file {busiest_questions}",
         // are told apart by this and by nothing else — see `rendered_to_nothing`.
         if cooked_mode && rendered_to_nothing > 0 {
             "  ← an empty rendering has no errors: those files were dropped, not read"
+        } else {
+            ""
+        },
+        // **Where the unit came from**, beside the reading: a cached run and a walked run print the same numbers by
+        // design, so "nothing was re-walked" is the only thing that tells a cache measurement from a real one.
+        if seeded && closure {
+            if the_unit_came_from_the_cache {
+                "  · the translation unit came **from the cache** (nothing was walked)"
+            } else if tu_cache.is_some() {
+                "  · the translation unit was **walked** and kept"
+            } else {
+                ""
+            }
         } else {
             ""
         },

@@ -42,12 +42,19 @@
 /// See the module documentation for what is and is not recorded.
 #[derive(Debug, Default, Clone)]
 pub struct TypeNames {
-    /// `(name, depth)`, in declaration order, appended and never removed.
+    /// The **most recent** declaration of each name, and the depth it was written at.
     ///
-    /// A `Vec` rather than a set because the depth has to be compared at lookup time, and because a file
-    /// declares far fewer types than it writes tokens: a linear scan from the end is cheaper than hashing and
-    /// finds the most recent declaration first, which is the one that shadows.
-    bindings: Vec<(Box<str>, usize)>,
+    /// A map rather than the `Vec` of every binding this used to be, and the change is a **cost** fix with no
+    /// semantic change. The lookup always wanted the last binding of a name and then compared its depth, so the
+    /// earlier bindings were unreachable — the old field's own note said so ("the scan looks from the end, so the
+    /// earliest is simply never reached") while the scan still walked them all on every query. That made the
+    /// parse cost grow with the *file*: `zmmintrin.h`'s rendering measured 0.29 ms/KB at 30 KB and 1.17 ms/KB at
+    /// 244 KB, and the same text with a different number of declarations per token moved the number — a lookup
+    /// that scans the history is O(names) per question, and the questions are asked once per declarator.
+    ///
+    /// The cap below makes it a quadratic with a ceiling rather than an unbounded one, which is why the growth
+    /// flattens instead of exploding — and why it stays invisible on small files and in tests.
+    bindings: std::collections::HashMap<Box<str>, usize>,
     /// How many braced bodies are open. See the module documentation for what this approximates.
     depth: usize,
 }
@@ -59,34 +66,35 @@ impl TypeNames {
 
     /// Record that `name` was declared to be a type at the current depth.
     ///
-    /// Duplicates are kept: a redeclaration is common (`class Widget;` then `class Widget { ... };`), and the
-    /// scan looks from the end, so the earliest is simply never reached.
+    /// A **redeclaration replaces** the entry, which is exactly what the old append-and-scan-from-the-end
+    /// computed: the latest binding is the one that answers. `class Widget;` followed by `class Widget { … };`
+    /// therefore ends with the depth of the second, which is the one in force where the name is used next.
     pub fn declare(&mut self, name: &str) {
         // A guard against a pathological file turning the table into a memory problem. `MAX_DEPTH` and the
         // other budgets in this crate exist for the same reason: an editor parses whatever is in the buffer.
         const MAX_NAMES: usize = 4096;
 
-        if self.bindings.len() >= MAX_NAMES {
+        if self.bindings.len() >= MAX_NAMES && !self.bindings.contains_key(name) {
             return;
         }
 
-        self.bindings.push((name.into(), self.depth));
+        self.bindings.insert(name.into(), self.depth);
     }
 
     /// Is `name` a type name visible where the cursor is?
     ///
     /// Visible means declared at this depth or any shallower one, which is the approximation the module
-    /// documentation describes. The **most recent** matching declaration decides, so a name redeclared as
-    /// something else — which this table cannot represent, since it records nothing else — keeps its answer.
+    /// documentation describes.
     pub fn is_a_type(&self, name: &str) -> bool {
         self.bindings
-            .iter()
-            .rev()
-            .find(|(bound, _)| &**bound == name)
-            .is_some_and(|(_, declared_at)| *declared_at <= self.depth)
+            .get(name)
+            .is_some_and(|declared_at| *declared_at <= self.depth)
     }
 
-    /// How many names are recorded, for tests and for a consumer auditing the table.
+    /// How many **names** are recorded, for tests and for a consumer auditing the table.
+    ///
+    /// Distinct names, not declarations: the table holds one entry per name by construction, and the number is
+    /// what the cap above bounds.
     pub fn len(&self) -> usize {
         self.bindings.len()
     }

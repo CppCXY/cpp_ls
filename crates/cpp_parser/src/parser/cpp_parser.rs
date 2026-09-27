@@ -40,7 +40,12 @@ pub struct Checkpoint {
     /// Parser state like the two above, and restored for the same reason: a speculative region parses its own
     /// declaration, and whether *that* one's type was qualified must not leak back into the enclosing one.
     declaration_type_is_qualified: bool,
-    /// How many diagnostics had been reported when the checkpoint was taken.
+    /// How long [`CppParser`]'s closed-marks journal was when the checkpoint was taken.
+    ///
+    /// The one piece of bookkeeping that is neither an event nor a token: a rollback has to forget the markers
+    /// closed since, and this is what names them — see the journal's own note for the measurement that made the
+    /// difference between a linear parse and a quadratic one.
+    closed_marks_journal_len: usize,    /// How many diagnostics had been reported when the checkpoint was taken.
     ///
     /// The fourth piece of state that is not in the event stream, and the one that is easiest to miss because it
     /// is not *parse* state at all: a reading that is tried and rewound reported its problems on the way, and a
@@ -209,6 +214,19 @@ pub struct CppParser<'a> {
     /// `complete()` and owe that event. Collapsing the two into one set is what makes the event
     /// stream go unbalanced in ways that are invisible in the tree.
     closed_marks: std::collections::HashMap<usize, bool>,
+    /// The positions in [`CppParser::closed_marks`], **in the order they were first closed**.
+    ///
+    /// What makes a rollback proportional to the work it undoes instead of to the file. `rollback` has to forget
+    /// every marker closed at or past the checkpoint, and it used to do that by *scanning the whole map*
+    /// (`closed_marks.retain(...)`) — which is O(nodes so far), once per speculative attempt, and there is a
+    /// speculative attempt per declaration. Measured on a rendering of `zmmintrin.h`: 0.29 ms/KB at 30 KB against
+    /// 1.17 ms/KB at 244 KB, and a file of repeated `int f ( int a ) ;` grew the same way — the shape of a parse
+    /// whose cost is the square of the file.
+    ///
+    /// The journal's tail past a checkpoint **is** the set to forget: an entry appears here exactly when its
+    /// marker is closed, so truncating this list to the checkpoint's length names every position that was closed
+    /// since — and removing those from the map is precisely what the scan computed.
+    closed_marks_journal: Vec<usize>,
     /// How many template argument lists the cursor is inside, syntactically.
     ///
     /// Inside one, `>` closes the list rather than comparing: `Vec<A<B>>`, `Vec<1, 2>`. The
@@ -414,6 +432,8 @@ impl MarkerEventContainer for CppParser<'_> {
             std::collections::hash_map::Entry::Occupied(_) => false,
             std::collections::hash_map::Entry::Vacant(slot) => {
                 slot.insert(want_event);
+                // …and the journal, so that a rollback can undo exactly this insertion without scanning the map.
+                self.closed_marks_journal.push(position);
                 if want_event {
                     self.events.push(MarkEvent::NodeEnd);
                 }
@@ -483,6 +503,7 @@ impl<'a> CppParser<'a> {
             current_token: CppTokenKind::None,
             open_marks: Vec::new(),
             closed_marks: std::collections::HashMap::new(),
+            closed_marks_journal: Vec::new(),
             template_argument_depth: 0,
             constraint_depth: 0,
             a_template_id_may_be_the_name: false,
@@ -651,6 +672,7 @@ impl<'a> CppParser<'a> {
             declaration_type_is_qualified: self.declaration_type_is_qualified,
             errors_len: self.errors.len(),
             terminator_came_from_a_branch: self.terminator_came_from_a_branch,
+            closed_marks_journal_len: self.closed_marks_journal.len(),
         }
     }
 
@@ -672,7 +694,12 @@ impl<'a> CppParser<'a> {
         // Positions at or past the truncation point are gone from the event stream, so their
         // "already closed" bookkeeping must go too — otherwise a future marker reusing the same
         // position would be considered closed and its `NodeEnd` silently skipped.
-        self.closed_marks.retain(|p, _| *p < checkpoint.events_len);
+        for position in self
+            .closed_marks_journal
+            .split_off(checkpoint.closed_marks_journal_len)
+        {
+            self.closed_marks.remove(&position);
+        }
         self.declaration_type_name = checkpoint.declaration_type_name;
         self.previous_declaration_type_name = checkpoint.previous_declaration_type_name;
         self.declaration_type_is_qualified = checkpoint.declaration_type_is_qualified;
