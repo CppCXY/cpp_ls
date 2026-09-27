@@ -291,6 +291,17 @@ impl<F: FileProvider> SummaryStore<F> {
         &self.index
     }
 
+    /// The index, for a caller that **read a file and has something to add to it** — the cooked reading
+    /// ([`crate::Session::cook`]).
+    ///
+    /// Narrow on purpose, and the store is still the owner: what a caller may do here is say what one file was
+    /// read *as*, not replace the index or re-key the summaries. Everything the store derives from the summaries
+    /// (the include graph, the visibility memo) is recomputed by the index's own `insert`, so a caller cannot get
+    /// that half out of step by forgetting it.
+    pub fn index_mut(&mut self) -> &mut ProjectIndex {
+        &mut self.index
+    }
+
     /// The configuration every summary in this store is keyed against.
     ///
     /// Exposed because a caller cannot always reconstruct it: the watcher asks which files would search a given

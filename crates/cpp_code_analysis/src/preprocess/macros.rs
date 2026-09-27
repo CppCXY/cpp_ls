@@ -274,6 +274,25 @@ impl MacroTable {
         Self::default()
     }
 
+    /// **What the compilation itself defines**, as a table: the compiler's predefined names and the command line's
+    /// `-D`s, each in force from offset 0.
+    ///
+    /// `Marked` is the state every summary's *conditions* were evaluated against, and this is that state as a
+    /// cook's starting layer — so a cook and a summary cannot disagree about `#ifdef _WIN32`. The two types answer
+    /// different questions (`Marked`: is this name defined, and does anybody know; a table: what does it expand to),
+    /// and this is the one-way door between them: a name `Marked` holds a **body** for becomes a binding, and one it
+    /// only knows the *definedness* of is left out — a name with no replacement list expands to nothing, which is
+    /// not something a table can paste.
+    pub fn from_marked(marked: &crate::Marked) -> Self {
+        let mut table = MacroTable::new();
+        for name in marked.defined_names() {
+            if let Some(definition) = marked.get(&name) {
+                table.define(definition.clone());
+            }
+        }
+        table
+    }
+
     /// Remember where a name's newest binding is.
     fn index(&mut self, name: &str) {
         let index = (self.bindings.len() - 1) as u32;

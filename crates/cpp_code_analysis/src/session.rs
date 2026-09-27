@@ -88,8 +88,11 @@ use crate::index::worklist::StepOutcome;
 use crate::index::watch::{ChangeBatch, FileEvent, Response, WatchFilter};
 use crate::index::worklist::{Priority, Step, outcome_of};
 use crate::index::{
-    definition_across_files, macro_across_files, member_completions_at, members_of, name_completions_at,
+    FileIndexer, definition_across_files, macro_across_files, member_completions_at, members_of,
+    name_completions_at,
 };
+use crate::macros::MacroTable;
+use crate::cache::SummaryKey;
 use crate::project::{ConfigReport, ProjectDiscovery};
 use crate::file::vfs::Vfs;
 use crate::symbol::{Known, UnknownReason};
@@ -272,7 +275,8 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// event interesting" and "is this file part of the project" — have one answer, and the cache directory is the
     /// case that makes that concrete: it is not project source and it is not an event anybody wants.
     filter: WatchFilter,
-    /// What the project scan found, so that a configuration change can re-seed from it.
+
+/// What the project scan found, so that a configuration change can re-seed from it.
     project: Vec<PathBuf>,
     queue: Work,
     /// The files this session has **parsed** since the last body pass — the candidates for
@@ -283,6 +287,16 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// only the chunk that happened to drain the queue is what left MSVC's `<xstring>` and `<vector>` — both read in
     /// the first chunk, both scoped by a macro body defined in a later one — reading at file scope for ever.
     parsed_since_the_last_pass: Vec<PathBuf>,
+    /// **The open files whose cooked reading is missing or stale** — what [`Session::cook`] is called for when the
+    /// queue drains.
+    ///
+    /// A list rather than "all open files, every time", for two reasons that are both about cost: a drain happens
+    /// after every keystroke, and re-cooking a file whose text did not change is a unit walk and a parse for an
+    /// answer the index already holds. A file joins this when a buffer changes ([`Session::did_change`] and
+    /// friends) and when it is opened, because those are the two moments its reading can be out of date — a file
+    /// whose summary came from the **disk cache** was never parsed in this run, so nothing else would notice that it
+    /// has no cooked reading at all.
+    cooked_wanted: Vec<PathBuf>,
 }
 
 impl Session<DiskFiles> {
@@ -504,6 +518,7 @@ impl<F: FileProvider + Clone> Session<F> {
             project,
             queue: Work::default(),
             parsed_since_the_last_pass: Vec::new(),
+            cooked_wanted: Vec::new(),
         };
 
         // The scan is the queue's **seed**, not a list to consult later: opening a project is the caller saying
@@ -713,8 +728,19 @@ impl<F: FileProvider + Clone> Session<F> {
     fn buffer_changed(&mut self, path: &Path, text: &str) {
         self.documents.open(path, text);
         self.vfs.insert(path, text, true);
+        // Drops the summary **and the cooked reading**: what this file was read *as* is no longer what it is, and a
+        // declaration whose range points into the text the user just replaced is a wrong answer rather than a
+        // missing one. The reading is rebuilt when the queue drains — see `cooked_wanted`.
         self.store.forget(path);
+        self.want_a_cooked_reading(path);
         self.queue.again(path.to_path_buf(), Priority::Open, 0);
+    }
+
+    /// Remember that `path` needs its cooked reading (re)built, once.
+    fn want_a_cooked_reading(&mut self, path: &Path) {
+        if !self.cooked_wanted.iter().any(|held| held == path) {
+            self.cooked_wanted.push(path.to_path_buf());
+        }
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -798,6 +824,16 @@ impl<F: FileProvider + Clone> Session<F> {
             self.store.re_read_where_a_body_decides(&parsed);
         }
 
+        // **And the files whose cooked reading is out of date**, now that their environments are complete: a file's
+        // macros are the ones its includes brought in, and the queue emptying is the first moment that is true. This
+        // is the product's only caller of the cooked reading — every declaration query picks it up from the index,
+        // and the files are the ones a reader has open or has just edited.
+        if self.is_idle() && !self.cooked_wanted.is_empty() {
+            for path in std::mem::take(&mut self.cooked_wanted) {
+                self.cook(&path);
+            }
+        }
+
         done
     }
 
@@ -877,6 +913,149 @@ impl<F: FileProvider + Clone> Session<F> {
     /// as facts.
     pub fn files(&self) -> &Vfs<SessionFiles<F>> {
         &self.vfs
+    }
+
+    /// **Read a file the way a compiler reads it**, and let the index answer for what came out.
+    ///
+    /// One call that is the whole foundation, in the order the layers were built: walk the file's own translation
+    /// unit ([`crate::TranslationUnit::walk`], over the summaries the index already holds and the text this session
+    /// is holding), read the unit's definitions once, cook the file against **its** environment
+    /// ([`crate::FileMacros`]) and the compilation's own definitions ([`MacroTable::from_marked`]), render, index
+    /// the rendering and map every range back into the file ([`crate::FileIndexer::index_rendering`]), and hand the
+    /// declarations to the index ([`crate::ProjectIndex::insert_cooked`]).
+    ///
+    /// # Why it is worth doing, and when
+    ///
+    /// The raw reading — the file's own text — cannot see what a macro declares, and it cannot see the *scope* a
+    /// namespace-opening macro puts a declaration in: MSVC's `_STD_BEGIN` is `namespace std {` in `yvals_core.h`,
+    /// so every declaration in `<string>` is `std::`-qualified to a compiler and at file scope to a reader. Measured
+    /// on the 255-file SDK corpus, 3 250 declaration names exist **only** after expansion, and the index answers for
+    /// 4 of 40 sampled ones before this call and 40 of 40 after.
+    ///
+    /// It is **not free** (a unit walk plus a parse of the rendering per file), so the session does it for the files
+    /// a reader is actually looking at, at the moment its queue drains: [`Session::cook_the_open_files`] is what the
+    /// indexing loop calls, and this is what a caller that wants one file cooked says.
+    ///
+    /// `None` when the file has no summary or no text — nothing has read it yet, which is a state and not an error.
+    pub fn cook(&mut self, path: impl AsRef<Path>) -> Option<CookedReading> {
+        let path = path.as_ref().to_path_buf();
+        let key = SummaryKey::new(0, self.store.context_hash(&path));
+
+        // What the file's own text already declares — the names the cooked reading adds are the ones missing here.
+        let already_declared: std::collections::HashSet<String> = self
+            .store
+            .index()
+            .summary(&path)
+            .into_iter()
+            .flat_map(|summary| summary.declarations.iter())
+            .map(crate::DeclFact::qualified_name)
+            .collect();
+
+        // **The closure, with its text**, from the index and the buffers: the walk reads a file's includes, so it
+        // needs the same edge set the visibility walk uses, and one read per file rather than one per edge.
+        let closure = self.closure_with_text(&path);
+        let text = closure
+            .iter()
+            .find(|(held, _)| held == &path)
+            .map(|(_, text)| text.clone())?;
+
+        let unit = {
+            let index = self.store.index();
+            let root = index.summary(&path)?;
+            let mut definitions = crate::MacroDefinitions::default();
+            crate::TranslationUnit::walk(
+                root,
+                |wanted| {
+                    closure
+                        .iter()
+                        .find(|(held, _)| held == wanted)
+                        .and_then(|(held, text)| Some((index.summary(held)?, text.as_str())))
+                },
+                index.macros(),
+                &mut definitions,
+            )
+        };
+
+        let seed = MacroTable::from_marked(self.store.index().macros());
+        let (tokens, _) = cpp_parser::lex(&text, &cpp_parser::LexerConfig::default());
+        let unit_definitions = unit.definitions();
+        let macros = crate::preprocess::cooked::FileMacros::new(
+            unit.environment_of(&path)?,
+            &unit_definitions,
+            Some(&seed),
+            true,
+        );
+        let rendered = crate::preprocess::cooked::cook_with(&text, &tokens, &macros).render();
+
+        let indexer = FileIndexer::new(&self.files, &self.config);
+        let (summary, mapped) = indexer.index_rendering(&path, &rendered, key);
+        let reading = CookedReading {
+            declarations: summary.declarations.len(),
+            only_after_expansion: summary
+                .declarations
+                .iter()
+                .filter(|fact| !already_declared.contains(&fact.qualified_name()))
+                .count(),
+            mapped,
+        };
+
+        self.store
+            .index_mut()
+            .insert_cooked(&path, summary.declarations);
+        Some(reading)
+    }
+
+    /// Cook every **open** file — what the indexing loop does when its queue drains.
+    ///
+    /// The moment is the point: a file's environment is only complete once everything it includes has been read, and
+    /// "the queue is empty" is exactly that moment. The files are the open ones because those are what a reader is
+    /// looking at, and cooking costs a unit walk and a parse per file.
+    ///
+    /// Returns what each file read as, for a caller that reports it.
+    pub fn cook_the_open_files(&mut self) -> Vec<(PathBuf, CookedReading)> {
+        let open = self.documents.paths();
+        let mut done = Vec::new();
+        for path in open {
+            if let Some(reading) = self.cook(&path) {
+                done.push((path, reading));
+            }
+        }
+        done
+    }
+
+    /// The closure of `path` **with the text of each file**, in the order the graph is walked.
+    ///
+    /// Read from the index's own edges, so it is the same closure the visibility answers use, and through this
+    /// session's overlay, so an unsaved buffer is what gets cooked. One entry per file, and a file whose text this
+    /// session cannot get is left out — the walk then treats it as a file that defines nothing, which is what an
+    /// unreadable include is.
+    fn closure_with_text(&self, root: &Path) -> Vec<(PathBuf, String)> {
+        let mut out: Vec<(PathBuf, String)> = Vec::new();
+        let mut seen: Vec<PathBuf> = Vec::new();
+        let mut queue: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::new();
+        queue.push_back(root.to_path_buf());
+
+        while let Some(path) = queue.pop_front() {
+            if seen.contains(&path) {
+                continue;
+            }
+            seen.push(path.clone());
+
+            let Some(text) = self.text(&path) else {
+                continue;
+            };
+            out.push((path.clone(), text));
+
+            if let Some(summary) = self.store.index().summary(&path) {
+                for include in &summary.includes {
+                    if let Some(resolved) = &include.resolved {
+                        queue.push_back(resolved.clone());
+                    }
+                }
+            }
+        }
+
+        out
     }
 
     /// Which declaration the name at `offset` means, using this file's scopes and then the index.
@@ -962,6 +1141,21 @@ impl<F: FileProvider + Clone> Session<F> {
             written_type,
         )
     }
+}
+
+/// **What reading a file the way a compiler reads it produced** — see [`Session::cook`].
+///
+/// Three numbers rather than a summary, because the summary has already gone where it belongs: the index holds the
+/// declarations (that is the point of the call), and what a caller — a status line, a test, a log — wants to know is
+/// whether the reading found anything the file's own text did not, and whether every range could be placed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CookedReading {
+    /// How many declarations the cooked reading found.
+    pub declarations: usize,
+    /// How many of them the file's own text does not declare — the names that exist only after expansion.
+    pub only_after_expansion: usize,
+    /// How the ranges mapped back into the file; see [`crate::MapReport`].
+    pub mapped: crate::MapReport,
 }
 
 /// The queue, and what each path in it is doing there.
@@ -1315,6 +1509,80 @@ mod tests {
     // -------------------------------------------------------------------------------------------
     // The buffer is the text
     // -------------------------------------------------------------------------------------------
+
+    /// **A declaration only a macro makes becomes one this session answers for**, once its queue drains.
+    ///
+    /// `DECLARE_HANDLE(HWND)` declares `HWND__` and `HWND` to a compiler and *nothing* to a reader of the file's own
+    /// text: the declaration is inside the macro's replacement list, and the invocation is not a declaration. So the
+    /// index has no `HWND__` before the file is cooked and has one after — which is the whole reason the reading
+    /// exists.
+    ///
+    /// (The other half of what cooking buys — the *scope* a namespace-opening macro puts a declaration in — is
+    /// already handled by the raw reading when the indexer is given the closure's macro bodies: `BEGIN_NS` is
+    /// `namespace ns {` to the parser and a declaration inside it is scoped correctly. That is B121/B131, and it is
+    /// why this test is about a declaration the file does not write at all rather than about one it writes.)
+    #[test]
+    fn a_declaration_only_a_macro_makes_is_found_once_the_session_has_cooked_the_file() {
+        let handle = "#define DECLARE_HANDLE(name) struct name##__ { int unused; }; \
+                      typedef struct name##__ *name\n";
+        let source = "#include \"handle.h\"\nDECLARE_HANDLE(HWND);\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/handle.h", handle)
+            .with_file("/p/api.h", source);
+        let fixture = Memory::new("cooked-reading-is-indexed", &files);
+        let mut session = fixture.session();
+
+        session.did_open("/p/api.h", source);
+
+        // **One step**: `api.h` is read and its include is queued, so the queue is *not* empty — and a file whose
+        // includes have not been read has an environment that is not complete, which is why nothing is cooked yet.
+        session.advance(1);
+        let before = session.index().definition("HWND__", Path::new("/p/api.h"));
+        assert!(
+            matches!(before, Known::Unknown(_)),
+            "the file's own text does not declare what the macro declares: {before:?}"
+        );
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/api.h"))
+                .is_none(),
+            "and nothing has cooked it yet"
+        );
+
+        // **Drain**: the queue emptying is the moment a file's environment is complete, and that is where the
+        // session cooks the files a reader is looking at. No caller asked for this — it is the indexing loop's own
+        // last step.
+        session.index_everything();
+
+        let after = session.index().definition("HWND__", Path::new("/p/api.h"));
+        let Known::Yes(found) = after else {
+            panic!("the cooked reading declares it: {after:?}");
+        };
+        assert_eq!(found.file, Path::new("/p/api.h"));
+        let at = found.fact.range;
+        let written = &source[at.start_offset..at.end_offset()];
+        assert!(
+            written.contains("DECLARE_HANDLE"),
+            "the declaration is reported at the invocation: {written:?}"
+        );
+
+        // What the cook reported about itself, asked for explicitly so the numbers are part of the test: the file
+        // was already cooked once by the drain, and cooking it again reads the same thing.
+        let cooked = session.cook_the_open_files();
+        assert_eq!(cooked.len(), 1, "api.h is the open file");
+        let (path, reading) = &cooked[0];
+        assert_eq!(path, Path::new("/p/api.h"));
+        assert!(
+            reading.declarations >= 2,
+            "the struct, its member and the typedef are declarations here: {reading:?}"
+        );
+        assert!(
+            reading.only_after_expansion >= 2,
+            "`HWND__` and `HWND` exist only after expansion: {reading:?}"
+        );
+        assert_eq!(reading.mapped.dropped, 0, "every range landed in the file");
+    }
 
     #[test]
     fn a_buffer_is_the_text_the_analysis_reads() {

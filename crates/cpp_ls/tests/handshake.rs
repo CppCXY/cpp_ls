@@ -515,3 +515,79 @@ fn read_messages(stdout: impl Read, tx: std::sync::mpsc::Sender<Value>) {
         }
     }
 }
+
+/// The macro-declared type: the declaration is inside `DECLARE_HANDLE`'s replacement list, and `HWND h;` is a use
+/// of the name it makes.
+const HANDLE_H: &str = "#define DECLARE_HANDLE(name) struct name##__ { int unused; }; \
+                        typedef struct name##__ *name\n";
+const API_CPP: &str = "#include \"handle.h\"\nDECLARE_HANDLE(HWND);\nHWND h;\n";
+
+/// **A declaration a macro makes is a declaration this server answers for.**
+///
+/// `DECLARE_HANDLE(HWND)` declares `HWND__` and `HWND` to a compiler and *nothing* to a reader of `api.cpp`: the
+/// declaration is inside the replacement list, in a header the file includes. The index has it only because the
+/// session reads the file a **second way** — cooked, through the translation unit that brings the macro in
+/// (`Session::cook`, run by the indexing loop when its queue drains), with every range mapped back into the file.
+///
+/// Over the wire the difference is one jump that works, and the assertion is deliberately about the *range* rather
+/// than only about the file: a definition of `HWND` that the raw reading had found would point at the text
+/// `DECLARE_HANDLE(HWND)` writes — the argument of the invocation — while the cooked reading reports the
+/// declaration at the **invocation** it came out of, which is the place a reader can act on.
+#[test]
+fn a_declaration_a_macro_makes_is_found_over_the_wire() {
+    let project = Project::new("macro-declared");
+    project.write("handle.h", HANDLE_H);
+    project.write("api.cpp", API_CPP);
+
+    let mut server = Server::start(project.root());
+    let api_uri = uri_of(&project.root().join("api.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": api_uri, "languageId": "cpp", "version": 1, "text": API_CPP }
+        }),
+    );
+
+    // `HWND h;` is the third line, and the name starts it.
+    let location = server.ask_until(100, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": { "uri": api_uri },
+                "position": { "line": 2, "character": 1 },
+            },
+        })
+    });
+
+    let found = &location["result"];
+    let found_uri = found["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a definition was expected, got {location}"));
+    assert!(
+        found_uri.ends_with("api.cpp"),
+        "the declaration the macro made belongs to the file that invoked it: {location}"
+    );
+    assert_eq!(
+        found["range"]["start"]["line"],
+        json!(1),
+        "and it is reported at the invocation: {location}"
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}

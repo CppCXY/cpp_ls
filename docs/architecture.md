@@ -1162,6 +1162,44 @@ the cooked index: declarations 4820 raw / 4062 cooked | +3250 only after expansi
 **下一次**(第 2 项收尾 + 第 3 项):把 `index_rendering` 接进 LSP 的会话(开一个文件:建 TU → 熟读本文 →
 `insert_cooked`,文件改动时 `forget`/重来),以及 M4(裸 CST 降级)。
 
+### 接进 LSP(已落地):会话自己把打开的文件熟读一遍
+
+`Session::cook(path)` 就是整条地基的一次调用,顺序就是它被造出来的顺序:走这个文件自己的 TU
+(`TranslationUnit::walk`,吃索引里的 summary + 会话持有的正文)→ 读一次单元的定义 → 用**它自己的环境**
+(`FileMacros`)加**编译自己的定义**(`MacroTable::from_marked`)熟读 → 渲染 → 索引渲染并把每个 range 映射回文件
+(`FileIndexer::index_rendering`)→ 声明交给索引(`ProjectIndex::insert_cooked`)。
+
+**什么时候做**:队列**排空**的那一刻(`Session::advance` 里 `is_idle()` 分支),对象是"读过但熟读过期"的打开文件
+——`cooked_wanted` 这张小表在**缓冲区变化**时被填(`did_change`/`did_open`/`did_save`)、在 `did_close` 时被清。
+三条理由,每条都有具体后果:
+
+1. **环境必须完整**:一个文件能用的宏是它的 include 带进来的,而"队列空了"是它第一次成立;
+2. **只做变化过的**:一次 drain 跟着一次按键,重熟读一个没变的文件是白走一次 TU + 一次索引;
+3. **缓存命中也得做**:一次热启动里 summary 来自磁盘缓存、这个进程从没解析过它,只有"打开"这条记录能说明
+   它还没有熟读那一份——最初的实现挂在"这一批解析过的文件"上,于是**热启动永远不熟读**,而 LSP 大多数时间
+   就在热启动里。
+
+**失效是同步的**:`buffer_changed` 先 `store.forget(path)`(summary **和**熟读声明一起丢),再登记重做。留着旧的
+熟读声明比没有更糟:它的 range 指向用户刚刚替换掉的正文,跳转会落在错的地方。
+
+**证据(两层)**:
+
+- `session::tests::a_declaration_only_a_macro_makes_is_found_once_the_session_has_cooked_the_file`:`DECLARE_HANDLE`
+  的夹具,`advance(1)` 时 `HWND__` **答不出来**(队列还没空,没熟读),`index_everything()` 之后**答得出来**;
+- `cpp_ls/tests/handshake.rs::a_declaration_a_macro_makes_is_found_over_the_wire`:真的服务器、真的 stdio、
+  真的 `didOpen`,对 `HWND h;` 要 `textDocument/definition` → 答案在 `api.cpp` 第 1 行(`DECLARE_HANDLE(HWND)`
+  那个调用点)。**并且反证过**:把 drain 里的熟读关掉,这条测试 30 s 内答不出来、失败——它测的确实是熟读这条路。
+
+**代价**:熟读一个文件 = 一次它自己闭包的走查 + 一次定义读 + 一次熟读 + 一次索引(255 语料各阶段实测摊到每文件约
+26 ms:walk 2.1 + definitions 0.4 + cook 7.6 + index 16.2),**每个改动过的打开文件、每次 drain 一次**,在写者
+线程里,不在查询路径上。查询路径一点没变:它只是在索引里多看到一份声明。
+
+**记下来一个这次量出来的事实**:`_STD_BEGIN` 那类"开名字空间的宏"**裸读已经处理对了**——索引器拿到闭包的
+宏体时,`BEGIN_NS` 对解析器就是 `namespace ns {`,里面的声明作用域是对的(B121/B131)。所以熟读给 LSP 补的
+是另一件事:文件自己**没写**的声明(`DECLARE_HANDLE` 那种,声明在宏体里)。测试因此用后者当夹具,这条区别
+写进了测试的注释里——否则下一个人会以为熟读是给作用域用的。
+
+
 
 
 
