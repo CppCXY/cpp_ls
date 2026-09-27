@@ -2264,6 +2264,85 @@ impl ProjectIndex {
         self.cooked.remove(&normalize(path));
     }
 
+    /// **The project's symbols matching `query`**, best first — what a `workspace/symbol` search shows.
+    ///
+    /// # What is searched, and what is not
+    ///
+    /// Every declaration in every summary the index holds, **plus the names only the cooked reading declares**: the
+    /// same two readings every other declaration query unions, asked here **without the visibility walk**, because a
+    /// workspace search is about the project and not about what one file can see. A name a macro declared
+    /// (`DECLARE_HANDLE(HWND)`'s `HWND__`) is a symbol a compiler knows, so a search finds it; a declaration both
+    /// readings found is one answer, deduplicated the same way (`(qualified name, kind)` per file).
+    ///
+    /// **Locals are left out** ([`DeclFact::local`]): a variable inside a function body is not a project symbol, and
+    /// a summary cannot even place it in the function it belongs to.
+    ///
+    /// # The match, and what the cap means
+    ///
+    /// Case-insensitive **substring of the qualified name**, so `wid` finds `ns::Widget`. The ranking is exact name,
+    /// then a prefix of the name, then anything — and within a rank, alphabetical, because two runs over one project
+    /// have to answer in the same order or a diff of two answers is noise.
+    ///
+    /// `limit` caps the answer, and hitting it is **not** an error: a search box is not a claim about the project
+    /// the way a reference list is — the user narrows the query, and every editor's symbol search truncates. That is
+    /// the opposite of the decision [`crate::macro_references`] makes, where a partial answer would be a false one.
+    pub fn symbols_matching(&self, query: &str, limit: usize) -> Vec<ProjectSymbol> {
+        let wanted = query.trim().to_lowercase();
+        let mut matches: Vec<(usize, String, ProjectSymbol)> = Vec::new();
+
+        for summary in self.summaries() {
+            let cooked = self.cooked.get(&normalize(&summary.path));
+
+            let raw: Vec<&DeclFact> = summary
+                .declarations
+                .iter()
+                .filter(|fact| !fact.local)
+                .collect();
+
+            let fresh: Vec<&DeclFact> = cooked
+                .into_iter()
+                .flat_map(|cooked| cooked.declarations.iter())
+                .filter(|fact| {
+                    !fact.local
+                        && !raw
+                            .iter()
+                            .any(|known| known.name == fact.name && known.kind == fact.kind)
+                })
+                .collect();
+
+            for fact in raw.into_iter().chain(fresh) {
+                let qualified = fact.qualified_name();
+                let Some(rank) = rank_of(&qualified, &fact.name, &wanted) else {
+                    continue;
+                };
+
+                matches.push((
+                    rank,
+                    qualified.to_lowercase(),
+                    ProjectSymbol {
+                        file: summary.path.clone(),
+                        fact: fact.clone(),
+                    },
+                ));
+            }
+        }
+
+        // The rank first, then the name, then the **file** — three answers that compare equal have to come back in
+        // one order, and two files may declare the same name.
+        matches.sort_by(|one, two| {
+            one.0
+                .cmp(&two.0)
+                .then_with(|| one.1.cmp(&two.1))
+                .then_with(|| one.2.file.cmp(&two.2.file))
+        });
+
+        matches
+            .into_iter()
+            .take(limit)
+            .map(|(_, _, symbol)| symbol)
+            .collect()
+    }
+
     /// The files in which `name` is visible, in insertion order.
     ///
     /// `name` is matched against a declaration's **qualified** name first — `ns::Widget` — and against its bare
@@ -3489,6 +3568,88 @@ fn normalize(path: &Path) -> String {
     normalize_path(path, cfg!(windows))
 }
 
+/// One declaration a **workspace symbol** search found — see [`ProjectIndex::symbols_matching`].
+///
+/// Owned rather than borrowed, unlike [`VisibleDeclaration`]: a search collects from several maps (the summaries
+/// and the cooked readings) and sorts what it found, so there is nothing to borrow from by the time it answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectSymbol {
+    pub file: PathBuf,
+    pub fact: DeclFact,
+}
+
+/// How well a declaration matches a search query: lower is better, `None` is not a match.
+///
+/// # A bare word is about the **name**; a qualified query is about the qualified name's **tail**
+///
+/// That one rule is what keeps a search for `wid` from answering with every member of every matching class —
+/// `ns::Widget::size` contains `wid` too, and two letters in a symbol box should not list a whole project's
+/// members — while still letting `Widget::si` find that member, which is the query a user types when they *do* want
+/// one.
+///
+/// ```text
+/// `size`         exact, then prefix, then anywhere in the **name**      → finds `Widget::size` at any depth ✓
+/// `Widget::si`   matched against the **last two** segments: the ones before the last must match exactly, the last
+///                is a prefix → `ns::Widget::size` matches (its tail is `Widget::size`) ✓
+/// `ns::widget`   …and `ns::Widget::size`'s tail is `Widget::size`, so `ns` does not match it ✗ — a class query
+///                does not drag its members in. It matches `ns::Widget` itself ✓
+/// ```
+///
+/// A leading `::` is dropped, so `::Widget` — how a reader spells "the global one" — finds what `Widget` finds. (The
+/// index records a global declaration's qualified name as its bare name, and there is only one to find.)
+fn rank_of(qualified: &str, name: &str, wanted: &str) -> Option<usize> {
+    let wanted = wanted.trim_start_matches("::").to_lowercase();
+    if wanted.is_empty() {
+        return None;
+    }
+
+    let query: Vec<&str> = wanted.split("::").collect();
+
+    if query.len() == 1 {
+        let name = name.to_lowercase();
+
+        if name == wanted {
+            return Some(0);
+        }
+        if name.starts_with(&wanted) {
+            return Some(1);
+        }
+        if name.contains(&wanted) {
+            return Some(2);
+        }
+
+        return None;
+    }
+
+    let segments: Vec<String> = qualified
+        .to_lowercase()
+        .split("::")
+        .map(str::to_string)
+        .collect();
+
+    // The **tail**: `Widget::si` has to be able to find `ns::Widget::size`, and it is the last segments it names.
+    if segments.len() < query.len() {
+        return None;
+    }
+    let tail = &segments[segments.len() - query.len()..];
+
+    let (last_asked, asked) = query.split_last()?;
+    let (last, rest) = tail.split_last()?;
+
+    if rest.iter().map(String::as_str).ne(asked.iter().copied()) {
+        return None;
+    }
+
+    if last == last_asked {
+        return Some(0);
+    }
+    if last.starts_with(last_asked) {
+        return Some(1);
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::{IncludeVisibility, ProjectIndex};
@@ -3640,15 +3801,80 @@ mod tests {
     }
 
     /// A cooked reading of `source`, as [`crate::Session::cook`] builds one: the rendering indexed and mapped back.
-    fn cooked_reading_of(source: &str) -> crate::CookedFile {
+    fn cooked_reading_of(path: &str, source: &str) -> crate::CookedFile {
         let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
         let rendered = crate::preprocess::cooked::cook(source, &tokens).render();
         let provider = crate::MemoryFiles::new();
         let config = crate::CompilerConfig::default();
         let indexer = crate::FileIndexer::new(&provider, &config);
         indexer
-            .index_rendering(Path::new("/p/a.h"), &rendered, SummaryKey::new(0, 0))
+            .index_rendering(Path::new(path), &rendered, SummaryKey::new(0, 0))
             .into()
+    }
+
+    /// **A workspace search finds declarations in files nobody has opened**, ranks them, and leaves locals out.
+    ///
+    /// The query is project-wide and deliberately *not* visibility-scoped: a symbol search is about the project, so
+    /// a class in a header nothing includes is still a symbol. What it does share with every other declaration query
+    /// is the two readings — a name only the cooked reading declares is a name a compiler knows.
+    #[test]
+    fn a_workspace_search_finds_symbols_across_the_project() {
+        let mut index = index(&[
+            ("/p/widget.h", "namespace ns {\nstruct Widget { int size; };\n}\n"),
+            (
+                "/p/other.cpp",
+                "void f() {\n    int widget_local;\n}\nstruct Widest { int y; };\n",
+            ),
+            ("/p/handle.h", "#define DECLARE_HANDLE(name) struct name##__ { int unused; };\nDECLARE_HANDLE(HWND);\n"),
+        ]);
+
+        let names = |found: &[super::ProjectSymbol]| -> Vec<String> {
+            found.iter().map(|symbol| symbol.fact.name.clone()).collect()
+        };
+
+        // Case-insensitive substring of the qualified name.
+        let found = index.symbols_matching("wid", 100);
+        assert_eq!(
+            names(&found),
+            vec!["Widget", "Widest"],
+            "the name itself ranks above the one that merely contains it: {found:?}"
+        );
+        assert_eq!(
+            found[0].fact.scope.as_deref(),
+            Some("ns"),
+            "and the match is on the qualified name: {found:?}"
+        );
+
+        // A local is not a project symbol, even though its name matches.
+        assert_eq!(
+            names(&index.symbols_matching("widget_local", 100)),
+            Vec::<String>::new(),
+            "a variable inside a body is not something the project has"
+        );
+
+        // A qualified query finds it too — and finds a **member**, which is the one query that should.
+        assert_eq!(names(&index.symbols_matching("ns::widget", 100)), vec!["Widget"]);
+        assert_eq!(
+            names(&index.symbols_matching("Widget::si", 100)),
+            vec!["size"],
+            "a query with `::` is about a qualified name"
+        );
+        assert_eq!(index.symbols_matching("wid", 1).len(), 1);
+
+        // **A name only the cooked reading declares is a symbol**: a compiler sees `HWND__`, so a search finds it.
+        // The file has to be in the index for the reading to be reachable at all — `insert_cooked` files a *second*
+        // reading of a file the index knows.
+        index.insert_cooked(
+            Path::new("/p/handle.h"),
+            cooked_reading_of(
+                "/p/handle.h",
+                "#define DECLARE_HANDLE(name) struct name##__ { int unused; };\nDECLARE_HANDLE(HWND);",
+            ),
+        );
+        assert!(
+            names(&index.symbols_matching("HWND__", 100)).contains(&"HWND__".to_string()),
+            "the macro-declared type is a symbol a compiler knows"
+        );
     }
 
     /// **Re-indexing a file with *different* text takes its cooked reading with it.**
@@ -3664,7 +3890,7 @@ mod tests {
     fn re_indexing_different_text_takes_the_cooked_reading_with_it() {
         let source = "struct Plain { int size; };\n";
         let mut index = index(&[("/p/a.h", source)]);
-        index.insert_cooked(Path::new("/p/a.h"), cooked_reading_of(source));
+        index.insert_cooked(Path::new("/p/a.h"), cooked_reading_of("/p/a.h", source));
         assert!(index.cooked_declarations(Path::new("/p/a.h")).is_some());
 
         // The same text, read again: the content hash matches, so the reading describes what is still there.

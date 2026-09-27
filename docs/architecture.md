@@ -1285,6 +1285,38 @@ the cooked index: declarations 4820 raw / 4062 cooked | +3250 only after expansi
 并且把"索引里有多少文件"印在同一行——"语料变大了"从此不可能再隐形 ✓。同一个计时器也顺便量清楚了:
 那个第二遍在这份语料上是 **37–53 ms** ✓,不是成本项。
 
+### 项目符号搜索接出去了(已落地):**匹配规则**就是功能本身
+
+`workspace/symbol` 是这里第一个**不问某个文件**的查询:它在索引里搜**每一份摘要**的声明,而且**不走可见性**
+——符号搜索问的是项目,一个谁都没 include 的头里的类仍然是一个符号 ✓;两种读数照旧合起来(宏声明的 `HWND__`
+编译器看得见,所以搜得到 ✓),按 `(限定名, kind)` 去重 ✓;局部变量不进(它不是项目符号,摘要也放不下它 ✓)。
+
+**匹配规则是这一轮真正要定下来的东西**,两条:
+
+```text
+`size`         裸词 → 匹配**名字**:精确 → 前缀 → 名字里任意位置   (所以任何深度上的 Widget::size 都找得到 ✓)
+`Widget::si`   带 `::` → 匹配限定名的**尾部**:除最后一段外都要精确相等,最后一段是前缀
+               → ns::Widget::size 的尾部是 Widget::size ✓ 找得到成员 ✓
+`ns::widget`   而同一个成员在这里**不该**被带出来:它的尾部是 Widget::size,`ns` 对不上 ✗
+               匹配的是 ns::Widget 本身 ✓
+```
+
+前两版规则都被测试当场否掉 ✗:第一版对限定名也做"包含"匹配 → 搜 `ns::widget` 把 `ns::Widget::size` 一起带出来 ✗;
+第二版要求"段数完全相同" → `Widget::si` 就找不到 `ns::Widget::size` 了 ✗。第三版(尾部匹配)两个都对 ✓✓——
+所以**这条规则是被测试逼出来的**,不是设计出来的 ✓。
+
+**拒绝的规矩和引用一致、理由却不同**:协议这一版给 `workspace/symbol` 的响应没有 `isIncomplete`(补全列表有 ✓),
+所以索引还有活时同样答 `null` ✓——"没有这个符号"是用户会据此行动的一句话 ✓。**但上限不是拒绝**:搜索可以少给几条,
+那是符号框本来的形状(用户会继续把词打细 ✓,每个编辑器的搜索都截断 ✓),而"这个名字的引用就这些"是关于项目的断言 ✓。
+两句话不同,分界就写在这个模块里 ✓。
+
+**证据**:`index::project::tests::a_workspace_search_finds_symbols_across_the_project`(裸词排名 ✓、局部不在 ✓、
+限定名尾部两条 ✓、上限 ✓、熟读独有的名字 ✓)+ `cpp_ls::handlers::workspace_symbol::tests::a_symbol_search_is_refused_while_the_index_has_work`
+(**造出**队列未读的状态,断言 `None`,再 `index_everything()` 后断言 1 条 ✓)+
+`handshake.rs::a_workspace_search_finds_a_symbol_in_a_file_nobody_opened`(客户端只打开 `main.cpp`,
+搜 `widget` 得到 `["Widget", "WidgetRegistry"]`,前者在**没人打开过的** `search.h` 里、`containerName` 是 `ns` ✓;
+再搜 `Widget::si` 只得到 `size`、搜 `ns::widget` 只得到 `Widget` ✓)。
+
 ### 折叠范围接出去了(已落地):读的还是**文件自己**,而且顺手修了一个"同一条规则两处实现"
 
 `textDocument/foldingRange` 是这一串接线里最简单的一个:它**只读这个文件**——不看索引、不看熟读、不看别的文件 ✓。
@@ -1518,7 +1550,7 @@ request/notification/response、text_document)。前三个是"某个**打开**�
 
 ## 7. 度量与门禁
 
-每次改动后必须全绿(测试基线:**1279 个测试**、42 个 suite,实测;`cargo clippy --workspace --all-targets`
+每次改动后必须全绿(测试基线:**1282 个测试**、42 个 suite,实测;`cargo clippy --workspace --all-targets`
 零警告,`cargo doc` 零警告,`cpp_dump` 零错误):
 
 ```bash
@@ -1666,8 +1698,10 @@ std_probe <list> --seeds --closure
   引用与改名都答 `null`(协议没有"不全"这个说法)✓。见 §6 那一节。
 - **折叠范围**:四类区域(花括号对、注释段、`#if`、`include` 段),只读这个文件的 token 与指令;容忍未配平(不折 ✗),
   `Code` 发 `None` 而不是硬编一个 kind ✓。见 §6 那一节。
-- **LSP 的能力表现在是八项**:诊断(push + pull)、definition、hover、completion、documentSymbol、foldingRange、
-  references、rename(含 `prepareRename`)✓。
+- **项目符号搜索(本轮)**:索引里每一份摘要的声明(两种读数、不去查可见性、局部不进)✓;匹配规则是"裸词看名字、
+  带 `::` 看限定名的尾部" ✓;上限不是拒绝、不完整才是 ✓。见 §6 那一节。
+- **LSP 的能力表现在是九项**:诊断(push + pull)、definition、hover、completion、documentSymbol、foldingRange、
+  references、rename(含 `prepareRename`)、workspaceSymbol ✓。
 
 **下一步(按依赖排序)**(更新到本轮之后):
 1. **删形状规则(M4)**:覆盖率这一关过了(每个会被发布的文件都有熟读),大纲也接出来了——于是这一步现在是
@@ -1677,6 +1711,6 @@ std_probe <list> --seeds --closure
    关掉它,跑四个语料 + 大纲的两条测试,把差异按文件列出来,再决定要不要留一半(比如只留"注解"那一支)。
 2. **熟读剩下的文件**:255/109 两档只剩 `sourceannotations.h`,已判定是 `/analyze` 专属语法(**非缺口**)。
 3. **L2(名字驻留)**:量过,是噪声级别(§6 L1/L2),不做;L1/L4 已完成。
-4. **M5 余下**:已接 definition / hover / completion / documentSymbol / foldingRange / references / rename ✓。
-   再往后是 **workspace/symbol**(索引里所有文件的声明 ✓,同一个 `DeclFact` 词汇 ✓)、**选择范围**
-   (`selectionRange`,要的是每个声明一条作用域链 ✗ 比前几个贵)和**签名帮助**(那需要类型,是另一条线 ✗)。
+4. **M5 余下**:已接 definition / hover / completion / documentSymbol / foldingRange / references / rename /
+   workspaceSymbol ✓。再往后是**选择范围**(`selectionRange`,每个声明要一条作用域链 ✗ 比前几个贵)和**签名帮助**
+   (那需要类型,是另一条线 ✗)。

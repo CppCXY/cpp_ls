@@ -24,6 +24,7 @@ use lsp_server::{Request, Response};
 use lsp_types::request::{
     Completion, DocumentDiagnosticRequest, DocumentSymbolRequest, FoldingRangeRequest,
     GotoDefinition, HoverRequest, PrepareRenameRequest, References, Rename, Request as LspRequest,
+    WorkspaceSymbolRequest,
 };
 
 use crate::context::ServerContext;
@@ -37,6 +38,7 @@ use super::{
     hover::on_hover,
     references::on_references,
     rename::{on_prepare_rename, on_rename},
+    workspace_symbol::on_workspace_symbol,
 };
 
 macro_rules! dispatch_request {
@@ -83,6 +85,7 @@ pub async fn on_request_handler(
         References => on_references,
         PrepareRenameRequest => on_prepare_rename,
         Rename => on_rename,
+        WorkspaceSymbolRequest => on_workspace_symbol,
         DocumentDiagnosticRequest => on_pull_document_diagnostic,
     });
 

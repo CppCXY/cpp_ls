@@ -124,7 +124,7 @@ pub use index::{
     ChangeBatch, CookedFile, EventKind, FileEvent, FileIndexer, FileReferences, IncludeBudget,
     IncludeIndex, IncludeVisibility, MacroReferences, MemberCompletions, MemberList, NameCompletions,
     NotIndexed, NotIndexedReason, OfferedName, PathPattern, Priority, ProjectDefinition, ProjectIndex,
-    ProjectMacro, ProjectMember, Reference, ReferenceBudget, ReferenceKind, Rename, Response, Step,
+    ProjectMacro, ProjectMember, ProjectSymbol, Reference, ReferenceBudget, ReferenceKind, Rename, Response, Step,
     StepOutcome, StoreStats, SummaryReadError, SummaryStore, UnlistedBase, UnresolvedEdge,
     VisibleDeclaration, WatchFilter, Worklist, definition_across_files, macro_across_files,
     macro_references, member_across_files, member_completions_at, members_of, name_completions_at,

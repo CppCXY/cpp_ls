@@ -1095,6 +1095,121 @@ fn a_macro_is_renamed_everywhere_and_an_ordinary_name_is_refused() {
     server.notify("exit", Value::Null);
 }
 
+/// The workspace-symbol fixture: a class in a namespace, in a header — and the client opens only the `.cpp`.
+const SEARCH_H: &str = "namespace ns {\nstruct Widget { int size; };\n}\nstruct WidgetRegistry { int count; };\n";
+const SEARCH_CPP: &str = "#include \"search.h\"\nvoid f() { ns::Widget w; }\n";
+
+/// **A symbol in a file nobody opened is found by a project search.**
+///
+/// Every other feature here is asked about a cursor in a file the client is showing; this one is asked about the
+/// project, and the answer has to include declarations from files the user has never looked at — which is what the
+/// index is for. The query is matched the way the index documents it (`Widget::si` finds the member, `ns::widget`
+/// does not drag it in), and the one thing this test pins beyond that is the qualification travelling with the
+/// symbol, because a client shows it beside the name.
+#[test]
+fn a_workspace_search_finds_a_symbol_in_a_file_nobody_opened() {
+    let project = Project::new("workspace-symbol");
+    project.write("search.h", SEARCH_H);
+    project.write("main.cpp", SEARCH_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    let capabilities = server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    assert_eq!(
+        capabilities["result"]["capabilities"]["workspaceSymbolProvider"],
+        json!(true),
+        "the client is told the server searches: {capabilities}"
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": SEARCH_CPP }
+        }),
+    );
+
+    // Asked again until it answers, because a search that arrives while the index still has work is refused
+    // (`null`) rather than answered partially — see the handler's module note.
+    let answer = server.ask_until_it(
+        100,
+        |id| json!({ "id": id, "method": "workspace/symbol", "params": { "query": "widget" } }),
+        |response| {
+            response["result"]
+                .as_array()
+                .is_some_and(|symbols| !symbols.is_empty())
+        },
+    );
+
+    let found = answer["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a symbol list was expected, got {answer}"));
+    let names: Vec<&str> = found
+        .iter()
+        .filter_map(|symbol| symbol["name"].as_str())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["Widget", "WidgetRegistry"],
+        "the name first, then the one that contains it: {answer}"
+    );
+
+    let widget = &found[0];
+    assert!(
+        widget["location"]["uri"]
+            .as_str()
+            .is_some_and(|uri| uri.ends_with("search.h")),
+        "the class is declared in a file the client never opened: {widget}"
+    );
+    assert_eq!(
+        widget["containerName"],
+        json!("ns"),
+        "and the namespace it is in travels with it: {widget}"
+    );
+    assert_eq!(widget["kind"], json!(5), "a class: {widget}");
+
+    // The **qualified** query finds the same class, and the member only when it is asked for by its owner.
+    let qualified = server.ask_until(200, |id| {
+        json!({ "id": id, "method": "workspace/symbol", "params": { "query": "Widget::si" } })
+    });
+    let names: Vec<&str> = qualified["result"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|symbol| symbol["name"].as_str())
+        .collect();
+    assert_eq!(names, vec!["size"], "`Widget::si` asks for the member: {qualified}");
+
+    let class_only = server.ask_until(300, |id| {
+        json!({ "id": id, "method": "workspace/symbol", "params": { "query": "ns::widget" } })
+    });
+    let names: Vec<&str> = class_only["result"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|symbol| symbol["name"].as_str())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["Widget"],
+        "and a class query does not drag its members in: {class_only}"
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
 /// The folding fixture: an include run, a comment block, a class, and a conditional — one of each kind the protocol
 /// names, in an order where the lines are easy to count.
 const FOLDS_CPP: &str = "#include <string>\n\
