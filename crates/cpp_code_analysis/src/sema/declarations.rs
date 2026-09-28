@@ -101,6 +101,12 @@ pub fn build_facts(
 /// `None` for a declaration that declares no type: a class, a namespace, a function, an alias. See
 /// [`DeclFact::type_of`].
 pub fn declared_type_of(root: &CppSyntaxNode, binding: &Binding) -> Option<String> {
+    declared_type_of_with(&DeclarationShapes::of(root), binding)
+}
+
+/// [`declared_type_of`] for a caller that has the file's shapes already — which is every caller with more than one
+/// question to ask. See [`DeclarationShapes`] for what building them costs and why that is the right trade.
+fn declared_type_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
     // The kinds that have a type in this sense. A field and a parameter are `Variable` too — they are what a
     // member access is asked *from* — while a class and a function are not: a class *is* a type and a function
     // *returns* one, and those spellings come from a different part of the syntax.
@@ -108,48 +114,20 @@ pub fn declared_type_of(root: &CppSyntaxNode, binding: &Binding) -> Option<Strin
         return None;
     }
 
-    // The declaration's own specifier sequence, found by **descending to where the binding is** and keeping the
-    // last one passed on the way down.
-    //
-    // Not "the text before the name", which is what this started as and what a `Binding`'s range makes tempting:
-    // a binding's range is the *declarator* (`w` in `Widget w;`) rather than the whole declaration, so the text in
-    // front of it is empty and every variable's type came out as `None`. Descending from the root costs one walk
-    // down the spine and asks the tree a structural question instead of reading text and hoping about geometry.
-    let mut node = root.clone();
-    let anchor = the_offset_to_descend_by(binding);
+    // The specifier sequence, and the declarator whose own text holds the operators the specifiers do not — both
+    // **innermost on the path**, which is what "the last one passed on the way down" meant when this was a
+    // descent: for a parameter the outermost declarator is the *function's* (`f(Widget* p)`), and the one that
+    // holds `p` is the parameter's own.
     let mut found = None;
     let mut declarator = None;
-
-    loop {
-        if let Some(specifiers) = node
-            .children()
-            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq)
-        {
-            found = Some(specifiers);
+    shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
+        if let Some(node) = &shape.specifiers {
+            found = Some(node.clone());
         }
-        // The declarator, whose own text holds the operators the specifiers do not — see below. The **innermost**
-        // one on the path wins, because the path follows the name: for a parameter the outermost declarator is
-        // the *function's* (`f(Widget* p)`), and the one that holds `p` is the parameter's own.
-        if let Some(found) = node
-            .children()
-            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
-        {
-            declarator = Some(found);
+        if let Some(node) = &shape.declarator {
+            declarator = Some(node.clone());
         }
-
-        match node
-            .children_with_tokens()
-            .find(|element| {
-                element
-                    .as_node()
-                    .is_some_and(|child| holds(child, anchor))
-            })
-            .and_then(|element| element.into_node())
-        {
-            Some(child) => node = child,
-            None => break,
-        }
-    }
+    });
 
     let spelling = strip_declaration_specifiers(&type_spelling_of(&found?));
     let Some(declarator) = declarator else {
@@ -232,10 +210,241 @@ fn the_offset_to_descend_by(binding: &Binding) -> usize {
     }
 }
 
-/// Is `offset` inside this node?
-fn holds(node: &CppSyntaxNode, offset: usize) -> bool {
-    let range = node.text_range();
-    offset >= usize::from(range.start()) && offset < usize::from(range.end())
+/// **The declaration nodes of one file**, in the one form the four "what does this declaration say" questions need.
+///
+/// # Why this exists, in one measurement
+///
+/// [`declared_type_of`], [`declared_returns_of`], [`declared_alias_target`] and [`declared_bases_of`] all answered
+/// by *descending from the root to the binding* and keeping what they passed on the way. Descending scans a node's
+/// children until it finds the one holding the offset, so it is O(siblings) at every level and therefore
+/// O(declarations in the file) **per binding**. On the 138-file closure of `<iostream>` + `<string>` that was
+/// **14.4 s of a 23.8 s index** — 7.5 s in `declared_type_of`, 6.9 s in `declared_returns_of`, against 0.97 s for
+/// *parsing* every one of those files. `crate::stages` is the instrument that found it; this type is the fix.
+///
+/// The same questions, asked of a file whose shapes have been read once: the node holding an offset is found by
+/// binary search, and then the ancestor chain is walked **upward**, which is O(how deeply declarations nest).
+///
+/// # What a shape is
+///
+/// One node with something to say about a binding inside it: the children a question reads (`DeclSpecifierSeq`,
+/// `TrailingReturnType`, `Declarator`, a `using`'s `TypeId`, a class's base names) or a kind that is a declaration
+/// in its own right (`using`/`typedef`, and the class-like definitions whose bases are read). A node with none of
+/// those is not a shape — no question in this module is answered by one.
+pub struct DeclarationShapes {
+    /// Every shape, in **document order** (pre-order) — which is also start-offset order, the order the binary
+    /// search over a sibling run relies on.
+    shapes: Vec<Shape>,
+    /// The shapes with no parent: a run in `children`.
+    roots: (u32, u32),
+    /// Each shape's direct children, as runs — see [`DeclarationShapes::of`] for why they are laid out separately.
+    children: Vec<u32>,
+}
+
+/// One node a question is answered at, and how it is reached.
+struct Shape {
+    /// The node's own range — the interval that decides which bindings it is the shape *for*.
+    at: cpp_parser::SourceRange,
+    kind: CppSyntaxKind,
+    /// Its `DeclSpecifierSeq` child, if it has one.
+    specifiers: Option<CppSyntaxNode>,
+    /// Its `TrailingReturnType` child, if it has one.
+    trailing: Option<CppSyntaxNode>,
+    /// Its `Declarator` child, if it has one.
+    declarator: Option<CppSyntaxNode>,
+    /// A `using`'s `TypeId` child — the type the alias points at.
+    type_id: Option<CppSyntaxNode>,
+    /// A class-like definition's base **names** (the `NameExpr` inside each `BaseSpecifier`), in declaration
+    /// order. The access keyword is deliberately not part of it: `public B` names `B`.
+    bases: Vec<CppSyntaxNode>,
+    /// The innermost shape containing this one — the chain [`DeclarationShapes::on_the_path`] walks.
+    parent: Option<u32>,
+    /// This shape's own children, as a run in [`DeclarationShapes::children`].
+    children: (u32, u32),
+}
+
+impl DeclarationShapes {
+    /// Read every shape of `root`, in one pass over the tree.
+    ///
+    /// The children are laid out as **runs** in a second array rather than as links, because the search that finds
+    /// which child holds an offset needs random access to a parent's children, and in pre-order a parent's
+    /// children are not consecutive: a child's whole subtree comes between it and its next sibling. Two counting
+    /// passes put them in order — the order they were collected in, which is start-offset order, which is what the
+    /// search assumes.
+    pub fn of(root: &CppSyntaxNode) -> Self {
+        let mut shapes: Vec<Shape> = Vec::new();
+        // The shapes the node being visited is inside, outermost first.
+        let mut chain: Vec<u32> = Vec::new();
+
+        for node in root.descendants() {
+            let at = cpp_parser::source_range(node.text_range());
+
+            // Close every shape this node is not inside; what is left is the chain it belongs to.
+            while chain
+                .last()
+                .is_some_and(|top| shapes[*top as usize].at.end_offset() <= at.start_offset)
+            {
+                chain.pop();
+            }
+
+            let kind = CppSyntaxKind::from(node.kind());
+            let read = children_a_question_reads(&node);
+            if read.is_empty() && !declares_a_shape(kind) {
+                continue;
+            }
+
+            let parent = chain.last().copied();
+            shapes.push(Shape {
+                at,
+                kind,
+                specifiers: read.specifiers,
+                trailing: read.trailing,
+                declarator: read.declarator,
+                type_id: read.type_id,
+                bases: read.bases,
+                parent,
+                children: (0, 0),
+            });
+            chain.push(shapes.len() as u32 - 1);
+        }
+
+        let mut runs = vec![(0u32, 0u32); shapes.len() + 1];
+        for shape in &shapes {
+            runs[slot_of(shape.parent)].1 += 1;
+        }
+
+        let mut placed = 0u32;
+        let mut cursor = Vec::with_capacity(runs.len());
+        for run in runs.iter_mut() {
+            cursor.push(placed);
+            run.0 = placed;
+            placed += run.1;
+        }
+
+        let mut children = vec![0u32; placed as usize];
+        for (index, shape) in shapes.iter().enumerate() {
+            let slot = slot_of(shape.parent);
+            children[cursor[slot] as usize] = index as u32;
+            cursor[slot] += 1;
+        }
+
+        for (index, shape) in shapes.iter_mut().enumerate() {
+            shape.children = runs[index + 1];
+        }
+
+        DeclarationShapes {
+            shapes,
+            roots: runs[0],
+            children,
+        }
+    }
+
+    /// How many shapes the file has — what a caller prints when it wants to know whether the walk was worth it.
+    pub fn len(&self) -> usize {
+        self.shapes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.shapes.is_empty()
+    }
+
+    /// Walk the shapes an offset is inside, **outermost first**, and let the caller keep what it wants.
+    ///
+    /// This is the whole of the query side, and the reason it is a walk with a visitor rather than four functions
+    /// that each return "the node I wanted": every question here is "the *innermost*/*outermost* node on the path
+    /// with this property", and answering all of them from one chain is what stops the four questions from being
+    /// four descents.
+    ///
+    /// The direction is the one a descent has — the original code walked down from the root and let each match
+    /// **overwrite** the last, so "the innermost" is the *last* shape the visitor sees and "the outermost" is the
+    /// first. Getting that backwards is not a subtle wrong answer: the outermost declaration of a class is a
+    /// `DeclSpecifierSeq` whose text is the whole class body, so a member's type came out as `size; }`.
+    fn on_the_path(&self, offset: usize, mut visit: impl FnMut(&Shape)) {
+        let mut run = self.roots;
+
+        loop {
+            let candidates = &self.children[run.0 as usize..(run.0 + run.1) as usize];
+            // Siblings are ordered and do not overlap, so the last one starting at or before the offset is the
+            // only one that can contain it.
+            let position =
+                candidates.partition_point(|index| self.shapes[*index as usize].at.start_offset <= offset);
+            let Some(&child) = position.checked_sub(1).and_then(|at| candidates.get(at)) else {
+                return;
+            };
+
+            let shape = &self.shapes[child as usize];
+            if shape.at.end_offset() <= offset {
+                return;
+            }
+
+            visit(shape);
+            run = shape.children;
+        }
+    }
+}
+
+/// Which slot of the run table a shape's children belong in: the roots' run first, then one run per shape.
+fn slot_of(parent: Option<u32>) -> usize {
+    parent.map_or(0, |parent| parent as usize + 1)
+}
+
+/// The children of `node` that a question in this module reads, in **one** scan of its children.
+struct ShapeChildren {
+    specifiers: Option<CppSyntaxNode>,
+    trailing: Option<CppSyntaxNode>,
+    declarator: Option<CppSyntaxNode>,
+    type_id: Option<CppSyntaxNode>,
+    bases: Vec<CppSyntaxNode>,
+}
+
+impl ShapeChildren {
+    fn is_empty(&self) -> bool {
+        self.specifiers.is_none()
+            && self.trailing.is_none()
+            && self.declarator.is_none()
+            && self.type_id.is_none()
+            && self.bases.is_empty()
+    }
+}
+
+fn children_a_question_reads(node: &CppSyntaxNode) -> ShapeChildren {
+    let mut read = ShapeChildren {
+        specifiers: None,
+        trailing: None,
+        declarator: None,
+        type_id: None,
+        bases: Vec::new(),
+    };
+
+    for child in node.children() {
+        match CppSyntaxKind::from(child.kind()) {
+            CppSyntaxKind::DeclSpecifierSeq if read.specifiers.is_none() => read.specifiers = Some(child),
+            CppSyntaxKind::TrailingReturnType if read.trailing.is_none() => read.trailing = Some(child),
+            CppSyntaxKind::Declarator if read.declarator.is_none() => read.declarator = Some(child),
+            CppSyntaxKind::TypeId if read.type_id.is_none() => read.type_id = Some(child),
+            // A base's *name*, not the whole specifier: taking the specifier's text would read the access keyword
+            // as part of the name (`public B` is `B`).
+            CppSyntaxKind::BaseSpecifier => read.bases.extend(
+                child
+                    .children()
+                    .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr),
+            ),
+            _ => {}
+        }
+    }
+
+    read
+}
+
+/// Is a node of this kind a shape on its own, with nothing to read from its children?
+fn declares_a_shape(kind: CppSyntaxKind) -> bool {
+    matches!(
+        kind,
+        CppSyntaxKind::UsingDecl
+            | CppSyntaxKind::TypedefDecl
+            | CppSyntaxKind::ClassDef
+            | CppSyntaxKind::StructDef
+            | CppSyntaxKind::EnumDef
+    )
 }
 
 /// The type a **`typedef` or `using` alias** names, as the file spells it.
@@ -266,55 +475,44 @@ fn holds(node: &CppSyntaxNode, offset: usize) -> bool {
 /// The query layer needs the same answer for an alias declared in the buffer it is looking at, without a summary:
 /// the same reason [`declared_type_of`] is public, and the same rule about one implementation.
 pub fn declared_alias_target(root: &CppSyntaxNode, binding: &Binding) -> Option<String> {
+    declared_alias_target_with(&DeclarationShapes::of(root), binding)
+}
+
+/// [`declared_alias_target`] for a caller that has the file's shapes already.
+fn declared_alias_target_with(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
     if !matches!(binding.kind, BindingKind::Alias | BindingKind::Typedef) {
         return None;
     }
 
-    // The declaration itself, found the way the other two helpers find it: the last `using`/`typedef` node passed
-    // on the way down to the binding, because a binding's range is the name and not the declaration around it.
-    let mut node = root.clone();
-    let anchor = the_offset_to_descend_by(binding);
+    // The innermost `using`/`typedef` the name is inside — "the last one passed on the way down". What is kept is
+    // copied out rather than borrowed: the visitor is handed a reference valid only for its own call, which is the
+    // shape of the walk (see [`DeclarationShapes::on_the_path`]).
     let mut declaration = None;
-
-    loop {
+    shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
         if matches!(
-            CppSyntaxKind::from(node.kind()),
+            shape.kind,
             CppSyntaxKind::UsingDecl | CppSyntaxKind::TypedefDecl
         ) {
-            declaration = Some(node.clone());
+            declaration = Some((
+                shape.kind,
+                shape.type_id.clone(),
+                shape.specifiers.clone(),
+                shape.declarator.clone(),
+            ));
         }
+    });
+    let (kind, type_id, specifiers, declarator) = declaration?;
 
-        match node
-            .children_with_tokens()
-            .find(|element| {
-                element
-                    .as_node()
-                    .is_some_and(|child| holds(child, anchor))
-            })
-            .and_then(|element| element.into_node())
-        {
-            Some(child) => node = child,
-            None => break,
-        }
-    }
-
-    let declaration = declaration?;
-
-    if CppSyntaxKind::from(declaration.kind()) == CppSyntaxKind::UsingDecl {
+    if kind == CppSyntaxKind::UsingDecl {
         // `using X = <TypeId>;` — the target is that node's whole text, template arguments and all.
-        return declaration
-            .children()
-            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TypeId)
+        return type_id
+            .as_ref()
             .map(|target| target.text().to_string().trim().to_string())
             .filter(|target| !target.is_empty());
     }
 
-    let specifiers = declaration
-        .children()
-        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq)?;
-    let declarator = declaration
-        .children()
-        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator);
+    let specifiers = specifiers.as_ref()?;
+    let declarator = declarator.as_ref();
 
     // No declarator: `typedef struct { … } ;` has no name to bind either, so this cannot be reached with a fact
     // to build — but returning the specifiers is the honest answer if it ever is.
@@ -326,7 +524,7 @@ pub fn declared_alias_target(root: &CppSyntaxNode, binding: &Binding) -> Option<
     let spelling = format!(
         "{} {}",
         strip_declaration_specifiers(&specifiers.text().to_string()),
-        without(&declarator.text().to_string(), &declarator, binding.name_range)
+        without(&declarator.text().to_string(), declarator, binding.name_range)
     );
     let spelling = spelling.split_whitespace().collect::<Vec<_>>().join(" ");
 
@@ -370,60 +568,45 @@ fn without(text: &str, node: &CppSyntaxNode, name: cpp_parser::SourceRange) -> S
 /// recording it as one would answer `make().size` with "the type `auto` has no members" — a wrong answer where
 /// "nothing is known" is the true one. See [`DeclFact::returns`].
 pub fn declared_returns_of(root: &CppSyntaxNode, binding: &Binding) -> Option<String> {
+    declared_returns_of_with(&DeclarationShapes::of(root), binding)
+}
+
+/// [`declared_returns_of`] for a caller that has the file's shapes already.
+fn declared_returns_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
     if binding.kind != BindingKind::Function {
         return None;
     }
 
-    // The walk `declared_type_of` makes, and for the same reason: a binding's range is the *declarator*, so the
-    // tree is asked where the declaration is rather than the geometry of a range. Three things are collected on the
-    // way: the last specifier sequence passed, the last trailing return type, and the declarator itself — whose
-    // text *before the name* is the other half of the return type (see below).
-    let mut node = root.clone();
-    let anchor = the_offset_to_descend_by(binding);
+    // Three things are collected on the way past the declaration, and **the direction each is kept in is not
+    // decoration**: the specifier sequence and the trailing return type are the innermost on the path ("the last
+    // one seen going down"), while the declarator is the outermost — its text *before the name* is where the
+    // operators in front of it live, and the nested declarators are its pointer parts.
     let mut specifiers = None;
     let mut trailing = None;
     let mut declarator = None;
-
-    loop {
-        if let Some(found) = node
-            .children()
-            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq)
-        {
-            specifiers = Some(found.text().to_string());
+    shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
+        if let Some(node) = &shape.specifiers {
+            specifiers = Some(node.clone());
         }
-        if let Some(found) = node
-            .children()
-            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TrailingReturnType)
-            && let Some(type_id) = found
+        if let Some(node) = &shape.trailing
+            && let Some(type_id) = node
                 .children()
                 .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TypeId)
         {
-            trailing = Some(type_id.text().to_string());
+            let spelling = type_id.text().to_string().trim().to_string();
+            if !spelling.is_empty() {
+                trailing = Some(spelling);
+            }
         }
-        // The **outermost** declarator seen on the way down, which is the one whose own text holds the name: the
-        // nested ones are its pointer/reference parts, and reading the text before the name off the outer one
-        // gets every operator in order.
+        // The **outermost** declarator on the path, which is the one whose own text holds the name: the nested
+        // ones are its pointer/reference parts, and reading the text before the name off the outer one gets every
+        // operator in order.
         if declarator.is_none()
-            && let Some(found) = node
-                .children()
-                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+            && let Some(node) = &shape.declarator
         {
-            declarator = Some(found);
+            declarator = Some(node.clone());
         }
-
-        match node
-            .children_with_tokens()
-            .find(|element| {
-                element
-                    .as_node()
-                    .is_some_and(|child| holds(child, anchor))
-            })
-            .and_then(|element| element.into_node())
-        {
-            Some(child) => node = child,
-            None => break,
-        }
-    }
+    });
 
     if let Some(trailing) = trailing {
         let spelling = trailing.trim().to_string();
@@ -447,7 +630,7 @@ pub fn declared_returns_of(root: &CppSyntaxNode, binding: &Binding) -> Option<St
 
     let spelling = format!(
         "{} {}",
-        strip_declaration_specifiers(&specifiers?),
+        strip_declaration_specifiers(&specifiers?.text().to_string()),
         before_the_name
     );
     let spelling = spelling.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -492,51 +675,34 @@ fn before(text: &str, node: &CppSyntaxNode, name: cpp_parser::SourceRange) -> St
 ///
 /// Empty for anything that is not a class, and for a class with no bases.
 pub fn declared_bases_of(root: &CppSyntaxNode, binding: &Binding) -> Vec<String> {
+    declared_bases_of_with(&DeclarationShapes::of(root), binding)
+}
+
+/// [`declared_bases_of`] for a caller that has the file's shapes already.
+fn declared_bases_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Vec<String> {
     if binding.kind != BindingKind::Class {
         return Vec::new();
     }
 
-    // The class definition the binding is inside — the last one passed on the way down to it, which is the walk
-    // `declared_type_of` makes and for the same reason: a binding's range does not cover the construct that
+    // The class-like definition the binding is inside — "the last one passed on the way down", which is the walk
+    // [`declared_type_of`] makes and for the same reason: a binding's range does not cover the construct that
     // declared it, so the *tree* is asked where the declaration is rather than the geometry of a range.
-    let mut node = root.clone();
-    let anchor = the_offset_to_descend_by(binding);
     let mut owner = None;
-
-    loop {
+    shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
         if matches!(
-            CppSyntaxKind::from(node.kind()),
+            shape.kind,
             CppSyntaxKind::ClassDef | CppSyntaxKind::StructDef | CppSyntaxKind::EnumDef
         ) {
-            owner = Some(node.clone());
+            owner = Some(shape.bases.clone());
         }
+    });
 
-        match node
-            .children_with_tokens()
-            .find(|element| {
-                element
-                    .as_node()
-                    .is_some_and(|child| holds(child, anchor))
-            })
-            .and_then(|element| element.into_node())
-        {
-            Some(child) => node = child,
-            None => break,
-        }
-    }
-
-    let Some(owner) = owner else {
+    let Some(bases) = owner else {
         return Vec::new();
     };
 
-    owner
-        .children()
-        .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::BaseSpecifier)
-        .filter_map(|specifier| {
-            specifier
-                .children()
-                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)
-        })
+    bases
+        .iter()
         .map(|name| name.text().to_string().trim().to_string())
         .filter(|name| !name.is_empty())
         .collect()
@@ -614,7 +780,7 @@ fn strip_declaration_specifiers(spelling: &str) -> String {
 /// A free function rather than a method so that the borrow of the fact list and the borrow of the scope tree
 /// cannot be confused for each other while the walk is filling one from the other.
 fn fact_for(
-    root: &CppSyntaxNode,
+    shapes: &DeclarationShapes,
     binding: &Binding,
     scope: Option<String>,
     local: bool,
@@ -631,6 +797,26 @@ fn fact_for(
     // §4.2 ①). The declaration stays findable by position, which was the point of keeping it at all.
     let name = binding.name.text();
 
+    // **The four type questions, timed apart.** Together they are 98% of the index's sweep on a real project
+    // (138 files of MSVC's standard library), and each one is a different traversal of the same tree — so which of
+    // them dominates is the difference between four different fixes. See `crate::stages`.
+    let type_of = {
+        let _timer = crate::stages::StageTimer::new(crate::stages::Stage::TypeOf);
+        declared_type_of_with(shapes, binding)
+    }
+    .or_else(|| {
+        let _timer = crate::stages::StageTimer::new(crate::stages::Stage::Alias);
+        declared_alias_target_with(shapes, binding)
+    });
+    let returns = {
+        let _timer = crate::stages::StageTimer::new(crate::stages::Stage::Returns);
+        declared_returns_of_with(shapes, binding)
+    };
+    let bases = {
+        let _timer = crate::stages::StageTimer::new(crate::stages::Stage::Bases);
+        declared_bases_of_with(shapes, binding)
+    };
+
     Some(DeclFact {
         kind: DeclKind::from_binding_kind(binding.kind),
         name,
@@ -639,9 +825,9 @@ fn fact_for(
         // answer a *shape* cannot give, because `void f() { int x; }` and `void f() { }` differ by a declaration
         // that is not in a scope at all. See [`ScopeTree::declares_a_local`].
         local,
-        type_of: declared_type_of(root, binding).or_else(|| declared_alias_target(root, binding)),
-        returns: declared_returns_of(root, binding),
-        bases: declared_bases_of(root, binding),
+        type_of,
+        returns,
+        bases,
         range: binding.range,
         name_range: binding.name_range,
         // The one field that comes from the diagnostics rather than from the tree — see [`DeclFact::clean`] for
@@ -759,8 +945,9 @@ fn overlaps(one: SourceRange, other: SourceRange) -> bool {
 struct DeclarationFacts<'a> {
     scopes: &'a ScopeTree,
     preprocessing: &'a FilePreprocessing,
-    /// The tree, which is where a declared type's spelling comes from.
-    root: &'a CppSyntaxNode,
+    /// **The file's declarations, read once** — where a declared type's spelling comes from. Built here rather than
+    /// per binding: that difference is 14.4 s against a lookup, see [`DeclarationShapes`].
+    shapes: DeclarationShapes,
     /// The declarations the diagnostics fall inside, computed once — see [`Declarations`].
     declarations: Declarations<'a>,
     guards: SummaryGuards,
@@ -778,7 +965,7 @@ impl<'a> DeclarationFacts<'a> {
         DeclarationFacts {
             scopes,
             preprocessing,
-            root,
+            shapes: DeclarationShapes::of(root),
             declarations: Declarations::of(root, errors),
             guards: SummaryGuards::default(),
             facts: Vec::new(),
@@ -786,12 +973,12 @@ impl<'a> DeclarationFacts<'a> {
     }
 
     fn build(self) -> (Vec<DeclFact>, SummaryGuards) {
-        // Destructured so that the walk below holds the three inputs and the two outputs as separate bindings:
-        // the loop pushes into `facts` while reading `declarations`, which a `&mut self` method could not do.
+        // Destructured so that the walk below holds the inputs and the two outputs as separate bindings: the loop
+        // pushes into `facts` while reading `shapes` and `declarations`, which a `&mut self` method could not do.
         let DeclarationFacts {
             scopes,
             preprocessing,
-            root,
+            shapes,
             declarations,
             mut guards,
             mut facts,
@@ -807,7 +994,7 @@ impl<'a> DeclarationFacts<'a> {
             let local = scopes.declares_a_local(ScopeId(index));
 
             for binding in &scope.bindings {
-                if let Some(fact) = fact_for(root, binding, prefix.clone(), local, &declarations) {
+                if let Some(fact) = fact_for(&shapes, binding, prefix.clone(), local, &declarations) {
                     facts.push(fact);
                 }
             }

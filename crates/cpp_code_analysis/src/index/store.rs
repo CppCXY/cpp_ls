@@ -324,18 +324,27 @@ impl<F: FileProvider> SummaryStore<F> {
     /// **re-checked** against the filesystem — see `resolution_still_holds` below — which is the one thing about a
     /// summary that its key cannot name. What a hit does not do is parse, search for a *new* include, or write.
     pub fn get(&mut self, path: &Path) -> Option<&FileSummary> {
-        let source = self.files.read(path)?;
-        let key = SummaryKey::new(content_hash(&source), self.context_hash(path));
+        let source = {
+            let _read = crate::stages::StageTimer::new(crate::stages::Stage::Read);
+            self.files.read(path)?
+        };
+        let key = {
+            let _hash = crate::stages::StageTimer::new(crate::stages::Stage::Hash);
+            SummaryKey::new(content_hash(&source), self.context_hash(path))
+        };
 
-        if let Ok(stored) = read_summary(&key.path_under(&self.cache))
-            && stored.key == key
-            && self.resolution_still_holds(path, &stored)
         {
-            self.stats.reused += 1;
-            // Filed under the path that asked, which is not necessarily the one recorded in the entry: the key
-            // names the text, so two files with the same text share an entry. See `ProjectIndex::insert_at`.
-            self.index.insert_at(path, stored);
-            return self.index.summary(path);
+            let _lookup = crate::stages::StageTimer::new(crate::stages::Stage::Lookup);
+            if let Ok(stored) = read_summary(&key.path_under(&self.cache))
+                && stored.key == key
+                && self.resolution_still_holds(path, &stored)
+            {
+                self.stats.reused += 1;
+                // Filed under the path that asked, which is not necessarily the one recorded in the entry: the key
+                // names the text, so two files with the same text share an entry. See `ProjectIndex::insert_at`.
+                self.index.insert_at(path, stored);
+                return self.index.summary(path);
+            }
         }
 
         self.stats.rebuilt += 1;
@@ -346,6 +355,7 @@ impl<F: FileProvider> SummaryStore<F> {
         if has_unresolved_includes(&summary) {
             self.stats.unstored += 1;
         } else {
+            let _encode = crate::stages::StageTimer::new(crate::stages::Stage::Encode);
             // A failed write is not a failed lookup: the answer is in hand and in the index. Reporting it would
             // turn a read-only checkout — a perfectly ordinary way to work — into a broken editor.
             let _ = write_summary(&summary, &self.cache);
@@ -525,9 +535,12 @@ impl<F: FileProvider> SummaryStore<F> {
         // spelling answers `None` for a file that is right there — measured as `open.h` arriving with an empty text
         // and every macro body in it silently unscoped, which is exactly the bug this pass exists to prevent.
         let mut sources: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        for summary in self.index.summaries() {
-            if let Some(text) = self.files.read(&summary.path) {
-                sources.insert(normalize_path(&summary.path, cfg!(windows)), text);
+        {
+            let _read = crate::stages::StageTimer::new(crate::stages::Stage::Read);
+            for summary in self.index.summaries() {
+                if let Some(text) = self.files.read(&summary.path) {
+                    sources.insert(normalize_path(&summary.path, cfg!(windows)), text);
+                }
             }
         }
 
@@ -542,16 +555,39 @@ impl<F: FileProvider> SummaryStore<F> {
         // `_STD_BEGIN` is `_EXTERN_CXX_WORKAROUND namespace std {` and `_EXTERN_CXX_WORKAROUND` is empty in the arm
         // in force. Read without that environment the shape is `Other` — a body whose first token is a word nobody
         // could resolve — and a name the reader would not use is a file this pass does not re-read.
+        //
+        // # What that costs, and the two caches that bound it
+        //
+        // The environment is a **closure walk**, and a closure holds thousands of macros whose bodies mostly cannot
+        // be placed by the plain reader — so asking per *macro* is a closure walk per *macro*. Measured, with the
+        // environment built inside the inner loop and its `MacroDefinitions` created there too: indexing the 138
+        // files of one real project took **362 s**, against **16.5 s** for the same index before this question was
+        // asked. Two things bound it, and both are the same shape — build the expensive thing once:
+        //
+        // * **one `MacroDefinitions` for the whole pass**: reading a definition out of a file's text does not depend
+        //   on which body is asking, and this is the cache that exists to say so (it was being defeated by being
+        //   created per macro);
+        // * **one environment per file, built lazily**: the words inside a body are decided by the include order of
+        //   the file that *defines* the macro, so the environment is a fact about that file and not about the body —
+        //   and a file with no unplaceable body never builds one at all.
         let mut bodied: Vec<String> = Vec::new();
+        let mut is_bodied: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut definitions = crate::summary::MacroDefinitions::default();
 
+        // Scoped to **this loop** and stopped before the pass continues: what follows re-parses files through
+        // `FileIndexer::index`, which is already timed as `Parse` + `Sweep`, and a timer that enclosed it would
+        // count that work twice (measured: an enclosing version reported 106% of the wall clock).
+        let scan = crate::stages::StageTimer::new(crate::stages::Stage::BodiedScan);
         for summary in self.index.summaries() {
             let key = normalize_path(&summary.path, cfg!(windows));
             let Some(source) = sources.get(&key) else {
                 continue;
             };
 
+            let mut environment: Option<cpp_parser::MacroEnvironment> = None;
+
             for fact in &summary.macros {
-                if !fact.kind.is_definition() || bodied.contains(&fact.name) {
+                if !fact.kind.is_definition() || is_bodied.contains(fact.name.as_str()) {
                     continue;
                 }
                 let Some(range) = fact.body_range else {
@@ -565,38 +601,35 @@ impl<F: FileProvider> SummaryStore<F> {
                 let used = if cpp_parser::shape_of_a_body(body).a_reading_uses_this() {
                     true
                 } else {
-                    // A body the plain reading cannot place. This is the only place an environment is built, and
-                    // it is built for the file that **defines** the macro: the words inside its body are the ones
-                    // whose meaning its own include order decides.
-                    let mut definitions = crate::summary::MacroDefinitions::default();
-                    let environment = {
-                        let index = &self.index;
+                    let environment = environment.get_or_insert_with(|| {
                         let evidence = crate::summary::macros_from_the_closure_with_bodies(
                             summary,
                             |wanted| {
                                 let key = normalize_path(wanted, cfg!(windows));
                                 Some((
-                                    index.summary(std::path::Path::new(&key))?,
+                                    self.index.summary(std::path::Path::new(&key))?,
                                     sources.get(&key)?.as_str(),
                                 ))
                             },
-                            index.macros(),
+                            self.index.macros(),
                             &mut definitions,
                         );
 
                         cpp_parser::MacroEnvironment::from_included_macros(evidence.macros)
                             .with_bodies_in_force(evidence.conditional_bodies)
-                    };
+                    });
 
-                    cpp_parser::shape_of_a_body_at(body, &environment, range.start_offset)
+                    cpp_parser::shape_of_a_body_at(body, environment, range.start_offset)
                         .a_reading_uses_this()
                 };
 
                 if used {
+                    is_bodied.insert(&fact.name);
                     bodied.push(fact.name.clone());
                 }
             }
         }
+        scan.stop();
 
         if bodied.is_empty() {
             return 0;
@@ -654,6 +687,7 @@ impl<F: FileProvider> SummaryStore<F> {
             if truncated || has_unresolved_includes(&rebuilt) {
                 self.stats.unstored += 1;
             } else {
+                let _encode = crate::stages::StageTimer::new(crate::stages::Stage::Encode);
                 let _ = write_summary(&rebuilt, &self.cache);
             }
 

@@ -317,6 +317,18 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// into the difference between 4.5 s and 12.7 s for 255 files (measured; the census's own note records the same
     /// effect at 40 s). Invalidated **per path** when a file changes, since the keys are offsets in that file.
     definitions: crate::MacroDefinitions,
+    /// **The translation unit each cooked file was read in**, kept across cooks.
+    ///
+    /// The one-walk timeline ([`crate::TranslationUnit`]) is what makes a *file's* environment a position in a walk
+    /// rather than a walk of its own — but [`Session::cook`] was building one **per cooked file**, so cooking the
+    /// 138 files of one real project's closure walked that closure 138 times. The compiler's answer to the same
+    /// repetition is a preamble, and the crate already has it on disk ([`crate::TranslationUnitCache`], keyed on the
+    /// content of every file the walk entered); this is the in-session half, so that a second cook of the same
+    /// translation unit does not even decode the entry again.
+    ///
+    /// Cleared whole by any change: a unit is a reading of its closure, and the shortest correct invalidation is
+    /// "nothing in it may have moved".
+    units: std::collections::HashMap<String, std::sync::Arc<crate::TranslationUnit>>,
     /// **The headers the include search path can name**, read once — what `#include` is completed from.
     ///
     /// Built with the session rather than on the first completion, and the reason is the budget rather than the
@@ -570,6 +582,7 @@ impl<F: FileProvider + Clone> Session<F> {
             parsed_since_the_last_pass: Vec::new(),
             cooking: Cooking::default(),
             definitions: crate::MacroDefinitions::default(),
+            units: std::collections::HashMap::new(),
             headers,
         };
 
@@ -731,6 +744,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // knows any more, and a view built on it would answer about an edit nobody saved.
         self.vfs.close(path);
         self.store.forget(path);
+        self.units.clear();
         self.queue.again(path.to_path_buf(), Priority::Rest, 0);
     }
 
@@ -761,6 +775,11 @@ impl<F: FileProvider + Clone> Session<F> {
             // …and the definitions this session read **out of** that file: their keys are offsets in it, so an edit
             // that moved them would leave entries a later fact could reach and never wrote.
             self.definitions.forget(path);
+            // …and the **translation units**: a unit is a reading of its whole closure, so a file that changed
+            // anywhere in it makes every unit built over it a reading of text that is no longer there. Cleared
+            // whole, for the reason `Session::translation_unit_of` gives: the honest short answer to "did something
+            // inside it move" is "assume so", and the disk entry checks file by file when it is asked again.
+            self.units.clear();
         }
 
         let response = self.store.respond(batch);
@@ -814,7 +833,9 @@ impl<F: FileProvider + Clone> Session<F> {
         // missing one. The reading is rebuilt when the queue drains — see [`Session::cooking`].
         self.store.forget(path);
         self.definitions.forget(path);
-        self.want_a_cooked_reading(path);
+        // The **translation units** too: every one of them was a walk over a closure that contains this file.
+        self.units.clear();
+        self.cooking.want(path);
 
         self.queue.again(path.to_path_buf(), Priority::Open, 0);
     }
@@ -855,54 +876,110 @@ impl<F: FileProvider + Clone> Session<F> {
         }
 
         for dependent in self.store.index().dependents_of(path) {
+            // **Only the files that had a reading are asked for another one.** Dropping a stale reading is what this
+            // loop is for; re-marking a file that never had one would cook a file nobody has looked at, which is the
+            // 11.7 s the cooking policy was narrowed to avoid — paid here one header edit at a time. A file with no
+            // reading is answered from its own text, and gets one when something looks at it.
+            let had_a_reading = self.store.index().cooked_declarations(&dependent).is_some();
             self.store.index_mut().forget_cooked(&dependent);
-            self.want_a_cooked_reading(&dependent);
-        }
-    }
-
-    /// Mark the files `root` includes, transitively, for cooking — **skipping the ones that already have a
-    /// reading**.
-    ///
-    /// Called for every open file at each drain, so it has to be both cheap and idempotent: the closure is one walk
-    /// of the index's edges, and a file that has a reading is not marked again — otherwise every drain would cook
-    /// the whole closure over and over. A file whose reading is *stale* is not this method's business: the
-    /// invalidation dropped its reading already ([`Session::buffer_changed`]), and a file with no reading is marked
-    /// here.
-    fn want_the_closure_cooked(&mut self, root: &Path) {
-        for included in self.closure_paths(root) {
-            if self.store.index().cooked_declarations(&included).is_none() {
-                self.want_a_cooked_reading(&included);
+            if had_a_reading {
+                self.cooking.want(&dependent);
             }
         }
     }
 
-    /// Mark **every indexed file** for cooking, skipping the ones that already have a reading.
+    /// Mark **the files a reader is looking at** for cooking, skipping the ones that already have a reading.
     ///
-    /// # Why the whole project, and not only what an open file reaches
+    /// # What this used to cover, and the measurement that changed it
     ///
-    /// Because a file with no cooked reading is answered from its **own text**, and that reading is the coarser one:
-    /// a declaration a macro writes is a guess there, a branch nobody takes is still there, and the parser's
-    /// complaints about both are published. The session publishes a diagnostic for *every* indexed file — the
-    /// workspace pass, and the pull request a client makes about a file it is showing — so "every file whose
-    /// diagnostics are published has a reading" is the property the workspace pass needs, and it is the gate the
-    /// architecture puts in front of deleting the shape rules.
+    /// Cooking used to cover the open file's **whole closure** and then **every indexed file**. Measured on one real
+    /// project — a single `main.cpp` including `<cstdio>`, `<iostream>`, `<optional>` and `<string>`, whose closure
+    /// is **138 files**:
     ///
-    /// # What it costs, and where the cost is paid
+    /// ```text
+    /// index (summaries, cached)            cold 24.2 s | warm  4.2 s
+    /// cooking every file of the closure    cold 11.7 s | warm 11.9 s   ← the cache cannot help: a reading is not stored
+    /// ```
     ///
-    /// One unit walk, one cook and one index per file — measured on the 255-file SDK corpus at **7~8 s** in total
-    /// (definitions 95 ms, expansion 2.18 s, indexing 4.0–5.6 s), which is the same order as reading the project in
-    /// the first place. It is paid **in slices, in the background, behind the files a reader is waiting for**: the
-    /// slice loop above takes `COOK_SLICE` at a time, the pump yields between slices, and a query never waits for
-    /// this — it is the same queue discipline the indexing steps use, for the same reason.
+    /// and the reading that half buys is **one declaration in a thousand**: `cook(<string>)` reports 1000
+    /// declarations, of which **1** is one the raw reading does not already have. The rest — the scopes, the
+    /// members, the aliases, `std::string` itself — comes from the raw reading once the closure's **macro bodies**
+    /// are in hand ([`crate::FileIndexer::with_macro_bodies`]).
     ///
-    /// # Why the scan is here rather than in the marking
+    /// # What is looked at, and why the direct includes are part of it
     ///
-    /// A file can lose its reading at any time (an edit, a watched change, a dependent of one — all through
-    /// [`Session::invalidate_dependents`], which marks what it drops), and a file can be *added* at any time (a new
-    /// source, a header discovered by an include). So "which files have no reading" is asked at the moment the work
-    /// is handed out, once per drain, and the answer is a pass over the index: one hash lookup per file, which the
-    /// membership set in [`Cooking`] keeps from becoming a quadratic scan.
-    fn want_the_project_cooked(&mut self) {
+    /// ```text
+    /// the open files                    what a reader is reading
+    /// the files their text names        `#include "api.h"` is a line the reader wrote; a declaration a macro
+    ///                                   writes in `api.h` is **`api.h`'s** declaration, and a question asked from
+    ///                                   `main.cpp` has to be answered with a jump into `api.h`
+    /// ```
+    ///
+    /// and nothing else. A file one level further down has no reading until something looks at it —
+    /// [`Session::want_cooked_reading`] is that "something" for everything the editor did not open, and it is one
+    /// file at a time rather than a subtree.
+    ///
+    /// # Why a file that already has a reading is not wanted again
+    ///
+    /// Because this runs at **every** idle drain, so "want it" has to mean "if it is not already read": a queue
+    /// that is refilled with files that have readings never empties, and a session whose backlog never empties
+    /// never reports itself idle — which is a hang, not a slowdown. (Measured the hard way: the pump spun for over
+    /// a minute in `a_file_nobody_looked_at_is_not_cooked_and_one_a_request_names_is`, and every request behind it
+    /// waited.)
+    fn want_the_closure_cooked(&mut self, root: &Path) {
+        let already_read = |session: &Self, path: &Path| {
+            session.store.index().cooked_declarations(path).is_some()
+        };
+
+        for included in self.direct_includes_of(root) {
+            if !already_read(self, &included) {
+                self.cooking.want(&included);
+            }
+        }
+
+        if !already_read(self, root) {
+            self.cooking.want(root);
+        }
+    }
+
+    /// The files `path` includes **directly**, as the index resolved them.
+    fn direct_includes_of(&self, path: &Path) -> Vec<PathBuf> {
+        self.store
+            .index()
+            .summary(path)
+            .map(|summary| {
+                summary
+                    .includes
+                    .iter()
+                    .filter_map(|include| include.resolved.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// **Mark one file for cooking** — "something is about to look at this".
+    ///
+    /// The entry point for a caller that knows which file a question is about: the shell calls it for every file a
+    /// request names, so the answer *after* this one is the compiler's reading and this one is the file's own. It
+    /// is deliberately not a "cook it now": the caller is a query, the cooking is the pump's work, and a keystroke
+    /// must not wait for a unit walk.
+    pub fn want_cooked_reading(&mut self, path: &Path) {
+        self.cooking.want(path);
+    }
+
+    /// **Mark every indexed file for cooking** — the project-wide sweep, kept behind the caller's choice rather
+    /// than done on every drain.
+    ///
+    /// It is what a client that publishes diagnostics for **every file in the workspace** needs (the workspace
+    /// pass, and a pull request about a file it is showing): a file with no cooked reading is answered from its own
+    /// text, where a declaration a macro writes is a guess and a branch nobody takes is still there. It is also
+    /// what made starting a one-file project cost **11.7 s** (the measurement in
+    /// [`Session::want_the_closure_cooked`]), which is why the session no longer does it by default: what is looked
+    /// at is cooked, and a file nobody looks at is answered from its own text and says so
+    /// ([`crate::DiagnosticReading`]).
+    ///
+    /// A caller that wants the whole project read as a compiler reads it says so — that is what this is for.
+    pub fn want_everything_cooked(&mut self) {
         let wanted: Vec<PathBuf> = self
             .store
             .index()
@@ -914,11 +991,6 @@ impl<F: FileProvider + Clone> Session<F> {
         for path in wanted {
             self.cooking.want(&path);
         }
-    }
-
-    /// Remember that `path` needs its cooked reading (re)built, once.
-    fn want_a_cooked_reading(&mut self, path: &Path) {
-        self.cooking.want_urgently(path);
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -978,23 +1050,18 @@ impl<F: FileProvider + Clone> Session<F> {
         // A **slice**, like the indexing steps: cooking a file is a unit walk, a parse and an index, and a session
         // that did a whole closure in one call would hold the writer for seconds while the user types.
         if self.is_idle() {
-            // moment the closure is *known*: at `did_open` time the file's summary is the one just dropped, so the
-            // index has no edges to follow yet. What this makes true is the product's whole reason for cooking: a
-            // name used in the file the user is editing is declared in a header they never opened, and the answer
-            // has to come from that header's reading.
+            // **What a reader is looking at**, and nothing else: the open files and the files their own text names,
+            // plus whatever a request named ([`Session::want_cooked_reading`]). See
+            // [`Session::want_the_closure_cooked`] for the measurement that narrowed this down from the whole
+            // closure — 11.7 s of every startup for one declaration in a thousand — and
+            // [`Session::want_everything_cooked`] for the caller that still wants the whole project read that way.
             for open in self.documents.paths() {
                 self.want_the_closure_cooked(&open);
             }
 
-            // **And then the rest of the project**, at the back of the same queue — see
-            // [`Session::want_the_project_cooked`] for why every file is wanted and not only the open ones.
-            self.want_the_project_cooked();
-
             for path in self.cooking.take(COOK_SLICE) {
-                // The queue is drained **in the order it was filled**, which is the closure's own order: the open
-                // file first, then what it includes a level at a time, then the rest of the project. A user who asks
-                // about a name in the file they are looking at is therefore answered from a cooked reading before
-                // the deeper headers are done — and before the project pass has started on files nobody has open.
+                // The queue is drained **in the order it was filled**: the open file first, then the includes it
+                // names, then whatever a request asked about — so the file a reader is looking at is ready first.
                 self.cook(&path);
             }
         }
@@ -1300,8 +1367,94 @@ impl<F: FileProvider + Clone> Session<F> {
         &self.vfs
     }
 
-    /// **Read a file the way a compiler reads it**, and let the index answer for what came out.
+    /// **The translation unit `path` belongs to**, walked once and then reused.
     ///
+    /// # Why this is the whole point of plan A
+    ///
+    /// A file's macro environment is a *position in one walk of the unit*
+    /// ([`crate::TranslationUnit`]): the walk visits every file the unit enters, records where each was entered, and
+    /// every later question — "what is `_STD_BEGIN` in `<xstring>`" — is a lookup in that timeline rather than a
+    /// closure walk of its own. Measured before this existed (the census, 255 files of the Windows SDK):
+    /// **17 618 794 conditional facts evaluated, 147 s of a 174 s run**, because each file's environment was built
+    /// as if it were the only one.
+    ///
+    /// [`Session::cook`] built one anyway — *per cooked file* — so cooking the 138 files of one real project's
+    /// closure walked that closure 138 times. Three levels of reuse, cheapest first:
+    ///
+    /// ```text
+    /// this session, this unit        the in-memory map below          — no walk, no read, no decode
+    /// a previous run, same content   TranslationUnitCache on disk     — a read and a hash of the closure
+    /// otherwise                      the walk, once                   — and it is written for the next run
+    /// ```
+    ///
+    /// # What invalidates it
+    ///
+    /// Any change to any file: the map is cleared whole. A unit is a reading of *its closure*, and the honest
+    /// short answer to "did something in it move" is "assume so" — the disk entry is the one that can afford to
+    /// check file by file (it hashes the closure), and it is consulted fresh each time this map misses.
+    fn translation_unit_of(&mut self, path: &Path) -> Option<std::sync::Arc<crate::TranslationUnit>> {
+        let key = queue_key(path);
+
+        if let Some(unit) = self.units.get(&key) {
+            return Some(unit.clone());
+        }
+
+        let context = self.store.context_hash(path);
+        let cache = crate::TranslationUnitCache::of_store(&self.store);
+
+        // Read out of the cache under a timer, then matched: a stage timer inside a `match` scrutinee is a block
+        // clippy asks to hoist, and hoisting it is what the timer wants anyway — it should cover the read only.
+        let cached = {
+            let _get = crate::stages::StageTimer::new(crate::stages::Stage::UnitGet);
+            cache.get(path, context, &self.files)
+        };
+
+        let unit = match cached {
+            Some(unit) => unit,
+            None => {
+                let (closure, closure_by_key) = {
+                    let _closure = crate::stages::StageTimer::new(crate::stages::Stage::Closure);
+                    self.closure_with_text(path)
+                };
+
+                // **The session's own definition cache**, not a fresh one: the walk reads back every `#define` a
+                // file sees, and the same definition reaches hundreds of files — `<vector>` and `<string>` both see
+                // `_STD_BEGIN`, whose text is in `yvals_core.h`. One cache per *walk* is one parse per definition
+                // per file, which the census measured at 12.2 s of a 40 s run. Invalidated **per path** when a file
+                // changes, since the keys are offsets in that file.
+                let index = self.store.index();
+                let root = index.summary(path)?;
+                let mut definitions = std::mem::take(&mut self.definitions);
+                let unit = {
+                    let _walk = crate::stages::StageTimer::new(crate::stages::Stage::Walk);
+                    crate::TranslationUnit::walk(
+                        root,
+                        |wanted| {
+                            let (held, text) = closure.get(*closure_by_key.get(&queue_key(wanted))?)?;
+                            Some((index.summary(held)?, text.as_str()))
+                        },
+                        index.macros(),
+                        &mut definitions,
+                    )
+                };
+                self.definitions = definitions;
+
+                // Written for the **next run**, and the write is the caller's business to fail: a read-only
+                // checkout is an ordinary way to work, and a cache that cannot be written is not a wrong answer.
+                {
+                    let _put = crate::stages::StageTimer::new(crate::stages::Stage::UnitPut);
+                    let _ = cache.put(path, context, &unit, &self.files);
+                }
+                unit
+            }
+        };
+
+        let unit = std::sync::Arc::new(unit);
+        self.units.insert(key, unit.clone());
+        Some(unit)
+    }
+
+    /// **Read a file the way a compiler reads it**, and let the index answer for what came out.    ///
     /// One call that is the whole foundation, in the order the layers were built: walk the file's own translation
     /// unit ([`crate::TranslationUnit::walk`], over the summaries the index already holds and the text this session
     /// is holding), read the unit's definitions once, cook the file against **its** environment
@@ -1345,46 +1498,30 @@ impl<F: FileProvider + Clone> Session<F> {
         // needs the same edge set the visibility walk uses, and one read per file rather than one per edge. The map
         // beside it is what makes answering the walk's questions a lookup rather than a scan — see
         // [`Session::closure_with_text`].
-        let (closure, closure_by_key) = self.closure_with_text(&path);
-        let text = closure
-            .get(*closure_by_key.get(&queue_key(&path))?)
-            .map(|(_, text)| text.clone())?;
-
-        // **The session's own definition cache**, not a fresh one: the walk reads back every `#define` a file sees,
-        // and the same definition reaches hundreds of files — `<vector>` and `<string>` both see `_STD_BEGIN`, whose
-        // text is in `yvals_core.h`. One cache per *file* is one parse per definition per file, which the census
-        // measured at 12.2 s of a 40 s run before the probe stopped doing it. Kept for the session's lifetime,
-        // because cooking the whole project asks the same question about the same definitions over and over.
         //
-        // It is invalidated by **path**: an entry is keyed by the offset it was written at, so an edit that moved
-        // every later offset makes the old entries reachable by facts that never wrote them.
-        let unit = {
-            let index = self.store.index();
-            let root = index.summary(&path)?;
-            let mut definitions = std::mem::take(&mut self.definitions);
-            let unit = crate::TranslationUnit::walk(
-                root,
-                |wanted| {
-                    let (held, text) = closure.get(*closure_by_key.get(&queue_key(wanted))?)?;
-                    Some((index.summary(held)?, text.as_str()))
-                },
-                index.macros(),
-                &mut definitions,
-            );
-            self.definitions = definitions;
-            unit
-        };
+        // …and it is read **only on a miss**: the unit itself is what is expensive, and it is asked for first.
+        let unit = self.translation_unit_of(&path)?;
+        let text = self.files.read(&path)?;
 
         let seed = MacroTable::from_marked(self.store.index().macros());
-        let (tokens, _) = cpp_parser::lex(&text, &cpp_parser::LexerConfig::default());
+        let (tokens, _) = {
+            let _lex = crate::stages::StageTimer::new(crate::stages::Stage::Lex);
+            cpp_parser::lex(&text, &cpp_parser::LexerConfig::default())
+        };
         let unit_definitions = unit.definitions();
-        let macros = crate::preprocess::cooked::FileMacros::new(
-            unit.environment_of(&path)?,
-            &unit_definitions,
-            Some(&seed),
-            true,
-        );
-        let rendered = crate::preprocess::cooked::cook_with(&text, &tokens, &macros).render();
+        let macros = {
+            let _macros = crate::stages::StageTimer::new(crate::stages::Stage::Macros);
+            crate::preprocess::cooked::FileMacros::new(
+                unit.environment_of(&path)?,
+                &unit_definitions,
+                Some(&seed),
+                true,
+            )
+        };
+        let rendered = {
+            let _render = crate::stages::StageTimer::new(crate::stages::Stage::Render);
+            crate::preprocess::cooked::cook_with(&text, &tokens, &macros).render()
+        };
 
         let indexer = FileIndexer::new(&self.files, &self.config);
         let indexed = indexer.index_rendering(&path, &rendered, key);
@@ -1401,7 +1538,10 @@ impl<F: FileProvider + Clone> Session<F> {
             mapped: indexed.mapped,
         };
 
-        self.store.index_mut().insert_cooked(&path, indexed.into());
+        {
+            let _insert = crate::stages::StageTimer::new(crate::stages::Stage::Insert);
+            self.store.index_mut().insert_cooked(&path, indexed.into());
+        }
         Some(reading)
     }
 
@@ -1919,18 +2059,9 @@ struct Cooking {
 }
 
 impl Cooking {
-    /// Want `path` cooked, at the back of the queue: the project pass uses this, and the front belongs to the files
-    /// a reader is waiting for.
+    /// Want `path` cooked, **at the front**: something is about to look at it, and its answer is the next thing
+    /// asked for.
     fn want(&mut self, path: &Path) -> bool {
-        self.push(path, false)
-    }
-
-    /// Want `path` cooked **now**: an edit made it stale, and its answer is the next thing its reader asks for.
-    fn want_urgently(&mut self, path: &Path) -> bool {
-        self.push(path, true)
-    }
-
-    fn push(&mut self, path: &Path, urgent: bool) -> bool {
         if !self.held.insert(queue_key(path)) {
             return false;
         }
@@ -1938,12 +2069,7 @@ impl Cooking {
         // The spelling is kept as the caller gave it: the cook resolves it against the index's own spelling anyway
         // (`Session::cook` asks the index for the path it filed the file under), and rewriting it here would be a
         // second opinion about identity.
-        if urgent {
-            self.wanted.push_front(path.to_path_buf());
-        } else {
-            self.wanted.push_back(path.to_path_buf());
-        }
-
+        self.wanted.push_front(path.to_path_buf());
         true
     }
 
@@ -2451,7 +2577,7 @@ mod tests {
     /// reads it. Without the closure marking the index would have the raw reading of `api.h` — which cannot see
     /// what `DECLARE_HANDLE` declares at all.
     #[test]
-    fn a_header_the_user_never_opened_is_cooked_because_the_open_file_includes_it() {
+    fn a_header_the_user_never_opened_is_cooked_when_a_request_names_it() {
         let handle = "#define DECLARE_HANDLE(name) struct name##__ { int unused; }; \
                       typedef struct name##__ *name\n";
         let api = "#include \"handle.h\"\nDECLARE_HANDLE(HWND);\n";
@@ -2460,16 +2586,15 @@ mod tests {
             .with_file("/p/handle.h", handle)
             .with_file("/p/api.h", api)
             .with_file("/p/main.cpp", main);
-        let fixture = Memory::new("the-closure-is-cooked", &files);
+        let fixture = Memory::new("a-named-file-is-cooked", &files);
         let mut session = fixture.session();
 
         session.did_open("/p/main.cpp", main);
         session.index_everything();
 
-        // The queue is empty **and** the cooking backlog is: `index_everything` waits for both, which is what makes
-        // this an assertion about the closure rather than about the file that happened to be first.
-        assert_eq!(session.pending(), 0, "both kinds of work are done");
-
+        // **The open file, and the files its own text names.** `api.h` is one of them, so the declaration the macro
+        // writes in it is `api.h`'s declaration and a question about `HWND` is answered with a jump into it — the
+        // capability that the closure used to buy, bought for the price of one direct include instead of 138 files.
         let after = session.index().definition("HWND__", Path::new("/p/main.cpp"));
         let Known::Yes(found) = after else {
             panic!("`api.h`'s cooked reading declares it: {after:?}");
@@ -2477,21 +2602,29 @@ mod tests {
         assert_eq!(
             found.file,
             Path::new("/p/api.h"),
-            "and it is `api.h`'s declaration — the file the macro is invoked in, which nobody opened"
+            "the file that invoked the macro, which nobody opened"
         );
+
+        // **And not one level further**: `handle.h` is nobody's direct include here, so it has no reading until
+        // something looks at it. That is the difference between a bounded set and the closure — measured on a real
+        // project: the closure was 138 files and **11.7 s of every startup**, the direct includes are four.
         assert!(
             session
                 .index()
-                .cooked_declarations(Path::new("/p/api.h"))
-                .is_some(),
-            "a cooked reading for the header, built because the open file includes it"
+                .cooked_declarations(Path::new("/p/handle.h"))
+                .is_none(),
+            "a transitive include is not cooked for free"
         );
+
+        // A request naming it — the shell's `prepare` does this for every file a request is about — is what makes it.
+        session.want_cooked_reading(Path::new("/p/handle.h"));
+        session.index_everything();
         assert!(
             session
                 .index()
                 .cooked_declarations(Path::new("/p/handle.h"))
                 .is_some(),
-            "…and one for the header *it* includes, which is where the macro is written"
+            "and then it has one"
         );
     }
 
@@ -2582,18 +2715,16 @@ mod tests {
         assert_eq!(found.unplaced, 0, "nothing had to be hidden: {found:?}");
     }
 
-    /// **A file nobody has open is cooked too**, once the queue drains.
+    /// **What is cooked is what is looked at**: the open files and the files their own text names, plus any file a
+    /// request is about — not a closure, and not a project.
     ///
-    /// The reader who needs this is not a user asking a question — it is the diagnostic pass, which publishes an
-    /// answer for **every** indexed file: a file with no cooked reading is answered from its own text, where a
-    /// declaration a macro writes is a guess and a branch nobody takes still reports. So the project is read the way
-    /// a compiler reads it, and the file nobody opened is the point of the test rather than an accident of it.
-    ///
-    /// The **order** is asserted too, and it is the reason this is affordable at all: the open file and its closure
-    /// are cooked first, and the rest of the project waits behind them — one slice is four files, the closure here is
-    /// exactly four, and the fifth file is still uncooked when that slice is done.
+    /// The reader who needed the old behaviour was the diagnostic pass, which publishes an answer for every indexed
+    /// file — but "every indexed file" is the **closure** of an open file, and on a real project that was 138 files:
+    /// measured at **11.7 s** of the startup, every time, cache or no cache, for the difference between 999 and 1000
+    /// declarations. A file nobody looks at is answered from its own text, and the diagnostic layer says so
+    /// ([`super::DiagnosticReading::Raw`]) rather than pretending otherwise.
     #[test]
-    fn a_file_nobody_opened_is_cooked_once_the_queue_drains() {
+    fn a_file_nobody_looked_at_is_not_cooked_and_one_a_request_names_is() {
         let main = "#include \"a.h\"\n#include \"b.h\"\n#include \"c.h\"\nA a; B b; C c;\n";
         let files = MemoryFiles::new()
             .with_file("/p/a.h", "struct A { int x; };\n")
@@ -2601,25 +2732,23 @@ mod tests {
             .with_file("/p/c.h", "struct C { int x; };\n")
             .with_file("/p/main.cpp", main)
             .with_file("/p/other.cpp", "#include \"a.h\"\nvoid g() { }\n");
-        let fixture = Memory::new("the-project-is-cooked", &files);
+        let fixture = Memory::new("only-what-is-looked-at-is-cooked", &files);
         let mut session = fixture.session();
 
-        // The scan's part: a file the caller knows about, in the rest half of the queue. Nothing opens it, nothing
-        // includes it, and it is the project's to read.
+        // A file the caller knows about, in the rest half of the queue. Nothing opens it, nothing looks at it.
         session.add_project_files([PathBuf::from("/p/other.cpp")]);
         session.did_open("/p/main.cpp", main);
 
-        // One slice of everything: the index is read, and the first four files are cooked — the open file and its
-        // closure.
-        session.advance(64);
-        for cooked in ["/p/main.cpp", "/p/a.h", "/p/b.h", "/p/c.h"] {
+        session.index_everything();
+        assert_eq!(session.pending_work(), 0, "both kinds of work are done");
+
+        for looked_at in ["/p/main.cpp", "/p/a.h", "/p/b.h", "/p/c.h"] {
             assert!(
                 session
                     .index()
-                    .cooked_declarations(Path::new(cooked))
+                    .cooked_declarations(Path::new(looked_at))
                     .is_some(),
-                "{cooked} is what the reader is waiting for: {}",
-                session.pending_cooking()
+                "{looked_at} is what the reader is looking at"
             );
         }
         assert!(
@@ -2627,28 +2756,28 @@ mod tests {
                 .index()
                 .cooked_declarations(Path::new("/p/other.cpp"))
                 .is_none(),
-            "and the project's own files wait behind them"
+            "and a file nobody opened, nobody included and no request named has no reading"
         );
 
+        // A request names it: that is what the shell does before every query, and the reading follows.
+        session.want_cooked_reading(Path::new("/p/other.cpp"));
         session.index_everything();
-        assert_eq!(session.pending_work(), 0, "both kinds of work are done");
         assert!(
             session
                 .index()
                 .cooked_declarations(Path::new("/p/other.cpp"))
                 .is_some(),
-            "the file nobody opened has a reading, so its diagnostics are the compiler's answer"
+            "the file a request is about is read the way a compiler reads it"
         );
     }
 
-    /// **Editing a header invalidates the reading of a file nobody opened**, and the file comes back.
+    /// **Editing a header invalidates the reading of every file that had one**, and those come back.
     ///
-    /// This is the half of the project-wide cooking that is easy to get wrong: it used to drop the readings of the
-    /// **open** files that include the changed one, which was exactly the set of files that had a reading. Now the
-    /// set is every dependent ([`crate::ProjectIndex::dependents_of`]), because a stale reading is a wrong answer
-    /// rather than a missing one — and `other.cpp` is a dependent even though no user has ever looked at it.
+    /// The set is every dependent ([`crate::ProjectIndex::dependents_of`]), because a stale reading is a wrong answer
+    /// rather than a missing one — and it is *only* the dependents that had a reading, because a file nobody has
+    /// looked at has nothing to invalidate and asking for a new reading would cook a file nobody asked about.
     #[test]
-    fn editing_a_header_invalidates_the_reading_of_a_file_nobody_opened() {
+    fn editing_a_header_invalidates_the_readings_that_depend_on_it() {
         let ns = "#define BEGIN_NS namespace one {\n#define END_NS }\n";
         let api = "#include \"ns.h\"\nBEGIN_NS struct Widget { int size; }; END_NS\n";
         let other = "#include \"api.h\"\nWidget w;\n";
@@ -2656,11 +2785,13 @@ mod tests {
             .with_file("/p/ns.h", ns)
             .with_file("/p/api.h", api)
             .with_file("/p/other.cpp", other);
-        let fixture = Memory::new("a-project-cooked-file-goes-stale", &files);
+        let fixture = Memory::new("a-cooked-file-goes-stale", &files);
         let mut session = fixture.session();
 
         session.add_project_files([PathBuf::from("/p/other.cpp")]);
         session.did_open("/p/api.h", api);
+        // A request names `other.cpp`, so it has a reading to lose — which is what this test is about.
+        session.want_cooked_reading(Path::new("/p/other.cpp"));
         session.index_everything();
         assert!(
             session
@@ -2713,6 +2844,7 @@ mod tests {
 
         session.add_project_files([PathBuf::from("/p/other.cpp")]);
         session.did_open("/p/api.h", api);
+        session.want_cooked_reading(Path::new("/p/other.cpp"));
         session.index_everything();
 
         // The same declarations with one more member: the file changed, its macros did not.

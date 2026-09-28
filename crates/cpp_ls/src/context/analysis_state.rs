@@ -74,9 +74,20 @@ impl AnalysisState {
     /// is the trade this exists to avoid.)
     pub async fn prepare(&self, path: &std::path::Path) -> bool {
         let path = path.to_path_buf();
-        self.update_session(move |session| session.load(&path).is_some())
-            .await
-            .unwrap_or(false)
+        self.update_session(move |session| {
+            let loaded = session.load(&path).is_some();
+            // **A file a request is about gets its cooked reading** — and this is the only place that knows which
+            // file a request named. Not "cook it now": the query below answers from the reading that exists (its own
+            // text, when there is nothing else), and the *next* request gets the compiler's reading, which is what
+            // `isIncomplete` tells a client to come back for. The session's rule is that a reading is built when
+            // something looks at the file; this is the "something" for everything the editor did not open.
+            if loaded {
+                session.want_cooked_reading(&path);
+            }
+            loaded
+        })
+        .await
+        .unwrap_or(false)
     }
 
     /// Tell the indexing pump that the queue has work in it.

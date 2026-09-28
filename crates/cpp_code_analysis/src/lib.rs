@@ -51,6 +51,7 @@ pub mod sema;
 pub mod semantic;
 pub mod session;
 pub mod signature;
+pub mod stages;
 pub mod summary;
 pub mod summary_codec;
 

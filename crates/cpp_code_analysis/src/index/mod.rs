@@ -68,6 +68,7 @@ use crate::preprocess::directive::{Directive, SpannedDirective};
 use crate::preprocess::preprocess;
 use crate::sema::declarations::{assign_guards, build_facts, mark_settling_macro_facts};
 use crate::sema::scopes::build_scopes;
+use crate::stages::{Stage, StageTimer};
 use crate::summary::{FactGuard, FileSummary, IncludeFact, MacroFact};
 use crate::summary_codec::DecodeError;
 
@@ -140,8 +141,23 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             config = config.with_macros_from_includes(bodies);
         }
 
-        let tree = CppParser::parse(source, config);
-        self.index_tree(path, source, &tree, key)
+        let tree = {
+            let _parse = StageTimer::new(Stage::Parse);
+            CppParser::parse(source, config)
+        };
+        let summary = {
+            let _sweep = StageTimer::new(Stage::Sweep);
+            self.index_tree(path, source, &tree, key)
+        };
+        // **Destroying the tree is work**, and it is timed because it is not free and not obvious: a file's tree is
+        // tens of thousands of green nodes held by `Arc`s, and dropping it walks every one of them. On the 138-file
+        // project this was the missing third of the cold index after the shape walk was fixed — the stages summed to
+        // 6.0 s of a 9.5 s run, and the difference was here.
+        {
+            let _drop = StageTimer::new(Stage::Drop);
+            drop(tree);
+        }
+        summary
     }
 
     /// **Index a file through its cooked stream** — the reading a compiler would parse, with every range turned
@@ -182,9 +198,18 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             config = config.with_macros_from_includes(bodies);
         }
 
-        let tree = CppParser::parse(&rendered.text, config);
-        let mut summary = self.index_tree(path, &rendered.text, &tree, key);
-        let report = summary.map_into_the_file(rendered);
+        let tree = {
+            let _parse = StageTimer::new(Stage::RenderParse);
+            CppParser::parse(&rendered.text, config)
+        };
+        let mut summary = {
+            let _sweep = StageTimer::new(Stage::RenderSweep);
+            self.index_tree(path, &rendered.text, &tree, key)
+        };
+        let report = {
+            let _map = StageTimer::new(Stage::Map);
+            summary.map_into_the_file(rendered)
+        };
 
         // The tree's errors, each asked of the map. `reported_span` answers for a node's whole range — from the first
         // token it covers to the last — and `reported_at` for the span an offset falls in, which is the fallback for
@@ -226,17 +251,26 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
     ) -> FileSummary {
         // See `index`: the content part of the key is the text, always. The caller supplies the part that
         // describes the *compilation* — the configuration and the directory the file sits in.
+        //
+        // Not timed here: the caller that asked for the build has timed this same hash already
+        // (`SummaryStore::get` does it to look the entry up), and timing it twice would count it twice.
         let key = SummaryKey::new(content_hash(source), key.context_hash);
 
         let root = tree.get_red_root();
-        let preprocessing = preprocess(source, tree.get_tokens());
+        let preprocessing = {
+            let _scan = StageTimer::new(Stage::Scan);
+            preprocess(source, tree.get_tokens())
+        };
         // The same evidence object for both readers — see the field's note. The cast is the point: the scope walk
         // asks the trait, the parse asked the concrete type, and there is one value behind both.
         let evidence: &dyn cpp_parser::MacroBodies = match self.bodies {
             Some(bodies) => bodies,
             None => &crate::sema::scopes::NoMacroBodies,
         };
-        let scopes = build_scopes(&root, evidence);
+        let scopes = {
+            let _scopes = StageTimer::new(Stage::Scopes);
+            build_scopes(&root, evidence)
+        };
         // The diagnostics, as ranges, for the one field a fact takes from them rather than from the tree — see
         // [`DeclFact::clean`]. Collected once for the whole file: the parser reports a handful per file, and
         // asking per declaration would be a scan of the list per fact.
@@ -246,35 +280,46 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             .map(|error| cpp_parser::source_range(error.range))
             .collect();
 
-        let (mut declarations, mut guards) =
-            build_facts(&scopes, &preprocessing, &root, &errors);
+        let (mut declarations, mut guards) = {
+            let _facts = StageTimer::new(Stage::Facts);
+            build_facts(&scopes, &preprocessing, &root, &errors)
+        };
 
-        let mut macros: Vec<MacroFact> = preprocessing
-            .directives
-            .iter()
-            .filter_map(macro_fact)
-            .collect();
-
-        // The interner is local: resolving an include mints an id as a side effect, and the id is discarded
-        // because a summary stores the *path*. A `FileId` is an index into a run's interner and means nothing to
-        // whoever reads the summary back.
         let mut interner = PathInterner::new(cfg!(windows));
         let resolver = IncludeResolver::new(self.files, self.config);
         let directory = path.parent().unwrap_or(Path::new("."));
 
-        let mut includes: Vec<IncludeFact> = preprocessing
-            .directives
-            .iter()
-            .filter_map(|spanned| {
-                include_fact(
-                    &spanned.directive,
-                    spanned.range,
-                    directory,
-                    &resolver,
-                    &mut interner,
-                )
-            })
-            .collect();
+        // The includes are their own stage because **resolving one is a filesystem search**, per file, per pass —
+        // the one step here that is not proportional to the text but to the search path. Measured on the 138-file
+        // project, this is where most of the sweep goes.
+        let (mut macros, mut includes) = {
+            let _includes = StageTimer::new(Stage::Includes);
+
+            let macros: Vec<MacroFact> = preprocessing
+                .directives
+                .iter()
+                .filter_map(macro_fact)
+                .collect();
+
+            // The interner is local: resolving an include mints an id as a side effect, and the id is discarded
+            // because a summary stores the *path*. A `FileId` is an index into a run's interner and means nothing to
+            // whoever reads the summary back.
+            let includes: Vec<IncludeFact> = preprocessing
+                .directives
+                .iter()
+                .filter_map(|spanned| {
+                    include_fact(
+                        &spanned.directive,
+                        spanned.range,
+                        directory,
+                        &resolver,
+                        &mut interner,
+                    )
+                })
+                .collect();
+
+            (macros, includes)
+        };
 
         // Every kind of fact carries a guard, and they are assigned together rather than per kind: the sweep is
         // over *offsets*, and running it once per fact list would rebuild the region list each time. An include's
@@ -295,35 +340,44 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             .collect();
         guarded.sort_by_key(|(_, at)| *at);
 
-        assign_guards(&mut guarded, &preprocessing, &mut guards);
+        let own_guard = {
+            let _guards = StageTimer::new(Stage::Guards);
 
-        // The file's **own include guard is not a condition**, and this is the step that makes the standard
-        // library queryable at all: a header puts its whole body inside `#ifndef _GLIBCXX_STRING`, so without this
-        // rule every `#include` written inside a header is "conditional" and every declaration reached through one
-        // is `ConditionalCompilation` — measured on the closure of `<string>`, that is *every* cross-file answer
-        // there is. See `deguard_the_files_own_guard` for why calling it unconditional is the honest reading.
-        let own_guard = own_guard_region(&preprocessing, &root);
+            assign_guards(&mut guarded, &preprocessing, &mut guards);
 
-        // Stored, not just used here: a *walk* evaluating a condition needs the same rule, and it has only the
-        // summary. See `SummaryGuards::own_guard` — a file's own guard is not a condition on anything.
-        guards.own_guard = own_guard.map(|region| region as u32);
+            // The file's **own include guard is not a condition**, and this is the step that makes the standard
+            // library queryable at all: a header puts its whole body inside `#ifndef _GLIBCXX_STRING`, so without this
+            // rule every `#include` written inside a header is "conditional" and every declaration reached through one
+            // is `ConditionalCompilation` — measured on the closure of `<string>`, that is *every* cross-file answer
+            // there is. See `deguard_the_files_own_guard` for why calling it unconditional is the honest reading.
+            let own_guard = own_guard_region(&preprocessing, &root);
 
-        if let Some(region) = own_guard {
-            let mut all: Vec<&mut FactGuard> = declarations
-                .iter_mut()
-                .map(|fact| &mut fact.guard)
-                .chain(macros.iter_mut().map(|fact| &mut fact.guard))
-                .chain(includes.iter_mut().map(|fact| &mut fact.guard))
-                .collect();
-            deguard_the_files_own_guard(&mut all, region);
-        }
+            // Stored, not just used here: a *walk* evaluating a condition needs the same rule, and it has only the
+            // summary. See `SummaryGuards::own_guard` — a file's own guard is not a condition on anything.
+            guards.own_guard = own_guard.map(|region| region as u32);
+
+            if let Some(region) = own_guard {
+                let mut all: Vec<&mut FactGuard> = declarations
+                    .iter_mut()
+                    .map(|fact| &mut fact.guard)
+                    .chain(macros.iter_mut().map(|fact| &mut fact.guard))
+                    .chain(includes.iter_mut().map(|fact| &mut fact.guard))
+                    .collect();
+                deguard_the_files_own_guard(&mut all, region);
+            }
+
+            own_guard
+        };
 
         // What the guards above cannot say on their own: whether a `#define` inside an `#if` still *settles* the
         // name whichever branch is taken — the `#ifndef NAME / #define NAME` idiom, which is how the system headers
         // define most of the macros a project uses. It runs after the de-guard step because a fact already
         // `Unconditional` has nothing to settle, and it is told which region the own guard is because the rule it
         // applies nests inside conditionals and must agree with that step about what a file guard means.
-        mark_settling_macro_facts(&preprocessing, own_guard, &mut macros);
+        {
+            let _settling = StageTimer::new(Stage::Settling);
+            mark_settling_macro_facts(&preprocessing, own_guard, &mut macros);
+        }
 
         FileSummary {
             path: path.to_path_buf(),

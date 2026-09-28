@@ -27,18 +27,47 @@ fn main() {
     );
     let opening = started.elapsed();
 
+    // **The two halves of the work, timed apart.** `index_everything` is one number, and the two things it does are
+    // different jobs with different fixes: reading a file **into the index** (parse + scopes + facts, one file at a
+    // time) and **cooking** it (a walk of the unit as a compiler would read it, then a parse of the rendering).
+    // The first is bounded by the project; the second is bounded by the closure, and on a standard-library project
+    // that is where the time goes.
     let indexed = Instant::now();
-    session.index_everything();
+    cpp_code_analysis::stages::StageTimes::reset();
+    while session.pending() > 0 {
+        session.advance(64);
+    }
+    let indexed_for = indexed.elapsed();
+
+    let cooked = Instant::now();
+    while session.pending_cooking() > 0 {
+        session.advance(64);
+    }
+    let cooked_for = cooked.elapsed();
+
     println!(
-        "opened in {opening:?} | toolchain {:?} | {} include paths | {} project files | indexed {} files in {:?} (pending {} | stats {:?})",
+        "opened in {opening:?} | toolchain {:?} | {} include paths | {} project files | indexed {} files in {indexed_for:?} + cooked {cooked_for:?} (pending {} | stats {:?})",
         session.toolchain().and_then(|toolchain| toolchain.version.clone()),
         session.config().include_paths.len(),
         session.project_files().len(),
         session.index().len(),
-        indexed.elapsed(),
         session.pending(),
         session.stats()
     );
+
+    // **Where the time went**, stage by stage — and how much of the wall clock that accounts for.
+    //
+    // The gap is the point of printing both: a table that covers most of the wall time is an instrument, and one
+    // that covers a third is telling us where to look next. `stages::StageTimes` documents the rule that makes the
+    // sum meaningful (the stages do not overlap).
+    let stages = cpp_code_analysis::stages::StageTimes::read();
+    let wall = (indexed_for + cooked_for).as_secs_f64() * 1000.0;
+    println!(
+        "stages account for {:.1} ms of the {:.1} ms of indexing + cooking",
+        stages.total().as_secs_f64() * 1000.0,
+        wall
+    );
+    print!("{}", stages.report());
 
     // **What the index actually holds**, asked directly: whether the facts are there at all (an alias or a
     // template may never become one) or whether the lookup is keyed differently.
