@@ -90,7 +90,8 @@ pub use tu_cache::{TRANSLATION_UNITS_DIRECTORY, TranslationUnitCache};
 pub use summary::ConditionalBody;
 pub use summary::{
     ConditionAt, ConditionalRegion, CookedDiagnostic, DeclFact, DeclKind, FactGuard, FileSummary,
-    GuardBranch, IncludeFact, IndexedRendering, MacroFact, MacroKind, MacroView, MapReport,
+    GuardBranch, IncludeFact, IndexedRendering, IndexedUnit, UnitReading, MacroFact, MacroKind, MacroView,
+    MapReport,
     OutlineSymbol,
     SummaryGuards, TranslationUnit, UnitDefinitions, macros_from_direct_includes,
     macros_from_direct_includes_with_bodies, macros_from_the_closure_with_bodies, ClosureEvidence,
@@ -187,4 +188,5 @@ pub use symbol::{
     QualifiedName, Scope, ScopeId, ScopeKind, ScopeTree, UnknownReason,
 };
 pub use token::Token;
+
 

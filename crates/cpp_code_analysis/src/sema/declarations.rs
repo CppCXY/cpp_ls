@@ -965,7 +965,10 @@ impl<'a> DeclarationFacts<'a> {
         DeclarationFacts {
             scopes,
             preprocessing,
-            shapes: DeclarationShapes::of(root),
+            shapes: {
+                let _shapes = crate::stages::StageTimer::new(crate::stages::Stage::Shapes);
+                DeclarationShapes::of(root)
+            },
             declarations: Declarations::of(root, errors),
             guards: SummaryGuards::default(),
             facts: Vec::new(),

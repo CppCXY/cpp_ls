@@ -254,6 +254,103 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         }
     }
 
+    /// **Parse a unit's rendering once, and file the facts under the files they stand in.**
+    ///
+    /// This is the reading the plan calls *the unit reading*, and it is one step further than
+    /// [`FileIndexer::index_rendering`]: that one indexes a **single file's** rendering and maps the ranges back
+    /// into that file, while this indexes the **whole program's** rendering — the stream
+    /// [`crate::TranslationUnit::cook_the_unit`] stitches in include order — and splits what it finds by the file
+    /// each declaration was written in.
+    ///
+    /// # What it buys
+    ///
+    /// The index holds "what the compiler saw" for **every file in the program**, including headers nobody has
+    /// opened. Without it a header's cooked facts exist only if some request happened to name the file
+    /// ([`crate::Session::want_cooked_reading`]), so a cross-file answer about `std::string`'s members depends on
+    /// whether a reader had looked at `<xstring>` — a difference no answer should have.
+    ///
+    /// # The mapping, and what is dropped
+    ///
+    /// A rendering's offsets are not file offsets, so every range goes back through
+    /// [`crate::RenderedUnit::written_span`], which answers with the place a reader can act on: a token the file
+    /// wrote keeps its own range, and one that came out of a macro body answers with the **outermost call site**.
+    /// A fact whose **name** and whose **range** come out in different files is dropped and counted — half in one
+    /// file and half in another is not "a bit less", it is a fact about nothing (the same rule
+    /// [`crate::FileSummary::map_into_the_file`] applies per file).
+    pub fn index_unit_rendering(
+        &self,
+        root: &Path,
+        stream: &crate::RenderedUnit,
+        key: SummaryKey,
+    ) -> crate::IndexedUnit {
+        let mut config = ParserConfig::default().with_dialect(self.config.dialect());
+        if let Some(bodies) = self.macro_facts {
+            config = config.with_macros_from_includes(bodies);
+        }
+
+        let tree = {
+            let _parse = StageTimer::new(Stage::RenderParse);
+            CppParser::parse(&stream.text, config)
+        };
+        let summary = {
+            let _sweep = StageTimer::new(Stage::RenderSweep);
+            self.index_tree(root, &stream.text, &tree, key)
+        };
+
+        let mut files: Vec<(std::path::PathBuf, crate::CookedFile)> = stream
+            .files
+            .iter()
+            .map(|path| (path.clone(), crate::CookedFile::default()))
+            .collect();
+        let mut unplaced = 0usize;
+
+        for mut fact in summary.declarations {
+            let Some((file, range)) = stream.written_span(fact.range) else {
+                unplaced += 1;
+                continue;
+            };
+            let Some((name_file, name_range)) = stream.written_span(fact.name_range) else {
+                unplaced += 1;
+                continue;
+            };
+            if name_file != file {
+                unplaced += 1;
+                continue;
+            }
+
+            fact.range = range;
+            fact.name_range = name_range;
+            if let Some((_, cooked)) = files.get_mut(file as usize) {
+                cooked.declarations.push(fact);
+            }
+        }
+
+        // The tree's errors, each asked of the same map. A rendering error that **cannot** be placed in any file
+        // is counted rather than reported against a text the reader cannot see.
+        for error in tree.get_errors() {
+            let range = cpp_parser::source_range(error.range);
+            match stream.written_span(range) {
+                Some((file, range)) => {
+                    if let Some((_, cooked)) = files.get_mut(file as usize) {
+                        cooked.diagnostics.push(crate::CookedDiagnostic {
+                            range,
+                            message: error.message.clone(),
+                        });
+                    }
+                }
+                None => unplaced += 1,
+            }
+        }
+
+        crate::IndexedUnit {
+            files,
+            unplaced,
+            tokens: stream.len(),
+            files_with_tokens: stream.files_with_tokens(),
+            missing: stream.missing,
+        }
+    }
+
     /// [`FileIndexer::index`] for a caller that already has the tree.
     ///
     /// Parsing twice is the most expensive thing this layer can be asked to do, and an editor usually has the tree

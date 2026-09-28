@@ -106,6 +106,9 @@ pub enum Stage {
     /// *Detail*: asking whether a macro body's shape is one a reading uses, **without** an environment
     /// (`shape_of_a_body`), inside `BodiedScan`.
     BodiedPlain,
+    /// *Detail*: reading a file's declaration shapes ([`crate::DeclarationShapes::of`]), inside `Facts` and so
+    /// inside `Sweep` — one pass over the tree that every question about a declaration is then answered from.
+    Shapes,
     /// *Detail*: the same question **with** an environment — building the defining file's closure environment and
     /// asking `shape_of_a_body_at`, inside `BodiedScan`.
     BodiedEnv,
@@ -141,6 +144,7 @@ impl Stage {
                 | Stage::Returns
                 | Stage::Bases
                 | Stage::Drop
+                | Stage::Shapes
                 | Stage::BodiedPlain
                 | Stage::BodiedEnv
                 | Stage::ReEnv
@@ -150,7 +154,7 @@ impl Stage {
 }
 
 /// Every stage, in the order the table prints them.
-pub const STAGES: [Stage; 35] = [
+pub const STAGES: [Stage; 36] = [
     Stage::Read,
     Stage::Hash,
     Stage::Lookup,
@@ -180,6 +184,7 @@ pub const STAGES: [Stage; 35] = [
     Stage::Returns,
     Stage::Bases,
     Stage::Drop,
+    Stage::Shapes,
     Stage::BodiedPlain,
     Stage::BodiedEnv,
     Stage::Load,
@@ -221,6 +226,7 @@ impl Stage {
             Stage::Returns => "returns",
             Stage::Bases => "bases",
             Stage::Drop => "drop",
+            Stage::Shapes => "shapes",
             Stage::BodiedPlain => "bodied-plain",
             Stage::BodiedEnv => "bodied-env",
             Stage::Load => "load",
@@ -260,6 +266,7 @@ impl Stage {
             | Stage::Returns
             | Stage::Bases
             | Stage::Drop
+            | Stage::Shapes
             | Stage::BodiedPlain
             | Stage::BodiedEnv => Family::Indexing,
             Stage::Lex
@@ -578,4 +585,6 @@ mod tests {
         assert!(report.contains("[detail]"), "{report}");
     }
 }
+
+
 

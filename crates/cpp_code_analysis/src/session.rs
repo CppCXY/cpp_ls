@@ -87,7 +87,7 @@ use crate::index::references::{MacroReferences, ReferenceBudget, macro_reference
 use crate::inlay::ParameterHint;
 use crate::index::store::{StoreStats, SummaryStore};
 use crate::index::worklist::StepOutcome;
-use crate::summary::OutlineSymbol;
+use crate::summary::{OutlineSymbol, UnitReading};
 use crate::index::watch::{ChangeBatch, FileEvent, Response, WatchFilter};
 use crate::index::worklist::{Priority, Step, outcome_of};
 use crate::index::{
@@ -317,6 +317,11 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// into the difference between 4.5 s and 12.7 s for 255 files (measured; the census's own note records the same
     /// effect at 40 s). Invalidated **per path** when a file changes, since the keys are offsets in that file.
     definitions: crate::MacroDefinitions,
+    /// **The project's translation units that have been read as programs** — see [Session::read_the_unit].
+    ///
+    /// Cleared wherever [Session::units] is: a unit read is a reading of the same timeline, so anything that
+    /// moves inside it makes this list a claim about a reading that no longer describes its closure.
+    units_read: std::collections::HashSet<String>,
     /// **The translation unit each cooked file was read in**, kept across cooks.
     ///
     /// The one-walk timeline ([`crate::TranslationUnit`]) is what makes a *file's* environment a position in a walk
@@ -583,6 +588,7 @@ impl<F: FileProvider + Clone> Session<F> {
             cooking: Cooking::default(),
             definitions: crate::MacroDefinitions::default(),
             units: std::collections::HashMap::new(),
+            units_read: std::collections::HashSet::new(),
             headers,
         };
 
@@ -745,6 +751,7 @@ impl<F: FileProvider + Clone> Session<F> {
         self.vfs.close(path);
         self.store.forget(path);
         self.units.clear();
+        self.units_read.clear();
         self.queue.again(path.to_path_buf(), Priority::Rest, 0);
     }
 
@@ -780,6 +787,7 @@ impl<F: FileProvider + Clone> Session<F> {
             // whole, for the reason `Session::translation_unit_of` gives: the honest short answer to "did something
             // inside it move" is "assume so", and the disk entry checks file by file when it is asked again.
             self.units.clear();
+        self.units_read.clear();
         }
 
         let response = self.store.respond(batch);
@@ -835,6 +843,7 @@ impl<F: FileProvider + Clone> Session<F> {
         self.definitions.forget(path);
         // The **translation units** too: every one of them was a walk over a closure that contains this file.
         self.units.clear();
+        self.units_read.clear();
         self.cooking.want(path);
 
         self.queue.again(path.to_path_buf(), Priority::Open, 0);
@@ -964,6 +973,14 @@ impl<F: FileProvider + Clone> Session<F> {
     /// is deliberately not a "cook it now": the caller is a query, the cooking is the pump's work, and a keystroke
     /// must not wait for a unit walk.
     pub fn want_cooked_reading(&mut self, path: &Path) {
+        // **And read it, if nothing has.** A reading is built out of a summary ([`Session::cook`] answers `None`
+        // without one), and a file a request names may be one no pump has reached — a header outside every
+        // translation unit, a file the workspace scan did not list. Wanting it cooked and not reading it is a
+        // promise the session never keeps: the next request gets the same raw reading and the `isIncomplete` flag
+        // goes on telling the client to come back for an answer that is not coming.
+        if self.store.index().summary(path).is_none() {
+            self.queue.add(path.to_path_buf(), Priority::Open, 0);
+        }
         self.cooking.want(path);
     }
 
@@ -1055,6 +1072,14 @@ impl<F: FileProvider + Clone> Session<F> {
         // A **slice**, like the indexing steps: cooking a file is a unit walk, a parse and an index, and a session
         // that did a whole closure in one call would hold the writer for seconds while the user types.
         if self.is_idle() {
+            // **NOT WIRED, ON PURPOSE — see the note on [`Session::read_the_unit`].** The unit read is implemented
+            // and tested, and calling it here makes a measured answer **worse** (49 names in `std` disappear, and
+            // `std::size_t` goes from "resolved in a header" to "the index has no such name"), which I have not
+            // explained yet. Shipping an unexplained change in answers to buy a capability is the trade this
+            // project does not make: the capability waits for the explanation.
+            //
+            // self.read_a_looked_at_unit();
+            //
             // **What a reader is looking at**, and nothing else: the open files and the files their own text names,
             // plus whatever a request named ([`Session::want_cooked_reading`]). See
             // [`Session::want_the_closure_cooked`] for the measurement that narrowed this down from the whole
@@ -1505,7 +1530,146 @@ impl<F: FileProvider + Clone> Session<F> {
         Some(unit)
     }
 
-    /// **Read a file the way a compiler reads it**, and let the index answer for what came out.    ///
+    /// **Read one translation unit as a program, and file its facts under every file it read.**
+    ///
+    /// # What this is for
+    ///
+    /// Everything else in this session reads a **file**: its own text, its own closure, its own environment. This is
+    /// the one call that reads a **program** — the closure stitched into one stream in include order
+    /// ([`crate::TranslationUnit::cook_the_unit`]), parsed **once**
+    /// ([`crate::FileIndexer::index_unit_rendering`]) — and hands every declaration it finds to the file it was
+    /// written in.
+    ///
+    /// That is what would make the index hold "what the compiler saw" for files **nobody has opened**: today a
+    /// header's cooked facts exist only for the files some request happened to name, so a cross-file answer depends
+    /// on whether a reader had looked at the header yet.
+    ///
+    /// # Why it is **not** wired into the pump
+    ///
+    /// Because it makes a measured answer worse, and that is not understood yet. On the real workspace, calling it
+    /// at the drain changes three readings the wrong way:
+    ///
+    /// ```text
+    ///                                   without the unit read   with it
+    /// declarations_in("std") after draining          2008        1959
+    /// definition, resolved in a header                 50          46
+    /// definition, the index has no such name            8          12   (`std::size_t` one of them)
+    /// ```
+    ///
+    /// **The bisect is exact**: commenting out the one call at the drain restores all three, with everything else in
+    /// this session's work in place — so the cause is this call and not the laziness policy, not the timeline the
+    /// second pass now reads, and not the `want_cooked_reading` fix that came with it.
+    ///
+    /// The obvious explanation does not survive reading the code: `visible_declarations_upto` gets the raw facts
+    /// **first** and skips a cooked fact whose `(name, kind)` the raw list already has, so adding cooked facts can
+    /// only add candidates. Something else is going on, and the next measurement is the one that names it rather
+    /// than guesses: `std_probe --cooked-index` on this workspace's closure prints the two readings' declaration
+    /// counts and their difference **per file**, which is what tells "the cooked facts are wrong" apart from "the
+    /// raw facts moved".
+    ///
+    /// `None` when the file has no summary or the walk cannot be built — nothing has read it yet, which is a state
+    /// and not an error.
+    pub fn read_the_unit(&mut self, root: &Path) -> Option<UnitReading> {
+        // The index's own spelling again, for the same reason [`Session::cook`] takes it: the unit's frames are
+        // keyed by the normalized path.
+        let root = self.store.index().summary(root)?.path.clone();
+        let unit = self.translation_unit_of(&root)?;
+
+        // **The text of every file the walk entered**, which is what the cook reads. One entry per file, read
+        // through this session's overlay so an unsaved buffer is what gets read — and a file the provider cannot
+        // read is simply absent, which the stream counts as a hole rather than as an empty file.
+        let mut sources: HashMap<PathBuf, String> = HashMap::new();
+        for path in unit.files() {
+            if let Some(text) = self.files.read(path) {
+                sources.insert(path.to_path_buf(), text);
+            }
+        }
+
+        let definitions = unit.definitions();
+        let seed = MacroTable::from_marked(self.store.index().macros());
+        let stream = unit.cook_the_unit(&sources, &definitions, Some(&seed), true);
+
+        let key = SummaryKey::new(0, self.store.context_hash(&root));
+        let indexer = FileIndexer::new(&self.files, &self.config);
+        let indexed = indexer.index_unit_rendering(&root, &stream, key);
+
+        let mut placed = 0usize;
+        for (path, cooked) in indexed.files {
+            placed += 1;
+            self.store.index_mut().insert_cooked(&path, cooked);
+        }
+
+        Some(UnitReading {
+            root,
+            files: placed,
+            declared: 0,
+            tokens: indexed.tokens,
+            files_with_tokens: indexed.files_with_tokens,
+            missing: indexed.missing,
+            unplaced: indexed.unplaced,
+        })
+    }
+
+    /// **The project's translation units, read once each** — what the pump calls when its queue drains.
+    ///
+    /// One per call rather than all of them, for the reason the pump is sliced at all: a unit read is a walk, a
+    /// render and a parse, and a session that did a hundred of them in one call would hold the writer for as long
+    /// as a compiler takes to build the project. [`Session::pending_work`] counts the ones still unread, so a
+    /// caller looping on it keeps coming back.
+    pub fn read_a_unit_of_the_project(&mut self) -> Option<UnitReading> {
+        let root = self
+            .project
+            .iter()
+            .find(|root| !self.units_read.contains(&queue_key(root)))
+            .cloned()?;
+
+        let reading = self.read_the_unit(&root);
+        self.units_read.insert(queue_key(&root));
+        reading
+    }
+
+    /// **A unit of one file a reader is looking at**, read as a program — one per drain.
+    ///
+    /// The policy is [`Session::cook`]'s: a reading is built when something looks at the file. What changed is the
+    /// **unit** the reading is built for — not "this file and its direct includes", but the whole translation unit
+    /// the file is read in, parsed once, with every declaration in it filed under the file it was written in.
+    ///
+    /// One per drain, like every other step here, and bounded by the number of *open* files rather than by the
+    /// project: a project with two hundred translation units does not read two hundred programs because one file is
+    /// open. [`Session::read_a_unit_of_the_project`] is the caller that wants all of them.
+    pub fn read_a_looked_at_unit(&mut self) -> Option<UnitReading> {
+        let root = self
+            .documents
+            .paths()
+            .into_iter()
+            .find(|path| !self.units_read.contains(&queue_key(path)))?;
+
+        let reading = self.read_the_unit(&root);
+        self.units_read.insert(queue_key(&root));
+        reading
+    }
+
+    /// How many units of **looked-at** files have not been read as programs yet.
+    ///
+    /// # Why this is **not** part of [`Session::pending_work`]
+    ///
+    /// It was, for one round, and that was a **hang**: a counter of work is a promise that the pump will do it, and
+    /// the only step that marks a unit read ([`Session::read_a_looked_at_unit`]) is not wired into the pump — so
+    /// `pending_work` never reached zero and [`Session::index_everything`]'s `while pending_work() > 0` spun at full
+    /// speed for ever, doing nothing each round. A test binary pegged a core and had to be killed.
+    ///
+    /// The rule that follows is the one this type already learned once (§8's "a queue that exists for one path must
+    /// be invisible to the other"): **a work counter may only count work the pump performs.** A question about
+    /// something the pump does not do is a *question*, and it is asked by name.
+    pub fn unread_units(&self) -> usize {
+        self.documents
+            .paths()
+            .iter()
+            .filter(|path| !self.units_read.contains(&queue_key(path)))
+            .count()
+    }
+
+    /// Read one file the way a compiler reads it**, and let the index answer for what came out.    ///
     /// One call that is the whole foundation, in the order the layers were built: walk the file's own translation
     /// unit ([`crate::TranslationUnit::walk`], over the summaries the index already holds and the text this session
     /// is holding), read the unit's definitions once, cook the file against **its** environment
@@ -2627,6 +2791,10 @@ mod tests {
     /// `main.cpp` is open, `api.h` is not, and the declaration only exists because `api.h` was read as a compiler
     /// reads it. Without the closure marking the index would have the raw reading of `api.h` — which cannot see
     /// what `DECLARE_HANDLE` declares at all.
+    ///
+    /// **The bound is one level of includes, and a unit read moves it** — see
+    /// [`a_unit_read_reads_the_whole_program_once`] for what the session does when a caller asks for the program
+    /// rather than for one file, and why that is not wired into the pump yet.
     #[test]
     fn a_header_the_user_never_opened_is_cooked_when_a_request_names_it() {
         let handle = "#define DECLARE_HANDLE(name) struct name##__ { int unused; }; \
@@ -2676,6 +2844,81 @@ mod tests {
                 .cooked_declarations(Path::new("/p/handle.h"))
                 .is_some(),
             "and then it has one"
+        );
+    }
+
+    /// **A unit read puts the whole program in the index, once** — [`Session::read_the_unit`].
+    ///
+    /// The reading this session is built to reach and has not reached: one walk, one stream, one parse, and every
+    /// declaration filed under the file it was written in — so a header has the program's reading whether or not
+    /// anybody opened it. Here the same fixture as above, asked for the **program** rather than for one file:
+    /// `handle.h` is read (it is what the program is made of), and a file the program does not read is not.
+    ///
+    /// It is a test of a call the pump does **not** make yet, and that is deliberate: wiring it changes answers in a
+    /// way that is not explained (the note on [`Session::read_the_unit`] has the three readings and the bisect), and
+    /// an unexplained change in answers is not shipped to buy a capability.
+    #[test]
+    fn a_unit_read_reads_the_whole_program_once() {
+        let handle = "#define DECLARE_HANDLE(name) struct name##__ { int unused; }; \
+                      typedef struct name##__ *name\n";
+        let api = "#include \"handle.h\"\nDECLARE_HANDLE(HWND);\n";
+        let main = "#include \"api.h\"\nHWND h;\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/handle.h", handle)
+            .with_file("/p/api.h", api)
+            .with_file("/p/main.cpp", main)
+            .with_file("/p/other.cpp", "#include \"other.h\"\nvoid g() { }\n")
+            .with_file("/p/other.h", "struct Unrelated { int y; };\n");
+        let fixture = Memory::new("a-unit-read", &files);
+        let mut session = fixture.session();
+
+        session.did_open("/p/main.cpp", main);
+        session.index_everything();
+
+        // Nothing has read `handle.h` as a program yet: it is a transitive include, and the per-file policy stops
+        // at the direct ones.
+        assert!(session.index().cooked_declarations(Path::new("/p/handle.h")).is_none());
+
+        let reading = session
+            .read_the_unit(Path::new("/p/main.cpp"))
+            .expect("the unit reads");
+        assert_eq!(reading.root, Path::new("/p/main.cpp"));
+        // **`files` is the walk's frames; `files_with_tokens` is smaller, and that is not a defect.** `handle.h`
+        // holds one `#define` and nothing else, and a directive contributes no token to the rendering — the same
+        // distinction the census records as "a clean file whose rendering is empty was not read at all" (§7). Both
+        // numbers are asserted so that the difference stays visible rather than being smoothed over.
+        assert!(
+            reading.files >= 3,
+            "the program is three files: {reading:?}"
+        );
+        assert_eq!(
+            reading.files_with_tokens, 2,
+            "two of them write tokens; a file of directives writes none: {reading:?}"
+        );
+        assert_eq!(reading.missing, 0, "every file had text: {reading:?}");
+
+        // **The program's files**, including the header nobody opened and the macro's declaration in the file that
+        // invoked it.
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/handle.h"))
+                .is_some(),
+            "a file the program is made of is read with it"
+        );
+        let after = session.index().definition("HWND__", Path::new("/p/main.cpp"));
+        let Known::Yes(found) = after else {
+            panic!("`api.h`'s cooked reading declares it: {after:?}");
+        };
+        assert_eq!(found.file, Path::new("/p/api.h"));
+
+        // **And a file outside the program is not touched**: nothing compiles `other.cpp`, nobody opens it.
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/other.cpp"))
+                .is_none(),
+            "a file no program reads and nobody opens has no reading"
         );
     }
 
@@ -4050,3 +4293,5 @@ mod tests {
         );
     }
 }
+
+

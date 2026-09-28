@@ -1989,6 +1989,38 @@ impl RenderedUnit {
         self.file_of(file)
     }
 
+    /// Where a **span** of the rendering was written: the file it stands in, and the range to act on there.
+    ///
+    /// [`RenderedUnit::written_at`] answers for one token; this is what a *fact* needs, because a declaration is a
+    /// span and a reader wants the whole of it. The two ends are asked separately and the answer is the span
+    /// between them, which is the same arithmetic
+    /// [`RenderedCooked::written_span`](crate::preprocess::cooked::RenderedCooked::written_span) does for one
+    /// file's rendering.
+    ///
+    /// The two ends can stand in **different** files — a macro invocation that expands to text from two headers,
+    /// or a declaration whose body came out of one and whose name was written in another — and there the honest
+    /// answer is the outermost call site, which is what `written_at` gives for each token: a range the reader can
+    /// see rather than a span across two texts.
+    pub fn written_span(
+        &self,
+        range: cpp_parser::SourceRange,
+    ) -> Option<(u32, cpp_parser::SourceRange)> {
+        let (file, first) = self.written_at(range.start_offset)?;
+        let (last_file, last) = self.written_at(range.end_offset().saturating_sub(1))?;
+
+        if last_file != file || last.end_offset() <= first.start_offset {
+            return Some((file, first));
+        }
+
+        Some((
+            file,
+            cpp_parser::SourceRange {
+                start_offset: first.start_offset,
+                length: last.end_offset() - first.start_offset,
+            },
+        ))
+    }
+
     /// The path a span's file index names.
     pub fn file_of(&self, file: u32) -> Option<&std::path::Path> {
         self.files.get(file as usize).map(std::path::PathBuf::as_path)
@@ -2789,6 +2821,48 @@ pub struct MapReport {
     pub placed: usize,
     /// Ranges that landed nowhere, taking their facts with them.
     pub dropped: usize,
+}
+
+/// What indexing a **whole unit's** rendering produced, file by file — see
+/// [`crate::FileIndexer::index_unit_rendering`].
+///
+/// One parse, many files: the facts are grouped by the file each declaration was written in, so a caller files
+/// them under their own paths rather than under the unit's root.
+#[derive(Debug, Default)]
+pub struct IndexedUnit {
+    /// Each file's share, in the order the unit's frames hold them — which is include order.
+    pub files: Vec<(std::path::PathBuf, crate::CookedFile)>,
+    /// Facts and errors that could not be placed in any file.
+    pub unplaced: usize,
+    /// How many tokens the unit's stream has.
+    pub tokens: usize,
+    /// How many files the stream actually carries a token from.
+    pub files_with_tokens: usize,
+    /// How many files the walk reached that the caller had no text for.
+    pub missing: usize,
+}
+
+/// What reading one translation unit as a program produced — see [`crate::Session::read_the_unit`].
+///
+/// A report rather than the facts themselves: the facts went into the index (that is the point of the call), and
+/// what a caller wants back is whether the reading happened and how much of the program it covered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnitReading {
+    /// The unit's root, in the index's own spelling.
+    pub root: std::path::PathBuf,
+    /// How many files the reading was filed under.
+    pub files: usize,
+    /// Declarations placed in a file.
+    pub declared: usize,
+    /// Tokens in the unit's stream.
+    pub tokens: usize,
+    /// Files the stream carries a token from — not `files`, because a file whose whole body is inside a branch
+    /// nobody takes contributes nothing, and counting it as read is the mistake §7 records.
+    pub files_with_tokens: usize,
+    /// Files the walk reached that this session had no text for.
+    pub missing: usize,
+    /// Facts and errors that could not be placed in any file.
+    pub unplaced: usize,
 }
 
 /// One thing the parse of a **rendering** found, said in the file's own coordinates.
