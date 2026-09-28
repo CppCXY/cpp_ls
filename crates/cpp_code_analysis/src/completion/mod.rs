@@ -65,7 +65,7 @@ use std::sync::Arc;
 use cpp_parser::{CppSyntaxNode, SourceRange};
 
 pub use context::{CompletionContext, context_at};
-pub use includes::{Header, HeaderIndex, SharedHeaders};
+pub use includes::{Header, HeaderIndex, HeaderKind, SharedHeaders};
 pub use table::{
     BUILTIN_TYPES, DIRECTIVES, DirectiveName, KEYWORDS, Keyword, KeywordUse, SNIPPETS, Snippet,
 };
@@ -309,6 +309,34 @@ pub fn completion_at(
     }
 }
 
+/// **What the completion made of a cursor** — the one diagnosis this layer is worth logging.
+///
+/// A `.` whose answer is the names in scope is the shape a user reported as "补全明显错误": the popup is full of
+/// things that cannot follow the operator, and nothing in it says whether the *type* could not be worked out, the
+/// class could not be found, or the cursor was never read as a member access at all. Those three have different
+/// fixes, and the reason is thrown away by the time a client sees an answer with no members in it.
+///
+/// Only asked when the answer contained no members, so the cost is one extra query on exactly the keystrokes a
+/// reader would complain about.
+pub fn why_no_members(
+    index: &ProjectIndex,
+    scopes: &ScopeTree,
+    root: &CppSyntaxNode,
+    path: &Path,
+    offset: usize,
+) -> String {
+    match context_at(root, offset) {
+        CompletionContext::Member(_) => {
+            match crate::index::project::member_completions_at(index, scopes, root, path, offset) {
+                Known::Yes(found) => format!("the member query answered, with {} members", found.members.members.len()),
+                Known::Unknown(reason) => reason.describe(),
+                Known::No => "the member query answered `No`".to_string(),
+            }
+        }
+        other => format!("the cursor is not a member access at all: {other:?}"),
+    }
+}
+
 /// The members of an object, after a `.` or `->`.
 fn members(
     index: &ProjectIndex,
@@ -340,7 +368,18 @@ fn members(
 
     let mut scored: Vec<Scored> = Vec::new();
 
+    // **One row per spelling.** A class declares `replace` eleven times and `insert` nine, and every one of them is
+    // a real declaration a jump should find — but a list is something a reader *picks* from, and eleven rows
+    // reading `replace` are one choice offered eleven times. So the member query's list is collapsed by name here,
+    // which is the same rule the name query applies and for the same reason. The declarations are not lost: the
+    // jump and the hover ask `members_of` / `member_definitions_across_files`, which keep the whole overload set.
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
     for member in &found.members.members {
+        if !seen.insert(member.fact.name.as_str()) {
+            continue;
+        }
+
         let mut item = CompletionItem::declared(&member.fact, &member.file);
         item.kind = member_kind(member, &found.class);
         item.replace = replace;
@@ -534,11 +573,13 @@ fn headers_for(
             item.replace = range;
 
             // **Where the header comes from**, which is the one thing a reader cannot see from the name and the one
-            // thing that decides whether the include will resolve: a header of this project is found from this
-            // source tree, one on the search path is found from anywhere with the same `-I`.
-            item.detail = Some(match header.directory {
-                HeaderIndex::PROJECT => "this project".to_string(),
-                _ => "on the include path".to_string(),
+            // thing that decides whether the include will resolve — and, since a real search path holds four
+            // thousand headers of which a hundred and fifty are the standard library's, the thing that decides
+            // which one they meant.
+            item.detail = Some(match header.kind {
+                HeaderKind::StandardLibrary => "the C++ standard library".to_string(),
+                HeaderKind::Project => "this project".to_string(),
+                HeaderKind::System => "on the include path".to_string(),
             });
             item
         })

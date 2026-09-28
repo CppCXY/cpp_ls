@@ -72,8 +72,8 @@ pub use cache::{
 // questions the cursor is asking and in what order the answer is shown. See `completion`'s module documentation.
 pub use completion::{
     BUILTIN_TYPES, CompletionContext, CompletionItem, CompletionSet, DIRECTIVES, DirectiveName,
-    Header, HeaderIndex, ItemKind, KEYWORDS, Keyword, KeywordUse, SNIPPETS, SharedHeaders, Snippet,
-    completion_at, context_at, header_index,
+    Header, HeaderIndex, HeaderKind, ItemKind, KEYWORDS, Keyword, KeywordUse, SNIPPETS, SharedHeaders, Snippet,
+    completion_at, context_at, header_index, why_no_members,
 };
 pub use file::token;
 pub use include::{config, graph, msvc, paths, system_headers, toolchain};
@@ -134,13 +134,13 @@ pub use toolchain::{
 // two paths is worse than a longer import.
 pub use index::{
     ChangeBatch, CookedFile, EventKind, FileEvent, FileIndexer, FileReferences, IncludeBudget,
-    IncludeIndex, IncludeVisibility, MacroReferences, MemberCompletions, MemberList, NameCompletions,
+    HeaderTarget, IncludeIndex, IncludeVisibility, MacroReferences, MemberCompletions, MemberList, NameCompletions,
     NameProvenance, NotIndexed, NotIndexedReason, OfferedName, PathPattern, Priority, ProjectDefinition,
     ProjectIndex, ProjectMacro, ProjectMember, ProjectSymbol, Reference, ReferenceBudget, ReferenceKind,
     Rename, Response, Step, StepOutcome, StoreStats, SummaryReadError, SummaryStore, UnlistedBase,
     UnresolvedEdge, VisibleDeclaration, WatchFilter, Worklist, definition_across_files,
     macro_across_files, macro_references, member_across_files, member_completions_at, members_of,
-    name_completions_at, outcome_of, read_summary, summarize, write_summary,
+    header_at, name_completions_at, outcome_of, read_summary, summarize, write_summary,
 };
 pub use macros::{MacroBody, MacroDef, MacroTable, Parameter, ParameterKind};
 pub use module_info::{ImportDeclaration, ImportTarget, ModuleInfo, ModuleUnit};

@@ -70,33 +70,55 @@ pub async fn on_completion(
         let view = session.view(&path)?;
         let offset = offset_at_position(&view, position)?;
 
-        Some(completions(session, &view, offset, snippets))
+        let found = session.completions(&view, offset);
+        log_a_member_that_produced_no_members(session, &view, offset, &found.items);
+
+        Some(CompletionResponse::List(lsp_types::CompletionList {
+            // See the module documentation: pending work means "ask again", a capped list means "do not".
+            is_incomplete: session.pending() > 0 && !found.truncated,
+            items: found
+                .items
+                .iter()
+                .enumerate()
+                .map(|(rank, item)| item_for(item, rank, &view, found.replace, snippets))
+                .collect(),
+        }))
     })
     .await
 }
 
-/// The completion list for one cursor, from the analysis and the session's own state.
+/// **Why a `.` produced no members** — the one diagnosis in this handler worth a log line.
 ///
-/// A plain function rather than a closure inside the handler, so that a test can ask about a cursor without a
-/// client, a URI and a position on the wire.
-pub fn completions(
+/// A `.` whose answer is the names in scope is the shape a user reported as "补全明显错误": the popup is full of
+/// things that cannot follow the operator, and nothing a client sees says whether the *type* could not be worked
+/// out, the class could not be found, or the cursor was never read as a member access at all. Those three have
+/// different fixes and the same symptom, so the reason is worth recording — but only for an answer with **no
+/// members in it**, which is the one shape that needs explaining.
+fn log_a_member_that_produced_no_members(
     session: &Session<DiskFiles>,
     view: &cpp_code_analysis::FileView,
     offset: usize,
-    snippets: Snippets,
-) -> CompletionResponse {
-    let found = session.completions(view, offset);
+    items: &[AnalysisItem],
+) {
+    let has_members = items
+        .iter()
+        .any(|item| matches!(item.kind, ItemKind::Method | ItemKind::Field));
 
-    CompletionResponse::List(lsp_types::CompletionList {
-        // See the module documentation: pending work means "ask again", a capped list means "do not".
-        is_incomplete: session.pending() > 0 && !found.truncated,
-        items: found
-            .items
-            .iter()
-            .enumerate()
-            .map(|(rank, item)| item_for(item, rank, view, found.replace, snippets))
-            .collect(),
-    })
+    if has_members {
+        return;
+    }
+
+    log::info!(
+        "completion at {}:{offset} has no members: {}",
+        view.path.display(),
+        cpp_code_analysis::why_no_members(
+            session.index(),
+            &view.scopes,
+            &view.root,
+            &view.path,
+            offset
+        )
+    );
 }
 
 /// Can the client interpolate a snippet body?

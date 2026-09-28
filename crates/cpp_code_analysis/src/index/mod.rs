@@ -43,11 +43,11 @@ pub mod worklist;
 pub use environment::{MacrosHere, visibility_at};
 
 pub use project::{
-    CookedFile, IncludeVisibility, MemberCompletions, MemberList, NameCompletions, NameProvenance,
+    CookedFile, HeaderTarget, IncludeVisibility, MemberCompletions, MemberList, NameCompletions, NameProvenance,
     OfferedName, ProjectDefinition, ProjectDefinitions, ProjectIndex, ProjectMacro, ProjectMember,
     ProjectSymbol, UnlistedBase, VisibleDeclaration, definition_across_files,
     definitions_across_files, macro_across_files, member_across_files, member_completions_at,
-    member_definitions_across_files, members_of, name_completions_at,
+    header_at, member_definitions_across_files, members_of, name_completions_at,
 };
 pub use references::{
     FileReferences, MacroReferences, Reference, ReferenceBudget, ReferenceKind, Rename,

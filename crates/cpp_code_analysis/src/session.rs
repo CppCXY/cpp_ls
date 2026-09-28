@@ -1448,6 +1448,21 @@ impl<F: FileProvider + Clone> Session<F> {
         macro_across_files(self.store.index(), &view.root, &view.path, offset)
     }
 
+    /// **Where the `#include` under the cursor points** — the fourth answer a jump can give.
+    ///
+    /// The three the analysis already had are a declaration (the scope walk), an overload set (the index by name)
+    /// and a macro (`#define`). A **header name** is none of them: nothing in the file declares `vector`, the scope
+    /// walker never sees `<vector>` (the grammar folds it into one token inside a directive), and the macro table
+    /// has no entry for it. So `textDocument/definition` on `#include <vector>` had nothing to answer with, and a
+    /// reader who ctrl-clicked it was told there is no definition — which is true of every question that was asked
+    /// and false about the file it names.
+    ///
+    /// The answer is the resolved path, from the same summary field the resolver wrote when the file was read, so
+    /// this is a lookup rather than a second implementation of the search: see [`crate::header_at`].
+    pub fn header_at(&self, view: &FileView, offset: usize) -> Known<crate::HeaderTarget> {
+        crate::header_at(self.store.index(), &view.root, &view.path, offset)
+    }
+
     /// Everywhere the macro name written at `offset` is used, across the project — the query a rename starts from.
     ///
     /// The name comes from the cursor rather than from the caller, because that is what a client has: a position,

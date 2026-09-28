@@ -39,6 +39,7 @@ use crate::guard::Visibility;
 use crate::include::graph::Marked;
 use crate::file::paths::normalize_path;
 use crate::summary::{DeclFact, FactGuard, FileSummary, MacroFact};
+use crate::preprocess::directive::IncludeForm;
 use crate::symbol::{Known, UnknownReason};
 
 /// How many files a visibility walk will cross before giving up.
@@ -48,6 +49,112 @@ use crate::symbol::{Known, UnknownReason};
 /// includes — which the visited set already handles. The number is here so that the *round* count of a
 /// pathological graph cannot become an unbounded amount of work on a keystroke.
 const MAX_VISIBILITY_DEPTH: usize = 128;
+
+/// **Where an `#include` points** — the target a reader asks about by pointing at the header's name.
+///
+/// The fourth answer a "go to definition" can give, beside a declaration, an overload set and a macro, and the one
+/// it was missing: nothing in the file *declares* `vector`, so every question the jump is built out of — the scope
+/// walk, the index by name, the macro table — answers nothing at all for `#include <vector>`, and a reader who
+/// ctrl-clicks it is told there is no definition to go to.
+///
+/// The name is the spelling between the delimiters (`vector`, `sys/types.h`), which is what the resolver searched
+/// for and what a reader wrote; the delimiters are the *form*, which is why [`HeaderTarget::form`] is separate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderTarget {
+    /// The spelling between the delimiters, and — for [`IncludeForm::Macro`] — the macro's name.
+    pub spelling: String,
+    pub form: IncludeForm,
+    /// The directive, as a range in the file **being edited**, which is what a client highlights.
+    ///
+    /// The whole `#include <vector>` rather than the name inside it, and that is the honest range: a jump to a
+    /// header lands at the top of a file whose contents have nothing to do with this one, and highlighting the
+    /// directive that asked for it is what tells the reader *why* they are looking at it.
+    pub range: cpp_parser::SourceRange,
+    /// The file it resolved to, as a path a client can open.
+    pub resolved: PathBuf,
+}
+
+/// The `#include` whose **directive** covers `offset`, if there is one and it resolved.
+///
+/// # What it answers, and what it deliberately does not
+///
+/// * `Yes(target)` — the cursor is on an `#include` line and the resolver found the file. The spelling is the one
+///   written, which is what a client shows; the path is where the file is, which is what it opens.
+/// * `Unknown(NotDeclaredHere)` — the line is an `#include` and **nothing was found** for it: a header outside every
+///   search path, or one whose file was deleted since. Not `No`, and the distinction is the one the rest of this
+///   module keeps: "the index cannot see it" is a different claim from "there is no such thing".
+/// * `Unknown(UnparsableName)` — the cursor is not on an `#include` at all. Either nothing is here, or what is here
+///   is a different kind of name (a macro include's target is [`ProjectIndex::macro_definition`]'s question).
+/// * `Unknown(ConditionalCompilation)` — the `#include` is inside an `#if` this layer cannot evaluate, so whether
+///   the file is part of the translation unit is not known.
+///
+/// The directive's own range is what the cursor is matched against rather than the header-name token, and the two
+/// differ on purpose: a reader who points at `#include` or at the `<` means the same thing as one who points at
+/// `vector`, and the tree has no node for the second half of the line when the lexer never folded it.
+pub fn header_at(
+    index: &ProjectIndex,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    offset: usize,
+) -> Known<HeaderTarget> {
+    // The tree answers *which line*, because only the tree knows where the cursor is; the summary answers *where it
+    // points*, because resolution happened when the file was read and re-running the search here would be a second
+    // implementation of the resolver.
+    let Some((spelling, name_range)) = crate::sema::resolve::header_name_at(root, offset) else {
+        return Known::Unknown(UnknownReason::UnparsableName);
+    };
+
+    let Some(summary) = index.summary(path) else {
+        // The file's own reading is not in the index, so nothing here knows where its includes resolved. The
+        // spelling is what the caller pointed at, and saying it is better than an empty reason.
+        return Known::Unknown(UnknownReason::UnresolvedInclude(Box::from(
+            spelling.as_str(),
+        )));
+    };
+
+    // The fact whose **directive** covers the name: `range` is the whole `#include …` line, and the name sits
+    // inside it. A file has few includes, so this is a scan of a handful of ranges.
+    let Some(fact) = summary.includes.iter().find(|include| {
+        include.range.start_offset <= name_range.start_offset
+            && include.range.end_offset() >= name_range.end_offset()
+    }) else {
+        return Known::Unknown(UnknownReason::UnparsableName);
+    };
+
+    match fact.guard {
+        FactGuard::Unconditional => {}
+        FactGuard::Region(_) => {
+            // The directive is inside an `#if`. Whether it is part of the translation unit is a question this
+            // layer answers elsewhere (`index::environment::visibility_at`) and this query does not ask, so the
+            // honest answer is the one every other conditional answer in this module gives.
+            return Known::Unknown(UnknownReason::ConditionalCompilation);
+        }
+    }
+
+    // **A macro include's target is a macro.** `#include HEADER` names a name, and what it expands to is the
+    // preprocessor's answer — which is the same question `#define` answers, so it goes to the same place rather
+    // than being guessed at here.
+    if fact.form == IncludeForm::Macro {
+        return Known::Unknown(UnknownReason::UnresolvedInclude(Box::from(
+            fact.spelling.as_str(),
+        )));
+    }
+
+    match &fact.resolved {
+        Some(resolved) => Known::Yes(HeaderTarget {
+            spelling: fact.spelling.clone(),
+            form: fact.form,
+            range: fact.range,
+            resolved: resolved.clone(),
+        }),
+        // **The search ran and found nothing** — the header is on no include path this project configured, or the
+        // file it named has been deleted since. `UnresolvedInclude` is exactly this reason, and it is the one the
+        // rest of the crate already uses for a declaration reachable only through an include nobody could find.
+        None => Known::Unknown(UnknownReason::UnresolvedInclude(Box::from(
+            fact.spelling.as_str(),
+        ))),
+    }
+}
 
 /// Which declaration something refers to, using **both** layers.
 ///

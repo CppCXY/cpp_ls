@@ -130,17 +130,164 @@ pub fn name_at(root: &CppSyntaxNode, offset: usize) -> Option<(String, SourceRan
     ))
 }
 
+/// **The header name written at `offset`**, if the cursor is on one: `"vector"` for `#include <vector>`.
+///
+/// The fourth kind of "what is under the cursor", beside a name, a member and a macro — and it is its own query
+/// because none of those three can answer it. A header name is not a declaration (nothing in the file declares it),
+/// not a name the scope walker sees (the grammar folds `<vector>` into a single `HeaderName` token inside a
+/// directive, exactly as [`name_at_including_directives`] describes), and not a member. So a reader who
+/// ctrl-clicks `#include <vector>` gets nothing at all from the three questions a jump is built out of.
+///
+/// The spelling is returned **without its delimiters**, which is what every consumer of a header name wants: the
+/// resolver searches for `vector`, the reverse map is keyed by `vector`, and the delimiters are the *form* rather
+/// than part of the name — see [`crate::IncludeForm`].
+///
+/// `None` for a cursor anywhere else on the line — on the `#`, on `include`, on a `//` comment after the name —
+/// which is the same "nothing to say here" answer [`name_at`] gives for punctuation. A **macro** include
+/// (`#include HEADER`) is also `None`: `HEADER` is a name, and the question about it is the macro question.
+pub fn header_name_at(root: &CppSyntaxNode, offset: usize) -> Option<(String, SourceRange)> {
+    let token = header_name_token_at(root, offset)?;
+    let text = token.text();
+    let range = cpp_parser::source_range(token.text_range());
+
+    let spelling = text
+        .strip_prefix('<')
+        .and_then(|rest| rest.strip_suffix('>'))
+        .or_else(|| {
+            text.strip_prefix('"')
+                .and_then(|rest| rest.strip_suffix('"'))
+        })
+        .unwrap_or(text);
+
+    Some((spelling.to_string(), range))
+}
+
+/// The `HeaderName` token holding `offset`, if the offset is **inside** it.
+///
+/// Strictly inside rather than at its edge: a cursor at the end of `#include <vector>|` is past the name, and a
+/// completion there is not asking about the header that was just written — see
+/// [`crate::completion::context`], which is the other consumer of that boundary.
+fn header_name_token_at(
+    root: &CppSyntaxNode,
+    offset: usize,
+) -> Option<cpp_parser::CppSyntaxToken> {
+    root.descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .find(|token| {
+            cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::HeaderName
+                && contains_token(token, offset)
+        })
+}
+///
+/// **Is there a `.` or `->` token ending exactly at `offset`?**
+///
+/// The question a completion asks when the tree's recovery did not produce a member access: `.` and `->` are
+/// operators, and one that ends at the cursor is the operator the reader has just typed, whatever node the parser
+/// built around it. See [`crate::completion::context`] for why that fallback exists.
+///
+/// Answered by **text** rather than by token kind: the grammar gives `.` and `->` kinds of their own, and a reader
+/// of this predicate that had to know their names would be a second place to update if either changed — the same
+/// reason [`member_access_of`] finds the operator by its text.
+pub fn operator_ending_at(root: &CppSyntaxNode, offset: usize) -> Option<usize> {
+    let token = token_ending_at(root, offset)?;
+
+    matches!(token.text(), "." | "->").then_some(offset)
+}
+
+/// **The name node that is the object of an `operator` written at `offset`** — the name before a member access
+/// whose own node the recovery lost.
+///
+/// [`name_node_at`] answers for a cursor *on* a name; this answers for the position just after one, which is where
+/// an operator sits. It walks back from the operator, and it stops at the first **non-trivia** thing it meets:
+///
+/// ```text
+/// full.            the name ends where the operator begins — `full`
+/// full .           the same access with a space in it
+/// full. /* why */  and the same with a comment, which is trivia and is walked over
+/// x + full.        `full` is what the walk reaches first, not `x`
+/// ```
+///
+/// # What it refuses
+///
+/// A **node that is not a spelling**: a recovery is free to wrap whatever it could not read in the node kinds it
+/// does know, and measured on `full.` at the end of a line it produces a name node whose text is `"full.\n"` — the
+/// operator and the line break included. Handing that to the type layer asks what type `full.\n` has, which is a
+/// question with no answer rather than a wrong one, so it is skipped and the walk goes on to the identifier inside.
+pub fn name_ending_before_an_operator(root: &CppSyntaxNode, offset: usize) -> Option<CppSyntaxNode> {
+    let mut at = offset;
+
+    while at > 0 {
+        at -= 1;
+
+        // **The name, once the walk has passed the operator and its trivia.** Asked from the last position the
+        // look walked over, which is inside the identifier: the recovery's *node* here is `"full.\n"` — name,
+        // operator and line break in one — and it is refused because a name node holding an operator is not a
+        // spelling. The identifier inside it is one, which is why the walk goes on to it rather than trusting what
+        // the recovery built.
+        if let Some(node) = name_node_at(root, at)
+            && usize::from(node.text_range().end()) <= offset
+            && is_a_spelling(&node)
+        {
+            return Some(node);
+        }
+
+        let token = cpp_parser::token_at(root, at)?;
+
+        // **The operator itself is stepped over**, because that is where the walk starts: the byte before the
+        // operator is *inside* it, and what lies beyond is either trivia or the name being looked for.
+        if matches!(token.text(), "." | "->") {
+            continue;
+        }
+
+        // Anything else that is not trivia ends the walk: `x + full.` must not reach `x`, and a member list
+        // inferred from the wrong object is worse than no list at all.
+        if !cpp_parser::is_trivia(cpp_parser::CppTokenKind::from(token.kind())) {
+            return None;
+        }
+    }
+
+    None
+}
+
+/// Is this name node a spelling rather than a recovery's idea of one?
+///
+/// A name is identifiers, `::`, `~` and the whitespace between them, and it ends at an identifier: `full`, `ns::C`,
+/// `~D`, `operator+`. Anything else — a `.`, a `,`, a line break at the end — is something the recovery absorbed
+/// that the name does not own.
+///
+/// Measured on the shape this fallback exists for: for `full.` at the end of a line the recovery produces a name
+/// node whose text is `"full.\n"`, operator and line break included. Handing that to the type layer asks what type
+/// `full.\n` has, which is a question with no answer rather than a wrong one — and refusing it is what keeps this a
+/// *fallback* rather than a second, worse reader.
+fn is_a_spelling(node: &CppSyntaxNode) -> bool {
+    let text = node.text().to_string();
+    let trimmed = text.trim();
+
+    !trimmed.is_empty()
+        && trimmed.chars().all(|character| {
+            character.is_alphanumeric() || matches!(character, '_' | ':' | '~' | ' ' | '\t')
+        })
+        && trimmed
+            .chars()
+            .next_back()
+            .is_some_and(|last| last.is_alphanumeric() || last == '_')
+}
+
+/// The token whose range ends exactly at `offset`.
+///
+/// [`cpp_parser::token_at`] is **right-biased**: at a boundary it returns the token that *follows*, so the token
+/// to the left has to be asked for from one byte earlier. `None` when that byte is not inside a token — the start
+/// of the file, or an offset past the text.
+pub(crate) fn token_ending_at(root: &CppSyntaxNode, offset: usize) -> Option<cpp_parser::CppSyntaxToken> {
+    if offset == 0 {
+        return None;
+    }
+
+    let token = cpp_parser::token_at(root, offset - 1)?;
+    (usize::from(token.text_range().end()) == offset).then_some(token)
+}
+
 /// The name the cursor is on, including when the cursor is inside a **preprocessor directive**.
-///
-/// [`name_at`] answers for the syntax the grammar builds name nodes for, and a directive is not part of it:
-/// `#define FOO(x) …` is a run of tokens inside a `PreprocessorDirective`, so a cursor on `FOO` finds no name node
-/// and [`name_at`] answers `None`. That is the wrong answer for the question a user asks by pointing at a macro's
-/// name — "where is this used", "rename this" and "go to its definition" all start from the `#define`.
-///
-/// The fallback is the token under the cursor: if it is an `Identifier`, its spelling **is** the name. Nothing is
-/// inferred from it, which is what keeps this honest: a `#define`'s name and a use of it are the same spelling by
-/// construction, and a spelling nothing defines is rejected by whichever query reads it (there is no definition to
-/// find, and no references to list).
 ///
 /// The token search is a walk of the tree at the offset, not a scan of the file: this runs on every request that
 /// has a cursor.
@@ -882,7 +1029,10 @@ fn contains_range(outer: SourceRange, inner: SourceRange) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{definition_at, identifier_written_at, name_at, name_node_at, qualified_name_at};
+    use super::{
+        definition_at, header_name_at, identifier_written_at, name_at, name_node_at,
+        qualified_name_at,
+    };
     use crate::sema::scopes::build_scopes;
     use crate::sema::symbol::{BindingKind, Known, UnknownReason};
     use cpp_parser::{CppParser, ParserConfig};
@@ -911,6 +1061,82 @@ mod tests {
         let scopes = build_scopes(&root, &crate::NoMacroBodies);
 
         definition_at(&scopes, &root, at(source, needle))
+    }
+
+    /// **A member access with nothing written after the operator.**
+    ///
+    /// The shape a live server gets and a fixture test can miss: `full.` at the end of a line is a file being typed
+    /// at, and the parser reports `expected identifier after member access operator` and recovers — so what the tree
+    /// says about the offset after the dot is not something to assume.
+    ///
+    /// Two facts are pinned here, and the second is the one that matters at the edge: the offset **immediately
+    /// after** the operator is a member access with an empty name (the state a client asks in), and so is the
+    /// offset **past the name's own position** — which is one further, and is where a cursor sits when the next
+    /// byte is a newline.
+    #[test]
+    fn a_member_access_with_nothing_after_the_operator_answers_at_the_operator_and_after_it() {
+        // **Parsed without the clean-parse assertion**, and that is the point rather than a convenience: this
+        // fixture *is* the diagnostic the feature exists for. The tests at the top of this module refuse a file the
+        // parser complained about; this one cannot, because the complaint is the shape under test.
+        //
+        // The `;` on the line below is what gives the cursor a position to exist at: with `}` there, the offset a
+        // client sends for "the end of the line that ends in `.`" is past the brace, and no reading of the text can
+        // call that a member access. A fixture has to put the cursor where the shape it is testing actually is.
+        let source = "#include <string>\nint main() {\n    std::string full;\n    full. \n;\n}\n";
+        let parsed = CppParser::parse(source, ParserConfig::default());
+        let errors = parsed.get_errors();
+        let root = parsed.get_red_root();
+
+        let dot = source.find("full.").expect("the fixture") + "full.".len() - 1;
+        assert_eq!(&source[dot..dot + 1], ".", "the fixture's operator");
+
+        // 1. The offset just past the operator, which is where a cursor that has typed it is.
+        let access = super::member_access_at(&root, dot + 1).unwrap_or_else(|| {
+            panic!(
+                "the offset after the `.` must read as a member access; the parser said {:?}",
+                errors.iter().map(|error| &error.message).collect::<Vec<_>>()
+            )
+        });
+        assert_eq!(access.object.text().to_string(), "full");
+        assert!(access.member.is_empty(), "nothing is written after the dot");
+        assert_eq!(
+            access.member_range.start_offset,
+            dot + 1,
+            "and the name goes immediately after the operator"
+        );
+    }
+
+    /// **A header name is its own kind of thing under the cursor**, and the delimiters are the *form* rather than
+    /// part of the name: the resolver searches for `vector`, the reverse map is keyed by `vector`, and a consumer
+    /// that had to strip `<` and `>` would be re-reading a token the lexer already folded.
+    #[test]
+    fn a_header_name_is_read_without_its_delimiters() {
+        let source = "#include <vector>\n#include \"local.h\"\n#include MACRO\n";
+        let parsed = tree(source);
+        let root = parsed.get_red_root();
+
+        let (angled, range) =
+            header_name_at(&root, at(source, "vector")).expect("`vector` is a header name");
+        assert_eq!(angled, "vector");
+        assert_eq!(&source[range.start_offset..range.end_offset()], "<vector>");
+
+        let (quoted, _) =
+            header_name_at(&root, at(source, "local.h")).expect("`local.h` is a header name");
+        assert_eq!(quoted, "local.h");
+
+        // A **macro** include names a macro, so the question about it is the macro question — answering it here
+        // would be a second, weaker implementation of `#define` resolution.
+        assert!(
+            header_name_at(&root, at(source, "MACRO")).is_none(),
+            "`#include MACRO` names a macro, not a header"
+        );
+
+        // The `#` and the word `include` are part of the directive, not of the name.
+        assert!(header_name_at(&root, 0).is_none(), "the `#` is not the name");
+        assert!(
+            header_name_at(&root, source.find("include").expect("the fixture") + 2).is_none(),
+            "and neither is `include`"
+        );
     }
 
     #[test]

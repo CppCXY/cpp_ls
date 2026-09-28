@@ -29,7 +29,17 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 /// How long any single expectation may take. Generous: a debug build parses a project's first file, and CI is slow.
+/// How long a test waits for an answer before calling it a failure.
+///
+/// Thirty seconds is generous for a project of fixture files and it is **not** generous for one that pulls in the
+/// standard library: `#include <string>` is a closure of thousands of MSVC headers, and the first request about a
+/// name inside it waits for the index to read them. A test whose subject *is* that closure therefore waits longer —
+/// see [`STD_LIBRARY_TIMEOUT`] — rather than the whole file being given a longer deadline, because a fixture that
+/// hangs should still fail in half a minute.
 const TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The deadline for a test that makes the analysis read a standard-library header, which is real work.
+const STD_LIBRARY_TIMEOUT: Duration = Duration::from_secs(180);
 
 const WIDGET_H: &str = "struct Widget { int size; };\n";
 
@@ -143,6 +153,87 @@ fn a_client_can_open_a_file_and_get_diagnostics_a_definition_and_a_hover() {
         "and the range is the name in that file, not the top of it: {location}"
     );
     assert_eq!(location["result"]["range"]["start"]["character"], json!(20));
+
+    // --- definition on the `#include` itself: the header it names -----------------------------------
+    // The fourth answer a jump can give, and the one that used to be missing entirely: `#include "widget.h"`
+    // **declares nothing**, so the scope walk, the index by name and the macro table all answer "nothing found"
+    // for a line whose whole purpose is to name a file. The cursor is inside the spelling (character 12 is the `d`
+    // of `widget.h`), and the range that comes back is the file's first line rather than a point at its start —
+    // an editor *selects* a scalar location, and a zero-width range would select nothing.
+    let header = server.ask_until(150, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": { "uri": main_uri },
+                "position": { "line": 0, "character": 12 },  // inside `"widget.h"`
+            },
+        })
+    });
+
+    let header_uri = header["result"]["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a header was expected, got {header}"));
+    assert!(
+        header_uri.ends_with("widget.h"),
+        "the include names widget.h: {header}"
+    );
+    assert_eq!(
+        header["result"]["range"]["start"],
+        json!({ "line": 0, "character": 0 }),
+        "from the top of the header: {header}"
+    );
+    assert_eq!(
+        header["result"]["range"]["end"],
+        json!({ "line": 1, "character": 0 }),
+        "to the start of the second line, which is where the header's first line ends: {header}"
+    );
+
+    // --- hover on the same name: **which file the search found** ------------------------------------
+    // The other half of a jump whose target the reader cannot see: the line they wrote names a *spelling*, and a
+    // search turns it into one of the thousands of files on this machine's include path. The popup says which.
+    let about_the_header = server.ask_until(170, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": main_uri },
+                "position": { "line": 0, "character": 12 },
+            },
+        })
+    });
+    let markdown = about_the_header["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a hover was expected, got {about_the_header}"));
+    assert!(
+        markdown.contains("#include \"widget.h\""),
+        "the line as the file writes it: {markdown}"
+    );
+    // The path is compared **case-insensitively**, because the session resolves it through the VFS and the
+    // temporary directory the fixture lives in is spelled in lower case there on Windows. What is being asserted
+    // is that the popup carries the resolved *file*, not the spelling the reader wrote.
+    let resolved = markdown.to_lowercase();
+    assert!(
+        resolved.contains("widget.h") && resolved.contains("cppls-handshake-tests"),
+        "and where it resolved to: {markdown}"
+    );
+
+    // The `#` is part of the directive rather than of the name, and the analysis answers `null` there — which is
+    // the same "nothing to go to" it gave before this round for the *whole* line. Asserted so that the boundary is
+    // pinned: a client that sends a ctrl-click on the `#` must not be sent to a file the analysis guessed at.
+    let on_the_hash = server.request(
+        160,
+        "textDocument/definition",
+        json!({
+            "textDocument": { "uri": main_uri },
+            "position": { "line": 0, "character": 0 },
+        }),
+    );
+    assert_eq!(
+        on_the_hash["result"],
+        Value::Null,
+        "the `#` is not the header's name: {on_the_hash}"
+    );
 
     // --- hover: the type of a local, then the declaration of the member ---------------------------
     // The two positions below are `Widget w;` on line 3 and the `size` of `w.size` on line 4.
@@ -302,6 +393,30 @@ fn uri_of(path: &Path) -> String {
     format!("file:///{}", text.trim_start_matches('/'))
 }
 
+/// **Where a cursor at the end of a needle is**, as the protocol's line and character.
+///
+/// The offset *past* the needle — `full.` puts the cursor after the operator, which is where a reader who has just
+/// typed it is. A test that states a position by hand states it wrong sooner or later, and the failure is silent:
+/// the request still gets an answer, about a position nobody is looking at. Counting the line(s) and characters of
+/// the fixture is a line of code and cannot drift away from the text it is about.
+fn position_of(source: &str, needle: &str) -> (u32, u32) {
+    let at = source
+        .find(needle)
+        .unwrap_or_else(|| panic!("{needle:?} is not in the fixture"))
+        + needle.len();
+
+    let before = &source[..at];
+    let line = before.matches('\n').count();
+    let character = before
+        .rsplit('\n')
+        .next()
+        .expect("rsplit always yields one piece")
+        .chars()
+        .count();
+
+    (line as u32, character as u32)
+}
+
 /// The server, as a client sees it: a process, a pipe, and the messages it sent.
 struct Server {
     child: Child,
@@ -414,7 +529,18 @@ impl Server {
         build: impl Fn(i64) -> Value,
         accept: impl Fn(&Value) -> bool,
     ) -> Value {
-        let deadline = Instant::now() + TIMEOUT;
+        self.ask_until_it_within(first_id, TIMEOUT, build, accept)
+    }
+
+    /// [`Server::ask_until_it`] with the caller's own deadline, for a test whose subject is genuinely slow.
+    fn ask_until_it_within(
+        &mut self,
+        first_id: i64,
+        within: Duration,
+        build: impl Fn(i64) -> Value,
+        accept: impl Fn(&Value) -> bool,
+    ) -> Value {
+        let deadline = Instant::now() + within;
         let mut id = first_id;
 
         loop {
@@ -434,7 +560,7 @@ impl Server {
             }
 
             if Instant::now() >= deadline {
-                panic!("no answer the test accepts within {TIMEOUT:?}; the last one was: {response}");
+                panic!("no answer the test accepts within {within:?}; the last one was: {response}");
             }
 
             id += 1;
@@ -812,6 +938,19 @@ fn a_name_only_the_cooked_reading_declares_is_offered_over_the_wire() {
     server.notify("exit", Value::Null);
 }
 
+/// The `std::string` fixture: a standard-library type from a header, and a `.` where the member list belongs.
+///
+/// Written the way a reader does — `#include <string>`, a declaration, then the operator — so that the test covers
+/// the chain and not the completion layer alone: the header has to be **found** on the search path, its declarations
+/// have to be **indexed**, and `std::string` has to resolve before there is a member list to collapse.
+const STD_STRING_CPP: &str = "\
+#include <string>
+int main() {
+    std::string full;
+    full.
+}
+";
+
 /// **The other query, over the wire: after a `.`, what the object's type has.**
 ///
 /// `w.` asks for the members of `w`'s type, and the type is written `one::Widget` — a qualified spelling the lookup
@@ -894,6 +1033,155 @@ fn a_members_members_are_offered_over_the_wire() {
         json!({ "line": 3, "character": 6 }),
         "the edit is an empty range just past the dot: {size}"
     );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
+/// **A `.` on a `std::string` offers the standard library's members, once each.**
+///
+/// The case a user reported as "补全依然存在明显错误": the popup after `full.` was a list of file-scope names —
+/// `printf`, `full`, `myName`, `sum`, `main` — plus keywords, which is what a client is shown when the member
+/// question has no answer. Two separate faults can produce that shape, and this test pins both:
+///
+/// * **the members are found at all**, through `#include <string>` and the type's declaration in a header the
+///   session had to index — the whole chain has to work for `std::string` to resolve;
+/// * **each spelling appears once.** MSVC's `basic_string` declares `replace` eleven times and `insert` nine, and
+///   the list used to carry every one of them: 119 rows of which 64 shared a label with another row. A list is
+///   something a reader picks from, so eleven rows reading `replace` are one choice offered eleven times — and a
+///   client that lays out 119 rows with duplicated labels is what "the popup looks broken" means.
+///
+/// It is an end-to-end test rather than a unit one because the failure was a *chain*: the fix could be right in the
+/// completion layer and the answer still wrong if the index never resolved `<string>`.
+///
+/// # `#[ignore]`, and why it is not a disabled test
+///
+/// It is **too slow for the debug profile**: the fixture's one `#include <string>` is a closure of thousands of
+/// MSVC headers, which the index reads before it can answer, and a debug build does that in minutes rather than in
+/// the sixteen seconds a release build takes. The harness's own deadline is therefore unreachable in a debug run
+/// — and a test that fails for a *build profile* teaches nothing about the code, which is the one thing a test
+/// must not do.
+///
+/// It runs in release, and that is how it was written and verified:
+///
+/// ```text
+/// cargo test --release -p cpp_ls --test handshake -- --ignored a_standard_library
+/// ```
+///
+/// What covers the same ground in a debug run: `cpp_code_analysis/tests/completion.rs`'s
+/// `a_member_position_offers_the_members_with_their_distinctions` (the member list and its kinds, from a fixture
+/// with no standard library in it) and the probe, which is the instrument this was measured with.
+#[test]
+#[ignore = "needs the release profile: the standard library closure takes minutes to index in debug"]
+fn a_standard_library_member_list_has_each_spelling_once() {
+    let project = Project::new("completion-std-string");
+    project.write("main.cpp", STD_STRING_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": STD_STRING_CPP }
+        }),
+    );
+
+    // **The position of the operator, computed from the fixture** rather than counted by hand.
+    //
+    // This test was written with the position hard-coded twice and wrong twice, and the failure is invisible: an
+    // off-by-one lands on the newline (still a name position, so the answer looks like "the members were not
+    // found") or on the closing brace (still an answer about a position nobody is looking at). A test whose
+    // subject is *where* the cursor is cannot afford to state the where by hand.
+    let (line, character) = position_of(STD_STRING_CPP, "full.");
+    assert_eq!(
+        (line, character),
+        (3, 9),
+        "the operator ends the fourth line and the cursor is just past it — written out here once, so that a \
+         fixture edited above this line fails loudly instead of silently asking about the wrong place"
+    );
+
+    // Asked until the list holds `append`, because the standard library's closure is thousands of files and the
+    // index is still reading when the first request arrives.
+    let answer = server.ask_until_it_within(
+        100,
+        STD_LIBRARY_TIMEOUT,
+        |id| {
+            json!({
+                "id": id,
+                "method": "textDocument/completion",
+                "params": {
+                    "textDocument": { "uri": main_uri },
+                    "position": { "line": line, "character": character },
+                },
+            })
+        },
+        |response| {
+            response["result"]["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["label"] == json!("append")))
+        },
+    );
+
+    let items = answer["result"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a completion list was expected, got {answer}"));
+
+    let labels: Vec<&str> = items
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect();
+
+    assert!(
+        labels.contains(&"append") && labels.contains(&"size") && labels.contains(&"substr"),
+        "the members of the standard library's string: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"printf") && !labels.contains(&"main"),
+        "and not the names in scope, which cannot follow the operator: {labels:?}"
+    );
+
+    let mut unique = labels.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        labels.len(),
+        "every spelling appears once — {} of {} rows are repeats: {:?}",
+        labels.len() - unique.len(),
+        labels.len(),
+        labels
+            .iter()
+            .filter(|label| labels.iter().filter(|other| other == label).count() > 1)
+            .collect::<Vec<_>>()
+    );
+
+    // Each row carries an **edit that replaces what was typed**, so that the choice is inserted rather than
+    // appended to the half-written name — the same contract the `Widget` case asserts, on a type that came from a
+    // header rather than from the buffer.
+    let append = items
+        .iter()
+        .find(|item| item["label"] == json!("append"))
+        .expect("asserted above");
+    assert_eq!(
+        append["textEdit"]["range"]["start"],
+        json!({ "line": line, "character": character }),
+        "just past the dot: {append}"
+    );
+    assert_eq!(append["textEdit"]["newText"], json!("append"), "{append}");
 
     server.request(999, "shutdown", Value::Null);
     server.notify("exit", Value::Null);

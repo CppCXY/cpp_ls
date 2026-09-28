@@ -19,7 +19,7 @@
 //! visible in this output or it is not.
 
 use cpp_code_analysis::{
-    DiskFiles, ItemKind, OpenDocuments, Session, SessionFiles, WatchFilter,
+    DiskFiles, ItemKind, Known, OpenDocuments, Session, SessionFiles, WatchFilter,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -89,6 +89,94 @@ fn main() {
     );
 
     // ---------------------------------------------------------------- the positions a reader asks at
+    // **`#include` first**, because it is the one completion whose answer is not in the program at all: the headers
+    // are files on a search path, and whether the index found them is a fact about this machine rather than about
+    // the file.
+    println!("\n--- `#include <` : the headers on the search path ---");
+    {
+        // A file written for the occasion, **opened in the session like any other buffer**: the question is what
+        // the *completion* answers, and asking it needs a cursor in a real file. Four prefixes in one text so that
+        // one open serves all of them.
+        let probe = root.join("__completion_probe.cpp");
+        let text = "#include <v\n#include <iost\n#include <sys/\n#include <cstd\n";
+        std::fs::write(&probe, text).expect("the probe writes");
+        session.did_open(&probe, text);
+
+        for prefix in ["v", "iost", "sys/", "cstd"] {
+            let Some(offset) = after_include(&probe, prefix) else {
+                continue;
+            };
+
+            let view = session.view(&probe).expect("the probe was opened");
+            let found = session.completions(&view, offset);
+
+            // **The headers a C++ reader actually writes**, asked by name rather than read off the first ten: a
+            // list that begins well and omits `<vector>` is the failure this whole section exists to catch.
+            let wanted = ["vector", "iostream", "cstddef", "string", "map", "algorithm"];
+            let present: Vec<&str> = wanted
+                .iter()
+                .copied()
+                .filter(|name| found.items.iter().any(|item| item.label == *name))
+                .collect();
+            let where_at = |name: &str| {
+                found
+                    .items
+                    .iter()
+                    .position(|item| item.label == name)
+                    .map_or("—".to_string(), |at| at.to_string())
+            };
+
+            println!(
+                "  {prefix:<6} | {:>4} items{} | first {:?}",
+                found.items.len(),
+                if found.truncated { " TRUNCATED" } else { "" },
+                names(&found, 8)
+            );
+            println!(
+                "         | standard headers present: {present:?} at {:?}",
+                wanted
+                    .iter()
+                    .map(|name| (*name, where_at(name)))
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        let _ = std::fs::remove_file(&probe);
+    }
+
+    // **What every `#include` in the file points at**, which is the other half of the same line: a completion
+    // offers a spelling, and the jump has to turn it into the file the search found.
+    println!("\n--- `#include` : where each one points ---");
+    let mut at = 0usize;
+    while let Some(found) = source[at..].find("#include") {
+        let line_start_at = at + found;
+        at = line_start_at + "#include".len();
+
+        let Some((_, range)) = cpp_code_analysis::sema::resolve::header_name_at(&view.root, at + 1) else {
+            println!(
+                "{:>5} | no header name on this line | {}",
+                line_of(&source, line_start_at) + 1,
+                &source[line_start_at..line_end(&source, line_of(&source, line_start_at))]
+            );
+            continue;
+        };
+
+        match session.header_at(&view, range.start_offset + 1) {
+            Known::Yes(target) => println!(
+                "{:>5} | {:<28} -> {}",
+                line_of(&source, line_start_at) + 1,
+                target.spelling,
+                target.resolved.display()
+            ),
+            Known::Unknown(reason) => println!(
+                "{:>5} | resolves to nothing: {}",
+                line_of(&source, line_start_at) + 1,
+                reason.describe()
+            ),
+            Known::No => println!("{:>5} | no", line_of(&source, line_start_at) + 1),
+        }
+    }
+
     // Every `::` in the file, which is the question "what does this scope hold".
     println!("\n--- `::` : one scope's names ---");
     let mut at = 0usize;
@@ -124,6 +212,16 @@ fn main() {
             .iter()
             .any(|item| matches!(item.kind, ItemKind::Method | ItemKind::Field));
         if !is_a_member_list {
+            // **What it answered instead**, which is the diagnosis: a `.` that falls through to the name list is
+            // either not a member position at all (the parser recovered) or the object's type could not be worked
+            // out. Printing the context is what tells the two apart.
+            println!(
+                "{:>5}:{:<4} NOT a member list — {:?} | {:?}",
+                line_of(&source, after) + 1,
+                after - line_start(&source, after),
+                cpp_code_analysis::context_at(&view.root, after),
+                names(&completions, 5)
+            );
             continue;
         }
 
@@ -136,6 +234,42 @@ fn main() {
             completions.prefix,
             names(&completions, 8)
         );
+
+        // **The duplicates**, which a real client renders as several identical rows. The label is what a reader
+        // picks by, so two items with one label are one choice offered twice — and the count says how bad it is on
+        // the type being completed, which on MSVC's `basic_string` is where a user meets it first.
+        let mut labels: Vec<&str> = completions
+            .items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect();
+        labels.sort_unstable();
+        let before = labels.len();
+        labels.dedup();
+        if labels.len() != before {
+            let mut repeated: Vec<(String, usize, String)> = Vec::new();
+            for item in &completions.items {
+                let count = completions
+                    .items
+                    .iter()
+                    .filter(|other| other.label == item.label)
+                    .count();
+                if count > 1 && !repeated.iter().any(|(name, _, _)| *name == item.label) {
+                    let source = item
+                        .fact
+                        .as_ref()
+                        .map_or("<no fact>".to_string(), |fact| {
+                            format!("name={:?} kind={:?}", fact.name, fact.kind)
+                        });
+                    repeated.push((item.label.clone(), count, source));
+                }
+            }
+            println!(
+                "         | {} items share {} label(s): {repeated:?}",
+                before - labels.len(),
+                repeated.len()
+            );
+        }
     }
 
     // The end of every line that holds no identifier — where a reader presses the key to write something new.
@@ -273,6 +407,13 @@ fn names(found: &cpp_code_analysis::CompletionSet, take: usize) -> Vec<&str> {
         .take(take)
         .map(|item| item.label.as_str())
         .collect()
+}
+
+/// The offset just past the `#include <` of a line written as `#include <PREFIX` in `path`, if that file exists.
+fn after_include(path: &std::path::Path, prefix: &str) -> Option<usize> {
+    let source = std::fs::read_to_string(path).ok()?;
+    let wanted = format!("#include <{prefix}");
+    source.find(&wanted).map(|at| at + wanted.len())
 }
 
 fn last_names(found: &cpp_code_analysis::CompletionSet, take: usize) -> Vec<&str> {

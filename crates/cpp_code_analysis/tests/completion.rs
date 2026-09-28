@@ -14,7 +14,8 @@
 //! find the query that lists the members and the layer that decides the list is wanted in the same place.
 
 use cpp_code_analysis::{
-    CompilerConfig, ItemKind, Known, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+    CompilerConfig, ItemKind, Known, MemoryFiles, OpenDocuments, Session, SessionFiles,
+    UnknownReason, WatchFilter,
 };
 
 const HEADER: &str = "int from_the_header(int value);\n";
@@ -696,4 +697,78 @@ fn a_short_list_is_not_marked_truncated() {
         !session.completions(&view, cursor).truncated,
         "three headers do not fill a budget of two hundred"
     );
+}
+
+/// **An `#include` points at a file**, which is the fourth answer a jump can give and the one nothing else in the
+/// analysis can produce: `#include "near.h"` declares nothing, so the scope walk, the index by name and the macro
+/// table all answer "nothing found" for a line whose whole purpose is to name a file.
+#[test]
+fn an_include_points_at_the_header_it_names() {
+    let session = ranked_session();
+    let view = session.view("/p/a.cpp").expect("the file is held");
+
+    // Inside the spelling: `#include "near.h"` — character 12 is the `e` of `near`.
+    let cursor = RANKED_CPP.find("near.h").expect("the fixture");
+    let Known::Yes(found) = session.header_at(&view, cursor) else {
+        panic!("the cursor is on a header name");
+    };
+
+    assert_eq!(found.spelling, "near.h");
+    assert_eq!(found.resolved, std::path::PathBuf::from("/p/near.h"));
+    assert_eq!(
+        RANKED_CPP[..found.range.end_offset()].trim_end(),
+        "#include \"near.h\"",
+        "the range is the whole directive — the `#`, the name and any trailing comment — because that is \
+         what the reader pointed at"
+    );
+
+    // The `#` and the word `include` are part of the directive rather than of the name. Nothing in this analysis
+    // depends on which one a reader points at — `Session::header_at` is asked with a *cursor*, and every client
+    // sends the same requests for a ctrl-click wherever it lands on the line — so the assertions here are about
+    // the boundary being where it is documented to be rather than about a user-visible difference.
+    assert!(
+        !matches!(
+            session.header_at(&view, RANKED_CPP.find("#include").expect("the fixture")),
+            Known::Yes(_)
+        ),
+        "the `#` is not the header's name"
+    );
+
+    // A name that is not a header is **not** this query's business — and the answer says so rather than saying
+    // "nothing found", which is what keeps it from swallowing a jump that has a real declaration behind it.
+    let on_a_declaration = RANKED_CPP.find("at_file_scope").expect("the fixture");
+    match session.header_at(&view, on_a_declaration) {
+        Known::Unknown(reason) => assert_eq!(
+            reason.describe(),
+            UnknownReason::UnparsableName.describe(),
+            "`at_file_scope` is not a header name at all"
+        ),
+        other => panic!("a variable is not a header: {other:?}"),
+    }
+}
+
+/// **An `#include` that resolves to nothing is `Unknown` and names the header** — the same distinction the rest of
+/// the crate keeps: "the index cannot find it" is a different claim from "there is no such file", and the reader
+/// whose project has no `-I` for a header deserves to be told the first.
+#[test]
+fn an_include_that_resolves_to_nothing_says_so() {
+    const FIXTURE: &str = "#include \"nowhere.h\"\nint x;\n";
+    let memory = MemoryFiles::new().with_file("/p/a.cpp", FIXTURE);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session =
+        Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.index_everything();
+
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let cursor = FIXTURE.find("nowhere").expect("the fixture");
+
+    match session.header_at(&view, cursor) {
+        Known::Unknown(reason) => assert!(
+            reason.describe().contains("nowhere.h"),
+            "the reason names the header nobody could find: {}",
+            reason.describe()
+        ),
+        other => panic!("a header that resolves to nothing is `Unknown`: {other:?}"),
+    }
 }

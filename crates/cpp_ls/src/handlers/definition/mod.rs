@@ -35,8 +35,15 @@
 //! can see) and mapping them onto a line and column. When that file cannot be read at all, the answer is still the
 //! file, with a zero-width range at its start: a jump that lands at the top of the right file is worth having, and
 //! the position of a name the analysis cannot see is not something this layer can invent.
+//!
+//! # The fourth answer: an `#include` points at a file
+//!
+//! `#include <vector>` **declares nothing** — no scope declares it, the index has no fact by that name, and the
+//! macro table has no entry for it — so every question above answers "nothing found" for a line whose whole purpose
+//! is to name a file. It is asked first ([`cpp_code_analysis::Session::header_at`]) because the shape at the cursor
+//! decides which question applies, and there is no position at which both can be true.
 
-use cpp_code_analysis::Known;
+use cpp_code_analysis::{DiskFiles, Known, Session};
 use lsp_types::{
     ClientCapabilities, GotoDefinitionParams, GotoDefinitionResponse, Location, OneOf, Range,
     ServerCapabilities,
@@ -66,6 +73,17 @@ pub async fn on_goto_definition_handler(
         let view = session.view(&path)?;
         let offset = offset_at_position(&view, position)?;
 
+        // **A header name before a declaration**, because the two cannot both be here and only one of them can
+        // answer: `#include <vector>` declares nothing, so the declaration question below would answer "nothing
+        // found" for a name that has a perfectly good file behind it. Asked first rather than as a fallback for
+        // the same reason a member query is asked before a name query — the *shape* at the cursor decides which
+        // question applies, and the shape here is a directive.
+        if let Known::Yes(header) = session.header_at(&view, offset) {
+            // A header this session cannot hold — the file is on disk but the VFS refused it — answers `None`
+            // rather than a location with no range, which is the same "nothing to go to" the reader had before.
+            return location_of_a_file(session, &header).map(GotoDefinitionResponse::Scalar);
+        }
+
         let Known::Yes(found) = session.definitions(&view, offset) else {
             return None;
         };
@@ -86,6 +104,33 @@ pub async fn on_goto_definition_handler(
         }
     })
     .await
+}
+
+/// **A jump to a file rather than to a name in it** — what `#include <vector>` points at.
+///
+/// The range is the **whole first line** rather than a point at the top of the file, and the difference is what a
+/// client does with it: an editor that receives a scalar location *selects* the range, and a zero-width range at
+/// offset zero selects nothing and scrolls to a column that may not be where anything is. The file itself is the
+/// answer — a header has nothing to highlight — so the range says "here, from the beginning" and no more.
+///
+/// `None` when the resolved path cannot be spelled as a URI or is not in the VFS, which leaves the client with the
+/// same "no definition" it had before rather than with a URI it cannot open.
+fn location_of_a_file(
+    session: &Session<DiskFiles>,
+    header: &cpp_code_analysis::HeaderTarget,
+) -> Option<Location> {
+    let uri = path_to_uri(&header.resolved)?;
+    let file = session.files().held(&header.resolved)?;
+
+    let end_of_the_first_line = file
+        .text
+        .find('\n')
+        .map_or_else(|| file.text.len(), |newline| newline + 1);
+    let end = position_in_file(file, end_of_the_first_line)?;
+    Some(Location {
+        uri,
+        range: Range::new(lsp_types::Position::new(0, 0), end),
+    })
 }
 
 /// The declaration's name, as a range in the file that declares it.

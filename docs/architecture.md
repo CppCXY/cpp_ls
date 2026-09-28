@@ -2216,6 +2216,96 @@ is_first_expansion, is_implicit, no_tokens, print_node_kind` —— 全是本文
 成员分派、连发 didChange 后的补全)。**反证**:把 `name_score` 的 provenance 拿掉(全部给 `LOCAL`)→
 "最近的声明在最前"那条红;把 `with_table` 关掉 → 关键词/片段那两条红。
 
+### 补全的第二轮(本轮):头文件的**来源**决定了是哪四千个名字里的哪一个,以及 `#include` 也是能跳的
+
+上一轮把补全的顺序修好了,用户的两个反馈是同一类东西的另一半:
+
+**① `#include` 里没有 C++ 标准库头文件。** 探针量出来的答案是"有,但排在两千名之后"。这台机器的搜索路径
+**4036** 个头,其中标准库自己的 **264** 个(MSVC 的 `VC/Tools/MSVC/<ver>/include`),按拼写排序时
+`#include <v` 的前八个是 `VDDSVC.H`、`VSCustomNativeHeapEtwProvider.h`、`VdmDbg.h`… —— Windows SDK 的
+四千个文件里名字以 `v` 开头的那些。**顺序没错,集合错了**,而这只有一条判据能分开:
+
+```text
+HeaderKind::StandardLibrary   这个目录里有 `vector`          ← 判据是"目录里有什么",不是路径长什么样
+HeaderKind::Project           项目自己的头
+HeaderKind::System            SDK / CRT / 第三方 -I 目录
+```
+
+判据问的是**文件**而不是目录名:libstdc++ 是 `include/c++/<ver>` 加一个目标子目录,MSVC 是
+`VC/Tools/MSVC/<ver>/include`,一个匹配两者的路径模式也会匹配项目自己的 `include/c++/`;而"目录里有
+`vector`"按标准自己的说法**就是**标准库。第二层再分一次:同一个目录里 127 个没有扩展名(C++ 标准头)、
+137 个有(`vadefs.h`、`vcruntime.h`、`corecrt.h`,C 运行时的),所以 `is_a_cxx_header` 把 `<vector>` 排在
+`<vadefs.h>` 前面 —— 它是**kind 内部的 tie-break**,项目自己的 `config.h` 不会被它压到系统头后面。
+
+实测(同一个 xmake 项目,`#include <v`):`valarray, variant, vector, version, cliext/vector, vadefs.h, …`,
+`vector` 从第 15 位到第 3 位;`#include <iost` → `iostream` 第 0 位;`#include <cstd` → `cstddef` 第 3 位。
+
+**② 头文件不能跳转。** 这一条是**功能缺失**,不是排序问题:`#include <vector>` **什么都不声明**——作用域走查
+问不到、索引按名字问不到、宏表里没有——所以跳转的三个问题对一个"整行的目的就是命名一个文件"的行全部回答
+"没找到"。缺的是第四种答案:
+
+```text
+ProjectIndex::header_at(index, root, path, offset) -> Known<HeaderTarget>
+  HeaderTarget { spelling, form, range, resolved }
+
+已知 → 跳过去,range 是**这个文件里的整条指令**(客户端会 *选中* 一个 scalar location,零宽 range 什么都选不中)
+UnresolvedInclude → "在 include 路径上没找到"          ← 已有的 variant,正是这个意思
+UnparsableName    → 光标不在 `#include` 上
+ConditionalCompilation → 这条 include 在判断不了的 `#if` 里
+```
+
+树回答**哪一行**(只有树知道光标在哪),摘要回答**指到哪**(解析是读文件时做的,这里再跑一遍搜索就是第二份
+实现)。`header_name_at` 归 `sema::resolve`(第四种"光标下面是什么",和名字/成员/宏并列),折叠成
+`<vector>` 的那一个 token 由词法器交出,所以拼写读回来不带定界符 —— 定界符是**形式**,搜索路径和反向映射
+用的都是 `vector`。顺带把**悬停**接上:同一个位置,弹出 `#include "widget.h"` 加解析出的绝对路径 —— 这是
+读者从那一行里唯一看不到的东西(名字变成四千个文件里的哪一个)。
+
+**证据**:`tests/completion.rs` 三条(include 指向它命名的头、解析不到时是 `Unknown` 且带上拼写、普通变量不是
+头)、`sema/resolve.rs` 一条(`<vector>` 读回 `vector`、`#include MACRO` 不是头、`#`/`include` 不是名字)、
+`cpp_ls/tests/handshake.rs` 端到端两条(第 0 行第 12 列的跳转落在 `widget.h`、同一位置的悬停带路径;
+第 0 列也就是 `#` 上答 `null`,把边界钉住)、`completion/includes.rs` 四条(标准库先于平台、标准头先于
+C 运行时头、项目自己的头按根拼、判据问的是目录里有什么)。
+
+### 补全的第三轮(本轮):**重载集不是很多行**,以及一个"测试写错了位置"的教训
+
+用户贴了一张 `full.` 的截图说"依然存在明显错误"。截图里是**文件作用域的名字**:`printf`、`full`、`myName`、
+`sum`、`main`,加上关键词。两条独立的原因,症状一样:
+
+**① 重载集被当成很多行给出来了(真 bug)。** MSVC 的 `basic_string` 声明 `replace` **11** 次、`insert` **9** 次、
+`append` 7 次;`std::string` 的成员列表因此是 **119 行,其中 64 行与另一行同 label** ✗。这是上一轮重写时
+丢掉的一条规矩——`member_completions_at` 给的是**声明**,而补全要的是**可以挑的东西**:同一拼写给 11 行就是
+一个选择给了 11 次。现在按名字折叠(和名字查询同一条规矩,同一个理由),**119 → 55**。
+声明没有丢:`members_of` / `member_definitions_across_files` 仍然持有整个重载集,跳转和悬停问的是它们。
+
+**② 光标位置在测试里被手算了三次,错了三次(教训)。** 追这一条的代价值得写下来,因为**失败的样子是"看不见"**:
+位置偏一格就落在换行上(还是名字位置,所以答案看起来像"成员没找到")或落在 `}` 上(还是有个答案,只是关于
+一个没人在看的位置)。
+
+```text
+第 1 次:line 4 character 9   fixture 里 `.` 在 character 8,9 已经过了一行 → 落在 `}` 上
+第 2 次:line 4 character 8   行号本身错了一行(那条 `}` 是第 4 行,`full.` 是第 3 行)
+第 3 次:断言里又写了一遍 line 4
+```
+
+修法不是再数一遍,而是**从 fixture 算**:`position_of(STD_STRING_CPP, "full.")` 走一遍文本、数换行和字符,
+把位置**算出来**;同一个值再在断言里写一次(`(3, 9)`),这样 fixture 一改就红,而不是继续问错的地方。
+配套的一个诊断留下了:`why_no_members` + handler 里的一行 `log::info!` —— 一个"没有成员的答案"会说出
+它到底是**不是成员位置**、还是**类型没读出来**、还是**类没找到**,三者修法不同、症状一样。
+
+**顺带补的一层兜底**:`full.` 在行尾时解析器报
+`expected identifier after member access operator` 并**恢复**,恢复出来的节点不一定是成员访问。所以
+`completion::context` 现在**树答不出来时也读文本**:一个 `./->` 结束在光标处(可以隔空格/制表符),左边是
+一个名字,就是"空成员名的成员访问"。这是**兜底而不是第二份实现**——树有答案就用树的,因为树知道
+`f(x).`、`arr[i].` 的对象是什么。**实测**:真服务器在 `full.|` 上答的是 55 个 `std::string` 成员,
+`append` 的编辑范围就是光标处、`newText` 是 `append`。
+
+**证据**:`cpp_ls/tests/handshake.rs::a_standard_library_member_list_has_each_spelling_once`
+(`#[ignore]` + release:那条 `#include <string>` 的闭包在 debug 里要几分钟,harness 的 30 s 截止线到不了,
+而**因为编译档位而红的测试等于没测**;release 下 **16.6 s** 通过,断言含"每个拼写只出现一次"),
+`completion/context.rs` 一条(兜底在 `full.|` 上读出对象与空成员名),
+`sema/resolve.rs` 一条(同一个位置树自己也答得出来)。**反证**:把按名字折叠去掉 → 上面那条端到端红
+(119 行、64 行重复)。
+
 ### M4 —— 文件 CST 降级
 裸树只保留:无损、括号/指令结构、浅层声明扫描。此时它那侧的门禁放宽到"结构正确",不再要求 C++ 正确。
 **验收**:宽容语法里针对展开的谓词清零。
@@ -2374,6 +2464,19 @@ cargo run --release --example completion_probe -- <dir> [<file.cpp>]
     名字会被给出来),而正确答案是把它拆成两次提问——`min` 处问"本文件的局部在不在",空光标处问"头文件里的
     文件作用域名字在不在"。修测试**不是**把断言删掉,也不是把过滤退回去,而是把那条测试**本来要问的问题**
     问出来 ✓。
+17. **光标位置不许手算,而且手算错了不会报错——它只会回答另一个位置的问题。** 这一轮为了复现用户那张 `full.`
+    的截图,同一个位置手算了**三次、错了三次**(偏一格落在换行上、行号错一行、断言里又写了一遍),每次都拿到
+    "看起来像 bug"的答案:一个空列表、或者一个关于 `}` 的列表。三个可复用的做法:位置从 fixture **算**
+    (`position_of(source, "full.")`,数换行和字符);算出来的值同时在断言里写一次,这样 fixture 一改就红;
+    以及**测试问的位置必须是客户端会发的位置**——`character` 是"这一行第几个字符",`. ` 在第 8 列的行尾,
+    客户端发的是 8,不是 9,也不是"下一行的 0"。配套的一条:一个"没有成员"的答案要能说出**为什么**
+    (`why_no_members`),因为"不是成员位置""类型读不出来""类找不到"三种原因的修法完全不同,而症状一模一样 ✓。
+18. **`#[ignore]` 不是"关掉的测试",是"这条测试的输入决定了它只能在某个档位跑"。** 上面那条端到端为了
+    `std::string` 的成员列表,必须让索引读 MSVC 的整个 `<string>` 闭包:release **16.6 s**,debug 是几分钟,
+    而 harness 单条请求的截止线是 30 s —— 于是一个**和代码无关、只和编译档位有关**的红出现了。这不是测试
+    坏了,是它跑错了档位:标注 `#[ignore = "needs the release profile: …"]` 并给出确切的命令行,同时让
+    **debug 里有一条覆盖同一片逻辑的等价测试**(那就是 `tests/completion.rs` 里用自造类的那条),这样
+    "被忽略"的代价是**多写一条**,而不是少测一块 ✓。
 
 ---
 
@@ -2495,6 +2598,15 @@ cargo run --release --example completion_probe -- <dir> [<file.cpp>]
   `isIncomplete` 现在把"索引还有活"和"列表被截断"分开。实测:真实文件函数体内空行 200 项、前 8 项全是本文件
   自己的名字(改前 692 项、前 6 项才是)。**已知成本**:不走成员/限定名的补全每次 16–17 ms(release),
   下一步是"按名字索引"而不是调常数。见 §6 那一节与 `examples/completion_probe.rs`。
+- **头文件的来源与跳转(本轮)**:`HeaderKind` 把搜索路径分成标准库 / 项目 / 系统三档(判据是**目录里有没有
+  `vector`**,不是路径长什么样),标准库内部再按"名字有没有扩展名"分出 C++ 头与 C 运行时头 —— 同一台机器上
+  `#include <v` 因此从 `VDDSVC.H` 开头变成 `valarray, variant, vector, …`,`vector` 从第 15 位到第 3 位。
+  另外补上第四种跳转答案:`#include` 指向它命名的**文件**(`header_at` → `HeaderTarget`),悬停同一个位置给
+  解析出的绝对路径。见 §6 那一节。
+- **成员列表按名字折叠(本轮)**:`std::string` 的成员从 **119 行(64 行重复 label,`replace` 11 次、`insert` 9 次)
+  收到 55 行**,一个拼写一行;重载集仍然完整地留在 `members_of` / `member_definitions_across_files` 里,给跳转与
+  悬停用。另外 `completion::context` 补了一层**文本兜底**:树在 `full.` 上恢复失败时,从文本里读出"操作符 + 左边
+  一个名字"这个形状。见 §6 那一节。
 - **LSP 的能力表现在是十三项**:诊断(push + pull)、definition、hover、completion、documentSymbol、foldingRange、
   references、rename(含 `prepareRename`)、workspaceSymbol、selectionRange、inlayHint、semanticTokens、signatureHelp ✓。
 

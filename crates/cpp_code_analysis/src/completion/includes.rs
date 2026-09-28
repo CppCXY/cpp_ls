@@ -59,6 +59,45 @@ pub struct Header {
     pub directory: usize,
     /// How deep under that directory it is, which is what orders two candidates whose names both match.
     pub depth: usize,
+    /// Where this header comes from, which is the first thing the ranking sorts by.
+    pub kind: HeaderKind,
+}
+
+/// **Where a header comes from** — the one thing that decides which of four thousand names a reader means.
+///
+/// A C++ toolchain's search path is not one list: the standard library's own headers are about a hundred and fifty
+/// files at the front of a directory that also holds the C runtime's, and behind them sit the platform SDK's, which
+/// on Windows is **four thousand** files that a program includes twice a year. Offered in spelling order, `#include
+/// <v` returns `VDDSVC.H` and `VSCustomNativeHeapEtwProvider.h` before `valarray`, `variant` and `vector` — measured
+/// on this machine, and the reason this type exists at all.
+///
+/// Ordered by how likely a reader means it, because that is what the ranking does with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum HeaderKind {
+    /// **The C++ standard library's own headers**: `<vector>`, `<iostream>`, `<cstddef>`.
+    StandardLibrary,
+    /// **A header of the project being edited**: `config/version.h`, `src/widget.h`.
+    Project,
+    /// A header on the search path that is not the standard library's and not the project's: the Windows SDK, the
+    /// C runtime, a third-party library's `-I` directory.
+    System,
+}
+
+/// The file whose presence says a directory is **the C++ standard library's**.
+///
+/// A marker rather than a path pattern, and the two implementations this has to recognise are why: MSVC's STL is
+/// `…/VC/Tools/MSVC/<version>/include`, libstdc++'s is `…/include/c++/<version>` plus a target subdirectory, and a
+/// pattern that matched both would be a pattern that matched a project's `include/c++/` too — while a directory
+/// that holds `vector` **is** the standard library's, by the standard's own rule that `<vector>` names a header a
+/// conforming implementation provides.
+const STANDARD_LIBRARY_MARKER: &str = "vector";
+
+/// Does this directory hold the C++ standard library?
+///
+/// Asked of `vector` and not of the directory's name: a project that points `-I` at `…/include/c++/12` and one that
+/// points it at its own `include` are told apart by what is in them, and nothing else distinguishes them.
+fn is_the_standard_library(directory: &Path) -> bool {
+    directory.join(STANDARD_LIBRARY_MARKER).is_file()
 }
 
 /// The headers the search path holds, sorted by name.
@@ -111,6 +150,14 @@ impl HeaderIndex {
         let mut truncated = false;
 
         for (directory, root) in directories.into_iter().enumerate() {
+            // **Which directory this is**, asked once per directory rather than once per header: the answer decides
+            // the first key of the ranking, and a reader's `#include <v` means `<vector>` rather than `VDDSVC.H`.
+            let kind = if is_the_standard_library(&root) {
+                HeaderKind::StandardLibrary
+            } else {
+                HeaderKind::System
+            };
+
             let mut pending: std::collections::VecDeque<(PathBuf, String, usize)> =
                 std::collections::VecDeque::from([(root.clone(), String::new(), 0)]);
 
@@ -126,10 +173,10 @@ impl HeaderIndex {
                 };
 
                 for entry in entries.flatten() {
-                    let Ok(kind) = entry.file_type() else {
+                    let Ok(entry_kind) = entry.file_type() else {
                         continue;
                     };
-                    if kind.is_symlink() {
+                    if entry_kind.is_symlink() {
                         continue;
                     }
 
@@ -142,14 +189,14 @@ impl HeaderIndex {
                         format!("{prefix}/{file_name}")
                     };
 
-                    if kind.is_dir() {
+                    if entry_kind.is_dir() {
                         if depth < MAX_HEADER_DEPTH {
                             pending.push_back((entry.path(), name, depth + 1));
                         }
                         continue;
                     }
 
-                    if !kind.is_file() || !is_a_header(&file_name) {
+                    if !entry_kind.is_file() || !is_a_header(&file_name) {
                         continue;
                     }
 
@@ -166,6 +213,7 @@ impl HeaderIndex {
                             name,
                             directory,
                             depth,
+                            kind,
                         });
                     }
                 }
@@ -211,36 +259,46 @@ impl HeaderIndex {
 
     /// The headers whose name matches a spelling being typed, best first, at most `limit`.
     ///
-    /// # The rules, and the second one is what makes the list usable
+    /// # The rules, and the first three are what make the list usable
     ///
-    /// 1. **How the spelling matched** (`match_rank`): the segment that *is* what was typed, then one that begins
-    ///    with it, then one that contains it. This decides first, because a reader who has finished typing a name
-    ///    means the header called that.
-    /// 2. **The project's own headers before the search path's**, when the match is equally good — a reader typing
-    ///    in a project means that project's files far more often than the standard library's, and which is which is
-    ///    said in the item's detail either way.
-    /// 3. **Shallower first**: among equally good matches, the header nearer the top of its search directory wins,
+    /// 1. **Where the header comes from** ([`HeaderKind`]): the standard library's own, then the project's, then the
+    ///    rest of the search path. Measured on this machine, a Windows C++ search path holds **4 036** headers and
+    ///    127 of them are the standard library's — so for the prefix `v` the list used to begin `VDDSVC.H`,
+    ///    `VSCustomNativeHeapEtwProvider.h`, `VdmDbg.h` and reached `valarray`/`variant`/`vector` well past the two
+    ///    hundred items a client is willing to show. The order was not wrong; the *set* was, and this is the only
+    ///    signal that tells a reader's `<vector>` from the SDK's `Vfw.h`.
+    /// 2. **A standard header before the C runtime's** (`is_a_cxx_header`), because one directory holds both. The
+    ///    standard library's spelling is the reason this works: a C++ header is named `<vector>` and a C header is
+    ///    named `<vadefs.h>`, and the same directory on this machine holds 127 of the first and 137 of the second.
+    ///    Without this the answer to `#include <v` was `vadefs.h`, `vcruntime.h`, `vcclr.h`, … and `<vector>` was
+    ///    item 15 — right after the six runtime headers a reader will never include by hand.
+    /// 3. **How the spelling matched** (`match_rank`): the segment that *is* what was typed, then one that begins
+    ///    with it, then one that contains it. This decides *after* the kind rather than before, because a standard
+    ///    header whose name merely contains the letters is likelier than a system header named exactly that — the
+    ///    reader is more likely to be writing `#include <str` for `<cstring>` than for `STRALIGN.H`.
+    /// 4. **Shallower first**: among equally good matches, the header nearer the top of its search directory wins,
     ///    which is what puts `experimental/vector.h` above `bits/stl_vector.h` for the prefix `vector`.
-    /// 4. **Then the spelling**, so that the order is the same on every run and a reader can find a header by
+    /// 5. **Then the spelling**, so that the order is the same on every run and a reader can find a header by
     ///    looking where its name is.
     ///
     /// An empty prefix matches everything at the same rank, so the answer to `#include <` with nothing typed is the
-    /// project's own headers and then the search path, shallowest first — a list a reader can look something up in,
-    /// rather than a sample of it in filesystem order.
+    /// standard library first, then the project's own, then the search path — a list a reader can look something up
+    /// in, rather than a sample of it in filesystem order.
     pub fn matching(&self, prefix: &str, limit: usize) -> Vec<Header> {
-        let mut ranked: Vec<(u8, u8, usize, String, usize)> = Vec::new();
+        let mut ranked: Vec<(HeaderKind, u8, u8, usize, String, usize)> = Vec::new();
 
-        for (name, directory) in self.spellings() {
+        for (name, directory, kind) in self.spellings() {
             let Some(rank) = match_rank(&name, prefix) else {
                 continue;
             };
 
-            // `0` for the project's own, `1` for the search path's: the whole of the second rule, expressed as a
-            // sort key so that the comparison below is one `sort` rather than three branches. It sorts *after* the
-            // rank, because a project header that merely contains the letters must not be preferred to a standard
-            // header the reader has named exactly.
-            let from_the_search_path = u8::from(directory != Self::PROJECT);
-            let depth = if directory == Self::PROJECT {
+            // `0` for a C++ standard header and `1` for everything else; see the second rule above. It is a
+            // tie-break **within** a kind, so a project's `config.h` is not pushed below a system `<vector>`.
+            let is_a_cxx_name = u8::from(!(
+                kind == HeaderKind::StandardLibrary && is_a_cxx_header(&name)
+            ));
+
+            let depth = if kind == HeaderKind::Project {
                 // A project header has no depth under a search directory: `config/version.h` is written from the
                 // project root, and how many directories that is says nothing about how near it is.
                 0
@@ -248,7 +306,7 @@ impl HeaderIndex {
                 name.matches('/').count()
             };
 
-            ranked.push((rank, from_the_search_path, depth, name, directory));
+            ranked.push((kind, rank, is_a_cxx_name, depth, name, directory));
         }
 
         ranked.sort();
@@ -256,15 +314,16 @@ impl HeaderIndex {
         ranked
             .into_iter()
             .take(limit)
-            .map(|(_, _, _, name, directory)| Header {
+            .map(|(kind, _, _, _, name, directory)| Header {
                 depth: name.matches('/').count(),
                 name,
                 directory,
+                kind,
             })
             .collect()
     }
 
-    /// Every header the index can name, as a **spelling and where it was found**.
+    /// Every header the index can name, as a **spelling, where it was found and what kind it is**.
     ///
     /// The project's own are spelled here rather than stored as [`Header`]s because the spelling depends on the
     /// root, and the list can be replaced wholesale when a build system hands over more files. The search path's
@@ -272,8 +331,8 @@ impl HeaderIndex {
     ///
     /// A project file whose path is not under the root is spelled **absolutely**: it is a real header a reader may
     /// include, and a spelling produced by stripping a prefix that is not there would be a lie about where it is.
-    fn spellings(&self) -> Vec<(String, usize)> {
-        let mut found: Vec<(String, usize)> = self
+    fn spellings(&self) -> Vec<(String, usize, HeaderKind)> {
+        let mut found: Vec<(String, usize, HeaderKind)> = self
             .project
             .iter()
             .map(|file| {
@@ -282,15 +341,13 @@ impl HeaderIndex {
                     .map(|relative| relative.to_string_lossy().replace('\\', "/"))
                     .unwrap_or_else(|_| file.to_string_lossy().replace('\\', "/"));
 
-                (spelling, Self::PROJECT)
+                (spelling, Self::PROJECT, HeaderKind::Project)
             })
             .collect();
 
-        found.extend(
-            self.headers
-                .iter()
-                .map(|header| (header.name.clone(), header.directory)),
-        );
+        found.extend(self.headers.iter().map(|header| {
+            (header.name.clone(), header.directory, header.kind)
+        }));
 
         found
     }
@@ -384,6 +441,21 @@ fn is_a_header(file_name: &str) -> bool {
     HEADER_EXTENSIONS.iter().any(|known| extension.eq_ignore_ascii_case(known))
 }
 
+/// Is this the spelling of a **C++** standard header, rather than one of the C headers that sit beside it?
+///
+/// The standard library's own spelling is the rule, and there is no second one: a C++ header is `<vector>`,
+/// `<iostream>`, `<cstddef>` and a C header is `<vadefs.h>`, `<stdio.h>`, `<corecrt.h>` — the standard says the
+/// first form names a header and leaves the second to the C library, which the same directory also holds. Measured
+/// on this machine's STL directory: **127** names without an extension and **137** with one, and the second group
+/// is what a reader writing `#include <v` was shown first (`vadefs.h`, `vcruntime.h`, `vcclr.h`, …).
+///
+/// Not a rule about *which* headers exist, and it is only ever a **tie-break within the standard library's own
+/// directory**: a project's `config.h` is not a C++ header by this test and is not pushed below anything by it,
+/// because the kind is compared first.
+fn is_a_cxx_header(name: &str) -> bool {
+    !name.rsplit('/').next().unwrap_or(name).contains('.')
+}
+
 /// The include directories of a configuration, as paths to read.
 pub fn search_directories(config: &crate::CompilerConfig) -> Vec<PathBuf> {
     config
@@ -397,7 +469,13 @@ pub fn search_directories(config: &crate::CompilerConfig) -> Vec<PathBuf> {
 mod tests {
     use super::*;
 
+    /// An index whose search path **is** the standard library — which is what the marker test would decide for a
+    /// directory holding `vector`, and what these fixtures stand for.
     fn index_of(names: &[&str]) -> HeaderIndex {
+        index_of_kind(names, HeaderKind::StandardLibrary)
+    }
+
+    fn index_of_kind(names: &[&str], kind: HeaderKind) -> HeaderIndex {
         HeaderIndex {
             headers: names
                 .iter()
@@ -408,6 +486,7 @@ mod tests {
                     // search directory is what the last tie-break is about, and a fixture passing a depth unrelated
                     // to the name would be testing an index no walk can produce.
                     depth: name.matches('/').count(),
+                    kind,
                 })
                 .collect(),
             project: Vec::new(),
@@ -415,6 +494,52 @@ mod tests {
             unread: 0,
             truncated: false,
         }
+    }
+
+    /// **The standard library's own headers come before the rest of the search path**, and that is the whole
+    /// point of the kind: measured on this machine, a Windows C++ search path holds 4 036 headers, 127 of them the
+    /// standard library's, and for the prefix `v` the list used to begin `VDDSVC.H`,
+    /// `VSCustomNativeHeapEtwProvider.h`, `VdmDbg.h` — with `<valarray>`, `<variant>` and `<vector>` past the two
+    /// hundred items a client shows.
+    #[test]
+    fn the_standard_library_comes_before_the_platform() {
+        let index = index_of_kind(&["bits/stl_vector.h", "sys/types.h"], HeaderKind::System);
+
+        let mut both = index;
+        both.headers.push(Header {
+            name: "vector".to_string(),
+            directory: 0,
+            depth: 0,
+            kind: HeaderKind::StandardLibrary,
+        });
+
+        let found: Vec<String> = both
+            .matching("v", 10)
+            .into_iter()
+            .map(|header| header.name)
+            .collect();
+        assert_eq!(found, vec!["vector", "bits/stl_vector.h"], "measured on a real toolchain");
+    }
+
+    /// The kind decides **before** the match quality, and that is a decision rather than an accident: a reader
+    /// writing `#include <str` means `<cstring>` far more often than `STRALIGN.H`, so a standard header that merely
+    /// contains the letters still beats a system header named exactly that.
+    #[test]
+    fn a_standard_header_that_merely_contains_the_letters_beats_a_system_one_that_is_named_for_it() {
+        let mut index = index_of_kind(&["STRALIGN.H"], HeaderKind::System);
+        index.headers.push(Header {
+            name: "string_view".to_string(),
+            directory: 0,
+            depth: 0,
+            kind: HeaderKind::StandardLibrary,
+        });
+
+        let found: Vec<String> = index
+            .matching("str", 10)
+            .into_iter()
+            .map(|header| header.name)
+            .collect();
+        assert_eq!(found, vec!["string_view", "STRALIGN.H"]);
     }
 
     /// **A top-level header beats one buried under implementation directories**, which is the difference between a
@@ -506,11 +631,26 @@ mod tests {
         assert!(!index.truncated());
     }
 
+    /// The marker is what tells a standard library directory from any other `-I` one, and it is asked of the
+    /// **contents**: this machine's checkout has no `vector` at its root and a real STL directory does.
+    #[test]
+    fn the_standard_library_is_recognised_by_what_is_in_it() {
+        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(
+            !is_the_standard_library(here),
+            "a crate directory does not hold the standard library"
+        );
+        assert!(
+            !is_the_standard_library(Path::new("/no/such/directory/exists/here")),
+            "and neither does one that does not exist"
+        );
+    }
+
     /// A project's own headers are offered **beside** the search path's and ahead of them, spelled relative to the
     /// project root — which is what a reader writes in `#include "config/version.h"`.
     #[test]
     fn the_projects_own_headers_are_spelled_from_the_root_and_offered_first() {
-        let index = index_of(&["version"]).with_project([
+        let index = index_of_kind(&["version"], HeaderKind::System).with_project([
             PathBuf::from("/p/config/version.h"),
             PathBuf::from("/p/main.cpp"),
             PathBuf::from("/p/vector"),
@@ -524,11 +664,11 @@ mod tests {
         assert_eq!(
             found,
             vec![
-                ("version".to_string(), 0),
                 ("config/version.h".to_string(), HeaderIndex::PROJECT),
+                ("version".to_string(), 0),
             ],
-            "the search path's exact match first, then the project's own file — the rank decides, and \
-             where a header comes from only breaks a tie"
+            "the project's own file first — a reader typing in a project means its own headers — and the \
+             search path's `version` beside it"
         );
 
         assert!(

@@ -94,6 +94,15 @@ pub fn hover(session: &Session<DiskFiles>, view: &FileView, offset: usize) -> Op
         return None;
     }
 
+    // **A header name before a declaration**, for the reason the jump asks it first: `#include <vector>` declares
+    // nothing, so every question below answers "nothing to say" for a name whose answer is a file on disk. The
+    // popup is the resolved path, which is the one thing a reader cannot see from the line they wrote — the header
+    // is found by a search, and *which* of the four thousand files on this machine's search path it found is the
+    // answer to the question the line asks.
+    if let Known::Yes(header) = session.header_at(view, offset) {
+        return Some(markdown(header_markdown(&header)));
+    }
+
     // The macro question first: it is about the text, and it is answered without the scope tree.
     if let Known::Yes(found) = session.macro_definition(view, offset) {
         return Some(markdown(macro_markdown(session, view, &found)));
@@ -117,6 +126,27 @@ fn markdown(value: String) -> Hover {
         }),
         range: None,
     }
+}
+
+/// **A header, as the file it resolved to** — what a hover on `#include <vector>` says.
+///
+/// One line and a path, because that is the whole answer: the reader wrote a name, a search turned it into a file,
+/// and the file is the thing they cannot see. The **delimiters are the form the directive used**, put back on the
+/// name so that the line reads as the reader wrote it — the two spellings search differently, and seeing which one
+/// was applied is how a reader tells "found beside the file" from "found on the search path".
+fn header_markdown(header: &cpp_code_analysis::HeaderTarget) -> String {
+    let (open, close) = match header.form {
+        cpp_code_analysis::IncludeForm::Quote => ('"', '"'),
+        // A macro include never reaches here: its target is a macro, and the question about it is the macro
+        // question, which is asked above. Both remaining forms are the angle one as far as a reader is concerned.
+        cpp_code_analysis::IncludeForm::Angle | cpp_code_analysis::IncludeForm::Macro => ('<', '>'),
+    };
+
+    format!(
+        "```cpp\n#include {open}{}{close}\n```\n\n`{}`\n",
+        header.spelling,
+        header.resolved.display()
+    )
 }
 
 /// A macro, as the definition writes it.
