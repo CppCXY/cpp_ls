@@ -2348,6 +2348,64 @@ didChange  →  buffer_changed:  换掉文本 + 装入 VFS        ← 立刻。�
 的绑定(include 来的、宏体里的)一律保留 —— 拿另一个文件的 offset 和这个文件的光标比,是两把尺子。
 **实测**:`a_name_declared_below_the_cursor_is_not_offered`(空行处不给 `sum`,`return ` 之后给)。
 
+### 补全的第五轮(本轮):**同一个事实有两个读者**,而它们对同一个光标给出了相反的答案
+
+第五次报告还是"`full2.` 什么都没有"。这一轮查出来的不是排序、不是类型推断、也不是上一轮的陈旧窗口,而是
+一条**架构上的**病:架构文档开头写的那条规矩 —— "每个功能只读**一个**结构" —— 在这个功能上被违反了,而违反
+的代价是一次**只差一个字节**的分歧。
+
+**① 光标落在算符的**列**上,和落在算符**后面**,是同一个意思,但只有一个读者知道这件事。**
+
+```text
+    full2.\n
+    ^^^^^ 234..239   标识符
+         ^ 239       `.` 自己那一列 —— 光标画在它上面时,客户端发的是这个位置
+          ^ 240      算符之后(这里是换行) —— 刚敲完 `.` 的光标在这里
+```
+
+客户端在光标的**两个字符之间**发位置。对读者来说这两者是同一件事,所以 `context::context_at` 两个都问 ——
+它先问树(`member_access_at`),树答不出来时**再问文本**(`member_access_from_the_text`:三字节窗口内、
+以算符结尾的 `.`/`->`)。树为什么答不出来,是这一轮量清楚的:
+
+```text
+语法在 `full2.\n` 上恢复出来的节点是 IdentifierExpr@234..239  ← `.` **不在**节点范围里
+   member_access_at(239)  → 这个节点的空成员区间是 [240,240),239 不在其中 → None
+   context_at(239)        → 树答不出来 → 文本兜底 → Member(object = full2) ✓
+```
+
+而索引层的 `member_completions_at` **只问了树**,于是同一个光标上两个读者给出相反的答案:
+
+```text
+cursor 239  context_at            → Member(…)      ✓ 成员查询答了,55 个成员
+            member_completions_at → UnparsableName ✗ "光标根本不是成员访问"
+```
+
+**实测**:探针在同一个偏移上同时打出这两行,一行列 55 个成员、一行说"不是成员访问"。用户看到的那一面是
+**四个作用域里的名字**(`full2`、`myName`、`main`、`Name`)—— 一份**没法跟在 `.` 后面**的列表。两个读者、
+一个事实、两种答案,这就是文档 §1 那条规矩要防的东西。
+
+**修法:让问形状的地方只有一个。** `index::project::member_completions_at` 现在从 `completion::context_at`
+取形状,而不是自己读树;`Session::member_completions`、`why_no_members`、成员补全三条路因此走同一个读法。
+
+**② 诊断本身也是那个第二个读者。** `why_no_members` 原来去问 `member_completions_at`,于是它报的是**另一个
+问题**的答案。现在**理由和列表一起产生**:`members()` 返回 `(CompletionSet, why)`,`why` 是在它自己的每一步上
+写下来的("类型读不出来"、"这个类没声明"、"成员全是实现保留的"、`N 个成员`)。诊断不可能和列表不一致,因为
+它们是同一次读的两个出口。
+
+**实测**:`a_member_access_on_the_last_line_of_a_body_offers_its_members_at_either_caret` —— body 的
+**最后一行**是 `w.`(`}` 跟在后面,恢复无处可去),算符之后和算符那一列两个偏移**都**必须给出成员,而且
+**都**必须是"成员查询答了"这句话,不能是"不是成员访问"。端到端一条
+(`cpp_ls/tests/handshake.rs` 的 `a_member_access_on_the_last_line_of_a_body_offers_the_members`)拿 MSVC 的
+`std::string` 钉同一件事,**实测 release 23.8 s 通过**(它要等索引把 `<iostream>`/`<string>` 的闭包读成
+156 份摘要;debug 下同一份闭包要几分钟,理由和 `a_standard_library_member_list_has_each_spelling_once` 相同)。
+
+**③ 一条记在日志里的教训。** 这一轮的诊断是**四次**"补全位置不对"的报告里第一次能一眼看出真相的:那条日志
+现在同时写客户端发的 `line/character`、它换算成的**字节**、以及**那个字节落在哪个字符上**,外加索引当时读到
+了哪儿。前三次都栽在同一个地方 —— 手算的列号差一格,而请求**照样有答案**,只是答的是没人看的那个位置;这一轮
+的第一次跑也是同一个病(测试问的是 `full2` 的 `2`,答案当然是一份名字列表)。配套的一条:端到端的循环里
+**只许问客户端真的会发的位置**,`ends_at - 2`(名字最后一个字符)不在其中 —— 那里问的是 `full2` 这个名字,
+是另一个问题、另一个正确答案。
+
 ### M4 —— 文件 CST 降级
 裸树只保留:无损、括号/指令结构、浅层声明扫描。此时它那侧的门禁放宽到"结构正确",不再要求 C++ 正确。
 **验收**:宽容语法里针对展开的谓词清零。
@@ -2358,14 +2416,15 @@ didChange  →  buffer_changed:  换掉文本 + 装入 VFS        ← 立刻。�
 
 ## 7. 度量与门禁
 
-每次改动后必须全绿(测试基线:**1395 个测试**、49 个 suite,实测;`cargo clippy --workspace --all-targets`
-零警告,`cargo doc` 零警告,`cpp_dump` 零错误):
+每次改动后必须全绿(测试基线:**1453 个测试**、49 个 suite(其中 2 条 `#[ignore]`,release 下跑),实测;
+`cargo clippy --workspace --all-targets` 零警告,`cargo doc` 零警告,`cpp_dump` 零错误):
 
 ```bash
 cargo test --workspace
 cargo clippy --workspace --all-targets        # 零警告
 cargo doc --no-deps -p cpp_code_analysis      # 零警告
 cargo run -q -p cpp_parser --bin cpp_dump -- crates/cpp_parser/tests/real_world.cpp   # 零错误
+cargo test --release -p cpp_ls --test handshake -- --ignored   # 需要标准库闭包的那三条(§8 第 18 条)
 ```
 
 四个语料 + 两个端到端。**每个语料必须记下它是哪一档跑出来的**(§5):同一个 255 文件语料,档 0(只有文本)
@@ -2519,6 +2578,26 @@ cargo run --release --example completion_probe -- <dir> [<file.cpp>]
     坏了,是它跑错了档位:标注 `#[ignore = "needs the release profile: …"]` 并给出确切的命令行,同时让
     **debug 里有一条覆盖同一片逻辑的等价测试**(那就是 `tests/completion.rs` 里用自造类的那条),这样
     "被忽略"的代价是**多写一条**,而不是少测一块 ✓。
+19. **同一个事实有两个读者时,它们迟早会对同一个光标给出相反的答案 —— 而"迟早"是字面意思。** 这一轮的红是
+    一条**只差一个字节**的分歧:光标画在算符**自己那一列**上时,客户端发的位置是算符的起始字节,而语法的
+    `MemberExpr` 范围在算符**之前**就结束了,于是"只读树"的 `member_completions_at` 答"这不是成员访问",
+    "树 + 文本都问"的 `context_at` 答"这是一个成员访问、名字还没写"。实测(活服务器同一行日志):补全列了
+    **55 个成员**,紧挨着的诊断说**"光标根本不是成员访问"** —— 两个读者,一个事实,两种答案。教训可以复用到
+    任何"答案 + 解释"的功能上:①**读者只能有一个**,哪怕它比另一个慢一点,慢是可以量的、分歧不能;②解释必须
+    **和答案一起产生**(`members()` 返回 `(set, why)`,而不是让诊断再去问一遍),否则解释永远有踩空的余量;
+    ③让第二个读者"也问一下文本"是治标 —— 第三个消费者出现时它还会漏。配套的记账方式:那条日志同时写
+    `line/character`、换算出的字节、和**那个字节落在哪个字符上**,因为前三次同类报告都栽在同一件事上(手算的
+    列号差一格,请求照样有答案,只是答的是没人看的那个位置)✓。
+20. **冷启动的窗口是设计的一部分,不是 bug —— 但只有 `isIncomplete` 能让客户端熬过去。** 打开一个项目之后头
+    几秒,索引还没读完这个文件 include 的**闭包**,所以 `std::string` 这个名字在索引里还不存在,补全只能答
+    "类型不知道" → 空列表。这一轮把它量清楚了:同一条请求在索引 `31/32`(已读/排队)时答空、`156/0` 时答
+    55 个成员,**实测 release 端到端 23.8 s 通过**,其中大部分时间花在等闭包上(debug 档同一份闭包要几分钟,
+    它是 MSVC 的 `<string>` 闭包,156 个文件)。两个结论:①`Session::catch_up` **只**读这个文件 + 它**直接**
+    include 的头,这是对的 —— 每次按键都读整个闭包是几百毫秒,而"这个文件自己的摘要"才是一次解析;②因此这
+    段窗口**必然存在**,唯一的出路是协议里那一位:handler 发
+    `isIncomplete = pending > 0 && !truncated`,会重问的客户端熬过去,不会重问的客户端在那几秒里看到一个空
+    列表。顺带量到一条:请求间隔 50 ms 时索引泵**没有**被饿死(31 → 156 个摘要),但请求和泵分的是**同一把
+    写锁** —— 比这更密的请求会让泵变慢,那时该做的是给泵一条自己的时间片,而不是把锁调粗 ✓。
 
 ---
 
@@ -2654,6 +2733,13 @@ cargo run --release --example completion_probe -- <dir> [<file.cpp>]
   `catch_up` 只重读**这一个文件**(队列里没有就零代价),补全 handler 在查询前调用它。另外作用域列表现在按
   **声明位置**过滤:**body 里**光标下面声明的名字不再给出(类成员与名字空间不受此限,那里文本顺序不是语言规则)。
   见 §6 那一节。
+- **成员形状只有一个读者(本轮)**:`index::project::member_completions_at` 改成从 `completion::context_at` 取
+  形状(原来自己读树),修的是"光标画在算符**自己那一列**上"时两个读者给出相反答案 —— 树在 `full2.\n` 上恢复出
+  的节点 `IdentifierExpr@234..239` **不含** `.`,于是树说"不是成员访问",而补全该给 55 个成员。诊断也一起改了:
+  `members()` 现在把**理由和列表一起**交出来(`why_no_members` 不再去问第二个查询),所以日志里的解释永远和
+  用户看到的列表是同一次读。实测:`tests/completion.rs` 新增一条(算符那一列与之后**都**给成员、**都**说"成员
+  查询答了"),端到端 `a_member_access_on_the_last_line_of_a_body_offers_the_members` release **23.8 s** 通过。
+  见 §6 那一节与 §8 第 19 条。
 - **LSP 的能力表现在是十三项**:诊断(push + pull)、definition、hover、completion、documentSymbol、foldingRange、
   references、rename(含 `prepareRename`)、workspaceSymbol、selectionRange、inlayHint、semanticTokens、signatureHelp ✓。
 
@@ -2673,7 +2759,9 @@ cargo run --release --example completion_probe -- <dir> [<file.cpp>]
    (9 处)。去掉实参再查 + 限定名逐段跟随别名,都是实例化那一片的前置小步。
 5. **类型推断的下一块:模板实例化**。109 档语料 54/60 个 `auto` 拒答全在模板体内。
 6. **删除形状规则(M4)**:**结论不变** —— 这一族买到的是 94 个活着的声明 + 304 个死分支声明,而大纲刻意读裸读。
-7. **索引泵的写锁切片**(量过、还没提上日程):第一份改动要等一个泵切片(debug 里 1200 行 **0.36 s**,release 小得多)。
+7. **索引泵的写锁切片**(量过、还没提上日程):第一份改动要等一个泵切片(debug 里 1200 行 **0.36 s**,release 小得多);
+   现在多了一条读数 —— 请求间隔 50 ms 时泵**没有**被饿死(31 → 156 个摘要),但请求和泵共用同一把写锁,更密的
+   请求会让泵变慢(§8 第 20 条)。
 8. **诊断的防抖任务也追赶队列**:同一条规矩(§8 第 11 条),但它自愈,所以排在后面。
 9. **熟读剩下的文件**:255/109 两档只剩 `sourceannotations.h`,已判定是 `/analyze` 专属语法(**非缺口**)。
 10. **L2(名字驻留)**:量过,是噪声级别,不做;L1/L4 已完成。

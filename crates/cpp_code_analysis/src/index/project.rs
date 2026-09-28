@@ -880,16 +880,17 @@ pub struct MemberCompletions {
 /// steps are all ones that already existed, which is the whole reason it is short:
 ///
 /// ```text
-/// 1. read the shape   — the object expression and what of the member is written (sema::resolve::member_access_at)
+/// 1. read the shape   — the object expression and what of the member is written (completion::context_at)
 /// 2. infer the type   — type_of_expression, the recursive inference the member *lookup* already uses
 /// 3. list the members — members_of, including the ones the bases declare
 /// ```
 ///
 /// # The state it exists for
 ///
-/// `w.` — the operator typed and nothing after it. That is the keystroke that *asks* the question, and the parser
-/// reads it as a member access with an empty member rather than as some other construct, so nothing here needs a
-/// second shape reader or a re-parse of the line. The same answer covers `w.si`, where the work is only that
+/// `w.` — the operator typed and nothing after it. That is the keystroke that *asks* the question, and the reader
+/// above is the one place that decides it is a member access: the parser usually reads `w.` as an access with an
+/// empty member, and where a recovery loses that shape the reader falls back to the **text**, which cannot be
+/// ambiguous about an operator sitting at the cursor. The same answer covers `w.si`, where the work is only that
 /// [`MemberCompletions::member_range`] is the written prefix instead of a point.
 ///
 /// # The answers, and the one that matters most
@@ -909,7 +910,17 @@ pub fn member_completions_at(
     path: &Path,
     offset: usize,
 ) -> Known<MemberCompletions> {
-    let Some(access) = crate::sema::resolve::member_access_at(root, offset) else {
+    // **The shape comes from the completion context, which is the one reader of it.** This used to call
+    // `sema::resolve::member_access_at`, which reads the access out of the tree alone, and the two disagree about
+    // one offset a client really sends: with the caret drawn **on** the operator's own column (`full2|.`), the
+    // grammar's access node ends before the operator, so the tree answers "not a member access" while the context
+    // reader — which asks the text as well, for exactly this reason — answers "a member access with nothing
+    // written". Measured on a live server: the member list and the diagnostic for the same keystroke said opposite
+    // things, and a client asking at the caret's own column got the names in scope.
+    //
+    // Two readers of one fact is the shape of every bug in this area; the completion layer owns this question, and
+    // every consumer of it — this query, `Session::member_completions`, the log line — goes through it.
+    let crate::completion::CompletionContext::Member(access) = crate::completion::context_at(root, offset) else {
         return Known::Unknown(UnknownReason::UnparsableName);
     };
 
@@ -1630,7 +1641,7 @@ fn offered(found: Vec<Candidate>, depth: usize) -> Vec<OfferedName> {
 ///
 /// Not a rule about what the analysis will answer: hover, a jump and a rename still find a reserved name — a reader
 /// who points at `_Arg` in a header wants to know what it is — this only decides what to **offer**.
-fn is_reserved_to_the_implementation(fact: &DeclFact) -> bool {
+pub(crate) fn is_reserved_to_the_implementation(fact: &DeclFact) -> bool {
     let name = fact.name.as_str();
     let mut characters = name.chars();
 
@@ -3085,7 +3096,7 @@ fn enclosing_class(scopes: &crate::ScopeTree, offset: usize) -> Option<String> {
 /// this walk, because the walk does not ask "which name space"; it asks for the qualified spelling the index keys
 /// on, and a global declaration's spelling is its bare name. Keeping the prefix made `::Widget w;` — the type
 /// spelling a consumer hands over verbatim from `DeclFact.type_of` — fail to find a class sitting in the buffer.
-fn base_type_name(written: &str) -> &str {
+pub(crate) fn base_type_name(written: &str) -> &str {
     let mut name = written.trim();
 
     // Template arguments: the members of `std::vector<int>` are the members of `std::vector`'s primary template,

@@ -945,39 +945,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 break;
             };
 
-            // Only the resolved includes are wanted, and they are cloned out before the queue is touched: `get`
-            // borrows the store, and the queue is a field of the same struct.
-            // The file is loaded into the VFS *before* it is read, so that everything the analysis reads it is
-            // also holding: a hover that shows a declaration from a header nobody opened asks the VFS for it, and
-            // a file that was indexed is a file whose text and line index are already here.
-            self.vfs.load(&path);
-            let before = self.store.stats();
-            let includes: Vec<PathBuf> = self
-                .store
-                .get(&path)
-                .map(|summary| {
-                    summary
-                        .includes
-                        .iter()
-                        .filter_map(|include| include.resolved.clone())
-                        .collect()
-                })
-                .unwrap_or_default();
-            let after = self.store.stats();
-
-            // Everything this file includes joins the same half of the list the file came from, one level further
-            // out — a header an open file includes is worth reading before the rest of the project, and a header
-            // the project's tenth translation unit includes is not.
-            for include in includes {
-                self.queue.add(include, priority, depth + 1);
-            }
-
-            done.push(Step {
-                path,
-                priority,
-                depth,
-                outcome: outcome_of(before, after),
-            });
+            done.push(self.index_one(path, priority, depth));
         }
 
         // **The second pass, at the moment the closure is in hand**. `SummaryStore::get` reads one file with
@@ -1034,6 +1002,45 @@ impl<F: FileProvider + Clone> Session<F> {
         done
     }
 
+    /// **Read one file, and queue what it includes.** One step of the work, as a function because there are now two
+    /// callers: the pump ([`Session::advance`]) and [`Session::catch_up`], which needs the same step *now* rather
+    /// than at the pump's pace.
+    ///
+    /// The order inside is the whole of the pump's correctness and is documented at the call site it came from: the
+    /// file is loaded into the VFS before it is read (so everything the analysis reads it is also holding), and its
+    /// resolved includes are cloned out before the queue is touched (`get` borrows the store, and the queue is a
+    /// field of the same struct).
+    fn index_one(&mut self, path: PathBuf, priority: Priority, depth: usize) -> Step {
+        self.vfs.load(&path);
+        let before = self.store.stats();
+        let includes: Vec<PathBuf> = self
+            .store
+            .get(&path)
+            .map(|summary| {
+                summary
+                    .includes
+                    .iter()
+                    .filter_map(|include| include.resolved.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let after = self.store.stats();
+
+        // Everything this file includes joins the same half of the list the file came from, one level further out —
+        // a header an open file includes is worth reading before the rest of the project, and a header the project's
+        // tenth translation unit includes is not.
+        for include in includes {
+            self.queue.add(include, priority, depth + 1);
+        }
+
+        Step {
+            path,
+            priority,
+            depth,
+            outcome: outcome_of(before, after),
+        }
+    }
+
     /// **Read one file now, if the editor has changed it since the index read it.**
     ///
     /// # The bug this exists for
@@ -1054,24 +1061,50 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// Blocking the request until the **pump** has caught up would be a lock, and it would be the wrong one: the
     /// pump reads the file's whole include closure, so a request about a file whose first line is
-    /// `#include <string>` would wait for thousands of headers — seconds, to answer a keystroke. What is stale is
-    /// *this file's summary*, and rebuilding that is one parse of one file the editor already holds.
+    /// `#include <string>` would wait for thousands of headers — seconds, to answer a keystroke.
     ///
-    /// # What it costs, and what it does not change
+    /// # The two cases, and why both end the same way
     ///
-    /// Nothing when the file is not stale: the queue is asked first, and a path that is not in it — the ordinary
-    /// case, since the pump drains after every edit — returns immediately without touching the store. When it *is*
-    /// stale, this is one `SummaryStore::get`, which is the same call the pump would have made one step later.
+    /// ```text
+    /// the file is queued         one file whose answer changed — an edit. Read it now.
+    /// the file is *not* queued   the ordinary keystroke, and the first one of a session.
+    /// ```
     ///
-    /// It does **not** follow the file's includes. A header the file includes is not "one edit behind" — the editor
-    /// did not change it — so the pump's order is left alone; the queue entry is dropped rather than worked, so the
-    /// file is not read twice.
+    /// and then, **either way**, the files it includes that the index has never read: a completion that needs a type
+    /// from a header cannot be answered while that header is missing, and "the index has not reached it yet" is not a
+    /// state a keystroke should be able to observe. It is the pump's own step (`Session::index_one`), so the
+    /// queueing and the cascade are the same code — and a header whose answer is *already* in the index is a cache
+    /// hit whenever the pump reaches it, so nothing is read twice.
+    ///
+    /// That second half is the case a user hit: `full2.` on a fresh session answered **four items** — the names in
+    /// scope — because `std::string` was not in the index yet and nothing had read the headers that declare it.
     pub fn catch_up(&mut self, path: &Path) {
-        if !self.queue.forget(path) {
-            return;
+        if self.queue.forget(path) {
+            self.index_one(path.to_path_buf(), Priority::Open, 0);
         }
 
-        self.store.get(path);
+        for include in self.unread_includes_of(path) {
+            self.index_one(include, Priority::Open, 1);
+        }
+    }
+
+    /// **The files this one includes that the index has never read**, in the order they were written.
+    ///
+    /// Empty for the ordinary case — a session whose pump has drained has read every include of every file it
+    /// indexed — and empty as well for a file with no summary at all, which is a question the caller has just
+    /// answered by reading it.
+    fn unread_includes_of(&self, path: &Path) -> Vec<PathBuf> {
+        let Some(summary) = self.store.index().summary(path) else {
+            return Vec::new();
+        };
+
+        summary
+            .includes
+            .iter()
+            .filter_map(|include| include.resolved.as_ref())
+            .filter(|resolved| self.store.index().summary(resolved).is_none())
+            .cloned()
+            .collect()
     }
 
     /// Work until there is nothing left, and say how many files were read.

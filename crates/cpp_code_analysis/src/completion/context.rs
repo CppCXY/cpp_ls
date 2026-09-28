@@ -112,88 +112,51 @@ pub fn context_at(root: &CppSyntaxNode, offset: usize) -> CompletionContext {
 /// which is what a user reported as "补全明显错误". A probe that asked at the byte right after the operator saw the
 /// member access and offered the members, so the two disagreed about the same keystroke.
 ///
-/// The text is the authority here and it is unambiguous: **an operator ending at the cursor, with nothing but
-/// spaces between it and the cursor**, is a member access with an empty name, whatever the recovery produced.
-/// `a . b` is the same access as `a.b`, so spaces are stepped over rather than required to be absent; a **newline**
-/// is not, because a `.` at the end of a line with the cursor at the start of the next one is a different (and
-/// more badly damaged) shape, and guessing about it would put a member list in a place nobody typed.
+/// The text is the authority here and it is unambiguous: **an operator ending at the cursor, or as near to it as
+/// the token boundary puts it**, is a member access with an empty name, whatever the recovery produced. `a . b` is
+/// the same access as `a.b`, so spaces are stepped over rather than required to be absent; a **newline** is not,
+/// because a `.` at the end of a line with the cursor at the start of the next one is a different (and more badly
+/// damaged) shape, and guessing about it would put a member list in a place nobody typed.
 ///
 /// What the tree is still asked for is the **object**, which is what a type is inferred from: the name written
 /// before the operator, which is the shape this fallback exists for. `f(x).` and `arr[i].` are not this function's
 /// business — the tree answers those, and when it does not the honest answer is nothing.
 ///
 /// Only ever a *fallback*: a tree-produced access is used when there is one, and it knows its object exactly.
+///
+/// # The window, and why it is not "the cursor and the byte before it"
+///
+/// A client's cursor sits **between two bytes**, so "the operator is here" has two readings: the operator ends at
+/// the cursor (`full2.|`) or the cursor is *on* the operator (`full2|.` where the cursor is drawn at the dot's
+/// column). Asked as "which of these two offsets does the operator end at", the answer is neither for the second:
+/// the walk steps back from the dot's own byte, lands before the operator, and finds `full2` rather than a `.`.
+/// Measured on a live server, that one-off is the difference between 55 members and the four names in scope.
+///
+/// So the question is asked of the **operator**, not of the cursor: a window of three bytes, and any of them having
+/// a `.` or `->` end there is the answer. Three is what the two readings need plus the byte between them, and the
+/// window cannot reach anything else — the operator is adjacent to the cursor by construction, because that is what
+/// "the cursor is after the operator" means.
 fn member_access_from_the_text(
     root: &CppSyntaxNode,
     offset: usize,
 ) -> Option<resolve::MemberAccess> {
-    // The offset the operator has to end at: the cursor itself, or the cursor stepped back over the **spaces and
-    // tabs** between the operator and it — `full. |` is the same access as `full.|`, and a client may report either.
-    // Nothing else is stepped over: a comment is not whitespace, and a line break is not either, because a cursor on
-    // the line *after* `full.` is a position nobody typed a member at, and a member list there would be an answer to
-    // a question that was not asked.
-    //
-    // **A client's cursor sits between two bytes**, so both readings of "here" are tried: the offset itself (where
-    // the token after the cursor ends, `full.|`) and the one before it (where the token the cursor is on ends,
-    // `full. |`). They are the same position to a reader and different ones to a byte counter, which is the whole
-    // reason this fallback exists rather than being a duplicate of the tree's answer.
-    for start in [Some(offset), offset.checked_sub(1)] {
-        let Some(start) = start else {
-            continue;
-        };
+    // The operator, asked of the two offsets a cursor on it can be: the reader has just typed it (`full2.|`) or the
+    // caret is drawn **on** its column (`full2|.`). One function rather than two branches, because both are
+    // "the operator next to this cursor" and neither is special.
+    let operator = resolve::operator_in(root, offset)
+        .or_else(|| offset.checked_sub(1).and_then(|before| resolve::operator_in(root, before)))?;
+    let at = usize::from(operator.text_range().end());
 
-        let mut at = start;
+    // **The object: the name before the operator.** Asked of the *tree* so that a qualified spelling comes back as
+    // one node — `std::string` and not `string` — because the type of `std::string::size_type` is a question about
+    // the whole name.
+    let object = resolve::name_ending_before_an_operator(root, at)?;
 
-        while let Some((before, spaces_only)) = trivia_ending_at(root, at) {
-            if !spaces_only {
-                break;
-            }
-
-            at = before;
-        }
-
-        if resolve::operator_ending_at(root, at).is_none() {
-            continue;
-        }
-
-        // **The object: the name before the operator.** Asked of the *tree* so that a qualified spelling comes back
-        // as one node — `std::string` and not `string` — because the type of `std::string::size_type` is a question
-        // about the whole name.
-        let Some(object) = resolve::name_ending_before_an_operator(root, at) else {
-            continue;
-        };
-
-        return Some(resolve::MemberAccess {
-            object,
-            member: String::new(),
-            member_range: SourceRange::new(at, 0),
-        });
-    }
-
-    None
-}
-
-/// The **trivia token ending exactly at `at`**, as the offset it starts at and whether it is spaces alone.
-///
-/// The stepping stone the fallback above walks back over: a token that ends where the cursor is and holds nothing
-/// but spaces or tabs is not the operator, and the byte before it is where to look next. `None` for anything else —
-/// a comment, a line break, a real token — which ends the walk, and `None` for a cursor that is *inside* a token
-/// rather than at its edge, because a cursor in the middle of `full` is not after an operator.
-fn trivia_ending_at(root: &CppSyntaxNode, at: usize) -> Option<(usize, bool)> {
-    let token = resolve::token_ending_at(root, at)?;
-    let kind = cpp_parser::CppTokenKind::from(token.kind());
-
-    if !cpp_parser::is_trivia(kind) {
-        return None;
-    }
-
-    Some((
-        usize::from(token.text_range().start()),
-        token
-            .text()
-            .chars()
-            .all(|character| matches!(character, ' ' | '\t')),
-    ))
+    Some(resolve::MemberAccess {
+        object,
+        member: String::new(),
+        member_range: SourceRange::new(at, 0),
+    })
 }
 
 /// The directive context at `offset`, when the cursor is inside a `PreprocessorDirective`.
@@ -559,6 +522,10 @@ mod tests {
         // the client reports for it. The tree's recovery is free to lose the access node here, so this asks the
         // textual fallback **directly** — the layer above asks the tree first and only comes here when the tree
         // answers nothing.
+        //
+        // **Every offset that is on the operator**, because that is the set a client can send: the `.` itself and
+        // the byte after it. Measured on a live server, the completion at the byte *after* the operator answered
+        // `Name` — the names in scope — which is what this test is here to keep from happening.
         let source = "#include <string>\nint main() {\n    std::string full;\n    full.\n;\n}\n";
         let root = cpp_parser::CppParser::parse(source, cpp_parser::ParserConfig::default())
             .get_red_root();
@@ -566,23 +533,25 @@ mod tests {
         let dot = source.find("full.").expect("the fixture") + "full".len();
         assert_eq!(&source[dot..dot + 1], ".", "the fixture's operator");
 
-        let access = super::member_access_from_the_text(&root, dot + 1).unwrap_or_else(|| {
-            panic!(
-                "the offset just past the `.` at {dot} must read as a member access; the token ending there is \
-                 {:?}, and the object before the operator is {:?}",
-                crate::sema::resolve::token_ending_at(&root, dot + 1)
-                    .map(|token| token.text().to_string()),
-                crate::sema::resolve::name_ending_before_an_operator(&root, dot + 1)
-                    .map(|node| node.text().to_string()),
-            )
-        });
+        for offset in [dot, dot + 1] {
+            let access = super::member_access_from_the_text(&root, offset).unwrap_or_else(|| {
+                panic!(
+                    "the offset {offset} is on the `.` at {dot} and must read as a member access; the token there \
+                     is {:?} and the object before the operator is {:?}",
+                    cpp_parser::token_at(&root, offset)
+                        .map(|token| (cpp_parser::CppTokenKind::from(token.kind()), token.text().to_string())),
+                    resolve::name_ending_before_an_operator(&root, dot + 1)
+                        .map(|node| node.text().to_string()),
+                )
+            });
 
-        assert_eq!(access.object.text().to_string(), "full");
-        assert!(access.member.is_empty(), "nothing is written after the dot");
-        assert_eq!(
-            access.member_range.start_offset,
-            dot + 1,
-            "and the name goes immediately after the operator"
-        );
+            assert_eq!(access.object.text().to_string(), "full");
+            assert!(access.member.is_empty(), "nothing is written after the dot");
+            assert_eq!(
+                access.member_range.start_offset,
+                dot + 1,
+                "and the name goes immediately after the operator"
+            );
+        }
     }
 }

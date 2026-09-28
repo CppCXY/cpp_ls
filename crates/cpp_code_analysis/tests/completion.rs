@@ -903,6 +903,47 @@ int f() {
     );
 }
 
+/// **The sequence a server is in when the very first completion arrives** — `did_open`, then the request, with the
+/// pump *not* advanced in between.
+///
+/// This is the order the LSP layer actually runs: `handlers::initialized` builds the session, `didOpen` replaces the
+/// buffer (which **drops that file's summary**), and a completion arrives before anything has read the file again.
+/// `Session::catch_up` is what the handler calls first, and the question this test holds fixed is whether that one
+/// call is **enough** — a completion that needs a name from a header needs the header to have been read *by someone*,
+/// and if `catch_up` rebuilds the file's summary without the index ever following its includes, the answer is an
+/// empty member list for a type the file plainly includes.
+///
+/// No standard library: the same shape with a local header, so that the test is about the sequence rather than about
+/// how long MSVC's `<string>` takes to read.
+#[test]
+fn the_first_completion_of_a_session_finds_the_type_in_an_included_header() {
+    let memory = MemoryFiles::new()
+        .with_file("/p/main.cpp", FRESHNESS_USES_HEADER)
+        .with_file("/p/widget.h", FRESHNESS_HEADER);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session =
+        Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    session.add_project_files([
+        std::path::PathBuf::from("/p/main.cpp"),
+        std::path::PathBuf::from("/p/widget.h"),
+    ]);
+
+    // **The server's sequence, and only that**: the client opens the document, and the pump has not run.
+    session.did_open("/p/main.cpp", FRESHNESS_USES_HEADER);
+    session.catch_up(std::path::Path::new("/p/main.cpp"));
+
+    let cursor = FRESHNESS_USES_HEADER.find("w.").expect("the fixture") + 2;
+    let view = session.view("/p/main.cpp").expect("the file is held");
+    let found = session.completions(&view, cursor);
+
+    let labels: Vec<&str> = found.items.iter().map(|item| item.label.as_str()).collect();
+    assert!(
+        labels.contains(&"size"),
+        "the members of the type the file includes, from a session that has read nothing yet — `catch_up` has to be \
+         enough on its own, or the first completion of every session is empty: {labels:?}"
+    );
+}
+
 /// **A file that has not been edited is not read again.** The pump drains after every edit, so the ordinary
 /// keystroke asks [`Session::catch_up`] about a path that is not in the queue — and the answer has to be free, or
 /// every completion would pay a parse.
@@ -928,4 +969,75 @@ fn a_file_that_is_not_stale_is_not_read_again() {
         after, before,
         "nothing was read, parsed or written: the file was not stale"
     );
+}
+
+/// **The operator on the last line of a body, asked at either of the two offsets a caret on it can mean.**
+///
+/// The fourth report of "No suggestions" under `full2.`, and the narrowest: the line is the **last of the body**,
+/// so the `}` follows it and the parser's recovery has nowhere to put the unfinished expression. Two things then
+/// went wrong together, and both are about the *cursor* rather than about the type:
+///
+/// * the tree's access node ends before the operator, so a reader that asked the tree only answered "the name
+///   `full2`, then something else" — and the client got the names in scope, a list of things that cannot follow a
+///   `.`;
+/// * a caret is drawn **between two characters**, and a client sends the position of the caret. For `full2|.` that
+///   is the operator's own column, and for `full2.|` it is one past it. Both mean "after the operator" to a reader,
+///   so both must answer the same list — and the diagnostic for the same keystroke must not say the opposite of
+///   what the list says. It did: "the cursor is not a member access at all" was logged beside 55 members, because
+///   the diagnostic asked the index layer's tree-only shape reader while the list asked the context reader.
+///
+/// No standard library here: a local header gives the same shape without paying for MSVC's `<string>`, which is
+/// what `a_member_access_on_a_standard_library_type_offers_its_members` in `cpp_ls`'s handshake suite is for.
+#[test]
+fn a_member_access_on_the_last_line_of_a_body_offers_its_members_at_either_caret() {
+    const FIXTURE: &str = "\
+#include \"widget.h\"
+int main() {
+    Widget w;
+    w.
+}
+";
+    let memory = MemoryFiles::new()
+        .with_file("/p/a.cpp", FIXTURE)
+        .with_file("/p/widget.h", FRESHNESS_HEADER);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session =
+        Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    session.add_project_files([
+        std::path::PathBuf::from("/p/a.cpp"),
+        std::path::PathBuf::from("/p/widget.h"),
+    ]);
+    session.index_everything();
+
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let dot = FIXTURE.find("w.").expect("the fixture") + 1;
+    assert_eq!(&FIXTURE[dot..dot + 1], ".", "the fixture's operator");
+
+    for offset in [dot, dot + 1] {
+        let found = session.completions(&view, offset);
+        let labels: Vec<&str> = found.items.iter().map(|item| item.label.as_str()).collect();
+
+        assert!(
+            labels.contains(&"size"),
+            "the caret at {offset} is on the operator, and `w` is a `Widget` declared a line above: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"w"),
+            "and not the names in scope, which cannot follow a `.`: {labels:?}"
+        );
+
+        // The sentence a failure is diagnosed with comes from the same reading as the list, so an empty list is
+        // always explained by the step that emptied it.
+        let why = cpp_code_analysis::why_no_members(
+            session.index(),
+            &view.scopes,
+            &view.root,
+            &view.path,
+            offset,
+        );
+        assert!(
+            why.contains("the member query answered"),
+            "the diagnosis agrees with the list at {offset}: {why}"
+        );
+    }
 }

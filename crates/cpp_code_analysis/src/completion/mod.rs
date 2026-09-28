@@ -278,9 +278,7 @@ pub fn completion_at(
             replace: SourceRange::new(offset, 0),
             ..CompletionSet::default()
         },
-        CompletionContext::Member(access) => {
-            members(index, scopes, root, path, &access, offset)
-        }
+        CompletionContext::Member(access) => members(index, scopes, root, path, &access, offset).set,
         CompletionContext::Qualified(position) => {
             names(index, scopes, root, path, &position, offset, false)
         }
@@ -316,6 +314,13 @@ pub fn completion_at(
 /// class could not be found, or the cursor was never read as a member access at all. Those three have different
 /// fixes, and the reason is thrown away by the time a client sees an answer with no members in it.
 ///
+/// **Asked of the same reader the answer came from**, and that is the whole of why this function takes `root` and
+/// not the set: the member list is produced together with the reason it came out empty, so the sentence a log shows
+/// is about *this* query rather than about a second one that may disagree with it. Measured on a live server: the
+/// diagnostic said "the cursor is not a member access at all" while the completion beside it was listing the
+/// members — because the diagnostic asked the index layer, whose tree-only shape reader does not accept a cursor
+/// drawn **on** the operator's own column, and the feature asks the context reader, which does.
+///
 /// Only asked when the answer contained no members, so the cost is one extra query on exactly the keystrokes a
 /// reader would complain about.
 pub fn why_no_members(
@@ -326,18 +331,32 @@ pub fn why_no_members(
     offset: usize,
 ) -> String {
     match context_at(root, offset) {
-        CompletionContext::Member(_) => {
-            match crate::index::project::member_completions_at(index, scopes, root, path, offset) {
-                Known::Yes(found) => format!("the member query answered, with {} members", found.members.members.len()),
-                Known::Unknown(reason) => reason.describe(),
-                Known::No => "the member query answered `No`".to_string(),
-            }
-        }
+        CompletionContext::Member(access) => members(index, scopes, root, path, &access, offset).why,
         other => format!("the cursor is not a member access at all: {other:?}"),
     }
 }
 
-/// The members of an object, after a `.` or `->`.
+/// The members of an object, after a `.` or `->`, and **the sentence that explains an empty list**.
+///
+/// # Why the object comes from the caller rather than from a second reading of the tree
+///
+/// This used to call `member_completions_at`, which reads the shape off the tree itself — and that is a **second
+/// reading of the same fact**, which is how the two came to disagree. The reader above answers "is the cursor a
+/// member access" from the tree **and** from the text (see [`context::context_at`]), because a parser recovering
+/// from a line that ends in an operator does not always build the access node; the query behind it only asked the
+/// tree, so a cursor the reader had just classified as a member access came back as *not a member access at all*
+/// and the list was empty. Measured on a live server: `full2.` on the last line of a body answered nothing.
+///
+/// There is one reader of the shape and it is the one above. What this function needs from it is the **object**,
+/// which is what a type is inferred from — and that inference is [`type_of_expression`], the same call the query
+/// makes, so the two layers still cannot disagree about the *type*.
+///
+/// # Why it returns the reason rather than only the list
+///
+/// An empty list has four causes — the object's type could not be read, the class is not declared anywhere the
+/// index can see, the class has no members, or every member was the implementation's — and they have four different
+/// fixes. The reason is produced *here*, where the steps are, rather than re-derived by a diagnostic that would
+/// have to ask the same questions again and could answer them differently. See [`why_no_members`].
 fn members(
     index: &ProjectIndex,
     scopes: &ScopeTree,
@@ -345,25 +364,73 @@ fn members(
     path: &Path,
     access: &crate::sema::resolve::MemberAccess,
     offset: usize,
-) -> CompletionSet {
+) -> MemberAnswer {
     let replace = access.member_range;
     let prefix = written_before(access, offset);
 
-    let Known::Yes(found) =
-        crate::index::project::member_completions_at(index, scopes, root, path, offset)
-    else {
-        // The object's type could not be worked out (`UnknownType`), or the type is not declared in anything the
-        // analysis can see. **Nothing is offered**, and that is the answer rather than a failure: a name that
-        // cannot follow the `.` is worse than no name, because the user believes it. The empty list is not marked
-        // truncated, so a client that sees `isIncomplete` alongside it knows the difference between "no members"
-        // and "not known yet".
-        return CompletionSet {
+    let refused = |why: String| MemberAnswer {
+        set: CompletionSet {
             scope: String::new(),
-            prefix,
+            prefix: prefix.clone(),
             replace,
             truncated: false,
             items: Vec::new(),
-        };
+        },
+        why,
+    };
+
+    let written = match crate::index::project::type_of_expression(index, scopes, root, path, &access.object, 0) {
+        Known::Yes((written, _)) => written,
+        // The object's type could not be worked out — a call, a dereference, a subscript: each needs a type
+        // *computed* rather than read off a declaration. **Nothing is offered**, and that is the answer rather than
+        // a failure: a name that cannot follow the `.` is worse than no name, because the user believes it. The
+        // empty list is not marked truncated, so a client that sees `isIncomplete` alongside it knows the
+        // difference between "no members" and "not known yet".
+        Known::Unknown(reason) => return refused(reason.describe()),
+        Known::No => {
+            return refused(format!(
+                "nothing says what `{}` is, so its members are not known",
+                access.object.text().to_string().trim()
+            ));
+        }
+    };
+
+    let class = crate::index::project::base_type_name(&written);
+    if class.is_empty() {
+        return refused(format!(
+            "the type of `{}` is `{written}`, which names no class to list members of",
+            access.object.text().to_string().trim()
+        ));
+    }
+
+    let found = match crate::index::project::members_of(index, scopes, root, path, class) {
+        Known::Yes(found) => found,
+        Known::Unknown(reason) => {
+            return MemberAnswer {
+                set: CompletionSet {
+                    scope: class.to_string(),
+                    prefix,
+                    replace,
+                    truncated: false,
+                    items: Vec::new(),
+                },
+                why: reason.describe(),
+            };
+        }
+        // `members_of` reports a class nothing declares as `Unknown`, so this arm is for totality and says the same
+        // thing it would.
+        Known::No => {
+            return MemberAnswer {
+                set: CompletionSet {
+                    scope: class.to_string(),
+                    prefix,
+                    replace,
+                    truncated: false,
+                    items: Vec::new(),
+                },
+                why: format!("`{class}` is not a class this analysis can see"),
+            };
+        }
     };
 
     let mut scored: Vec<Scored> = Vec::new();
@@ -374,14 +441,22 @@ fn members(
     // which is the same rule the name query applies and for the same reason. The declarations are not lost: the
     // jump and the hover ask `members_of` / `member_definitions_across_files`, which keep the whole overload set.
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut reserved = 0;
 
-    for member in &found.members.members {
+    for member in &found.members {
+        // The names the implementation owns are not offered — the same rule the name list applies, and the one a
+        // reader meets first on line. of a std::string (_Alty, _ALLOC_MASK, …).
+        if crate::index::project::is_reserved_to_the_implementation(&member.fact) {
+            reserved += 1;
+            continue;
+        }
+
         if !seen.insert(member.fact.name.as_str()) {
             continue;
         }
 
         let mut item = CompletionItem::declared(&member.fact, &member.file);
-        item.kind = member_kind(member, &found.class);
+        item.kind = member_kind(member, class);
         item.replace = replace;
 
         if member.depth > 0 {
@@ -399,20 +474,47 @@ fn members(
         }
 
         scored.push(Scored {
-            score: member_score(member, &found.class),
+            score: member_score(member, class),
             item,
         });
     }
 
     let (items, truncated) = ordered(scored);
+    let offered = items.len();
 
-    CompletionSet {
-        scope: found.class,
-        prefix,
-        replace,
-        truncated,
-        items,
+    let why = if offered > 0 {
+        format!("the member query answered, with {offered} members")
+    } else if reserved > 0 {
+        format!(
+            "`{class}` declares {} members and every one of them is reserved to the implementation",
+            found.members.len()
+        )
+    } else {
+        format!("`{class}` is declared and has no members this analysis can see")
+    };
+
+    MemberAnswer {
+        set: CompletionSet {
+            scope: class.to_string(),
+            prefix,
+            replace,
+            truncated,
+            items,
+        },
+        why,
     }
+}
+
+/// A member list and **why it is what it is** — see [`members`], which is the only producer.
+///
+/// The reason travels with the answer because the two are one reading: a diagnostic that had to ask a second query
+/// to find out why a list is empty would be a second reader of the same facts, and the two would drift apart the
+/// first time either changed. It costs nothing when the list is full — the sentence is built at the same moment the
+/// list is, and only a caller with an empty list has any use for it.
+struct MemberAnswer {
+    set: CompletionSet,
+    /// A sentence for a log line: what was looked up and what came back.
+    why: String,
 }
 
 /// The names visible at a cursor, from the scope tree and the index.

@@ -88,7 +88,13 @@ pub async fn on_completion(
         let offset = offset_at_position(&view, position)?;
 
         let found = session.completions(&view, offset);
-        log_a_member_that_produced_no_members(session, &view, offset, &found.items);
+        log_a_member_that_produced_no_members(
+            session,
+            &view,
+            offset,
+            (position.line, position.character),
+            &found.items,
+        );
 
         Some(CompletionResponse::List(lsp_types::CompletionList {
             // See the module documentation: pending work means "ask again", a capped list means "do not".
@@ -111,10 +117,21 @@ pub async fn on_completion(
 /// out, the class could not be found, or the cursor was never read as a member access at all. Those three have
 /// different fixes and the same symptom, so the reason is worth recording — but only for an answer with **no
 /// members in it**, which is the one shape that needs explaining.
+///
+/// **What it reports, and why each part is here.** The protocol position the client sent *and* the byte it became,
+/// because a completion is asked about a position rather than about a place in a file and the conversion between
+/// the two is the first thing to check; the character the byte landed on, because that is what turns "character 8"
+/// into "the `2` of `full2`" without anybody counting columns; the line itself; and the sentence
+/// [`cpp_code_analysis::why_no_members`] produces, which comes from the same reading the list came from.
+///
+/// Measured on this feature: a report of a `.` that offered nothing was a cursor **one column** from the operator
+/// the user was looking at, three separate times — and every one of them was invisible in a log that recorded only
+/// the byte.
 fn log_a_member_that_produced_no_members(
     session: &Session<DiskFiles>,
     view: &cpp_code_analysis::FileView,
     offset: usize,
+    asked: (u32, u32),
     items: &[AnalysisItem],
 ) {
     let has_members = items
@@ -125,9 +142,37 @@ fn log_a_member_that_produced_no_members(
         return;
     }
 
+    let line_body = {
+        // The text of the line the offset is on, so that a failure report says *where* as well as *why*.
+        let before = &view.source[..offset.min(view.source.len())];
+        let start = before.rfind('\n').map_or(0, |at| at + 1);
+        let end = view.source[start..]
+            .find('\n')
+            .map_or(view.source.len(), |at| start + at);
+        view.source[start..end].to_string()
+    };
+
+    // **The character the offset landed on**, which is the half of the report the protocol's own numbers do not
+    // give: a client sends a line and a character, the two become a byte, and a reader comparing "asked line 10
+    // character 8" with a line of text has to count columns to know whether the two agree. Measured on a live
+    // server: that arithmetic is where three separate reports of "the completion is wrong here" turned out to be
+    // about a cursor one column away from the operator the user was looking at.
+    let landed_on = view
+        .source
+        .get(offset..)
+        .and_then(|rest| rest.chars().next())
+        .map_or("the end of the file".to_string(), |found| {
+            format!("{found:?}")
+        });
+
     log::info!(
-        "completion at {}:{offset} has no members: {}",
+        "completion at {}:{offset} (asked line {} character {}, on {landed_on}) — the line is {line_body:?} — \
+             the index holds {} files with {} still queued — has no members: {}",
         view.path.display(),
+        asked.0,
+        asked.1,
+        session.index().len(),
+        session.pending(),
         cpp_code_analysis::why_no_members(
             session.index(),
             &view.scopes,

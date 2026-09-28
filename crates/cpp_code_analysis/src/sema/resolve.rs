@@ -178,20 +178,33 @@ fn header_name_token_at(
                 && contains_token(token, offset)
         })
 }
-///
-/// **Is there a `.` or `->` token ending exactly at `offset`?**
-///
-/// The question a completion asks when the tree's recovery did not produce a member access: `.` and `->` are
-/// operators, and one that ends at the cursor is the operator the reader has just typed, whatever node the parser
-/// built around it. See [`crate::completion::context`] for why that fallback exists.
-///
-/// Answered by **text** rather than by token kind: the grammar gives `.` and `->` kinds of their own, and a reader
-/// of this predicate that had to know their names would be a second place to update if either changed — the same
-/// reason [`member_access_of`] finds the operator by its text.
-pub fn operator_ending_at(root: &CppSyntaxNode, offset: usize) -> Option<usize> {
-    let token = token_ending_at(root, offset)?;
 
-    matches!(token.text(), "." | "->").then_some(offset)
+/// The `.` or `->` token **inside `position`**, wherever in it the token's own range begins.
+///
+/// # The two ways a client's caret lands on an operator
+///
+/// A caret is drawn **between two characters**, so a reader who has just typed `.` reports the position after it
+/// (`full2.|`, where the token *ends*), while a client that draws the caret **onto** the character reports the
+/// operator's own column (`full2|.`, where the token *starts*). Both mean the same thing to a reader, so both are
+/// asked here — and a fallback that asked only the first read `full2|.` as "the name `full2`, then something else",
+/// which measured on a live server is the difference between 55 members of a `std::string` and the four names in
+/// scope.
+///
+/// The whole token, not a byte: `token_at` is right-biased, so at a boundary it answers with the token that
+/// *follows*, which is what makes a window of offsets turn into "the token at the cursor, and the one next to it".
+pub fn operator_in(root: &CppSyntaxNode, position: usize) -> Option<cpp_parser::CppSyntaxToken> {
+    let token = cpp_parser::token_at(root, position)?;
+
+    if matches!(token.text(), "." | "->") {
+        return Some(token);
+    }
+
+    // The token before it: `full2|.` has the cursor on the operator, and the operator the *next* token after the
+    // cursor's own is a different question.
+    let before = position.checked_sub(1)?;
+    let token = cpp_parser::token_at(root, before)?;
+
+    matches!(token.text(), "." | "->").then_some(token)
 }
 
 /// **The name node that is the object of an `operator` written at `offset`** — the name before a member access
@@ -271,20 +284,6 @@ fn is_a_spelling(node: &CppSyntaxNode) -> bool {
             .chars()
             .next_back()
             .is_some_and(|last| last.is_alphanumeric() || last == '_')
-}
-
-/// The token whose range ends exactly at `offset`.
-///
-/// [`cpp_parser::token_at`] is **right-biased**: at a boundary it returns the token that *follows*, so the token
-/// to the left has to be asked for from one byte earlier. `None` when that byte is not inside a token — the start
-/// of the file, or an offset past the text.
-pub(crate) fn token_ending_at(root: &CppSyntaxNode, offset: usize) -> Option<cpp_parser::CppSyntaxToken> {
-    if offset == 0 {
-        return None;
-    }
-
-    let token = cpp_parser::token_at(root, offset - 1)?;
-    (usize::from(token.text_range().end()) == offset).then_some(token)
 }
 
 /// The name the cursor is on, including when the cursor is inside a **preprocessor directive**.

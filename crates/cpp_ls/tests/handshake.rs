@@ -1322,6 +1322,141 @@ fn a_completion_sees_a_change_to_an_included_header() {
     server.notify("exit", Value::Null);
 }
 
+/// **A `.` at the end of a body, on a `std::string` variable, offers the members.**
+///
+/// The third report of the same symptom — "No suggestions" under `full2.` — and the one that shows how narrow the
+/// failure is: the same file answered correctly when the line below the cursor was something else, and answered
+/// nothing when the operator was the **last line of the body**, with `}` after it. That is the state a reader is in
+/// constantly (type the line, press the key, and the closing brace is what follows), so it is the state this test
+/// holds fixed.
+///
+/// The answers that are *not* acceptable here, and why each of them used to happen:
+///
+/// * an **empty list** — the member query could not work out the type of the object;
+/// * the **names in scope** (`myName`, `full2`, `main`, the keywords) — which is what a declined member query falls
+///   through to, and a list of things that cannot follow a `.`;
+/// * a **different list at the two positions a caret after the operator can be reported at** — measured on a live
+///   server: the request one column early was answered from the tree, found the name `full2`, and offered the names
+///   in scope.
+///
+/// **Release only**, for the reason `a_standard_library_member_list_has_each_spelling_once` gives: the answer needs
+/// `std::string`, and *this project has no sources of its own for the pump to seed from* — the client's buffer is
+/// the only file — so the assertion can only be met once the pump has read the 156 files of MSVC's `<iostream>`/
+/// `<string>` closure. Measured: **23.8 s in release**, past the debug profile's deadline. The debug-equivalent is
+/// `cpp_code_analysis/tests/completion.rs`'s
+/// `a_member_access_on_the_last_line_of_a_body_offers_its_members_at_either_caret`, which holds the same shape with
+/// a header of the project's own.
+///
+/// ```text
+/// cargo test --release -p cpp_ls --test handshake -- --ignored a_member_access_on_the_last_line
+/// ```
+#[test]
+#[ignore = "needs the release profile: the answer comes from the standard library's include closure (156 files)"]
+fn a_member_access_on_the_last_line_of_a_body_offers_the_members() {
+    let project = Project::new("completion-last-line");
+    project.write("main.cpp", LAST_LINE_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": LAST_LINE_CPP }
+        }),
+    );
+
+    // **The two characters a caret after a typed `.` can be reported at.**
+    //
+    // A caret is drawn *between* two characters, and `position_of` returns the offset **past** `full2.` — which is
+    // where the caret sits once the operator has been typed. The other position a reader can mean is one before it:
+    // the newline's own column (`full2.|`). Both mean "after the operator" to a reader and both must answer the same
+    // list, which is exactly the pair a live server disagreed about — a request one column early was answered from
+    // the tree, found the name `full2` and offered the names in scope instead of the members.
+    //
+    // The characters **at or before** the operator's own column are deliberately not asked about here: there the
+    // question is about the name `full2`, which is a different question with a different (and correct) answer.
+    // Getting this arithmetic wrong is how three separate reports of "the completion is wrong here" turned out to be
+    // about a cursor one column away from the operator — see `position_of` and the note on
+    // `log_a_member_that_produced_no_members`.
+    let (line, ends_at) = position_of(LAST_LINE_CPP, "full2.");
+
+    for character in [ends_at, ends_at - 1] {
+        let answer = server.ask_until_it_within(
+            100,
+            STD_LIBRARY_TIMEOUT,
+            |id| {
+                json!({
+                    "id": id,
+                    "method": "textDocument/completion",
+                    "params": {
+                        "textDocument": { "uri": main_uri },
+                        "position": { "line": line, "character": character },
+                    },
+                })
+            },
+            |response| {
+                response["result"]["items"]
+                    .as_array()
+                    .is_some_and(|items| items.iter().any(|item| item["label"] == json!("append")))
+            },
+        );
+
+        let items = answer["result"]["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("a completion list was expected, got {answer}"));
+        let labels: Vec<&str> = items
+            .iter()
+            .filter_map(|item| item["label"].as_str())
+            .collect();
+
+        assert!(
+            labels.contains(&"append") && labels.contains(&"size"),
+            "the members of the standard library's string, at line {line} character {character}: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"full2") && !labels.contains(&"myName"),
+            "and not the names in scope, at line {line} character {character}: {labels:?}"
+        );
+    }
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
+/// The fixture for the last-line case: the operator is the **final line of the body**, with `}` after it.
+///
+/// Written to match the report it came from, including the parts that look incidental and are not: a member
+/// function with a body (so the class has a non-trivial parse), a second variable of a user-defined type (so the
+/// scope is not empty), and the standard library included (so the type's members come from a header).
+const LAST_LINE_CPP: &str = "\
+#include <iostream>
+#include <string>
+struct Name {
+    std::string firstName;
+    std::string lastName;
+    std::string getFullName() const { return firstName + lastName; }
+};
+int main() {
+    Name myName;
+    std::string full2;
+    full2.
+}
+";
+
 /// **A completion asked for right after a change sees the change.**
 ///
 /// A client sends `didChange` and then, without waiting for anything, asks for a completion at a position that only
