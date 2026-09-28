@@ -112,6 +112,12 @@ pub struct WindowsSdk {
     pub version: String,
 }
 
+impl WindowsSdk {
+    /// The SDK's **product** directory under a program files root — the constant segment of a layout whose version
+    /// segment is enumerated from the disk. See [`windows_sdks`].
+    pub const PRODUCT: &'static str = "10";
+}
+
 /// A toolchain found on Windows: the toolset, the SDK, and the search list that joins them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Msvc {
@@ -307,6 +313,23 @@ fn cl_for_this_host(toolset: &Path) -> Option<PathBuf> {
 }
 
 /// Windows SDKs, newest first, from either the environment's `WindowsSdkDir` or the installer's default place.
+///
+/// # The one literal in the layout, and why it is not a version
+///
+/// `Windows Kits\10` is the SDK's **product** directory, and every SDK Microsoft has shipped since Windows 10 has
+/// used it: the version is the next segment (`Include\10.0.26100.0`), and a machine with a 2024 SDK still has
+/// `Windows Kits\10`. So the literal is part of the layout in the same way `VC\Tools\MSVC` is, and it is a
+/// constant here rather than a number written into a path — the segments a *version* could change are all
+/// **enumerated from the disk**, which is the thing worth keeping true:
+///
+/// ```text
+/// C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt     ← enumerated, newest first
+/// ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ~~~~            ^^^^
+///  environment                                the product     the version
+/// ```
+///
+/// A SDK that is *installed* but has no `Include` directory is not a SDK, which is what the `read_dir` below
+/// decides — an empty `Windows Kits\10` on a machine that only builds C is skipped rather than reported.
 pub fn windows_sdks(layout: &WindowsLayout) -> Vec<WindowsSdk> {
     let mut roots: Vec<PathBuf> = Vec::new();
 
@@ -314,7 +337,7 @@ pub fn windows_sdks(layout: &WindowsLayout) -> Vec<WindowsSdk> {
         roots.push(sdk_dir.clone());
     }
     for program_files in &layout.program_files {
-        roots.push(program_files.join("Windows Kits").join("10"));
+        roots.push(program_files.join("Windows Kits").join(WindowsSdk::PRODUCT));
     }
 
     let mut found: Vec<WindowsSdk> = Vec::new();

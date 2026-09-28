@@ -2406,6 +2406,80 @@ cursor 239  context_at            → Member(…)      ✓ 成员查询答了,55
 **只许问客户端真的会发的位置**,`ends_at - 2`(名字最后一个字符)不在其中 —— 那里问的是 `full2` 这个名字,
 是另一个问题、另一个正确答案。
 
+### 工具链发现的第六轮(本轮):**"装着"不等于"在 `PATH` 上"**,以及 `clang-cl` 不是 `cl`
+
+用户提的两件事都成立,而且**一件是活的、一件是潜伏的**。先说结论:硬编码的**版本号**在 include 这条路上基本
+没有(下面有逐条清点),真正在流血的是一条别的:**这台机器上的 clang 从来没被发现过**。
+
+**① 逐条清点"硬编码的版本号"。** 这是用户问的第一件事,值得按"谁在读盘、谁在写死"过一遍:
+
+```text
+VC\Tools\MSVC\<version>            枚举磁盘,取最新                      ✓ 没有写死
+Windows Kits\10\Include\<version>  "10" 是 SDK 的**产品**目录            ✓ 不是版本(见下)
+vswhere -latest                    问安装器                            ✓ 没有写死
+bin\Hostx64\x64\cl.exe             host/target 对是硬编码的**四对**      ← 潜伏
+14.35.32215 / 10.0.22621.0         只出现在测试 fixture 和文档注释里     ✓
+C:\...\MSVC\14.35.32215\include    examples/workspace_probe.rs 里写死    ✗ 真的会过期(已修)
+```
+
+"潜伏"那条值得说明:`cl_for_this_host` 的四对是 `Hostx64/x64`、`Hostx64/x86`、`Hostx86/x64`、`Hostx86/x86`,
+ARM64 的主机/目标对不在里面 —— 于是 `bin\` 下只有 ARM64 目录的安装会让 `toolset_at` 返回 `None`(那是
+**未完成安装**的判据,所以整个工具集被丢掉),MSVC 这一档就没了。这不是版本号,但是同一类病(把布局写死在
+代码里),修法应该是枚举 `bin\<host>\<target>\cl.exe` 里**存在**的那些,而不是再补一对。`Windows Kits\10` 那个字面量则相反:**每一个**
+Windows SDK(含 Windows 11 的)都用这个目录名,版本在下一段(`Include\10.0.26100.0`)而且是从盘上枚举的 ——
+所以它不是"写死的版本",是布局的一部分;现在它是 `WindowsSdk::PRODUCT` 这个常量,并在文档里把三个段标出来
+(哪段来自环境、哪段是产品、哪段是版本)。
+
+**② 真正在流血的那条:`PATH` 不是"这台机器有什么"。**
+
+```text
+clang++                                → (not on PATH)
+C:\Program Files\LLVM\bin\clang++.exe  → clang version 18.1.8      ← 装着,而且没在 PATH 上
+g++                                    → C:\Users\zc\Desktop\mingw\mingw64\bin\g++.exe
+```
+
+**实测**:这台机器上 clang 18.1.8 和 MSVC 14.51 都在,`COMPILER_NAMES` 里 5 个名字一个都不在 `PATH` 上,
+于是第 4 档找到的是 MinGW 的 `g++` —— 而 libstdc++ 和 MSVC 的 STL 是**两份不同的标准库**。这不是"少几个
+补全",是**答的是这个工程构建时永远看不到的声明**。这和"Windows 上优先 MSVC"要防的是同一件事,只是换了个
+入口:LLVM 的安装器写的是**机器级 `PATH`**,而编辑器是从一个**已经存在**的 shell 启起来的,看不到那次修改 ——
+所以这是机器状态,不是谁写错了。
+
+修法在 `find_compiler` 里加了第 3 档(顺序是关键,**装着的大于 `PATH` 上的**):
+
+```text
+1. compile_commands.json 为这个文件指定的编译器
+2. CXX,然后 CC
+3. 安装器放编译器的地方:%ProgramFiles%\LLVM\bin、%ProgramFiles%\Microsoft Visual Studio\LLVM\bin、
+   %ProgramFiles%\LLVM-<版本>\bin(枚举、新的先),以及 Unix 侧的 /usr/bin、/opt/homebrew/bin、
+   /usr/local/bin、/opt/llvm/bin
+4. PATH 上的 g++/clang++/c++/gcc/clang/cc
+5. 系统头目录(没得问)
+```
+
+两个细节是有理由的:名字优先、目录其次(`clang++` 在第二个目录里也胜过第一个目录里的 `g++`,问的是"这是哪个
+编译器"而不是"它放在哪");同一个名字两处都有时只问一次(同一个安装被找到两遍,再问一次就是为已有答案再起一个
+进程)。**实测**:这四条新测试在**两个平台**上跑 —— 故意的,不是 `#[cfg]`,因为记下这次测量的机器是 Windows 而
+CI 是 Linux,一条只在一个平台上验证的测量等于没验证。
+
+**③ `clang-cl` 不是 `cl`。** 第二件事的一半。`is_msvc` 按**文件名**判断,而 `clang-cl.exe` 的 stem 不是 `cl`,
+所以:项目**点名** `clang-cl`(`.cppls.toml` 的 `compiler`、编译数据库的第一个参数)时,它被送进 `-dM -E -v
+-x c++` 那条路 —— clang 的 MSVC 驱动不接受这些,答案是没有答案,候选被**跳过**。反过来,如果按 stem 去匹配,
+它会走进 `INCLUDE` + `/PD` 那条路,而**实测** `clang-cl /nologo /Zc:preprocessor /Zc:__cplusplus /PD /c file`
+什么都不打印、退出 1:那个宏表是 `cl` 的,clang 的 MSVC 驱动没实现。
+
+所以它**故意**留在外面,并且把代价写下来:点名 `clang-cl` 会被报成"问不出来",然后退到机器自己的工具链,而
+`Toolchain::source` 在报告里说明是哪个候选答的。要正确回答它,需要 MSVC 的搜索列表**加上** clang 放自己内建头
+的 resource 目录(`lib\clang\18\include`,`stddef.h` 和 `stdarg.h` 一族在那里)—— 只给一半就是一个能解析
+`<vector>` 却找不到 `<stddef.h>` 的工具链,比说"答不出来"更糟。而 `clang++`(同一个编译器、GNU 驱动、安装器就
+放在 `clang-cl` 旁边)**是**被处理的,也正是第 3 档第一个找的名字。
+
+**证据**:`include/toolchain.rs` 四条新测试 —— `a_compiler_that_is_installed_is_found_when_the_path_does_not_say`
+(装着 clang、`PATH` 上是 MinGW,答案必须是 clang)、`an_installed_clang_is_preferred_to_an_installed_gcc`
+(名字优先于目录)、`an_empty_installation_directory_is_not_a_compiler`(目录存在不等于有编译器)、
+`clang_cl_is_not_mistaken_for_microsofts_compiler`。顺带把 `examples/workspace_probe.rs` 里写死的
+`…\MSVC\14.35.32215\include` 换成**问会话要**标准库目录(`config().system_include_paths()`),否则那台机器
+一升级工具链,探针就什么也找不到了。
+
 ### M4 —— 文件 CST 降级
 裸树只保留:无损、括号/指令结构、浅层声明扫描。此时它那侧的门禁放宽到"结构正确",不再要求 C++ 正确。
 **验收**:宽容语法里针对展开的谓词清零。
@@ -2762,7 +2836,13 @@ cargo run --release --example completion_probe -- <dir> [<file.cpp>]
 7. **索引泵的写锁切片**(量过、还没提上日程):第一份改动要等一个泵切片(debug 里 1200 行 **0.36 s**,release 小得多);
    现在多了一条读数 —— 请求间隔 50 ms 时泵**没有**被饿死(31 → 156 个摘要),但请求和泵共用同一把写锁,更密的
    请求会让泵变慢(§8 第 20 条)。
-8. **诊断的防抖任务也追赶队列**:同一条规矩(§8 第 11 条),但它自愈,所以排在后面。
-9. **熟读剩下的文件**:255/109 两档只剩 `sourceannotations.h`,已判定是 `/analyze` 专属语法(**非缺口**)。
-10. **L2(名字驻留)**:量过,是噪声级别,不做;L1/L4 已完成。
-11. **带括号的声明符(§8 第 8 条)**:`void (*f(int a))(int b);` 这类声明还没进符号模型,是**独立**缺口。
+8. **MSVC 的 host/target 对改成枚举**(本轮查出来的潜伏项,§6 那一节):`bin\Hostx64\x64\cl.exe` 这四对是写死的,
+   `bin\` 下只有 ARM64 目录的安装会被当成"未完成的工具集"而丢掉。修法是枚举存在的那些,并把"哪一种 host/target
+   更该选"写成排序而不是列表顺序。
+9. **`clang-cl` 的 resource 目录**(本轮查出来的缺口,§6 那一节):回答它需要 MSVC 的搜索列表**加上**
+   `lib\clang\<ver>\include`(clang 自己的 `stddef.h`/`stdarg.h` 在那里),否则就是一个能解析 `<vector>` 却找不到
+   `<stddef.h>` 的工具链。现在它是"问不出来就跳过",`Toolchain::source` 会说明。
+10. **诊断的防抖任务也追赶队列**:同一条规矩(§8 第 11 条),但它自愈,所以排在后面。
+11. **熟读剩下的文件**:255/109 两档只剩 `sourceannotations.h`,已判定是 `/analyze` 专属语法(**非缺口**)。
+12. **L2(名字驻留)**:量过,是噪声级别,不做;L1/L4 已完成。
+13. **带括号的声明符(§8 第 8 条)**:`void (*f(int a))(int b);` 这类声明还没进符号模型,是**独立**缺口。

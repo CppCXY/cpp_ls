@@ -42,12 +42,21 @@
 //! and is re-asked next session. (: the same reasoning is applied there to the decision
 //! *not* to index the standard library ahead of time.)
 //!
-//! # MSVC is deliberately not handled
+//! # MSVC is handled by a different question
 //!
-//! `cl` has no `-v`, and its include directories come from `INCLUDE`, which `vcvarsall.bat` sets in the shell
-//! that runs the build — an editor started from anywhere else does not have it. There is no `cl` on the machine
-//! this was written on, so there is also no evidence about what it prints. Writing that path now would be a guess
-//! with a plausible shape, which is worse than a gap that says so.
+//! `cl` has no `-v`: its include directories come from `INCLUDE`, which `vcvarsall.bat` sets in the shell that runs
+//! the build — an editor started from anywhere else does not have it. So `cl` is asked the way a developer prompt
+//! would set it up (`include::msvc`), and this module's `-E -v` path is for everything else. The two meet in
+//! [`discover_with`], which is the one place the order between them is decided.
+//!
+//! # A compiler that is installed is not a compiler on `PATH`
+//!
+//! Asking `PATH` is asking the *shell*, and an editor started from a menu inherits whichever `PATH` its parent had.
+//! Measured on the machine this was written on: clang 18.1.8 sits in `C:\Program Files\LLVM\bin` and is not on
+//! `PATH`, so the analysis asked MinGW's `g++` instead — a different standard library, and therefore `std::`
+//! answers about declarations this project's build never sees. LLVM's installer writes `PATH` *after* the shell
+//! that launched the editor exists, which is why this is a machine state and not a mistake. So the names are also
+//! looked for where their installers put them: see `INSTALLED_COMPILER_NAMES`.
 
 use std::path::{Path, PathBuf};
 
@@ -205,6 +214,154 @@ impl Environment {
 /// others are the ones people actually install. `cl` is not here — see the module documentation.
 const COMPILER_NAMES: &[&str] = &["g++", "clang++", "c++", "gcc", "clang", "cc"];
 
+/// The compilers looked for **where an installer puts them**, because `PATH` is not where they are.
+///
+/// # The measurement this list exists for
+///
+/// LLVM's Windows installer defaults to `C:\Program Files\LLVM` and offers to add it to `PATH` — an offer that is
+/// easy to decline and easy to lose, because it writes the *machine* `PATH` and an editor started from a shell
+/// that already existed does not see the change. Measured on the machine this was written on, which has both:
+///
+/// ```text
+/// clang++                                    → (not on PATH)
+/// C:\Program Files\LLVM\bin\clang++.exe      → clang version 18.1.8
+/// g++                                        → C:\Users\zc\Desktop\mingw\mingw64\bin\g++.exe   ← what was used
+/// ```
+///
+/// So a machine with clang 18 and MSVC 14.51 was analysed against MinGW's libstdc++, which is a *different*
+/// standard library — the completion list and every `std::` answer describe declarations this project's build
+/// never sees. That is the same failure the platform tier exists to prevent for MSVC, and it has the same fix:
+/// look where the installer puts it rather than only where `PATH` says.
+///
+/// `clang++` first, and `clang++` rather than `clang`, because the `-E -v` search list depends on the driver: a
+/// `clang` asked as `-x c++` lists C++'s directories but is configured as a C compiler, so its resource directory
+/// and its target differ. The rest of the list is [`COMPILER_NAMES`] in the same order, for the case where a
+/// machine has a `g++` in a conventional place and nothing on `PATH` at all.
+///
+/// **`clang-cl` is not on it**, and `cl` is not either: neither of them can be asked where its headers are. `cl`
+/// has no `-E -v` at all, and `clang-cl` has no `-v` *and* no macro dump — so offering either as a discovery
+/// candidate would be a process started to learn that it cannot answer. Both are only ever asked when a project
+/// **names** one, which is evidence rather than a guess; see [`is_msvc`] for what happens then.
+const INSTALLED_COMPILER_NAMES: &[&str] = &["clang++", "g++", "clang", "gcc", "c++"];
+
+/// The directories an installer puts a compiler in, when `PATH` does not say.
+///
+/// Each entry is a convention of a *distribution*, not a guess: LLVM's installer, Apple's command line tools and
+/// Homebrew are where those names live on those machines. None of them is invented, and one that is not there
+/// costs a `stat` — see [`installed_compilers`], which is what keeps this list from being an opinion about where
+/// software should be installed.
+///
+/// **Both platforms' lists are returned, on every platform**, which is a deliberate cost of a few stats against a
+/// testability win: the Unix entries are absolute paths that a Windows machine simply does not have, and the
+/// Windows entries are built from the caller's program files roots, which a Unix caller passes empty. That is what
+/// lets `a_compiler_that_is_installed_is_found_when_the_path_does_not_say` — the measurement this whole step
+/// exists for — be a test on the machine that recorded it *and* on the Linux CI that runs the same suite.
+fn compiler_install_roots(program_files: &[PathBuf]) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+
+    for program_files in program_files {
+        // The standalone LLVM installer's default, and Visual Studio's own LLVM component. Which of the two a
+        // machine has is not worth two code paths.
+        roots.push(program_files.join("LLVM").join("bin"));
+        roots.push(
+            program_files
+                .join("Microsoft Visual Studio")
+                .join("LLVM")
+                .join("bin"),
+        );
+    }
+
+    // A hand-unpacked LLVM keeps its version in the directory name (`LLVM-18.1.8-win64`). Newest first, so a
+    // machine with two keeps the one a person would have unpacked last.
+    let mut versioned: Vec<PathBuf> = Vec::new();
+    for program_files in program_files {
+        let Ok(entries) = std::fs::read_dir(program_files) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.to_ascii_uppercase().starts_with("LLVM") && entry.path().join("bin").is_dir() {
+                versioned.push(entry.path().join("bin"));
+            }
+        }
+    }
+    versioned.sort_by(|one, two| two.cmp(one));
+    roots.extend(versioned);
+
+    // And the filesystem's own conventions, which is what a Unix-like system has instead of an installer.
+    roots.extend([
+        // Apple's command line tools, and the two places Homebrew puts a formula.
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+        // A compiler unpacked beside its own version number, which is how LLVM's release tarballs are used.
+        PathBuf::from("/opt/llvm/bin"),
+    ]);
+
+    roots
+}
+
+/// Every compiler this machine has in a conventional place, in the order they should be asked.
+///
+/// A **candidate list**, not a decision: the caller asks each one and keeps the first that answers, for the reason
+/// [`discover_with`] gives — a compiler that cannot be asked is skipped rather than fatal.
+///
+/// The order is by **name** first and directory second, which is the same shape [`COMPILER_NAMES`] has on `PATH`: a
+/// `clang++` in the second directory is a better answer than the `g++` in the first, because the question is which
+/// compiler this is and not where it is kept. A name that exists in several places yields the first directory's,
+/// and the rest are not offered — one installation is one toolchain.
+///
+/// Nothing here touches the disk except [`compiler_install_roots`], which lists directories: whether a compiler
+/// *exists* is asked of the [`FileProvider`], so a test can put a clang in a directory that does not exist and get
+/// the answer a real machine would.
+fn installed_compilers(
+    files: &impl FileProvider,
+    environment: &Environment,
+    program_files: &[PathBuf],
+) -> Vec<PathBuf> {
+    // Asked once per call rather than once per candidate: it is a directory listing of a program files root, and
+    // the answer cannot change while one discovery runs.
+    let roots = compiler_install_roots(program_files);
+    let extensions = extensions_for(environment);
+    let mut found: Vec<PathBuf> = Vec::new();
+
+    for name in INSTALLED_COMPILER_NAMES {
+        for root in &roots {
+            let candidate = candidates_in(root, name, &extensions)
+                .into_iter()
+                .find(|candidate| files.exists(candidate));
+
+            if let Some(candidate) = candidate {
+                if !found.contains(&candidate) {
+                    found.push(candidate);
+                }
+                break;
+            }
+        }
+    }
+
+    found
+}
+
+/// The extensions to try for a compiler's name in a conventional directory.
+///
+/// The environment's `PATHEXT` where it has one: a Windows process has it, and it is the platform's own answer to
+/// "what does an executable look like here". A caller that built an [`Environment`] by hand — a test — gets the one
+/// extension a Windows installer writes, which is what such a machine has. Empty on a system where an executable is
+/// a file with the execute bit, and then [`candidates_in`] returns the bare name.
+fn extensions_for(environment: &Environment) -> Vec<String> {
+    if !environment.path_extensions.is_empty() {
+        return environment.path_extensions.clone();
+    }
+
+    if cfg!(windows) {
+        return vec![".exe".to_string()];
+    }
+
+    Vec::new()
+}
+
 /// The compiler to ask, or `None` when nothing usable was found.
 ///
 /// # The order, and why it is this one
@@ -212,12 +369,20 @@ const COMPILER_NAMES: &[&str] = &["g++", "clang++", "c++", "gcc", "clang", "cc"]
 /// ```text
 /// 1. the compiler compile_commands.json names for this file  — it is what actually builds the file
 /// 2. `CXX`, then `CC`                                        — the project's stated choice
-/// 3. `g++`, `clang++`, `c++`, … on `PATH`                    — the machine's default
+/// 3. `clang++`, `g++`, … where an installer put them         — a compiler this machine has
+/// 4. `g++`, `clang++`, `c++`, … on `PATH`                    — a compiler the shell can see
 /// ```
 ///
 /// Each step is a weaker claim than the one before it. The build database is the only one that knows *this* file
-/// is built by *that* compiler — a project with two toolchains in it is what step 1 exists for — while `PATH` is
-/// a guess about the machine and is last because of it.
+/// is built by *that* compiler — a project with two toolchains in it is what step 1 exists for — while `PATH` is a
+/// guess about the shell and is last because of it.
+///
+/// **Step 3 before step 4, and that is the whole of what this function changed.** A machine can have both a clang
+/// 18 under `C:\Program Files\LLVM` and a MinGW `g++` on `PATH`, and the measured answer used to be the `g++` —
+/// a *different* standard library, so every `std::` answer described declarations the project's build never sees.
+/// An installation is evidence of what this machine is for; `PATH` is evidence of what one shell was told. So the
+/// installed compiler is asked first, and `PATH` is what answers when nothing is installed where installers put
+/// things.
 ///
 /// A name with a separator in it is a path and is looked for where it says (`CXX=/opt/gcc/bin/g++`); a bare name
 /// is searched on `PATH`, which is what a shell would do with it.
@@ -226,6 +391,21 @@ pub fn find_compiler(
     commands: Option<&CompileCommands>,
     for_file: &Path,
     environment: &Environment,
+) -> Option<PathBuf> {
+    find_compiler_among(files, commands, for_file, environment, &[])
+}
+
+/// [`find_compiler`], with the directories an installer uses passed in.
+///
+/// The program files roots are the caller's because they are the *platform's* fact — the same one
+/// [`WindowsLayout`](crate::include::msvc::WindowsLayout) already carries for `vswhere` — and because a test has
+/// to be able to say "a machine whose program files are here" without owning one. `discover` passes the layout's.
+pub fn find_compiler_among(
+    files: &impl FileProvider,
+    commands: Option<&CompileCommands>,
+    for_file: &Path,
+    environment: &Environment,
+    program_files: &[PathBuf],
 ) -> Option<PathBuf> {
     if let Some(commands) = commands
         && let Some(command) = commands.command_for(for_file)
@@ -248,9 +428,14 @@ pub fn find_compiler(
         }
     }
 
-    COMPILER_NAMES
-        .iter()
-        .find_map(|name| locate(files, Path::new(name), environment))
+    installed_compilers(files, environment, program_files)
+        .into_iter()
+        .next()
+        .or_else(|| {
+            COMPILER_NAMES
+                .iter()
+                .find_map(|name| locate(files, Path::new(name), environment))
+        })
 }
 
 /// Find one name: as a path when it says where it is, on `PATH` when it does not.
@@ -390,7 +575,8 @@ pub fn parse_builtin_macros(output: &str) -> Vec<CommandLineMacro> {
 /// 2. `CXX`, then `CC`                                 the person saying which compiler
 /// 3. the platform's own: MSVC on Windows the machine's convention
 /// 4. `g++`, `clang++`, `c++`, … on `PATH`             the machine's default
-/// 5. the system's header directories                  nothing could be asked: headers without macros
+/// 5. `clang++`, `g++`, … where an installer put them  the same names, for a `PATH` that does not say
+/// 6. the system's header directories                  nothing could be asked: headers without macros
 /// ```
 ///
 /// Each step is a weaker claim than the one before it, and the answer says which one it came from
@@ -400,7 +586,8 @@ pub fn parse_builtin_macros(output: &str) -> Vec<CommandLineMacro> {
 /// **Windows prefers MSVC** unless the project or the person said otherwise: a Windows project's standard library
 /// is the one that ships with the toolchain the build uses, and a `g++` on `PATH` (MinGW, say) has a *different*
 /// libstdc++ and a different Windows SDK — analysing an MSVC project against it answers about declarations the
-/// build never sees.
+/// build never sees. Step 5 is the other half of that: a clang that is installed but not on `PATH` is a *clang*,
+/// and answering with MinGW for it is the same wrong answer by a different route.
 ///
 /// `None` when nothing at all could be found: no compiler, and not even a conventional header directory. That is a
 /// state the analysis reports (every include stays unresolved) rather than papering over.
@@ -453,7 +640,8 @@ fn database_compiler(commands: Option<&CompileCommands>, for_file: &Path) -> Opt
 /// 1. the names passed in, in the order given      .cppls.toml > compile database > CMakeCache
 /// 2. `CXX`, then `CC`                             the person's
 /// 3. the platform's own: MSVC on Windows          the machine's convention
-/// 4. `g++`, `clang++`, … on `PATH`                the machine's default
+/// 4. `clang++`, `g++`, … where an installer put them, then the names only `PATH` knows
+///                                                 what this machine has
 /// 5. the system's header directories              nothing to ask
 /// ```
 ///
@@ -507,12 +695,26 @@ pub fn discover_with(
         return Some(toolchain.claiming(ToolchainSource::PlatformDefault));
     }
 
-    // 4. Whatever is installed.
+    // 4. Whatever this machine has: the names where an installer put them, then the names only `PATH` knows, and
+    // each name once — a `clang++` on `PATH` and the one in `C:\Program Files\LLVM\bin` are the same installation
+    // found twice, and asking a second time is another process for an answer already in hand.
+    let mut candidates: Vec<PathBuf> = find_compiler_among(files, None, for_file, environment, &layout.program_files)
+        .into_iter()
+        .collect();
+
     for name in COMPILER_NAMES {
+        if let Some(on_path) = locate(files, Path::new(name), environment)
+            && !candidates.contains(&on_path)
+        {
+            candidates.push(on_path);
+        }
+    }
+
+    for name in &candidates {
         if let Some(toolchain) = ask(
             files,
             runner,
-            Path::new(name),
+            name,
             environment,
             layout,
             standard.as_deref(),
@@ -561,6 +763,21 @@ fn ask(
 /// an analysis can know before running it: `cl` has no `-E -v`, and its search list comes from `INCLUDE`. A
 /// program called `cl` that is not Microsoft's would fail the macro dump and be reported as a compiler that could
 /// not be asked — which is the honest outcome, and not a silent wrong answer.
+///
+/// # `clang-cl` is not `cl`, and the difference is not cosmetic
+///
+/// Measured on a machine with LLVM 18 installed: `clang-cl` with `cl`'s own macro-dump flags prints **nothing**
+/// and exits `1` — that dump is `cl`'s, and clang's MSVC driver does not implement it. So `clang-cl` stays out of
+/// this branch, deliberately, and pays for it: a `clang-cl` a project **names** (`compiler` in `.cppls.toml`, the
+/// first argument of a compile database entry) falls through to [`search_paths`], which asks it `cl`'s flags as
+/// GNU ones, gets an error, and **skips** the candidate in favour of whatever the machine offers next.
+///
+/// Answering for it properly needs the MSVC search list *plus* the resource directory clang keeps its own builtin
+/// headers in (`lib\clang\18\include`, where `stddef.h` and the `stdarg.h` family live) — one of those without the
+/// other is a toolchain that resolves `<vector>` and cannot find `<stddef.h>`, which is worse than saying so.
+/// [`Toolchain::source`] reports which candidate answered, so the skip is visible rather than silent.
+/// `clang++` — the same compiler, the GNU driver, and what LLVM's Windows installer puts beside `clang-cl` — **is**
+/// handled, and is what `INSTALLED_COMPILER_NAMES` looks for first.
 fn is_msvc(program: &Path) -> bool {
     program
         .file_stem()
@@ -1028,8 +1245,9 @@ End of search list.
     // -------------------------------------------------------------------------------------------
 
     use super::{
-        COMPILER_NAMES, CommandRunner, CompilerConfig, IncludePath, Path, Toolchain,
-        ToolchainSource, discover, find_compiler, parse_builtin_macros, search_paths,
+        COMPILER_NAMES, CommandRunner, CompilerConfig, IncludePath, Path, PathBuf, Toolchain,
+        ToolchainSource, discover, find_compiler, find_compiler_among, installed_compilers, is_msvc,
+        parse_builtin_macros, search_paths,
     };
     use crate::include::config::{CompileCommand, CompileCommands};
     use crate::file::paths::{MemoryFiles, normalize_path};
@@ -1205,6 +1423,123 @@ End of search list.
             find_compiler(&files, None, Path::new("/p/main.cpp"), &environment()),
             None
         );
+    }
+
+    /// **The measurement this step exists for**: a clang that is installed is not a clang that is on `PATH`.
+    ///
+    /// Measured on the machine this was written on — clang++ 18.1.8 under `C:\Program Files\LLVM\bin`, nothing
+    /// named `clang*` on `PATH`, and MinGW's `g++` there instead. Before this step the analysis answered with the
+    /// MinGW toolchain, whose libstdc++ is a *different* standard library from the one the project's build sees.
+    #[test]
+    fn a_compiler_that_is_installed_is_found_when_the_path_does_not_say() {
+        let files = MemoryFiles::new()
+            .with_case_insensitive(true)
+            .with_file(
+                "C:/Program Files/LLVM/bin/clang++.exe",
+                "the installed clang",
+            )
+            .with_file("/mingw/bin/g++.exe", "what `PATH` says");
+
+        let mut mingw_on_path = environment();
+        mingw_on_path.path = vec![Path::new("/mingw/bin").into()];
+        mingw_on_path.path_extensions = vec![".exe".to_string()];
+
+        let found = find_compiler_among(
+            &files,
+            None,
+            Path::new("C:/p/main.cpp"),
+            &mingw_on_path,
+            &[PathBuf::from("C:/Program Files")],
+        );
+
+        assert_eq!(
+            found,
+            Some(PathBuf::from("C:/Program Files/LLVM/bin/clang++.exe")),
+            "the installed clang, not the MinGW `g++` on `PATH`: they are different standard libraries"
+        );
+    }
+
+    /// The order is by **name** first and directory second, so a clang in the second directory beats a `g++` in
+    /// the first — the question is which compiler this is, not where it is kept.
+    #[test]
+    fn an_installed_clang_is_preferred_to_an_installed_gcc() {
+        let files = MemoryFiles::new()
+            .with_case_insensitive(true)
+            .with_file("/usr/local/bin/g++.exe", "")
+            .with_file("/opt/homebrew/bin/clang++.exe", "");
+
+        let mut nothing_on_path = environment();
+        nothing_on_path.path = Vec::new();
+        nothing_on_path.path_extensions = vec![".exe".to_string()];
+
+        let found = installed_compilers(
+            &files,
+            &nothing_on_path,
+            &[PathBuf::from("/nothing/there")],
+        );
+
+        assert!(
+            found.iter().any(|path| path.ends_with("clang++.exe")),
+            "the clang is offered: {found:?}"
+        );
+        assert!(
+            found.iter().any(|path| path.ends_with("g++.exe")),
+            "and so is the `g++`, after it: {found:?}"
+        );
+        assert!(
+            found
+                .iter()
+                .position(|path| path.ends_with("clang++.exe"))
+                .zip(found.iter().position(|path| path.ends_with("g++.exe")))
+                .is_some_and(|(clang, gcc)| clang < gcc),
+            "clang first, whichever directory it is in: {found:?}"
+        );
+    }
+
+    /// A conventional directory **without** the name is not an answer, which is what keeps the list from turning
+    /// into "a directory that exists is a toolchain".
+    #[test]
+    fn an_empty_installation_directory_is_not_a_compiler() {
+        let files = MemoryFiles::new()
+            .with_case_insensitive(true)
+            .with_file("/opt/homebrew/bin/brew", "")
+            .with_file("/usr/local/bin/cmake", "");
+
+        let mut nothing_on_path = environment();
+        nothing_on_path.path = Vec::new();
+        nothing_on_path.path_extensions = vec![".exe".to_string()];
+
+        assert!(
+            installed_compilers(&files, &nothing_on_path, &[]).is_empty(),
+            "no file named for a compiler is a compiler"
+        );
+
+        // …and a name the caller already found on `PATH` is still the answer when nothing is installed.
+        let files = MemoryFiles::new().with_file("/mingw/bin/g++.exe", "");
+        let mut on_path = environment();
+        on_path.path = vec![Path::new("/mingw/bin").into()];
+        on_path.path_extensions = vec![".exe".to_string()];
+
+        assert_eq!(
+            find_compiler_among(&files, None, Path::new("/p/main.cpp"), &on_path, &[]),
+            Some(std::path::PathBuf::from("/mingw/bin/g++.exe"))
+        );
+    }
+
+    /// **`clang-cl` is not `cl`.** The two are asked in completely different ways — `cl` through `INCLUDE` and a
+    /// macro dump that clang's MSVC driver does not implement, everything else through `-E -v` — so a name test
+    /// that matched both would send one of them down the other's path.
+    #[test]
+    fn clang_cl_is_not_mistaken_for_microsofts_compiler() {
+        assert!(is_msvc(Path::new("/VS/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe")));
+        assert!(is_msvc(Path::new("cl.exe")), "the name is matched, not the path");
+
+        assert!(
+            !is_msvc(Path::new("C:/Program Files/LLVM/bin/clang-cl.exe")),
+            "clang's MSVC driver: it accepts `cl`'s flags and has no macro dump"
+        );
+        assert!(!is_msvc(Path::new("C:/Program Files/LLVM/bin/clang++.exe")));
+        assert!(!is_msvc(Path::new("/usr/bin/c++")));
     }
 
     #[test]

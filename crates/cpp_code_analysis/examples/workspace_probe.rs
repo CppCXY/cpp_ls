@@ -54,10 +54,22 @@ fn main() {
         index.declarations_in("std", &file).len(),
         session.project_files().len()
     );
+    // **The standard library's own directory, asked of the session rather than written down.** A probe that spells
+    // out `…\MSVC\14.35.32215\include` is a probe that stops finding anything the day the machine's toolset is
+    // updated — which is the same mistake as hard-coding a version into the analysis, one layer up.
+    let standard_library = session
+        .config()
+        .system_include_paths()
+        .next()
+        .map(std::path::Path::to_path_buf);
+    if let Some(directory) = &standard_library {
+        println!("the standard library's directory: {}", directory.display());
+    }
+
     for header in ["string", "optional", "iostream", "istream", "ostream", "xstring"] {
-        let path = std::path::PathBuf::from(format!(
-            "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.35.32215\\include\\{header}"
-        ));
+        let Some(path) = standard_library.as_ref().map(|root| root.join(header)) else {
+            continue;
+        };
         println!(
             "  {header}: indexed {} | cooked {} | summary declarations {:?}",
             session.view(&path).is_some(),
@@ -198,9 +210,12 @@ fn main() {
             }
         }
     }
-    let string_header = std::path::PathBuf::from(
-        "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.35.32215\\include\\xstring",
-    );    if let Some(summary) = session.index().summary(&string_header) {        println!("--- what <string>''s {} declarations are called ---", summary.declarations.len());
+    let string_header = standard_library
+        .as_ref()
+        .map(|root| root.join("xstring"))
+        .unwrap_or_default();
+    if let Some(summary) = session.index().summary(&string_header) {
+        println!("--- what <string>'s {} declarations are called ---", summary.declarations.len());
         for fact in summary.declarations.iter().take(400) {
             if matches!(fact.name.as_str(), "string" | "basic_string" | "allocator" | "char_traits" | "size_t") {
                 println!("   name={:<16} qualified={:<28} scope={:?} kind={:?}", fact.name, fact.qualified_name(), fact.scope, fact.kind);
@@ -213,9 +228,10 @@ fn main() {
     // **A header whose class never arrived.** `<istream>` is indexed and its `basic_istream` is asked for by name
     // everywhere, so what its summary actually holds is the difference between "the facts are filed wrong" and
     // "the file's body was never read": the names, in source order, with the scope each was filed under.
-    let istream_header = std::path::PathBuf::from(
-        "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.35.32215\\include\\istream",
-    );
+    let istream_header = standard_library
+        .as_ref()
+        .map(|root| root.join("istream"))
+        .unwrap_or_default();
     if let Some(summary) = session.index().summary(&istream_header) {
         let text = std::fs::read_to_string(&istream_header).unwrap_or_default();
         let line_of = |offset: usize| text[..offset.min(text.len())].matches('\n').count() + 1;
