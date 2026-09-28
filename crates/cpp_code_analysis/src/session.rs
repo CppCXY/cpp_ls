@@ -1593,10 +1593,17 @@ impl<F: FileProvider + Clone> Session<F> {
         let indexer = FileIndexer::new(&self.files, &self.config);
         let indexed = indexer.index_unit_rendering(&root, &stream, key);
 
+        // **The gate: a program we could not parse is a program whose scopes we do not assert.** The measurement is
+        // the one written on `IndexedUnit::errors`: `braces` is zero and the scopes are still wrong, because equal
+        // counts of `{` and `}` do not make the parser pair them the way the file meant. So a stream with errors is
+        // **reported and not filed**: the per-file readings are untouched, and nothing gets *worse* — which is the
+        // whole difference between this and the version that filed it and lost 49 names in `std`.
         let mut placed = 0usize;
-        for (path, cooked) in indexed.files {
-            placed += 1;
-            self.store.index_mut().insert_cooked(&path, cooked);
+        if indexed.errors == 0 {
+            for (path, cooked) in indexed.files {
+                placed += 1;
+                self.store.index_mut().insert_cooked(&path, cooked);
+            }
         }
 
         Some(UnitReading {
@@ -1607,6 +1614,9 @@ impl<F: FileProvider + Clone> Session<F> {
             files_with_tokens: indexed.files_with_tokens,
             missing: indexed.missing,
             unplaced: indexed.unplaced,
+            unbalanced: indexed.unbalanced,
+            braces: indexed.braces,
+            errors: indexed.errors,
         })
     }
 
@@ -2844,6 +2854,70 @@ mod tests {
                 .cooked_declarations(Path::new("/p/handle.h"))
                 .is_some(),
             "and then it has one"
+        );
+    }
+
+    /// **A file whose text does not balance its braces is left out of the program**, and named.
+    ///
+    /// The hazard this pins was found by measurement, not by reading: on a real project
+    /// `CodeAnalysis/sourceannotations.h` — the Windows SDK's `/analyze` header, the one file a census has never
+    /// read cleanly — opens `namespace vc_attributes {` whose close is not in the text we rendered. Everything
+    /// spliced after it read as `vc_attributes::std`: `<cstdio>`'s declarations, `<string>`'s, the lot. A reader
+    /// asking about `std::size_t` was told the index had no such name while the file in front of them declared it.
+    ///
+    /// So a frame that does not balance is dropped from the **stream** (not from the index: its own reading is the
+    /// per-file one, which is unaffected) and reported. The test is the shape of the rule: `broken.h` is unbalanced,
+    /// `good.h` opens a namespace **and closes it**, and `good.h`'s declarations must still be scoped by it.
+    #[test]
+    fn a_file_that_does_not_balance_its_braces_is_left_out_of_the_program() {
+        let files = MemoryFiles::new()
+            // Opens a namespace and never closes it: what a `/analyze` header does, and what swallows a program.
+            .with_file(
+                "/p/broken.h",
+                "namespace vc_attributes {\nstruct NotAClosure { int x; };\n",
+            )
+            .with_file(
+                "/p/good.h",
+                "namespace good {\nstruct Inside { int y; };\n}\n",
+            )
+            .with_file(
+                "/p/main.cpp",
+                "#include \"broken.h\"\n#include \"good.h\"\nInside i;\n",
+            );
+        let fixture = Memory::new("a-unit-that-does-not-balance", &files);
+        let mut session = fixture.session();
+
+        session.did_open("/p/main.cpp", "#include \"broken.h\"\n#include \"good.h\"\nInside i;\n");
+        session.index_everything();
+
+        let reading = session
+            .read_the_unit(Path::new("/p/main.cpp"))
+            .expect("the unit reads");
+
+        assert_eq!(
+            reading.unbalanced.len(),
+            1,
+            "one file does not balance: {reading:?}"
+        );
+        assert!(
+            reading.unbalanced[0].ends_with("broken.h"),
+            "and it is the one that opens a brace it never closes: {reading:?}"
+        );
+
+        // **The file after it is still read correctly.** This is the whole point: without the rule, `good.h`'s
+        // declarations would have come out inside `vc_attributes`.
+        let inside = session
+            .index()
+            .cooked_declarations(Path::new("/p/good.h"))
+            .expect("good.h is part of the program");
+        let inside = inside
+            .iter()
+            .find(|fact| fact.name == "Inside")
+            .expect("the class is declared there");
+        assert_eq!(
+            inside.scope.as_deref(),
+            Some("good"),
+            "the namespace `good.h` opens and closes itself still holds it"
         );
     }
 
@@ -4293,5 +4367,7 @@ mod tests {
         );
     }
 }
+
+
 
 

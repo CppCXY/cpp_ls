@@ -348,6 +348,9 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             tokens: stream.len(),
             files_with_tokens: stream.files_with_tokens(),
             missing: stream.missing,
+            unbalanced: stream.unbalanced.clone(),
+            braces: stream.braces,
+            errors: tree.get_errors().len(),
         }
     }
 
@@ -1700,6 +1703,8 @@ mod tests {
         assert_eq!(files.read(Path::new("/p/other.h")), None);
     }
 }
+
+
 
 
 

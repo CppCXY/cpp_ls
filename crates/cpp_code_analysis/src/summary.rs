@@ -1607,6 +1607,25 @@ impl UnitCook<'_> {
         );
 
         let mut next = 0usize;
+        // **The frame's own tokens, counted before they are pushed.** A file whose text opens a brace it does not
+        // close would swallow every file spliced after it — see [`RenderedUnit::unbalanced`], which is where the
+        // measurement and the rule are written down. The includes are spliced either way: they are files with
+        // their own text, and what they are worth does not depend on this one balancing.
+        let mut depth = 0i64;
+        for token in &cooked.tokens {
+            match token.text() {
+                "{" => depth += 1,
+                "}" => depth -= 1,
+                _ => {}
+            }
+        }
+
+        if depth != 0 {
+            out.unbalanced.push(self.unit.frames[frame as usize].file.clone());
+            self.stitch_included(included, 0, out);
+            return;
+        }
+
         for token in &cooked.tokens {
             // **Where the token stands in this file**, which is also what decides whether an include that has not
             // been spliced yet comes first: the call site for an expansion (the text the reader sees) and the
@@ -1952,11 +1971,39 @@ pub struct RenderedUnit {
     pub spans: Vec<UnitSpan>,
     /// The files the walk entered, in the order it entered them — what a span's `file` indexes.
     pub files: Vec<std::path::PathBuf>,
+    /// **The stream's own brace balance**: `{` minus `}` over every token in it.
+    ///
+    /// One number, and it separates two failures that look identical from outside: a stream that does not balance
+    /// (a file's text opened a brace it never closed, so everything spliced after it is inside) and a *balanced*
+    /// stream whose scopes the walk still pairs wrongly. The first is a fact about the rendering, the second about
+    /// the reader, and no amount of looking at a wrong scope name tells them apart.
+    pub braces: i64,
     /// How many files the unit reached that the caller had **no text** for.
     ///
     /// A hole rather than an empty file: the stream is missing whatever that file would have contributed, and a
     /// consumer that needs to know whether what it read is the whole program asks this.
     pub missing: usize,
+    /// **Files whose own text does not balance its braces**, so their text was left out of the stream.
+    ///
+    /// # Why a file's text can be left out
+    ///
+    /// A brace opened in one file and closed in another is not a defect in C++ — a header that opens a namespace
+    /// for its includer to close is a real idiom — but in a **program** stream it is a hazard, and it is the hazard
+    /// that made this field exist: measured on a real project, `CodeAnalysis/sourceannotations.h` (the Windows
+    /// SDK's `/analyze` header, the one file a census has never read cleanly) opens `namespace vc_attributes {` and
+    /// the close is not in the text we rendered. Everything spliced after it — `<cstdio>`, `<string>`, the whole
+    /// standard library — then read as `vc_attributes::std`, and a reader asking about `std::size_t` got "the index
+    /// has no such name" while the file in front of them declared it.
+    ///
+    /// So a frame whose own tokens do not balance is **left out of the stream** (its includes are still spliced,
+    /// because they are separate files with their own text) and named here. The alternative — keeping the text and
+    /// letting the scopes be wrong — is the failure this field replaces: silent, and it moves every answer in the
+    /// program rather than the one file's.
+    ///
+    /// The root cause is elsewhere and is registered rather than papered over: an identifier nobody defines
+    /// evaluates to **0** in `#if`, so `#if defined(_PREFAST_)` is decidable — and answering `Unknown` there is
+    /// what pulls the `/analyze` header into a program that never asks for it.
+    pub unbalanced: Vec<std::path::PathBuf>,
 }
 
 /// One token's place in a unit's rendering, and where it came from.
@@ -2054,6 +2101,11 @@ impl RenderedUnit {
     fn push(&mut self, text: &str, file: u32, written: cpp_parser::SourceRange) {
         if !self.text.is_empty() {
             self.text.push(' ');
+        }
+        match text {
+            "{" => self.braces += 1,
+            "}" => self.braces -= 1,
+            _ => {}
         }
         let start = self.text.len();
         self.text.push_str(text);
@@ -2840,6 +2892,19 @@ pub struct IndexedUnit {
     pub files_with_tokens: usize,
     /// How many files the walk reached that the caller had no text for.
     pub missing: usize,
+    /// Files whose own text did not balance its braces and was left out of the stream — see
+    /// [`RenderedUnit::unbalanced`].
+    pub unbalanced: Vec<std::path::PathBuf>,
+    /// The stream's own brace balance — see [`RenderedUnit::braces`].
+    pub braces: i64,
+    /// Errors the parse of the stream reported.
+    ///
+    /// **This is the gate the unit reading needs**, and `braces` is not: measured on a real project the stream is
+    /// *lexically* balanced (`braces: 0`) while `CodeAnalysis/sourceannotations.h` — the one file a census has never
+    /// read cleanly, registered as "`/analyze`-only syntax, not a gap" — still leaves its `namespace vc_attributes`
+    /// open **syntactically**, so every file spliced after it reads as `vc_attributes::std`. Equal counts of `{` and
+    /// `}` do not make the parser pair them the way the file meant; only the parse does.
+    pub errors: usize,
 }
 
 /// What reading one translation unit as a program produced — see [`crate::Session::read_the_unit`].
@@ -2863,6 +2928,15 @@ pub struct UnitReading {
     pub missing: usize,
     /// Facts and errors that could not be placed in any file.
     pub unplaced: usize,
+    /// Files whose own text did not balance its braces, so it was left out of the program's stream — see
+    /// [`RenderedUnit::unbalanced`]. Named rather than counted: the file is the thing to look at.
+    pub unbalanced: Vec<std::path::PathBuf>,
+    /// The stream's own brace balance — see [`RenderedUnit::braces`].
+    pub braces: i64,
+    /// Errors the parse of the **program** reported — see [`IndexedUnit::errors`] for why this and not `braces` is
+    /// the gate. Non-zero means the reading was **not** filed into the index, because the scopes it would assert
+    /// are the scopes of a text that did not parse.
+    pub errors: usize,
 }
 
 /// One thing the parse of a **rendering** found, said in the file's own coordinates.
@@ -2930,4 +3004,5 @@ impl DeclKind {
 // stored, not a place that knows about directives. There was a `build_declarations` here that took only a scope
 // tree and filled every guard with `Unconditional`; it was deleted rather than kept, because a function whose
 // contract is "the guards are wrong" is one a caller reaches for by accident.
+
 

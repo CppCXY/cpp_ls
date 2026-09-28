@@ -582,4 +582,136 @@ fn main() {
         let column = offset - source[..*offset].rfind('\n').map_or(0, |at| at + 1);
         println!("{:>4}:{:<3} | {}", line + 1, column, &text[..text.len().min(60)]);
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // **What a unit read adds, and what it displaces** — the audit for the one capability this session
+    // built and did not wire (`Session::read_the_unit`: it changes three readings the wrong way, and the
+    // reason is not understood).
+    //
+    // Both sides are measured **in this one process**, because the question is a difference and two runs
+    // are two machines: the index's answer for `std` before and after, split by file and by reading —
+    // "the total went down by 49" is a symptom, and the file it went down *in* is the cause.
+    // ---------------------------------------------------------------------------------------------
+    println!("\n--- a unit read, before and after ---");
+
+    fn std_by_file(
+        session: &cpp_code_analysis::Session,
+    ) -> Vec<(String, usize, usize, bool)> {
+        let mut rows = Vec::new();
+        for summary in session.index().summaries() {
+            let raw = summary
+                .declarations
+                .iter()
+                .filter(|fact| fact.scope.as_deref() == Some("std"))
+                .count();
+            let cooked = session.index().cooked_declarations(&summary.path);
+            let has = cooked.is_some();
+            let cooked = cooked
+                .map(|facts| {
+                    facts
+                        .iter()
+                        .filter(|fact| fact.scope.as_deref() == Some("std"))
+                        .count()
+                })
+                .unwrap_or(0);
+            if raw + cooked > 0 {
+                rows.push((summary.path.display().to_string(), raw, cooked, has));
+            }
+        }
+        rows.sort();
+        rows
+    }
+
+    let std_total =
+        |session: &cpp_code_analysis::Session| session.index().declarations_in("std", &file).len();
+
+    let before_total = std_total(&session);
+    let before = std_by_file(&session);
+    let before_cooked: usize = before.iter().map(|(_, _, cooked, _)| cooked).sum();
+    let before_cooked_files = before.iter().filter(|(_, _, _, has)| *has).count();
+
+    let reading = session.read_the_unit(&file);
+    println!("unit read: {reading:?}");
+
+    let after_total = std_total(&session);
+    let after = std_by_file(&session);
+    let after_cooked: usize = after.iter().map(|(_, _, cooked, _)| cooked).sum();
+    let after_cooked_files = after.iter().filter(|(_, _, _, has)| *has).count();
+
+    println!(
+        "declarations_in(\"std\") {before_total} → {after_total} | declarations in `std`: \
+         raw+cooked {before_cooked} → {after_cooked}, over {before_cooked_files} → \
+         {after_cooked_files} files with a cooked reading"
+    );
+
+    let by_path: std::collections::HashMap<&str, (usize, usize)> = before
+        .iter()
+        .map(|(path, raw, cooked, _)| (path.as_str(), (*raw, *cooked)))
+        .collect();
+    let mut moved = 0usize;
+    for (path, raw, cooked, _) in &after {
+        let (raw_before, cooked_before) = by_path.get(path.as_str()).copied().unwrap_or((*raw, 0));
+        if raw_before != *raw || cooked_before != *cooked {
+            moved += 1;
+            if moved <= 20 {
+                println!(
+                    "   {:<22} raw {raw_before} → {raw} | cooked {cooked_before} → {cooked}",
+                    path.rsplit(['\\', '/']).next().unwrap_or(path)
+                );
+            }
+        }
+    }
+    println!("   {moved} files changed either reading's `std` count");
+
+    // **What the unit's cooked reading actually says** — the scopes, not the count. A cooked `std` count of zero
+    // beside 57 files that have a reading means the scope walk over the unit's rendering never opened `std`; the
+    // three lines below say whether that is "no scopes at all" or "scopes that are not `std`", which are two
+    // different defects (a rendering that lost `_STD_BEGIN`'s expansion, or a walk that cannot see it).
+    {
+        let cstdio = session
+            .index()
+            .summaries()
+            .find(|summary| summary.path.ends_with("cstdio"))
+            .map(|summary| summary.path.clone());
+        if let Some(cstdio) = cstdio
+            && let Some(facts) = session.index().cooked_declarations(&cstdio)
+        {
+            let scoped = facts.iter().filter(|fact| fact.scope.is_some()).count();
+            println!(
+                "   cstdio's unit reading: {} declarations, {scoped} with a scope — first ones:",
+                facts.len()
+            );
+            for fact in facts.iter().take(8) {
+                println!("      {:<18} scope={:?} kind={:?}", fact.name, fact.scope, fact.kind);
+            }
+        }
+
+        // **Where the wrong scope came from**, asked of the index rather than guessed: the namespace fact itself
+        // (which file, which offset) and one fact that ended up inside it. A namespace that encloses a *later*
+        // file's `std` is either an unbalanced file or a close that the walk never paired, and the two have
+        // different offsets — this is the line that tells them apart.
+        for summary in session.index().summaries() {
+            let Some(facts) = session.index().cooked_declarations(&summary.path) else {
+                continue;
+            };
+            for fact in facts {
+                if fact.name == "vc_attributes" || fact.scope.as_deref() == Some("vc_attributes") {
+                    println!(
+                        "   {} @{}..{} | name={} scope={:?} kind={:?}",
+                        summary
+                            .path
+                            .to_string_lossy()
+                            .rsplit(['\\', '/'])
+                            .next()
+                            .unwrap_or_default(),
+                        fact.range.start_offset,
+                        fact.range.end_offset(),
+                        fact.name,
+                        fact.scope,
+                        fact.kind
+                    );
+                }
+            }
+        }
+    }
 }
