@@ -361,8 +361,11 @@ impl<F: FileProvider> SummaryStore<F> {
             let _ = write_summary(&summary, &self.cache);
         }
 
-        self.index.insert(summary);
-        self.index.summary(path)
+        {
+            let _insert = crate::stages::StageTimer::new(crate::stages::Stage::IndexInsert);
+            self.index.insert(summary);
+            self.index.summary(path)
+        }
     }
 
     /// Index `entry` **and everything it includes**, so that the declarations the file can see are in the index.
@@ -463,7 +466,7 @@ impl<F: FileProvider> SummaryStore<F> {
         // See [`SummaryStore::re_read_what_a_body_changes`] for the filter and for what is deliberately not stored.
         let truncated = !outcome.not_indexed.is_empty();
         let indexed = outcome.indexed.clone();
-        outcome.re_read = self.re_read_what_a_body_changes(&indexed, truncated);
+        outcome.re_read = self.re_read_what_a_body_changes(&indexed, &[], truncated);
 
         outcome.stats = self.stats.since(before);
         outcome
@@ -513,12 +516,21 @@ impl<F: FileProvider> SummaryStore<F> {
     /// `files` are the ones this caller has just **parsed** — a summary read from the disk cache carries whatever
     /// reading it was stored with, and a file whose text did not change cannot have a different one. Returns how
     /// many were re-read.
-    pub fn re_read_where_a_body_decides(&mut self, files: &[PathBuf]) -> usize {
-        self.re_read_what_a_body_changes(files, false)
+    pub fn re_read_where_a_body_decides(
+        &mut self,
+        files: &[PathBuf],
+        units: &[std::sync::Arc<crate::TranslationUnit>],
+    ) -> usize {
+        self.re_read_what_a_body_changes(files, units, false)
     }
 
     /// Returns how many files were re-read.
-    fn re_read_what_a_body_changes(&mut self, indexed: &[PathBuf], truncated: bool) -> usize {
+    fn re_read_what_a_body_changes(
+        &mut self,
+        indexed: &[PathBuf],
+        units: &[std::sync::Arc<crate::TranslationUnit>],
+        truncated: bool,
+    ) -> usize {
         // Every indexed file's text, read once: the walk slices each macro's body out of it, and a candidate is
         // re-parsed from it. One read per file per pass, rather than one per candidate include.
         //
@@ -544,6 +556,40 @@ impl<F: FileProvider> SummaryStore<F> {
             }
         }
 
+        // **One unit, not a closure walk per file.** The words inside a macro body are decided by the environment
+        // of the file that *defines* it, and that environment is a **position in the walk of the translation unit
+        // that reads it** — the same walk for every file in the unit. Building it per file is what this pass used
+        // to do, in both of its loops, and it was 7.4 s of a 9.3 s cold index (`stages`: `bodied-env` 4 040 ms +
+        // `re-env` 3 363 ms). A unit is cached — on disk by the content of its whole closure, in memory by
+        // `Session::translation_unit_of` — so the pass pays for one walk and then asks positions in it.
+        let seed = crate::macros::MacroTable::from_marked(self.index.macros());
+        let unit_definitions: Vec<crate::UnitDefinitions> =
+            units.iter().map(|unit| unit.definitions()).collect();
+        let environments: Vec<(&std::sync::Arc<crate::TranslationUnit>, crate::UnitDefinitions)> =
+            units.iter().zip(unit_definitions).collect();
+
+        // **The names the files being re-read could possibly need** — the filter's own filter, and the one that
+        // decides whether this pass costs anything on a warm start.
+        //
+        // The scan below asks a question about every `#define` in the project, and that question is expensive
+        // whenever the plain shape does not answer it: it needs the *defining* file's closure environment, which is
+        // a walk of that file's includes. Measured on the 138-file project — plain shapes 9.3 ms, environments
+        // **4 127 ms** — the environments are this pass. But the answer is only ever *used* for names the files
+        // being re-read mention (`mentions_one_of` below), and that test is a **whole-word** test on their text. So
+        // a name that appears in none of their texts cannot change any decision, and the files that define it do
+        // not have to be asked about at all.
+        //
+        // On a warm start this is the whole bill: one file was re-parsed and it mentions a few hundred words, so
+        // only the handful of files defining those words are asked — 4.1 s becomes nothing. On a **cold** start
+        // every file was parsed, so every one of their words is a candidate and the narrowing does nothing; that
+        // case is honest work about a real question, and the unit reading (a later step) is what changes its shape:
+        // there the environment is a *position in one timeline* rather than a closure walk per file.
+        //
+        // It is not an approximation: `bodied` only ever reaches `mentions_one_of(text, &bodied)`, and a name
+        // dropped here is a name no parsed file's text contains.
+        let mentioned = words_mentioned_by(&sources, indexed);
+        let wanted = |name: &str| mentioned.contains(name);
+
         // The names whose body a **reading** uses, from the **macro facts** of the indexed closure — not from its
         // text, and not from the environment: this is the question "could any file's reading have changed", and
         // the answer has to be knowable without building an environment per file. `a_reading_uses_this` is the
@@ -556,22 +602,28 @@ impl<F: FileProvider> SummaryStore<F> {
         // in force. Read without that environment the shape is `Other` — a body whose first token is a word nobody
         // could resolve — and a name the reader would not use is a file this pass does not re-read.
         //
-        // # What that costs, and the two caches that bound it
+        // # What that costs, and the caches that bound it
         //
         // The environment is a **closure walk**, and a closure holds thousands of macros whose bodies mostly cannot
         // be placed by the plain reader — so asking per *macro* is a closure walk per *macro*. Measured, with the
         // environment built inside the inner loop and its `MacroDefinitions` created there too: indexing the 138
         // files of one real project took **362 s**, against **16.5 s** for the same index before this question was
-        // asked. Two things bound it, and both are the same shape — build the expensive thing once:
+        // asked. Three things bound it, and all three are the same shape — build the expensive thing once, or not
+        // at all:
         //
         // * **one `MacroDefinitions` for the whole pass**: reading a definition out of a file's text does not depend
         //   on which body is asking, and this is the cache that exists to say so (it was being defeated by being
         //   created per macro);
         // * **one environment per file, built lazily**: the words inside a body are decided by the include order of
         //   the file that *defines* the macro, so the environment is a fact about that file and not about the body —
-        //   and a file with no unplaceable body never builds one at all.
+        //   and a file with no unplaceable body never builds one at all;
+        // * **`mentioned` above**: a file that defines none of the words the files being re-read mention is not
+        //   asked about, so its environment is never built (4 127 ms of a 4 186 ms pass, on a cold start's corpus,
+        //   and all of it on a warm one).
         let mut bodied: Vec<String> = Vec::new();
         let mut is_bodied: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        // The cache the **timeline-less** caller's fallback reads definitions through — one parse per definition
+        // rather than one per definition per file. Unused when the caller passes units, which is the session.
         let mut definitions = crate::summary::MacroDefinitions::default();
 
         // Scoped to **this loop** and stopped before the pass continues: what follows re-parses files through
@@ -584,7 +636,18 @@ impl<F: FileProvider> SummaryStore<F> {
                 continue;
             };
 
+            // A file that defines none of the words the files being re-read mention can contribute nothing — see
+            // `mentioned` above. Asked before the environment is built, which is the whole point.
+            if !summary
+                .macros
+                .iter()
+                .any(|fact| fact.kind.is_definition() && wanted(&fact.name))
+            {
+                continue;
+            }
+
             let mut environment: Option<cpp_parser::MacroEnvironment> = None;
+            let bodies = bodies_of(&environments, &seed, &summary.path);
 
             for fact in &summary.macros {
                 if !fact.kind.is_definition() || is_bodied.contains(fact.name.as_str()) {
@@ -598,29 +661,50 @@ impl<F: FileProvider> SummaryStore<F> {
                     continue;
                 };
 
-                let used = if cpp_parser::shape_of_a_body(body).a_reading_uses_this() {
+                // The plain shape first — it is free (9.7 ms for every body in the project) and it settles most
+                // bodies; an environment is only asked for the ones it cannot read.
+                let plain = {
+                    let _plain = crate::stages::StageTimer::new(crate::stages::Stage::BodiedPlain);
+                    cpp_parser::shape_of_a_body(body).a_reading_uses_this()
+                };
+                let used = if plain {
                     true
                 } else {
-                    let environment = environment.get_or_insert_with(|| {
-                        let evidence = crate::summary::macros_from_the_closure_with_bodies(
-                            summary,
-                            |wanted| {
-                                let key = normalize_path(wanted, cfg!(windows));
-                                Some((
-                                    self.index.summary(std::path::Path::new(&key))?,
-                                    sources.get(&key)?.as_str(),
-                                ))
-                            },
-                            self.index.macros(),
-                            &mut definitions,
-                        );
+                    let _inconclusive = crate::stages::StageTimer::new(crate::stages::Stage::BodiedEnv);
+                    match &bodies {
+                        // **The unit's own timeline**: the body is read in the environment of the file that
+                        // defines it, which is a position in the walk — no closure walked here at all.
+                        Some(bodies) => {
+                            cpp_parser::shape_of_a_body_at(body, bodies, range.start_offset)
+                                .a_reading_uses_this()
+                        }
+                        // A caller with **no timeline at all** — a probe indexing a closure from an entry point, a
+                        // test — keeps the reading this pass has always had: the defining file's own closure,
+                        // walked once per file that needs it. Slower, and the same answer for a file that *is* its
+                        // own unit root; the session passes units and never comes here.
+                        None => {
+                            let environment = environment.get_or_insert_with(|| {
+                                let evidence = crate::summary::macros_from_the_closure_with_bodies(
+                                    summary,
+                                    |wanted| {
+                                        let key = normalize_path(wanted, cfg!(windows));
+                                        Some((
+                                            self.index.summary(std::path::Path::new(&key))?,
+                                            sources.get(&key)?.as_str(),
+                                        ))
+                                    },
+                                    self.index.macros(),
+                                    &mut definitions,
+                                );
 
-                        cpp_parser::MacroEnvironment::from_included_macros(evidence.macros)
-                            .with_bodies_in_force(evidence.conditional_bodies)
-                    });
+                                cpp_parser::MacroEnvironment::from_included_macros(evidence.macros)
+                                    .with_bodies_in_force(evidence.conditional_bodies)
+                            });
 
-                    cpp_parser::shape_of_a_body_at(body, environment, range.start_offset)
-                        .a_reading_uses_this()
+                            cpp_parser::shape_of_a_body_at(body, environment, range.start_offset)
+                                .a_reading_uses_this()
+                        }
+                    }
                 };
 
                 if used {
@@ -635,6 +719,13 @@ impl<F: FileProvider> SummaryStore<F> {
             return 0;
         }
 
+        // **The names as a set, not as a list.** `mentions_one_of` walks every word of a file and asks whether it
+        // is one of these; against a `Vec` that is a linear scan *per word* — tens of thousands of words per file,
+        // over a list of hundreds — and it was the last unnamed third of a cold index: 9.45 s of wall clock with
+        // 5.70 s of stages, and this line was the difference. A `HashSet` makes the same question one hash.
+        let bodied_names: std::collections::HashSet<&str> =
+            bodied.iter().map(String::as_str).collect();
+
         // One cache of parsed `#define`s for the whole pass: a definition does not depend on which file is being
         // read, so the feed costs one parse per definition rather than one per definition per file.
         let mut definitions = crate::summary::MacroDefinitions::default();
@@ -644,12 +735,21 @@ impl<F: FileProvider> SummaryStore<F> {
             let Some(source) = sources.get(&normalize_path(path, cfg!(windows))) else {
                 continue;
             };
-            if !mentions_one_of(source, &bodied) {
+            let mentioned = {
+                let _filter = crate::stages::StageTimer::new(crate::stages::Stage::ReFilter);
+                mentions_one_of(source, &bodied_names)
+            };
+            if !mentioned {
                 continue;
             }
-
             // The environment, built from the closure **as the walk found it** — the same call a query-time
             // consumer makes, so the reading and its check cannot disagree about what the evidence was.
+            //
+            // **This is the half that still walks a closure per file** (3 363 ms of the cold index, `re-env`).
+            // Loop 1 above asks its question of a *unit's* timeline, which is a position and costs nothing; this
+            // one needs the environment as the parser's `MacroFacts`, and the unit-backed reader (`FileMacros`)
+            // implements this crate's `MacroBindings` — one question — not that ten-method trait. The bridge is a
+            // second `impl`, and it is the next step of this work, not a thing to guess at here.
             let environment = {
                 let index = &self.index;
                 let sources = &sources;
@@ -657,6 +757,7 @@ impl<F: FileProvider> SummaryStore<F> {
                     continue;
                 };
 
+                let _re_env = crate::stages::StageTimer::new(crate::stages::Stage::ReEnv);
                 let evidence = crate::summary::macros_from_the_closure_with_bodies(
                     summary,
                     |wanted| {
@@ -867,6 +968,30 @@ impl<F: FileProvider> SummaryStore<F> {
     }
 }
 
+/// **The macro bodies the shape reader asks about, out of the unit that reads this file.**
+///
+/// The one place the pass's environments are built, for both of its loops: a file has one environment — the
+/// position its frame occupies in the timeline of the unit that reads it — and asking twice would be asking the
+/// same question twice.
+///
+/// `None` when no unit in `environments` reads the file, which the caller answers with the plain shape: a file
+/// outside every unit is one nobody compiled, and there is no environment to read its bodies in.
+fn bodies_of<'pass>(
+    environments: &'pass [(&std::sync::Arc<crate::TranslationUnit>, crate::UnitDefinitions)],
+    seed: &'pass crate::macros::MacroTable,
+    path: &Path,
+) -> Option<crate::preprocess::cooked::FileMacros<'pass>> {
+    environments.iter().find_map(|(unit, definitions)| {
+        let view = unit.environment_of(path)?;
+        Some(crate::preprocess::cooked::FileMacros::new(
+            view,
+            definitions,
+            Some(seed),
+            true,
+        ))
+    })
+}
+
 /// Does this text mention any of `names` as a whole word?
 ///
 /// The filter [`SummaryStore::re_read_what_a_body_changes`] uses, and it is deliberately a **text** scan rather
@@ -874,9 +999,38 @@ impl<F: FileProvider> SummaryStore<F> {
 /// reading change?") only ever needs a sound over-approximation. A name inside a comment or a string literal counts
 /// as a mention, which costs one re-parse of a file whose summary comes out identical; a name that is *not* in the
 /// text cannot be invoked, so no file that could change is skipped.
-fn mentions_one_of(text: &str, names: &[String]) -> bool {
+///
+/// `names` is a **set** and not a slice: this runs once per word of every file being re-read, and asked against a
+/// list it is a linear scan per word (see the call site — that was 3.5 s of a 9.4 s index).
+fn mentions_one_of(text: &str, names: &std::collections::HashSet<&str>) -> bool {
+    words_of(text).any(|word| names.contains(word))
+}
+
+/// The words of a text, by the rule [`mentions_one_of`] compares with — **one rule, two readers**, because the
+/// scan that decides which macro bodies to ask about ([`SummaryStore::re_read_what_a_body_changes`]) narrows itself
+/// by "which words do the files being re-read mention", and a second, slightly different notion of a word there
+/// would be a filter that silently skips a file this one would have re-read.
+fn words_of(text: &str) -> impl Iterator<Item = &str> {
     text.split(|character: char| !(character.is_alphanumeric() || character == '_'))
-        .any(|word| names.iter().any(|name| name == word))
+        .filter(|word| !word.is_empty())
+}
+
+/// Every whole word the files in `files` mention, as a set — the narrowing [`SummaryStore::re_read_what_a_body_changes`]
+/// applies, and a **superset** of the names `mentions_one_of` could match in any of them.
+fn words_mentioned_by<'a>(
+    sources: &'a std::collections::HashMap<String, String>,
+    files: &[PathBuf],
+) -> std::collections::HashSet<&'a str> {
+    let mut mentioned = std::collections::HashSet::new();
+
+    for path in files {
+        let Some(text) = sources.get(&normalize_path(path, cfg!(windows))) else {
+            continue;
+        };
+        mentioned.extend(words_of(text));
+    }
+
+    mentioned
 }
 
 /// Does this summary write an `#include` whose target was never found?
@@ -1936,4 +2090,6 @@ mod tests {
         );
     }
 }
+
+
 

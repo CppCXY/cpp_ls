@@ -1039,7 +1039,12 @@ impl<F: FileProvider + Clone> Session<F> {
 
         if self.is_idle() && !self.parsed_since_the_last_pass.is_empty() {
             let parsed = std::mem::take(&mut self.parsed_since_the_last_pass);
-            self.store.re_read_where_a_body_decides(&parsed);
+            // **The timelines the pass reads its environments out of**, built by the session because a unit is a
+            // session's fact rather than a store's: `translation_unit_of` walks a closure, caches on disk by the
+            // content of that closure, and holds the result in `units`. The pass used to walk a closure *per file*
+            // inside itself; this is one walk for the whole pass, and on the 138-file project it is **one unit**.
+            let units = self.units_for_the_pass(&parsed);
+            self.store.re_read_where_a_body_decides(&parsed, &units);
         }
 
         // **And the files whose cooked reading is out of date**, now that their environments are complete: a file's
@@ -1069,6 +1074,49 @@ impl<F: FileProvider + Clone> Session<F> {
         done
     }
 
+    /// **The translation units a pass over these files reads its environments out of** — one walk each, and cached.
+    ///
+    /// The project's own translation units are tried first, because one of them covers the most: a project file is
+    /// a root whose closure is the program, while a header's own closure is "this header compiled standalone".
+    /// A candidate that a unit already built reads is skipped — the question is "which timeline holds this file's
+    /// environment", and the first unit that answers `environment_of` is that timeline. On the 138-file project
+    /// this returns **one** unit, where the second pass used to walk a closure per file.
+    fn units_for_the_pass(
+        &mut self,
+        files: &[PathBuf],
+    ) -> Vec<std::sync::Arc<crate::TranslationUnit>> {
+        // Asked by the **index's own spelling** of each path: a unit's frames are keyed by the normalized form, so
+        // asking with `C:\…` about a frame spelled `c:/…` answers `None` — which would build a unit per file and
+        // put the whole cost back where it was.
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        for path in self.project.iter().chain(files.iter()) {
+            let path = self
+                .store
+                .index()
+                .summary(path)
+                .map(|summary| summary.path.clone())
+                .unwrap_or_else(|| path.clone());
+            if !candidates.contains(&path) {
+                candidates.push(path);
+            }
+        }
+
+        let mut units: Vec<std::sync::Arc<crate::TranslationUnit>> = Vec::new();
+        for candidate in candidates {
+            if units
+                .iter()
+                .any(|unit| unit.environment_of(&candidate).is_some())
+            {
+                continue;
+            }
+            if let Some(unit) = self.translation_unit_of(&candidate) {
+                units.push(unit);
+            }
+        }
+
+        units
+    }
+
     /// **Read one file, and queue what it includes.** One step of the work, as a function because there are now two
     /// callers: the pump ([`Session::advance`]) and [`Session::catch_up`], which needs the same step *now* rather
     /// than at the pump's pace.
@@ -1078,7 +1126,10 @@ impl<F: FileProvider + Clone> Session<F> {
     /// resolved includes are cloned out before the queue is touched (`get` borrows the store, and the queue is a
     /// field of the same struct).
     fn index_one(&mut self, path: PathBuf, priority: Priority, depth: usize) -> Step {
-        self.vfs.load(&path);
+        {
+            let _load = crate::stages::StageTimer::new(crate::stages::Stage::Load);
+            self.vfs.load(&path);
+        }
         let before = self.store.stats();
         let includes: Vec<PathBuf> = self
             .store

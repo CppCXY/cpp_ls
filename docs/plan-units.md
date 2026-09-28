@@ -550,7 +550,7 @@ indexed 138 files in 23.77 s                     indexed 138 files in 3.90 s
 | # | 做什么 | 门禁 | 状态 |
 |---|---|---|---|
 | 1 | `declared_type_of`/`declared_returns_of` 的每绑定下潜 → 一次建表 + 查表 | 冷启动 **23.8 s → < 8 s**;declarations 的 20 条测试绿;四档语料读数不变 | **已做,见 §12** |
-| 2 | `bodied-scan` 缩到"这一轮真正可能相关"的范围(或缓存判决) | 暖启动 **3.9 s → < 1 s**;冷启动再降 ~4 s | 下一个 |
+| 2 | `bodied-scan` 缩到"这一轮真正可能相关"的范围(或缓存判决) | 暖启动 **3.9 s → < 1 s**;冷启动再降 ~4 s | **已做,见 §13**(暖启动 **270 ms**;冷启动不变,原因在 §13) |
 | 3 | 阶段 1(单元读数):此时重复才成为主要项 | 剩下的时间里再砍一半 | |
 | 4 | 阶段 2/3(单元并行 / preamble–suffix) | 同前 | |
 
@@ -592,3 +592,129 @@ indexed 138 files in 23.77 s                     indexed 138 files in 3.90 s
    `index_one` 的 `vfs.load`(正文 + 行索引)、`SummaryStore::get` 末尾的 `ProjectIndex::insert`
    (以及 `index_tree` 尾部那几个未计时的排序与 `FileScope`/`FilePreprocessing` 的销毁)。
    **下一轮的第一件事是给这两处各加一个阶段**,不是接着猜。
+
+---
+
+## 13. 第 2 项做完了:第二遍 pass 的过滤器先问"这一轮谁会用到"(暖启动 4.08 s → 270 ms)
+
+### 先量,再改
+
+`bodied-scan` 拆成两段之后,答案比预想的干净(同一个工作区,冷启动):
+
+```text
+bodied-scan   4 185.6 ms
+  bodied-plain    9.3 ms   ← 三万个宏体的"形状"判断本身几乎不要钱
+  bodied-env  4 127.1 ms   ← 98.6% 是"形状说不清 → 建这个定义所在文件的闭包环境"
+```
+
+也就是说:**这个 pass 的钱全花在"给每个文件建一次闭包环境"上**(138 个文件 × ~30 ms),
+而它的产物只是一个**过滤器**——`bodied`(哪些宏名值得重读),再拿去问"这一轮解析过的文件里,谁提到过它"。
+
+### 改法:给过滤器加一层过滤器
+
+`mentions_one_of` 是**整词**比较(`store.rs` 的 `words_of`:按非 `[A-Za-z0-9_]` 切分)。所以:
+
+> 一个宏名,如果**这一轮要重读的那些文件的文本里根本没出现过**,它就不可能改变任何决定——
+> 定义它的文件连问都不必问。
+
+于是扫描之前先算 `mentioned` = 那些文件(只是那些文件!)的全部整词,循环里每个文件先做一次
+`any(fact.kind.is_definition() && mentioned.contains(fact.name))`,不为真就 `continue`——**环境根本不建**。
+
+**这不是近似**:`bodied` 只被 `mentions_one_of(text, &bodied)` 用过一次,而被这一层丢掉的名字,
+按定义就是"要重读的文件里没有一个提到过它"。
+
+### 读数
+
+| | 改前 | 改后 |
+|---|---|---|
+| **暖启动** `indexed 138 files in` | 4.08 s | **270 ms**(15×) |
+| 其中 `bodied-scan` | 3 776 ms | **168 ms** |
+| 冷启动 `indexed 138 files in` | 9.30 s | 9.45 s(**没变**) |
+
+冷启动没变,而且**这是应该的**:冷跑时每个文件都被解析过,`mentioned` 就覆盖了全部单词,
+这一层过滤器什么也筛不掉。它是"**日常**"(开编辑器、改一个文件、重启一次)那一侧的钱:
+一个文件被重读、它提到几百个词、于是只有定义这几个词的那几个文件被问。
+
+暖启动剩下的 168 ms **全部**是 `bodied-env`——给那几个定义文件建环境,这是这个 pass 真正的工作,不是浪费。
+
+**答案没有退化**:探针两张表与改前逐条相同(`declarations_in("std")` 1959 → 2008、`definition`
+55/50/8/4、`Ambiguous` 11 类同名同数、`std::basic_string` 成员 202、`xstring` 1637/526、
+`cook(<string>)` 1000 条声明 1 条只在展开后 / 0 unplaced / 2000 映射)。
+`cargo test -p cpp_code_analysis`(全部 target)**全绿**。
+
+### 冷启动那 3.5 s:**量出来了,是第二次 pass 的第二个循环**
+
+先给 `index_one` 的 `vfs.load` 与 `ProjectIndex::insert` 各加了一个阶段——**两个都不是**(25 ms / 2 ms)。
+顺手发现并修掉一个真的二次扫描:`mentions_one_of` 把每个词和**一个名单**线性比(`names.iter().any(...)`),
+而它每个文件的每个词都要跑一次;改成 `HashSet` 之后这一段 **9 ms**(原来是它把 3.5 s 里的多少,见下)。
+最后把第二次 pass 的两个循环分别计时,账就平了:
+
+```text
+墙钟 9 314 ms
+阶段 5 798 ms(62%)   +   re-env 3 363 ms   =  9 161 ms  → 98.4% 有名字
+
+  第二次 pass · 循环 1 的闭包环境(bodied-env)   4 040 ms   43%
+  第二次 pass · 循环 2 的闭包环境(re-env)       3 363 ms   36%
+  parse(194 个文件)                              899 ms   10%
+  sweep                                          571 ms    6%
+  encode + read/hash/lookup/load/insert          390 ms    4%
+```
+
+**结论:冷启动的 79% 是第二次 pass 在"每个文件建一次闭包环境",而且建了两遍**——
+循环 1 为了问"这个宏体算不算一个读数会用的形状",循环 2 为了拿它重建那个文件。
+
+我在这 3.5 s 上**猜错了三次**(销毁语法树 / `vfs.load` / `ProjectIndex::insert`),第四次是加计时器量出来的。
+`§8 第 15 条`那句话这轮又验证了三遍。
+
+**下一轮就是它,而且这次不用猜**:两处的环境都该来自**一条单元时间线**(`TranslationUnit::environment_of`),
+而不是每文件一次闭包走查——这正是 §4 的目标结构。要做的那一层桥已经找到了:
+`cpp_parser::shape_of_a_body_at` 收的**就是** `MacroBodies`(`&(impl MacroBodies + ?Sized)`),
+所以单元时间线可以直接喂给它;缺的只有一步——`MacroBody` 是 token 序列、没有 `&str`,
+所以要给 `MacroBodies::body_at` 的返回类型换成 `Cow<'_, str>`
+(借的给 `MacroEnvironment`,拥有的给"从 token 拼出文本"这一侧),
+`FileMacros` 再实现 `MacroBodies`。**这一步做完,7.4 s 就没了。**
+
+预计:冷启动 **9.3 s → ~2 s**。
+
+---
+
+## 15. 第一座桥通了:循环 1 改吃**一条单元时间线**(冷启动 9.31 s → 5.46 s)
+
+按 §14 的路线做的三步,都落地了:
+
+1. **`cpp_parser::MacroBodies::body_at` 的返回类型换成 `Option<Cow<'_, str>>`**(`symbols.rs`)。
+   理由是两种读者持有文本的方式不同:`MacroEnvironment` **有**文本、借出去;
+   `UnitDefinitions` 只有 **token**(那是它在文件里有位置的东西)、得拼一个。`Cow` 是唯一不逼任何一方
+   在每次调用上分配或复制的返回类型。改了三处 impl / 一处调用点(`sema/scopes.rs` 的 `&body`),零阻力。
+2. **`impl cpp_parser::MacroBodies for FileMacros<'_>`**(`preprocess/cooked.rs`):把一条时间线的
+   "这个位置这个名字是什么"接成形状读者的那一个问题,体文本由 token 按序空格拼出
+   (形状读的是 **kind**——`namespace`/`::`/`{`/`}`——不是拼写,而体里唯一吃空白的那处
+   `#define F(x) +x` vs `+ x` 不是任何读数会用的形状)。
+3. **第二次 pass 的循环 1 改从单元取环境**(`store.rs` + `session.rs` 的 `units_for_the_pass`):
+   `body_at` 一次问的是"定义文件在那个单元里的位置",于是**每文件一次闭包走查**没有了。
+   工程文件优先当根(一个工程文件的闭包就是整个程序),已经被某个单元读到的候选直接跳过——
+   这个工作区因此是 **1 个单元、1 次走查(97 ms)**。
+
+| 读数 | 改前 | 改后 |
+|---|---|---|
+| 冷启动 `indexed 138 files in` | 9.31 s | **5.46 s** |
+| `bodied-scan` | 4 162 ms | **21.6 ms** |
+| 暖启动 | 270 ms | **155 ms** |
+| 单元(`walk` + 取定义) | — | 114 ms(一次) |
+
+**答案没有退化**:两张表与改前逐条相同(`declarations_in("std")` 1959 → 2008、`definition` 55/50/8/4、
+`Ambiguous` 同名同数、`basic_string` 成员 202、`xstring` 1637/526、`cook(<string>)` 1000/1/0/2000 映射)。
+`cargo test -p cpp_code_analysis --lib` **510 passed**,`clippy` 零警告。
+
+**没有时间线的调用方**(探针从入口走一个闭包、测试)**行为一字不改**:`units` 为空时循环 1 退回原来那条
+逐文件闭包走查(`index_includes_from` 传 `&[]`)。这不是脚手架,是"调用方手里没有时间线"这一档的读数。
+
+### 还差第二座桥(剩下的 61%)
+
+冷启动剩下的 5.46 s 里,阶段只占 1.90 s,`re-env`(**循环 2** 的逐文件闭包环境)仍是 **~3.36 s**。
+挡住它的是同一个形状的第二个接口:`FileIndexer` 把环境交给 `ParserConfig::with_macros_from_includes`,
+那里要的是 **`MacroFacts`(十个方法)** 而不是 `MacroBodies`(一个方法);`FileMacros` 现在实现的是本 crate 的
+`MacroBindings`。所以第二座桥是 `impl MacroFacts for FileMacros`(或一个 `MacroBindings → MacroFacts` 的适配器),
+之后循环 2 就能和循环 1 用同一个 `bodies_of`,**3.36 s 一起消失**。
+
+预计:冷启动 **5.46 s → ~2 s**,暖启动 ~100 ms。

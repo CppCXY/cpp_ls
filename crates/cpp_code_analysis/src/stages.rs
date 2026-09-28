@@ -103,6 +103,22 @@ pub enum Stage {
     /// *Detail*: **destroying a parsed tree**, inside `Sweep` — a green tree is tens of thousands of `Arc`s and
     /// dropping it is not free.
     Drop,
+    /// *Detail*: asking whether a macro body's shape is one a reading uses, **without** an environment
+    /// (`shape_of_a_body`), inside `BodiedScan`.
+    BodiedPlain,
+    /// *Detail*: the same question **with** an environment — building the defining file's closure environment and
+    /// asking `shape_of_a_body_at`, inside `BodiedScan`.
+    BodiedEnv,
+    /// Taking a file into the session's VFS: reading its text and building its line index
+    /// (`Session::index_one`'s `vfs.load`).
+    Load,
+    /// Filing a summary into the project index (`ProjectIndex::insert` / `insert_cooked`).
+    IndexInsert,
+    /// *Detail*: building the closure environment a re-read file is rebuilt against, in the second pass's second
+    /// loop (`macros_from_the_closure_with_bodies`), inside `BodiedScan`'s pass.
+    ReEnv,
+    /// *Detail*: the mention filter of the second pass's second loop, inside the same pass.
+    ReFilter,
 }
 
 impl Stage {
@@ -125,12 +141,16 @@ impl Stage {
                 | Stage::Returns
                 | Stage::Bases
                 | Stage::Drop
+                | Stage::BodiedPlain
+                | Stage::BodiedEnv
+                | Stage::ReEnv
+                | Stage::ReFilter
         )
     }
 }
 
 /// Every stage, in the order the table prints them.
-pub const STAGES: [Stage; 29] = [
+pub const STAGES: [Stage; 35] = [
     Stage::Read,
     Stage::Hash,
     Stage::Lookup,
@@ -160,6 +180,12 @@ pub const STAGES: [Stage; 29] = [
     Stage::Returns,
     Stage::Bases,
     Stage::Drop,
+    Stage::BodiedPlain,
+    Stage::BodiedEnv,
+    Stage::Load,
+    Stage::IndexInsert,
+    Stage::ReEnv,
+    Stage::ReFilter,
 ];
 
 impl Stage {
@@ -195,6 +221,12 @@ impl Stage {
             Stage::Returns => "returns",
             Stage::Bases => "bases",
             Stage::Drop => "drop",
+            Stage::BodiedPlain => "bodied-plain",
+            Stage::BodiedEnv => "bodied-env",
+            Stage::Load => "load",
+            Stage::IndexInsert => "index-insert",
+            Stage::ReEnv => "re-env",
+            Stage::ReFilter => "re-filter",
         }
     }
 
@@ -212,7 +244,11 @@ impl Stage {
             | Stage::Parse
             | Stage::Sweep
             | Stage::Encode
+            | Stage::Load
+            | Stage::IndexInsert
             | Stage::BodiedScan
+            | Stage::ReEnv
+            | Stage::ReFilter
             | Stage::Scan
             | Stage::Scopes
             | Stage::Facts
@@ -223,7 +259,9 @@ impl Stage {
             | Stage::Alias
             | Stage::Returns
             | Stage::Bases
-            | Stage::Drop => Family::Indexing,
+            | Stage::Drop
+            | Stage::BodiedPlain
+            | Stage::BodiedEnv => Family::Indexing,
             Stage::Lex
             | Stage::Macros
             | Stage::Render
@@ -280,10 +318,20 @@ impl Drop for StageTimer {
 }
 
 /// What every stage has cost so far.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StageTimes {
     /// Nanoseconds per stage, in [`STAGES`] order.
     nanos: [u64; STAGES.len()],
+}
+
+impl Default for StageTimes {
+    /// Written out rather than derived: the standard library's `Default` for arrays stops at 32 elements, and this
+    /// table is longer than that — a derive that stops compiling when a stage is added is worse than four lines.
+    fn default() -> Self {
+        StageTimes {
+            nanos: [0; STAGES.len()],
+        }
+    }
 }
 
 impl StageTimes {
@@ -530,3 +578,4 @@ mod tests {
         assert!(report.contains("[detail]"), "{report}");
     }
 }
+

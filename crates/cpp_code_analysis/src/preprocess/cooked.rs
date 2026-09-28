@@ -671,6 +671,39 @@ impl crate::macros::MacroBindings for FileMacros<'_> {
     }
 }
 
+/// **[`FileMacros`] as the shape reader's one question** — "what does this name stand for at this offset".
+///
+/// # Why this impl exists
+///
+/// `cpp_parser::shape_of_a_body_at` takes a `MacroBodies`, and `FileMacros` is the reader that answers out of a
+/// **unit's timeline**: a view into one walk, over definitions read where they were written. That is the reader the
+/// second pass wants — `SummaryStore::re_read_what_a_body_changes` builds a closure environment per file today,
+/// in both of its loops, for **79% of a cold index** — and this impl is the one seam between the two.
+///
+/// # The spelling
+///
+/// A definition read in place keeps its **tokens** — they are the thing that has a position in the file — so the
+/// text the shape reader gets is built here: the body's significant tokens, in order, one space apart. That is the
+/// same answer as the file's own text for this question, for two reasons: the shape reader lexes what it is given
+/// and asks about **kinds** (`namespace`, `::`, `{`, `}`) rather than about spelling, and the one place whitespace
+/// is load-bearing in a body — `#define F(x) +x` versus `+ x`, which differ when the argument is empty — is not a
+/// shape any reading uses.
+impl cpp_parser::MacroBodies for FileMacros<'_> {
+    fn body_at(&self, name: &str, at: usize) -> Option<std::borrow::Cow<'_, str>> {
+        let definition = crate::macros::MacroBindings::definition_at(self, name, at)?;
+
+        let mut spelling = String::new();
+        for token in definition.body.significant() {
+            if !spelling.is_empty() {
+                spelling.push(' ');
+            }
+            spelling.push_str(&token.text);
+        }
+
+        Some(std::borrow::Cow::Owned(spelling))
+    }
+}
+
 /// **The cook's running state**: the file's own directives over what it started with.
 ///
 /// A file's `#define`s are the *newest* layer, which is why the walk over them is a layer of its own rather than

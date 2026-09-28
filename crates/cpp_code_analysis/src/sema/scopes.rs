@@ -242,7 +242,7 @@ impl ScopeWalker<'_> {
         // (`_GLIBCXX_BEGIN_NAMESPACE_VERSION` is `namespace __8 {` in one configuration and nothing in another),
         // and the words *inside* it (`_STD_BEGIN` is `_EXTERN_CXX_WORKAROUND namespace std {`, and
         // `_EXTERN_CXX_WORKAROUND` is empty in the arm that is in force — see [`cpp_parser::shape_of_a_body_at`]).
-        match cpp_parser::shape_of_a_body_at(body, self.bodies, range.start_offset) {
+        match cpp_parser::shape_of_a_body_at(&body, self.bodies, range.start_offset) {
             cpp_parser::BodyShape::OpensANamespace(segments) => Some(OpenedByBody::Opens {
                 name,
                 segments,

@@ -885,7 +885,15 @@ impl BodyShape {
 pub trait MacroBodies {
     /// The replacement list `name` stands for at `at` — `Some("")` when it stands for **nothing**, which is the
     /// answer this exists for, and `None` when nobody says.
-    fn body_at(&self, name: &str, at: usize) -> Option<&str>;
+    ///
+    /// # Why the answer is a `Cow`
+    ///
+    /// The bodies come from two kinds of reader, and they hold their text differently. An environment that *has*
+    /// the text (`MacroEnvironment`, built from a file's own `#define`s) lends it, and a reader that has only a
+    /// definition's **tokens** — this crate's `UnitDefinitions`, which reads a body where it was written and keeps
+    /// the tokens rather than a spelling — has to hand back a string it built. Both are legitimate, and `Cow` is
+    /// the one return type that does not force the second to allocate on every call or the first to copy.
+    fn body_at(&self, name: &str, at: usize) -> Option<std::borrow::Cow<'_, str>>;
 }
 
 /// A body reader that answers `None` for every name: nobody says anything expands to nothing.
@@ -894,14 +902,15 @@ pub trait MacroBodies {
 pub struct NothingAtAll;
 
 impl MacroBodies for NothingAtAll {
-    fn body_at(&self, _name: &str, _at: usize) -> Option<&str> {
+    fn body_at(&self, _name: &str, _at: usize) -> Option<std::borrow::Cow<'_, str>> {
         None
     }
 }
 
 impl<T: MacroFacts + ?Sized> MacroBodies for T {
-    fn body_at(&self, name: &str, at: usize) -> Option<&str> {
+    fn body_at(&self, name: &str, at: usize) -> Option<std::borrow::Cow<'_, str>> {
         self.body_text_at_or_in_force(name, at)
+            .map(std::borrow::Cow::Borrowed)
     }
 }
 
