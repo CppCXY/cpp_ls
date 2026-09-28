@@ -718,3 +718,47 @@ bodied-scan   4 185.6 ms
 之后循环 2 就能和循环 1 用同一个 `bodies_of`,**3.36 s 一起消失**。
 
 预计:冷启动 **5.46 s → ~2 s**,暖启动 ~100 ms。
+
+---
+
+## 16. 第二座桥比预想的小:**`MacroView` 本来就是 `MacroFacts`**(冷启动 5.46 s → 1.93 s)
+
+写 §15 时我以为第二座桥是"给 `FileMacros` 再实现一个十一方法的 `MacroFacts`",还担心
+`body_text_of` 要 `&str`、而 `MacroDef` 只有 token。**翻了一遍才发现那个 impl 早就存在**:
+`summary.rs` 里 `impl cpp_parser::MacroFacts for MacroView<'_>`,`body_text` 就存在时间线的事件里
+(`event.body_text`)。也就是说"一条时间线"本来就是解析器要的那种证据,不需要新建任何东西。
+
+真正要改的只有一处**类型体操**:`FileIndexer` 同时喂给两个读者——解析器要 `&dyn MacroFacts`(十一问),
+作用域走查要 `&dyn MacroBodies`(一问)——而这两个 trait 对象之间**编译器不能互转**
+(`MacroFacts ⇒ MacroBodies` 是 blanket impl,不是 supertrait)。改法是把构造器写成泛型:
+
+```rust
+pub fn with_macro_bodies<T: cpp_parser::MacroFacts>(mut self, bodies: &'a T) -> Self {
+    self.bodies = Some(bodies);        // &dyn MacroBodies —— 作用域走查
+    self.macro_facts = Some(bodies);   // &dyn MacroFacts  —— 解析器
+    self
+}
+```
+两次强制转换都发生在调用点(那里 `T` 是具体的:物化的 `MacroEnvironment`,或一条时间线上的 `MacroView`),
+于是**解析和作用域走查不可能拿到两个不同的环境**——这本来就是 `FileIndexer` 收环境的原因。
+
+**读数:**
+
+| | 改前 | 改后 |
+|---|---|---|
+| 冷启动 `indexed 138 files in` | 5.46 s | **1.93 s** |
+| 暖启动 | 155 ms | **155 ms** |
+| 账目覆盖率 | 62% | **94.5%**(1 816 ms / 1 929 ms) |
+
+冷启动现在花在哪:`parse` 895 ms(194 个文件自己的文本)、`sweep` 574 ms、`encode` 164 ms、
+单元(`walk` + 取定义)110 ms,其余 ~80 ms。**没有一项是"重复"了。**
+
+### 一条被测试抓住的回归(记下来,因为它是这类改动的标准形状)
+
+我第一版让循环 2 **只认**单元:`units` 为空时既不做形状判断、也不给重建的文件环境。
+`tests/scopes.rs::a_scope_a_macro_body_opens_holds_the_declarations_behind_it` 立刻红了——
+它走的是 `SummaryStore::index_includes_from`(探针从入口走一个闭包,**背后没有会话**),
+于是 `_STD_BEGIN` 开出来的 `std` 没了,`vector` 掉回文件作用域。修法是给循环 2 也补上
+**"没有时间线"那一档**(`closure_environment`,就是改之前那段代码),两档并存、各说各的读数。
+教训和 §5 阶段 1 写的一样:**换读者的时候,没有新机器的调用方必须原样保留旧机器**,否则它不会报错,
+它只会答得更少。

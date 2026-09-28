@@ -91,7 +91,16 @@ pub struct FileIndexer<'a, F: FileProvider> {
     /// rule take `_STD addressof(*p)` as one qualified name when `_STD` is `::std::`), and the *scope walk*
     /// reads it through [`crate::sema::scopes::MacroBodies`] (which is what opens `std` from `_STD_BEGIN`'s
     /// `namespace std {`). A second value for either would be a second answer to the same question.
-    bodies: Option<&'a cpp_parser::MacroEnvironment>,
+    bodies: Option<&'a dyn cpp_parser::MacroBodies>,
+    /// The **same evidence**, for the reader that wants the parser's questions rather than the scope walk's one:
+    /// `ParserConfig::with_macros_from_includes` takes a [`cpp_parser::MacroFacts`], and a `dyn MacroBodies` is not
+    /// one. Both point at the single value the caller handed to [`FileIndexer::with_macro_bodies`], so the parse and
+    /// the scope walk cannot be given two different environments — which is the whole reason this type takes a body
+    /// reader at all.
+    ///
+    /// A **unit's timeline** ([`crate::MacroView`]) is such a value: it answers the parser's questions positionally
+    /// out of one walk, where the alternative was materialising a map per file.
+    macro_facts: Option<&'a dyn cpp_parser::MacroFacts>,
 }
 
 impl<'a, F: FileProvider> FileIndexer<'a, F> {
@@ -100,6 +109,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             files,
             config,
             bodies: None,
+            macro_facts: None,
         }
     }
 
@@ -108,8 +118,14 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
     /// The one piece of evidence a summary can contain that is **not** in the file it describes: `_STD_BEGIN`'s
     /// `namespace std {` is in `yvals_core.h`, and every declaration in MSVC's `<vector>` is scoped by it. See
     /// [`crate::summary::MacroScopeReading`], which is where the reading and the body behind it are kept.
-    pub fn with_macro_bodies(mut self, bodies: &'a cpp_parser::MacroEnvironment) -> Self {
+    ///
+    /// Generic over the reader rather than taking a `dyn` one, because the two traits it has to satisfy are
+    /// unrelated as *trait objects* (`MacroFacts` implies `MacroBodies` through a blanket impl, which the compiler
+    /// cannot see through `dyn`): the call site passes a concrete reader — a materialised `MacroEnvironment`, or a
+    /// [`crate::MacroView`] into a unit's timeline — and both coercions happen here.
+    pub fn with_macro_bodies<T: cpp_parser::MacroFacts>(mut self, bodies: &'a T) -> Self {
         self.bodies = Some(bodies);
+        self.macro_facts = Some(bodies);
         self
     }
 
@@ -137,7 +153,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // gets and all it can get.
         let mut config =
             ParserConfig::default().with_dialect(self.config.dialect());
-        if let Some(bodies) = self.bodies {
+        if let Some(bodies) = self.macro_facts {
             config = config.with_macros_from_includes(bodies);
         }
 
@@ -194,7 +210,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         key: SummaryKey,
     ) -> crate::IndexedRendering {
         let mut config = ParserConfig::default().with_dialect(self.config.dialect());
-        if let Some(bodies) = self.bodies {
+        if let Some(bodies) = self.macro_facts {
             config = config.with_macros_from_includes(bodies);
         }
 
@@ -1587,6 +1603,7 @@ mod tests {
         assert_eq!(files.read(Path::new("/p/other.h")), None);
     }
 }
+
 
 
 

@@ -726,8 +726,8 @@ impl<F: FileProvider> SummaryStore<F> {
         let bodied_names: std::collections::HashSet<&str> =
             bodied.iter().map(String::as_str).collect();
 
-        // One cache of parsed `#define`s for the whole pass: a definition does not depend on which file is being
-        // read, so the feed costs one parse per definition rather than one per definition per file.
+        // The fallback's cache of parsed `#define`s — one parse per definition rather than one per definition per
+        // file. Read only by a caller that has no timeline to hand this pass (see the `None` arm below).
         let mut definitions = crate::summary::MacroDefinitions::default();
         let mut re_read = 0usize;
 
@@ -742,45 +742,29 @@ impl<F: FileProvider> SummaryStore<F> {
             if !mentioned {
                 continue;
             }
-            // The environment, built from the closure **as the walk found it** — the same call a query-time
-            // consumer makes, so the reading and its check cannot disagree about what the evidence was.
-            //
-            // **This is the half that still walks a closure per file** (3 363 ms of the cold index, `re-env`).
-            // Loop 1 above asks its question of a *unit's* timeline, which is a position and costs nothing; this
-            // one needs the environment as the parser's `MacroFacts`, and the unit-backed reader (`FileMacros`)
-            // implements this crate's `MacroBindings` — one question — not that ten-method trait. The bridge is a
-            // second `impl`, and it is the next step of this work, not a thing to guess at here.
-            let environment = {
-                let index = &self.index;
-                let sources = &sources;
-                let Some(summary) = index.summary(path) else {
-                    continue;
-                };
-
-                let _re_env = crate::stages::StageTimer::new(crate::stages::Stage::ReEnv);
-                let evidence = crate::summary::macros_from_the_closure_with_bodies(
-                    summary,
-                    |wanted| {
-                        Some((
-                            index.summary(wanted)?,
-                            sources
-                                .get(&normalize_path(wanted, cfg!(windows)))
-                                .map(String::as_str)
-                                .unwrap_or(""),
-                        ))
-                    },
-                    index.macros(),
-                    &mut definitions,
-                );
-
-                cpp_parser::MacroEnvironment::from_included_macros(evidence.macros)
-                    .with_bodies_in_force(evidence.conditional_bodies)
-            };
+            // **The unit's timeline again, and this is the half that used to walk a closure per file** (3 363 ms,
+            // `re-env`, of a 5.46 s cold index). The file was read once before its includes were in the index and
+            // is read here as the program reads it: `MacroView` is a *position* in the walk the pass already paid
+            // for, and it answers the parser's questions — `kind_of`, `body_text_of`, the in-force bodies — out of
+            // that walk rather than out of a map materialised for this file alone.
+            let view = units.iter().find_map(|unit| unit.environment_of(path));
 
             let key = SummaryKey::new(content_hash(source), self.context_hash(path));
-            let rebuilt = FileIndexer::new(&self.files, &self.config)
-                .with_macro_bodies(&environment)
-                .index(path, source, key);
+            let indexer = FileIndexer::new(&self.files, &self.config);
+            let rebuilt = match view {
+                Some(view) => indexer.with_macro_bodies(&view).index(path, source, key),
+                // **A caller with no timeline** — a probe indexing a closure from an entry point, a test — keeps
+                // the reading this pass has always had: the file's own closure, walked once for it. The session
+                // passes units and never comes here; dropping this arm would silently unscope every declaration
+                // behind a namespace-opening macro for those callers (`tests/scopes.rs` is one).
+                None => {
+                    let Some(environment) = self.closure_environment(path, &sources, &mut definitions)
+                    else {
+                        continue;
+                    };
+                    indexer.with_macro_bodies(&environment).index(path, source, key)
+                }
+            };
 
             self.stats.rebuilt += 1;
             re_read += 1;
@@ -796,6 +780,41 @@ impl<F: FileProvider> SummaryStore<F> {
         }
 
         re_read
+    }
+
+    /// **One file's own closure, as an environment** — the reading this pass had before a session could hand it a
+    /// unit's timeline.
+    ///
+    /// The fallback for a caller with no units at all: `SummaryStore::index_includes_from` walks a closure from an
+    /// entry point and has no session behind it, and `FileMacros`/`MacroView` need a walk to be a position in. The
+    /// cost is a closure walk per file that needs one, which is why the session passes units instead.
+    fn closure_environment(
+        &self,
+        path: &Path,
+        sources: &std::collections::HashMap<String, String>,
+        definitions: &mut crate::summary::MacroDefinitions,
+    ) -> Option<cpp_parser::MacroEnvironment> {
+        let summary = self.index.summary(path)?;
+
+        let evidence = crate::summary::macros_from_the_closure_with_bodies(
+            summary,
+            |wanted| {
+                Some((
+                    self.index.summary(wanted)?,
+                    sources
+                        .get(&normalize_path(wanted, cfg!(windows)))
+                        .map(String::as_str)
+                        .unwrap_or(""),
+                ))
+            },
+            self.index.macros(),
+            definitions,
+        );
+
+        Some(
+            cpp_parser::MacroEnvironment::from_included_macros(evidence.macros)
+                .with_bodies_in_force(evidence.conditional_bodies),
+        )
     }
 
     /// Forget everything the store holds about `path`, because the file is gone.    ///
