@@ -1291,6 +1291,127 @@ fn a_scope_a_macro_body_opens_holds_the_declarations_behind_it() {
     );
 }
 
+/// **A word in a macro's body that expands to nothing is not a word** — the shape MSVC's `_STD_BEGIN` really has.
+///
+/// The failure this pins was the whole of `std::format`. Measured on MSVC 14.51's `yvals_core.h`, the body of
+/// `_STD_BEGIN` is a word and a namespace head:
+///
+/// ```text
+/// #define _STD_BEGIN   \
+///     _EXTERN_CXX_WORKAROUND \
+///     namespace std {
+/// ```
+///
+/// and `_EXTERN_CXX_WORKAROUND` is `extern "C++" {` in one arm of its `#if` and **nothing at all** in the other.
+/// With the empty arm in force, `_STD_BEGIN`'s first token is an identifier with an empty replacement list, the
+/// shape reader stopped there, no scope was opened — and all 1054 declarations of `<format>` were filed at **file
+/// scope**, which is why `std::format` could not be found while `std::string` could.
+///
+/// # Why this is asked of the walker rather than of the store
+///
+/// Because the walker is where the reading is: [`build_scopes`] is handed the environment, and this is the question
+/// it asks of it. The store's second pass has a **separate** gate — "which files' readings could have changed" —
+/// which answers from the macro *facts* alone and can only see a body the plain reader can place; a test written
+/// against the store would be measuring that gate instead. Both halves are real, and this test is about the first.
+///
+/// Three details are copied from the real header rather than invented, and each is load-bearing: the body is
+/// written with **line continuations** (which is why the shape reader lexes it rather than pattern-matching it);
+/// the empty word's body is **whitespace** rather than an empty string — the continuation that ends a `#define`
+/// line belongs to the line, not to the body; and the empty word is defined in the environment the body is read
+/// in, which is what a header's own closure gives it.
+#[test]
+fn a_word_in_a_body_that_expands_to_nothing_does_not_stop_the_reading() {
+    use cpp_code_analysis::{MacroBodies, build_scopes};
+    use cpp_parser::{CppParser, IncludedMacro, MacroEnvironment, ParserConfig};
+
+    // The bodies verbatim: `_STD_BEGIN`'s is the real continuation and the real namespace head, and
+    // `_EXTERN_CXX_WORKAROUND`'s is what the arm that says nothing produces.
+    const STD_BEGIN: &str = "   \\\n    _EXTERN_CXX_WORKAROUND \\\n    namespace std {\n";
+    const NOTHING: &str = "   \n";
+    const STD_END: &str = "   \\\n    _END_EXTERN_CXX_WORKAROUND \\\n    }\n";
+
+    let word = |name: &str, body: &str| IncludedMacro {
+        name: name.into(),
+        from_offset: 0,
+        definition: None,
+        body_text: Some(body.into()),
+        parameters: None,
+    };
+
+    let environment = MacroEnvironment::from_included_macros([
+        word("_STD_BEGIN", STD_BEGIN),
+        word("_STD_END", STD_END),
+        word("_EXTERN_CXX_WORKAROUND", NOTHING),
+        word("_END_EXTERN_CXX_WORKAROUND", NOTHING),
+    ]);
+
+    // The premise, asserted separately: the word really is a macro with an empty body, so a failure below is about
+    // the shape reader rather than about the fixture.
+    assert!(
+        MacroBodies::body_at(&environment, "_EXTERN_CXX_WORKAROUND", 0)
+            .is_some_and(|body| body.trim().is_empty()),
+        "the fixture's empty word must answer an empty body"
+    );
+    assert_eq!(
+        cpp_parser::shape_of_a_body(STD_BEGIN),
+        cpp_parser::BodyShape::Other,
+        "…and without the environment the shape is unreadable, which is the state the bug was found in"
+    );
+
+    const FORMAT: &str = "\
+_STD_BEGIN
+_EXPORT_STD template <class... _Types>
+_NODISCARD string format(const format_string<_Types...> _Fmt, _Types&&... _Args) {
+    return {};
+}
+_STD_END
+int at_file_scope;
+";
+
+    let tree = CppParser::parse(FORMAT, ParserConfig::default());
+    let scopes = build_scopes(&tree.get_red_root(), &environment);
+
+    let readings: Vec<(&str, Option<Vec<String>>)> = scopes
+        .macro_readings
+        .iter()
+        .map(|reading| (reading.name.as_str(), reading.opens.clone()))
+        .collect();
+    assert_eq!(
+        readings,
+        vec![
+            ("_STD_BEGIN", Some(vec!["std".to_string()])),
+            ("_STD_END", None),
+        ],
+        "the two invocations are read **through** the empty word between their own names and the braces"
+    );
+
+    // …and the declarations are in the scope the body opened, which is what makes `std::format` a name.
+    let scope_of = |wanted: &str| {
+        cpp_code_analysis::ScopeId(
+            scopes
+                .scopes()
+                .iter()
+                .position(|scope| {
+                    scope.bindings.iter().any(|binding| binding.name.text() == wanted)
+                })
+                .unwrap_or_else(|| panic!("`{wanted}` was not declared at all")),
+        )
+    };
+
+    assert_eq!(
+        scopes
+            .qualification_prefix_of(scope_of("format"))
+            .unwrap_or_default(),
+        "std",
+        "`format` is a member of `std`"
+    );
+    assert_ne!(
+        scope_of("at_file_scope"),
+        scope_of("format"),
+        "and the declaration after `_STD_END` is back at file scope, so the closer was read too"
+    );
+}
+
 // ============================================================================
 // Malformed input
 // ============================================================================

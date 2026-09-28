@@ -536,21 +536,63 @@ impl<F: FileProvider> SummaryStore<F> {
         // the answer has to be knowable without building an environment per file. `a_reading_uses_this` is the
         // vocabulary's own answer, so a shape added to the reader becomes a name added here rather than a silent
         // hole — see `cpp_parser::BodyShape`.
+        //
+        // **Asked of the shape with the definer's own environment**, because a body can name a word that expands
+        // to nothing and the shape is only readable through it: measured on MSVC 14.51's `yvals_core.h`,
+        // `_STD_BEGIN` is `_EXTERN_CXX_WORKAROUND namespace std {` and `_EXTERN_CXX_WORKAROUND` is empty in the arm
+        // in force. Read without that environment the shape is `Other` — a body whose first token is a word nobody
+        // could resolve — and a name the reader would not use is a file this pass does not re-read.
         let mut bodied: Vec<String> = Vec::new();
+
         for summary in self.index.summaries() {
-            let Some(source) = sources.get(&normalize_path(&summary.path, cfg!(windows))) else {
+            let key = normalize_path(&summary.path, cfg!(windows));
+            let Some(source) = sources.get(&key) else {
                 continue;
             };
+
             for fact in &summary.macros {
-                let used = fact.kind.is_definition()
-                    && fact.body_range.is_some_and(|range| {
-                        source
-                            .get(range.start_offset..range.start_offset + range.length)
-                            .is_some_and(|body| {
-                                cpp_parser::shape_of_a_body(body).a_reading_uses_this()
-                            })
-                    });
-                if used && !bodied.contains(&fact.name) {
+                if !fact.kind.is_definition() || bodied.contains(&fact.name) {
+                    continue;
+                }
+                let Some(range) = fact.body_range else {
+                    continue;
+                };
+                let Some(body) = source.get(range.start_offset..range.start_offset + range.length)
+                else {
+                    continue;
+                };
+
+                let used = if cpp_parser::shape_of_a_body(body).a_reading_uses_this() {
+                    true
+                } else {
+                    // A body the plain reading cannot place. This is the only place an environment is built, and
+                    // it is built for the file that **defines** the macro: the words inside its body are the ones
+                    // whose meaning its own include order decides.
+                    let mut definitions = crate::summary::MacroDefinitions::default();
+                    let environment = {
+                        let index = &self.index;
+                        let evidence = crate::summary::macros_from_the_closure_with_bodies(
+                            summary,
+                            |wanted| {
+                                let key = normalize_path(wanted, cfg!(windows));
+                                Some((
+                                    index.summary(std::path::Path::new(&key))?,
+                                    sources.get(&key)?.as_str(),
+                                ))
+                            },
+                            index.macros(),
+                            &mut definitions,
+                        );
+
+                        cpp_parser::MacroEnvironment::from_included_macros(evidence.macros)
+                            .with_bodies_in_force(evidence.conditional_bodies)
+                    };
+
+                    cpp_parser::shape_of_a_body_at(body, &environment, range.start_offset)
+                        .a_reading_uses_this()
+                };
+
+                if used {
                     bodied.push(fact.name.clone());
                 }
             }

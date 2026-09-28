@@ -877,6 +877,51 @@ impl BodyShape {
     }
 }
 
+/// **What a name in a macro's body expands to**, for the one question a shape reader has to ask about it.
+///
+/// Deliberately not [`MacroFacts`]: this is one question, asked about one token of a body, and a caller that has
+/// only the bodies ([`crate::MacroEnvironment`]) should not have to answer the other nine. The blanket
+/// implementation below is what keeps the two from having to be in step.
+pub trait MacroBodies {
+    /// The replacement list `name` stands for at `at` — `Some("")` when it stands for **nothing**, which is the
+    /// answer this exists for, and `None` when nobody says.
+    fn body_at(&self, name: &str, at: usize) -> Option<&str>;
+}
+
+/// A body reader that answers `None` for every name: nobody says anything expands to nothing.
+///
+/// The reading [`shape_of_a_body`] has always had — a word it cannot resolve is left where it is.
+pub struct NothingAtAll;
+
+impl MacroBodies for NothingAtAll {
+    fn body_at(&self, _name: &str, _at: usize) -> Option<&str> {
+        None
+    }
+}
+
+impl<T: MacroFacts + ?Sized> MacroBodies for T {
+    fn body_at(&self, name: &str, at: usize) -> Option<&str> {
+        self.body_text_at_or_in_force(name, at)
+    }
+}
+
+/// Does `name` expand to nothing, at the point in a translation unit the caller is reading?
+///
+/// `at` is the offset the question is asked at, because a body is positional: `_EXTERN_CXX_WORKAROUND` is
+/// `extern "C++" {` in one arm of its `#if` and **nothing at all** in the other, so the same name has two answers
+/// in one file. A caller reading a body with no position of its own passes `0`, which is the reading a file that
+/// includes nothing has.
+///
+/// True for a name the environment says is a macro with an **empty** replacement list, and false for everything
+/// else — a name nobody defines, a name whose body has tokens in it, and a name whose body could not be resolved.
+/// The last is the safe direction: a cycle and "nobody says" are both `None`, and dropping a word because of a
+/// cycle would be inventing a shape out of a body that was never read.
+fn expands_to_nothing(bodies: &(impl MacroBodies + ?Sized), name: &str, at: usize) -> bool {
+    bodies
+        .body_at(name, at)
+        .is_some_and(|body| body.trim().is_empty())
+}
+
 /// What the replacement list `text` stands for: the two shapes of [`BodyShape`], and nothing else.
 ///
 /// Lexed rather than pattern-matched on the string, because a body is C++ tokens and not text: `namespace\`
@@ -897,7 +942,47 @@ impl BodyShape {
 /// inline namespace _V2 {       → Other    measured: not claimed, see BodyShape's note
 /// (anything else, "" included) → Other
 /// ```
+///
+/// # A word in the body that expands to nothing is not a word
+///
+/// The one case the shapes above do not cover, and the one that cost every `std::` name in the STL — measured on
+/// MSVC 14.51's `yvals_core.h`:
+///
+/// ```text
+/// #define _STD_BEGIN   \                     the body, verbatim, continuations and all
+///     _EXTERN_CXX_WORKAROUND \
+///     namespace std {
+///
+/// #define _EXTERN_CXX_WORKAROUND extern "C++" {     ← one arm of a conditional
+/// #define _EXTERN_CXX_WORKAROUND                    ← the other arm: **nothing at all**
+/// ```
+///
+/// With the empty arm in force, `_STD_BEGIN`'s first token is an identifier whose replacement list is empty, and
+/// the reading stopped there: `kinds.first()` was not `namespace`, so the shape was `Other`, no scope was opened,
+/// and all 1054 declarations of `<format>` were filed at **file scope** — which is why `std::format` could not be
+/// found while `std::string` (declared in headers reached through an `<istream>` that happened to record two
+/// other macro scopes) could. A word that expands to nothing is not part of the body at all, so it is dropped
+/// before the shape is read.
+///
+/// **Only a word that is a macro and expands to nothing is dropped**, which is what keeps this from inventing
+/// shapes: a name nobody defines is left where it is and the body is still `Other`. `_END_EXTERN_CXX_WORKAROUND`
+/// is the same idea on the closing side — it is empty in the same arm — and it is why `_STD_END` is read as `}`
+/// rather than as nothing.
 pub fn shape_of_a_body(text: &str) -> BodyShape {
+    shape_of_a_body_at(text, &NothingAtAll, 0)
+}
+
+/// [`shape_of_a_body`] for a caller that can say **what a word in the body expands to**, and where.
+///
+/// The parameter is the same seam [`MacroFacts`] already is, for the same reason: a body is written in a file and
+/// its meaning depends on the include order of the file that invokes it, so "is this word empty" is a question
+/// only the environment can answer. [`NothingAtAll`] answers `None` for every name, and that is the reading
+/// [`shape_of_a_body`] has always given: nothing is dropped and a body with an unknown word in it is `Other`.
+///
+/// `at` is where the **invocation** is written in the file being read, not an offset into `text`: the body's own
+/// offsets mean nothing to the environment, which indexes definitions by where they were written in *their* file.
+/// It is what makes `_EXTERN_CXX_WORKAROUND` answerable in both arms of its `#if`.
+pub fn shape_of_a_body_at(text: &str, bodies: &(impl MacroBodies + ?Sized), at: usize) -> BodyShape {
     use crate::{CppLexer, CppTokenKind, LexerConfig};
 
     let mut errors = Vec::new();
@@ -914,6 +999,16 @@ pub fn shape_of_a_body(text: &str) -> BodyShape {
                     | CppTokenKind::LineComment
                     | CppTokenKind::BlockComment
             )
+        })
+        .filter(|token| {
+            // A name that expands to nothing is dropped; everything else, keywords included, is kept. See the
+            // function's documentation for the measurement.
+            token.kind != CppTokenKind::Identifier
+                || !expands_to_nothing(
+                    bodies,
+                    &text[token.range.start_offset..token.range.end_offset()],
+                    at,
+                )
         })
         .collect();
 

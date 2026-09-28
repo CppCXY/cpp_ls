@@ -30,7 +30,7 @@
 //! binding that cannot be placed is dropped, and the resulting gap is visible to a consumer — which is better
 //! than a binding in the wrong scope, and much better than a panic in an editor.
 
-use cpp_parser::{CppAstNode, CppSyntaxKind, CppSyntaxNode, CppTokenKind};
+use cpp_parser::{CppAstNode, CppSyntaxKind, CppSyntaxNode, CppTokenKind, MacroBodies};
 
 use crate::summary::MacroScopeReading;
 
@@ -56,48 +56,14 @@ enum Body {
     OpensAScope,
 }
 
-/// Where [`build_scopes`] gets "what does this macro invocation stand for" from.
-///
-/// A file's tokens can say that `_STD_BEGIN` is a name on a line of its own; only the macro's **replacement list**
-/// says that it is `namespace std {`. The list is not in this file — for MSVC's STL it is in `yvals_core.h`, and
-/// for libstdc++'s namespace-version pair it is in `bits/c++config.h` — so it arrives from outside, and this is the
-/// seam it arrives through.
-///
-/// `None` means **nobody says**, never "the body is empty": a body of zero tokens is a body, and a caller that
-/// conflated the two would read every `#define POINTER_32` as an unknown name. That distinction is
-/// [`cpp_parser::MacroFacts::body_text_at_or_in_force`]'s, and the trait exists so that the walker does not
-/// have to know which of the two channels answered.
-pub trait MacroBodies {
-    /// What `name`'s replacement list says **at `at`**, when anything says.
-    fn body_at(&self, name: &str, at: usize) -> Option<&str>;
-}
-
 /// The answer for a caller with no macro evidence at all — a buffer parsed on its own, or a test that is about
 /// something else.
 ///
-/// Not a "no macros exist" claim: every question gets "nobody says", which is the answer that leaves every reading
-/// exactly where it was before this trait existed.
-pub struct NoMacroBodies;
-
-impl MacroBodies for NoMacroBodies {
-    fn body_at(&self, _name: &str, _at: usize) -> Option<&str> {
-        None
-    }
-}
-
-/// **Every macro environment in the process, whichever one it is.** The blanket implementation is what keeps this
-/// seam from being a second place environments are enumerated: `MacroFacts` already asks this question, and a
-/// second `impl` for each implementation of it would be a list to keep in step — the owned environment, a walked
-/// unit's view, and whatever comes next.
-///
-/// It reads through `&dyn MacroFacts` too, which is what the indexer hands over: a caller that has a
-/// `&dyn MacroFacts` can be a [`MacroBodies`] without knowing which implementation is behind it.
-impl<T: cpp_parser::MacroFacts + ?Sized> MacroBodies for T {
-    fn body_at(&self, name: &str, at: usize) -> Option<&str> {
-        self.body_text_at_or_in_force(name, at)
-    }
-}
-
+/// The parser's own [`cpp_parser::NothingAtAll`], under the name this crate's callers and tests already use: one
+/// type with two names would be worse than one name in two crates, and the *behaviour* is the thing both crates
+/// have to agree about — "nobody says", which is the answer that leaves every reading exactly where it was before
+/// the seam existed.
+pub use cpp_parser::NothingAtAll as NoMacroBodies;
 /// Build a file's symbol table from its syntax tree.
 ///
 /// The root node is the translation unit, and the table it produces has that as its file scope. See the module
@@ -126,7 +92,8 @@ pub fn build_scopes(root: &CppSyntaxNode, bodies: &dyn MacroBodies) -> ScopeTree
 /// Walks a tree, creating a scope per construct and a binding per declaration.
 struct ScopeWalker<'a> {
     table: ScopeTree,
-    /// What the includes say about a macro the file invokes — see [`MacroBodies`].
+    /// What the includes say about a macro the file invokes — see [`MacroBodies`], which is
+    /// [`cpp_parser::MacroBodies`]: the seam is one trait, in the crate that owns the reader that needs it.
     bodies: &'a dyn MacroBodies,
 }
 
@@ -271,7 +238,11 @@ impl ScopeWalker<'_> {
         let range = cpp_parser::source_range(node.text_range());
         let body = self.bodies.body_at(&name, range.start_offset)?;
 
-        match cpp_parser::shape_of_a_body(body) {
+        // **Asked at the invocation's own offset**, because a body is positional in two ways: the body itself
+        // (`_GLIBCXX_BEGIN_NAMESPACE_VERSION` is `namespace __8 {` in one configuration and nothing in another),
+        // and the words *inside* it (`_STD_BEGIN` is `_EXTERN_CXX_WORKAROUND namespace std {`, and
+        // `_EXTERN_CXX_WORKAROUND` is empty in the arm that is in force — see [`cpp_parser::shape_of_a_body_at`]).
+        match cpp_parser::shape_of_a_body_at(body, self.bodies, range.start_offset) {
             cpp_parser::BodyShape::OpensANamespace(segments) => Some(OpenedByBody::Opens {
                 name,
                 segments,

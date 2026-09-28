@@ -163,7 +163,11 @@ pub use project::{
     PROJECT_CONFIG_FILE, ProjectConfig, ProjectDiscovery, Severity, WorkspaceSection, find_cmake_cache,
     find_database, load_config, parse_cmake_cache, parse_config,
 };
-pub use scopes::{MacroBodies, NoMacroBodies, build_scopes, declared_module_names};
+// `MacroBodies` is the parser's trait, re-exported here because this crate's public API names it: the seam between
+// "a file's tokens" and "what its includes say the macros mean" is one trait, and a consumer should not have to
+// know which crate defined it.
+pub use cpp_parser::MacroBodies;
+pub use scopes::{NoMacroBodies, build_scopes, declared_module_names};
 // The driver sits above the folders rather than in one of them: it is the join of all four — the toolchain, the
 // include configuration, the summaries and the queries — and putting it inside any one of them would make that
 // folder the owner of the others.

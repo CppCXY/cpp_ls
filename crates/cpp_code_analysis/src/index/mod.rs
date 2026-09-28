@@ -232,7 +232,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         let preprocessing = preprocess(source, tree.get_tokens());
         // The same evidence object for both readers — see the field's note. The cast is the point: the scope walk
         // asks the trait, the parse asked the concrete type, and there is one value behind both.
-        let evidence: &dyn crate::sema::scopes::MacroBodies = match self.bodies {
+        let evidence: &dyn cpp_parser::MacroBodies = match self.bodies {
             Some(bodies) => bodies,
             None => &crate::sema::scopes::NoMacroBodies,
         };
