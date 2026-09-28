@@ -1187,6 +1187,141 @@ fn a_standard_library_member_list_has_each_spelling_once() {
     server.notify("exit", Value::Null);
 }
 
+/// The type a `.` is asked about is declared in a **header**, and the test's change rewrites that header: the only
+/// way the new member can be in the answer is if the header's *summary* was rebuilt, which is what
+/// [`cpp_code_analysis::Session::catch_up`] does before the query.
+const FRESH_TYPE_H: &str = "struct Widget { int size; };\n";
+
+/// The uses of it, and a `.` at the end of the last line.
+const FRESH_TYPE_CPP: &str = "\
+#include \"widget.h\"
+int main() {
+    Widget w;
+    w.
+}
+";
+
+/// **An edit to an included header is visible to the completion that follows it.**
+///
+/// This is the shape a user reported and diagnosed as "文件的 didchange 尚未处理完毕": an edit reaches the analysis in
+/// two steps that are not the same step. `didChange` replaces the **text** immediately — the scope tree is rebuilt
+/// from it on every parse — and *drops the file's summary*, which is rebuilt later, when the index pump reaches that
+/// file. A request answered inside that window sees the new text with the **old facts**.
+///
+/// What it covers is the *atomicity of the pair*: the change and the request arrive with nothing in between, and the
+/// answer is about the changed text. What it does **not** discriminate is the fix itself — the class here is in the
+/// buffer's own scope tree (a view parses the text it holds, includes and all), so the members are answerable from
+/// the tree whether or not the summary was rebuilt. The falsification for
+/// [`cpp_code_analysis::Session::catch_up`] is at the session level, where the staleness is visible and measured:
+/// `cpp_code_analysis/tests/completion.rs::a_completion_after_an_edit_is_about_the_file_the_edit_wrote`, which
+/// asserts that the stale reading is *wrong* and that `catch_up` is what makes it right.
+///
+/// # Why the change is to a header rather than to `main.cpp`
+///
+/// Because a change to the file being edited moves the cursor, and the request would then be about a position that
+/// did not exist before. Rewriting `widget.h` leaves `w.` where it was.
+#[test]
+fn a_completion_sees_a_change_to_an_included_header() {
+    let project = Project::new("completion-after-header-change");
+    project.write("widget.h", FRESH_TYPE_H);
+    project.write("main.cpp", FRESH_TYPE_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+    let header_uri = uri_of(&project.root().join("widget.h"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": FRESH_TYPE_CPP }
+        }),
+    );
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": header_uri, "languageId": "cpp", "version": 1, "text": FRESH_TYPE_H }
+        }),
+    );
+
+    // Wait until the list is the members of the type **as it is now**, so that the assertion below is about the
+    // change and not about the index being cold.
+    let (line, character) = position_of(FRESH_TYPE_CPP, "w.");
+    server.ask_until_it(
+        100,
+        |id| {
+            json!({
+                "id": id,
+                "method": "textDocument/completion",
+                "params": {
+                    "textDocument": { "uri": main_uri },
+                    "position": { "line": line, "character": character },
+                },
+            })
+        },
+        |response| {
+            response["result"]["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["label"] == json!("size")))
+        },
+    );
+
+    // **The change**, and then the request with nothing in between.
+    server.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": header_uri, "version": 2 },
+            "contentChanges": [{ "text": "struct Widget { int size; int added_by_the_edit; };\n" }],
+        }),
+    );
+
+    // **Asked once, with nothing in between**: the request a client sends in the same breath as the keystroke, and
+    // the one that used to be answered from the header's *old* summary — with no members at all, or with the names
+    // in scope instead.
+    let answer = server.request(
+        200,
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": main_uri },
+            "position": { "line": line, "character": character },
+        }),
+    );
+
+    let items = answer["result"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a completion list was expected, got {answer}"));
+
+    let labels: Vec<&str> = items
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect();
+
+    assert!(
+        labels.contains(&"added_by_the_edit"),
+        "the member the edit added, which only a rebuilt summary can express — asked once, right after the change, \
+         with no retry to hide a stale answer: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"main"),
+        "and not the names in scope, which is what a stale summary produces: {labels:?}"
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
 /// **A completion asked for right after a change sees the change.**
 ///
 /// A client sends `didChange` and then, without waiting for anything, asks for a completion at a position that only

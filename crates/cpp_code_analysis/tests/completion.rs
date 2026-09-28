@@ -772,3 +772,160 @@ fn an_include_that_resolves_to_nothing_says_so() {
         other => panic!("a header that resolves to nothing is `Unknown`: {other:?}"),
     }
 }
+
+// ------------------------------------------------------------------------------------------------------------
+// The cursor's file must be **read before it is asked about**, and the state it is read in is the bug.
+// ------------------------------------------------------------------------------------------------------------
+
+/// A file whose type is declared in a **header**, which is where a stale reading actually shows: `Widget`'s members
+/// come from `widget.h`'s summary, so that header has to have been read for `w.` to be answerable at all.
+const FRESHNESS_HEADER: &str = "struct Widget { int size; };\n";
+const FRESHNESS_USES_HEADER: &str = "\
+#include \"widget.h\"
+int f() {
+    Widget w;
+    w.
+}
+";
+
+/// **An edit replaces the text *and drops the summary*, and completion must not run between those two steps.**
+///
+/// `Session::buffer_changed` does the first immediately — the scope tree is rebuilt from the new text on every parse,
+/// so a local's declarator is always right — and queues the second (the summary is rebuilt when the pump reaches the
+/// file). A completion asked inside that window sees the new text with the **old facts**, and the damage is not an
+/// error but a *different list*: the member query cannot work out the object's type, declines, and the client is
+/// handed the names in scope, which is a list of everything that cannot follow a `.`.
+///
+/// That is what a user reported, with a screenshot: the popup after `myName.firstName.` was `printf`, `full`, `sum`,
+/// `main` and the keywords. The fix is [`Session::catch_up`], which the completion handler calls before the query: it
+/// re-reads the one file, and does nothing at all when there is nothing waiting.
+#[test]
+fn a_completion_after_an_edit_is_about_the_file_the_edit_wrote() {
+    let memory = MemoryFiles::new()
+        .with_file("/p/a.cpp", FRESHNESS_USES_HEADER)
+        .with_file("/p/widget.h", FRESHNESS_HEADER);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session =
+        Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    session.add_project_files([
+        std::path::PathBuf::from("/p/a.cpp"),
+        std::path::PathBuf::from("/p/widget.h"),
+    ]);
+    session.index_everything();
+
+    // The edit: the type gains a member, and the header's text is replaced exactly as `didChange` replaces it. **The
+    // pump is deliberately not advanced** — that is the window this test is about, and it is the state a real server
+    // is in when the keystroke that asked the question arrives.
+    let edited = "struct Widget { int size; int extra; };\n";
+    session.did_change("/p/widget.h", edited);
+    assert!(
+        session.pending() > 0,
+        "the edit dropped the summary and queued the file, which is the state under test"
+    );
+
+    let cursor = FRESHNESS_USES_HEADER.find("w.").expect("the fixture") + 2;
+    let view = session.view("/p/a.cpp").expect("the file is held");
+
+    // **Without the catch-up**: the header's summary is the old one, so `Widget` still has only `size`.
+    let stale = session.completions(&view, cursor);
+    let stale_labels: Vec<&str> = stale.items.iter().map(|item| item.label.as_str()).collect();
+    assert!(
+        !stale_labels.contains(&"extra"),
+        "the index is one edit behind until something reads the file: {stale_labels:?}"
+    );
+
+    // **With it**: one parse of one file, and the answer is about the text the user is looking at.
+    session.catch_up(std::path::Path::new("/p/widget.h"));
+    let fresh = session.completions(&view, cursor);
+    let labels: Vec<&str> = fresh.items.iter().map(|item| item.label.as_str()).collect();
+
+    assert!(
+        labels.contains(&"extra") && labels.contains(&"size"),
+        "both members of the type the header now declares: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"f"),
+        "and the names in scope are not — a `.` is not a name position: {labels:?}"
+    );
+    assert_eq!(
+        session.pending(),
+        0,
+        "the synchronous read is the queue's work, done early: the file is not read a second time when the pump \
+         gets to it"
+    );
+}
+
+/// **A name declared below the cursor is not in scope yet**, which is the other half of what a user reported: the
+/// popup at the top of `main` offered `sum` — a variable whose declaration is three lines further down.
+///
+/// A *scope* holds every binding written inside its braces, so a list built from them contains names the language
+/// has not reached. The rule is textual and it applies to **bodies** only: a class's members are reachable
+/// regardless of where in the class they are written (`void f() { x = 1; } int x;` is legal), so filtering those by
+/// position would remove names a reader can write.
+#[test]
+fn a_name_declared_below_the_cursor_is_not_offered() {
+    const FIXTURE: &str = "\
+int f() {
+    int above = 1;
+    int also_above = 2;
+
+    int sum = above + also_above;
+    return sum;
+}
+";
+    let memory = MemoryFiles::new().with_file("/p/a.cpp", FIXTURE);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session =
+        Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.index_everything();
+
+    // At the blank line **above** `int sum`, where a reader would type the declaration that uses it.
+    let blank = FIXTURE.find("\n\n    int sum").expect("the fixture") + 1;
+    let labels = labels_at(&session, "/p/a.cpp", blank);
+
+    assert!(
+        labels.contains(&"above".to_string()) && labels.contains(&"also_above".to_string()),
+        "what was declared above the cursor is offered: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"sum".to_string()),
+        "and what is declared below it is not — the language has not reached it: {labels:?}"
+    );
+
+    // …and the same name **is** offered once the cursor is below its declaration, which is what keeps this from
+    // being a filter that removes too much.
+    let after = FIXTURE.find("return sum").expect("the fixture") + "return ".len();
+    let labels = labels_at(&session, "/p/a.cpp", after);
+    assert!(
+        labels.contains(&"sum".to_string()),
+        "below the declaration it is in scope: {labels:?}"
+    );
+}
+
+/// **A file that has not been edited is not read again.** The pump drains after every edit, so the ordinary
+/// keystroke asks [`Session::catch_up`] about a path that is not in the queue — and the answer has to be free, or
+/// every completion would pay a parse.
+#[test]
+fn a_file_that_is_not_stale_is_not_read_again() {
+    let memory = MemoryFiles::new()
+        .with_file("/p/a.cpp", FRESHNESS_USES_HEADER)
+        .with_file("/p/widget.h", FRESHNESS_HEADER);
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session =
+        Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    session.add_project_files([
+        std::path::PathBuf::from("/p/a.cpp"),
+        std::path::PathBuf::from("/p/widget.h"),
+    ]);
+    session.index_everything();
+
+    let before = session.stats();
+    session.catch_up(std::path::Path::new("/p/widget.h"));
+    let after = session.stats();
+
+    assert_eq!(
+        after, before,
+        "nothing was read, parsed or written: the file was not stale"
+    );
+}

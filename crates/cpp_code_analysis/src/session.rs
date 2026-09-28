@@ -1034,6 +1034,46 @@ impl<F: FileProvider + Clone> Session<F> {
         done
     }
 
+    /// **Read one file now, if the editor has changed it since the index read it.**
+    ///
+    /// # The bug this exists for
+    ///
+    /// An edit reaches the index in two steps, and they are not the same step: `Session::did_open` /
+    /// `did_change` replace the buffer **and drop the file's summary**, and the summary is rebuilt later, when the
+    /// pump reaches that file in the queue. Between the two, the analysis holds the new *text* and the old *facts*:
+    /// the scope tree is rebuilt from the new text on every parse (so locals are right), while everything that reads
+    /// the index is an edit behind.
+    ///
+    /// Completion is where that shows, and it shows as the wrong list rather than as an error: `full.` needs the
+    /// **type** of `full`, the type comes from the index, and a stale index says `full` is not declared — so the
+    /// member query declines and the client is handed the names in scope, which is a list of things that cannot
+    /// follow a `.`. Measured on a user's file: the popup after `myName.firstName.` was `printf`, `full`, `sum`,
+    /// `main` and the keywords.
+    ///
+    /// # Why this and not a lock
+    ///
+    /// Blocking the request until the **pump** has caught up would be a lock, and it would be the wrong one: the
+    /// pump reads the file's whole include closure, so a request about a file whose first line is
+    /// `#include <string>` would wait for thousands of headers — seconds, to answer a keystroke. What is stale is
+    /// *this file's summary*, and rebuilding that is one parse of one file the editor already holds.
+    ///
+    /// # What it costs, and what it does not change
+    ///
+    /// Nothing when the file is not stale: the queue is asked first, and a path that is not in it — the ordinary
+    /// case, since the pump drains after every edit — returns immediately without touching the store. When it *is*
+    /// stale, this is one `SummaryStore::get`, which is the same call the pump would have made one step later.
+    ///
+    /// It does **not** follow the file's includes. A header the file includes is not "one edit behind" — the editor
+    /// did not change it — so the pump's order is left alone; the queue entry is dropped rather than worked, so the
+    /// file is not read twice.
+    pub fn catch_up(&mut self, path: &Path) {
+        if !self.queue.forget(path) {
+            return;
+        }
+
+        self.store.get(path);
+    }
+
     /// Work until there is nothing left, and say how many files were read.
     ///
     /// Chunked rather than one `advance(usize::MAX)`: the steps of a whole project are a `Vec` nobody wants, and a
@@ -1985,6 +2025,27 @@ impl Work {
             (Priority::Rest, true) => self.rest.push_front((path, depth)),
             (Priority::Rest, false) => self.rest.push_back((path, depth)),
         }
+    }
+
+    /// **Forget a path whose answer is already in hand** — the queue entry a synchronous re-read makes unnecessary.
+    ///
+    /// Returns whether there was anything to forget, which is also how a caller learns that the file *was* stale:
+    /// a path in the queue is a path whose summary was dropped and not yet rebuilt, so "the queue had it" and "the
+    /// index is one edit behind" are the same statement.
+    ///
+    /// The path becomes [`Standing::Worked`] rather than being left unknown, because it *has* been worked — by
+    /// whoever read it synchronously — and a later `add` for it (an include discovered by another file) must not
+    /// queue a second read of a file the store already answered for.
+    fn forget(&mut self, path: &Path) -> bool {
+        let key = queue_key(path);
+
+        if matches!(self.standing.get(&key), Some(Standing::Queued(_))) {
+            self.standing.insert(key, Standing::Worked);
+            self.queued -= 1;
+            return true;
+        }
+
+        false
     }
 
     /// The next file to work, and the half it came from.

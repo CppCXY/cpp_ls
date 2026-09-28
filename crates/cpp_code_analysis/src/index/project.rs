@@ -1153,6 +1153,10 @@ fn visible_names(
     let chain = scopes.scope_chain(innermost);
     let mut names: Vec<OfferedName> = Vec::new();
 
+    // The file the cursor is in, as the store spells paths, so that the declaration-order filter can tell this
+    // file's offsets from another file's.
+    let in_this_file = normalize(path);
+
     for (depth, scope) in chain.iter().copied().enumerate() {
         let Some(data) = scopes.scope(scope) else {
             continue;
@@ -1187,7 +1191,20 @@ fn visible_names(
             crate::ScopeKind::Block | crate::ScopeKind::Function | crate::ScopeKind::Lambda
         );
         names.extend(offered(
-            bindings_of(root, path, &data.bindings, None, body),
+            // **In a body, only what is declared above the cursor is in scope.** A *scope* holds every binding
+            // written in its braces, so a list built from the scope contains `int c = a + b;` at a cursor three
+            // lines above it — a name that cannot be written there, because the language has not declared it yet.
+            // It is the same rule a reader applies without thinking, and the one a user reported: "在我下面声明的
+            // 变量不应该补全出来".
+            //
+            // Only bodies: a class's members and a namespace's names are visible in **declaration order
+            // independent** fashion (`class C { void f() { x = 1; } int x; };` is legal), so the filter would be
+            // wrong there. Nothing is lost by the narrower rule — a body is exactly where the *textual* order is
+            // the language's rule.
+            bindings_of(root, path, &data.bindings, None, body)
+                .into_iter()
+                .filter(|candidate| !body || declared_above(candidate, offset, &in_this_file))
+                .collect(),
             depth,
         ));
 
@@ -1299,6 +1316,40 @@ fn names_in_a_scope(
     Known::Yes(names)
 }
 
+/// **Is this declaration above the cursor**, so that the language has reached it?
+///
+/// The rule a reader applies without thinking, and the one a user reported as missing ("在我下面声明的变量不应该补全
+/// 出来"): `int sum = a + b;` three lines *below* the cursor is not a name that can be written at the cursor, and a
+/// list built from a scope's bindings contains it anyway — a scope holds every binding written inside its braces.
+///
+/// # Where it applies, and where it must not
+///
+/// Only in a **body** (a function, a block, a lambda), because that is the one place where textual order *is* the
+/// language's rule. A class's members and a namespace's names are reachable regardless of where they are written —
+/// `class C { void f() { x = 1; } int x; };` is perfectly legal — so filtering those by position would remove names
+/// a reader can legitimately write.
+///
+/// # The one thing it will not judge
+///
+/// A binding from **another file**: its range is an offset into that file, so comparing it with this file's cursor
+/// compares two different rulers. Those are kept — the conservative direction, and the same one the rest of this
+/// module takes: a name that is in scope and not offered is a missing answer, while a name that is not in scope yet
+/// and *is* offered is one the reader sees as a mistake.
+///
+/// In practice every binding here is the buffer's own — `build_scopes` walks one file's tree, and a name reached
+/// through an include is a [`NameProvenance::DirectInclude`] fact from the index rather than a binding — so this is
+/// the guard that keeps the rule from being wrong if that ever changes.
+fn declared_above(candidate: &Candidate, offset: usize, in_this_file: &str) -> bool {
+    if candidate.file != Path::new(in_this_file) {
+        return true;
+    }
+
+    let at = candidate.fact.name_range.start_offset;
+
+    // A zero-length range at the start of the file is what a recovery produces, and it is not a position.
+    at == 0 || at < offset
+}
+
 /// One name on its way to being offered: where it was declared, how far inside one answer it was, and how near the
 /// cursor that is.
 ///
@@ -1337,9 +1388,7 @@ impl Candidate {
 /// the tier that ranks first, and there are as many of them as the reader wrote.
 const MAX_COLLECTED_NAMES: usize = 400;
 
-/// The bindings one of the file's own scopes holds, as names to offer.
-///
-/// `scope` is the qualified spelling the binding was written in — `ns` for `namespace ns { … }`, a class's name for
+/// The bindings one of the file's own scopes holds, as names to offer. — `ns` for `namespace ns { … }`, a class's name for
 /// its body — and `None` for a scope that has none: a function body, a block, a lambda. The distinction is the one
 /// [`DeclFact::scope`] documents, and it is passed rather than derived because the caller is the one that knows
 /// *why* it is listing these bindings.

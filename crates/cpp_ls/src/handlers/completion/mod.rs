@@ -61,8 +61,25 @@ pub async fn on_completion(
     let snippets = snippets_of(context.lsp_features().supports_snippets());
 
     // Read in first, under the write lock, so the query itself can be a read — the same boundary every handler has.
+    //
+    // **Two steps, and the second is the one that makes the answer about the text the user sees.** `prepare` puts the
+    // file in the table; `catch_up` makes its **summary** current, because an edit replaces the text *and* drops the
+    // summary, and the summary is rebuilt later by the pump. A completion asked inside that window gets the new text
+    // with the old facts: `full.` cannot find the type of `full`, the member query declines, and the client is shown
+    // the names in scope — a list of things that cannot follow a `.`. Measured on a user's file: the popup after
+    // `myName.firstName.` was `printf`, `full`, `sum`, `main` and the keywords.
+    //
+    // It is one parse of **one file**, and nothing at all when there is no edit waiting — see [`Session::catch_up`],
+    // which also says why waiting for the pump would have been the wrong fix (the pump reads the file's whole
+    // include closure, which for a file that includes `<string>` is thousands of headers).
     if let Some(path) = uri_to_file_path(&uri) {
         context.analysis().prepare(&path).await;
+
+        let read = path.clone();
+        context
+            .analysis()
+            .update_session(move |session| session.catch_up(&read))
+            .await;
     }
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
