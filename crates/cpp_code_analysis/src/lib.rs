@@ -39,6 +39,7 @@
 //! token was written in a different file: navigation reaches the macro, diagnostics reach the call site.
 
 pub mod cache;
+pub mod completion;
 pub mod file;
 pub mod folding;
 pub mod include;
@@ -65,6 +66,14 @@ pub mod summary_codec;
 // * `sema`     — names, scopes, the index's declaration facts, and C++20 modules
 pub use cache::{
     CACHE_DIRECTORY, FORMAT_VERSION, READING_FINGERPRINT, SummaryKey, content_hash, fnv1a64,
+};
+// The *completion* layer is the one place where the answer to a cursor is assembled rather than queried: the two
+// name queries below it answer "what is visible" and "what does this type have", and this decides which of those
+// questions the cursor is asking and in what order the answer is shown. See `completion`'s module documentation.
+pub use completion::{
+    BUILTIN_TYPES, CompletionContext, CompletionItem, CompletionSet, DIRECTIVES, DirectiveName,
+    Header, HeaderIndex, ItemKind, KEYWORDS, Keyword, KeywordUse, SNIPPETS, SharedHeaders, Snippet,
+    completion_at, context_at, header_index,
 };
 pub use file::token;
 pub use include::{config, graph, msvc, paths, system_headers, toolchain};
@@ -126,12 +135,12 @@ pub use toolchain::{
 pub use index::{
     ChangeBatch, CookedFile, EventKind, FileEvent, FileIndexer, FileReferences, IncludeBudget,
     IncludeIndex, IncludeVisibility, MacroReferences, MemberCompletions, MemberList, NameCompletions,
-    NotIndexed, NotIndexedReason, OfferedName, PathPattern, Priority, ProjectDefinition, ProjectIndex,
-    ProjectMacro, ProjectMember, ProjectSymbol, Reference, ReferenceBudget, ReferenceKind, Rename, Response, Step,
-    StepOutcome, StoreStats, SummaryReadError, SummaryStore, UnlistedBase, UnresolvedEdge,
-    VisibleDeclaration, WatchFilter, Worklist, definition_across_files, macro_across_files,
-    macro_references, member_across_files, member_completions_at, members_of, name_completions_at,
-    outcome_of, read_summary, summarize, write_summary,
+    NameProvenance, NotIndexed, NotIndexedReason, OfferedName, PathPattern, Priority, ProjectDefinition,
+    ProjectIndex, ProjectMacro, ProjectMember, ProjectSymbol, Reference, ReferenceBudget, ReferenceKind,
+    Rename, Response, Step, StepOutcome, StoreStats, SummaryReadError, SummaryStore, UnlistedBase,
+    UnresolvedEdge, VisibleDeclaration, WatchFilter, Worklist, definition_across_files,
+    macro_across_files, macro_references, member_across_files, member_completions_at, members_of,
+    name_completions_at, outcome_of, read_summary, summarize, write_summary,
 };
 pub use macros::{MacroBody, MacroDef, MacroTable, Parameter, ParameterKind};
 pub use module_info::{ImportDeclaration, ImportTarget, ModuleInfo, ModuleUnit};

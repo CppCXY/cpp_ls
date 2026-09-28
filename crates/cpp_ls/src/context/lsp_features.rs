@@ -52,6 +52,26 @@ impl LspFeatures {
             .unwrap_or_default()
     }
 
+    /// **Can the client interpolate a snippet body?**
+    ///
+    /// The one capability a completion has to branch on, because the cost of guessing wrong is asymmetric: a client
+    /// that supports snippets and is not sent any loses a convenience, while a client that does not and is sent one
+    /// writes `${1:condition}` into the file as literal text.
+    ///
+    /// `snippetSupport` is the protocol's flag for exactly this question, and its absence is a **no**: the field's
+    /// own note says a client that does not set it is assumed to take plain text only. That default matters here
+    /// more than usual, because the failure is not a missing feature — it is placeholder syntax written into the
+    /// user's file, which they then have to delete.
+    pub fn supports_snippets(&self) -> bool {
+        self.client_capabilities
+            .text_document
+            .as_ref()
+            .and_then(|text_document| text_document.completion.as_ref())
+            .and_then(|completion| completion.completion_item.as_ref())
+            .and_then(|item| item.snippet_support)
+            .unwrap_or(false)
+    }
+
     pub fn supports_pull_diagnostic(&self) -> bool {
         if let Some(text_document) = &self.client_capabilities.text_document {
             return text_document.diagnostic.is_some();

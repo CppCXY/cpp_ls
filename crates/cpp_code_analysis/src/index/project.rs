@@ -883,6 +883,33 @@ pub struct OfferedName {
     /// locals above globals, or grouping by where a name came from, would otherwise have to reconstruct the walk it
     /// was just handed the result of.
     pub depth: usize,
+    /// **How far from the cursor the declaration is in the program text** — the field a consumer ranks by.
+    ///
+    /// [`OfferedName::depth`] counts *scopes*, which orders a lookup but does not answer the question a suggestion
+    /// list is judged by: a local and a name from `zmmintrin.h` can both be depth 2. This says which of them is
+    /// nearer — the buffer's own scope, the buffer, a header beside it, a header it includes, or a header only
+    /// that header includes — and it is the same order C++ would find them in from the other end.
+    ///
+    /// Recorded here rather than re-derived by a consumer because the derivation needs the include *graph*, and
+    /// the walk that produced this list already crossed it: see [`NameProvenance`].
+    pub from: NameProvenance,
+}
+
+/// Where a name a completion offers was found, relative to the file the cursor is in.
+///
+/// Ordered by nearness, so that the ranking can use the enumeration itself as a tier and two consumers cannot
+/// disagree about which of two provenances is closer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum NameProvenance {
+    /// A scope of the file being edited: a local, a parameter, a member of the class the cursor's body is in, or
+    /// the names written directly in a `::`-qualified scope.
+    Scope,
+    /// Written at file scope in the file being edited.
+    ThisFile,
+    /// A header the file being edited includes directly.
+    DirectInclude,
+    /// A file reached only through another file — the standard library's own headers, mostly.
+    IndirectInclude,
 }
 
 /// What a completion **in a name** should offer: the scope that was listed, and its names.
@@ -967,14 +994,23 @@ pub fn name_completions_at(
         return Known::Unknown(UnknownReason::UnparsableName);
     };
 
+    // **What is typed decides how much is read**, and the difference is not small. The index half of this query
+    // collects every declaration of every file the cursor can see — measured on a real file that includes
+    // `<string>`, **1103** names at one cursor — and collecting them to then drop all but the ones beginning with
+    // `w` is work with no answer in it. A client asks on every keystroke, so the prefix is passed down and applied
+    // where the names are still borrowed: see [`ProjectIndex::visible_declarations`].
+    //
+    // An **empty prefix must not filter**: that is the state the whole feature exists for (`return |`, a blank
+    // line), and a filter that treated "nothing written" as "nothing matches" would empty the list exactly when it
+    // is most wanted.
     let names = if position.scope.is_empty() {
-        match visible_names(index, scopes, root, path, offset) {
+        match visible_names(index, scopes, root, path, offset, &position.written) {
             Known::Yes(names) => names,
             Known::Unknown(reason) => return Known::Unknown(reason),
             Known::No => return Known::Unknown(UnknownReason::UnparsableName),
         }
     } else {
-        match names_in_a_scope(index, scopes, root, path, &position.scope) {
+        match names_in_a_scope(index, scopes, root, path, &position.scope, &position.written) {
             Known::Yes(names) => names,
             Known::Unknown(reason) => return Known::Unknown(reason),
             Known::No => return Known::Unknown(UnknownReason::UnparsableName),
@@ -1001,6 +1037,7 @@ fn visible_names(
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     offset: usize,
+    written: &str,
 ) -> Known<Vec<OfferedName>> {
     let Some(innermost) = scopes.scope_at(offset) else {
         return Known::Unknown(UnknownReason::UnparsableName);
@@ -1050,14 +1087,17 @@ fn visible_names(
         // …and for a **namespace**, the names other files write into it. A namespace is reopened by every file
         // that mentions it, so the buffer's list is never the whole answer.
         if let Some(prefix) = scopes.qualification_prefix_of(scope) {
-            names.extend(offered(declarations_in(&prefix, index, path), depth));
+            names.extend(offered(
+                declarations_in(&prefix, index, path, written),
+                depth,
+            ));
         }
     }
 
     // The global name space: the buffer's own file scope, and every file it includes. One step past the chain, so
     // that the depth stays an ordinary count of how far the lookup walked — the file scope is a scope like any
     // other, it is just not one the chain walked through.
-    names.extend(global_offers(index, scopes, root, path, chain.len()));
+    names.extend(global_offers(index, scopes, root, path, chain.len(), written));
 
     sort_and_hide(&mut names);
     Known::Yes(names)
@@ -1074,8 +1114,9 @@ fn global_offers(
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     depth: usize,
+    written: &str,
 ) -> Vec<OfferedName> {
-    let mut names = offered(global_names(index, scopes, root, path), depth);
+    let mut names = offered(global_names(index, scopes, root, path, written), depth);
     sort_and_hide(&mut names);
     names
 }
@@ -1087,11 +1128,12 @@ fn names_in_a_scope(
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     scope: &str,
+    written: &str,
 ) -> Known<Vec<OfferedName>> {
     // The global name space has no spelling of its own: `::` is what the file writes, and `None` is what a
     // declaration at file scope records.
     if scope == "::" {
-        return Known::Yes(global_offers(index, scopes, root, path, 0));
+        return Known::Yes(global_offers(index, scopes, root, path, 0, written));
     }
 
     // A leading `::` on a longer path — `::ns::Widget` — asks for the *global* one, and the spelling to look up is
@@ -1125,11 +1167,14 @@ fn names_in_a_scope(
                     0,
                 ));
             }
-            names.extend(offered(declarations_in(spelling, index, path), 0));
+            names.extend(offered(
+                declarations_in(spelling, index, path, written),
+                0,
+            ));
         }
         // Not in the buffer at all: the project's answer, or nothing.
         None => {
-            let found = declarations_in(spelling, index, path);
+            let found = declarations_in(spelling, index, path, written);
             if found.is_empty() {
                 // Empty is either "declared and empty" or "no such scope", and the difference is the *name* — the
                 // same distinction `direct_members` makes, for the same reason.
@@ -1146,6 +1191,44 @@ fn names_in_a_scope(
     sort_and_hide(&mut names);
     Known::Yes(names)
 }
+
+/// One name on its way to being offered: where it was declared, how far inside one answer it was, and how near the
+/// cursor that is.
+///
+/// Named rather than a tuple because there are four of them now and two of the four are `usize`; a call site that
+/// had to remember which was which is how a ranking ends up ordered by the wrong number.
+struct Candidate {
+    file: PathBuf,
+    fact: DeclFact,
+    /// How far *inside* one answer the name was found — a base class's member is one step further than the class's
+    /// own — which is added to the depth of the scope the answer came from.
+    steps: usize,
+    from: NameProvenance,
+}
+
+impl Candidate {
+    fn new(file: PathBuf, fact: DeclFact, from: NameProvenance) -> Candidate {
+        Candidate {
+            file,
+            fact,
+            steps: 0,
+            from,
+        }
+    }
+}
+
+/// How many declarations from **other files** one name query will collect.
+///
+/// A backstop on work rather than a statement about the answer, and the number is derived from what the answer can
+/// be: `crate::completion` shows at most two hundred items, and every one of them is scored by *how near the cursor
+/// its declaration is*. A query that has already collected this many names — all of them from files the cursor
+/// reaches through includes, which is the tier that ranks last — cannot have its answer changed by the next one,
+/// and on a file that includes `<string>` and the C++ standard library there are **26 728** declarations in the
+/// files one cursor can see.
+///
+/// The file's **own** declarations are not capped: they come from the scope tree rather than from here, they are
+/// the tier that ranks first, and there are as many of them as the reader wrote.
+const MAX_COLLECTED_NAMES: usize = 400;
 
 /// The bindings one of the file's own scopes holds, as names to offer.
 ///
@@ -1166,7 +1249,7 @@ fn bindings_of(
     bindings: &[crate::Binding],
     scope: Option<&str>,
     local: bool,
-) -> Vec<(PathBuf, DeclFact, usize)> {
+) -> Vec<Candidate> {
     let spelling = scope.unwrap_or_default();
 
     bindings
@@ -1174,7 +1257,7 @@ fn bindings_of(
         .map(|binding| {
             let mut fact = fact_from_binding(root, spelling, binding);
             fact.local = local;
-            (path.to_path_buf(), fact, 0)
+            Candidate::new(path.to_path_buf(), fact, NameProvenance::Scope)
         })
         .collect()
 }
@@ -1185,8 +1268,9 @@ fn global_names(
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
-) -> Vec<(PathBuf, DeclFact, usize)> {
-    let mut names: Vec<(PathBuf, DeclFact, usize)> = scopes
+    written: &str,
+) -> Vec<Candidate> {
+    let mut names: Vec<Candidate> = scopes
         .root()
         .and_then(|root_scope| scopes.scope(root_scope))
         // `false`: this **is** the global name space — the one scope where a name beginning with an underscore is
@@ -1194,7 +1278,13 @@ fn global_names(
         .map(|data| bindings_of(root, path, &data.bindings, None, false))
         .unwrap_or_default();
 
-    names.extend(declarations_in_scope(index, path, None));
+    // **The buffer's own file-scope names are the file's**, even though they live in the global name space: the
+    // distinction the ranking needs is "did the reader write this here", not "which scope is it in".
+    for name in &mut names {
+        name.from = NameProvenance::ThisFile;
+    }
+
+    names.extend(declarations_in_scope(index, path, None, written));
     names
 }
 
@@ -1209,16 +1299,54 @@ fn declarations_in_scope(
     index: &ProjectIndex,
     visible_from: &Path,
     scope: Option<&str>,
-) -> Vec<(PathBuf, DeclFact, usize)> {
+    written: &str,
+) -> Vec<Candidate> {
+    // **The prefix is applied here, where the names are still borrowed.** Everything below this point is work per
+    // declaration — a `DeclFact` clone, a provenance lookup, a `Vec` push — and on a file that includes `<string>`
+    // there are over a thousand of them at one cursor position. Collecting them to drop all but those beginning
+    // with `w` is the difference between a keystroke and a stutter, and it is a filter rather than a query: the
+    // names it drops could not have been offered anyway. See [`crate::sema::resolve::name_position_at`].
+    let accepts = |fact: &DeclFact| name_starts_with(fact, written);
+
     let found = match scope {
-        Some(spelling) => index.declarations_in(spelling, visible_from),
-        None => index.visible_declarations(visible_from, |fact| fact.scope.is_none() && !fact.local),
+        Some(spelling) => index.declarations_in_where(spelling, visible_from, accepts),
+        None => index.visible_declarations_where(visible_from, |fact| {
+            accepts(fact) && fact.scope.is_none() && !fact.local
+        }),
     };
 
+    // The names a reader has **not** written are the last tier of the answer, and past this many of them there is
+    // nothing left that could reach the top of a list two hundred long. See [`MAX_COLLECTED_NAMES`].
+    let found = found.into_iter().take(MAX_COLLECTED_NAMES);
+
     found
-        .into_iter()
-        .map(|declaration| (declaration.file.clone(), declaration.fact.clone(), 0))
+        .map(|declaration| {
+            Candidate::new(
+                declaration.file.clone(),
+                declaration.fact.clone(),
+                provenance_of(index, visible_from, declaration.visibility, &declaration.file),
+            )
+        })
         .collect()
+}
+
+/// Does this declaration's name begin with what is being typed?
+///
+/// Case-insensitive, and **`true` for an empty prefix** — the state the whole feature is for. The rule is a
+/// *filter* and not a ranking: the offer list drops a name this rejects, because a name the reader has not started
+/// typing cannot be what they meant and the client would filter it out anyway. What it must not do is decide
+/// between two names that both match; that is `crate::completion`'s job.
+fn name_starts_with(fact: &DeclFact, written: &str) -> bool {
+    if written.is_empty() {
+        return true;
+    }
+
+    let name = fact.name.as_str();
+    name.len() >= written.len()
+        && name
+            .chars()
+            .zip(written.chars())
+            .all(|(have, wanted)| have.eq_ignore_ascii_case(&wanted))
 }
 
 /// [`declarations_in_scope`] for a named scope, spelled the way this module spells lookups.
@@ -1226,8 +1354,51 @@ fn declarations_in(
     spelling: &str,
     index: &ProjectIndex,
     visible_from: &Path,
-) -> Vec<(PathBuf, DeclFact, usize)> {
-    declarations_in_scope(index, visible_from, Some(spelling))
+    written: &str,
+) -> Vec<Candidate> {
+    declarations_in_scope(index, visible_from, Some(spelling), written)
+}
+
+/// **How near the cursor a file is**, for the ranking: the buffer, a project header beside it, a header the buffer
+/// includes, or one only those headers include.
+///
+/// The three cross-file answers are exactly the three the visibility walk produced — the file was reached by
+/// crossing includes — so this only has to tell *which* of them a fact is, and the question it asks the graph is
+/// the cheap one: does the file that declares this name appear among the cursor file's **own** `#include`s.
+///
+/// A file that is reachable only through a guarded `#include` ([`IncludeVisibility::Conditional`]) is ranked as an
+/// indirect one, which is the honest place for it: it is in the list — the reader may be writing for exactly that
+/// configuration — but it is not one of the headers this file certainly includes.
+fn provenance_of(
+    index: &ProjectIndex,
+    visible_from: &Path,
+    visibility: IncludeVisibility,
+    declaring: &Path,
+) -> NameProvenance {
+    if visibility == IncludeVisibility::Conditional {
+        return NameProvenance::IndirectInclude;
+    }
+
+    let declaring = normalize(declaring);
+    let mut direct = false;
+
+    if let Some(summary) = index.summary(visible_from) {
+        for include in &summary.includes {
+            let Some(resolved) = &include.resolved else {
+                continue;
+            };
+            if normalize(resolved) == declaring {
+                direct = true;
+                break;
+            }
+        }
+    }
+
+    if direct {
+        return NameProvenance::DirectInclude;
+    }
+
+    NameProvenance::IndirectInclude
 }
 
 /// The members of a class, bases included, as names to offer.
@@ -1237,34 +1408,43 @@ fn names_of_a_class(
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     class: &str,
-) -> Known<Vec<(PathBuf, DeclFact, usize)>> {
+) -> Known<Vec<Candidate>> {
     match members_of(index, scopes, root, path, class) {
         Known::Yes(members) => Known::Yes(
             members
                 .members
                 .into_iter()
-                .map(|member| (member.file, member.fact, member.depth))
+                .map(|member| {
+                    // A class's own members are reachable from a cursor inside the class without a qualifier, and
+                    // they are ranked as what they are — the nearest thing there is, beside a local. Which is why
+                    // the provenance is `Scope` and the *depth* carries the inheritance: see `Score::LOCAL`.
+                    let mut candidate = Candidate::new(member.file, member.fact, NameProvenance::Scope);
+                    candidate.steps = member.depth;
+                    candidate
+                })
                 .collect(),
         ),
         Known::Unknown(reason) => Known::Unknown(reason),
         Known::No => Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(class))),
     }
 }
-/// Wrap `(file, fact, steps)` as offers, adding the depth of the scope they were found in and dropping the
-/// declarations that have no name to type — and the names the implementation owns.
+
+/// Wrap candidates as offers, adding the depth of the scope they were found in and dropping the declarations that
+/// have no name to type — and the names the implementation owns.
 ///
-/// `steps` is how far *inside* one answer the name was — a base class's members are one step further than the
-/// class's own — and the two are added because they mean the same thing to a consumer: how far the lookup had to
-/// walk before it found this name, which is the order C++ walks in too.
-fn offered(found: Vec<(PathBuf, DeclFact, usize)>, depth: usize) -> Vec<OfferedName> {
+/// [`Candidate::steps`] is how far *inside* one answer the name was — a base class's members are one step further
+/// than the class's own — and the two are added because they mean the same thing to a consumer: how far the lookup
+/// had to walk before it found this name, which is the order C++ walks in too.
+fn offered(found: Vec<Candidate>, depth: usize) -> Vec<OfferedName> {
     found
         .into_iter()
-        .filter(|(_, fact, _)| !fact.name.is_empty())
-        .filter(|(_, fact, _)| !is_reserved_to_the_implementation(fact))
-        .map(|(file, fact, steps)| OfferedName {
-            file,
-            fact,
-            depth: depth.saturating_add(steps),
+        .filter(|candidate| !candidate.fact.name.is_empty())
+        .filter(|candidate| !is_reserved_to_the_implementation(&candidate.fact))
+        .map(|candidate| OfferedName {
+            file: candidate.file,
+            fact: candidate.fact,
+            depth: depth.saturating_add(candidate.steps),
+            from: candidate.from,
         })
         .collect()
 }
@@ -3101,6 +3281,45 @@ impl ProjectIndex {
         self.visible_declarations(visible_from, |fact| fact.scope.as_deref() == Some(scope))
     }
 
+    /// [`ProjectIndex::declarations_in`] with a **second** condition, applied while the facts are still borrowed.
+    ///
+    /// The second predicate exists for one caller and one reason: a completion has a prefix, and on a file that
+    /// includes `<string>` the scope it is listing holds over a thousand declarations. A caller that collected them
+    /// and then kept the ones beginning with `w` would do a `DeclFact` clone, a provenance lookup and a `Vec` push
+    /// per name to throw 99% of them away — on every keystroke. The two conditions are asked together because
+    /// there is no useful notion of order between them: both are filters, and a fact that fails either is not
+    /// collected.
+    ///
+    /// A method rather than a parameter on [`ProjectIndex::declarations_in`] because that one's callers do not have
+    /// a second condition, and a query with an optional filter it never uses is a query whose filter is untested.
+    pub fn declarations_in_where(
+        &self,
+        scope: &str,
+        visible_from: &Path,
+        accepts: impl Fn(&DeclFact) -> bool,
+    ) -> Vec<VisibleDeclaration<'_>> {
+        self.visible_declarations_upto(
+            visible_from,
+            &|fact: &DeclFact| fact.scope.as_deref() == Some(scope) && accepts(fact),
+            MAX_COLLECTED_NAMES,
+        )
+    }
+
+    /// The visibility walk over the declaration list, with the door open for a caller outside this module and
+    /// capped at `MAX_COLLECTED_NAMES`.
+    ///
+    /// The cap and not the whole set, because the one caller is a completion and the names this drops could not
+    /// have reached the top of its list — see `MAX_COLLECTED_NAMES`, which states the argument. A caller that wants
+    /// **every** visible declaration asks [`ProjectIndex::files_declaring`] or [`ProjectIndex::declarations_in`],
+    /// which have no cap because their answers are about one name rather than a list.
+    pub fn visible_declarations_where(
+        &self,
+        visible_from: &Path,
+        accepts: impl Fn(&DeclFact) -> bool,
+    ) -> Vec<VisibleDeclaration<'_>> {
+        self.visible_declarations_upto(visible_from, &accepts, MAX_COLLECTED_NAMES)
+    }
+
     /// The declarations some predicate accepts, in the files `visible_from` can see.
     ///
     /// The one place the visibility walk is applied to the declaration list, so that a new query over facts
@@ -3130,25 +3349,62 @@ impl ProjectIndex {
         visible_from: &Path,
         accepts: impl Fn(&DeclFact) -> bool,
     ) -> Vec<VisibleDeclaration<'a>> {
+        self.visible_declarations_upto(visible_from, &accepts, usize::MAX)
+    }
+
+    /// [`ProjectIndex::visible_declarations`] with a **cap** on how many are collected.
+    ///
+    /// The cap is what makes a completion over a standard-library closure cheap, and it is safe for the same
+    /// reason the collection is: a caller that wants at most `n` names and ranks them by **how near the cursor
+    /// their declaration is** cannot be affected by the `n + 1`-th, because every name this walk produces is from
+    /// a file reached through an include — the tier that ranks last. See [`MAX_COLLECTED_NAMES`].
+    ///
+    /// `usize::MAX` is the honest spelling of "no cap" rather than an `Option`, because the two callers that pass
+    /// it are asking a question about a *name* rather than a list — a jump, a rename — and their answers are
+    /// allowed to be as many as there are.
+    fn visible_declarations_upto<'a>(
+        &'a self,
+        visible_from: &Path,
+        accepts: &impl Fn(&DeclFact) -> bool,
+        limit: usize,
+    ) -> Vec<VisibleDeclaration<'a>> {
         // Keyed by the **normalized** path, which is what the summary map is keyed by too: the walk produces
         // normalized spellings, and normalizing three hundred paths again per query is work with no answer in it.
-        let visible: HashMap<String, IncludeVisibility> = self.visible_files(visible_from).into_iter().collect();
+        let visible: HashMap<String, IncludeVisibility> =
+            self.visible_files(visible_from).into_iter().collect();
 
         let mut found = Vec::new();
 
         for summary in self.summaries() {
+            // **The cap is checked before a file is read, not while it is.** A file is one declaration list, and
+            // the only thing worth stopping on is a whole one: taking half of a file's facts would leave the
+            // cooked-vs-raw deduplication below comparing against a `raw` list that is itself half a file, and
+            // `(name, kind)` identity is per file. So a query takes files until it has enough, and "enough" is a
+            // number no answer can reach past — see [`MAX_COLLECTED_NAMES`].
+            if found.len() >= limit {
+                break;
+            }
+
             let key = normalize(&summary.path);
-            let Some(visibility) = visible.get(&key) else {
+            let Some(visibility) = visible.get(&key).copied() else {
                 continue;
             };
+
+            // The cooked reading is looked up **once**, because a file that was never cooked — which is most of
+            // them — has nothing to union and must not pay for the `raw` list below.
+            let cooked = self.cooked.get(&key);
 
             for fact in summary.declarations.iter().filter(|fact| accepts(fact)) {
                 found.push(VisibleDeclaration {
                     file: summary.path.clone(),
                     fact,
-                    visibility: *visibility,
+                    visibility,
                 });
             }
+
+            let Some(cooked) = cooked else {
+                continue;
+            };
 
             // …and what the file was **cooked** into, minus what the raw reading already said. `(name, kind)` is
             // the identity a candidate is deduplicated by — see the method's note.
@@ -3159,11 +3415,9 @@ impl ProjectIndex {
                 .map(|fact| (fact.name.as_str(), fact.kind))
                 .collect();
             raw.sort_unstable();
-            for fact in self
-                .cooked
-                .get(&key)
-                .into_iter()
-                .flat_map(|cooked| cooked.declarations.iter())
+            for fact in cooked
+                .declarations
+                .iter()
                 .filter(|fact| accepts(fact))
             {
                 if raw.binary_search(&(fact.name.as_str(), fact.kind)).is_ok() {
@@ -3172,7 +3426,7 @@ impl ProjectIndex {
                 found.push(VisibleDeclaration {
                     file: summary.path.clone(),
                     fact,
-                    visibility: *visibility,
+                    visibility,
                 });
             }
         }
@@ -7048,6 +7302,27 @@ mod tests {
         )
     }
 
+    /// The names offered at the **first offset of the body** of `source` — where nothing is written yet.
+    ///
+    /// The position with no prefix, which is a different question from [`names_at`]'s and cannot be spelled as one:
+    /// a needle is what a test looks for, and "the cursor is at the start of a line" is not a spelling.
+    fn names_at_blank(
+        files: &[(&str, &str)],
+        from: &str,
+        source: &str,
+    ) -> Known<super::NameCompletions> {
+        let (index, tree) = analysed_while_typing(files, from, source);
+        let root = tree.get_red_root();
+        let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
+
+        let at = source
+            .find("void f()")
+            .and_then(|body| source[body..].find('{').map(|brace| body + brace + 1))
+            .expect("the fixture has a body");
+
+        super::name_completions_at(&index, &scopes, &root, Path::new(from), at)
+    }
+
     /// The names in an answer, in the order the query put them.
     #[track_caller]
     fn offered(found: &Known<super::NameCompletions>) -> Vec<String> {
@@ -7195,16 +7470,10 @@ mod tests {
         // to place it in, and the standard library's headers declare thousands of names like it — offering one
         // would fill the list with names the user cannot see, and the *right* answer for this cursor is the local
         // that really is here.
+        let header = "/p/widget.h";
+        let declaration = "void g() {\n  int __first = 0;\n  int helper;\n}\nint global_name;\n";
         let source = "#include \"widget.h\"\nvoid f() {\n  int mine;\n  min\n}\n";
-        let found = names_at(
-            &[(
-                "/p/widget.h",
-                "void g() {\n  int __first = 0;\n  int helper;\n}\nint global_name;\n",
-            )],
-            "/p/main.cpp",
-            source,
-            "min",
-        );
+        let found = names_at(&[(header, declaration)], "/p/main.cpp", source, "min");
 
         let names = offered(&found);
         assert!(
@@ -7215,9 +7484,16 @@ mod tests {
             !names.contains(&"__first".to_string()) && !names.contains(&"helper".to_string()),
             "another file's locals are not names this file can write: {names:?}"
         );
+
+        // **A name that does not begin with what is being typed is not collected**, which is a filter and not a
+        // ranking: `global_name` cannot be completed from `min`, and a client would drop it. So the same question
+        // is asked once more at the **blank** position the feature exists for, which is where the file-scope name
+        // has to appear — asking it at `min` would be asserting two things at once.
+        let at_a_blank = names_at_blank(&[(header, declaration)], "/p/main.cpp", source);
+        let names = offered(&at_a_blank);
         assert!(
             names.contains(&"global_name".to_string()),
-            "…while a file-scope name in the same header is: {names:?}"
+            "…while a file-scope name in the same header is offered where nothing is typed: {names:?}"
         );
     }
 

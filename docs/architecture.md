@@ -2157,6 +2157,65 @@ definition 家族不变(53 解决在本地 + 48 在头文件 / 8 无解),类型 
 (保留名不提供,而局部 `_name` 与成员 `_mine` 仍然提供)、`tests/scopes.rs` 一条(限定名类型的局部)。**反证**:
 把 `Inactive` 改回 `Conditional` → 列表回到 14351 项;把保留名规则关掉 → 601 项回来 ✓。
 
+### 补全重写(本轮):**顺序就是功能**,以及两张语言自己的词表
+
+上一轮把列表从 14351 收到 692,用户的下一条反馈是"**几乎所有东西都补出来了**,大量标准库变量根本不需要",同时
+"代码片段和关键词补全全都没有"。两句话说的是同一件事的两半:**692 项里能用的那部分被埋住了**,而"能用的那部分"
+之外还有一整类东西(list 里根本没有的东西)要给出来。
+
+**根因不是过滤器少了,是列表没有顺序。** 名字查询本身是对的——"把 include 图里可达的每个声明都算可见",这是
+编译器也会做的事——但那是**一个正确的答案**,不是**补全要的答案**。所以这一轮没有再加过滤器,而是加了一层:
+
+```text
+crates/cpp_code_analysis/src/completion/
+  context.rs    光标在写什么:成员 / 限定名 / 名字 / 指令名 / 头文件名 / 什么都不是
+  mod.rs        候选 + 计分 + 预算,以及"哪张词表属于这里"的裁决
+  table.rs      关键词(按形状分类)、代码片段、指令名、不是关键词的内建类型名
+  includes.rs   `#include` 的答案:搜索路径读一次,项目的头按根目录拼
+```
+
+**① 顺序 = 声明离光标在**程序文本**里有多远。** `OfferedName` 上新增 `from: NameProvenance`,由可见性走查顺手
+给出(它已经走过了那张图),四档从近到远:`Scope`(光标所在作用域链,含所在类的成员)→ `ThisFile`(本文件文件
+作用域)→ `DirectInclude`(本文件直接 include 的头)→ `IndirectInclude`(那些头再 include 的)。计分是
+tier + penalty,tier 主导、penalty 只做"值先于类型""变量先于宏"的小微调:
+
+```text
+LOCAL 0     FILE 100     SNIPPET 140     KEYWORD 150     DIRECT_INCLUDE 200     INDIRECT_INCLUDE 300
+```
+
+实测(`examples/completion_probe.rs`,一个真实项目里 1309 行 / 54931 字节的 `.cpp`,include 了 `<string>`):
+函数体内空行处 **200 项**(预算上限),前 8 项是 `attrs, node, get_attributes, get_source_range,
+is_first_expansion, is_implicit, no_tokens, print_node_kind` —— 全是本文件自己的东西,末尾才是
+`remove_extent, remove_pointer, size_t, std`。改之前同一位置是 692 项、前 6 项才是文件自己的。
+
+**② 四张词表,按光标形状给。** 关键词按 `KeywordUse`(Statement / Type / Specifier / Expression / Member)
+分类:`while` 只在可以写语句的地方给,`void` 处处给,`public` 只在类体里给。代码片段是**写形状**而不是拼拼写——
+`if` 给的是 `if (${1:condition}) {\n\t$0\n}`。片段和它写的关键词只出一个(两个同 label 不同效果的 item 是让人
+选错);`return`、`class` 这些关键词因为片段更值得要,所以给片段。
+
+**③ 指令和头文件名。** `#` 后面给指令名,`#inc` 给的是**替换** `inc` 的编辑(否则成了 `#incinclude`);
+`#include` 后面给头文件名,来源两处:include 搜索路径(`-I`/`-isystem`,构建 session 时走一次、有深度与数量
+上限)和**项目自己的头**(按项目根拼,`#include "config/version.h"` 的写法)。`#endif ` 后面**什么都不给**——
+那是一张"不能跟在这里的东西"的列表。
+
+**④ 预算与 `isIncomplete` 分开。** item 上限 200(载荷边界:14351 项曾是 4.5 MB JSON)。协议只有一个
+`isIncomplete`,它同时被用来表示两件相反的事,所以这一层把它们分开:**索引还有活没干** = "边打字边再问"
+(`session.pending() > 0 && !truncated`),**列表被预算截断** = "这就是最好的了,别再问"。
+
+**⑤ 两处成本,量出来的。** 前缀**在借用状态就过滤**(`declarations_in_where` / `visible_declarations_where`),
+而不是收集完再筛:一个文件里能看见 **26 728** 个声明,收完再丢掉 99% 是每一次按键都付的钱。收集也有上限
+(`MAX_COLLECTED_NAMES = 400`,为什么这个数不可达写在它的注释里)。**仍然贵的部分**:在一个 include 了
+`<string>` 的文件里,不走成员也不走限定名的补全**每次 16–17 ms**(release;探针的 warm 读数),其中
+`visible_files` 0.5 ms、`name_position_at` 0.03 ms,其余 15 ms 是"把可见闭包里的声明过一遍"。
+下一步是给那条路径建一张**按名字索引的表**(现在它是 O(可见闭包里的声明数) × 每次按键),而不是继续调常数。
+
+**证据**:`cpp_code_analysis/tests/completion.rs` 十条(四档顺序、打字不重排、关键词/片段在文件名字与头名字
+之间、`#` 的四种位置、`#include` 的替换范围与项目头、注释里为空而注释末尾不是、成员位置只给成员且带继承说明、
+`::` 只给那一个作用域、光标在名字中间时"前缀过滤、整词替换"、预算未触发时不标 truncated)、
+`completion/{context,table,includes}.rs` 单测 24 条、`cpp_ls/tests/handshake.rs` 端到端仍是三条(宏声明的名字、
+成员分派、连发 didChange 后的补全)。**反证**:把 `name_score` 的 provenance 拿掉(全部给 `LOCAL`)→
+"最近的声明在最前"那条红;把 `with_table` 关掉 → 关键词/片段那两条红。
+
 ### M4 —— 文件 CST 降级
 裸树只保留:无损、括号/指令结构、浅层声明扫描。此时它那侧的门禁放宽到"结构正确",不再要求 C++ 正确。
 **验收**:宽容语法里针对展开的谓词清零。
@@ -2195,6 +2254,8 @@ cargo run --release --example types_probe -- <list>
 # **一个真实目录的读数**:发现到的 toolchain、索引了多少文件、`std` 里有多少名字、每个标识符问 definition/type
 # 得到什么、每个 `::` 处补全给几个名字(用户报症状时用的就是这一条)
 cargo run --release --example workspace_probe -- <dir> [<file.cpp>]
+# **补全本身**:每个 `::` / `.` 处给几项、函数体内空行处前 8 项是什么、以及每个偏移的成本(冷/热)
+cargo run --release --example completion_probe -- <dir> [<file.cpp>]
 ```
 
 | 语料 | 档 | 方式 | 现状基线 |
@@ -2301,6 +2362,18 @@ cargo run --release --example workspace_probe -- <dir> [<file.cpp>]
     教训:**词表里区分开的档,消费它的地方也必须分开处理**;合并发生在消费者那一侧时,加能力只会让错答案变大 ✓。
 14. **`:nth` 与 `Break`/`Try` 这类 PowerShell 保留字**在同一条命令里混用会静默改变行为;多行补丁一律用编辑器
     工具而不是字符串替换(见第 10 条末尾的同一个教训)。
+15. **插桩要插在"候选怀疑对象"上,不然量出来的数是别人的时间。** 补全这一轮量那条 16 ms:先量到
+    `visible_files` 0.5 ms、`name_position_at` 0.03 ms,于是把 `visible_declarations` 里里外外插满,读数说它
+    只花 2–6 ms,而外层的 `visible_names` 报 11–16 ms —— 中间那 6–10 ms 从来没被任何一段计时框住,
+    因为**真正的开销在下游**:把收集到的名字克隆进 `OfferedName`、再在建 item 时克隆第二次、再进
+    `HashSet<String>` 去重。真正的结论(需要一张按名字索引的表)是**看数字的形状**得出的,不是看某一段的绝对
+    值。两条可复用的做法:插桩只打印**超过阈值**的那几次(每次 `eprintln!` 都要拿一次 stderr 锁,插在热路径上
+    会把被测量的东西本身变慢 ✗);以及先做一个"把某一段整个拿掉"的对照,再决定要不要优化它 ✓。
+16. **一条"过滤"和一条"排序"的差别,在测试里也是差别。** 前缀过滤那一改落地之后,一条老测试红了:它在一个
+    `min` 前缀的光标上断言 `global_name` 在列表里 ✗。那是**测试把两件事合在一起问**了(名字被收集到了 / 这个
+    名字会被给出来),而正确答案是把它拆成两次提问——`min` 处问"本文件的局部在不在",空光标处问"头文件里的
+    文件作用域名字在不在"。修测试**不是**把断言删掉,也不是把过滤退回去,而是把那条测试**本来要问的问题**
+    问出来 ✓。
 
 ---
 
@@ -2416,14 +2489,21 @@ cargo run --release --example workspace_probe -- <dir> [<file.cpp>]
   三条保留名规则(`__name`/`_Name`/全局 `_name`)不再出现在补全里(601 项),成员列表同样处理。实测:函数体内
   空行 **14351 项 / 4531 KiB → 692 项 / 192 KiB**,`line.` 成员 **202 → 155 项**且前 15 项从 `_ALLOC_MASK` 变成
   `allocator_type`/`append`/`assign`;`std_query` 仍 9/9。见 §6 那一节与 §8 第 13 条。
+- **补全重写(本轮)**:候选之上加了一层 `crates/cpp_code_analysis/src/completion/` —— 光标上下文(成员 / 限定名 /
+  名字 / 指令名 / `#include` / 注释),`NameProvenance` 四档顺序(作用域 → 本文件 → 直接 include → 间接 include),
+  关键词与代码片段两张词表(按形状给),指令名与头文件名(搜索路径 + 项目自己的头),200 项的载荷预算。
+  `isIncomplete` 现在把"索引还有活"和"列表被截断"分开。实测:真实文件函数体内空行 200 项、前 8 项全是本文件
+  自己的名字(改前 692 项、前 6 项才是)。**已知成本**:不走成员/限定名的补全每次 16–17 ms(release),
+  下一步是"按名字索引"而不是调常数。见 §6 那一节与 `examples/completion_probe.rs`。
 - **LSP 的能力表现在是十三项**:诊断(push + pull)、definition、hover、completion、documentSymbol、foldingRange、
   references、rename(含 `prepareRename`)、workspaceSymbol、selectionRange、inlayHint、semanticTokens、signatureHelp ✓。
 
 **下一步(按依赖排序)**(更新到本轮之后):
-1. **补全列表还可以更小**(本轮量到的下一步):692 项里仍有 `FILE`、`HUGE`、`ISA_AVAILABILITY`、`abort`/`abs`/`acos`
-   这一档 —— 它们是**真的可见**(C 头文件里的全局名字 ✓)但几乎不会是用户此刻想写的。要动它需要一条"这个名字
-   在**这个位置**有多大可能"的规则(候选排序那一项),而不是又一条过滤器;先把量放在这里:一个 78 行文件的函数
-   体内空行,可见名 692 个,其中文件自身的名字 **6** 个。
+1. **补全的名字查询要一张按名字索引的表**(本轮量出来的下一个数)。不走成员、不走限定名的补全在一个 include 了
+   `<string>` 的文件里是 **16–17 ms**(release,`examples/completion_probe.rs` 的 warm 读数):`visible_files`
+   0.5 ms、`name_position_at` 0.03 ms,余下 15 ms 全在"把可见闭包里的 **26 728** 个声明过一遍"。前缀过滤与
+   收集上限已经加过(见 §6 那一节),再往下只能换数据结构:一个 key 到那份摘要的倒排(`名字首字母 → (文件, 声明)`)
+   建在 `insert_at` 那一侧,查询就变成"按前缀取候选"而不是"扫全部"。上限本身已经不是问题(200 项),**代价**是问题。
 2. **一个类被声明多次时,基类走查要取"有基类子句的那条声明"**。MSVC 的 `<istream>` 把 `std::basic_istream` 声明
    三次(类 + 两条显式实例化),`bases_of` 要一条 → 歧义 → 空基类表 → **继承来的成员整片消失**
    (`std::cin.eof()` 现在只是回落到名字查询才有个答案)。判据是语言的:只有**定义**有基类子句。

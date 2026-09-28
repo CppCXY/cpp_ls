@@ -317,6 +317,16 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// into the difference between 4.5 s and 12.7 s for 255 files (measured; the census's own note records the same
     /// effect at 40 s). Invalidated **per path** when a file changes, since the keys are offsets in that file.
     definitions: crate::MacroDefinitions,
+    /// **The headers the include search path can name**, read once — what `#include` is completed from.
+    ///
+    /// Built with the session rather than on the first completion, and the reason is the budget rather than the
+    /// cost: this walks the `-I` directories with a depth bound and a file count, so the work is bounded and
+    /// happens once, while doing it lazily would put a filesystem walk on the first keystroke after a `#include`.
+    ///
+    /// Behind a lock because the **project's** half of it grows: [`crate::Session::add_project_files`] re-derives
+    /// that half when a build system hands over more translation units, and a completion may be asked for before,
+    /// during or after. The search-path half never changes after this field is built.
+    headers: crate::SharedHeaders,
 }
 
 impl Session<DiskFiles> {
@@ -541,8 +551,12 @@ impl<F: FileProvider + Clone> Session<F> {
             store = store.with_cache_directory(cache_dir);
         }
 
+        // The search path, read once. Before the struct literal rather than inside it because it borrows `config`,
+        // which the literal moves.
+        let headers = crate::completion::header_index(&config, &root, project.clone());
+
         let mut session = Session {
-            root,
+            root: root.clone(),
             config,
             toolchain,
             discovery,
@@ -551,11 +565,12 @@ impl<F: FileProvider + Clone> Session<F> {
             documents,
             store,
             filter,
-            project,
+            project: project.clone(),
             queue: Work::default(),
             parsed_since_the_last_pass: Vec::new(),
             cooking: Cooking::default(),
             definitions: crate::MacroDefinitions::default(),
+            headers,
         };
 
         // The scan is the queue's **seed**, not a list to consult later: opening a project is the caller saying
@@ -647,6 +662,14 @@ impl<F: FileProvider + Clone> Session<F> {
             }
 
             self.queue.add(path, Priority::Rest, 0);
+        }
+
+        // **The header list sees the new files.** A header of this project is offered in a `#include` completion,
+        // and "which files are the project" is exactly the list that just grew — so the half of the header index
+        // that is derived from it is derived again. The search-path half is *not* re-read: that is a filesystem
+        // walk, and nothing that happened here can have changed it.
+        if added > 0 && let Ok(mut headers) = self.headers.write() {
+            *headers = headers.clone().with_project(self.project.clone());
         }
 
         added
@@ -1477,6 +1500,60 @@ impl<F: FileProvider + Clone> Session<F> {
             &view.path,
             offset,
         )
+    }
+
+    /// **The completion list for a cursor** — the layer that decides *which* question the cursor is asking.
+    ///
+    /// The two queries above answer "what is visible here" and "what does this type have"; this one reads the
+    /// shape at the cursor, picks between them, adds the language's own vocabulary (keywords, snippets, directives,
+    /// headers), and orders the result by how near each declaration is to the reader. See
+    /// [`crate::completion`] for the whole of the reasoning; the short version is that "every name reachable
+    /// through the include graph" is a *correct* answer and a useless one, and the difference is the order.
+    ///
+    /// # The one thing this needs that the session does not already hold
+    ///
+    /// An `#include`'s answer is a **file name**, and nothing in the index or the tree knows one: the index holds
+    /// the files somebody has read, and a reader typing `#include <chro` wants the header that is on the search
+    /// path whether or not any file has included it. So the search path is walked once, when the session is built,
+    /// and the project's own headers are listed from [`Session::project_files`] — see
+    /// [`crate::completion::header_index`].
+    ///
+    /// # `is_incomplete` is the caller's to decide
+    ///
+    /// This returns [`CompletionSet::truncated`](crate::CompletionSet::truncated) — "the budget cut this list" —
+    /// and it is deliberately **not** [`Session::pending`]. The two are different claims and a client reacts to them
+    /// differently: pending work means "ask me again as you type, a name may be missing for the only reason that
+    /// its file has not been read yet", while a capped list means the opposite ("do not ask again, this is the best
+    /// I have"). A caller that merged them would leave a client retrying a list that cannot change.
+    pub fn completions(&self, view: &FileView, offset: usize) -> crate::CompletionSet {
+        // The header index through its lock, and **an empty one on a poisoned lock**: a completion is a suggestion
+        // list, and a thread that panicked while adding project files is no reason to fail the request — the
+        // declarations below are the answer the reader came for.
+        let headers = self
+            .headers
+            .read()
+            .map(|headers| headers.clone())
+            .unwrap_or_default();
+
+        crate::completion::completion_at(
+            self.store.index(),
+            &view.scopes,
+            &view.root,
+            &view.path,
+            offset,
+            &headers,
+        )
+    }
+
+    /// **The headers the search path can name** — what a `#include` is completed from.
+    ///
+    /// A clone rather than a borrow, because the answer is behind a lock that is written when the project's file
+    /// list grows. See [`Session::completions`] for the whole reason.
+    pub fn headers(&self) -> crate::HeaderIndex {
+        self.headers
+            .read()
+            .map(|headers| headers.clone())
+            .unwrap_or_default()
     }
 
     /// **The documentation comment above a declaration** — what a hover shows when a file writes one.

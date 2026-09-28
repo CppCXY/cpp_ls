@@ -878,7 +878,17 @@ fn a_members_members_are_offered_over_the_wire() {
         .iter()
         .find(|item| item["label"] == json!("size"))
         .unwrap_or_else(|| panic!("`Widget` has a `size` member: {answer}"));
-    assert_eq!(size["kind"], json!(6), "a variable, as the index records it: {size}");
+    assert_eq!(
+        size["kind"],
+        json!(5),
+        "a **field** rather than a variable, because it is reached through an object — the completion layer \
+         distinguishes the two positions, and a client draws them with different icons: {size}"
+    );
+    assert_eq!(
+        size["detail"],
+        json!("int"),
+        "and the type the declaration was written with, which is what the item's own line is for: {size}"
+    );
     assert_eq!(
         size["textEdit"]["range"]["start"],
         json!({ "line": 3, "character": 6 }),
