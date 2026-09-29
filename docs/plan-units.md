@@ -1933,7 +1933,7 @@ main.cpp         import mathlib; import geometry;
 ```
 
 用 `target/build_modules.bat` 真编译并**真跑**:`cl /std:c++latest /EHsc /c /interface …` → 链接 →
-输出 `7 7 12`(三个函数的结果都对)。脚本里三条**量出来的**编译器事实,正是 §35 那张表预测的边角:
+输出 `7 12 12`(三个函数的结果都对:`add(3,4)`、`multiply(3,4)`、`area_of(3,4)`)。脚本里三条**量出来的**编译器事实,正是 §35 那张表预测的边角:
 
 ```text
 /interface 单独用**仍然会链接**          → 必须加 /c            (否则 LNK1561)
@@ -2423,7 +2423,7 @@ SUMMARY src/shapes-area.cppm  module Some("shapes")  partition Some("area")  int
 ```text
 import std; 冷读    393–401 个文件,6.0–6.5 s(第一次),547.7 ms(磁盘有 summary),0.004 ms(再问一次)
 模块套件            40 条;库 562 条;集成全绿;clippy 干净
-真编译器验过的      build_modules.bat → 7 7 12;build_header_units.bat → 42;build_partitions.bat → 14 12 16
+真编译器验过的      build_modules.bat → 7 12 12;build_header_units.bat → 42;build_partitions.bat → 14 12 16
 ```
 
 ---
@@ -2530,4 +2530,102 @@ Outer<int>::count = 0     变量(没有 body,另一条路径)
 * 更彻底的一条是给泵的每一步加 panic 边界。**我故意没做**:分析层在 panic 之后的状态没有人定义过
   (队列一致性、store 与 index 的对齐),把 panic 吞掉会让"索引处于未定义状态"变成"看起来正常" ——
   比一个死掉的泵更糟。要做就先定义那句话,再决定吞不吞。
+
+---
+
+## 44. `std::string` 的成员一个也补不出来:**MSVC 的 `<xstring>` 读不出来**
+
+用户接着报:`std::string` 的对象用 `.` 访问,没有成员。**这次不是我今天引进的** —— `git stash` 掉今天全部改动
+之后量同一个文件,数字一模一样。
+
+### 最小复现(不依赖用户的项目)
+
+```text
+target/string_probe/main.cpp
+    #include <string>
+    int main() { std::string s; s. }
+```
+
+```text
+declarations_in("std::basic_string") = 0
+`s.` → 0 item(s), scope "std::string"      ← 对象本身认得出来(`type_at` 答 `std::string`),成员表是空的
+```
+
+### 三层量下去,定位到**渲染后的文本仍然读不出来**
+
+```text
+① <xstring> 的**原文**直接解析      240 756 字节 → 149 个 parse error,只有 2 个 scope、2 条 fact
+                                    (宏这么多文件里,原文读不出来是预期的 —— 吃的是 cook 之后的渲染)
+② cook() 成功                      CookedReading { declarations: 337, diagnostics: 0, mapped: placed 674 }
+                                    但 337 条里 **没有** `basic_string`,scope 分布是 file scope 262 / std 50 / 其它 25
+③ 读**整棵 unit**(154 个文件、499 344 个 token、75 个 error)
+                                    `declarations_in("std::basic_string")` 仍然是 0,`s.` 仍然是 0
+```
+
+②是关键:**`cook` 没有失败,它成功了 —— 而它渲染出来的文本里 `basic_string` 的类体不存在。** 而且
+`cook()` 的 `diagnostics: 0` 说明渲染后的文本本身是"合法"的:它不是读不动,是**没有那个类**。
+
+### 为什么渲染会丢掉那个类:SAL 注解的展开
+
+用逐段前缀解析定位第一个出错的构造,落在 `_Char_traits::find` 的参数上:
+
+```cpp
+_NODISCARD static _CONSTEXPR17 const _Elem* find(
+    _In_reads_(_Count) const _Elem* _First, size_t _Count, const _Elem& _Ch) noexcept /* strengthened */ {
+```
+
+MSVC 的 SAL 注解在 `sal.h` 里是一条**连锁宏**:
+
+```text
+_In_reads_(size)  →  _SAL2_Source_(_In_reads_, (size), …)   →  _SA_annotes3(SAL_name, #Name, "", "2") _GrouP_(…)
+                     _SA_annotes3 有三个分支:空 / __declspec("…") / [SAL_annotes(…)]
+                     _GrouP_ → _GrouP_impl_ → … → _SAL_nop_impl_ → 空
+```
+
+`preprocess/cooked.rs` 里写着"**函数式宏一律展开**、没有参数表的才跳过",SAL 正是函数式宏 —— 也就是说这条
+链**本该**被展开成 `__declspec("SAL_name(...)")` 或空。而实际渲染出来的文本里它**没有展开完**,留下一个标识符
+后面跟括号,解析器于是在这一行断言失败(**"expected ), but get identifier"**),恢复过程从此丢掉了后面的类体。
+
+单独把三个候选形态喂给解析器验证过,三个都**能**读:
+
+```text
+const char* find(_In_reads_(_Count) const char* _First, size_t _Count) noexcept;     0 errors
+const char* find(__declspec("SAL_name(SAL_annotes,)") const char* _First, …);        0 errors
+const char* find([SAL_annotes(Name=SAL_name)] const char* _First, …);                0 errors
+```
+
+**所以问题不在"解析器不认 SAL",而在"这条宏链没有被展开成任何上面三者之一"。** 下一步要量的就是那条链断在
+哪一环(是 `sal.h` 的多分支重定义按最后一条生效、还是链中间某一环没有带参数表而被跳过),这也是 §42 里
+"模板实参内 `::`"那类"渲染与原文的契约"问题的同一个家族。
+
+### 这次我犯的错:**`Remove-Item` 删掉了未提交的 fixture**
+
+清理临时探针时,我顺手把 `crates/cpp_code_analysis/tests/fixtures/` 也删了 —— 而它**从未被提交过**
+(每一轮 `git status` 都显示 `??`),所以 git 里没有、回收站里也没有(git 的 `rm`/PowerShell 的
+`Remove-Item` 都不进回收站)。**13 个 fixture 文件(§36–§40 全部的真编译器语料)被我清掉了。**
+
+能救回来的只有两份:`target/modules/local_math.h`(`build_header_units.bat` 复制过去的)和当时构建出的
+`.ifc`/`.obj`(只是产物)。其余 12 个按本会话的记录逐个重写,并用真编译器重新验证:
+
+```text
+build_modules.bat      → 7 12 12     (main.cpp 里三个函数的结果都对)
+build_header_units.bat → 42
+build_partitions.bat   → 14 12 16
+模块套件               40 条全绿
+```
+
+重写时还发现**原文里记错了一件事**:§36 起一直写 `build_modules.bat` 打印 `7 7 12`,而 `multiply(3, 4)`
+是 12 —— 三处 `7 7 12` 已改成 `7 12 12`。这条数字从来没被复读过,直到文件被删掉、必须重写时才被算了一遍。
+
+**教训(写给下一次)**:`target/` 下的脚本和产物可以随便删,**源码树里未提交的东西不能**。清理之前先看
+`git status` 的 `??` —— 那些是删了就回不来的。这条比 §43 的 panic 更贵,因为它丢的是**证据**,而证据重建
+之后就不再是"当时量到的那个东西"了。
+
+### 登记:下一件该做的事
+
+| 活 | 为什么 | 起手式 |
+| --- | --- | --- |
+| **SAL 宏链的展开** | `std::string`/`std::vector`/所有 STL 类的成员补全都靠它;这是用户能看见的最大缺口 | 打印 `cook` 出来的渲染文本,搜 `_In_reads_`;对比 `sal.h` 的三条 `_SA_annotes3` 分支哪一条在 `__cplusplus`/`_MSC_VER` 下生效,以及链中间哪一环没被展开 |
+| **把 fixture 提交** | 它们已经是 40 条测试和三个 `build_*.bat` 的依据,却一直是未跟踪状态 | `git add crates/cpp_code_analysis/tests/fixtures` —— 下次再有人清理临时文件,它们不会消失 |
+| **渲染与原文的契约** | ②里 `diagnostics: 0` 而类体不见了,说明"渲染成功"不等于"渲染对了";这类丢失现在没有任何检查会发现 | 一个"渲染后文本必须包含源文件里每个类名"的自检(至少对 `_EXPORT_STD` 这类宏包裹的声明) |
 
