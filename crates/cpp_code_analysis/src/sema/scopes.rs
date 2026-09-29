@@ -1029,10 +1029,11 @@ impl ScopeWalker<'_> {
         }
 
         // The qualifier, read by the reader that will bind the declaration — one implementation, so that "is this
-        // ours" and "where does it go" cannot come to disagree.
+        // ours" and "where does it go" cannot come to disagree. `None` when what follows the separator is not an
+        // identifier, and then this reading does not apply: the declaration is read by the ordinary path.
         qualified_specifier_name_node(node)
-            .map(|name| qualified_name_along(name).0)
-            .is_some_and(|qualifier| self.scope_of_a_qualifier(&qualifier).is_some())
+            .and_then(qualified_name)
+            .is_some_and(|(qualifier, _)| self.scope_of_a_qualifier(&qualifier).is_some())
     }
 
     /// **The scope a `::`-qualified declaration's qualifier names**, or `None` when this file has not built one.
@@ -1991,11 +1992,15 @@ fn qualified_declarator_name(
 ) -> Option<(String, (Name, cpp_parser::SourceRange))> {
     let node = name_node_along_declarator(declarator)?;
 
-    if !is_qualified(&node) {
-        return None;
+    // Everything up to the final `::` is the qualifier, and what follows it is the name — which is `None` when it
+    // is a destructor, an operator or a conversion function. Those are declarations whose name `classify` cannot
+    // spell this way, and the honest answer is that this reading does not apply to them rather than a panic: see
+    // [`qualified_name`], whose first version took the indexing thread down on a real project.
+    if is_qualified(&node) {
+        return qualified_name(node);
     }
 
-    Some(qualified_name_along(node))
+    None
 }
 
 /// **The same, for the other place the grammar puts a qualified name** — the specifier sequence.
@@ -2019,7 +2024,7 @@ fn qualified_specifier_name(
         .ancestors()
         .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration)?;
 
-    Some(qualified_name_along(qualified_specifier_name_node(&declaration)?))
+    qualified_name(qualified_specifier_name_node(&declaration)?)
 }
 
 /// **The name node of a declaration whose name the grammar put in the specifier sequence.**
@@ -2047,64 +2052,127 @@ fn qualified_specifier_name_node(declaration: &CppSyntaxNode) -> Option<CppSynta
     })
 }
 
-/// One `::`-qualified name node, as everything before the name and the name itself.
+/// One `::`-qualified name node, as everything before the name and the name itself — `None` when what follows the
+/// last separator is not a plain identifier (a destructor, an operator, a conversion function), which the caller
+/// reads by other means.
 ///
-/// The name is the **last segment**, and the qualifier is everything before it: `Outer<int>::Inner::grow` is `grow`
-/// in `Outer<int>::Inner`.
+/// # Why the *segments* of the tree, and not the name node's own tokens
 ///
-/// # Why the tokens, and not the text
+/// A name node's direct tokens are not its text. `Outer<T>::grow` holds `<`, `T` and `>` in a **child node**, so a
+/// reader that walks `children_with_tokens` sees no angle brackets at all, counts a depth of zero everywhere, and
+/// believes the `::` inside `<A::B>` is a separator. Measured on a real project, that ended in
+/// `last_identifier(..).expect(..)`: no direct identifier token either, and the **indexing thread panicked** —
+/// which the user saw as a status bar that never stopped spinning, because the pump never reached the end of its
+/// work.
 ///
-/// Two things have to be told apart that a character walk gets wrong. A separator inside a **template argument
-/// list** is not a separator between segments (`Box<A::B>::grow` names `grow` in `Box<A::B>`), so the angle brackets
-/// have to be tracked; and the qualifier is compared against the names scopes record, which are spelled without
-/// whitespace or comments (`Outer::\n    Inner` is the scope `Outer::Inner`). Tokens answer both — the depth is
-/// counted over their text, and trivia is dropped by kind rather than by being trimmed from a substring.
-///
-/// The name token is the **last identifier** of the node rather than the text after the final separator, because
-/// C++ writes three things there that are not a bare identifier and all three have to come back as what they are:
-/// `Widget::~Widget` is a destructor, `Widget::operator+` an operator, and only [`name_from_text`] — which sees the
-/// `~` and the `operator` keyword in the node — can tell either from a plain name.
-fn qualified_name_along(node: CppSyntaxNode) -> (String, (Name, cpp_parser::SourceRange)) {
-    let tokens: Vec<cpp_parser::CppSyntaxToken> = node
-        .children_with_tokens()
-        .filter_map(|child| child.into_token())
-        .collect();
+/// So the text is assembled from the **leaves** of the subtree (every token of every descendant), which is the
+/// node's text by definition, with trivia dropped as it goes. The qualifier is then everything before the last `::`
+/// that is outside every `<…>`.
+fn qualified_name(node: CppSyntaxNode) -> Option<(String, (Name, cpp_parser::SourceRange))> {
+    /// The subtree's text, with trivia dropped, as characters — and for each one the token it came from.
+    struct Spelled {
+        characters: Vec<char>,
+        /// `(the token, how many characters of it came before this one)`.
+        origins: Vec<(cpp_parser::CppSyntaxToken, usize)>,
+    }
 
-    // The last separator outside every `<…>`, as a position in the token list.
-    let mut depth = 0usize;
-    let mut last_separator = None;
+    fn spell(node: &CppSyntaxNode, into: &mut Spelled) {
+        for child in node.children_with_tokens() {
+            if let Some(token) = child.clone().into_token() {
+                let kind = CppTokenKind::from(token.kind());
 
-    for (at, token) in tokens.iter().enumerate() {
-        for character in token.text().chars() {
-            match character {
-                '<' => depth += 1,
-                '>' => depth = depth.saturating_sub(1),
-                _ => {}
+                if matches!(
+                    kind,
+                    CppTokenKind::Whitespace
+                        | CppTokenKind::LineComment
+                        | CppTokenKind::BlockComment
+                ) {
+                    continue;
+                }
+
+                for (at, character) in token.text().chars().enumerate() {
+                    into.characters.push(character);
+                    into.origins.push((token.clone(), at));
+                }
+
+                continue;
             }
-        }
 
-        if depth == 0 && CppTokenKind::from(token.kind()) == CppTokenKind::Scope {
-            last_separator = Some(at);
+            if let Some(child) = child.into_node() {
+                spell(&child, into);
+            }
         }
     }
 
-    let qualifier = tokens[..last_separator.unwrap_or(0)]
-        .iter()
-        .filter(|token| {
-            !matches!(
-                CppTokenKind::from(token.kind()),
-                CppTokenKind::Whitespace
-                    | CppTokenKind::LineComment
-                    | CppTokenKind::BlockComment
-            )
-        })
-        .map(|token| token.text().to_string())
-        .collect::<String>();
+    let mut spelled = Spelled {
+        characters: Vec::new(),
+        origins: Vec::new(),
+    };
+    spell(&node, &mut spelled);
 
-    let token = last_identifier(&node).expect("a qualified name has at least one identifier");
-    let name = name_from_text(token.text(), &node).expect("an identifier names something");
+    // The last `::` outside every `<…>`. The characters come from tokens rather than from `node.text()`, so a `::`
+    // written in a comment is not here to be counted.
+    let mut depth = 0usize;
+    let mut last_separator = None;
+    let mut at = 0usize;
 
-    (qualifier, (name, cpp_parser::source_range(token.text_range())))
+    while at < spelled.characters.len() {
+        match spelled.characters[at] {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            ':' if depth == 0 && spelled.characters.get(at + 1) == Some(&':') => {
+                last_separator = Some(at);
+                at += 1;
+            }
+            _ => {}
+        }
+
+        at += 1;
+    }
+
+    let last_separator = last_separator?;
+    let after_the_separator = last_separator + 2;
+
+    let qualifier: String = spelled.characters[..last_separator].iter().collect();
+    let written: String = spelled.characters[after_the_separator..].iter().collect();
+
+    // **A destructor, an operator and a conversion function are not identifiers** (`~Widget`, `operator+`,
+    // `operator bool`), and this is what tells them apart: what follows the separator has to be one identifier and
+    // nothing else. The same answer `last_identifier` used to give, without needing a token that may not be there.
+    let name = match written.chars().next() {
+        Some(first) if is_identifier_start(first) => &written[first.len_utf8()..],
+        _ => return None,
+    };
+
+    if !name.chars().all(is_identifier_character) || name.is_empty() {
+        return None;
+    }
+
+    // The name is one token by construction, so its range is that token's — taken from the first character after
+    // the separator.
+    let (token, offset_in_it) = spelled.origins.get(after_the_separator)?;
+    let starts_at = usize::from(token.text_range().start()) + offset_in_it;
+
+    Some((
+        qualifier,
+        (
+            Name::identifier(written.clone()),
+            cpp_parser::SourceRange::new(starts_at, written.len()),
+        ),
+    ))
+}
+
+/// C++'s rule for the first character of an identifier, near enough: a letter or an underscore.
+///
+/// `$` is accepted by some compilers and is deliberately not here — this decides whether a *name* follows a `::`,
+/// and everything it rejects (`~`, `operator`, a digit) is something this reading has already decided not to
+/// handle rather than something it would get wrong.
+fn is_identifier_start(character: char) -> bool {
+    character.is_alphabetic() || character == '_'
+}
+
+fn is_identifier_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
 }
 
 /// Is this name written with a qualifier?
@@ -2115,6 +2183,9 @@ fn is_qualified(node: &CppSyntaxNode) -> bool {
 }
 
 /// The last identifier token in a node, which is the entity a qualified name ends with.
+///
+/// **The name node's own tokens only**, so it answers `None` for a name whose segments are child nodes
+/// (`Outer<T>::grow`) — see [`qualified_name`], which reads the subtree instead and says why.
 fn last_identifier(node: &CppSyntaxNode) -> Option<cpp_parser::CppSyntaxToken> {
     node.children_with_tokens()
         .filter_map(|child| child.into_token())

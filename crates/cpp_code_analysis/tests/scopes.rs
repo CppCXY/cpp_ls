@@ -1066,6 +1066,68 @@ fn a_friend_declaration_binds_nothing() {
     );
 }
 
+/// **A qualified name whose segments are separate nodes does not take the indexing thread down.**
+///
+/// `Outer<T>::grow` writes `<`, `T` and `>` in a **child node** of the name, so a reader that walks the name node's
+/// own tokens sees no angle brackets at all, counts a depth of zero everywhere, and believes the `::` inside
+/// `<A::B>` is a separator. That reader ended in `last_identifier(..).expect(..)` — no direct identifier token
+/// either — and **panicked**, on a real project, inside the background indexing thread.
+///
+/// What the user saw was not an error message: a status bar that never stopped spinning (the pump never reached the
+/// end of its work) and a completion list with nothing in it (a client that is told `isIncomplete` filters what it
+/// has). Both of those are the same panic, and the corpus below is what the compiler's own headers are made of.
+#[test]
+fn a_qualified_name_with_nested_segments_is_read_without_panicking() {
+    let table = scopes(
+        "\
+template <class T> struct Outer { struct Inner { void grow(); }; };
+template <class T> void Outer<T>::Inner::grow() {}
+template <class T> void Outer<T>::grow() {}
+template <class T> void Outer<A::B>::grow() {}
+void Outer<Box<int>>::grow() {}
+void Outer<int>::grow(Outer<int>::Inner* p) {}
+int Outer<int>::count = 0;
+",
+    );
+
+    // The name is the last segment and the class is where the qualifier points — `grow` in `Outer::Inner` for the
+    // first line, `grow` in `Outer` for the rest.
+    let named = |wanted: &str| -> Vec<String> {
+        (0..table.scopes().len())
+            .filter(|index| {
+                table
+                    .qualified_name_of(cpp_code_analysis::ScopeId(*index))
+                    .as_deref()
+                    == Some(wanted)
+            })
+            .flat_map(|index| {
+                table
+                    .scope(cpp_code_analysis::ScopeId(index))
+                    .map(|scope| {
+                        scope
+                            .bindings
+                            .iter()
+                            .map(|binding| binding.name.text())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect()
+    };
+
+    let in_class = named("Outer");
+    let in_inner = named("Outer::Inner");
+
+    assert!(
+        in_class.contains(&"grow".to_string()) && in_class.contains(&"count".to_string()),
+        "the members written through a template argument are members of the class: {in_class:?}"
+    );
+    assert!(
+        in_inner.contains(&"grow".to_string()),
+        "and the nested one is in the nested class: {in_inner:?}"
+    );
+}
+
 /// A `static_assert` declares nothing, and does not stop the declarations around it.
 #[test]
 fn a_static_assert_declares_nothing() {
@@ -1830,3 +1892,4 @@ fn a_local_declared_with_a_qualified_type_is_bound() {
         "and so is the next one: {body}"
     );
 }
+

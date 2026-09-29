@@ -175,6 +175,50 @@ fn main() {
     }
 
     // ---------------------------------------------------------------------------------------------
+    // **The keystroke that was reported as "`std` is gone"**: a prefix typed inside a scope, which is what a completion
+    // is actually asked about — a reader does not type `std::` and stop, they type `std::str` and look.
+    //
+    // The list is capped (`ITEM_BUDGET`), and the cap is applied *after* the names are ranked — so the question this
+    // section answers is whether the ranking can push a match out of the answer. It is asked on a buffer of its own,
+    // because the text has to contain the half-typed name for the query to see it.
+    // ---------------------------------------------------------------------------------------------
+    println!("\n--- completion with a prefix typed ---");
+    let typed = format!("#include <format>\n{on_disk}\nvoid probe_typed() {{\n    std::str\n}}\n");
+    let mut prefixed = Session::open(
+        root.clone(),
+        SessionFiles::new(OpenDocuments::new(), DiskFiles),
+        WatchFilter::new(&root),
+    );
+    prefixed.did_open(&file, &typed);
+    prefixed.index_everything();
+
+    if let Some(view) = prefixed.view(&file)
+        && let Some(offset) = typed.find("std::str").map(|at| at + "std::str".len())
+    {
+        let found = prefixed.completions(&view, offset);
+        let labels: Vec<&str> = found.items.iter().map(|item| item.label.as_str()).collect();
+        println!(
+            "std::str      scope {:?} prefix {:?} | {} item(s), truncated {}",
+            found.scope,
+            found.prefix,
+            found.items.len(),
+            found.truncated
+        );
+        for name in ["string", "string_view", "stoul", "strlen"] {
+            println!(
+                "      {name:<14} {}",
+                if labels.contains(&name) {
+                    "offered"
+                } else {
+                    "**NOT OFFERED**"
+                }
+            );
+        }
+        let sample: Vec<&str> = labels.iter().take(10).copied().collect();
+        println!("      first: {sample:?}");
+    }
+
+    // ---------------------------------------------------------------------------------------------
     // Hover: the type at the cursor. `auto y = x.back()` is the case the user named, and `back` itself is the case
     // where the answer is a *spelling* — what the library wrote, macros and all.
     // ---------------------------------------------------------------------------------------------

@@ -2426,3 +2426,108 @@ import std; 冷读    393–401 个文件,6.0–6.5 s(第一次),547.7 ms(磁盘
 真编译器验过的      build_modules.bat → 7 7 12;build_header_units.bat → 42;build_partitions.bat → 14 12 16
 ```
 
+---
+
+## 43. 用户报的两个症状是**同一次 panic**:进度条一直转 + `std` 补全"消失"
+
+用户在真的编辑器里看到两件事,并说"应该都是语义分析全面错了"。量下去发现:**不是两个缺陷,是一个**,
+而且是我今天 §39 引进的。
+
+### 症状 → 一个根因
+
+```text
+进度条一直转          pump 循环的条件是 pending_work() > 0,而它永远不为 0
+补全里 std 什么都没有   客户端被告知 isIncomplete,它就把已有结果过滤/丢弃
+```
+
+而 `pending_work()` 不为 0 的原因:用户在项目的 `workspace_probe` 上跑一下,直接拿到
+
+```text
+thread 'cppls-index' panicked at src/sema/scopes.rs:2104:
+a qualified name has at least one identifier
+```
+
+**索引线程当场死了。** 它平时看不见,是因为它跑在一个 detach 的 tokio 任务里:panic 只打到 stderr,
+LSP 连接仍然活着、请求仍然有回答(回答的是半成品),于是界面上只剩一个转不完的圈。
+
+### 为什么是我今天的代码:一个"看起来对"的 token 假设
+
+§39 我写 `qualified_name_along` 时假设"名字节点的 `::` 是它的**直接** token"。对 `Widget::grow` 成立,
+对 `Outer<T>::grow` **不成立** —— `<`、`T`、`>` 在一个**子节点**里,于是:
+
+```text
+1. 深度计数看不到尖括号 → 永远 0 → `<A::B>` 里的 `::` 被当成段分隔符
+2. `last_identifier()`(只扫直接 token)对它也返回 None
+3. 那一行写的是 .expect("a qualified name has at least one identifier")  →  panic
+```
+
+而 `Outer<T>::grow` 这种写法在 MSVC 的 STL 头里**到处都是** —— 这也解释了为什么只有用户的项目炸、
+我的 fixture 不炸:fixture 里最长的是 `Box<int>::grow`,而 `Box<int>` 的 `<int>` **恰好是直接的**
+`TemplateArgumentList` token……不,更准确地说:fixture 规模小、命中概率低。**这是"我的测试语料不够真"
+的又一个实例**,和 §37 那次"探针把 `Ambiguous` 显示成 `None`"同类,只是这次代价落在用户身上。
+
+### 修法:**读整棵子树的叶子,而不是直接 token**;并且**不许 panic**
+
+```text
+qualified_name(node) -> Option<..>     整棵子树的 token(按定义就是节点文本),边收集边丢 trivia
+   ├ 在"字符 + 每个字符来自哪个 token"上读:最后一个深度 0 的 `::` 才是分隔符(注释里的 `::` 不在其中,因为 trivia 已丢)
+   ├ 限定符 = 分隔符之前
+   └ 名字   = 分隔符之后,必须是**一个标识符**;否则返回 None(析构/operator/转换函数走别的路)
+```
+
+**返回值从"元组"改成 `Option`**,`is_qualified` 为真但名字不是标识符时返回 `None` 而不是崩 —— 这是这条
+路上唯一的 `.expect`。顺手查了 `sema/`、`index/`、`completion/` 三个目录非测试代码里剩下的 panic 点:
+只剩三条,两条是"刚 peek 过"、一条是锁中毒,都是**真不可能**而不是**碰巧没发生**。
+
+### 读数
+
+```text
+用户的项目(138 个文件)          workspace_probe 跑完,不再 panic
+pending                          indexed 138 files in 1.45 s | pending 0        ← 进度条会停
+std::str 打进去                   8 item(s),truncated false
+                                 string / string_view 都在;first = [streambuf, streamoff, streampos, …]
+```
+
+最后那一行是**新加进 `editor_probe` 的一节**:用户报的是"打了一半的前缀",而原来的探针只问 `std::`
+(空前缀)。**报告里的形状要照着复现,不能照着猜。**
+
+### 回归测试
+
+`tests/scopes.rs::a_qualified_name_with_nested_segments_is_read_without_panicking` —— 语料就是真头的形状:
+
+```text
+Outer<T>::Inner::grow     嵌套类 + 模板实参
+Outer<T>::grow            模板实参
+Outer<A::B>::grow         实参里还有 `::`      ← 直接 token 假设在这里最危险
+Outer<Box<int>>::grow     实参里有嵌套模板
+Outer<int>::count = 0     变量(没有 body,另一条路径)
+```
+
+断言名字落在正确的类里(`Outer` / `Outer::Inner`),而不是只断言"没崩" —— 一个返回空表的实现也能不崩。
+
+### 顺带:把修好的服务器装到用户的编辑器里
+
+用户跑的**不是** `target/release/cpp_ls.exe`,而是扩展目录里的一份**拷贝**
+(`~/.vscode/extensions/cppcxy.cppls-0.0.1/server/cpp_ls.exe`,9 月 28 日的构建)。所以源码修好 ≠ 用户看到修好:
+
+```text
+1. cargo build --release -p cpp_ls
+2. copy target/release/cpp_ls.exe → E:\vscode-cppls\server\cpp_ls.exe   (扩展源码在 E:\vscode-cppls)
+3. npx vsce package --no-dependencies --out cppls.vsix
+4. code --install-extension cppls.vsix --force
+5. 校验:安装后的 exe 与 target/release 的 SHA256 相同,cpp_ls --version 退出 0
+```
+
+**这一步以前没有写在任何地方** —— 上面这段就是它现在的位置。装完必须**重载 VS Code 窗口**:已经跑着的
+服务器进程是旧二进制,而且它启动时读过的索引还是坏的。
+
+### 登记:下一件该做的事是**让泵的死亡看得见**
+
+这次是两小时的排查,只因为"一个后台任务死了"在界面上表现为"一直在忙"。没有做的那一半:
+
+* 泵**检测到不前进**时(连续 N 轮 `pending_work()` 不变),应当 `finish_progress_task` 并把数字写进日志,
+  这样用户看到的是"加载完了,但有 N 个文件没读"而不是一个永动的圈;
+* 更彻底的一条是给泵的每一步加 panic 边界。**我故意没做**:分析层在 panic 之后的状态没有人定义过
+  (队列一致性、store 与 index 的对齐),把 panic 吞掉会让"索引处于未定义状态"变成"看起来正常" ——
+  比一个死掉的泵更糟。要做就先定义那句话,再决定吞不吞。
+
