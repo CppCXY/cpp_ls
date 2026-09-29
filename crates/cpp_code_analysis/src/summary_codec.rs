@@ -454,6 +454,35 @@ pub fn decode_translation_unit(
         closure,
     ))
 }
+/// Could **this binary** serve the summary whose first bytes are `header`? — the question a cache sweep asks of a
+/// file it will not otherwise read.
+///
+/// The header is the magic, the two version numbers, and the key; a file written by another decoder, another
+/// producer or another reader (`READING_FINGERPRINT`) can never be served, because the key it would be looked up
+/// under is computed from the same numbers and cannot equal it. Such a file is not a stale answer waiting to be
+/// caught — it is unreachable, which is the definition of garbage.
+pub fn is_servable(header: &[u8]) -> bool {
+    let mut reader = Reader::new(header);
+
+    let Ok(magic) = reader.take(MAGIC.len()) else {
+        return false;
+    };
+    if magic != MAGIC {
+        return false;
+    }
+
+    matches!(
+        (reader.u32(), reader.u32(), reader.u64(), reader.u64(), reader.u64()),
+        (Ok(codec), Ok(format), Ok(_), Ok(_), Ok(fingerprint))
+            if codec == CODEC_VERSION
+                && format == crate::FORMAT_VERSION
+                && fingerprint == crate::READING_FINGERPRINT
+    )
+}
+
+/// How many bytes at the start of a summary file [`is_servable`] needs.
+pub const HEADER_LENGTH: usize = 8 + 4 + 4 + 8 + 8 + 8;
+
 pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
     let mut reader = Reader::new(bytes);
 

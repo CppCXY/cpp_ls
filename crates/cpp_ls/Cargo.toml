@@ -10,7 +10,7 @@ cpp_code_analysis.workspace = true
 
 # The protocol. `lsp-server` is the transport-and-framing half (stdio/TCP, JSON-RPC, the initialize
 # handshake); `lsp_types` is the emmy fork of the generated types, which is what the inherited handlers
-# are written against — see `docs/ls-architecture.md` §1.
+# are written against.
 lsp-server.workspace = true
 lsp_types.workspace = true
 serde.workspace = true

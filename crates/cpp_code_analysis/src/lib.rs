@@ -66,7 +66,8 @@ pub mod summary_codec;
 // * `project`  — what the project says about itself: `.cppls.toml`, the build system, the toolchain
 // * `sema`     — names, scopes, the index's declaration facts, and C++20 modules
 pub use cache::{
-    CACHE_DIRECTORY, FORMAT_VERSION, READING_FINGERPRINT, SummaryKey, content_hash, fnv1a64,
+    CACHE_BUDGET_BYTES, CACHE_DIRECTORY, FORMAT_VERSION, PruneReport, READING_FINGERPRINT, SummaryKey,
+    content_hash, fnv1a64, prune,
 };
 // The *completion* layer is the one place where the answer to a cursor is assembled rather than queried: the two
 // name queries below it answer "what is visible" and "what does this type have", and this decides which of those

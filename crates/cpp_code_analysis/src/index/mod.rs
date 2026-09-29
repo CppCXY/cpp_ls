@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 use cpp_parser::{CppParser, CppSyntaxTree, ParserConfig};
 
 pub mod environment;
+mod names;
 pub mod project;
 pub mod references;
 pub mod store;

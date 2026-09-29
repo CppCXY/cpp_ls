@@ -322,6 +322,12 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// Cleared wherever [Session::units] is: a unit read is a reading of the same timeline, so anything that
     /// moves inside it makes this list a claim about a reading that no longer describes its closure.
     units_read: std::collections::HashSet<String>,
+    /// **What each edited file's directives said the last time it changed**, by the path the queue keys on.
+    ///
+    /// The comparison an edit is judged by: an edit that leaves a file's directives where and what they were cannot
+    /// have changed the environment any file reads it in, or the timeline of any unit it is part of — so it drops
+    /// neither. See [`crate::preprocess::directive::DirectiveSignature`].
+    directive_signatures: std::collections::HashMap<String, crate::preprocess::directive::DirectiveSignature>,
     /// **The translation unit each cooked file was read in**, kept across cooks.
     ///
     /// The one-walk timeline ([`crate::TranslationUnit`]) is what makes a *file's* environment a position in a walk
@@ -333,7 +339,10 @@ pub struct Session<F: FileProvider = DiskFiles> {
     ///
     /// Cleared whole by any change: a unit is a reading of its closure, and the shortest correct invalidation is
     /// "nothing in it may have moved".
-    units: std::collections::HashMap<String, std::sync::Arc<crate::TranslationUnit>>,
+    ///
+    /// **Bounded** ([`MAX_UNITS`]): a unit holds a whole closure's timeline, and a project with a thousand sources
+    /// would otherwise keep one per source it was ever asked about.
+    units: UnitTable,
     /// **The headers the include search path can name**, read once — what `#include` is completed from.
     ///
     /// Built with the session rather than on the first completion, and the reason is the budget rather than the
@@ -455,14 +464,16 @@ impl Session<DiskFiles> {
             None => config,
         };
 
-        Session::assemble(
+        let session = Session::assemble(
             root,
             files,
             filter,
             config,
             toolchain,
             discovery,
-        )
+        );
+        session.sweep_the_cache_in_the_background();
+        session
     }
 }
 
@@ -587,8 +598,9 @@ impl<F: FileProvider + Clone> Session<F> {
             parsed_since_the_last_pass: Vec::new(),
             cooking: Cooking::default(),
             definitions: crate::MacroDefinitions::default(),
-            units: std::collections::HashMap::new(),
+            units: UnitTable::default(),
             units_read: std::collections::HashSet::new(),
+            directive_signatures: std::collections::HashMap::new(),
             headers,
         };
 
@@ -698,6 +710,23 @@ impl<F: FileProvider + Clone> Session<F> {
     // What changed
     // ---------------------------------------------------------------------------------------------
 
+    /// **Sweep the summary cache on a thread of its own**, once, when a project is opened.
+    ///
+    /// What it removes is only what could never be served again — see [`crate::cache::prune`] — so it changes no
+    /// answer and needs nothing from the session but the directory's name. It is the product path only
+    /// ([`Session::open`]), not [`Session::with_config`]: a test that counts the files in a cache directory does
+    /// not want a second party deleting them, and a session over a provider that is not the disk has no directory
+    /// to sweep. The thread is detached and its result unread: a sweep that fails has left a cache that is larger
+    /// than it should be, which is where it started.
+    fn sweep_the_cache_in_the_background(&self) {
+        let cache = self.store.cache_directory().to_path_buf();
+        let _ = std::thread::Builder::new()
+            .name("cppls-cache-sweep".to_string())
+            .spawn(move || {
+                crate::cache::prune(&cache, crate::cache::CACHE_BUDGET_BYTES);
+            });
+    }
+
     /// The client opened a document, or said what its buffer now contains.
     ///
     /// The buffer becomes the text for that path, the summary built from the *old* text is dropped, and the file
@@ -750,6 +779,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // knows any more, and a view built on it would answer about an edit nobody saved.
         self.vfs.close(path);
         self.store.forget(path);
+        self.directive_signatures.remove(&queue_key(path));
         self.units.clear();
         self.units_read.clear();
         self.queue.again(path.to_path_buf(), Priority::Rest, 0);
@@ -778,16 +808,25 @@ impl<F: FileProvider + Clone> Session<F> {
         // event as an edit as far as a dependent's reading is concerned, and the reverse walk needs the edges and the
         // macro facts that are still there.
         for (path, _) in batch.changed() {
-            self.invalidate_dependents(path);
+            // What the file says **now**: the buffer if one is open, the disk otherwise, and nothing when it is gone.
+            let text = self.files.read(path);
+            let moved = self.directives_moved(path, text.as_deref());
+
+            if moved.environment {
+                self.invalidate_dependents(path);
+            }
             // …and the definitions this session read **out of** that file: their keys are offsets in it, so an edit
             // that moved them would leave entries a later fact could reach and never wrote.
             self.definitions.forget(path);
-            // …and the **translation units**: a unit is a reading of its whole closure, so a file that changed
-            // anywhere in it makes every unit built over it a reading of text that is no longer there. Cleared
-            // whole, for the reason `Session::translation_unit_of` gives: the honest short answer to "did something
-            // inside it move" is "assume so", and the disk entry checks file by file when it is asked again.
-            self.units.clear();
-        self.units_read.clear();
+            // …and the **translation units**: a unit is a reading of its whole closure, so a file whose *directives*
+            // moved anywhere in it makes every unit built over it a reading of a timeline that is no longer there.
+            // Cleared whole, for the reason `Session::translation_unit_of` gives: the honest short answer to "did
+            // something inside it move" is "assume so", and the disk entry checks file by file when it is asked
+            // again. A change that left every directive where it was leaves the timeline as it was.
+            if moved.layout {
+                self.units.clear();
+                self.units_read.clear();
+            }
         }
 
         let response = self.store.respond(batch);
@@ -828,25 +867,66 @@ impl<F: FileProvider + Clone> Session<F> {
     /// anything can ask a question about the file — and the summary is dropped with it, because the old one
     /// describes text that no longer exists.
     fn buffer_changed(&mut self, path: &Path, text: &str) {
+        // **Judged before the old text is replaced**: the first edit of a file has no signature on record, and the
+        // text the VFS is holding is what it said until this moment.
+        if !self.directive_signatures.contains_key(&queue_key(path))
+            && let Some(held) = self.vfs.held(path) {
+                let before = crate::preprocess::directive::directive_signature(&held.text);
+                self.directive_signatures.insert(queue_key(path), before);
+            }
+        let moved = self.directives_moved(path, Some(text));
+
         self.documents.open(path, text);
         self.vfs.insert(path, text, true);
 
         // **Who read what this file used to say**, asked while it still says it: `forget` below takes the summary
         // with it, and the answer is "every file that includes this one, at any depth" — see
-        // [`Session::invalidate_dependents`].
-        self.invalidate_dependents(path);
+        // [`Session::invalidate_dependents`]. Only when the file's directives changed: a file that says the same
+        // things to its includers says them to the same readings.
+        if moved.environment {
+            self.invalidate_dependents(path);
+        }
 
         // Drops the summary **and the cooked reading**: what this file was read *as* is no longer what it is, and a
         // declaration whose range points into the text the user just replaced is a wrong answer rather than a
         // missing one. The reading is rebuilt when the queue drains — see [`Session::cooking`].
         self.store.forget(path);
         self.definitions.forget(path);
-        // The **translation units** too: every one of them was a walk over a closure that contains this file.
-        self.units.clear();
-        self.units_read.clear();
+        // The **translation units** too — every one of them was a walk over a closure that contains this file — but
+        // only when a directive moved: a unit is a timeline of directives, so an edit that leaves every one of them
+        // where and what it was (typing in a function body, which is nearly every keystroke) leaves it as it was. This
+        // is the rule the "no incremental AST" designs use for their preamble: the part above the first thing that
+        // can change the environment is reused, and the part below is re-read.
+        if moved.layout {
+            self.units.clear();
+            self.units_read.clear();
+        }
         self.cooking.want(path);
 
         self.queue.again(path.to_path_buf(), Priority::Open, 0);
+    }
+
+    /// **Did this text move any directive of the file?** — the two comparisons an edit is judged by, and the record
+    /// the next one is judged against.
+    ///
+    /// `None` for the text is a file that is gone, and it moved everything. A file with no signature on record has
+    /// never been compared, so it is assumed to have moved: the conservative answer, which is one re-read.
+    fn directives_moved(&mut self, path: &Path, text: Option<&str>) -> DirectivesMoved {
+        let key = queue_key(path);
+
+        let Some(text) = text else {
+            self.directive_signatures.remove(&key);
+            return DirectivesMoved { environment: true, layout: true };
+        };
+
+        let now = crate::preprocess::directive::directive_signature(text);
+        match self.directive_signatures.insert(key, now) {
+            Some(before) => DirectivesMoved {
+                environment: before.environment != now.environment,
+                layout: before.layout != now.layout,
+            },
+            None => DirectivesMoved { environment: true, layout: true },
+        }
     }
 
     /// **Drop the cooked readings a change to `path` invalidates, and want them built again.**
@@ -864,26 +944,19 @@ impl<F: FileProvider + Clone> Session<F> {
     /// is the same rule as before: between the change and the next drain, "not found" is honest, while a declaration
     /// whose range describes text that is no longer there is not.
     ///
-    /// # Why a file that defines no macros changes nothing
+    /// # When it is called
     ///
-    /// The environment *is* macros, so a file that defines none cannot change what any other file expands to, and
-    /// the reverse walk is skipped for it. That is what keeps the common case cheap: editing a source file invalidates
-    /// nothing at all (nothing includes it), while editing a header reaches whatever includes it. The gate is on the
-    /// **names** the file defines and not on their bodies — a `#define` that kept its name and changed its text does
-    /// change the reading, and a summary cannot tell the two apart without reading the text again. Conservative in
-    /// the safe direction: the cost of being wrong is one re-cook, and the cost of being wrong the other way is a
-    /// stale answer.
+    /// Only for a file whose **directives** changed ([`Session::directives_moved`]). The environment a dependent reads
+    /// in is what its includes' directives brought into force: a `#define` (added, removed, or with a new body), an
+    /// `#undef`, an `#include`, a condition. An edit that changes none of those — a function body, a comment, a
+    /// declaration — says the same thing to every includer, so their readings stay. The gate used to be "the file
+    /// defined macros *before* the edit", which is the wrong question twice over: it read the text the user had
+    /// already replaced (so the edit that *added* the first `#define` to a header was never noticed), and it ignored
+    /// everything but `#define` (an `#include` added to a macro-free header changes what every includer sees).
+    ///
+    /// Conservative in the safe direction: the cost of being wrong is one re-cook, and the cost of being wrong the
+    /// other way is a stale answer.
     fn invalidate_dependents(&mut self, path: &Path) {
-        let defines_macros = self
-            .store
-            .index()
-            .summary(path)
-            .is_some_and(|summary| summary.macros.iter().any(|fact| fact.kind.is_definition()));
-
-        if !defines_macros {
-            return;
-        }
-
         for dependent in self.store.index().dependents_of(path) {
             // **Only the files that had a reading are asked for another one.** Dropping a stale reading is what this
             // loop is for; re-marking a file that never had one would cook a file nobody has looked at, which is the
@@ -1114,6 +1187,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // asking with `C:\…` about a frame spelled `c:/…` answers `None` — which would build a unit per file and
         // put the whole cost back where it was.
         let mut candidates: Vec<PathBuf> = Vec::new();
+        let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
         for path in self.project.iter().chain(files.iter()) {
             let path = self
                 .store
@@ -1121,7 +1195,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 .summary(path)
                 .map(|summary| summary.path.clone())
                 .unwrap_or_else(|| path.clone());
-            if !candidates.contains(&path) {
+            if seen.insert(path.clone()) {
                 candidates.push(path);
             }
         }
@@ -1472,7 +1546,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let key = queue_key(path);
 
         if let Some(unit) = self.units.get(&key) {
-            return Some(unit.clone());
+            return Some(unit);
         }
 
         let context = self.store.context_hash(path);
@@ -2266,6 +2340,65 @@ pub struct CookedReading {
     pub unplaced: usize,
     /// How the ranges mapped back into the file; see [`crate::MapReport`].
     pub mapped: crate::MapReport,
+}
+
+/// How many translation units the session keeps in memory.
+///
+/// A unit is a timeline over a whole include closure, so it is the session's largest single object; the disk cache
+/// holds the rest ([`crate::TranslationUnitCache`]) and a unit that falls out of here is one decode away. Sixteen is
+/// enough for the units a reader is working in (the open files' roots and the headers they name) and small enough
+/// that a project of a thousand sources does not hold a thousand timelines.
+const MAX_UNITS: usize = 16;
+
+/// The in-memory translation units, least recently used out first.
+#[derive(Default)]
+struct UnitTable {
+    held: std::collections::HashMap<String, (u64, std::sync::Arc<crate::TranslationUnit>)>,
+    clock: u64,
+}
+
+impl UnitTable {
+    fn get(&mut self, key: &str) -> Option<std::sync::Arc<crate::TranslationUnit>> {
+        self.clock += 1;
+        let (used, unit) = self.held.get_mut(key)?;
+        *used = self.clock;
+        Some(unit.clone())
+    }
+
+    fn insert(&mut self, key: String, unit: std::sync::Arc<crate::TranslationUnit>) {
+        self.clock += 1;
+
+        if !self.held.contains_key(&key) && self.held.len() >= MAX_UNITS {
+            let oldest = self
+                .held
+                .iter()
+                .min_by_key(|(_, (used, _))| *used)
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
+                self.held.remove(&oldest);
+            }
+        }
+
+        self.held.insert(key, (self.clock, unit));
+    }
+
+    fn clear(&mut self) {
+        self.held.clear();
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.held.is_empty()
+    }
+}
+
+/// Which of a file's two directive comparisons an edit failed — see [`Session::directives_moved`].
+#[derive(Debug, Clone, Copy)]
+struct DirectivesMoved {
+    /// What the file tells its includers changed.
+    environment: bool,
+    /// Where the file's directives sit changed, so a timeline over it is out of date.
+    layout: bool,
 }
 
 /// The files waiting to be read **the way a compiler reads them**, in the order they will be.
@@ -3232,6 +3365,90 @@ mod tests {
                 .is_none(),
             "…while the file itself is re-read, which is not a question about macros"
         );
+    }
+
+    /// **The first `#define` a header gets reaches the files that include it.**
+    ///
+    /// The gate this replaced asked whether the header defined macros *before* the edit — so the edit that added the
+    /// header's first macro was the one edit it could not see, and every includer went on answering from a reading
+    /// built when the macro did not exist.
+    #[test]
+    fn the_first_macro_a_header_defines_invalidates_the_readings_that_include_it() {
+        let api = "#include \"ns.h\"\nBEGIN_NS struct Widget { int size; }; END_NS\n";
+        let other = "#include \"api.h\"\nWidget w;\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/ns.h", "// nothing to say yet\n")
+            .with_file("/p/api.h", api)
+            .with_file("/p/other.cpp", other);
+        let fixture = Memory::new("the-first-macro-of-a-header", &files);
+        let mut session = fixture.session();
+
+        session.add_project_files([PathBuf::from("/p/other.cpp")]);
+        session.want_cooked_reading(Path::new("/p/other.cpp"));
+        session.index_everything();
+        assert!(
+            session.index().cooked_declarations(Path::new("/p/other.cpp")).is_some(),
+            "the fixture starts with the dependent cooked"
+        );
+
+        session.did_open("/p/ns.h", "#define BEGIN_NS namespace one {\n#define END_NS }\n");
+
+        assert!(
+            session.index().cooked_declarations(Path::new("/p/other.cpp")).is_none(),
+            "the reading was built when `BEGIN_NS` meant nothing"
+        );
+    }
+
+    /// **An `#include` added to a header that defines nothing is still a change to its includers' environment.**
+    #[test]
+    fn an_include_added_to_a_header_invalidates_the_readings_that_include_it() {
+        let files = MemoryFiles::new()
+            .with_file("/p/macros.h", "#define ANSWER 42\n")
+            .with_file("/p/api.h", "int declared;\n")
+            .with_file("/p/other.cpp", "#include \"api.h\"\nint x = ANSWER;\n");
+        let fixture = Memory::new("an-include-is-an-environment", &files);
+        let mut session = fixture.session();
+
+        session.add_project_files([PathBuf::from("/p/other.cpp")]);
+        session.want_cooked_reading(Path::new("/p/other.cpp"));
+        session.index_everything();
+        assert!(session.index().cooked_declarations(Path::new("/p/other.cpp")).is_some());
+
+        session.did_open("/p/api.h", "#include \"macros.h\"\nint declared;\n");
+
+        assert!(
+            session.index().cooked_declarations(Path::new("/p/other.cpp")).is_none(),
+            "`ANSWER` is now in force where it was not"
+        );
+    }
+
+    /// **Typing below the last directive keeps the translation units; touching a directive drops them.**
+    ///
+    /// A unit is a timeline of directives, so what decides whether an edit can have moved it is whether any directive
+    /// did — nearly every keystroke is in a body, and re-walking the closure for each of them was most of what a
+    /// keystroke cost.
+    #[test]
+    fn a_unit_survives_typing_in_a_body_and_not_a_change_to_a_directive() {
+        let ns = "#define BEGIN_NS namespace one {\n#define END_NS }\n";
+        let api = "#include \"ns.h\"\nBEGIN_NS struct Widget { int size; }; END_NS\n";
+        let files = MemoryFiles::new().with_file("/p/ns.h", ns).with_file("/p/api.h", api);
+        let fixture = Memory::new("a-unit-survives-a-body", &files);
+        let mut session = fixture.session();
+
+        session.did_open("/p/api.h", api);
+        session.index_everything();
+        assert!(!session.units.is_empty(), "the fixture cooked a file, which walked a unit");
+
+        let typed = format!("{api}void body() {{ int inside; }}\n");
+        session.did_change("/p/api.h", &typed);
+        assert!(!session.units.is_empty(), "a body was typed below the last directive");
+
+        let typed_more = format!("{api}void body() {{ int inside; int more; }}\n");
+        session.did_change("/p/api.h", &typed_more);
+        assert!(!session.units.is_empty(), "and again");
+
+        session.did_change("/p/api.h", &format!("#include \"ns.h\"\n#define EXTRA 1\n{typed_more}"));
+        assert!(session.units.is_empty(), "a directive appeared, so the timeline is out of date");
     }
 
     /// **Editing a header invalidates the reading of the open file that includes it.**

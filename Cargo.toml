@@ -7,7 +7,7 @@ members = [
 # Every entry here is used by at least one crate. The table was inherited from the Lua project this server's shell
 # came from and carried twenty crates nothing referenced (`notify`, `walkdir`, `dirs`, `tera`, `schemars`,
 # `internment`, `toml_edit`, …); they are gone, and an entry that no `Cargo.toml` names is a dependency a reader
-# has to check rather than trust. See `docs/ls-architecture.md` §5.
+# has to check rather than trust.
 [workspace.dependencies]
 # local
 cpp_parser = { path = "crates/cpp_parser" }
@@ -23,7 +23,7 @@ serde_json = "1.0.151"
 rowan = { version = "0.17.0" }
 glob = "0.3"
 # `.cppls.toml` is a file a user writes by hand: it gets a real TOML parser, not a subset that silently ignores
-# what it cannot read. See `docs/ls-architecture.md` §5 and `crates/cpp_code_analysis/src/project/config.rs`.
+# what it cannot read. See `crates/cpp_code_analysis/src/project/config.rs`.
 toml = "0.8"
 percent-encoding = "2.3"
 log = "0.4.33"

@@ -347,16 +347,7 @@ pub fn macro_references<F: FileProvider>(
 
 /// The files whose own `#define`s are what the name means somewhere.
 fn files_defining(index: &ProjectIndex, name: &str) -> Vec<PathBuf> {
-    index
-        .summaries()
-        .filter(|summary| {
-            summary
-                .macros
-                .iter()
-                .any(|fact| fact.name == name && fact.kind.is_definition())
-        })
-        .map(|summary| summary.path.clone())
-        .collect()
+    index.files_defining_macro(name)
 }
 
 /// The files that could use the name: the definers, and everything that transitively includes one.

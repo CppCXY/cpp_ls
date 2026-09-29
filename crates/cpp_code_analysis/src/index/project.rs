@@ -32,9 +32,10 @@
 //! **guarded** include is reported as [`Known::Unknown`] rather than as visible or invisible — the same rule the
 //! rest of the crate follows, and the reason [`IncludeFact`](crate::summary::IncludeFact) carries a guard at all.
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
+use super::names::{NameIndex, Posting};
 use crate::guard::Visibility;
 use crate::include::graph::Marked;
 use crate::file::paths::normalize_path;
@@ -441,10 +442,22 @@ impl From<crate::IndexedRendering> for CookedFile {
 pub struct ProjectIndex {
     /// The summaries, by normalized path.
     summaries: HashMap<String, FileSummary>,
-    /// The paths in insertion order, so that a query over all of them is deterministic rather than
-    /// `HashMap`-ordered. A definition jump that returned a different file on each run would be a bug that only
+    /// The paths **by sequence number**, which is insertion order: a query over all of them is deterministic rather
+    /// than `HashMap`-ordered. A definition jump that returned a different file on each run would be a bug that only
     /// shows up in a test that runs twice.
-    order: Vec<String>,
+    ///
+    /// A map and not a `Vec` so that forgetting a file is a removal rather than a scan of every path — an edit
+    /// forgets its file, and on a project of a hundred thousand files a `retain` per keystroke is a cost with
+    /// nothing in it that answers anything.
+    order: BTreeMap<u32, String>,
+    /// The sequence number each file was given the first time it appeared: the reverse of `order`, and the identity
+    /// the name index's postings use. **Never reused** — a forgotten file's number stays retired, so a posting can
+    /// never come to point at a different file than it was made for.
+    sequence: HashMap<String, u32>,
+    next_sequence: u32,
+    /// The inverted index — see [`crate::index::names`]. Derived from `summaries` and `cooked`, and updated in the
+    /// same call that changes either; nothing else writes it.
+    names: NameIndex,
     /// For each file, the files that include it. Derived from the summaries; see the module documentation.
     included_by: HashMap<String, BTreeSet<String>>,
     /// The macros a **compilation** starts with, which no summary can hold: the compiler's predefined names and the
@@ -1398,6 +1411,10 @@ impl Candidate {
 /// The file's **own** declarations are not capped: they come from the scope tree rather than from here, they are
 /// the tier that ranks first, and there are as many of them as the reader wrote.
 const MAX_COLLECTED_NAMES: usize = 400;
+
+/// How many declarations one name may have before a workspace search stops ordering them — see
+/// `ProjectIndex::open_group`.
+const POPULAR_NAME: usize = 4096;
 
 /// The bindings one of the file's own scopes holds, as names to offer. — `ns` for `namespace ns { … }`, a class's name for
 /// its body — and `None` for a scope that has none: a function body, a block, a lambda. The distinction is the one
@@ -3207,12 +3224,18 @@ impl ProjectIndex {
 
         // Remove the edges the previous version of this file contributed, so that a deleted `#include` stops
         // making its target reachable. Without this, an edge would outlive the line that wrote it.
-        if let Some(previous) = self.summaries.get(&path) {
+        let sequence = if let Some(previous) = self.summaries.get(&path) {
+            let sequence = self.sequence[&path];
+
             for target in include_targets(previous) {
                 if let Some(includers) = self.included_by.get_mut(&target) {
                     includers.remove(&path);
                 }
             }
+
+            // The names the previous text declared and the macros it defined stop being findable under this file.
+            self.names.remove_declarations(sequence, false, &previous.declarations);
+            self.names.remove_macros(sequence, &previous.macros);
 
             // **The cooked reading describes the file *under the key it was built with***, so a summary filed under
             // a different key takes it with it. Both halves of the key are the reason: a different content hash means
@@ -3224,12 +3247,26 @@ impl ProjectIndex {
             // different bytes, a cache entry replaced by a fresh index, and the whole-project re-read a changed
             // `compile_commands.json` causes. Leaving the reading there would answer for a file nobody has any more,
             // at offsets into words that are gone — a wrong answer rather than a missing one.
-            if previous.key != summary.key {
-                self.cooked.remove(&path);
-            }
+            if previous.key != summary.key
+                && let Some(cooked) = self.cooked.remove(&path) {
+                    self.names.remove_declarations(sequence, true, &cooked.declarations);
+                }
+
+            sequence
         } else {
-            self.order.push(path.clone());
-        }
+            let sequence = self.next_sequence;
+            self.next_sequence += 1;
+            self.order.insert(sequence, path.clone());
+            self.sequence.insert(path.clone(), sequence);
+
+            // A reading filed before its summary (the contract says it should not be, but `insert_cooked` does not
+            // refuse) is findable from the moment the file has a number to be found under.
+            if let Some(cooked) = self.cooked.get(&path) {
+                self.names.add_declarations(sequence, true, &cooked.declarations);
+            }
+
+            sequence
+        };
 
         for target in include_targets(&summary) {
             self.included_by
@@ -3238,6 +3275,8 @@ impl ProjectIndex {
                 .insert(path.clone());
         }
 
+        self.names.add_declarations(sequence, false, &summary.declarations);
+        self.names.add_macros(sequence, &summary.macros);
         self.summaries.insert(path, summary);
     }
 
@@ -3262,11 +3301,19 @@ impl ProjectIndex {
                 includers.remove(&path);
             }
         }
-        self.order.retain(|held| held != &path);
+        let sequence = self.sequence.remove(&path);
+        if let Some(sequence) = sequence {
+            self.order.remove(&sequence);
+            self.names.remove_declarations(sequence, false, &summary.declarations);
+            self.names.remove_macros(sequence, &summary.macros);
+        }
         // **The cooked reading goes with it.** A file that is no longer indexed must not keep answering
         // declaration queries out of a rendering nobody has any more — the same rule as the summary, for the
         // same reason: an answer about a file that is gone is worse than no answer.
-        self.cooked.remove(&path);
+        if let Some(cooked) = self.cooked.remove(&path)
+            && let Some(sequence) = sequence {
+                self.names.remove_declarations(sequence, true, &cooked.declarations);
+            }
 
         true
     }
@@ -3286,7 +3333,7 @@ impl ProjectIndex {
 
     /// Every summary, in insertion order.
     pub fn summaries(&self) -> impl Iterator<Item = &FileSummary> {
-        self.order.iter().filter_map(|path| self.summaries.get(path))
+        self.order.values().filter_map(|path| self.summaries.get(path))
     }
 
     /// The files that include `path`, directly.
@@ -3314,6 +3361,13 @@ impl ProjectIndex {
             .lock()
             .expect("the visibility memo is not poisoned")
             .clear();
+
+        if let Some(&sequence) = self.sequence.get(&path) {
+            if let Some(previous) = self.cooked.get(&path) {
+                self.names.remove_declarations(sequence, true, &previous.declarations);
+            }
+            self.names.add_declarations(sequence, true, &reading.declarations);
+        }
         self.cooked.insert(path, reading);
     }
 
@@ -3343,7 +3397,11 @@ impl ProjectIndex {
     /// would answer with a declaration whose range points into text that no longer describes it. Not found is the
     /// honest answer there, and the reading comes back one drain later.
     pub fn forget_cooked(&mut self, path: &Path) {
-        self.cooked.remove(&normalize(path));
+        let path = normalize(path);
+        if let Some(cooked) = self.cooked.remove(&path)
+            && let Some(&sequence) = self.sequence.get(&path) {
+                self.names.remove_declarations(sequence, true, &cooked.declarations);
+            }
     }
 
     /// **The project's symbols matching `query`**, best first — what a `workspace/symbol` search shows.
@@ -3361,68 +3419,231 @@ impl ProjectIndex {
     ///
     /// # The match, and what the cap means
     ///
-    /// Case-insensitive **substring of the qualified name**, so `wid` finds `ns::Widget`. The ranking is exact name,
-    /// then a prefix of the name, then anything — and within a rank, alphabetical, because two runs over one project
-    /// have to answer in the same order or a diff of two answers is noise.
+    /// Case-insensitive **substring of the name**, so `wid` finds `ns::Widget`. The ranking is exact name, then a
+    /// prefix of the name, then anything — and within a rank, alphabetical **by name** and then by qualified name,
+    /// because two runs over one project have to answer in the same order or a diff of two answers is noise.
+    ///
+    /// # Why the order is by name, and what that buys
+    ///
+    /// The names are kept sorted ([`crate::index::names`]), so an answer in name order is one the search can stop
+    /// producing as soon as it has `limit` of them: the cost is the size of the answer, not the size of the project.
+    /// (Ordering by the *qualified* name — which puts `a::widget` before `widget` before `b::widget` — would need
+    /// every candidate's scope before the first could be placed.) Two declarations of one name are still adjacent,
+    /// ordered by where they are.
     ///
     /// `limit` caps the answer, and hitting it is **not** an error: a search box is not a claim about the project
     /// the way a reference list is — the user narrows the query, and every editor's symbol search truncates. That is
     /// the opposite of the decision [`crate::macro_references`] makes, where a partial answer would be a false one.
     pub fn symbols_matching(&self, query: &str, limit: usize) -> Vec<ProjectSymbol> {
         let wanted = query.trim().to_lowercase();
-        let mut matches: Vec<(usize, String, ProjectSymbol)> = Vec::new();
+        let bare = wanted.trim_start_matches("::");
+        if bare.is_empty() || limit == 0 {
+            return Vec::new();
+        }
 
-        for summary in self.summaries() {
-            let cooked = self.cooked.get(&normalize(&summary.path));
+        let mut hits: Vec<Hit<'_>> = Vec::new();
 
-            let raw: Vec<&DeclFact> = summary
-                .declarations
-                .iter()
-                .filter(|fact| !fact.local)
-                .collect();
+        if !bare.contains("::") {
+            // **One word is about the name.** The names are kept sorted by their lowercase form, which is the order
+            // the answer is reported in, so the search opens them best rank first and *stops when it has enough*:
+            //
+            // ```text
+            // exact      the one key equal to the query
+            // prefix     the keys from the query on, while they begin with it        (a range, not a scan)
+            // substring  the remaining keys that contain it                          (a scan that stops early)
+            // ```
+            if let Some(spellings) = self.names.spellings_of(bare) {
+                self.open_group(spellings, Some(0), bare, limit, &mut hits);
+            }
 
-            let fresh: Vec<&DeclFact> = cooked
-                .into_iter()
-                .flat_map(|cooked| cooked.declarations.iter())
-                .filter(|fact| {
-                    !fact.local
-                        && !raw
-                            .iter()
-                            .any(|known| known.name == fact.name && known.kind == fact.kind)
-                })
-                .collect();
+            if hits.len() < limit {
+                for (key, spellings) in self.names.lowered_from(bare) {
+                    if !key.starts_with(bare) {
+                        break;
+                    }
+                    if key == bare {
+                        continue;
+                    }
+                    self.open_group(spellings, Some(1), bare, limit, &mut hits);
+                    if hits.len() >= limit {
+                        break;
+                    }
+                }
+            }
 
-            for fact in raw.into_iter().chain(fresh) {
-                let qualified = fact.qualified_name();
-                let Some(rank) = rank_of(&qualified, &fact.name, &wanted) else {
-                    continue;
-                };
+            if hits.len() < limit {
+                for (key, spellings) in self.names.lowered_from("") {
+                    if key.starts_with(bare) || !key.contains(bare) {
+                        continue;
+                    }
+                    self.open_group(spellings, Some(2), bare, limit, &mut hits);
+                    if hits.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        } else {
+            // **A qualified query is about the last segment's prefix**, so only the names that begin with it are
+            // opened — in name order, and the rank (exact last segment, or a prefix of it) is decided per fact by
+            // the tail of its qualified name.
+            let last_asked = bare.rsplit("::").next().unwrap_or_default();
 
-                matches.push((
-                    rank,
-                    qualified.to_lowercase(),
-                    ProjectSymbol {
-                        file: summary.path.clone(),
-                        fact: fact.clone(),
-                    },
-                ));
+            for (key, spellings) in self.names.lowered_from(last_asked) {
+                if !key.starts_with(last_asked) {
+                    break;
+                }
+                self.open_group(spellings, None, bare, limit, &mut hits);
+                if hits.len() >= limit {
+                    break;
+                }
+            }
+
+            // A fact with no name has its scope's last segment for one, so it is not where the name order looks.
+            // There are few of them, and the rank decides; whatever the ordered walk left out is later than the
+            // `limit` it already has, so adding these to it cannot push out an answer that belongs.
+            if !last_asked.is_empty() {
+                self.open_group(&[Box::from("")], None, bare, limit, &mut hits);
             }
         }
 
-        // The rank first, then the name, then the **file** — three answers that compare equal have to come back in
-        // one order, and two files may declare the same name.
-        matches.sort_by(|one, two| {
-            one.0
-                .cmp(&two.0)
-                .then_with(|| one.1.cmp(&two.1))
-                .then_with(|| one.2.file.cmp(&two.2.file))
-        });
-
-        matches
-            .into_iter()
+        sort_hits(&mut hits);
+        hits.into_iter()
             .take(limit)
-            .map(|(_, _, symbol)| symbol)
+            .map(|hit| ProjectSymbol {
+                file: hit.file.to_path_buf(),
+                fact: hit.fact.clone(),
+            })
             .collect()
+    }
+
+    /// Open every spelling of one lowercase name: their hits, in the order [`sort_hits`] defines.
+    ///
+    /// **A name declared more than [`POPULAR_NAME`] times is cut at `limit` hits, in file order.** `size`, `begin` and
+    /// `run` are declared once per class that has one, and ordering *all* of them by qualified name to show the first
+    /// hundred would cost a project's worth of work for an answer no reader can tell from any other hundred. The cut
+    /// is deterministic (postings are in insertion order), and a name below the threshold is ordered exactly.
+    fn open_group<'a>(
+        &'a self,
+        spellings: &[Box<str>],
+        rank: Option<usize>,
+        wanted: &str,
+        limit: usize,
+        into: &mut Vec<Hit<'a>>,
+    ) {
+        let start = into.len();
+        for spelling in spellings {
+            let postings = self.names.named(spelling);
+            let stop_at = match postings.len() > POPULAR_NAME {
+                true => start + limit,
+                false => usize::MAX,
+            };
+            self.hits_in(postings, rank, wanted, stop_at, into);
+        }
+        into[start..].sort_by(hit_order);
+    }
+
+    /// The hits among one name's postings, with the cooked reading deduplicated against the raw one.
+    ///
+    /// `rank` is the rank the caller already knows (a whole bucket of names shares one), or `None` when the rank has
+    /// to be worked out from the declaration's qualified name.
+    fn hits_in<'a>(
+        &'a self,
+        postings: &[Posting],
+        rank: Option<usize>,
+        wanted: &str,
+        stop_at: usize,
+        into: &mut Vec<Hit<'a>>,
+    ) {
+        for (at, posting) in postings.iter().enumerate() {
+            if into.len() >= stop_at {
+                break;
+            }
+            let Some((summary, fact)) = self.resolve(*posting) else {
+                continue;
+            };
+
+            // A fact both readings found is one symbol: the raw reading's postings for this file come first in the
+            // list, and the same `(name, kind)` among them shadows the cooked one.
+            if posting.is_cooked() {
+                let shadowed = postings[..at]
+                    .iter()
+                    .rev()
+                    .take_while(|held| held.file == posting.file)
+                    .filter(|held| !held.is_cooked())
+                    .filter_map(|held| self.resolve(*held))
+                    .any(|(_, raw)| raw.kind == fact.kind);
+                if shadowed {
+                    continue;
+                }
+            }
+
+            let qualified = fact.qualified_name();
+            let Some(rank) = rank.or_else(|| rank_of(&qualified, &fact.name, wanted)) else {
+                continue;
+            };
+
+            let qualified = qualified.to_lowercase();
+            // What the fact is called for ordering: its name, or — with none — the last segment of its scope.
+            let name = match fact.name.is_empty() {
+                false => crate::index::names::lowercase(&fact.name),
+                true => qualified.rsplit("::").next().unwrap_or_default().to_string(),
+            };
+
+            into.push(Hit {
+                rank,
+                name,
+                qualified,
+                file: &summary.path,
+                posting: *posting,
+                fact,
+            });
+        }
+    }
+
+    /// The fact a posting points at, and the summary of the file it is in.
+    fn resolve(&self, posting: Posting) -> Option<(&FileSummary, &DeclFact)> {
+        let key = self.order.get(&posting.file)?;
+        let summary = self.summaries.get(key)?;
+        let fact = if posting.is_cooked() {
+            self.cooked.get(key)?.declarations.get(posting.index())?
+        } else {
+            summary.declarations.get(posting.index())?
+        };
+        Some((summary, fact))
+    }
+
+    /// The files that **define** the macro `name`, in insertion order — one lookup, where the question used to be a
+    /// scan of every file's macro facts.
+    pub fn files_defining_macro(&self, name: &str) -> Vec<PathBuf> {
+        self.names
+            .definers_of(name)
+            .iter()
+            .filter_map(|sequence| self.order.get(sequence))
+            .filter_map(|key| self.summaries.get(key))
+            .map(|summary| summary.path.clone())
+            .collect()
+    }
+
+    /// The summaries of the files that define **any** of these macros, in insertion order.
+    ///
+    /// The set form of [`ProjectIndex::files_defining_macro`], for a caller that holds a whole vocabulary — the
+    /// words a file mentions — and wants the files that could matter to it, without visiting the ones that cannot.
+    pub fn files_defining_any_macro<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Vec<&FileSummary> {
+        let mut sequences: BTreeSet<u32> = BTreeSet::new();
+        for name in names {
+            sequences.extend(self.names.definers_of(name).iter().copied());
+        }
+
+        sequences
+            .into_iter()
+            .filter_map(|sequence| self.order.get(&sequence))
+            .filter_map(|key| self.summaries.get(key))
+            .collect()
+    }
+
+    /// How many distinct declared names the index holds.
+    pub fn distinct_names(&self) -> usize {
+        self.names.distinct_names()
     }
 
     /// The files in which `name` is visible, in insertion order.
@@ -3432,7 +3653,11 @@ impl ProjectIndex {
     /// appear in some scope. A caller that gets one answer from the qualified match should prefer it to any
     /// number from the bare one.
     pub fn files_declaring(&self, name: &str, visible_from: &Path) -> Vec<VisibleDeclaration<'_>> {
-        self.visible_declarations(visible_from, |fact| matches(fact, name))
+        // The name is looked up under the two spellings a fact can answer to: the whole thing (a bare name) and its
+        // last segment (`ns::Widget` is `Widget` declared in `ns`). `matches` then decides between them.
+        let bare = name.strip_prefix("::").unwrap_or(name);
+        let last = bare.rsplit("::").next().unwrap_or(bare);
+        self.visible_declarations(visible_from, |fact| matches(fact, name), Narrow::Named(&[bare, last]))
     }
 
     /// Every declaration written **directly in** the scope `scope`, visible from `visible_from`.
@@ -3445,7 +3670,11 @@ impl ProjectIndex {
     /// variable inside a member function is a fact whose scope is `None` — a function body contributes no segment
     /// to a qualified name — so `C`'s members are `C`'s bindings and not everything written between its braces.
     pub fn declarations_in(&self, scope: &str, visible_from: &Path) -> Vec<VisibleDeclaration<'_>> {
-        self.visible_declarations(visible_from, |fact| fact.scope.as_deref() == Some(scope))
+        self.visible_declarations(
+            visible_from,
+            |fact| fact.scope.as_deref() == Some(scope),
+            Narrow::Scoped(scope),
+        )
     }
 
     /// [`ProjectIndex::declarations_in`] with a **second** condition, applied while the facts are still borrowed.
@@ -3469,6 +3698,7 @@ impl ProjectIndex {
             visible_from,
             &|fact: &DeclFact| fact.scope.as_deref() == Some(scope) && accepts(fact),
             MAX_COLLECTED_NAMES,
+            Narrow::Scoped(scope),
         )
     }
 
@@ -3484,7 +3714,7 @@ impl ProjectIndex {
         visible_from: &Path,
         accepts: impl Fn(&DeclFact) -> bool,
     ) -> Vec<VisibleDeclaration<'_>> {
-        self.visible_declarations_upto(visible_from, &accepts, MAX_COLLECTED_NAMES)
+        self.visible_declarations_upto(visible_from, &accepts, MAX_COLLECTED_NAMES, Narrow::Nothing)
     }
 
     /// The declarations some predicate accepts, in the files `visible_from` can see.
@@ -3515,8 +3745,9 @@ impl ProjectIndex {
         &'a self,
         visible_from: &Path,
         accepts: impl Fn(&DeclFact) -> bool,
+        narrow: Narrow<'_>,
     ) -> Vec<VisibleDeclaration<'a>> {
-        self.visible_declarations_upto(visible_from, &accepts, usize::MAX)
+        self.visible_declarations_upto(visible_from, &accepts, usize::MAX, narrow)
     }
 
     /// [`ProjectIndex::visible_declarations`] with a **cap** on how many are collected.
@@ -3534,15 +3765,44 @@ impl ProjectIndex {
         visible_from: &Path,
         accepts: &impl Fn(&DeclFact) -> bool,
         limit: usize,
+        narrow: Narrow<'_>,
     ) -> Vec<VisibleDeclaration<'a>> {
-        // Keyed by the **normalized** path, which is what the summary map is keyed by too: the walk produces
-        // normalized spellings, and normalizing three hundred paths again per query is work with no answer in it.
-        let visible: HashMap<String, IncludeVisibility> =
-            self.visible_files(visible_from).into_iter().collect();
+        // **Only the files the cursor's file can see are looked at**, and in insertion order. The walk answers with
+        // a handful of hundreds even when the project holds a hundred thousand files, so the cost of the question is
+        // the size of the closure and not the size of the project.
+        let files = self.visible_in_order(visible_from);
 
         let mut found = Vec::new();
 
-        for summary in self.summaries() {
+        // **A name or a scope narrows further**: the postings say which files hold a candidate at all, so a file
+        // that has none is never opened. Without a narrowing every visible file's declarations are the candidates.
+        let postings: Option<std::borrow::Cow<'_, [Posting]>> = match narrow {
+            Narrow::Nothing => None,
+            Narrow::Scoped(scope) => Some(std::borrow::Cow::Borrowed(self.names.scoped(scope))),
+            Narrow::Named(names) => {
+                let mut keys: Vec<&str> = names.to_vec();
+                keys.dedup();
+                match keys.as_slice() {
+                    [one] => Some(std::borrow::Cow::Borrowed(self.names.named(one))),
+                    _ => {
+                        let mut merged: Vec<Posting> = keys
+                            .iter()
+                            .flat_map(|key| self.names.named(key).iter().copied())
+                            .collect();
+                        merged.sort_unstable();
+                        merged.dedup();
+                        Some(std::borrow::Cow::Owned(merged))
+                    }
+                }
+            }
+        };
+
+        // One `(file, its candidates)` group at a time, in file order. Without postings a file's candidates are all of
+        // its facts, which is what the empty group range stands for.
+        let mut next = 0;
+        let mut visible = files.iter();
+
+        loop {
             // **The cap is checked before a file is read, not while it is.** A file is one declaration list, and
             // the only thing worth stopping on is a whole one: taking half of a file's facts would leave the
             // cooked-vs-raw deduplication below comparing against a `raw` list that is itself half a file, and
@@ -3552,16 +3812,54 @@ impl ProjectIndex {
                 break;
             }
 
-            let key = normalize(&summary.path);
-            let Some(visibility) = visible.get(&key).copied() else {
+            let (file, visibility, group): (u32, IncludeVisibility, Option<&[Posting]>) = match &postings {
+                None => {
+                    let Some(&(file, visibility)) = visible.next() else {
+                        break;
+                    };
+                    (file, visibility, None)
+                }
+                Some(postings) => {
+                    let Some(first) = postings.get(next) else {
+                        break;
+                    };
+                    let file = first.file;
+                    let end = next + postings[next..].partition_point(|held| held.file == file);
+                    let group = &postings[next..end];
+                    next = end;
+
+                    let Ok(at) = files.binary_search_by_key(&file, |visible| visible.0) else {
+                        continue;
+                    };
+                    (file, files[at].1, Some(group))
+                }
+            };
+
+            let Some(key) = self.order.get(&file) else {
+                continue;
+            };
+            let Some(summary) = self.summaries.get(key) else {
                 continue;
             };
 
             // The cooked reading is looked up **once**, because a file that was never cooked — which is most of
             // them — has nothing to union and must not pay for the `raw` list below.
-            let cooked = self.cooked.get(&key);
+            let cooked = self.cooked.get(key);
 
-            for fact in summary.declarations.iter().filter(|fact| accepts(fact)) {
+            let mut raw: Vec<&DeclFact> = Vec::new();
+
+            match group {
+                None => raw.extend(summary.declarations.iter().filter(|fact| accepts(fact))),
+                Some(group) => raw.extend(
+                    group
+                        .iter()
+                        .filter(|posting| !posting.is_cooked())
+                        .filter_map(|posting| summary.declarations.get(posting.index()))
+                        .filter(|fact| accepts(fact)),
+                ),
+            }
+
+            for fact in &raw {
                 found.push(VisibleDeclaration {
                     file: summary.path.clone(),
                     fact,
@@ -3575,19 +3873,18 @@ impl ProjectIndex {
 
             // …and what the file was **cooked** into, minus what the raw reading already said. `(name, kind)` is
             // the identity a candidate is deduplicated by — see the method's note.
-            let mut raw: Vec<(&str, crate::DeclKind)> = summary
-                .declarations
-                .iter()
-                .filter(|fact| accepts(fact))
-                .map(|fact| (fact.name.as_str(), fact.kind))
-                .collect();
-            raw.sort_unstable();
-            for fact in cooked
-                .declarations
-                .iter()
-                .filter(|fact| accepts(fact))
-            {
-                if raw.binary_search(&(fact.name.as_str(), fact.kind)).is_ok() {
+            let candidates: Box<dyn Iterator<Item = &DeclFact> + '_> = match group {
+                None => Box::new(cooked.declarations.iter()),
+                Some(group) => Box::new(
+                    group
+                        .iter()
+                        .filter(|posting| posting.is_cooked())
+                        .filter_map(|posting| cooked.declarations.get(posting.index())),
+                ),
+            };
+
+            for fact in candidates.filter(|fact| accepts(fact)) {
+                if raw.iter().any(|known| known.name == fact.name && known.kind == fact.kind) {
                     continue;
                 }
                 found.push(VisibleDeclaration {
@@ -3599,6 +3896,20 @@ impl ProjectIndex {
         }
 
         found
+    }
+
+    /// The files `from` can see, as `(sequence number, how)` in insertion order — the walk's answer put in the order
+    /// every declaration query reports in.
+    fn visible_in_order(&self, from: &Path) -> Vec<(u32, IncludeVisibility)> {
+        let mut files: Vec<(u32, IncludeVisibility)> = self
+            .visible_files(from)
+            .into_iter()
+            .filter_map(|(key, visibility)| Some((*self.sequence.get(&key)?, visibility)))
+            .collect();
+
+        files.sort_unstable_by_key(|(sequence, _)| *sequence);
+        files.dedup_by_key(|(sequence, _)| *sequence);
+        files
     }
 
     /// Every file `from` can see, and how — one walk of the include graph.
@@ -4781,6 +5092,44 @@ pub enum IncludeVisibility {
     Conditional,
 }
 
+/// What a declaration query knows about the fact it is looking for, before it reads a single fact.
+#[derive(Clone, Copy)]
+enum Narrow<'q> {
+    /// Nothing: every fact of every visible file is a candidate.
+    Nothing,
+    /// The fact's bare name is one of these.
+    Named(&'q [&'q str]),
+    /// The fact is written directly in this scope.
+    Scoped(&'q str),
+}
+
+/// One workspace-symbol candidate, with everything its ordering needs.
+struct Hit<'a> {
+    rank: usize,
+    /// Lowercased, because the order within a rank is alphabetical and case is not a difference a reader sees.
+    name: String,
+    /// The same, for the whole qualified name: two `Widget`s in different namespaces are ordered by where they are.
+    qualified: String,
+    file: &'a Path,
+    posting: Posting,
+    fact: &'a DeclFact,
+}
+
+/// Rank, then **name**, then qualified name, then **file** — answers that compare equal have to come back in one
+/// order, and two files may declare the same name — then the position, so that even two overloads in one file do.
+fn hit_order(one: &Hit<'_>, two: &Hit<'_>) -> std::cmp::Ordering {
+    one.rank
+        .cmp(&two.rank)
+        .then_with(|| one.name.cmp(&two.name))
+        .then_with(|| one.qualified.cmp(&two.qualified))
+        .then_with(|| one.file.cmp(two.file))
+        .then_with(|| one.posting.cmp(&two.posting))
+}
+
+fn sort_hits(hits: &mut [Hit<'_>]) {
+    hits.sort_by(hit_order);
+}
+
 /// Does this declaration answer to `name`?
 ///
 /// The qualified name first, then the bare one. Both are needed and the order matters: `ns::Widget` written in
@@ -5100,18 +5449,20 @@ mod tests {
             found.iter().map(|symbol| symbol.fact.name.clone()).collect()
         };
 
-        // Case-insensitive substring of the qualified name.
+        // Case-insensitive; both names begin with the query, so they share a rank and are ordered by name.
         let found = index.symbols_matching("wid", 100);
+        assert_eq!(names(&found), vec!["Widest", "Widget"], "one rank, alphabetical by name: {found:?}");
         assert_eq!(
-            names(&found),
-            vec!["Widget", "Widest"],
-            "the name itself ranks above the one that merely contains it: {found:?}"
-        );
-        assert_eq!(
-            found[0].fact.scope.as_deref(),
+            found[1].fact.scope.as_deref(),
             Some("ns"),
-            "and the match is on the qualified name: {found:?}"
+            "and the fact says which scope it was written in: {found:?}"
         );
+
+        // The rank comes before the name: the exact match is first although `Widest` sorts earlier than `Widget`.
+        let found = index.symbols_matching("widget", 100);
+        assert_eq!(names(&found), vec!["Widget"], "{found:?}");
+        let found = index.symbols_matching("idg", 100);
+        assert_eq!(names(&found), vec!["Widget"], "a substring finds the name it is inside: {found:?}");
 
         // A local is not a project symbol, even though its name matches.
         assert_eq!(
@@ -8064,3 +8415,279 @@ mod tests {
 
 
 
+
+/// The name index against the scan it replaced: the same questions, asked of the same index, answered both ways.
+///
+/// The inverted index is derived data, and derived data has one failure that no ordinary test finds — it drifts
+/// from what it was derived from after some particular sequence of edits. So this builds a corpus that has every
+/// kind of collision (one name in many files, one name in many scopes, a name only the cooked reading declares),
+/// mutates it the way a session does (forget, re-insert edited, cook, forget the cooking), and after **every**
+/// step asserts that each name query equals the brute-force answer over `summaries()`.
+#[cfg(test)]
+mod name_index_agrees_with_the_scan {
+    use super::*;
+    use crate::cache::SummaryKey;
+    use crate::index::summarize;
+
+    const WORDS: [&str; 6] = ["Widget", "size", "run", "Gadget", "count", "widest"];
+
+    /// A small deterministic generator: the corpus has to be the same on every machine and every run.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self, below: usize) -> usize {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((self.0 >> 33) as usize) % below
+        }
+    }
+
+    fn source_of(number: usize, generator: &mut Lcg) -> String {
+        let mut text = String::new();
+        for _ in 0..generator.next(3) {
+            text.push_str(&format!("#include \"f{}.h\"\n", generator.next(number.max(1))));
+        }
+        text.push_str(&format!("#define DECL{number}(n) struct n {{ int v; }};\n"));
+        text.push_str(&format!("DECL{number}(Made{})\n", generator.next(4)));
+        text.push_str(&format!("namespace ns{} {{\n", generator.next(3)));
+        for _ in 0..1 + generator.next(3) {
+            let class = WORDS[generator.next(WORDS.len())];
+            let member = WORDS[generator.next(WORDS.len())];
+            text.push_str(&format!("struct {class} {{ int {member}; void {member}2(); }};\n"));
+        }
+        text.push_str("}\n");
+        text.push_str(&format!("int {};\n", WORDS[generator.next(WORDS.len())]));
+        text.push_str(&format!("void fn{number}() {{ int {}; }}\n", WORDS[generator.next(WORDS.len())]));
+        text
+    }
+
+    fn file(index: &mut ProjectIndex, number: usize, source: &str) {
+        let path = format!("/p/f{number}.h");
+        let mut summary = summarize(Path::new(&path), source, SummaryKey::new(number as u64, 0));
+        for include in &mut summary.includes {
+            include.resolved = Some(PathBuf::from(format!("/p/{}", include.spelling)));
+        }
+        index.insert(summary);
+    }
+
+    fn cook(index: &mut ProjectIndex, number: usize, source: &str) {
+        let path = format!("/p/f{number}.h");
+        let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+        let rendered = crate::preprocess::cooked::cook(source, &tokens).render();
+        let provider = crate::MemoryFiles::new();
+        let config = crate::CompilerConfig::default();
+        let indexed = crate::FileIndexer::new(&provider, &config).index_rendering(
+            Path::new(&path),
+            &rendered,
+            SummaryKey::new(number as u64, 0),
+        );
+        index.insert_cooked(Path::new(&path), indexed.into());
+    }
+
+    type Row = (PathBuf, String, Option<String>, usize, IncludeVisibility);
+
+    fn row(file: &Path, fact: &DeclFact, visibility: IncludeVisibility) -> Row {
+        (file.to_path_buf(), fact.name.clone(), fact.scope.clone(), fact.range.start_offset, visibility)
+    }
+
+    /// Every fact a query can see, with the raw-then-cooked deduplication, the way the per-file scan did it.
+    fn scanned(
+        index: &ProjectIndex,
+        from: &Path,
+        accepts: impl Fn(&DeclFact) -> bool,
+    ) -> Vec<Row> {
+        let visible: HashMap<String, IncludeVisibility> = index.visible_files(from).into_iter().collect();
+        let mut rows = Vec::new();
+
+        for summary in index.summaries() {
+            let Some(visibility) = visible.get(&normalize(&summary.path)).copied() else {
+                continue;
+            };
+            let raw: Vec<&DeclFact> = summary.declarations.iter().filter(|fact| accepts(fact)).collect();
+            rows.extend(raw.iter().map(|fact| row(&summary.path, fact, visibility)));
+
+            for fact in index
+                .cooked_declarations(&summary.path)
+                .into_iter()
+                .flatten()
+                .filter(|fact| accepts(fact))
+            {
+                if !raw.iter().any(|known| known.name == fact.name && known.kind == fact.kind) {
+                    rows.push(row(&summary.path, fact, visibility));
+                }
+            }
+        }
+
+        rows
+    }
+
+    fn rows(found: &[VisibleDeclaration<'_>]) -> Vec<Row> {
+        found.iter().map(|found| row(&found.file, found.fact, found.visibility)).collect()
+    }
+
+    /// The workspace search as it was written before the index: every declaration of every file.
+    fn symbols_by_scanning(index: &ProjectIndex, query: &str, limit: usize) -> Vec<(PathBuf, String, Option<String>, usize)> {
+        let wanted = query.trim().to_lowercase();
+        let mut matches: Vec<(usize, String, String, PathBuf, &DeclFact)> = Vec::new();
+
+        for summary in index.summaries() {
+            let raw: Vec<&DeclFact> = summary.declarations.iter().filter(|fact| !fact.local).collect();
+            let fresh: Vec<&DeclFact> = index
+                .cooked_declarations(&summary.path)
+                .into_iter()
+                .flatten()
+                .filter(|fact| {
+                    !fact.local && !raw.iter().any(|known| known.name == fact.name && known.kind == fact.kind)
+                })
+                .collect();
+
+            for fact in raw.into_iter().chain(fresh) {
+                let qualified = fact.qualified_name();
+                let Some(rank) = rank_of(&qualified, &fact.name, &wanted) else {
+                    continue;
+                };
+                let qualified = qualified.to_lowercase();
+                let name = match fact.name.is_empty() {
+                    false => fact.name.to_lowercase(),
+                    true => qualified.rsplit("::").next().unwrap_or_default().to_string(),
+                };
+                matches.push((rank, name, qualified, summary.path.clone(), fact));
+            }
+        }
+
+        matches.sort_by(|one, two| {
+            one.0
+                .cmp(&two.0)
+                .then_with(|| one.1.cmp(&two.1))
+                .then_with(|| one.2.cmp(&two.2))
+                .then_with(|| one.3.cmp(&two.3))
+        });
+        matches
+            .into_iter()
+            .take(limit)
+            .map(|(_, _, _, file, fact)| (file, fact.name.clone(), fact.scope.clone(), fact.range.start_offset))
+            .collect()
+    }
+
+    fn check(index: &ProjectIndex, files: usize, step: &str) {
+        let asked_from: Vec<PathBuf> = (0..files).step_by(3).map(|n| PathBuf::from(format!("/p/f{n}.h"))).collect();
+
+        for from in &asked_from {
+            for word in WORDS.iter().copied().chain(["Made0", "Made3", "nothing", "ns0::Widget", "::size", "ns1::Gadget"]) {
+                assert_eq!(
+                    rows(&index.files_declaring(word, from)),
+                    scanned(index, from, |fact| matches(fact, word)),
+                    "{step}: files_declaring({word:?}) from {from:?}"
+                );
+            }
+            for scope in ["ns0", "ns1", "ns2", "ns0::Widget", "ns1::Gadget", "ns2::size", "nowhere"] {
+                assert_eq!(
+                    rows(&index.declarations_in(scope, from)),
+                    scanned(index, from, |fact| fact.scope.as_deref() == Some(scope)),
+                    "{step}: declarations_in({scope:?}) from {from:?}"
+                );
+            }
+        }
+
+        for query in [
+            "w", "wid", "Widget", "size", "ma", "made", "run2", "ns0::wid", "ns1::Gadget::si", "Widget::", "::widget", "ns0::",
+            "zzz", "  count ", "e",
+        ] {
+            for limit in [1, 4, 1000] {
+                let found: Vec<_> = index
+                    .symbols_matching(query, limit)
+                    .into_iter()
+                    .map(|symbol| (symbol.file, symbol.fact.name, symbol.fact.scope, symbol.fact.range.start_offset))
+                    .collect();
+                assert_eq!(found, symbols_by_scanning(index, query, limit), "{step}: symbols_matching({query:?}, {limit})");
+            }
+        }
+
+        let defining: Vec<PathBuf> = index
+            .summaries()
+            .filter(|summary| summary.macros.iter().any(|fact| fact.name == "DECL3" && fact.kind.is_definition()))
+            .map(|summary| summary.path.clone())
+            .collect();
+        assert_eq!(index.files_defining_macro("DECL3"), defining, "{step}: files_defining_macro");
+    }
+
+    /// A name declared thousands of times is cut at the limit rather than ordered — and the cut is deterministic.
+    #[test]
+    fn a_name_declared_everywhere_answers_the_first_hits_in_file_order() {
+        let mut index = ProjectIndex::new();
+        for number in 0..POPULAR_NAME + 50 {
+            file(&mut index, number, &format!("struct C{number} {{ void run(); }};\n"));
+        }
+
+        let found = index.symbols_matching("run", 10);
+        assert_eq!(found.len(), 10);
+        assert_eq!(found, index.symbols_matching("run", 10), "the same answer twice");
+        assert!(
+            found.iter().all(|symbol| {
+                let number: usize = symbol.file.to_string_lossy()[4..].trim_end_matches(".h").parse().unwrap();
+                number < 10
+            }),
+            "the cut takes the files in the order the index saw them: {found:?}"
+        );
+    }
+
+    #[test]
+    fn after_every_kind_of_edit() {
+        const FILES: usize = 24;
+        let mut generator = Lcg(7);
+        let mut sources: Vec<String> = Vec::new();
+        let mut index = ProjectIndex::new();
+
+        for number in 0..FILES {
+            sources.push(source_of(number, &mut generator));
+            file(&mut index, number, &sources[number]);
+        }
+        check(&index, FILES, "after building");
+
+        for number in (0..FILES).step_by(2) {
+            cook(&mut index, number, &sources[number]);
+        }
+        check(&index, FILES, "after cooking half of them");
+        // The corpus is not vacuous: the collisions the checks are about are really there.
+        assert!(index.symbols_matching("widget", 1000).len() > 10, "one name, many files and scopes");
+        assert!(
+            index.symbols_matching("made", 1000).iter().any(|symbol| symbol.fact.name.starts_with("Made")),
+            "a name only the cooked reading declares"
+        );
+        assert!(!index.declarations_in("ns0", Path::new("/p/f21.h")).is_empty());
+
+        // An edit, as a session does one: the summary is replaced under the same key and the reading is dropped.
+        for number in [3, 4, 11] {
+            index.forget(Path::new(&format!("/p/f{number}.h")));
+            sources[number] = source_of(number + 100, &mut generator);
+            file(&mut index, number, &sources[number]);
+        }
+        check(&index, FILES, "after forgetting and re-reading three files");
+
+        // A replacement under a *different* key (the key is made from the text) drops the reading with it.
+        let path = Path::new("/p/f6.h");
+        sources[6].push_str("int rekeyed;
+");
+        let mut summary = summarize(path, &sources[6], SummaryKey::new(999, 0));
+        for include in &mut summary.includes {
+            include.resolved = Some(PathBuf::from(format!("/p/{}", include.spelling)));
+        }
+        index.insert(summary);
+        assert!(index.cooked_declarations(path).is_none(), "the reading described a different key");
+        check(&index, FILES, "after a re-key");
+
+        for number in [0, 2, 8] {
+            index.forget_cooked(Path::new(&format!("/p/f{number}.h")));
+        }
+        check(&index, FILES, "after forgetting three readings");
+
+        cook(&mut index, 8, &sources[8]);
+        cook(&mut index, 8, &sources[8]);
+        check(&index, FILES, "after cooking one twice");
+
+        for number in 0..FILES {
+            index.forget(Path::new(&format!("/p/f{number}.h")));
+        }
+        assert_eq!(index.distinct_names(), 0, "an index with no files has no names");
+        assert!(index.symbols_matching("w", 10).is_empty());
+    }
+}

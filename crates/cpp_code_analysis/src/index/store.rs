@@ -546,12 +546,22 @@ impl<F: FileProvider> SummaryStore<F> {
         // (`C:\Users\…`). The index looks its own paths up through the same normalization, so a map keyed by the raw
         // spelling answers `None` for a file that is right there — measured as `open.h` arriving with an empty text
         // and every macro body in it silently unscoped, which is exactly the bug this pass exists to prevent.
+        //
+        // **Every** file only for a caller that has no timelines. With units the pass reads the files it *re-parses*
+        // and, once it knows which names they mention, the files that define one of those names — the two things it
+        // slices text out of. On a project of a hundred thousand files the edit that parsed one of them used to read
+        // and copy all of them, on every drain.
         let mut sources: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let eager = units.is_empty();
         {
             let _read = crate::stages::StageTimer::new(crate::stages::Stage::Read);
-            for summary in self.index.summaries() {
-                if let Some(text) = self.files.read(&summary.path) {
-                    sources.insert(normalize_path(&summary.path, cfg!(windows)), text);
+            if eager {
+                for summary in self.index.summaries() {
+                    self.read_into(&mut sources, &summary.path);
+                }
+            } else {
+                for path in indexed {
+                    self.read_into(&mut sources, path);
                 }
             }
         }
@@ -589,6 +599,39 @@ impl<F: FileProvider> SummaryStore<F> {
         // dropped here is a name no parsed file's text contains.
         let mentioned = words_mentioned_by(&sources, indexed);
         let wanted = |name: &str| mentioned.contains(name);
+
+        // **The files the scan below can be about at all**: those that define a word the re-read files mention. With
+        // an index of names that is a lookup per word; without timelines it is every file, as it always was.
+        let candidates: Vec<&FileSummary> = if eager {
+            self.index.summaries().collect()
+        } else {
+            self.index
+                .files_defining_any_macro(mentioned.iter().map(String::as_str))
+        };
+
+        if !eager {
+            let _read = crate::stages::StageTimer::new(crate::stages::Stage::Read);
+
+            // A file no unit covers has no timeline to be read through, so its reading falls back to walking its own
+            // closure — and that walk asks for the text of every file in it. Rare (a project file outside every
+            // unit), and the answer is the old one: read everything, once.
+            let uncovered = candidates
+                .iter()
+                .any(|summary| bodies_of(&environments, &seed, &summary.path).is_none())
+                || indexed
+                    .iter()
+                    .any(|path| !units.iter().any(|unit| unit.environment_of(path).is_some()));
+
+            if uncovered {
+                for summary in self.index.summaries() {
+                    self.read_into(&mut sources, &summary.path);
+                }
+            } else {
+                for summary in &candidates {
+                    self.read_into(&mut sources, &summary.path);
+                }
+            }
+        }
 
         // The names whose body a **reading** uses, from the **macro facts** of the indexed closure — not from its
         // text, and not from the environment: this is the question "could any file's reading have changed", and
@@ -630,7 +673,7 @@ impl<F: FileProvider> SummaryStore<F> {
         // `FileIndexer::index`, which is already timed as `Parse` + `Sweep`, and a timer that enclosed it would
         // count that work twice (measured: an enclosing version reported 106% of the wall clock).
         let scan = crate::stages::StageTimer::new(crate::stages::Stage::BodiedScan);
-        for summary in self.index.summaries() {
+        for summary in candidates.iter().copied() {
             let key = normalize_path(&summary.path, cfg!(windows));
             let Some(source) = sources.get(&key) else {
                 continue;
@@ -780,6 +823,17 @@ impl<F: FileProvider> SummaryStore<F> {
         }
 
         re_read
+    }
+
+    /// Read `path`'s text into `sources` under the normalized spelling the walk asks with, unless it is there.
+    fn read_into(&self, sources: &mut std::collections::HashMap<String, String>, path: &Path) {
+        let key = normalize_path(path, cfg!(windows));
+        if sources.contains_key(&key) {
+            return;
+        }
+        if let Some(text) = self.files.read(path) {
+            sources.insert(key, text);
+        }
     }
 
     /// **One file's own closure, as an environment** — the reading this pass had before a session could hand it a
@@ -1036,17 +1090,21 @@ fn words_of(text: &str) -> impl Iterator<Item = &str> {
 
 /// Every whole word the files in `files` mention, as a set — the narrowing [`SummaryStore::re_read_what_a_body_changes`]
 /// applies, and a **superset** of the names `mentions_one_of` could match in any of them.
-fn words_mentioned_by<'a>(
-    sources: &'a std::collections::HashMap<String, String>,
+fn words_mentioned_by(
+    sources: &std::collections::HashMap<String, String>,
     files: &[PathBuf],
-) -> std::collections::HashSet<&'a str> {
-    let mut mentioned = std::collections::HashSet::new();
+) -> std::collections::HashSet<String> {
+    let mut mentioned: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for path in files {
         let Some(text) = sources.get(&normalize_path(path, cfg!(windows))) else {
             continue;
         };
-        mentioned.extend(words_of(text));
+        for word in words_of(text) {
+            if !mentioned.contains(word) {
+                mentioned.insert(word.to_string());
+            }
+        }
     }
 
     mentioned

@@ -134,6 +134,130 @@ const fn parse_fingerprint(text: &str) -> u64 {
     value
 }
 
+/// How much the summary cache may hold before a sweep starts removing the oldest entries.
+///
+/// A budget rather than "never delete", because nothing else bounds the directory: every distinct text a file ever
+/// had, in every compilation, is an entry of its own — that is what makes a branch switch cheap — and a cache that
+/// only grows is a `.cppls` that one day is the largest thing in the checkout.
+pub const CACHE_BUDGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// What one sweep of the summary cache did.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PruneReport {
+    /// Summary files looked at.
+    pub examined: usize,
+    /// Removed because this binary can never serve them: another reader, producer or format wrote them.
+    pub unreachable: usize,
+    /// Removed, oldest first, to bring the directory under budget.
+    pub over_budget: usize,
+    /// Interrupted writes (`.tmp`) old enough that nobody is still writing them.
+    pub leftovers: usize,
+    /// What the summaries took before and after.
+    pub bytes_before: u64,
+    pub bytes_after: u64,
+}
+
+/// Sweep `<cache>/summaries`: remove what can never be served, then the oldest until the rest fits `budget_bytes`.
+///
+/// # Why this is needed, and why it is safe to run beside a session
+///
+/// The key contains [`READING_FINGERPRINT`], which is a hash of the readers' source, so **every change to a reader
+/// makes every entry written before it unreachable** — not wrong, just never asked for again. Nothing removed them.
+/// A developer of this crate, or a user upgrading it, left a whole project's worth of summaries behind each time.
+///
+/// A sweep only ever removes files a cache miss would rebuild: an unreachable file is never looked up, and a file
+/// removed for being old is one the next run re-derives. A file that disappears between the directory listing and
+/// the removal is somebody else's sweep, and is not an error. Writes are `.tmp` then rename
+/// ([`crate::index::write_summary`]), so a sweep never sees half a summary; a `.tmp` it finds is removed only when
+/// it is old enough that no writer can still own it.
+///
+/// A missing cache directory is an empty cache, and the sweep does not create it.
+///
+/// "Oldest" is by modification time — a hit does not rewrite an entry, so this is *first written*, not *last used*,
+/// and the budget is generous enough that it only matters to a cache that is well over what a project needs.
+pub fn prune(cache_directory: &Path, budget_bytes: u64) -> PruneReport {
+    use std::time::{Duration, SystemTime};
+
+    /// A write finishes in milliseconds; an hour is "the process that owned it is gone".
+    const ABANDONED_AFTER: Duration = Duration::from_secs(60 * 60);
+
+    let mut report = PruneReport::default();
+    let Ok(shards) = std::fs::read_dir(cache_directory.join("summaries")) else {
+        return report;
+    };
+
+    let now = SystemTime::now();
+    let mut kept: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
+
+    for shard in shards.flatten() {
+        let Ok(entries) = std::fs::read_dir(shard.path()) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if !metadata.is_file() {
+                continue;
+            }
+            let modified = metadata.modified().unwrap_or(now);
+            let length = metadata.len();
+
+            match path.extension().and_then(|extension| extension.to_str()) {
+                Some("tmp") => {
+                    if now.duration_since(modified).is_ok_and(|age| age > ABANDONED_AFTER)
+                        && std::fs::remove_file(&path).is_ok()
+                    {
+                        report.leftovers += 1;
+                    }
+                }
+                Some("bin") => {
+                    report.examined += 1;
+                    report.bytes_before += length;
+
+                    if !servable(&path)
+                        && std::fs::remove_file(&path).is_ok() {
+                            report.unreachable += 1;
+                            continue;
+                        }
+                    kept.push((modified, length, path));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    report.bytes_after = kept.iter().map(|(_, length, _)| length).sum();
+
+    if report.bytes_after > budget_bytes {
+        kept.sort_by_key(|(modified, _, _)| *modified);
+        for (_, length, path) in kept {
+            if report.bytes_after <= budget_bytes {
+                break;
+            }
+            if std::fs::remove_file(&path).is_ok() {
+                report.bytes_after -= length;
+                report.over_budget += 1;
+            }
+        }
+    }
+
+    report
+}
+
+/// Does the file at `path` start the way a summary this binary can serve starts?
+fn servable(path: &Path) -> bool {
+    use std::io::Read;
+
+    let mut header = [0u8; crate::summary_codec::HEADER_LENGTH];
+    std::fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .is_ok()
+        && crate::summary_codec::is_servable(&header)
+}
+
 /// The directory name this crate keeps its cache in, under the project root.
 ///
 /// A dot-directory inside the project rather than the operating system's cache directory: it is what the user
@@ -230,8 +354,8 @@ pub fn content_hash(text: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{CACHE_DIRECTORY, FORMAT_VERSION, SummaryKey, content_hash, fnv1a64};
-    use std::path::Path;
+    use super::{CACHE_DIRECTORY, FORMAT_VERSION, SummaryKey, content_hash, fnv1a64, prune};
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn the_hash_is_the_fixed_fnv_vectors() {
@@ -302,6 +426,69 @@ mod tests {
             from_another.file_name(),
             "the file name is the content's, the directory is the project's"
         );
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!("cppls-cache-prune-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        directory
+    }
+
+    fn write(directory: &Path, source: &str, fingerprint_shift: u64) -> PathBuf {
+        let mut summary = crate::index::summarize(Path::new("/p/a.h"), source, SummaryKey::new(0, 0));
+        summary.key.reading_fingerprint ^= fingerprint_shift;
+        crate::index::write_summary(&summary, directory).expect("the summary is written")
+    }
+
+    /// A summary another reader wrote is garbage the moment the reader changes; nothing else is touched.
+    #[test]
+    fn a_sweep_removes_what_this_binary_can_never_serve() {
+        let directory = scratch("unreachable");
+        let mine = write(&directory, "int mine;\n", 0);
+        let theirs = write(&directory, "int theirs;\n", 1);
+        let torn = mine.with_file_name("0000000000000000.bin");
+        std::fs::write(&torn, b"not a summary at all").expect("the fixture writes");
+
+        let report = prune(&directory, u64::MAX);
+
+        assert!(mine.exists(), "a summary this binary wrote is kept");
+        assert!(!theirs.exists(), "one another reader wrote is not");
+        assert!(!torn.exists(), "and neither is something that is not a summary");
+        assert_eq!((report.examined, report.unreachable, report.over_budget), (3, 2, 0));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// Over budget, the oldest go first — and only as many as it takes.
+    #[test]
+    fn a_sweep_over_budget_removes_the_oldest_first() {
+        let directory = scratch("budget");
+        let paths: Vec<PathBuf> = ["int a;\n", "int b;\n", "int c;\n"]
+            .iter()
+            .map(|source| write(&directory, source, 0))
+            .collect();
+        let size = std::fs::metadata(&paths[0]).expect("written").len();
+
+        let now = std::time::SystemTime::now();
+        for (age, path) in [(3u64, &paths[0]), (2, &paths[1]), (1, &paths[2])] {
+            let file = std::fs::File::options().write(true).open(path).expect("opens");
+            file.set_modified(now - std::time::Duration::from_secs(age * 100)).expect("sets");
+        }
+
+        let report = prune(&directory, size * 2 + size / 2);
+
+        assert!(!paths[0].exists(), "the oldest is the one to go");
+        assert!(paths[1].exists() && paths[2].exists());
+        assert_eq!(report.over_budget, 1);
+        assert!(report.bytes_after <= size * 3);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A project that has never been cached has nothing to sweep, and asking must not create the directory.
+    #[test]
+    fn a_sweep_of_a_directory_that_is_not_there_is_empty_and_creates_nothing() {
+        let directory = scratch("missing");
+        assert_eq!(prune(&directory, 0), super::PruneReport::default());
+        assert!(!directory.exists());
     }
 
     #[test]

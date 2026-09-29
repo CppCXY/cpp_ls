@@ -385,6 +385,66 @@ pub fn scan_directives(source: &str, tokens: &[CppTokenData]) -> Vec<SpannedDire
     out
 }
 
+/// What a file's directives say, as two numbers — the cheapest answer to "did this edit change what the file
+/// tells the files that include it".
+///
+/// # Two numbers, because two things depend on a directive
+///
+/// * `environment` — the directives' **text**, in order and nothing else. It is what an *includer* sees: which
+///   macros come into force, which files are pulled in, under which conditions. It does not move when an edit
+///   above a directive shifts it down the file, because an includer never asked where a directive is.
+/// * `layout` — the same, **and where each directive starts**. It is what a translation unit's timeline is made
+///   of: its events are `(file, offset)` positions, so an edit that shifts a directive has changed the timeline
+///   even though it has changed no macro.
+///
+/// So typing in a function body — after the file's last directive — changes neither, and typing between two
+/// directives changes `layout` only when it changes the *length* of what is above the later one. The comparison is
+/// conservative in the safe direction: two equal signatures mean the directives are the same lines at the same
+/// places, and two different ones only mean "assume so".
+///
+/// A directive's own text is its logical line without the trailing comment: a comment is trivia, and an edit to
+/// one is not an edit to the directive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectiveSignature {
+    pub environment: u64,
+    pub layout: u64,
+}
+
+/// Read the [`DirectiveSignature`] of `source`.
+pub fn directive_signature(source: &str) -> DirectiveSignature {
+    let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+
+    let mut environment = FNV_OFFSET;
+    let mut layout = FNV_OFFSET;
+
+    for directive in scan_directives(source, &tokens) {
+        let line = directive.line;
+        let text = source
+            .get(line.start_offset..line.end_offset())
+            .unwrap_or_default();
+
+        environment = fnv_mix(environment, text.as_bytes());
+        // A separator, so that two lines are not the same as one line made of both.
+        environment = fnv_mix(environment, &[0xff]);
+
+        layout = fnv_mix(layout, &(line.start_offset as u64).to_le_bytes());
+        layout = fnv_mix(layout, text.as_bytes());
+        layout = fnv_mix(layout, &[0xff]);
+    }
+
+    DirectiveSignature { environment, layout }
+}
+
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+fn fnv_mix(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 /// Is this token the first thing on its **logical** line?
 ///
 /// Scanned backwards over trivia. A `Newline` makes the answer yes; any other token makes it no; reaching
