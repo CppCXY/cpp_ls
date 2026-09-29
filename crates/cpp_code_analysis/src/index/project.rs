@@ -1734,6 +1734,16 @@ fn sort_and_hide(names: &mut Vec<OfferedName>) {
 ///
 /// See the guard in [`type_of_expression`]: this is a bound on an ill-formed file's recursion, not a statement
 /// about how complex a type may be.
+/// How many members deep a member's type is followed before the walk gives up.
+///
+/// A member declared with another member's name is the ordinary way a class writes its own types —
+/// `typedef _Ty& reference; reference front;`, `typedef size_t size_type; size_type size();` — so one step is not
+/// enough. The step is a **member lookup** rather than a substitution, which is why it needs a bound of its own:
+/// a lookup can be answered by a declaration that names the member it was asked from, and `a b; b a;` is writable
+/// text even though it is not a valid program. Eight is far past any real chain — the standard library's deepest
+/// are two or three.
+const MAX_NESTED_TYPE_DEPTH: usize = 8;
+
 const MAX_TYPE_DEPTH: usize = 8;
 /// The type of an expression, as far as this layer can tell, and the file that declared it.
 ///
@@ -1952,18 +1962,79 @@ pub(crate) fn type_of_expression(
             return Known::Unknown(reason);
         };
 
+        // **Which question is being asked depends on where the cursor is, and both are real.**
+        //
+        // ```text
+        // `v.data`    a member function named on its own   a function has no type *as a name*   nothing to give
+        // `v.data()`  the callee of a call                 what a call of it has                the return type
+        // `v.front`   a data member                        what its declaration says           `_Ty&`, substituted
+        // ```
+        //
+        // A cursor inside `data` in `v.data()` is on the **callee**, and every consumer asking about it — a hover,
+        // an inlay hint — wants the type of `v.data()`. Measured before this existed: the four offsets of `data`
+        // answered `UnknownType("v.data")` while the `(` one byte later answered `int*`, so the answer depended on
+        // which byte of one name the user was pointing at.
+        let arguments = arguments.to_vec();
+        let bindings = member_bindings(index, scopes, root, path, &class, &arguments);
+
+        let being_called = expression.parent().is_some_and(|parent| {
+            cpp_parser::CppSyntaxKind::from(parent.kind()) == cpp_parser::CppSyntaxKind::CallExpr
+        });
+
         // **A member of a class template is finished here**, and this is the one place it can be: the argument list
         // is the object type's, which is what this arm just computed, and the parameter names are the declaring
-        // class's. `v.data()` on a `std::vector<int>` is `_Ty*` in the header and `int*` here — without this the
+        // class's. `v.front` on a `std::vector<int>` is `_Ty&` in the header and `int&` here — without this the
         // answer is a type called `_Ty`, which is not a class, so nothing can follow it.
-        return match fact.type_of.as_deref() {
-            Some(type_of) => Known::Yes((
-                member_bindings(index, scopes, root, path, &class, arguments)
-                    .applied_to(&parse_type_spelling(type_of)),
-                file,
-            )),
-            None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
-        };
+        if let Some(type_of) = fact.type_of.as_deref() {
+            let finished = bindings.applied_to(&parse_type_spelling(type_of));
+
+            // **A member whose type is another member of the same class**: `_Ty& reference; reference front;`. The
+            // substitution has nothing to replace in `reference` — that spelling does not mention `_Ty` — so the
+            // name is resolved as a member of the *same* class with the same argument pairing, and the walk
+            // repeats while the type is still a bare name.
+            //
+            // A chain of two is real and common: `size_type` → `size_t` is how every standard container declares
+            // `size()`, `capacity()`, `max_size()`. The walk is bounded by [`MAX_NESTED_TYPE_DEPTH`] rather than
+            // by an argument about termination, because the argument is nearly — not exactly — true: each step
+            // asks about a *different* name and a class has finitely many members, but two members can name each
+            // other (`a b; b a;` is not valid C++ and *is* writable text), and a walk that trusted validity would
+            // not terminate on the file a language server has to survive.
+            let mut current = finished;
+            let mut current_file = file;
+            let mut asked: Vec<String> = vec![fact.name.clone()];
+
+            for _ in 0..MAX_NESTED_TYPE_DEPTH {
+                let nested = current.to_string();
+                if !writes_a_name(&nested) || asked.contains(&nested) {
+                    break;
+                }
+                asked.push(nested.clone());
+
+                let Known::Yes((inner, inner_file)) =
+                    member_fact(index, scopes, root, path, &class, &nested)
+                else {
+                    break;
+                };
+                let Some(inner_type) = inner.type_of.as_deref() else {
+                    break;
+                };
+
+                current = bindings.applied_to(&parse_type_spelling(inner_type));
+                current_file = inner_file;
+            }
+
+            return Known::Yes((current, current_file));
+        }
+
+        // No `type_of`: the declaration is a function (or a class). For a function being **called**, the answer is
+        // what the call has; for one merely named, there is no type and saying so is the honest answer.
+        if being_called
+            && let Some(returns) = what_a_call_has_in(&fact)
+        {
+            return Known::Yes((bindings.applied_to(&returns), file));
+        }
+
+        return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
     }
 
     Known::Unknown(UnknownReason::UnknownType(Box::from(written)))
@@ -2154,7 +2225,7 @@ impl NamedDeclaration {
             // file that is the better source by a wide margin — `const Widget* const p` is a shape with two
             // qualifier positions, and no parser of the *spelling* can put them back where the file had them.
             NamedDeclaration::Here(binding) => {
-                let declarator = declarator_declaring(root, binding.name_range)?;
+                let declarator = crate::sema::types::declarator_declaring(root, binding.name_range)?;
                 let specifiers = declarator.ancestors().find_map(|node| {
                     node.children().find(|child| {
                         CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq
@@ -2216,30 +2287,7 @@ impl NamedDeclaration {
     }
 }
 
-/// **The declarator that declares the name at `range`** — the innermost one whose text holds it.
-///
-/// Innermost, because a declaration holds the declarators of what it declares *and* of the parameters it takes:
-/// `void f(Widget* p)` has a `Declarator` for `f` whose text contains `p`, and the one that declares `p` is the
-/// parameter's own. The shortest match is the innermost, and it is also the only one whose specifiers are the
-/// *parameter's* specifiers.
-fn declarator_declaring(
-    root: &cpp_parser::CppSyntaxNode,
-    name: cpp_parser::SourceRange,
-) -> Option<cpp_parser::CppSyntaxNode> {
-    root.descendants()
-        .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
-        .filter(|child| {
-            let own = child.text_range();
-            usize::from(own.start()) <= name.start_offset
-                && usize::from(own.end()) >= name.end_offset()
-                && child
-                    .descendants()
-                    .any(|inner| CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::NameExpr)
-        })
-        .min_by_key(|child| {
-            usize::from(child.text_range().end()) - usize::from(child.text_range().start())
-        })
-    }
+
 
 /// The type a declaration was written with — or, where it wrote `auto`, the type its **initializer** has.
 ///

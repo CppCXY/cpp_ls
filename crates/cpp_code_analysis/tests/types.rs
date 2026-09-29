@@ -46,7 +46,8 @@ fn type_of_use(source: &str, spelling: &str) -> Option<String> {
 }
 
 /// The offset of the last **whole-word** occurrence of a spelling.
-fn last_word(source: &str, spelling: &str) -> usize {    let is_word = |character: char| character.is_alphanumeric() || character == '_';
+fn last_word(source: &str, spelling: &str) -> usize {
+    let is_word = |character: char| character.is_alphanumeric() || character == '_';
     let mut found = None;
     let mut from = 0usize;
 
@@ -67,7 +68,8 @@ fn last_word(source: &str, spelling: &str) -> usize {    let is_word = |characte
 
 /// The five shapes a modern codebase actually writes, each deduced from what the declaration wrote.
 #[test]
-fn an_auto_declaration_takes_the_type_of_its_initializer() {    let cases = [
+fn an_auto_declaration_takes_the_type_of_its_initializer() {
+    let cases = [
         (
             "int count();\nint f() { auto n = count(); return n; }\n",
             "n",
@@ -298,9 +300,15 @@ fn two_declarations_that_disagree_about_the_type_are_still_unknown() {
 }
 
 /// The type of the use of a name **in a session the caller built** — the two-file fixtures' way in.
+///
+/// The offset is the name's **last byte**, not its first, and that is the product's own rule rather than a
+/// convenience: a cursor "on a name" is anywhere inside it, and an offset at the name's *start* is the boundary
+/// between it and whatever precedes it — where a `*`, a `(`, or a `.` decides what the expression is. Measured,
+/// `v.data()` asked at the offset of `data` answers about `v.data` (an uncalled member function, which has no type)
+/// while the same name asked one byte later answers `int*`, which is what a reader pointing at the name sees.
 fn type_of_use_in(session: &Session<MemoryFiles>, path: &str, source: &str, spelling: &str) -> Option<String> {
     let view = session.view(path).expect("the file is held");
-    let offset = last_word(source, spelling);
+    let offset = last_word(source, spelling) + spelling.len() - 1;
 
     match session.type_at(&view, offset) {
         cpp_code_analysis::Known::Yes(found) => Some(found.type_of),
@@ -370,7 +378,7 @@ namespace std {
 template <class _Ty, class _Alloc = int>
 struct vector {
     _Ty& front;
-    _Ty* data;
+    _Ty* data();
 };
 }
 ";
@@ -378,7 +386,7 @@ struct vector {
 #include \"vector.h\"
 int f() {
     std::vector<int> v;
-    return *v.data + v.front;
+    return *v.data() + v.front;
 }
 ";
     let session = session_with(&[("/p/a.cpp", source), ("/p/vector.h", header)]);
@@ -400,17 +408,74 @@ int f() {
     );
 }
 
-/// **The boundary, stated as a test**: a member whose type is *another* member of the same template is not
-/// substituted, because the alias has to be resolved before the substitution has anywhere to land.
+/// **A member function the reader is pointing at inside a call has what the call has.**
 ///
-/// `reference` is `_Ty&` and `front` is declared with it. Substituting the arguments into `reference` replaces
-/// nothing — that spelling does not mention `_Ty` — so the answer is the **name** `reference`, which nothing
-/// declares. This layer reports it as the name it is rather than guessing that `reference` means `_Ty&`: the guess
-/// is right for `std::vector` and wrong for every template that declares a nested name with a different meaning,
-/// and nothing at this level can tell them apart. What it would take is resolving `std::vector<int>::reference` as
-/// its own member lookup *with the same argument pairing* — a step this layer does not take yet.
+/// A function has no type *as a name* — `DeclFact::returns` is the field for what a call of it gives — so the four
+/// offsets of `data` in `v.data()` answered nothing while the `(` one byte later answered `int*`. The answer
+/// depended on which byte of one name the cursor was on, which is not a distinction a reader can see. A cursor on
+/// the callee is a cursor on the call.
 #[test]
-fn a_member_whose_type_is_a_nested_alias_is_not_substituted() {
+fn a_member_function_inside_a_call_has_what_the_call_has() {
+    let header = "\
+namespace std {
+template <class _Ty>
+struct vector { _Ty* data(); };
+}
+";
+    let source = "\
+#include \"vector.h\"
+int f() {
+    std::vector<int> v;
+    return *v.data();
+}
+";
+    let session = session_with(&[("/p/a.cpp", source), ("/p/vector.h", header)]);
+
+    assert_eq!(
+        type_of_use_in(&session, "/p/a.cpp", source, "data").as_deref(),
+        Some("int*"),
+        "the callee inside a call has the return type, arguments substituted"
+    );
+}
+
+/// **A member function merely *named* has no type, and saying so is the answer.** `v.data;` is a member function
+/// not being called: there is no `int*` involved, and answering with the return type would be a claim about an
+/// expression the file did not write.
+#[test]
+fn a_member_function_that_is_not_called_has_no_type() {
+    let header = "\
+namespace std {
+template <class _Ty>
+struct vector { _Ty* data(); };
+}
+";
+    let source = "\
+#include \"vector.h\"
+int f() {
+    std::vector<int> v;
+    v.data;
+    return 0;
+}
+";
+    let session = session_with(&[("/p/a.cpp", source), ("/p/vector.h", header)]);
+
+    assert_eq!(
+        type_of_use_in(&session, "/p/a.cpp", source, "data"),
+        None,
+        "a function named on its own has no type"
+    );
+}
+
+
+/// **A member whose type is *another* member of the same class is resolved, with the same argument pairing.**
+///
+/// `_Ty& reference; reference front;` is how the standard library writes almost every member it has: the type of
+/// `front` is the *name* `reference`, which mentions no parameter at all, so substituting the arguments into it
+/// replaces nothing. The step that finishes it is a second member lookup — `reference` in the same class, with the
+/// same `_Ty = int` — and the walk repeats while the type is still a bare name. That is also what makes
+/// `size_type` → `size_t` work, which is the shape `v.size()` has.
+#[test]
+fn a_member_whose_type_is_a_nested_alias_is_resolved() {
     let header = "\
 namespace std {
 template <class _Ty>
@@ -431,18 +496,74 @@ int f() {
 
     assert_eq!(
         type_of_use_in(&session, "/p/a.cpp", source, "front").as_deref(),
-        Some("reference"),
-        "the name, unresolved — and a caller asking whether it names a class gets `None`, which is the honest \
-         answer rather than a wrong type"
+        Some("int&"),
+        "`reference` is `_Ty&` and `_Ty` is `int`, one member lookup further in"
     );
 }
+
+/// **A chain of two is real**: `size_type` is `size_t`, and a member declared with `size_type` is a `size_t`.
+///
+/// The walk terminates because each step asks about a **different declaration** — a class has finitely many
+/// members — and the cycle that would break that (`reference reference;`) is a member declared with its own type,
+/// which the reader records as the member itself and the walk refuses to follow.
+#[test]
+fn a_chain_of_nested_types_resolves() {
+    let source = "\
+namespace std {
+template <class _Ty>
+struct vector {
+    typedef unsigned long size_type;
+    typedef size_type difference_type;
+    difference_type count;
+};
+}
+int f() {
+    std::vector<int> v;
+    return (int)v.count;
+}
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+
+    assert_eq!(
+        type_of_use_in(&session, "/p/a.cpp", source, "count").as_deref(),
+        Some("unsigned long"),
+        "two members deep, and the name that ends the chain is the type"
+    );
+}
+
+/// **A `using` alias is an alias too**, and its target is written after the `=` rather than in a declarator — so
+/// it takes the *other* branch of the alias reader (`declared_alias_target`) than `typedef` does. Both branches end
+/// in the same field, and a member declared with either has the type the alias points at.
+#[test]
+fn a_using_alias_resolves_like_a_typedef() {
+    let source = "\
+namespace std {
+template <class _Ty>
+struct vector {
+    using size_type = unsigned long;
+    size_type count;
+};
+}
+int f() {
+    std::vector<int> v;
+    return (int)v.count;
+}
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+
+    assert_eq!(
+        type_of_use_in(&session, "/p/a.cpp", source, "count").as_deref(),
+        Some("unsigned long"),
+        "`using size_type = unsigned long;` is the same fact as `typedef unsigned long size_type;`"
+    );
+}
+
 
 /// **A class template written without arguments keeps its parameters**, which is the answer that must not become a
 /// guess: `std::vector` with no argument has no `_Ty` to pair, so a member's type stays `_Ty&` — a name a caller can
 /// see is unfinished rather than a type that happens to be wrong.
 #[test]
-fn a_template_without_arguments_keeps_its_parameters() {
-    let source = "\
+fn a_template_without_arguments_keeps_its_parameters() {    let source = "\
 namespace std {
 template <class _Ty>
 struct vector { typedef _Ty& reference; };

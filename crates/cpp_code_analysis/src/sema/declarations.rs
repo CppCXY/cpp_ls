@@ -101,7 +101,7 @@ pub fn build_facts(
 /// `None` for a declaration that declares no type: a class, a namespace, a function, an alias. See
 /// [`DeclFact::type_of`].
 pub fn declared_type_of(root: &CppSyntaxNode, binding: &Binding) -> Option<String> {
-    declared_type_of_with(&DeclarationShapes::of(root), binding)
+    declared_type_of_with(root, &DeclarationShapes::of(root), binding)
 }
 
 /// [`declared_type_of`] for a caller that has the file's shapes already — which is every caller with more than one
@@ -129,30 +129,115 @@ pub fn declared_type_of(root: &CppSyntaxNode, binding: &Binding) -> Option<Strin
 /// Because a `Binding` records it, and the reader uses it to descend — while a declarator's last `NameExpr` may
 /// belong to a parameter (`int f(int x)`) or a trailing return type. The reader prefers its own reading of the name
 /// when it can find one, and this range is what it falls back to.
-fn declared_type_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
-    // The kinds that have a type in this sense. A field and a parameter are `Variable` too — they are what a
-    // member access is asked *from* — while a class and a function are not: a class *is* a type and a function
-    // *returns* one, and those spellings come from a different part of the syntax.
-    if binding.kind != BindingKind::Variable {
+/// **The target of a `using X = Y;`**, read from the `TypeId` after the `=`.
+///
+/// `None` for anything that is not a `using` declaration the name is inside, which is what makes this safe to ask
+/// first: the ordinary `typedef` path and every variable declaration fall through to the specifiers-and-declarator
+/// reading.
+///
+/// The name is matched by **being inside the declaration** rather than by equality, because a `using` can declare
+/// several names in one line only as a template, and the range a binding records is the name's own:
+/// `template <class T> using Vec = vector<T>;` binds `Vec`, and the `TypeId` is what its type is.
+fn using_alias_target(root: &CppSyntaxNode, name: cpp_parser::SourceRange) -> Option<String> {
+    let declaration = root
+        .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::UsingDecl)
+        .filter(|node| {
+            let own = node.text_range();
+            usize::from(own.start()) <= name.start_offset && usize::from(own.end()) >= name.end_offset()
+        })
+        .min_by_key(|node| {
+            usize::from(node.text_range().end()) - usize::from(node.text_range().start())
+        })?;
+
+    let target = declaration
+        .children()
+        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TypeId)?
+        .text()
+        .to_string();
+    let target = target.trim().to_string();
+
+    (!target.is_empty()).then_some(target)
+}
+
+/// Does this declarator's span reach the start of the name it is being read for?
+///
+/// The **start**, not the whole range, for the reason the types module gives: a declarator's span ends at its own
+/// last child, and for `* p` that child is the `PointerType` — so the span is `(50, 52)` while the name is
+/// `(52, 53)`, and a test for full containment refuses the very declarator it is looking for.
+fn reaches_the_name(node: &CppSyntaxNode, name: cpp_parser::SourceRange) -> bool {
+    let span = node.text_range();
+    usize::from(span.start()) <= name.start_offset && usize::from(span.end()) >= name.start_offset
+}
+
+fn declared_type_of_with(
+    root: &CppSyntaxNode,
+    shapes: &DeclarationShapes,
+    binding: &Binding,
+) -> Option<String> {
+    // **The kinds that name a type.** A field and a parameter are `Variable` too — they are what a member access is
+    // asked *from* — and so is an **alias**, which is the kind this list was missing: `typedef _Ty& reference;`
+    // records nothing under a rule that only allows `Variable`, so every member a class declares with its own
+    // typedef had no type at all. That is the standard library's ordinary style (`typedef size_t size_type;` and
+    // then `size_type size();`), and the cost was double: a member's own `type_of` was empty *and* the walk that
+    // resolves one member's type against another's had nothing to read.
+    //
+    // What is still left out is the two kinds whose spelling comes from a different part of the syntax: a class
+    // declares no type *as a name* (it *is* one), and a function *returns* one — [`DeclFact::returns`] is that
+    // field, and `auto make() -> Widget` is why the two cannot be merged.
+    if !matches!(
+        binding.kind,
+        BindingKind::Variable | BindingKind::Typedef | BindingKind::Alias
+    ) {
         return None;
     }
 
-    // The specifier sequence, and the declarator whose own text holds the operators the specifiers do not — both
-    // **innermost on the path**, which is what "the last one passed on the way down" meant when this was a
-    // descent: for a parameter the outermost declarator is the *function's* (`f(Widget* p)`), and the one that
-    // holds `p` is the parameter's own.
+    // **The specifiers are the innermost on the path and the declarator is the outermost**, which is the same walk
+    // read in two directions and needs its reason stated, because "the innermost" is right for one and wrong for the
+    // other:
+    //
+    // * a *specifier sequence* is written **before** the name, so the last one on the path is the declaration's own
+    //   — `Widget` in `void f(Widget p)`, not the `void` the path passed through first;
+    // * a *declarator* is a chain of nested nodes around **one** name, and the outermost of them is the whole type:
+    //   `typedef void (*F)(int)` nests `(*F)(int)`, `(*F)` and `*`, and only the outermost carries the parameter
+    //   list. Keeping the last reaching one answers `void*` with the parameter list silently dropped; keeping the
+    //   widest by span answers `void` for `void f(Widget* p)` and `Widget` for `Widget* p`, because a declarator's
+    //   span is not required to cover the name it declares (`Widget* p`'s inner level spans `* `, two bytes short).
+    //
+    // The walk is outermost-first, so no arithmetic is needed: the **first** declarator that reaches the name is the
+    // one that declares it. That is what [`declarator_declaring`] answers from the tree, and the two agree by
+    // construction rather than by being written twice.
+    //
+    // **Why the tree is not asked directly.** It was, and it cost 8.6× on a real project: `declarator_declaring`
+    // walks from the root, and this function runs once per **binding** — 30 185 declarations in the corpus — so the
+    // walk turns one pass into a quadratic one. Measured: 2.9 s → 24.9 s indexing 356 files. The shape walk exists
+    // to answer these questions in one pass, and it can answer this one.
     let mut specifiers = None;
-    let mut declarator = None;
+    let mut declarator: Option<CppSyntaxNode> = None;
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
         if let Some(node) = &shape.specifiers {
             specifiers = Some(node.clone());
         }
-        if let Some(node) = &shape.declarator {
+        if declarator.is_none()
+            && let Some(node) = &shape.declarator
+            && reaches_the_name(node, binding.name_range)
+        {
             declarator = Some(node.clone());
         }
     });
 
+    // **A `using` alias writes its type after the `=`**, in a `TypeId` of its own rather than in a declarator:
+    // `using size_type = unsigned long;` has a `NameExpr` and a `TypeId` under the declaration and no specifier
+    // sequence at all. So the two spellings of an alias take two branches — `typedef` reads specifiers plus
+    // declarator, `using` reads the type id — and both end in the same field. Measured: without this branch a
+    // `using` alias answered `void`, because the specifiers of the *enclosing* class were what the walk had last
+    // seen.
+    if let Some(target) = using_alias_target(root, binding.name_range) {
+        return Some(target);
+    }
+
     let specifiers = specifiers?;
+
     let found = crate::sema::types::type_of_declaration(
         &specifiers,
         declarator.as_ref(),
@@ -805,7 +890,7 @@ fn fact_for(
     // them dominates is the difference between four different fixes. See `crate::stages`.
     let type_of = {
         let _timer = crate::stages::StageTimer::new(crate::stages::Stage::TypeOf);
-        declared_type_of_with(shapes, binding)
+        declared_type_of_with(root, shapes, binding)
     }
     .or_else(|| {
         let _timer = crate::stages::StageTimer::new(crate::stages::Stage::Alias);

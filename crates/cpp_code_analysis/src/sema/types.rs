@@ -389,11 +389,21 @@ impl fmt::Display for Type {
                 Some(size) => write!(out, "{of}[{size}]"),
                 None => write!(out, "{of}[]"),
             },
+            // **A pointer or an array in the return position needs its parentheses**, and they go around the
+            // *declarator* rather than around the whole type: `void (*)(int)` is a pointer to a function, while
+            // `(void*)(int)` and `void*(int)` read as a function returning a pointer — the one mistake this reader
+            // is written not to make. The language's rule is that a declarator's operators bind in the order they are
+            // parenthesised, so writing the shape back has to put the parentheses in the same place.
             Type::Function {
                 returns,
                 parameters,
             } => {
-                write!(out, "{returns}(")?;
+                match &**returns {
+                    pointer @ Type::Pointer { .. } => write!(out, "{}", pointer.as_a_declarator())?,
+                    array @ Type::Array { .. } => write!(out, "{}", array.as_a_declarator())?,
+                    other => write!(out, "{other}")?,
+                }
+                write!(out, "(")?;
                 for (at, parameter) in parameters.iter().enumerate() {
                     if at > 0 {
                         write!(out, ", ")?;
@@ -413,7 +423,63 @@ impl fmt::Display for Type {
     }
 }
 
-/// What a set of template parameter names stands for, by name — the map [`Type::substituted`] reads.
+impl Type {
+    /// **This type written the way a declarator writes it** — the shape `void (*)(int)` needs, and nothing else
+    /// does.
+    ///
+    /// A pointer or an array in the return position of a function type is the one place this layer has to write
+    /// parentheses: `void*(int)` reads as a function *returning* a pointer, which is a different type. The
+    /// parentheses go around the **declarator** rather than around the type — `void (*)(int)`, not `(void*)(int)` —
+    /// because that is where a name would stand, and a type read out of a declaration is that declaration with the
+    /// name taken out. `void (*)(int)` is `void (*F)(int)` minus the `F`.
+    ///
+    /// # Why the base goes on the left and the operators on the right
+    ///
+    /// Because that is the order a declaration writes them, and the shape holds them the other way round:
+    /// `Pointer { to: Builtin("void") }` has the `void` innermost. So the operators are collected on the way down —
+    /// `*` for a pointer, `[4]` for an array — and the base is written when the bottom is reached, in front of
+    /// them. A writer that emitted each level as it met it produced `(*void)(int)`.
+    fn as_a_declarator(&self) -> String {
+        let mut suffix = String::new();
+        let mut qualified = false;
+        let mut current = self;
+
+        loop {
+            match current {
+                Type::Pointer { to } => {
+                    suffix.push('*');
+                    current = to;
+                }
+                Type::Array { of, extent } => {
+                    suffix.push('[');
+                    if let Some(size) = extent {
+                        suffix.push_str(&size.to_string());
+                    }
+                    suffix.push(']');
+                    current = of;
+                }
+                // `void* const`: the qualifier is written after what it qualifies, which is why it is part of the
+                // operator run rather than of the base.
+                Type::Qualified { of }
+                    if matches!(**of, Type::Pointer { .. } | Type::Array { .. }) =>
+                {
+                    qualified = true;
+                    current = of;
+                }
+                _ => break,
+            }
+        }
+
+        // **The parentheses go around the operators, not around the base**: `void (*)(int)` is `void (*F)(int)` with
+        // the `F` left out, and `(void*)(int)` — what wrapping the whole thing gives — puts the `void` inside them.
+        format!(
+            "{current} ({suffix}{})",
+            if qualified { " const" } else { "" }
+        )
+    }
+}
+
+/// What a set of template parameter names stands for, by name — the map [Type::substituted] reads.
 ///
 /// A newtype over slices rather than a `HashMap`, because of how it is built and used: a class template's
 /// parameters are a short list in declaration order, the caller has just read them, and linear search over four
@@ -840,7 +906,71 @@ pub fn template_parameter_names(list: &CppSyntaxNode) -> Vec<String> {
     names
 }
 
-/// **Read a declared type from a declaration's syntax** — the specifier sequence plus the declarator around a name.
+/// **The declarator that declares the name at `range`** — the innermost one whose text holds it.
+///
+/// Innermost, because a declaration holds the declarators of what it declares *and* of the parameters it takes:
+/// `void f(Widget* p)` has a `Declarator` for `f` whose text contains `p`, and the one that declares `p` is the
+/// parameter's own. The shortest match is the innermost, and it is also the only one whose specifiers are the
+/// *parameter's* specifiers.
+pub fn declarator_declaring(
+    root: &cpp_parser::CppSyntaxNode,
+    name: cpp_parser::SourceRange,
+) -> Option<cpp_parser::CppSyntaxNode> {
+    // **The outermost declarator that declares this name**, which is the one under the declaration or under its
+    // `InitDeclarator` — not a search for the shortest one containing the name, and the difference is every
+    // function pointer and every array: `typedef void (*Callback)(int);` nests `(* Callback)(int)`, `(* Callback)`
+    // and `* Callback`, and the *innermost* of those is `* Callback` — whose reader answers `void*` with the
+    // parameter list lost. The whole declarator is what holds the whole type; the name is found inside it by
+    // [`type_of_declaration`], which descends to the node whose direct child is the name.
+    //
+    // This is the same shape the reader's own tests use, and it is not a coincidence: the declaration is where a
+    // type is written down.
+    let declaration = root
+        .descendants()
+        .filter(|node| {
+            // **Three more kinds declare a name than the one called `Declaration`.** `typedef` and `using` are
+            // their own nodes, and a **parameter** is a `Parameter` — so a search for `Declaration` alone found
+            // none of them: a function-pointer typedef came back with no type at all, and `void f(Widget* p)`'s
+            // `p` was read from the *function's* declaration, which is why a parameter answered `UnknownType`
+            // while the same spelling declared at the top of a body worked.
+            matches!(
+                CppSyntaxKind::from(node.kind()),
+                CppSyntaxKind::Declaration
+                    | CppSyntaxKind::TypedefDecl
+                    | CppSyntaxKind::UsingDecl
+                    | CppSyntaxKind::Parameter
+            ) && node
+                .descendants()
+                .any(|inner| CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::Declarator)
+                && {
+                    let own = node.text_range();
+                    usize::from(own.start()) <= name.start_offset
+                        && usize::from(own.end()) >= name.end_offset()
+                }
+        })
+        // **The innermost declaration containing the name.** Declarations nest — a parameter is declared inside a
+        // function's declaration — so the outermost one is the *function*, and reading it would answer about `f`
+        // when the question was `p`. `void f(Widget* p)` is the shape this is for, and it is the same
+        // innermost-wins rule the shapes walk uses.
+        .min_by_key(|node| {
+            usize::from(node.text_range().end()) - usize::from(node.text_range().start())
+        })?;
+
+    let init = declaration
+        .children()
+        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::InitDeclarator);
+
+    init.as_ref()
+        .and_then(|init| {
+            init.children()
+                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+        })
+        .or_else(|| {
+            declaration
+                .children()
+                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+        })
+}/// **Read a declared type from a declaration's syntax** — the specifier sequence plus the declarator around a name.
 ///
 /// # Why both halves are needed
 ///
@@ -1124,11 +1254,6 @@ fn read_argument(node: &CppSyntaxNode) -> Type {
     Type::named(node.text().to_string().trim())
 }
 
-/// Does this node's span take in the whole of that range?
-fn covers(node: &CppSyntaxNode, range: cpp_parser::SourceRange) -> bool {
-    let own = node.text_range();
-    usize::from(own.start()) <= range.start_offset && usize::from(own.end()) >= range.end_offset()
-}
 
 /// Does this node's span **contain the start** of that range?
 ///
@@ -1171,28 +1296,32 @@ fn declarator_holding_the_name(declarator: &CppSyntaxNode, name: cpp_parser::Sou
     }
 }
 
-/// **Wrap `base` in everything the declarator wrote between itself and the name.**
+/// **Wrap `base` in everything the declarator wrote around the name** — from the outside in.
 ///
-/// The declarator nests from the outside in — `* const p` is a `Declarator` holding a `PointerType` and a
-/// `Declarator` holding `p` — so this walks from the outermost declarator down to the one holding the name, and
-/// applies each level's operators in the order it meets them.
+/// # Why the outside comes first
 ///
-/// The three levels that matter, and what each does to the type so far:
+/// Because that is the order the type is built in, and the parentheses are what make it so. Without them a
+/// declarator reads left to right and the operators apply in the order they are met: `Widget* p` is a pointer to
+/// `Widget`, and iterating the levels from the name outwards gets that right by accident. With them the reading
+/// flips: `int (*p)[4]` is a pointer to an array, and `typedef void (*Callback)(int)` is a pointer to a function —
+/// while the same tokens without parentheses (`int *p[4]`, `void *Callback(int)`) are an array of pointers and a
+/// function returning a pointer. A walk that started at the name produced `void*(int)` for the third of those:
+/// **a function returning a pointer, which is the type the file did not write**.
+///
+/// # The rule at one level
 ///
 /// ```text
-/// PointerType          `*` / `* const`     wraps what is inside in a pointer
-/// ReferenceType        `&` / `&&`          wraps it in a reference
-/// ArrayType            `[4]` / `[]`        wraps it in an array of that extent
+/// a child Declarator            the way further in: recurse, then apply this level's operators to the result
+/// no child Declarator           the name is here: apply this level's operators to the base
 /// ```
 ///
-/// A `ParameterList` is **not** one of them. `int f(int x)`'s parameter list belongs to `f`'s *function type*, and
-/// so does `int (*cb)(int)`'s — but the second is a pointer to a function while the first is a function, which is
-/// exactly the difference the pointer level above it makes. So the list is read where it is met, as a wrapper of
-/// the type read so far: a function-typed declarator is a [`Type::Function`] whose `returns` is what the
-/// specifiers said.
+/// and "this level's operators" are its children that are not that declarator — `PointerType`, `ReferenceType`,
+/// `ArrayType`, `ParameterList`. The chain always ends at a level whose child *is* the name, because that is what
+/// [`declarator_holding_the_name`] descended to; the `innermost` argument is only the stop condition.
 ///
-/// A node that **is the way down** contributes nothing of its own, and that is not a special case but the rule:
-/// the operators of a declaration are the nodes that are *not* on the path from the type to the name.
+/// A `ParameterList` is an operator like the others, and that is the whole of the difference between a function and
+/// a pointer to one: `int f(int)` has the list at the level holding `f`, while `int (*f)(int)` has it at the level
+/// *outside* the parentheses, so the pointer is applied first and the list wraps the pointer.
 fn wrap(
     base: Type,
     outermost: &CppSyntaxNode,
@@ -1203,8 +1332,7 @@ fn wrap(
     ///
     /// `None` for a node that is not an operator, which is most of them: a `NameExpr`, a `DeclSpecifierSeq`, an
     /// initializer, an attribute. The caller loops rather than matching, because a level can hold more than one
-    /// operator (`int (*p)[4]`) and the order among them is the order they are written in — left to right is
-    /// outermost to innermost, and this is called on one level at a time.
+    /// operator (`int (*p)[4]`), and the order among them is the order they are written in.
     fn apply(wrapped: &Type, node: &CppSyntaxNode) -> Option<Type> {
         Some(match CppSyntaxKind::from(node.kind()) {
             CppSyntaxKind::PointerType => Type::Pointer {
@@ -1218,9 +1346,6 @@ fn wrap(
                 of: Arc::new(wrapped.clone()),
                 extent: array_extent(node),
             },
-            // A parameter list is the function being declared: `int f(int)` is a function `int(int)`, and a
-            // function *pointer* is that same list one level further in (`(*p)(int)`), which is what makes the
-            // order of these levels the whole of the difference between the two.
             CppSyntaxKind::ParameterList => Type::Function {
                 returns: Arc::new(wrapped.clone()),
                 parameters: read_parameters(node),
@@ -1229,46 +1354,80 @@ fn wrap(
         })
     }
 
-    // **The chain of declarators from the name outward**, innermost first — which is the order a type is built in:
-    // `* p` is a pointer *to* the base, and `int (*p)[4]` is a pointer to an array of four, so the level nearest
-    // the name carries the outermost operator.
-    //
-    // Built by walking **up**, because of where the operators sit: the `*` of `Widget* p` is a child of the
-    // declarator *around* the one holding `p`. A walk that descended would have to decide, at every level, whether
-    // the child in front of it is the way down or an operator — and "contains the name" answers that *wrongly* for
-    // the `Declarator` that wraps the way down, because it contains the name too. That mistake is what read
-    // `Widget* p` as `Widget`. Walking up visits each level once, and the way down is where it came from.
-    let mut chain: Vec<CppSyntaxNode> = vec![innermost.clone()];
-    let mut current = innermost.clone();
-    while current.text_range() != outermost.text_range() {
-        let Some(up) = current
-            .parent()
-            .filter(|up| CppSyntaxKind::from(up.kind()) == CppSyntaxKind::Declarator)
-        else {
-            break;
-        };
-        chain.push(up.clone());
-        current = up;
-    }
-
-    let mut wrapped = base;
-    for level in chain {
-        for child in level.children_with_tokens() {
-            let Some(child) = child.into_node() else {
-                continue;
-            };
-            // **The way down is not an operator.** A child whose span covers the name is either the level below —
-            // a `Declarator` — or the name itself, and neither is written around the type.
-            if covers(&child, name) {
+    /// The type of one declarator level, given the type the level **inside** it produced.
+    ///
+    /// `inside` is the specifiers' type when this is the level holding the name, and `None` when the level inside
+    /// this one is still to be read — which is why the parameter is an `Option` and why the operators are applied
+    /// whether or not it is `Some`: a level that wraps nothing yet still *has* operators to contribute, and
+    /// skipping them because the inner answer had not arrived yet is how `Widget* p` came back as `Widget`.
+    fn at_level(
+        level: &CppSyntaxNode,
+        name: cpp_parser::SourceRange,
+        inside: Option<Type>,
+        base: &Type,
+    ) -> Type {
+        // **The way down is not an operator**, and this is the rule rather than a special case: the operators of a
+        // declaration are the nodes that are *not* on the path from the type to the name. Without the filter,
+        // `(*p)`'s only child is `*p` and the pointer would be applied twice.
+        let mut wrapped = inside.unwrap_or_else(|| base.clone());
+        for child in level.children() {
+            // **Only a `Declarator` can be the way down**, and the test is its kind rather than "does it contain the
+            // name". The containment test is true of a `ParameterList` and an `ArrayType` as well — they are written
+            // after the name and their spans reach past it — so using it skipped exactly the operators this function
+            // exists to apply, which is how `void (*Callback)(int)` came back as `void*(int)`.
+            if CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator
+                && reaches(&child, name)
+            {
                 continue;
             }
             if let Some(next) = apply(&wrapped, &child) {
                 wrapped = next;
             }
         }
+
+        wrapped
     }
 
-    wrapped
+    // The levels from the outside in, **found by the descent that already exists** rather than by a climb:
+    // [`declarator_holding_the_name`] walks from the outermost declarator to the one holding the name, one strict
+    // narrowing step at a time, and the path it takes *is* the list of levels. Writing the walk a second time here
+    // — upwards — is what produced an eight-gigabyte allocation, because `ancestors()` can answer with the node it
+    // was asked about and a loop that walks it never advances.
+    let mut levels: Vec<CppSyntaxNode> = vec![outermost.clone()];
+    let mut current = outermost.clone();
+    while current.text_range() != innermost.text_range() {
+        let Some(down) = current
+            .children()
+            .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+            .find(|child| reaches(child, name))
+        else {
+            break;
+        };
+        levels.push(down.clone());
+        current = down;
+    }
+
+    // Applied **outside in**, and that direction is the whole of the difference between a function and a pointer to
+    // one. Read the levels from the name outwards and each one is something done *to* what is inside it — that is
+    // what the parentheses are for, and it is why a member's own type is a function of the level nearest the name
+    // rather than of the outermost one:
+    //
+    // ```text
+    // int (*f(int))(int)   `f`    → call it with an int            → `int(*)(int)(int)`'s inner part
+    //                      `*f`   → dereference that               → `int(*)(int)`
+    //                      `(*f)(int)` → call *that* with an int   → `int`
+    // ```
+    //
+    // so iterating **innermost first** builds the type the declaration wrote, and iterating outermost first builds
+    // `void*(int)` for `void (*cb)(int)` — a function returning a pointer where the file wrote a pointer to a
+    // function. Measured: five tests failed on that one inversion, and the two about arrays failed on it as well
+    // (`int (*p)[4]` came back as a function).
+    let mut wrapped: Option<Type> = None;
+    for level in levels.iter().rev() {
+        wrapped = Some(at_level(level, name, wrapped, &base));
+    }
+
+    wrapped.unwrap_or(base)
 }
 
 /// The `[4]` of an array declarator, when it is a number this layer can read.
