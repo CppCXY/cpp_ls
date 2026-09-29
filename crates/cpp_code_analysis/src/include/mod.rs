@@ -97,6 +97,20 @@ impl<'a, F: FileProvider> IncludeResolver<'a, F> {
         IncludeResolver { files, config }
     }
 
+    /// The provider this resolver reads through.
+    ///
+    /// Exposed for the one caller that has to resolve something an include search cannot: a **module partition**,
+    /// whose file is found by the module naming convention rather than by a search path. It needs the same provider
+    /// and the same configuration, and taking them from here is what keeps one resolver per file rather than two.
+    pub fn files(&self) -> &'a F {
+        self.files
+    }
+
+    /// The compilation this resolver resolves against.
+    pub fn config(&self) -> &'a CompilerConfig {
+        self.config
+    }
+
     /// Resolve an include written in the file at `including`.
     ///
     /// `including` is the *directory* of the file doing the including, which the caller has because only it

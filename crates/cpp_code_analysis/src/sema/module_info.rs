@@ -201,6 +201,16 @@ pub struct ModuleInfo {
 }
 
 impl ModuleInfo {
+    /// Does this file import a partition of its **own** module — `import :part;`?
+    ///
+    /// The question a caller asks before doing the work of resolving one, because the answer is `false` for almost
+    /// every file: a partition import can only appear in a module unit, and only in one that has a partition to
+    /// reach.
+    pub fn has_an_imported_partition(&self) -> bool {
+        self.imports
+            .iter()
+            .any(|declaration| declaration.target.partition_name().is_some())
+    }
     /// Read a file's module shape from its syntax tree.
     pub fn from_tree(root: &CppSyntaxNode) -> Self {
         let mut info = ModuleInfo::default();

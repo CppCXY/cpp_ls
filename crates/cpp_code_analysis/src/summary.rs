@@ -327,6 +327,20 @@ pub struct ModuleReading {
     /// The declarations of a header unit are all visible to an importer (a header unit exports what the header
     /// declares), so these are followed exactly like `#include`s and are **not** subject to [`DeclFact::exported`].
     pub header_units: Vec<std::path::PathBuf>,
+    /// **The partitions of this file's own module that it imports** — `export import :area;` — already **resolved**
+    /// to the file that declares them.
+    ///
+    /// A partition is not a module: `import :area;` is only legal inside `shapes`, and nothing outside may name it.
+    /// But the names it exports **are** part of `shapes`'s interface when the import is an `export import`, so a
+    /// reader of a file that says `import shapes;` must see them — and the file that declares them is one the
+    /// visibility walk has to reach. Measured on the partition fixture
+    /// (`tests/fixtures/modules/partitions.cpp`, built and run by `target/build_partitions.bat`): without this,
+    /// `definition("perimeter")` resolved to the primary interface unit while `rectangle` and `square` — which the
+    /// partition declares and `shapes.cppm` re-exports — answered "nothing declares it".
+    ///
+    /// Resolved rather than spelt, like [`ModuleReading::header_units`] and for the same reason: the walk holds
+    /// summaries and can search nothing.
+    pub partitions: Vec<std::path::PathBuf>,
 }
 ///
 /// The one kind of fact in a summary whose evidence is not in the file it describes. MSVC's `<vector>` writes

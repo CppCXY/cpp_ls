@@ -1550,14 +1550,27 @@ impl<F: FileProvider + Clone> Session<F> {
     /// so between an edit and the next drain this falls back to the raw reading — and a caller that publishes that
     /// answer will publish the coarser one. The LSP's diagnostic service answers that by re-diagnosing once the
     /// queue drains; a caller that publishes and forgets would show the raw errors until the next edit.
-    /// **Why this toolchain cannot see these modules, and what would let it** — one note per module, each pointing
-    /// at the `import` line that wrote it.
+    /// **Why this toolchain cannot see these modules — and this file's own partitions — one note each, pointing at
+    /// the `import` line that wrote it.**
     ///
     /// The sentence the analysis owes a reader who wrote `import std;` and got nothing: "no file in this project
     /// declares module `std`" is true and useless, because the file *does* exist on the machine — it is outside the
     /// project, in a directory only the compiler knows about, and which directory that is **differs per compiler**.
     /// See [`crate::Toolchain::module_note`], where the per-compiler facts are written down with the measurement
     /// behind each one.
+    ///
+    /// # Partitions, which are the same failure and a different sentence
+    ///
+    /// `import :area;` names a partition of the module **this file declares**, so the question is not "which file
+    /// declares module `area`" — nothing does, and asking it is why a partition import used to look like an import
+    /// of a module nobody has. It is "which file declares partition `area` of `shapes`", and what the compiler
+    /// needs is not a module built but the module's interface compiled *against* that partition's `.ifc`
+    /// ([`crate::Toolchain::partition_note`], and `target/build_partitions.bat` for the three commands that
+    /// establish it).
+    ///
+    /// Only a partition of the file's **own** module is asked about: `import :part;` in a file that declares no
+    /// module is a different mistake — there is no module for the partition to belong to — and it is left to the
+    /// reader of the syntax rather than described as a missing file.
     ///
     /// Empty when nothing is unreadable, which is the ordinary case for a project whose modules are its own files.
     ///
@@ -1576,36 +1589,85 @@ impl<F: FileProvider + Clone> Session<F> {
     /// only two values are "what everything else in the list is" and "this one", which is a field that says nothing.
     pub fn notes_about_the_modules(&self, view: &crate::FileView) -> Vec<ModuleNote> {
         let info = crate::ModuleInfo::from_tree(&view.root);
+        let own_module = info.module_name.clone();
+        let mut notes = Vec::new();
 
-        info.imports
-            .iter()
-            .filter_map(|declaration| {
-                let module = declaration.target.module_name()?;
+        for declaration in &info.imports {
+            let range = (declaration.range.start_offset, declaration.range.end_offset());
 
-                // A module this project declares is not a note: the reader can go to it, and telling them where
-                // their compiler keeps modules would be an answer to a question they did not ask.
-                if self.store.index().interface_unit_of(module).is_some() {
-                    return None;
-                }
-
-                let message = match &self.toolchain {
-                    Some(toolchain) => toolchain.module_note(module),
-                    // No compiler answered, so there is no per-compiler fact to give — and a sentence naming the
-                    // wrong compiler's switches would be worse than one naming none.
-                    None => format!(
-                        "no file this project contains declares module `{module}` — a module outside the project is \
-                         one only the compiler can see, and until then the names it exports are unknown rather than \
-                         absent"
-                    ),
+            // A partition of this file's own module: a file has to declare the module, and the project has to be
+            // missing the partition's file, for there to be anything to say.
+            if let Some(partition) = declaration.target.partition_name() {
+                let Some(module) = own_module.as_deref() else {
+                    continue;
                 };
 
-                Some(ModuleNote {
-                    message,
-                    start: declaration.range.start_offset,
-                    end: declaration.range.end_offset(),
-                })
-            })
-            .collect()
+                if self.the_partition_is_read(module, partition) {
+                    continue;
+                }
+
+                notes.push(ModuleNote {
+                    message: match &self.toolchain {
+                        Some(toolchain) => toolchain.partition_note(module, partition),
+                        None => format!(
+                            "no file this project contains declares partition `:{partition}` of module `{module}` \
+                             — a partition is not a module, and until its file is read the names it exports are \
+                             unknown rather than absent"
+                        ),
+                    },
+                    start: range.0,
+                    end: range.1,
+                });
+
+                continue;
+            }
+
+            let Some(module) = declaration.target.module_name() else {
+                continue;
+            };
+
+            // A module this project declares is not a note: the reader can go to it, and telling them where their
+            // compiler keeps modules would be an answer to a question they did not ask.
+            if self.store.index().interface_unit_of(module).is_some() {
+                continue;
+            }
+
+            let message = match &self.toolchain {
+                Some(toolchain) => toolchain.module_note(module),
+                // No compiler answered, so there is no per-compiler fact to give — and a sentence naming the
+                // wrong compiler's switches would be worse than one naming none.
+                None => format!(
+                    "no file this project contains declares module `{module}` — a module outside the project is \
+                     one only the compiler can see, and until then the names it exports are unknown rather than \
+                     absent"
+                ),
+            };
+
+            notes.push(ModuleNote {
+                message,
+                start: range.0,
+                end: range.1,
+            });
+        }
+
+        notes
+    }
+
+    /// **Did any file this session read turn out to be the interface unit of `module:partition`?**
+    ///
+    /// Asked of the **summaries** rather than of a resolution, so that the answer is "the project has this file"
+    /// rather than "the naming convention proposes one": a partition's file is read by the index like any other
+    /// module unit, and the reading records which module and partition it declares
+    /// ([`crate::ModuleReading::partition`]).
+    ///
+    /// A linear scan over the summaries, which is the same shape as every other question the index cannot key — and
+    /// it runs once per partition import of one file, which is a handful.
+    fn the_partition_is_read(&self, module: &str, partition: &str) -> bool {
+        self.store.index().summaries().any(|summary| {
+            summary.modules.module.as_deref() == Some(module)
+                && summary.modules.partition.as_deref() == Some(partition)
+                && summary.modules.is_interface
+        })
     }
 
     pub fn diagnostics(&self, path: impl AsRef<Path>) -> Option<FileDiagnostics> {

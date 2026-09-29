@@ -642,10 +642,10 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
 /// the *visibility* walk needs and stored in the summary so that it can be read without a tree — see
 /// [`crate::ModuleReading`].
 ///
-/// Partitions and header units are dropped here on purpose: a partition belongs to the importing file's own module
-/// (so it is not an edge between modules at all), and a header unit is a header, which the `#include` machinery
-/// already reaches by the same search. What is kept is the edge that nothing else can see: **this file's names
-/// become visible to anyone who imports the module it declares.**
+/// All three resolved-file lists are here for the same reason: **the walk holds summaries and can search nothing**,
+/// so a file the walk has to reach has to have been found already. What is *not* here is the edge's direction or its
+/// `export`: an `export import` re-exports and a plain `import` does not, and this model records neither — the
+/// direction of that omission is stated on [`crate::ModuleReading`].
 fn modules_of<F: FileProvider>(
     root: &cpp_parser::CppSyntaxNode,
     including: &Path,
@@ -685,16 +685,58 @@ fn modules_of<F: FileProvider>(
         })
         .collect();
 
+    // **A partition of this file's own module**, which is not a module and is not found by an include search:
+    // `export import :area;` in `shapes.cppm` means "the `area` partition of `shapes`", and the file that declares
+    // it is found by the module naming convention — the same resolution `scan_imports` uses, through the same
+    // [`crate::ModuleScanner`], so that "which file is `shapes:area`" has one answer in this crate.
+    //
+    // It has to be resolved here rather than left to the visibility walk for the reason the walk's own note gives:
+    // the walk holds summaries and can search nothing. And it has to be *recorded* because a partition's names are
+    // part of the module's interface when the import is an `export import` — measured on the partition fixture,
+    // where `rectangle` and `square` answered "nothing declares it" from a file that says `import shapes;` while
+    // `perimeter`, declared directly in the interface unit, resolved.
+    //
+    // A partition whose file cannot be found is **absent**, like an unresolved header unit: that is the honest
+    // state — nothing is known about it — rather than an empty partition.
+    let partitions: Vec<std::path::PathBuf> = match info.module_name.as_deref() {
+        Some(module) if info.has_an_imported_partition() => {
+            let mut scanner = crate::ModuleScanner::new(resolver.files(), resolver.config());
+            let mut found = Vec::new();
+
+            for declaration in &info.imports {
+                let Some(name) = declaration.target.partition_name() else {
+                    continue;
+                };
+
+                if let crate::ImportOutcome::Resolved(unit) =
+                    scanner.resolve_partition(Some(module), name, including, interner)
+                    && let Some(entry) = scanner.units().iter().find(|entry| entry.file == unit)
+                {
+                    found.push(entry.path.clone());
+                }
+            }
+
+            found
+        }
+        _ => Vec::new(),
+    };
+
     crate::ModuleReading {
         module: info.module_name,
         partition: info.partition_name,
-        is_interface: info.unit == Some(crate::ModuleUnit::InterfaceUnit),
+        // **`is_interface` is `ModuleUnit::is_interface`, not `== InterfaceUnit`.** A partition has two unit kinds
+        // and only the interface one is what an `import :part;` reaches — so a reader that asked for the primary
+        // interface variant answered `false` for every partition interface unit there is, which is how this was
+        // written first. `ModuleUnit` already states the rule (and `exports_to_importers` states the *different*
+        // question a module name asks); this is the caller that has to use it.
+        is_interface: info.unit.is_some_and(crate::ModuleUnit::is_interface),
         imports: info
             .imports
             .iter()
             .filter_map(|declaration| declaration.target.module_name().map(Box::from))
             .collect(),
         header_units,
+        partitions,
     }
 }
 

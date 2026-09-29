@@ -2133,7 +2133,70 @@ mod tests {
         assert_eq!(widget.kind, DeclKind::Type);
     }
 
-    fn facts(source: &str) -> (Vec<crate::summary::DeclFact>, crate::summary::SummaryGuards) {        let tree = CppParser::parse(source, ParserConfig::default());
+    /// **A name written with template arguments in its qualifier** — `Box<int>::grow`, `Box<int>::count`,
+    /// `Box<int>::Inner::deep` — is declared **in that class**, and the name it declares is the last segment.
+    ///
+    /// The template arguments are the whole difficulty, and they break three separate readings at once, each
+    /// silently:
+    ///
+    /// ```text
+    /// the scope's name        a class's scope is called `Box`, never `Box<int>`, so a lookup for `Box<int>::Inner`
+    ///                         finds nothing and the member is attributed to the file
+    /// the separator           `<` and `>` nest (`Box<A::B>::grow`), so the last `::` is not the last two characters
+    ///                         before the name — a split on the text cuts inside an argument list
+    /// the declared name       `Box<int>::Inner::deep`'s name is `deep`, and it is written in the *specifier
+    ///                         sequence* rather than in a declarator, so a reader looking in the declarator finds
+    ///                         nothing
+    /// ```
+    ///
+    /// Measured before this was handled: `int Box<int>::count = 0;` declared **no fact at all**, and the two
+    /// `grow` definitions produced facts whose scope was `Box` but with the body walked at file scope.
+    #[test]
+    fn a_qualified_name_with_template_arguments_declares_in_that_class() {
+        let source = "\
+template <class T> class Box {
+public:
+    int size;
+    void grow(int n);
+    struct Inner { int deep; };
+};
+void Box<int>::grow(int n) { size = n; }
+int Box<int>::count = 0;
+int Box<int>::Inner::deep = 0;
+";
+        let (facts, _) = facts(source);
+
+        let scope_of = |name: &str| {
+            facts
+                .iter()
+                .find(|fact| fact.name == name)
+                .unwrap_or_else(|| panic!("`{name}` must be a fact: {facts:?}"))
+                .scope
+                .clone()
+        };
+
+        assert_eq!(scope_of("grow").as_deref(), Some("Box"));
+        assert_eq!(
+            scope_of("count").as_deref(),
+            Some("Box"),
+            "`int Box<int>::count = 0;` is a member of `Box` — it used to declare nothing at all"
+        );
+        assert_eq!(
+            scope_of("deep").as_deref(),
+            Some("Box::Inner"),
+            "and a nested class's member is qualified by the *names*, without the template arguments"
+        );
+
+        // The name is the last segment, never the qualified spelling: a fact called `Box<int>::count` would not be
+        // found by any lookup, and would be a second entry for a class that has one.
+        assert!(
+            !facts.iter().any(|fact| fact.name.contains("::")),
+            "no fact is named with a qualifier"
+        );
+    }
+
+    fn facts(source: &str) -> (Vec<crate::summary::DeclFact>, crate::summary::SummaryGuards) {
+        let tree = CppParser::parse(source, ParserConfig::default());
         assert_eq!(tree.get_errors(), [], "the input must parse cleanly");
 
         let root = tree.get_red_root();

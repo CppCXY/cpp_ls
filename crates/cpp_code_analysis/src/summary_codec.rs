@@ -178,7 +178,7 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 ///
 /// Only [`CODEC_VERSION`] moves: an entry written before it existed has no parameter list, and the detail line
 /// falls back to the `(…)` it used to print — a weaker answer, not a wrong one.
-pub const CODEC_VERSION: u32 = 22;
+pub const CODEC_VERSION: u32 = 23;
 
 /// Write a summary as bytes.
 ///
@@ -312,6 +312,10 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
     }
     put_u32(&mut out, summary.modules.header_units.len() as u32);
     for unit in &summary.modules.header_units {
+        put_path(&mut out, unit);
+    }
+    put_u32(&mut out, summary.modules.partitions.len() as u32);
+    for unit in &summary.modules.partitions {
         put_path(&mut out, unit);
     }
 
@@ -711,6 +715,13 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
             imports
         },
         header_units: {
+            let mut units = Vec::new();
+            for _ in 0..reader.count()? {
+                units.push(reader.path()?);
+            }
+            units
+        },
+        partitions: {
             let mut units = Vec::new();
             for _ in 0..reader.count()? {
                 units.push(reader.path()?);
@@ -1289,6 +1300,7 @@ mod tests {
                 is_interface: true,
                 imports: vec!["std".into(), "widget.draw".into()],
                 header_units: vec![std::path::PathBuf::from("/usr/include/c++/v1/vector")],
+                partitions: vec![std::path::PathBuf::from("/p/widget-core-detail.cppm")],
             },
         }
     }

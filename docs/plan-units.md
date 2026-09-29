@@ -2146,3 +2146,283 @@ Session::notes_about_the_modules(view)  逐条 import 收成 ModuleNote { messag
 **下一步**(按价值):① `friend` 与类外成员定义的访问级别(§34 剩下的那一半);② 模块分区的真编译器验证;
 ③ `import "header";` 的引号形式在真语料上量一遍。
 
+---
+
+## 38. 类外成员定义:**一句"限定名不在这里声明"**,让整个函数体都不在类里
+
+第 ① 条。这是 §34 登记的最后一块,量出来比登记时想的**深一层**。
+
+### 先量:三种写法,只有一种漏
+
+```text
+① 类体内声明 + 类体内定义      void grow(Widget& other) { other. }      → 补全列出 hidden ✅
+② 类外定义                    void Widget::grow(Widget& other){ other.} → 补全**整个查询拒绝**(Known::No)❌
+③ 类外定义,游标在私有成员上  void Widget::set(int v){ hidden = v; }     → 也在类外,同样没绑定 ❌
+```
+
+②的形态**每个真实 C++ 工程都在写**,所以它不是边角。
+
+### 根因不是一处,是**三处叠在一起**,而且每一处单独看都合理
+
+```text
+1. 语法把限定名的名字放在**说明符序列**里,不放在 declarator 里:
+     void grow(Widget& other) { }          DeclSpecifierSeq["void"]          InitDeclarator["grow(…)"]
+     void Widget::grow(Widget& other) { }  DeclSpecifierSeq["void Widget::grow"] InitDeclarator["(…)"]
+   于是"在 declarator 里找名字"的读者对第二种**找不到名字**,`declared_name` 返回 None。
+
+2. `declared_name` 对限定名**故意**返回 None("int ns::count; 声明的是 ns 里的东西,在这里绑定会
+   造出一个不能非限定使用的名字")—— 这条是对的,但它让限定名走的路上没有任何一个环节接手。
+
+3. `is_unnamed_declaration`(最令人头痛的解析那个守门人)问的是 AST 的 `CppDeclaration::get_name_text()`,
+   而它对限定名 **也是 None** —— 和它对 `f(x);` 这个调用语句的答案一模一样。于是整个声明被当成
+   "走过声明路径但什么都没声明"而**整条跳过**:函数体没有被走,绑定没有,函数作用域没有。
+```
+
+第 3 条是真正致命的那一条,也是**只加前两条修不好**的原因:我先把 1、2 修完,测试仍然红,直到发现这个守门人。
+判据是 **body**:`f(x);` 没有函数体,而定义按定义就有 —— 一个 `CompoundStat` 直接子节点。
+
+### 修法:三处各修一处,并且修在**语法层**而不是在查询层打补丁
+
+| 改什么 | 在哪 |
+| --- | --- |
+| 读出 qualified declarator 的 `(qualifier, name)`:最后一个 `::` 之前是限定符,之后是名字(用 `last_identifier` + `name_from_text`,所以 `Widget::~Widget`、`Widget::operator+` 也是对的) | `sema/scopes.rs::qualified_declarator_name` |
+| 第二种拼写的同一个读法:名字在说明符序列里,所以从 declarator 往上找 `Declaration`、再取它的 `DeclSpecifierSeq`,并且**只认带 `::` 的 `NameExpr`**(否则 `void f()` 会被答成声明了 `void`) | `qualified_specifier_name` |
+| 声明落在**限定符命名的那个类作用域**里,函数作用域挂在它下面 | `ScopeWalker::declarator_as` |
+| `is_unnamed_declaration`:有函数体就不是"没声明任何东西" | 同上文件 |
+| 名字是**最后一段**(`grow` 而不是 `Widget::grow`) | `declarator_as` |
+
+**为什么修在这里而不是在 `classes_the_cursor_is_in` 里加一条"看看游标所在的函数是不是限定名"**:后者是
+workaround —— 它只修补全这一条路,而 `declared_as`、重载解析、`qualification_prefix_of`、跳转定义全都要各自再修一遍,
+而且各自会**不一致**。作用域树错了,就该修作用域树。
+
+**为什么不改 parser 的 `get_name_text`**:它是"这个声明引入的名字",而限定名引入的名字**确实**是最后一段 ——
+但它在 parser 层是公开 API,`get_name` 有 22 处调用,而这一轮要的只是分析层的一个守门人别读错。真要在 parser 层
+把 `ns::Foo<int>::bar` 读对,是另一件事(要处理模板实参里的 `::`),登记在下面。
+
+### 读数(同一个 fixture,同一份代码)
+
+```text
+改之前  other.  →  Known::No                                   ← 整个查询拒绝
+改之后  other.  →  ["grow", "hidden", "set", "shown"]           ← 私有的 hidden 在里面(因为游标在 Widget 的函数里)
+        w.      →  不含 hidden                                  ← 自由函数里同一份成员表,私有的不在
+```
+
+**两个方向都断言了**,因为"把访问级别整个关掉"也能让第一行通过。
+
+### 测试
+
+`a_member_defined_outside_its_class_keeps_its_access`(在 `index/project.rs` 的测试模块里,和另外两条访问级别测试
+并排)。它同时钉住:类外定义的函数体**在类里**、私有成员**在那里可写**、而**在自由函数里仍不可写**。
+
+**看齐**:560 库测试 + 全部集成测试绿,clippy 干净。
+
+**下一步**(按价值):① `friend`(`friend class X;` / `friend void f();` —— `classes_the_cursor_is_in` 的文档
+已经写明它**故意**不建模,所以这一条是"决定要不要改主意",不是修 bug);② parser 层把
+`ns::Foo<int>::bar` 这类**带模板实参的限定名**读对;③ 模块分区的真编译器验证。
+
+---
+
+## 39. 带模板实参的限定名:**一个"不在这里声明"的规则,套上了三层**
+
+第 ② 条。§38 修好的限定名读到 `ns::Foo<int>::bar` 就断了,而这是 MSVC STL 和每个模板库的日常写法。
+
+### 三个缺陷,三种"静默",而且都不是"答错"而是"什么都不答"
+
+```text
+void Box<int>::grow(int n) { size = n; }   作用域对(Box),但函数体在**文件作用域**走的 → 里面看不见私有成员
+int  Box<int>::count = 0;                  **一条 DeclFact 都没有**
+int  Box<int>::Inner::deep = 0;            有 fact,但 scope 是 None
+```
+
+根因分三层,每层单独看都合理:
+
+```text
+1. 作用域的名字里没有模板实参    class Box 的 scope 叫 `Box`,不叫 `Box<int>`。
+                                 于是 scope_with_qualified_name("Box<int>::Inner") 找不到 → 回退到文件作用域。
+2. 最后一个 `::` 不在文本末尾      `Box<A::B>::grow` 里 `<...>` 内有分隔符,按文本切会切进实参表。
+3. `Box<int>::count` 的"名字在哪"  它没有 body,`get_name_text()` 又是 None,于是和 `f(x);` 一样被
+                                  `is_unnamed_declaration` 整条丢掉。
+```
+
+### 修法
+
+| 改什么 | 在哪 |
+| --- | --- |
+| 逐段找作用域(段名**不带**实参:`Box<int>` → `Box`),而不是拿整串去比 | `scope_of_a_qualifier` |
+| 限定符从**token** 读:跟踪 `<>` 深度,只在深度 0 认 `::`;顺带按 token 类别去掉 trivia | `qualified_name_along` |
+| 名字在说明符序列里时:`DeclSpecifierSeq` 的**后代**(`DeclSpecifierSeq > TemplateType > NameExpr`),不是直接子节点 | `qualified_specifier_name_node` |
+| 三个条件一起判"这是不是限定声明":说明符里有 `::`、那个 `::` **不在 declarator 里**、declarator 自己没有名字 | `declaration_is_qualified` |
+| 守卫:`::` 限定声明**从不在文件作用域绑定名字** —— 要么绑进它命名的那个类,要么什么都不绑 | `declaration_parts` |
+
+最后一条不是新规矩,是 §38 之后必须显式写出来的一条:`tests/scopes.rs::a_qualified_declaration_binds_nothing_here`
+早就钉着 "`int ns::Widget::count = 0;` 在本文件既不声明 `ns` 也不声明 `Widget` 时**什么都不绑**" —— 而我第一版
+守卫写反了(命中就 return → 该绑的没绑),量出来两条测试红。正确形状是:**限定声明永远不走普通那条路**,
+限定符命名的 scope 存在 → 交给 `declarator_as` 绑进那个类;不存在 → 直接返回。
+
+### 读数(同一 fixture)
+
+```text
+改之前   fact `count` 不存在;`grow` 的 scope 是 Box 但函数体在文件作用域
+改之后   fact grow   scope Box          ← 两条定义都在
+         fact count  scope Box
+         fact deep   scope Box::Inner
+```
+
+**看齐**:561 库测试 + 全部集成测试绿,clippy 干净。
+
+---
+
+## 40. 模块分区:编译器先告诉我**依赖方向是反的**,然后分析层少了一整条边
+
+第 ③ 条,§36 留下的那个 C7621。真编译器跑了一遍,得到两件事。
+
+### 编译器说的(MSVC 14.35.32215,`target/build_partitions.bat`)
+
+fixture 四个文件 + 一个消费者,标准写法(`module shapes:area;` / `export import :area;`),脚本打印 `14 12 16`
+= `2*(3+4)`、`3*4`、`4*4` —— 数字本身就是"分区真的被解析、被链接进去了"的证明。
+
+```text
+第一版脚本(按文件顺序:先接口、后分区)
+   先编 shapes.cppm                        → **C7621: 找不到模块分区 "area"**
+   再编 shapes-area.cppm(带 shapes.ifc)   → exit 0
+
+第二版(反过来了)
+   先编 shapes-area.cppm(不带任何 /reference) → exit 0
+   再编 shapes.cppm,带 /reference shapes:area=shapes-area.ifc → exit 0
+```
+
+**依赖方向和文件名顺序相反**:分区是模块的一部分,所以主接口单元要用**分区的 `.ifc`**;而分区本身
+**不需要**主接口的 `.ifc` 就能编译。§36 记的"C7621,还要额外的 `/reference` 编排"是对的,但"编排"的方向
+当时没量出来 —— 一条**只有编译器能纠正的**猜测。
+
+另外两条也是量出来的:消费者 `import shapes;` **不需要**知道 `:area` 存在(这正是分区的意义);
+分区自己的 `.obj` **必须**参与链接(`shapes_area_impl.obj`,否则 `rectangle`/`square` 未定义)。
+
+### 分析层:一条完整的可见性边,谁都没有
+
+`partitions.cpp` 里 `definition("perimeter")` 一直是有的(声明就在主接口单元里),但:
+
+```text
+改之前   definition(perimeter) = shapes.cppm
+         definition(rectangle) = Unknown(NotDeclaredHere)
+         definition(square)    = Unknown(NotDeclaredHere)
+改之后   definition(rectangle) = shapes-area.cppm
+         definition(square)    = shapes-area.cppm
+```
+
+**"什么都没答"而不是"答错",这是这个项目里最难发现的一类** —— 而且方向是**少给**,和本项目到处写着的取向相反。
+
+语法层早就读对了(`shapes.cppm → import partition ':area' re-exported`,shapes-area 两个文件都是
+`partition Some("area")`),`ModuleScanner::resolve_partition` 也早就写着、也早就有测试 —— 缺的是
+**把解析结果放进 summary**,因为可见性走查**手里只有 summary,搜不了任何东西**:
+
+```text
+ModuleReading 多一个 `partitions: Vec<PathBuf>`(已解析,和 header_units 同一个理由)   CODEC_VERSION 22 → 23
+索引时用同一个 ModuleScanner 解析(命名约定:shapes:area → shapes-area.cppm)            index/mod.rs::modules_of
+可见性走查沿它走一步,和 header_units 并列                                            index/project.rs
+```
+
+**为什么不是"把 SummaryKey 改成含分区"**:分区文件**不是**这个文件的一部分——它有自己的路径和自己的 summary,
+走查沿着一条边走到它。key 是"这段文本 + 这套编译环境",分区不在其中,也不该在。
+
+### 测试
+
+`a_partitions_names_reach_a_file_that_imports_the_module` —— 不碰机器:`MemoryFiles` 摆出和真 fixture 同名的
+三个文件(`shapes.cppm` / `shapes-area.cppm` / `partitions.cpp`),断言接口单元自己的名字**和**分区里的两个名字
+都能从 `import shapes;` 的文件里解析出来。文件名用 MSVC 的约定,所以命名解析也被测到。
+
+**看齐**:561 库测试 + 全部集成测试绿(模块套件 39 条),clippy 干净;`target/build_partitions.bat` 打印 `14 12 16`。
+
+---
+
+## 41. 分区的诊断:一句"读不到模块 `area`"是关于一个**不存在的模块**的话
+
+§40 登记的第 ③ 条。分区导入读不到时,以前会走到 `module_note` 那条路上,于是说出一句
+**在语言里不成立**的话:"no file declares module `area`" —— 没有任何东西声明一个叫 `area` 的模块,
+`import :area;` 要的是**本文件自己那个模块的一个分区**。
+
+### 两句不同的话
+
+```text
+module_note(module)               "把接口单元编译成 .ifc 并用 /reference <m>=<file>.ifc 命名"
+partition_note(module, partition) "分区不是模块;MSVC 要拿分区的 .ifc 去编译**模块的接口单元**:
+                                   /reference shapes:area=<file>.ifc"
+```
+
+`partition_note` 里的三件事全部来自 §40 那三条命令(不是标准原文):**主接口**需要分区 `.ifc`(否则 C7621)、
+**分区自己**什么都不需要、**消费者**永远不提分区。Clang 那句按 §40 的登记给出
+`-fmodule-file=shapes:area=<file>`,GCC 那句说"它被建进模块自己的模块文件里"—— 和 §37 同样的取舍:
+`Dialect` 只有两个值,拿不准时把两种机制都说了。
+
+### 接线,以及一个**被测试抓出来的既有缺陷**
+
+`Session::notes_about_the_modules` 现在先看 `partition_name()`,再走模块那条路,并且用
+`the_partition_is_read()` 问"这个分区**有没有**文件" —— 问的是 **summary**(这个 session 真读到了什么),
+不是命名约定的提议。
+
+写这条测试的时候它红了,而红的原因不是新代码:
+
+```text
+SUMMARY src/shapes-area.cppm  module Some("shapes")  partition Some("area")  interface **false**
+```
+
+`ModuleReading::is_interface` 写的是 `info.unit == Some(ModuleUnit::InterfaceUnit)` —— 只认**主**接口单元,
+于是**每一个分区接口单元**都被记成 `false`,而 `ModuleUnit` 自己早就写着 `is_interface()` 同时认
+`InterfaceUnit` 和 `PartitionInterfaceUnit`(并且用另一个函数 `exports_to_importers()` 表达"主接口才是一个模块名
+解析到的东西"这个**不同**的问题)。修法是让调用方用那个已有的规则。
+
+**为什么这件事值得写下来**:§40 那条可见性边**没有**依赖这个字段(它沿 `partitions` 走),所以 §40 的
+`definition("rectangle")` 照样绿 —— 一个字段写错了整个模块套件也发现不了,直到有人问它。同一个形状
+§38/§39 各出现一次:**规则早就在库里写着,错的是调用方**。
+
+### 测试
+
+* 单元(`toolchain.rs`):MSVC 那句话里同时出现 `shapes:area` 和 `/reference`,并且断言它**不**说
+  "declares module `area`";GNU 那句不出现 `/reference` 而出现 `gcm.cache/shapes.gcm`。
+* 集成(`tests/modules.rs`):分区文件**不在**项目里 → 恰好一条 note,文案点名 `:area` 与 `shapes`;同一个 fixture
+  把分区文件**放进去** → 一条 note 都没有。**两个方向都断言**,因为"永远给 note"和"从不给 note"一样错。
+
+**看齐**:562 库测试 + 全部集成测试绿(模块套件 40 条),clippy 干净。
+
+---
+
+## 42. 今天这一轮的收尾:**剩下的活,按价值和理由排好**
+
+今天从"`import std;` 读不到"一路做到"分区有诊断",中间量出**五类缺陷**,其中三类是"规则早就在库里、
+错的是调用方"。这一节把没做完的事登记清楚,免得下次从猜开始。
+
+### 一、模块(接着 §35–§41 往下)
+
+| 活 | 为什么值得做 | 已知的坑 |
+| --- | --- | --- |
+| **分区在 GCC/Clang 上量一遍** | §40 的结论(依赖方向反的、消费者不需要知道分区、分区 `.obj` 必须链)是 **MSVC 的**。Clang 的开关是 `-fmodule-file=shapes:area=<file>`,GCC **没有开关**;这两条现在只是转述文档,没有实测 | 需要在那两台工具链上真跑;本项目只有 MSVC,所以要么装、要么把这条挂着 |
+| **`export import` 的方向** | `ModuleReading` 明确不记 `export`,所以**非** re-export 的 `import M;` 现在也会把 M 的名字给出去 —— 方向是"多给" | 记这个位要动 codec 和走查两处;`ImportDeclaration::is_reexport` 语法层已经有了 |
+| **分区的实现单元的 `.ifc`** | 现在只解析 `resolve_partition` 给的那个文件(接口单元);实现单元不参与可见性,这是对的 —— 但没写下来过 | 只差一条注释/一条测试 |
+| **`import "header";` 的引号形式在真语料上量一遍** | §37 说它和 `#include "…"` 同一套搜索,`header_units.cpp` 里有一个(`local_math.h`),但那是合成 fixture | 真语料 = 一个真用引号头单元的项目 |
+| **模块诊断进 LSP 的 `code`/`codeDescription`** | 现在是一句 `INFORMATION`;带 `code` 客户端才能做"这一条能一键修" | 需要协议侧的取舍,不是分析侧 |
+
+### 二、语义(§32–§39 登记的)
+
+| 活 | 为什么值得做 | 已知的坑 |
+| --- | --- | --- |
+| **`friend`** | `classes_the_cursor_is_in` 的文档**明确写着故意不建模**,方向是"少给";要不要改主意是一个决定,不是修 bug | 改了就要建模 friend 声明和它授予的范围;`is_friend` 的分支现在直接 return |
+| **`protected` 与基类链上的访问** | 现在 `protected` 在派生类里可见(有测试),但**继承方式**(`class D : private B`)不参与判断 | 需要 `bases` 里的 access 关键字;`Shape::bases` 现在只记名字 |
+| **带模板实参的限定名里,模板实参内的 `::`** | §39 的限定符读取按 `<>` 深度跳过实参,所以 `Box<A::B>::grow` 的**限定符**对,但实参里的 `A::B` 本身没有被解析成类型 | 这是类型解析那条路,不是作用域那条 |
+| **重载解析** | 一直没做,也不在这条路上:签名帮助给的是**集合**,挑一个需要实参类型 | 明确不做,记在这里免得被当成缺口 |
+
+### 三、工程(今天反复用到的工具,值得补的)
+
+| 活 | 为什么值得做 |
+| --- | --- |
+| `target/build_partitions.bat` 之外再加 `build_header_units.bat`/`build_modules.bat` 的统一入口 | 现在三个脚本各写各的 `vcvars` 调用;一个 `build_all.bat` 会让"真编译器验过"这件事更容易重复 |
+| `examples/modules_probe.rs` 已经有五节;把"分区"那节补上 | 现在分区是靠 `tests/modules.rs` 和脚本验的,探针没覆盖 |
+| 把"调用方用错既有规则"这个模式做成检查 | §38/§39/§41 各一次:错都不在库,在调用方。**没有自动检查**;能想到的最接近的是给 `ModuleUnit::is_interface` 这类函数加一条"调用方必须用它"的注释,以及 codec 版本号那样的强制点 |
+
+### 今天量到的、值得记住的坐标
+
+```text
+import std; 冷读    393–401 个文件,6.0–6.5 s(第一次),547.7 ms(磁盘有 summary),0.004 ms(再问一次)
+模块套件            40 条;库 562 条;集成全绿;clippy 干净
+真编译器验过的      build_modules.bat → 7 7 12;build_header_units.bat → 42;build_partitions.bat → 14 12 16
+```
+

@@ -821,7 +821,19 @@ impl ScopeWalker<'_> {
         //
         // This rejects only real declarations that genuinely have no name — `static_assert(...)`, a type
         // definition with no declarator, an anonymous class — and none of those declares a binding either.
-        if is_unnamed_declaration(node) {
+        // **A `::`-qualified declaration never binds its name at file scope.** Either it is a member of a class
+        // this file declares, and then `declarator_as` puts it in that class's scope, or the qualifier names
+        // something this file has not built — and then it binds nothing here. What it must not do is fall through
+        // to the ordinary path, which would bind `count` at file scope: a name that cannot be used unqualified and
+        // that collides with every other `count`. `a_qualified_declaration_binds_nothing_here` is that rule.
+        //
+        // The AST layer cannot tell these apart from a call statement — `get_name_text` answers `None` for both —
+        // which is why the question is asked here and in this shape.
+        if declaration_is_qualified(node) {
+            if !self.names_a_scope_this_file_has(node) {
+                return;
+            }
+        } else if is_unnamed_declaration(node) {
             return;
         }
 
@@ -988,10 +1000,117 @@ impl ScopeWalker<'_> {
         SpecifierName::None
     }
 
+    /// **Does this declaration name a class or namespace this file has built?**
+    ///
+    /// The first of the two questions [`ScopeWalker::declaration_parts`] asks about a declaration before reading it
+    /// at all. `true` means "this declares a member of something here", which is a declaration like any other and
+    /// must be read; `false` leaves the ordinary question ([`is_unnamed_declaration`]) to decide.
+    ///
+    /// The two shapes it covers, both of which the AST layer reports as unnamed:
+    ///
+    /// ```text
+    /// void Box<int>::grow(int n) { size = n; }   a member function defined outside its class
+    /// int Box<int>::count = 0;                   a static member defined outside its class
+    /// ```
+    ///
+    /// and the shape it deliberately does **not**:
+    ///
+    /// ```text
+    /// int ns::Widget::count = 0;                 in a file that declares neither `ns` nor `Widget`
+    /// ```
+    ///
+    /// — that declaration is about a scope this file has not built, so nothing is bound here. Which is not a
+    /// detail: `count` bound at file scope could not be used unqualified, and it would collide with every other
+    /// `count` in the file. `tests/scopes.rs::a_qualified_declaration_binds_nothing_here` is that rule, and this is
+    /// where it is kept.
+    fn names_a_scope_this_file_has(&self, node: &CppSyntaxNode) -> bool {
+        if !declaration_is_qualified(node) {
+            return false;
+        }
+
+        // The qualifier, read by the reader that will bind the declaration — one implementation, so that "is this
+        // ours" and "where does it go" cannot come to disagree.
+        qualified_specifier_name_node(node)
+            .map(|name| qualified_name_along(name).0)
+            .is_some_and(|qualifier| self.scope_of_a_qualifier(&qualifier).is_some())
+    }
+
+    /// **The scope a `::`-qualified declaration's qualifier names**, or `None` when this file has not built one.
+    ///
+    /// The walk is **segment by segment from the outermost**, and each step appends the next name to what it has so
+    /// far: a name is found by the qualified spelling a scope records ([`crate::ScopeTree::scope_with_qualified_name`]),
+    /// so `a::b::c` is found by looking for `a`, then `a::b`, then `a::b::c`.
+    ///
+    /// # Why not the whole qualifier at once
+    ///
+    /// Because a **template argument list** is not part of any scope's name:
+    ///
+    /// ```text
+    /// void Box<int>::grow(int n) { … }     the class's scope is named `Box`, not `Box<int>`
+    /// int Box<int>::Inner::deep = 0;       and the nested one is `Box::Inner`
+    /// ```
+    ///
+    /// Asking for `Box<int>::Inner` finds nothing and the declaration falls back to the scope it was written in —
+    /// which is the failure this function exists to prevent, and it is silent: the members of `Inner` are then
+    /// attributed to the file. Measured: `int Box<int>::count = 0;` declared **no fact at all** and
+    /// `int Box<int>::Inner::deep = 0;` produced a fact whose scope was `None`.
+    ///
+    /// A segment that names no scope ends the walk and answers `None` rather than continuing past it: `a::X<int>::b`
+    /// where `a::X` is unknown is unknown, and guessing the last segment that happened to match would attribute the
+    /// declaration to an unrelated class of the same name.
+    ///
+    /// # What a segment is, and why the template arguments are simply dropped
+    ///
+    /// Read from the **tokens**, not by splitting the text: `<` and `>` nest (`Box<Box<int>>::grow`), and a
+    /// character-level split gets that wrong. Everything from a `<` to its matching `>` is skipped, and what is
+    /// left is the segment's name — which for `Box<int>` is `Box`, the name the class's scope actually records.
+    fn scope_of_a_qualifier(&self, qualifier: &str) -> Option<ScopeId> {
+        let mut segments: Vec<String> = Vec::new();
+        let mut depth = 0usize;
+        let mut letters = String::new();
+
+        for character in qualifier.chars() {
+            match character {
+                '<' => depth += 1,
+                '>' => depth = depth.saturating_sub(1),
+                ':' if depth == 0 => {
+                    if !letters.is_empty() {
+                        segments.push(std::mem::take(&mut letters));
+                    }
+                }
+                _ if depth == 0 => letters.push(character),
+                _ => {}
+            }
+        }
+
+        if !letters.is_empty() {
+            segments.push(letters);
+        }
+
+        let mut walked = String::new();
+        let mut found = None;
+
+        for segment in segments {
+            if !walked.is_empty() {
+                walked.push_str("::");
+            }
+            walked.push_str(&segment);
+
+            found = self.table.scope_with_qualified_name(&walked);
+            found?;
+        }
+
+        found
+    }
     /// One declarator: a name, possibly a function, possibly with a body.
     ///
     /// `as_kind` overrides what the declarator would otherwise declare, for the case where a class-like
     /// keyword in the specifiers says the identifier here names a class or an enum rather than a variable.
+    ///
+    /// `outer` and `inner` are the two scopes the declaration is being read in — the same scope for an ordinary
+    /// declaration, and different for a templated one ([`ScopeWalker::declaration_parts`]). A declared name goes in
+    /// `outer`, which is where unqualified lookup would find it; a qualified one goes in the scope its qualifier
+    /// names, which is why neither parameter is used for it below.
     ///
     /// Returns the function scope it opened, when it opened one, so that the caller can walk a body the grammar
     /// placed beside the declarator rather than inside it.
@@ -1008,7 +1127,52 @@ impl ScopeWalker<'_> {
             return None;
         }
 
-        let (name, name_range) = declared_name(declarator)?;
+        // **`void Widget::grow() { … }` is a member of `Widget`**, and this is where that is decided — for
+        // everything written in the declaration and, through the scope the body is walked into, for everything
+        // written in the body.
+        //
+        // # The two spellings, which is the whole difficulty
+        //
+        // The grammar puts the name of a definition in one of two places, and it depends on whether the name is
+        // qualified:
+        //
+        // ```text
+        // void grow(Widget& other) { … }          DeclSpecifierSeq["void"] InitDeclarator["grow(…)"]   → declarator
+        // void Widget::grow(Widget& other) { … }  DeclSpecifierSeq["void Widget::grow"] InitDeclarator["(…)"] → specifier
+        // ```
+        //
+        // In the second the declarator holds **only the parameter list**, so a reader that looks for the name in
+        // the declarator finds none and gives up — which is exactly what this builder did: the definition opened no
+        // function scope, the body was walked into the file scope, and a completion after `other.` inside it
+        // declined the whole query because the cursor was in no class at all. Measured: the same cursor *inside*
+        // the class body offered the private member correctly, so the only difference was where the definition was
+        // written, which is not a difference C++ makes.
+        //
+        // # The qualifier decides the enclosing scope
+        //
+        // `Widget::grow` declares `grow` **in `Widget`**, which is also what makes a `private` member nameable in
+        // the body. That holds for a variable written the same way (`int Box<int>::count = 0;`) and for a nested
+        // class (`int Box<int>::Inner::deep = 0;`), and in all three the answer is the scope the qualifier names.
+        // When it names no scope this file has built — a class from a header, a spelling this file only declares —
+        // the answer is the scope the declaration was written in, which is where a declaration that qualifies
+        // nothing belongs: the honest fallback rather than a failure.
+        let qualified = qualified_declarator_name(declarator)
+            .or_else(|| qualified_specifier_name(declarator));
+
+        let (enclosing, name, name_range) = match qualified {
+            Some((qualifier, name)) => (
+                self.scope_of_a_qualifier(&qualifier).unwrap_or(outer),
+                name.0,
+                name.1,
+            ),
+            // The name it introduces is the **last** segment — `grow`, not `Widget::grow` — so a qualified
+            // spelling is read above rather than by `declared_name`, which refuses one precisely because the
+            // unqualified lookup it exists for cannot find it.
+            None => {
+                let (name, name_range) = declared_name(declarator)?;
+                (outer, name, name_range)
+            }
+        };
 
         let is_function = declarator
             .descendants()
@@ -1018,7 +1182,7 @@ impl ScopeWalker<'_> {
         // identifier is the class or the enum, and `class Widget w;` cannot happen — a second declarator would
         // be a second variable of that type.
         if let Some(kind) = as_kind {
-            self.bind(outer, name, kind, declarator, name_range);
+            self.bind(enclosing, name, kind, declarator, name_range);
             return None;
         }
 
@@ -1027,12 +1191,12 @@ impl ScopeWalker<'_> {
             // a scope of its own: `int x = x;` refers to an earlier `x`, so the name being declared and the
             // name being read live in the same scope, and a scope around the initialiser would put the read
             // outside the scope of the declaration it reads.
-            self.bind(outer, name, BindingKind::Variable, declarator, name_range);
+            self.bind(enclosing, name, BindingKind::Variable, declarator, name_range);
             return None;
         }
 
         let kind = function_binding_kind(&name);
-        self.bind(outer, name, kind, declarator, name_range);
+        self.bind(enclosing, name, kind, declarator, name_range);
 
         // A declaration with nothing to put in a scope opens none. `int size() const;` is a member function
         // declaration: its parameters are a *type*, not names, and it has no body — so a scope for it would be
@@ -1048,7 +1212,9 @@ impl ScopeWalker<'_> {
 
         // The parameters and the body share one scope, which is what C++ does: a parameter is visible in the
         // body and not outside it, and the body does not nest inside the parameter list. The scope hangs off
-        // `inner` so that a templated function's parameters can see the template's parameters.
+        // `inner` so that a templated function's parameters can see the template's parameters — and off
+        // `enclosing` instead when a qualifier named a class, which is the `Widget::grow` case above.
+        let parent = if enclosing == outer { inner } else { enclosing };
         //
         // The range reaches to the end of the body when there is one, because a scope is looked up by offset:
         // a cursor on a local declaration is inside the body, which is *past* the declarator, and a scope that
@@ -1061,9 +1227,15 @@ impl ScopeWalker<'_> {
             None => cpp_parser::source_range(declarator.text_range()),
         };
 
+        // **`enclosing`, not `inner`.** For an ordinary declaration the two are the same scope and this makes no
+        // difference; for a `Widget::grow` definition written outside its class they are not, and the difference
+        // is the whole point of the qualified reading above: the body has to hang off `Widget` for the cursor in
+        // it to be *in* `Widget` — which is what makes a `private` member nameable there. Measured with `inner`:
+        // the cursor's class list was empty and a completion after `other.` offered four public members where
+        // five were nameable.
         let function = self
             .table
-            .create_scope(ScopeKind::Function, Some(inner), Some(range));
+            .create_scope(ScopeKind::Function, Some(parent), Some(range));
 
         for parameter_list in parameter_lists(declarator) {
             self.parameters(&parameter_list, function);
@@ -1292,7 +1464,7 @@ fn function_binding_kind(name: &Name) -> BindingKind {
     }
 }
 
-/// Did this `Declaration` go through the declaration path without declaring anything?
+/// Does this `Declaration` go through the declaration path **without declaring anything here**?
 ///
 /// The question the most vexing parse forces on any parser without a table of type names. `f(x);` — a call —
 /// and `int(x);` — a declaration of `x` — are the same tokens, so the grammar reads both as a declaration; what
@@ -1302,6 +1474,15 @@ fn function_binding_kind(name: &Name) -> BindingKind {
 /// Answered by asking the AST layer rather than by walking the tree again: `CppDeclaration::get_name` is
 /// already the "which name does this declare" rule, and it looks only where a name may be. A second
 /// implementation here would be free to disagree with the first, and consumers use both.
+///
+/// # The shape `get_name` cannot answer for
+///
+/// A declaration whose name is **`::`-qualified**. The grammar puts `void Widget::grow(int)`'s name in the specifier
+/// sequence — the declarator holds only `(int)` — so `get_name` finds nothing and answers `None`, the same answer it
+/// gives a call statement. Those declarations are handled **before** this is asked
+/// ([`ScopeWalker::names_a_scope_this_file_has`]), because the answer for them is never "unnamed here": they are
+/// either a member of a class this file declares or a declaration about a scope this file does not have, and the
+/// second is the only case that reaches this function's caller as a `true`.
 ///
 /// `false` for every node that is not a `Declaration`, because the other declaration kinds state their name
 /// differently and already handle an absent one — an anonymous namespace, an unnamed `class {}`.
@@ -1315,6 +1496,91 @@ fn is_unnamed_declaration(node: &CppSyntaxNode) -> bool {
         // Not castable, so the AST layer has no opinion and this layer should not invent one.
         None => false,
     }
+}
+
+/// **Does this declaration name a class or namespace this file has built?**
+/// **Does this declaration name something through a `::`-qualified declarator?**
+///
+/// `void Box<int>::grow(int n) { … }` and `int Box<int>::count = 0;` both declare a name, and the AST's
+/// `get_name_text` answers `None` for both — the same answer it gives `f(x);`, which declares nothing. Three
+/// conditions together tell them apart, and each is here because leaving it out accepts something it should not:
+///
+/// ```text
+/// a `::` in a name under the specifier sequence   `void Box<int>::grow` — and NOT `f(x);`, whose `x` is an
+///                                                 argument the specifier sequence never mentions
+/// …outside the declarators                        a parameter's type is not this declaration's name:
+///                                                 `int f(std::string s);` declares `f`
+/// …and a declarator with no name of its own       `ns::Widget w;` writes a qualified *type* and a declarator
+///                                                 that names `w`, and that is the ordinary path's reading
+/// ```
+///
+/// The second condition is a walk that stops at every `Declarator`, which is what keeps a qualified type **inside**
+/// a declarator — a parameter, a return type — from being read as the declaration's own name.
+fn declaration_is_qualified(node: &CppSyntaxNode) -> bool {
+    let Some(specifiers) = first_child(node, CppSyntaxKind::DeclSpecifierSeq) else {
+        return false;
+    };
+
+    if !mentions_a_qualified_name(&specifiers, true) {
+        return false;
+    }
+
+    // A declarator that names something is the declaration's name; what is left is a declaration whose name was
+    // written where a type goes.
+    !declarators(node)
+        .iter()
+        .any(named_in_a_declarator)
+}
+
+/// Does anything written **outside a declarator** in this subtree spell a `::`-qualified name?
+///
+/// `inside_a_declarator` says whether the walk is already inside one: the specifier sequence starts outside, and
+/// every `Declarator` puts the walk inside for the rest of its subtree.
+fn mentions_a_qualified_name(node: &CppSyntaxNode, outside_a_declarator: bool) -> bool {
+    for child in node.children() {
+        let kind = CppSyntaxKind::from(child.kind());
+
+        if outside_a_declarator && kind == CppSyntaxKind::NameExpr && is_qualified(&child) {
+            return true;
+        }
+
+        let still_outside = outside_a_declarator && kind != CppSyntaxKind::Declarator;
+        if mentions_a_qualified_name(&child, still_outside) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Does this declarator hold a name of its own — an identifier that is not inside a parameter list?
+///
+/// **The identifier token, not the `NameExpr`**, because a qualified name in the specifier sequence is also a
+/// `NameExpr` — and the two are exactly what this whole reading has to tell apart. What a declarator that names
+/// something has, and a bare parameter list does not, is an identifier written in it.
+fn named_in_a_declarator(declarator: &CppSyntaxNode) -> bool {
+    for child in declarator.children_with_tokens() {
+        if let Some(token) = child.clone().into_token() {
+            if CppTokenKind::from(token.kind()) == CppTokenKind::Identifier {
+                return true;
+            }
+
+            continue;
+        }
+
+        if let Some(node) = child.into_node() {
+            // A parameter list is a type, not this declarator's name, and so is everything below one.
+            if CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ParameterList {
+                continue;
+            }
+
+            if named_in_a_declarator(&node) {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 /// The first direct child of a kind.
@@ -1714,6 +1980,131 @@ fn is_class_like_keyword_token(node: &CppSyntaxNode) -> bool {
                     | cpp_parser::CppKind::Token(CppTokenKind::EnumKeyword)
             )
         })
+}
+
+/// **The qualifier of a `::`-qualified declaration whose name the grammar put in the declarator.**
+///
+/// `void Widget::grow(int)` declares `grow`, and it declares it *in `Widget`* — the two facts this returns.
+/// `None` for every other declarator, which is the ordinary case and the one whose reading is [`declared_name`].
+fn qualified_declarator_name(
+    declarator: &CppSyntaxNode,
+) -> Option<(String, (Name, cpp_parser::SourceRange))> {
+    let node = name_node_along_declarator(declarator)?;
+
+    if !is_qualified(&node) {
+        return None;
+    }
+
+    Some(qualified_name_along(node))
+}
+
+/// **The same, for the other place the grammar puts a qualified name** — the specifier sequence.
+///
+/// ```text
+/// void Widget::grow(Widget& other) { … }   DeclSpecifierSeq["void Widget::grow"] InitDeclarator["(…)"]
+/// ```
+///
+/// The declarator holds only the parameter list, so [`qualified_declarator_name`] finds no name at all and the
+/// declaration would be read as one that declares nothing. This is the reader for that shape: the name node is in
+/// the specifier sequence, and everything after it — the parameter list, the `const`, the body — is not part of it.
+///
+/// **Only the name node that carries a `::` is taken.** A specifier sequence is mostly types, and treating the
+/// first name in it as the declared name would answer `void` for `void f()`; the qualifier is what makes this
+/// unambiguous, and [`is_unnamed_declaration`] has already established that the declaration is this shape before
+/// this is called.
+fn qualified_specifier_name(
+    declarator: &CppSyntaxNode,
+) -> Option<(String, (Name, cpp_parser::SourceRange))> {
+    let declaration = declarator
+        .ancestors()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declaration)?;
+
+    Some(qualified_name_along(qualified_specifier_name_node(&declaration)?))
+}
+
+/// **The name node of a declaration whose name the grammar put in the specifier sequence.**
+///
+/// `None` for every declaration that is not that shape — which is every ordinary declaration, and also the
+/// qualified declaration whose qualifier names a scope this file has not built. The two callers want that answer
+/// for different reasons and must get the same one:
+///
+/// * [`ScopeWalker::names_a_scope_this_file_has`] asks it to decide whether the declaration is this file's to bind
+///   at all, and reads the qualifier off the node;
+/// * [`qualified_specifier_name`] asks it for the name to bind.
+fn qualified_specifier_name_node(declaration: &CppSyntaxNode) -> Option<CppSyntaxNode> {
+    if !declaration_is_qualified(declaration) {
+        return None;
+    }
+
+    let specifiers = first_child(declaration, CppSyntaxKind::DeclSpecifierSeq)?;
+
+    // A **descendant**, not a child: the grammar writes a qualified name inside a wrapper — `DeclSpecifierSeq >
+    // TemplateType > NameExpr` for `void Box<int>::grow` — so a search of the direct children finds nothing and
+    // the declaration is read as one that declares nothing. That a qualified name is here at all is what
+    // `declaration_is_qualified` established, and it is the only `::` in this declaration's specifiers.
+    specifiers.descendants().find(|child| {
+        CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr && is_qualified(child)
+    })
+}
+
+/// One `::`-qualified name node, as everything before the name and the name itself.
+///
+/// The name is the **last segment**, and the qualifier is everything before it: `Outer<int>::Inner::grow` is `grow`
+/// in `Outer<int>::Inner`.
+///
+/// # Why the tokens, and not the text
+///
+/// Two things have to be told apart that a character walk gets wrong. A separator inside a **template argument
+/// list** is not a separator between segments (`Box<A::B>::grow` names `grow` in `Box<A::B>`), so the angle brackets
+/// have to be tracked; and the qualifier is compared against the names scopes record, which are spelled without
+/// whitespace or comments (`Outer::\n    Inner` is the scope `Outer::Inner`). Tokens answer both — the depth is
+/// counted over their text, and trivia is dropped by kind rather than by being trimmed from a substring.
+///
+/// The name token is the **last identifier** of the node rather than the text after the final separator, because
+/// C++ writes three things there that are not a bare identifier and all three have to come back as what they are:
+/// `Widget::~Widget` is a destructor, `Widget::operator+` an operator, and only [`name_from_text`] — which sees the
+/// `~` and the `operator` keyword in the node — can tell either from a plain name.
+fn qualified_name_along(node: CppSyntaxNode) -> (String, (Name, cpp_parser::SourceRange)) {
+    let tokens: Vec<cpp_parser::CppSyntaxToken> = node
+        .children_with_tokens()
+        .filter_map(|child| child.into_token())
+        .collect();
+
+    // The last separator outside every `<…>`, as a position in the token list.
+    let mut depth = 0usize;
+    let mut last_separator = None;
+
+    for (at, token) in tokens.iter().enumerate() {
+        for character in token.text().chars() {
+            match character {
+                '<' => depth += 1,
+                '>' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+
+        if depth == 0 && CppTokenKind::from(token.kind()) == CppTokenKind::Scope {
+            last_separator = Some(at);
+        }
+    }
+
+    let qualifier = tokens[..last_separator.unwrap_or(0)]
+        .iter()
+        .filter(|token| {
+            !matches!(
+                CppTokenKind::from(token.kind()),
+                CppTokenKind::Whitespace
+                    | CppTokenKind::LineComment
+                    | CppTokenKind::BlockComment
+            )
+        })
+        .map(|token| token.text().to_string())
+        .collect::<String>();
+
+    let token = last_identifier(&node).expect("a qualified name has at least one identifier");
+    let name = name_from_text(token.text(), &node).expect("an identifier names something");
+
+    (qualifier, (name, cpp_parser::source_range(token.text_range())))
 }
 
 /// Is this name written with a qualifier?

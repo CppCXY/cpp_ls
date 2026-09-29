@@ -4845,6 +4845,27 @@ impl ProjectIndex {
             }
         }
 
+        // **…and so is a partition of this file's own module.** `export import :area;` makes the partition's
+        // declarations part of *this* module's interface, so a file that imports the module has to see them — and
+        // the file that declares them is reached by exactly the same kind of resolved path. Not following it is a
+        // false negative, which is the direction this project refuses everywhere else: measured on the partition
+        // fixture (`target/build_partitions.bat`), `definition("perimeter")` resolved to the interface unit while
+        // `rectangle` and `square`, declared in the partition it re-exports, answered "nothing declares it".
+        //
+        // `Unconditional`, and for a reason that is *not* the same as the import note below: a partition import is
+        // not conditional in practice — the grammar does not allow `import :part;` inside a conditional region of a
+        // module unit, because the module's interface has to be known in full before anything is compiled against
+        // it.
+        for unit in &summary.modules.partitions {
+            let next = normalize(unit);
+
+            if let std::collections::hash_map::Entry::Vacant(slot) = best.entry(next.clone()) {
+                slot.insert(IncludeVisibility::Unconditional);
+                order.push(next.clone());
+                pending.push((next, IncludeVisibility::Unconditional, depth + 1));
+            }
+        }
+
         // **A module import is the other visibility edge**, and it is not an `#include` with another spelling:
             // an import is not textual (no macro travels along it) and it names a *module* rather than a file, so
             // the file behind it is found through the module the project declares. That is what makes
@@ -8637,6 +8658,59 @@ public:
             offered,
             ["grow", "hidden", "shown"],
             "inside the class both are nameable, so both are offered"
+        );
+    }
+
+    /// **A member defined outside its class is still that class's member** — for access, which is the question this
+    /// test is about, and for everything else that is a property of the declaration.
+    ///
+    /// The shape is one every real C++ codebase is written in: the class states the declaration (and with it the
+    /// access) and the definition lives further down the file, in a section of its own with no access label in
+    /// sight. `declared_access_at` reads the level *where the name is written*, so at an out-of-class definition it
+    /// finds no class body at all — see the expectations below.
+    #[test]
+    fn a_member_defined_outside_its_class_keeps_its_access() {
+        let source = "\
+class Widget {
+    int hidden;
+public:
+    int shown;
+    void set(int value);
+    void grow(Widget& other);
+};
+
+void Widget::set(int value) {
+    hidden = value;
+}
+
+void Widget::grow(Widget& other) {
+    other.
+}
+
+void f(Widget& w) {
+    w.
+}
+";
+        let Known::Yes(found) = completions_at(&[], "/p/a.cpp", source, "other.") else {
+            panic!("`other` is a `Widget`");
+        };
+        let offered: Vec<&str> = found.members.members.iter().map(|m| m.fact.name.as_str()).collect();
+        assert!(
+            offered.contains(&"hidden"),
+            "the cursor is inside a member of `Widget`, so `hidden` is nameable there: {offered:?}"
+        );
+        assert!(
+            offered.contains(&"set") && offered.contains(&"shown") && offered.contains(&"grow"),
+            "and so is everything else the class declares: {offered:?}"
+        );
+
+        let Known::Yes(found) = completions_at(&[], "/p/a.cpp", source, "w.") else {
+            panic!("`w` is a `Widget`");
+        };
+        let offered: Vec<&str> = found.members.members.iter().map(|m| m.fact.name.as_str()).collect();
+        assert!(
+            !offered.contains(&"hidden"),
+            "and from outside the class the same member is not: {offered:?}"
         );
     }
 

@@ -1346,6 +1346,146 @@ fn an_import_nothing_declares_gets_a_note_on_the_line_that_wrote_it() {
     let _ = DiskFiles;
 }
 
+/// **A module written in partitions** — the shape `tests/fixtures/modules/partitions.cpp` is built from, by the real
+/// compiler (`target/build_partitions.bat`, which prints `14 12 16`).
+///
+/// A partition is not a module: `export import :area;` is only legal inside `shapes`, and nothing outside may name
+/// it. What it *is* is part of the module's interface — an `export import` re-exports what the partition exports —
+/// so a reader of a file that says `import shapes;` must see the partition's names. Measured on the fixture before
+/// this was wired: `definition("perimeter")` resolved (declared in the interface unit itself) while `rectangle` and
+/// `square`, declared in the partition and re-exported, answered `NotDeclaredHere`.
+///
+/// The file names are the convention MSVC uses for the same fixture (`shapes-area.cppm` for `shapes:area`), so the
+/// naming resolution is exercised as well as the graph.
+#[test]
+fn a_partitions_names_reach_a_file_that_imports_the_module() {
+    use cpp_code_analysis::{
+        DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter,
+    };
+
+    let files = MemoryFiles::new()
+        .with_file(
+            "shapes.cppm",
+            "export module shapes;\n\
+             export import :area;\n\
+             export int perimeter(int, int);\n",
+        )
+        .with_file(
+            "shapes-area.cppm",
+            "export module shapes:area;\n\
+             export int rectangle(int, int);\n\
+             export int square(int);\n",
+        )
+        .with_file("partitions.cpp", "import shapes;\nint area = rectangle(3, 4);\n");
+
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        ".",
+        providers,
+        WatchFilter::new("."),
+        CompilerConfig::new(),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from("shapes.cppm"),
+        std::path::PathBuf::from("shapes-area.cppm"),
+        std::path::PathBuf::from("partitions.cpp"),
+    ]);
+    session.index_everything();
+
+    // The file that says `import shapes;` sees the interface unit's own name…
+    let perimeter = session.index().definition("perimeter", Path::new("partitions.cpp"));
+    assert!(
+        matches!(perimeter, Known::Yes(_)),
+        "`perimeter` is declared in the interface unit itself: {perimeter:?}"
+    );
+
+    // …and the partition's names, which are in another file that only the module's re-export reaches.
+    for name in ["rectangle", "square"] {
+        let found = session.index().definition(name, Path::new("partitions.cpp"));
+
+        assert!(
+            matches!(found, Known::Yes(_)),
+            "`{name}` is declared in `shapes:area`, which `shapes.cppm` re-exports: {found:?}"
+        );
+    }
+
+    let _ = DiskFiles;
+}
+
+/// **The reader is told about a partition the project does not have** — and told the right thing.
+///
+/// The failure this covers is the one a partition import looks like from the analysis's side: `import :area;` asks
+/// for a *module* named `area` by every reading that treats a partition as a module, nothing declares one, and the
+/// note that followed said "no file declares module `area`" — a sentence about a module that does not exist in the
+/// language. Measured on the partition fixture with the partition's file removed: the note has to name the module
+/// the partition belongs to and the switch MSVC actually wants (`/reference shapes:area=…`, C7621 without it).
+///
+/// Both directions in one test, because a note that is always emitted is as wrong as one that never is: the same
+/// fixture **with** the partition file present must produce no note at all.
+#[test]
+fn a_partition_the_project_does_not_have_gets_a_note_about_its_module() {
+    use cpp_code_analysis::{
+        DiskFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+    };
+
+    let interface = "export module shapes;\nexport import :area;\n";
+
+    // The partition's file is missing: the analysis knows the module `shapes` — and nothing declares `:area`.
+    let files = MemoryFiles::new().with_file("src/shapes.cppm", interface);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        ".",
+        providers,
+        WatchFilter::new("."),
+        CompilerConfig::new(),
+    );
+    session.add_project_files([std::path::PathBuf::from("src/shapes.cppm")]);
+    session.index_everything();
+
+    let view = session.view("src/shapes.cppm").expect("the file is held");
+    let notes = session.notes_about_the_modules(&view);
+
+    assert_eq!(notes.len(), 1, "one partition import, one note: {notes:?}");
+    assert!(
+        notes[0].message.contains(":area") && notes[0].message.contains("`shapes`"),
+        "the note names the partition and the module it belongs to: {}",
+        notes[0].message
+    );
+    assert!(
+        !notes[0].message.contains("declares module `area`"),
+        "and never reads a partition as a module: {}",
+        notes[0].message
+    );
+
+    // The same file with the partition present: nothing to say.
+    let files = MemoryFiles::new()
+        .with_file("src/shapes.cppm", interface)
+        .with_file(
+            "src/shapes-area.cppm",
+            "export module shapes:area;\nexport int rectangle(int, int);\n",
+        );
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        ".",
+        providers,
+        WatchFilter::new("."),
+        CompilerConfig::new(),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from("src/shapes.cppm"),
+        std::path::PathBuf::from("src/shapes-area.cppm"),
+    ]);
+    session.index_everything();
+
+    let view = session.view("src/shapes.cppm").expect("the file is held");
+    assert!(
+        session.notes_about_the_modules(&view).is_empty(),
+        "the partition's file is in the project, so there is nothing to be told"
+    );
+
+    let _ = DiskFiles;
+}
+
 #[test]
 fn an_import_makes_the_modules_names_visible() {
     use cpp_code_analysis::{

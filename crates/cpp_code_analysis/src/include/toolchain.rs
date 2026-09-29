@@ -1145,6 +1145,48 @@ impl Toolchain {
         }
     }
 
+    /// **Where this compiler keeps a partition's interface unit, and what would let it find one.**
+    ///
+    /// The same question as [`Toolchain::module_note`] about a **partition**, which is not a module: `import :area;`
+    /// is only legal inside the module that declares `area`, and the file that declares it is a unit of that module
+    /// rather than a module of its own. So the note is not "build a module and name it" but "this partition has no
+    /// *file*, and the module's interface is compiled against it".
+    ///
+    /// # What the compiler requires, measured
+    ///
+    /// `target/build_partitions.bat`, MSVC 14.35.32215, and the direction is the one that surprises:
+    ///
+    /// ```text
+    /// cl /interface /ifcOutput shapes.ifc shapes.cppm                     → C7621: cannot find module partition "area"
+    /// cl /interface /ifcOutput shapes-area.ifc shapes-area.cppm           → ok, no /reference needed
+    /// cl /interface /ifcOutput shapes.ifc /reference shapes:area=shapes-area.ifc shapes.cppm → ok
+    /// ```
+    ///
+    /// The primary interface unit needs the **partition's** `.ifc`; the partition needs nothing. The name on the
+    /// command line is `module:partition` — `shapes:area` — which is the spelling the standard uses for a partition
+    /// and is *not* the name of any module.
+    ///
+    /// GCC and Clang are named rather than described precisely, for the reason [`Toolchain::module_note`] gives:
+    /// this layer's fact is "MSVC or not", and the two build a partition into their module file the same way they
+    /// build the module itself.
+    pub fn partition_note(&self, module: &str, partition: &str) -> String {
+        match self.dialect {
+            Some(Dialect::Msvc) => format!(
+                "no file this project contains declares partition `:{partition}` of module `{module}`. A partition \
+                 is not a module — `import :{partition};` is only legal inside `{module}` — and MSVC compiles the \
+                 module's interface against the partition's `.ifc`: `/reference {module}:{partition}=<file>.ifc`. \
+                 Until then the names the partition exports are unknown rather than absent."
+            ),
+            _ => format!(
+                "no file this project contains declares partition `:{partition}` of module `{module}`. A partition \
+                 is not a module — `import :{partition};` is only legal inside `{module}` — and it has to have been \
+                 built into the module's own module file first (GCC: `gcm.cache/{module}.gcm`; Clang: \
+                 `-fmodule-file={module}:{partition}=<file>`). Until then the names it exports are unknown rather \
+                 than absent."
+            ),
+        }
+    }
+
     /// Where this toolchain ships the **source** of a standard module, if it ships one at all.
     ///
     /// Beside the include directories rather than inside them — `<VC>/Tools/MSVC/<version>/modules/std.ixx` sits in
@@ -2214,6 +2256,40 @@ End of search list.
             unknown.contains("unknown rather than absent") && !unknown.contains("/reference"),
             "an unknown compiler is not guessed at: {unknown}"
         );
+    }
+
+    /// **A partition is not a module, so the note says something else** — `import :area;` names a unit of the module
+    /// the file itself declares, and the fix is not "build a module and name it" but "compile the module's interface
+    /// against that partition's `.ifc`".
+    ///
+    /// The three commands behind MSVC's sentence are in `target/build_partitions.bat` and were measured on
+    /// 14.35.32215: the primary interface unit fails with C7621 without `/reference shapes:area=shapes-area.ifc`, the
+    /// partition itself compiles with no `/reference` at all, and the consumer never names the partition.
+    #[test]
+    fn a_partition_gets_a_note_about_the_module_it_belongs_to() {
+        let msvc = toolchain_of(Some(Dialect::Msvc), &["C:/VC/Tools/MSVC/14.35/include"]);
+
+        let note = msvc.partition_note("shapes", "area");
+        assert!(
+            note.contains("`shapes:area`") || note.contains("/reference shapes:area="),
+            "MSVC is told the switch, spelled with the module *and* the partition: {note}"
+        );
+        assert!(
+            note.contains(":area") && note.contains("`shapes`"),
+            "and which module the partition belongs to: {note}"
+        );
+        assert!(
+            !note.contains("declares module `area`"),
+            "the note must not read a partition as a module — nothing declares a module called `area`: {note}"
+        );
+        assert!(note.contains("unknown rather than absent"));
+
+        let gnu = toolchain_of(Some(Dialect::Gnu), &["/usr/include/c++/15"]).partition_note("shapes", "area");
+        assert!(
+            !gnu.contains("/reference"),
+            "MSVC's switch is not offered to a compiler that would reject it: {gnu}"
+        );
+        assert!(gnu.contains("gcm.cache/shapes.gcm"), "GCC builds it into the module file: {gnu}");
     }
 
     /// **Where a standard module's source is, when the toolchain ships one.** Found by asking the filesystem for
