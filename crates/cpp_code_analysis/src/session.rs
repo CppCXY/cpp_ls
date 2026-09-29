@@ -1743,13 +1743,13 @@ impl<F: FileProvider + Clone> Session<F> {
         let indexer = FileIndexer::new(&self.files, &self.config);
         let indexed = indexer.index_unit_rendering(&root, &stream, key);
 
-        // **The gate: a program we could not parse is a program whose scopes we do not assert.** The measurement is
-        // the one written on `IndexedUnit::errors`: `braces` is zero and the scopes are still wrong, because equal
-        // counts of `{` and `}` do not make the parser pair them the way the file meant. So a stream with errors is
-        // **reported and not filed**: the per-file readings are untouched, and nothing gets *worse* — which is the
-        // whole difference between this and the version that filed it and lost 49 names in `std`.
+        // **The gate: a program in which a scope still leaks from one file into another is not asserted.** A parse error
+        // is not the gate any more — it is filed against the file it is in — because the failure that made this reading
+        // lose names was never "there is an error", it was "one file's mistake became the next file's scopes", and
+        // `index_unit_rendering` now finds those (a brace paired across two files), quarantines the files that do it,
+        // and reports what it could not fix in `crossings`. Only a reading that still leaks is refused.
         let mut placed = 0usize;
-        if indexed.errors == 0 {
+        if indexed.crossings == 0 {
             for (path, cooked) in indexed.files {
                 placed += 1;
                 self.store.index_mut().insert_cooked(&path, cooked);
@@ -1767,6 +1767,8 @@ impl<F: FileProvider + Clone> Session<F> {
             unbalanced: indexed.unbalanced,
             braces: indexed.braces,
             errors: indexed.errors,
+            quarantined: indexed.quarantined,
+            crossings: indexed.crossings,
         })
     }
 
@@ -3162,6 +3164,97 @@ mod tests {
             Some("good"),
             "the namespace `good.h` opens and closes itself still holds it"
         );
+    }
+
+    /// **A file whose scope leaks is read on its own, and the rest of the program is not touched.**
+    ///
+    /// The text of `broken.h` balances its braces, so the balance check that leaves a file out lets it through — and the
+    /// parser still gets it wrong: `REPEATABLE [attribute] struct X { … };` (the Windows SDK's `/analyze` header spells
+    /// its declarations this way, with `REPEATABLE` a macro nothing in the program defines) reads as an expression
+    /// whose lambda body never closes. Read as part of the program, that swallows everything spliced after it, and
+    /// `good.h`'s `Inside` would not be in namespace `good` — or, with the reading refused for the sake of one file, not
+    /// in the index at all.
+    ///
+    /// The file is **quarantined**: found by the parse itself (a brace paired with a brace of another file), taken out
+    /// of the program's stream, parsed alone. Everything else reads as if it had never been there.
+    #[test]
+    fn a_file_whose_scope_leaks_is_read_alone_and_the_program_is_still_read() {
+        let leaky = "REPEATABLE\n[source_annotation_attribute( 1 )]\nstruct Pre\n{\n int Deref;\n};\n";
+        let main = "#include \"broken.h\"\n#include \"good.h\"\nInside i;\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/broken.h", leaky)
+            .with_file("/p/good.h", "namespace good {\nstruct Inside { int y; };\n}\n")
+            .with_file("/p/main.cpp", main);
+        let fixture = Memory::new("a-scope-that-leaks", &files);
+        let mut session = fixture.session();
+
+        session.did_open("/p/main.cpp", main);
+        session.index_everything();
+        let reading = session
+            .read_the_unit(Path::new("/p/main.cpp"))
+            .expect("the unit reads");
+
+        assert!(
+            reading.unbalanced.is_empty(),
+            "the text balances, which is why the balance check does not catch it: {reading:?}"
+        );
+        assert_eq!(reading.quarantined.len(), 1, "one file leaks: {reading:?}");
+        assert!(reading.quarantined[0].ends_with("broken.h"), "{reading:?}");
+        assert_eq!(reading.crossings, 0, "and once it is out, nothing crosses: {reading:?}");
+
+        // **The program was filed**: a reading that still had a leak would have been refused.
+        let inside = session
+            .index()
+            .cooked_declarations(Path::new("/p/good.h"))
+            .expect("the reading was filed")
+            .iter()
+            .find(|fact| fact.name == "Inside")
+            .expect("the class is declared there")
+            .scope
+            .clone();
+        assert_eq!(inside.as_deref(), Some("good"), "the file after the leaky one is read as itself");
+
+        // **The mistake stayed in the file that made it.**
+        let broken = session
+            .index()
+            .cooked_reading(Path::new("/p/broken.h"))
+            .expect("the quarantined file has a reading of its own");
+        assert!(!broken.diagnostics.is_empty(), "its parse errors are filed against it");
+        let good = session
+            .index()
+            .cooked_reading(Path::new("/p/good.h"))
+            .expect("good.h has a reading");
+        assert!(good.diagnostics.is_empty(), "and no error reaches the next file: {:?}", good.diagnostics);
+    }
+
+    /// **A program in which no file leaks is read once** — the ordinary case has no quarantine and no second parse.
+    #[test]
+    fn a_program_whose_files_keep_their_scopes_quarantines_nothing() {
+        let main = "#include \"a.h\"\n#include \"b.h\"\nint main_variable;\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/a.h", "namespace a {\nstruct A { int x; };\n}\n")
+            .with_file("/p/b.h", "namespace b {\n#include \"c.h\"\n}\n")
+            .with_file("/p/c.h", "struct C { int z; };\n")
+            .with_file("/p/main.cpp", main);
+        let fixture = Memory::new("a-program-that-does-not-leak", &files);
+        let mut session = fixture.session();
+
+        session.did_open("/p/main.cpp", main);
+        session.index_everything();
+        let reading = session.read_the_unit(Path::new("/p/main.cpp")).expect("the unit reads");
+
+        assert!(reading.quarantined.is_empty(), "{reading:?}");
+        assert_eq!(reading.crossings, 0, "a scope that closes around an `#include` is not a crossing: {reading:?}");
+        let c = session
+            .index()
+            .cooked_declarations(Path::new("/p/c.h"))
+            .expect("filed")
+            .iter()
+            .find(|fact| fact.name == "C")
+            .expect("declared")
+            .scope
+            .clone();
+        assert_eq!(c.as_deref(), Some("b"), "the namespace `b.h` opens around its include still holds `C`");
     }
 
     /// **A unit read puts the whole program in the index, once** — [`Session::read_the_unit`].

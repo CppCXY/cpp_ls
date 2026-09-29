@@ -313,6 +313,15 @@ pub struct CppParser<'a> {
     /// from the shaped bodies.
     macro_bodies_empty: std::cell::RefCell<std::collections::HashSet<Box<str>>>,
     macro_questions: std::cell::Cell<usize>,
+    /// **What [`a_specifier_follows_the_group`](crate::grammar) answered, by the absolute index of the name it was
+    /// asked from.** The question is answered by reading ahead through a *run* — `M(a) M(b) M(c) … int x;` asks it of
+    /// each `M` in turn, and each answer is the answer for the rest of the run — so without a memory a run of `n`
+    /// annotations is `n²/2` walks of the run, and each walk is a chain of lookups: MSVC's `<intrin.h>` writes eight
+    /// hundred of them in a row and took two and a half seconds to read. With one, each position is asked once.
+    ///
+    /// The answer depends only on the tokens ahead and on what is known about macros, so it is dropped whenever
+    /// either changes: a token split or folded, a `#define` or `#undef`.
+    follower_memo: std::cell::RefCell<std::collections::HashMap<usize, bool>>,
     macro_question_names: std::cell::RefCell<std::collections::HashSet<Box<str>>>,
     /// The names the **open template heads** declared as parameters that are types.
     ///
@@ -514,6 +523,7 @@ impl<'a> CppParser<'a> {
             macro_bodies: std::cell::RefCell::new(std::collections::HashMap::new()),
         macro_bodies_empty: std::cell::RefCell::new(std::collections::HashSet::new()),
             macro_questions: std::cell::Cell::new(0),
+            follower_memo: std::cell::RefCell::new(std::collections::HashMap::new()),
             macro_question_names: std::cell::RefCell::new(std::collections::HashSet::new()),
             declaration_type_name: None,
             previous_declaration_type_name: None,
@@ -767,6 +777,7 @@ impl<'a> CppParser<'a> {
             crate::text::SourceRange::new(first_end, token.range.end_offset() - first_end),
         );
 
+        self.follower_memo.get_mut().clear();
         self.tokens[self.token_index] = first;
         self.tokens.insert(self.token_index + 1, second);
         self.current_token = first.kind;
@@ -798,6 +809,7 @@ impl<'a> CppParser<'a> {
             // A header name has no escapes and no concatenation; anything else is a real string.
             if !text.contains('\\') {
                 let token = self.tokens[self.token_index];
+                self.follower_memo.get_mut().clear();
                 self.tokens[self.token_index] =
                     CppTokenData::new(CppTokenKind::HeaderName, token.range);
                 self.current_token = CppTokenKind::HeaderName;
@@ -854,6 +866,7 @@ impl<'a> CppParser<'a> {
         );
 
         // Replace the whole run with the single header-name token and advance past it.
+        self.follower_memo.get_mut().clear();
         self.tokens.splice(self.token_index..=end_index, [whole]);
         self.current_token = CppTokenKind::HeaderName;
         self.bump();
@@ -1172,6 +1185,7 @@ impl<'a> CppParser<'a> {
     /// Called by the directive rule where a `#define` writes its name. See [`crate::parser::MacroNames`] for what
     /// the table answers and what its absence means.
     pub fn declare_macro_name(&mut self, name: &str) {
+        self.follower_memo.get_mut().clear();
         self.macro_names.define(name);
     }
 
@@ -1240,6 +1254,16 @@ impl<'a> CppParser<'a> {
         None
     }
 
+    /// What was remembered for [`CppParser::follower_memo`], if anything.
+    pub fn remembered_follower(&self, index: usize) -> Option<bool> {
+        self.follower_memo.borrow().get(&index).copied()
+    }
+
+    /// Remember an answer for [`CppParser::follower_memo`].
+    pub fn remember_follower(&self, index: usize, answer: bool) {
+        self.follower_memo.borrow_mut().insert(index, answer);
+    }
+
     /// The source range of the token at `index`, or `None` when there is none.
     ///
     /// Beside [`CppParser::token_text_at`] for the rules that ask the **evidence** about a token that is not at the
@@ -1251,6 +1275,7 @@ impl<'a> CppParser<'a> {
 
     /// Record an `#undef`.
     pub fn undefine_macro_name(&mut self, name: &str) {
+        self.follower_memo.get_mut().clear();
         self.macro_names.undefine(name);
     }
 

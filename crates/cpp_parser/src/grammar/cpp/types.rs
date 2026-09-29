@@ -544,6 +544,17 @@ fn a_specifier_follows_the_group(p: &CppParser) -> bool {
 /// The second shape must keep its reading — it is the measurement that put the name follower out of the simple
 /// case — and it does, because the question asked from `CoFreeLibrary` finds `;` after *its* group.
 fn a_specifier_follows_the_group_at(p: &CppParser, name_offset: usize) -> bool {
+    // Remembered by where the name is, because the run recurses: see `CppParser::follower_memo`.
+    let at = p.current_token_index() + name_offset;
+    if let Some(answer) = p.remembered_follower(at) {
+        return answer;
+    }
+    let answer = a_specifier_follows_the_group_reading_ahead(p, name_offset);
+    p.remember_follower(at, answer);
+    answer
+}
+
+fn a_specifier_follows_the_group_reading_ahead(p: &CppParser, name_offset: usize) -> bool {
     let mut depth = 0isize;
 
     for (position, kind) in p

@@ -2115,6 +2115,41 @@ impl RenderedUnit {
             written,
         });
     }
+
+    /// **The same program without the tokens of `left_out` files** — the stream a fenced parse reads. Everything else
+    /// is token-for-token the original, in the original order; a left-out file's includes were spliced as files of
+    /// their own and stay.
+    pub fn without(&self, left_out: &std::collections::BTreeSet<u32>) -> RenderedUnit {
+        let mut out = self.empty_like();
+        for span in &self.spans {
+            if !left_out.contains(&span.file) {
+                out.push(&self.text[span.cooked.start_offset..span.cooked.end_offset()], span.file, span.written);
+            }
+        }
+        out
+    }
+
+    /// **Only the tokens `file` itself wrote** (a token a macro of its own produced counts) — what a quarantined file
+    /// is read from. Its spans are the original ones, so a fact found here maps back through
+    /// [`RenderedUnit::written_span`] exactly as it would from the whole program.
+    pub fn only(&self, file: u32) -> RenderedUnit {
+        let mut out = self.empty_like();
+        for span in &self.spans {
+            if span.file == file {
+                out.push(&self.text[span.cooked.start_offset..span.cooked.end_offset()], span.file, span.written);
+            }
+        }
+        out
+    }
+
+    fn empty_like(&self) -> RenderedUnit {
+        RenderedUnit {
+            files: self.files.clone(),
+            missing: self.missing,
+            unbalanced: self.unbalanced.clone(),
+            ..RenderedUnit::default()
+        }
+    }
 }
 
 /// What one walk collects, in the order it was walked.
@@ -2897,9 +2932,21 @@ pub struct IndexedUnit {
     pub unbalanced: Vec<std::path::PathBuf>,
     /// The stream's own brace balance — see [`RenderedUnit::braces`].
     pub braces: i64,
+    /// Files **quarantined**: the parser paired a brace of theirs with a brace in another file, so their tokens were
+    /// taken out of the program's stream and parsed on their own — see [`crate::FileIndexer::index_unit_rendering`].
+    /// What they declare is still filed; what their parse got wrong stays inside them.
+    pub quarantined: Vec<std::path::PathBuf>,
+    /// **How many braces the final parse still paired across two files.** This is the gate: zero means no scope
+    /// opened in one file is closed in another, so no file's mistakes reach the next one's names.
+    pub crossings: usize,
     /// Errors the parse of the stream reported.
     ///
-    /// **This is the gate the unit reading needs**, and `braces` is not: measured on a real project the stream is
+    /// Reported per file (each lands in the file it is in) and no longer the gate — see `crossings`. It was the gate
+    /// while the only defence against one file's unclosed scope was to refuse the whole program.
+    ///
+    /// *The original account, kept because it is the measurement:*
+    ///
+    /// **This was the gate the unit reading needed**, and `braces` is not: measured on a real project the stream is
     /// *lexically* balanced (`braces: 0`) while `CodeAnalysis/sourceannotations.h` — the one file a census has never
     /// read cleanly, registered as "`/analyze`-only syntax, not a gap" — still leaves its `namespace vc_attributes`
     /// open **syntactically**, so every file spliced after it reads as `vc_attributes::std`. Equal counts of `{` and
@@ -2933,10 +2980,14 @@ pub struct UnitReading {
     pub unbalanced: Vec<std::path::PathBuf>,
     /// The stream's own brace balance — see [`RenderedUnit::braces`].
     pub braces: i64,
-    /// Errors the parse of the **program** reported — see [`IndexedUnit::errors`] for why this and not `braces` is
-    /// the gate. Non-zero means the reading was **not** filed into the index, because the scopes it would assert
-    /// are the scopes of a text that did not parse.
+    /// Errors the parse of the **program** reported, wherever they are — each is also filed against its own file.
     pub errors: usize,
+    /// Files quarantined — see [`IndexedUnit::quarantined`].
+    pub quarantined: Vec<std::path::PathBuf>,
+    /// Braces the final parse still paired across two files — see [`IndexedUnit::crossings`]. Non-zero means the
+    /// reading was **not** filed into the index: a scope that leaks from one file into the next is the failure that
+    /// made this reading lose names, and a program that still does it is not asserted.
+    pub crossings: usize,
 }
 
 /// One thing the parse of a **rendering** found, said in the file's own coordinates.

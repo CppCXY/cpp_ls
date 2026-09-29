@@ -371,18 +371,57 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         stream: &crate::RenderedUnit,
         key: SummaryKey,
     ) -> crate::IndexedUnit {
-        let mut config = ParserConfig::default().with_dialect(self.config.dialect());
-        if let Some(bodies) = self.macro_facts {
-            config = config.with_macros_from_includes(bodies);
-        }
-
-        let tree = {
-            let _parse = StageTimer::new(Stage::RenderParse);
-            CppParser::parse(&stream.text, config)
+        // Built afresh for each parse: a configuration is consumed by the parser it is given to.
+        let config = || {
+            let mut config = ParserConfig::default().with_dialect(self.config.dialect());
+            if let Some(bodies) = self.macro_facts {
+                config = config.with_macros_from_includes(bodies);
+            }
+            config
         };
+
+        // **Fences.** One parse of the whole program lets one file's mistake become every later file's: a scope the
+        // parser opens in one file and does not close there stays open, and everything spliced after it is *inside*.
+        // The measured case is `CodeAnalysis/sourceannotations.h`, whose `REPEATABLE [attribute] struct X { … };` the
+        // parser reads as an expression with a lambda body and never closes — so the rest of the program, `<string>`
+        // included, became the body of a lambda, or (before this) sat in `vc_attributes::` for want of a `}`. The
+        // file's text balances its braces; it is the *pairing* that leaked, and only a parse can tell.
+        //
+        // So each parse is checked file by file for a brace paired with a brace of a **different** file (a scope that
+        // opens and closes in one file — even around an `#include` — is not one). A file that does it is
+        // **quarantined**: its tokens are taken out of the program's stream, which is read again without them, and
+        // they are parsed on their own — so what the file declares is still filed, with whatever mistakes its parse
+        // makes, but the mistakes end at the end of the file. Supplying the missing `}` in the file's place was tried
+        // first and does not hold: the parser is as likely to spend a supplied closer on something inside the leak.
+        //
+        // One parse when nothing crosses, which is the ordinary case; three at most, and if the third still finds a
+        // crossing the reading says so (`crossings`) and is not filed.
+        let mut quarantined: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+        let mut working: Option<crate::RenderedUnit> = None;
+
+        let (tree, crossings) = {
+            let mut round = 0;
+            loop {
+                let current = working.as_ref().unwrap_or(stream);
+                let tree = {
+                    let _parse = StageTimer::new(Stage::RenderParse);
+                    CppParser::parse(&current.text, config())
+                };
+                let crossing = brace_crossings(&tree, current);
+
+                if crossing.is_empty() || round == 2 {
+                    break (tree, crossing.len());
+                }
+
+                quarantined.extend(crossing);
+                working = Some(stream.without(&quarantined));
+                round += 1;
+            }
+        };
+        let program: &crate::RenderedUnit = working.as_ref().unwrap_or(stream);
         let summary = {
             let _sweep = StageTimer::new(Stage::RenderSweep);
-            self.index_tree(root, &stream.text, &tree, key)
+            self.index_tree(root, &program.text, &tree, key)
         };
 
         let mut files: Vec<(std::path::PathBuf, crate::CookedFile)> = stream
@@ -391,43 +430,21 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             .map(|path| (path.clone(), crate::CookedFile::default()))
             .collect();
         let mut unplaced = 0usize;
+        let mut errors = tree.get_errors().len();
 
-        for mut fact in summary.declarations {
-            let Some((file, range)) = stream.written_span(fact.range) else {
-                unplaced += 1;
-                continue;
+        file_what_was_found(summary.declarations, &tree, program, &mut files, &mut unplaced);
+
+        // **Each quarantined file, read alone.** Its tokens are the same tokens, so every range still maps back to the
+        // file the same way; only the parse is separate.
+        for &file in &quarantined {
+            let alone = stream.only(file);
+            let tree = {
+                let _parse = StageTimer::new(Stage::RenderParse);
+                CppParser::parse(&alone.text, config())
             };
-            let Some((name_file, name_range)) = stream.written_span(fact.name_range) else {
-                unplaced += 1;
-                continue;
-            };
-            if name_file != file {
-                unplaced += 1;
-                continue;
-            }
-
-            fact.range = range;
-            fact.name_range = name_range;
-            if let Some((_, cooked)) = files.get_mut(file as usize) {
-                cooked.declarations.push(fact);
-            }
-        }
-
-        // The tree's errors, each asked of the same map. A rendering error that **cannot** be placed in any file
-        // is counted rather than reported against a text the reader cannot see.
-        for error in tree.get_errors() {
-            let range = cpp_parser::source_range(error.range);
-            match stream.written_span(range) {
-                Some((file, range)) => {
-                    if let Some((_, cooked)) = files.get_mut(file as usize) {
-                        cooked.diagnostics.push(crate::CookedDiagnostic {
-                            range,
-                            message: error.message.clone(),
-                        });
-                    }
-                }
-                None => unplaced += 1,
-            }
+            let summary = self.index_tree(root, &alone.text, &tree, key);
+            errors += tree.get_errors().len();
+            file_what_was_found(summary.declarations, &tree, &alone, &mut files, &mut unplaced);
         }
 
         crate::IndexedUnit {
@@ -438,7 +455,12 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             missing: stream.missing,
             unbalanced: stream.unbalanced.clone(),
             braces: stream.braces,
-            errors: tree.get_errors().len(),
+            errors,
+            quarantined: quarantined
+                .iter()
+                .filter_map(|file| stream.file_of(*file).map(Path::to_path_buf))
+                .collect(),
+            crossings,
         }
     }
 
@@ -956,6 +978,127 @@ fn is_one_parenthesised_group(tokens: &[cpp_parser::CppTokenKind]) -> bool {
     }
 
     false
+}
+
+/// File the declarations and errors one parse found under the files they were written in.
+///
+/// Every range goes back through [`crate::RenderedUnit::written_span`]: a token the file wrote keeps its own range, and
+/// one that came out of a macro body answers with the outermost call site. A fact whose **name** and whose **range**
+/// come out in different files is dropped and counted — half in one file and half in another is not "a bit less", it
+/// is a fact about nothing (the same rule [`crate::FileSummary::map_into_the_file`] applies per file). An error that
+/// cannot be placed in any file is counted rather than reported against a text the reader cannot see.
+fn file_what_was_found(
+    declarations: Vec<crate::DeclFact>,
+    tree: &CppSyntaxTree,
+    stream: &crate::RenderedUnit,
+    files: &mut [(std::path::PathBuf, crate::CookedFile)],
+    unplaced: &mut usize,
+) {
+    for mut fact in declarations {
+        let Some((file, range)) = stream.written_span(fact.range) else {
+            *unplaced += 1;
+            continue;
+        };
+        let Some((name_file, name_range)) = stream.written_span(fact.name_range) else {
+            *unplaced += 1;
+            continue;
+        };
+        if name_file != file {
+            *unplaced += 1;
+            continue;
+        }
+
+        fact.range = range;
+        fact.name_range = name_range;
+        if let Some((_, cooked)) = files.get_mut(file as usize) {
+            cooked.declarations.push(fact);
+        }
+    }
+
+    for error in tree.get_errors() {
+        let range = cpp_parser::source_range(error.range);
+        match stream.written_span(range) {
+            Some((file, range)) => {
+                if let Some((_, cooked)) = files.get_mut(file as usize) {
+                    cooked.diagnostics.push(crate::CookedDiagnostic {
+                        range,
+                        message: error.message.clone(),
+                    });
+                }
+            }
+            None => *unplaced += 1,
+        }
+    }
+}
+
+/// **The files that own a brace the parse paired with a brace in another file**, one entry per such brace.
+///
+/// A brace pair is read off the tree, node by node: the `{` and `}` that are direct children of one node are the
+/// ones the parser paired, in order. A `{` with no `}` beside it is a scope the parser left open, and it *ends* where
+/// its node ends. The pair — or the open scope — crosses when the frame the `{` was written in is not the frame the
+/// `}` (or the node's last token) stands in.
+///
+/// Not a crossing, on purpose: a scope that opens and closes in one file with an `#include` in between (the include's
+/// tokens are inside it, and it still closes in the file that opened it), and a scope left open *within* a file (a
+/// parse error the file keeps to itself). What is looked for is the scope that leaves its file, because that is the
+/// one that changes what every later file's names are.
+fn brace_crossings(tree: &CppSyntaxTree, stream: &crate::RenderedUnit) -> Vec<u32> {
+    use cpp_parser::CppTokenKind;
+
+    let frame_at = |offset: usize| stream.written_at(offset).map(|(file, _)| file);
+    let mut crossing = Vec::new();
+
+    for node in tree.get_red_root().descendants() {
+        let mut open: Vec<usize> = Vec::new();
+
+        for element in node.children_with_tokens() {
+            let Some(token) = element.into_token() else {
+                continue;
+            };
+            let at = cpp_parser::source_range(token.text_range()).start_offset;
+
+            match CppTokenKind::from(token.kind()) {
+                CppTokenKind::LeftBrace => open.push(at),
+                CppTokenKind::RightBrace => {
+                    if let Some(opener) = open.pop()
+                        && let (Some(opened), Some(closed)) = (frame_at(opener), frame_at(at))
+                        && opened != closed
+                    {
+                        crossing.push(opened);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if open.is_empty() {
+            continue;
+        }
+
+        // Left open: it ends where the node's last real token is.
+        let mut last = node.last_token();
+        while let Some(token) = &last {
+            if !cpp_parser::is_trivia(CppTokenKind::from(token.kind())) {
+                break;
+            }
+            last = token.prev_token();
+        }
+        let Some(ended_in) = last
+            .and_then(|token| frame_at(cpp_parser::source_range(token.text_range()).start_offset))
+        else {
+            continue;
+        };
+
+        for opener in open {
+            if let Some(opened) = frame_at(opener)
+                && opened != ended_in
+            {
+                crossing.push(opened);
+            }
+        }
+    }
+
+    crossing
 }
 
 /// Give `#include "local.h"` the token the parser gives it: a header name.
