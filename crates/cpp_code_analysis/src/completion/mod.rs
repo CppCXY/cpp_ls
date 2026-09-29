@@ -196,17 +196,31 @@ fn kind_of(kind: DeclKind) -> ItemKind {
     }
 }
 
-/// A declaration's **own** one-line description: its type, or what it returns.
+/// A declaration's **own** one-line description: its type, or what it returns with what it takes.
 ///
 /// Deliberately not the kind ("a variable"): the icon already says that, and a line repeating the icon would
 /// crowd out the one thing a reader wants — the type — which is also the one thing a name from another file does
 /// not show in the list otherwise.
+///
+/// # Why a function shows its parameter list
+///
+/// Because a list of names is a list of *choices*, and two functions are told apart by what they take: the popup
+/// after `std::` holds `format`, `format_to`, `format_to_n`, `formatted_size` and `vformat`, all returning
+/// something string-shaped, and `string (…)` for every one of them is a row a reader cannot choose from. The
+/// spelling comes from the declaration's own fact ([`DeclFact::parameter_list`]), so it is available for a name
+/// declared in a header nobody has opened — the case this line exists for.
+///
+/// `(…)` survives for the one case it is still the honest answer to: a fact written before the field existed, or a
+/// function whose declarator the reading could not reach. It says "this function takes something", which is less
+/// than the truth and not more.
 fn detail_of(fact: &DeclFact) -> Option<String> {
     match fact.kind {
-        DeclKind::Function => fact
-            .returns
-            .as_ref()
-            .map(|returns| format!("{returns} (…)")),
+        DeclKind::Function => match (&fact.returns, &fact.parameter_list) {
+            (Some(returns), Some(parameters)) => Some(format!("{returns} {parameters}")),
+            (Some(returns), None) => Some(format!("{returns} (…)")),
+            (None, Some(parameters)) => Some(parameters.clone()),
+            (None, None) => None,
+        },
         DeclKind::Variable => fact.type_of.clone(),
         DeclKind::Type if !fact.bases.is_empty() => Some(format!(": {}", fact.bases.join(", "))),
         _ => None,
@@ -923,5 +937,53 @@ mod tests {
         const _: () = assert!(Score::SNIPPET < Score::KEYWORD);
         const _: () = assert!(Score::KEYWORD < Score::DIRECT_INCLUDE);
         const _: () = assert!(Score::DIRECT_INCLUDE < Score::INDIRECT_INCLUDE);
+    }
+
+    /// **A function's row shows what it takes.** The one thing a reader choosing between `format`, `format_to` and
+    /// `format_to_n` has to see, and the thing this model did not record until it had a parameter list: every
+    /// function in another file used to be described as `returns (…)`.
+    ///
+    /// The `(…)` survives only where it is still the truth — a fact written before the field existed, or a declarator
+    /// the reading could not reach — and that case is asserted here too, because a fallback nobody tests is a
+    /// fallback that silently stops working.
+    #[test]
+    fn a_functions_detail_line_is_what_it_takes() {
+        let fact = |returns: Option<&str>, parameter_list: Option<&str>| DeclFact {
+            name: "format".to_string(),
+            scope: Some("std".to_string()),
+            local: false,
+            kind: DeclKind::Function,
+            type_of: None,
+            returns: returns.map(str::to_string),
+            bases: Vec::new(),
+            parameters: Vec::new(),
+            parameter_list: parameter_list.map(str::to_string),
+            range: cpp_parser::SourceRange::new(0, 0),
+            name_range: cpp_parser::SourceRange::new(0, 0),
+            clean: true,
+            guard: crate::FactGuard::Unconditional,
+        };
+
+        assert_eq!(
+            detail_of(&fact(Some("string"), Some("(_Fmt, _Args...)"))).as_deref(),
+            Some("string (_Fmt, _Args...)"),
+            "the return type and the parameters, as the file spells them"
+        );
+        assert_eq!(
+            detail_of(&fact(Some("string"), Some("()"))).as_deref(),
+            Some("string ()"),
+            "a function that takes nothing says so — that is an answer, not an absence"
+        );
+        assert_eq!(
+            detail_of(&fact(Some("string"), None)).as_deref(),
+            Some("string (…)"),
+            "and with no list recorded, the old spelling is still the honest one"
+        );
+        assert_eq!(
+            detail_of(&fact(None, Some("(int)"))).as_deref(),
+            Some("(int)"),
+            "a constructor has no return type, and its parameters are then the whole description"
+        );
+        assert_eq!(detail_of(&fact(None, None)), None, "nothing to say");
     }
 }

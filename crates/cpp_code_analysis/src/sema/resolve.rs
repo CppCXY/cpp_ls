@@ -784,6 +784,27 @@ fn member_node_at(root: &CppSyntaxNode, offset: usize) -> Option<CppSyntaxNode> 
 /// which is what lets the cross-file layer answer: a declaration fact records the qualified name of the scope it
 /// was written in, so `ns::Widget` is a spelling an index can be asked about.
 pub fn definition_at(scopes: &ScopeTree, root: &CppSyntaxNode, offset: usize) -> Known<Binding> {
+    match definitions_at(scopes, root, offset) {
+        // The first of the declarations the name has, which is the one this analysis has always answered with:
+        // declaration order inside the scope that declares the name. A caller that can use them all — signature
+        // help, which shows an overload set as a list — asks [`definitions_at`].
+        Known::Yes(mut found) => Known::Yes(found.remove(0)),
+        Known::Unknown(reason) => Known::Unknown(reason),
+        Known::No => Known::No,
+    }
+}
+
+/// **Every declaration the name at `offset` has** — [`definition_at`]'s plural, and the query a call needs.
+///
+/// An overload set is one name with several declarations **in one scope**, and C++ ordinary lookup stops at the
+/// first scope that declares the name: what a reader can call is every declaration *there*, not the one the walk
+/// happened to reach first. So this is not "collect while walking" — it is "walk as before, and take all of them
+/// from the scope that answered".
+pub fn definitions_at(
+    scopes: &ScopeTree,
+    root: &CppSyntaxNode,
+    offset: usize,
+) -> Known<Vec<Binding>> {
     let Some((written, _)) = qualified_name_at(root, offset) else {
         return Known::Unknown(UnknownReason::UnparsableName);
     };
@@ -795,7 +816,7 @@ pub fn definition_at(scopes: &ScopeTree, root: &CppSyntaxNode, offset: usize) ->
     };
 
     if written.contains("::") {
-        return qualified_definition_at(scopes, innermost, &written);
+        return qualified_definitions_at(scopes, innermost, &written);
     }
 
     let name = Name::identifier(written.clone());
@@ -806,11 +827,8 @@ pub fn definition_at(scopes: &ScopeTree, root: &CppSyntaxNode, offset: usize) ->
     let mut pending = using_directive_targets(scopes);
     pending.extend(scopes_to_search(scopes, innermost));
 
-
-
     let mut visited = Vec::new();
     let mut searched_any_scope = false;
-
 
     while let Some(scope) = pending.pop() {
         if visited.contains(&scope) {
@@ -823,8 +841,9 @@ pub fn definition_at(scopes: &ScopeTree, root: &CppSyntaxNode, offset: usize) ->
             continue;
         };
 
-        if let Some(binding) = first_binding_of(scope_data, &name) {
-            return Known::Yes(binding.clone());
+        let found = bindings_named(scope_data, &name);
+        if !found.is_empty() {
+            return Known::Yes(found.into_iter().cloned().collect());
         }
     }
 
@@ -837,11 +856,15 @@ pub fn definition_at(scopes: &ScopeTree, root: &CppSyntaxNode, offset: usize) ->
     Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(written)))
 }
 
-/// Which declaration a `::`-qualified name written at a position refers to, within one file.
+/// Which declarations a `::`-qualified name written at a position refers to, within one file.
 ///
 /// `written` is the spelling as the file writes it, with a leading `::` for the global name space. See
 /// [`definition_at`] for the rule and for where it is deliberately wider than the language.
-fn qualified_definition_at(scopes: &ScopeTree, innermost: ScopeId, written: &str) -> Known<Binding> {
+fn qualified_definitions_at(
+    scopes: &ScopeTree,
+    innermost: ScopeId,
+    written: &str,
+) -> Known<Vec<Binding>> {
     // A leading `::` asks about the global name space, which is the file scope and nothing else — so there is
     // exactly one spelling to try rather than one per enclosing scope.
     let (global, spelling) = match written.strip_prefix("::") {
@@ -883,8 +906,9 @@ fn qualified_definition_at(scopes: &ScopeTree, innermost: ScopeId, written: &str
             continue;
         };
 
-        if let Some(binding) = first_binding_of(scope_data, &name) {
-            return Known::Yes(binding.clone());
+        let found = bindings_named(scope_data, &name);
+        if !found.is_empty() {
+            return Known::Yes(found.into_iter().cloned().collect());
         }
     }
 
@@ -994,13 +1018,18 @@ fn scopes_to_search(scopes: &ScopeTree, innermost: ScopeId) -> Vec<ScopeId> {
     enclosing
 }
 
-/// The first binding of `name` in `scope`, in declaration order.
-fn first_binding_of<'a>(scope: &'a Scope, name: &Name) -> Option<&'a Binding> {
+/// **Every binding of `name` in `scope`**, in declaration order.
+///
+/// A using-*directive* binds the namespace's name to record that the line exists, not to declare anything — see
+/// [`BindingKind::UsingDirective`] — so it is not a definition to jump to, and not one of a call's candidates.
+///
+/// The plural is the primitive: an overload set is several bindings under one name in one scope, and
+/// [`definition_at`] is the reader that wants only the first.
+fn bindings_named<'a>(scope: &'a Scope, name: &Name) -> Vec<&'a Binding> {
     scope
         .bindings_of(name)
-        // A using-*directive* binds the namespace's name to record that the line exists, not to declare
-        // anything — see [`BindingKind::UsingDirective`] — so it is not a definition to jump to.
-        .find(|binding| binding.kind != BindingKind::UsingDirective)
+        .filter(|binding| binding.kind != BindingKind::UsingDirective)
+        .collect()
 }
 
 /// Is `offset` inside this node's range?

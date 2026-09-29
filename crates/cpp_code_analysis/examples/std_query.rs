@@ -82,8 +82,7 @@ fn main() {
     let toolchain = discover(
         &files,
         &DiskCommands,
-        None,
-        &probe,
+        cpp_code_analysis::BuildStatement::default(),        &probe,
         &Environment::current(),
         &cpp_code_analysis::include::msvc::WindowsLayout::current(),
     );

@@ -193,8 +193,7 @@ fn main() {
                 cpp_code_analysis::discover(
                     &files,
                     &cpp_code_analysis::DiskCommands,
-                    None,
-                    first,
+                    cpp_code_analysis::BuildStatement::default(),                    first,
                     &cpp_code_analysis::Environment::current(),
                     &cpp_code_analysis::include::msvc::WindowsLayout::current(),
                 )

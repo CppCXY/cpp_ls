@@ -403,36 +403,25 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             let mut round = 0;
             loop {
                 let current = working.as_ref().unwrap_or(stream);
-                let t0 = std::time::Instant::now();
                 let tree = {
                     let _parse = StageTimer::new(Stage::RenderParse);
                     CppParser::parse(&current.text, config())
                 };
                 let crossing = brace_crossings(&tree, current);
-                eprintln!("TMP round {round}: {:?} tokens {} crossing {}", t0.elapsed(), current.len(), crossing.len());
 
                 if crossing.is_empty() || round == 2 {
                     break (tree, crossing.len());
                 }
 
                 quarantined.extend(crossing);
-                working = Some(stream.without(&quarantined));
+                working = Some({
+                    let _fence = StageTimer::new(Stage::UnitFence);
+                    stream.without(&quarantined)
+                });
                 round += 1;
             }
         };
         let program: &crate::RenderedUnit = working.as_ref().unwrap_or(stream);
-        {
-            let mut prev = 0.0f64;
-            for k in 1..=20usize {
-                let mut cut = program.text.len() * k / 20;
-                while cut < program.text.len() && (!program.text.is_char_boundary(cut) || program.text.as_bytes()[cut] != b' ') { cut += 1; }
-                let t0 = std::time::Instant::now();
-                let _tree = CppParser::parse(&program.text[..cut], config());
-                let ms = t0.elapsed().as_secs_f64() * 1000.0;
-                eprintln!("TMP prefix {k}/20: {ms:.0} ms (+{:.0}) at {:?}", ms - prev, program.file_at(cut.saturating_sub(1)).map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())));
-                prev = ms;
-            }
-        }
         let summary = {
             let _sweep = StageTimer::new(Stage::RenderSweep);
             self.index_tree(root, &program.text, &tree, key)
@@ -451,7 +440,10 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // **Each quarantined file, read alone.** Its tokens are the same tokens, so every range still maps back to the
         // file the same way; only the parse is separate.
         for &file in &quarantined {
-            let alone = stream.only(file);
+            let alone = {
+                let _fence = StageTimer::new(Stage::UnitFence);
+                stream.only(file)
+            };
             let tree = {
                 let _parse = StageTimer::new(Stage::RenderParse);
                 CppParser::parse(&alone.text, config())
@@ -1008,6 +1000,7 @@ fn file_what_was_found(
     files: &mut [(std::path::PathBuf, crate::CookedFile)],
     unplaced: &mut usize,
 ) {
+    let _files = StageTimer::new(Stage::UnitFiles);
     for mut fact in declarations {
         let Some((file, range)) = stream.written_span(fact.range) else {
             *unplaced += 1;
@@ -1059,6 +1052,7 @@ fn file_what_was_found(
 fn brace_crossings(tree: &CppSyntaxTree, stream: &crate::RenderedUnit) -> Vec<u32> {
     use cpp_parser::CppTokenKind;
 
+    let _fence = StageTimer::new(Stage::UnitFence);
     let frame_at = |offset: usize| stream.written_at(offset).map(|(file, _)| file);
     let mut crossing = Vec::new();
 

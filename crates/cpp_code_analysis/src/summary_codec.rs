@@ -166,7 +166,18 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// Only [`CODEC_VERSION`] moves, which is the ordinary case for a new field: an entry written before it existed has
 /// no parameters for its class templates, so its members' types stay `_Ty&` — a *weaker* answer rather than a wrong
 /// one, and the reader rejects it on the version number anyway.
-pub const CODEC_VERSION: u32 = 17;
+///
+/// # Version 18
+///
+/// A fact gained `parameter_list` — the parameters a **function** was declared with, as the file spells them
+/// (`(_Ty* _First, size_type _Count)`), which is what a completion's detail line shows beside a name from another
+/// file. Until now every function in the index was described as `returns (…)`: the fact had a return type and
+/// nothing else, so a popup listing a hundred standard-library names could not tell `std::format` from
+/// `std::format_to`.
+///
+/// Only [`CODEC_VERSION`] moves: an entry written before it existed has no parameter list, and the detail line
+/// falls back to the `(…)` it used to print — a weaker answer, not a wrong one.
+pub const CODEC_VERSION: u32 = 18;
 
 /// Write a summary as bytes.
 ///
@@ -199,6 +210,7 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
         for parameter in &fact.parameters {
             put_str(&mut out, parameter);
         }
+        put_opt_str(&mut out, fact.parameter_list.as_deref());
         put_range(&mut out, fact.range);
         put_range(&mut out, fact.name_range);
         put_u8(&mut out, u8::from(fact.local));
@@ -557,6 +569,7 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
                 }
                 parameters
             },
+            parameter_list: reader.optional_string()?,
             range: reader.range()?,
             name_range: reader.range()?,
             local: reader.u8()? != 0,
@@ -1061,6 +1074,7 @@ mod tests {
                     // And a parameter list, which is the other list-shaped field: a class template's parameter
                     // names, in the order the declaration wrote them.
                     parameters: vec!["_Ty".to_string(), "_Alloc".to_string()],
+                    parameter_list: Some("(int, int)".to_string()),
                     range: range(10, 20),
                     name_range: range(17, 6),
                     // Both flags' `true` branch here, and the other facts below cover `false` — a round trip that
@@ -1079,6 +1093,9 @@ mod tests {
                     returns: Some("ns::Container<int>".to_string()),
                     bases: Vec::new(),
                     parameters: Vec::new(),
+                    // The one field a completion's detail line reads: a function with no parameters is written
+                    // `()`, which is an answer, and `None` would be "nobody looked".
+                    parameter_list: Some("()".to_string()),
                     range: range(40, 15),
                     name_range: range(48, 6),
                     local: false,
@@ -1093,6 +1110,7 @@ mod tests {
                     returns: None,
                     bases: Vec::new(),
                     parameters: Vec::new(),
+                    parameter_list: None,
                     range: range(60, 8),
                     name_range: range(60, 0),
                     local: false,
@@ -1308,3 +1326,4 @@ mod tests {
         at
     }
 }
+

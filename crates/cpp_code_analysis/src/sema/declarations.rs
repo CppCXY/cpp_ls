@@ -295,6 +295,11 @@ pub struct DeclarationShapes {
     roots: (u32, u32),
     /// Each shape's direct children, as runs — see [`DeclarationShapes::of`] for why they are laid out separately.
     children: Vec<u32>,
+    /// **The class each template declaration introduces**, as `(the specifier sequence it introduces, its parameter
+    /// list)`, in document order — see [`declared_template_parameters_of`] for why the question cannot be answered
+    /// from the parent chain: `template <…>` and the class it introduces are *siblings*, and the specifier sequence
+    /// between them is not itself a shape.
+    templates: Vec<(cpp_parser::SourceRange, CppSyntaxNode)>,
 }
 
 /// One node a question is answered at, and how it is reached.
@@ -331,6 +336,8 @@ impl DeclarationShapes {
         let mut shapes: Vec<Shape> = Vec::new();
         // The shapes the node being visited is inside, outermost first.
         let mut chain: Vec<u32> = Vec::new();
+        // The class templates, recorded in the same pass — see the field's note.
+        let mut templates: Vec<(cpp_parser::SourceRange, CppSyntaxNode)> = Vec::new();
 
         for node in root.descendants() {
             let at = cpp_parser::source_range(node.text_range());
@@ -344,6 +351,24 @@ impl DeclarationShapes {
             }
 
             let kind = CppSyntaxKind::from(node.kind());
+
+            // **The one relation that is not on the path to a name**, recorded while the pass is here anyway: a
+            // template declaration and the class it introduces are siblings, so the pair is remembered by the range
+            // the specifier sequence covers. Recorded *before* the shape test below, because a `TemplateDecl` is
+            // not a shape — nothing in this module is answered at one.
+            if kind == CppSyntaxKind::TemplateDecl
+                && let Some(list) = node
+                    .children()
+                    .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TemplateParameterList)
+                && let Some(owner) = node.parent()
+            {
+                for child in owner.children() {
+                    if CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq {
+                        templates.push((cpp_parser::source_range(child.text_range()), list.clone()));
+                    }
+                }
+            }
+
             let read = children_a_question_reads(&node);
             if read.is_empty() && !declares_a_shape(kind) {
                 continue;
@@ -392,6 +417,7 @@ impl DeclarationShapes {
             shapes,
             roots: runs[0],
             children,
+            templates,
         }
     }
 
@@ -721,7 +747,26 @@ fn before(text: &str, node: &CppSyntaxNode, name: cpp_parser::SourceRange) -> St
     text[..to].trim().to_string()
 }
 
-/// **The names a class template declares its parameters with** — `["_Ty", "_Alloc"]` for `std::vector`.
+/// **The parameter list a declaration at `offset` was written with**, as the file spells it — parentheses included.
+///
+/// The **innermost `Declarator` ancestor** of the name, and *its* `ParameterList` child, which is the same reading
+/// [`crate::inlay::parameter_list_of`] makes for a call's parameters: a variable declared inside a function body has
+/// the enclosing function's list above it, and `void (*f(int a))(int b)` has two lists in one declaration. The
+/// declarator the name is a name *of* is the one whose list says what the name's parameters are.
+///
+/// `None` for a declaration that has no such list (every variable, class and alias) and for a name the tree does not
+/// hold a token for.
+pub fn parameter_list_at(root: &CppSyntaxNode, offset: usize) -> Option<String> {
+    let token = cpp_parser::token_at(root, offset)?;
+
+    let declarator = token
+        .parent_ancestors()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declarator)?;
+
+    crate::inlay::parameter_list_text(&declarator)
+}
+
+/// The names a class template declares its parameters with** — `["_Ty", "_Alloc"]` for `std::vector`.
 ///
 /// Empty for anything that is not a class template, which includes an ordinary class *and* a partial
 /// specialization: `template <class T> struct vector<T*>` declares parameters of its own, and a caller that took
@@ -733,52 +778,55 @@ fn before(text: &str, node: &CppSyntaxNode, name: cpp_parser::SourceRange) -> St
 /// *sibling* of it rather than a child, so the list, the class body and the binding are three nodes whose only
 /// common ancestor is the declaration they share. The walk asks it from the top and keeps the one whose specifier
 /// sequence contains the binding — which also gives the partial specializations away, since a file with two of them
-/// has two template declarations and the offsets are what tell them apart.
+/// has two template declarations and the offsets are what tell them apart. Where two of them contain the binding —
+/// a class template inside a class template — the **innermost** is the one that introduces it.
+///
+/// Both obvious readings of *that* are wrong, and both were measured: searching the template's **descendants**
+/// finds the `DeclSpecifierSeq` inside a `TemplateParameter` (`class _Ty` spells one) and decides the template
+/// introduces whatever is being asked about; searching its **children** finds only the parameter list, so no
+/// template ever introduces anything.
+///
+/// # Why the answer comes out of the shapes
+///
+/// Because a walk from the top is **per class binding**, and the tree it walks is the file's. That is affordable
+/// for one file and is not for a **unit** read, where the tree is the whole program: on the 138-file project the
+/// unit read spent **8.9 s of its 9.1 s `Facts`** here — the walk was over 332 755 tokens for every one of
+/// thousands of class bindings, while the four questions beside it cost 0.2 s between them. The relation is the
+/// same one either way, so it is read once, in the pass [`DeclarationShapes::of`] already makes, and the question
+/// becomes a scan of the file's template declarations — a handful per file, and the same answer as before,
+/// including for a partial specialization.
 ///
 /// A pass over the file's template declarations **per class**, not per declaration: it is called once for each kind
 /// of thing a class fact records, and a file has a handful of templates rather than a handful of thousands.
 pub fn declared_template_parameters_of(root: &CppSyntaxNode, binding: &Binding) -> Vec<String> {
+    declared_template_parameters_with(&DeclarationShapes::of(root), binding)
+}
+
+/// [`declared_template_parameters_of`] for a caller that has the file's shapes already.
+///
+/// The **innermost** template whose introduced specifier sequence contains the name wins, and that is a deliberate
+/// change in the answer rather than in the cost: a class template nested in another one declares its own parameters
+/// (`template <class _Ty> struct outer { template <class _Uty> struct inner { _Uty u; }; };`), both specifier
+/// sequences contain a member of `inner`, and the outer list pairs the wrong argument with the wrong name. See
+/// `a_nested_class_template_declares_its_own_parameters`, which is the case that was answered `["_Ty"]` before.
+///
+/// The walk from the top could not tell the two apart: it returned the **first** template it reached, which is the
+/// outermost. The table is in document order, so the last entry that contains the name is the one that introduces
+/// it.
+fn declared_template_parameters_with(shapes: &DeclarationShapes, binding: &Binding) -> Vec<String> {
     if binding.kind != BindingKind::Class {
         return Vec::new();
     }
 
     let at = binding.name_range.start_offset;
 
-    for declaration in root.descendants() {
-        if CppSyntaxKind::from(declaration.kind()) != CppSyntaxKind::TemplateDecl {
-            continue;
-        }
-
-        let Some(list) = declaration
-            .children()
-            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TemplateParameterList)
-        else {
-            continue;
-        };
-
-        // **The class this template introduces, by containment** — and the class is a *sibling* of the template
-        // declaration, not a child of it: `template <…>` and `struct vector { … }` are two children of one
-        // `Declaration`. So the specifier sequence that holds the body is looked for among the parent's children.
-        //
-        // Both obvious readings of this are wrong, and both were measured: searching the template's *descendants*
-        // finds the `DeclSpecifierSeq` inside a `TemplateParameter` (`class _Ty` spells one) and decides the
-        // template introduces whatever is being asked about; searching its *children* finds only the parameter
-        // list, so no template ever introduces anything.
-        let introduces_it = declaration.parent().is_some_and(|owner| {
-            owner.children().any(|node| {
-                CppSyntaxKind::from(node.kind()) == CppSyntaxKind::DeclSpecifierSeq && {
-                    let range = node.text_range();
-                    usize::from(range.start()) <= at && usize::from(range.end()) >= at
-                }
-            })
-        });
-
-        if introduces_it {
-            return crate::sema::types::template_parameter_names(&list);
-        }
-    }
-
-    Vec::new()
+    shapes
+        .templates
+        .iter()
+        .rev()
+        .find(|(introduced, _)| introduced.start_offset <= at && at <= introduced.end_offset())
+        .map(|(_, list)| crate::sema::types::template_parameter_names(list))
+        .unwrap_or_default()
 }
 /// The base classes a class-like declaration was written with, in declaration order.
 ///
@@ -908,10 +956,26 @@ fn fact_for(
         let _timer = crate::stages::StageTimer::new(crate::stages::Stage::Bases);
         declared_bases_of_with(shapes, binding)
     };
-    // The class template's parameter names, for the members whose types are written with them. Read from the tree
-    // rather than from the shapes because the list is a sibling of the class body and not on the path to the name
-    // — see [`declared_template_parameters_of`].
-    let parameters = declared_template_parameters_of(root, binding);
+    // The class template's parameter names, for the members whose types are written with them. Answered from the
+    // shapes like the four questions above it, and on a unit read it is the reason they are all asked of a table
+    // rather than of the tree — see [`declared_template_parameters_of`].
+    let parameters = {
+        let _timer = crate::stages::StageTimer::new(crate::stages::Stage::TemplateParameters);
+        declared_template_parameters_with(shapes, binding)
+    };
+    // **What the function was declared with**, which is the one thing a reader picking a name out of a hundred
+    // needs and a fact did not carry: `format` and `format_to` are two rows of a completion that used to read
+    // `string (…)` and `_OutputIt (…)`. Read from the tree at the name's own offset — see
+    // [`parameter_list_at`] for why the declarator is found that way rather than through the shapes.
+    let parameter_list = match binding.kind {
+        BindingKind::Function
+        | BindingKind::Constructor
+        | BindingKind::Destructor
+        | BindingKind::ConversionFunction
+        | BindingKind::OperatorFunction
+        | BindingKind::LiteralOperator => parameter_list_at(root, binding.name_range.start_offset),
+        _ => None,
+    };
 
     Some(DeclFact {
         kind: DeclKind::from_binding_kind(binding.kind),
@@ -925,6 +989,7 @@ fn fact_for(
         returns,
         bases,
         parameters,
+        parameter_list,
         range: binding.range,
         name_range: binding.name_range,
         // The one field that comes from the diagnostics rather than from the tree — see [`DeclFact::clean`] for
@@ -1042,9 +1107,10 @@ fn overlaps(one: SourceRange, other: SourceRange) -> bool {
 struct DeclarationFacts<'a> {
     scopes: &'a ScopeTree,
     preprocessing: &'a FilePreprocessing,
-    /// The tree the shapes were read from, kept for the **one** question that is not on the path to a name: a
-    /// class template's parameter list is a sibling of the class body, so it is found by walking the tree rather
-    /// than by following the shapes' parent chain — see [declared_template_parameters_of].
+    /// The tree the facts are read from, for the two questions that are not on the path to a name: a class
+    /// template's parameter list is a *sibling* of the class body, and a function's parameters are inside a
+    /// declarator rather than on the path to the name — see [`declared_template_parameters_of`] and
+    /// [`parameter_list_at`].
     root: &'a CppSyntaxNode,
     /// **The file's declarations, read once** — where a declared type's spelling comes from. Built here rather than
     /// per binding: that difference is 14.4 s against a lookup, see [`DeclarationShapes`].

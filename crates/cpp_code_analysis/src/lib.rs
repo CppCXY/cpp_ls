@@ -111,6 +111,7 @@ pub use config::{
     config_from_arguments, parse_compile_commands, predefined_macros_of, project_config_from_flags,
     split_command_line,
 };
+pub use include::toolchain::BuildStatement;
 pub use directive::{
     Define, Directive, DirectiveKind, Include, IncludeForm, SpannedDirective,
     parse_directive_tokens, scan_directives,
@@ -139,6 +140,7 @@ pub use index::{
     ChangeBatch, CookedFile, EventKind, FileEvent, FileIndexer, FileReferences, IncludeBudget,
     HeaderTarget, IncludeIndex, IncludeVisibility, MacroReferences, MemberCompletions, MemberList, NameCompletions,
     NameProvenance, NotIndexed, NotIndexedReason, OfferedName, PathPattern, Priority, ProjectDefinition,
+    ProjectDefinitions,
     ProjectIndex, ProjectMacro, ProjectMember, ProjectSymbol, Reference, ReferenceBudget, ReferenceKind,
     Rename, Response, Step, StepOutcome, StoreStats, SummaryReadError, SummaryStore, UnlistedBase,
     UnresolvedEdge, VisibleDeclaration, WatchFilter, Worklist, definition_across_files,

@@ -107,7 +107,7 @@ fn main() {
     let found = discover(
         &DiskFiles,
         &cpp_code_analysis::DiskCommands,
-        None,
+        cpp_code_analysis::BuildStatement::default(),
         &main,
         &cpp_code_analysis::Environment::current(),
         &cpp_code_analysis::include::msvc::WindowsLayout::current(),

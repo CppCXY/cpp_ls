@@ -103,6 +103,26 @@ pub enum Stage {
     Returns,
     /// *Detail*: reading a class's bases (`declared_bases_of`), inside `Facts`.
     Bases,
+    /// *Detail*: reading a class template's parameter names (`declared_template_parameters_of`), inside `Facts`.
+    ///
+    /// It is a stage of its own because it was the one question in `Facts` that had none, and on a **unit** read —
+    /// where the tree is the whole program rather than one file — it was 8.9 s of a 9.1 s `Facts`, hidden behind
+    /// four detail stages that added up to 0.2 s. A detail stage is what makes the remainder attributable.
+    TemplateParameters,
+    /// **Rendering a whole unit into one stream** ([`crate::TranslationUnit::cook_the_unit`]) — the lex and the
+    /// macro expansion of every file the walk reached, in include order.
+    ///
+    /// Top-level and in the *cooking* family, beside `Render` (one file) rather than inside it: on the 138-file
+    /// project this is 1.7 s where a single file's rendering is milliseconds, and a unit read that reported only
+    /// `render-parse` and `render-sweep` left it out of the total altogether — 3.18 s of wall clock against 1.44 s
+    /// of stages, with the difference unattributed.
+    UnitRender,
+    /// **Rebuilding a unit's stream around the fence** ([`crate::RenderedUnit::without`] and
+    /// [`crate::RenderedUnit::only`]): the program without a leaking file's tokens, and that file on its own.
+    UnitFence,
+    /// **Splitting what a unit's parse found by the file each fact was written in** (`file_what_was_found`), once
+    /// for the program and once per quarantined file.
+    UnitFiles,
     /// *Detail*: **destroying a parsed tree**, inside `Sweep` — a green tree is tens of thousands of `Arc`s and
     /// dropping it is not free.
     Drop,
@@ -155,6 +175,7 @@ impl Stage {
                 | Stage::Alias
                 | Stage::Returns
                 | Stage::Bases
+                | Stage::TemplateParameters
                 | Stage::Drop
                 | Stage::Shapes
                 | Stage::BodiedPlain
@@ -167,7 +188,7 @@ impl Stage {
 }
 
 /// Every stage, in the order the table prints them.
-pub const STAGES: [Stage; 38] = [
+pub const STAGES: [Stage; 42] = [
     Stage::Read,
     Stage::Hash,
     Stage::Lookup,
@@ -197,6 +218,10 @@ pub const STAGES: [Stage; 38] = [
     Stage::Alias,
     Stage::Returns,
     Stage::Bases,
+    Stage::TemplateParameters,
+    Stage::UnitRender,
+    Stage::UnitFence,
+    Stage::UnitFiles,
     Stage::Drop,
     Stage::Shapes,
     Stage::BodiedPlain,
@@ -241,6 +266,10 @@ impl Stage {
             Stage::Alias => "alias",
             Stage::Returns => "returns",
             Stage::Bases => "bases",
+            Stage::TemplateParameters => "template-params",
+            Stage::UnitRender => "unit-render",
+            Stage::UnitFence => "unit-fence",
+            Stage::UnitFiles => "unit-files",
             Stage::Drop => "drop",
             Stage::Shapes => "shapes",
             Stage::BodiedPlain => "bodied-plain",
@@ -283,6 +312,7 @@ impl Stage {
             | Stage::Alias
             | Stage::Returns
             | Stage::Bases
+            | Stage::TemplateParameters
             | Stage::Drop
             | Stage::Shapes
             | Stage::BodiedPlain
@@ -298,7 +328,13 @@ impl Stage {
             | Stage::RenderSweep
             | Stage::Map
             | Stage::Insert => Family::Cooking,
-            Stage::Walk | Stage::Closure | Stage::UnitGet | Stage::UnitPut => Family::Units,
+            Stage::Walk
+            | Stage::Closure
+            | Stage::UnitGet
+            | Stage::UnitPut
+            | Stage::UnitRender
+            | Stage::UnitFence
+            | Stage::UnitFiles => Family::Units,
         }
     }
 }

@@ -23,7 +23,7 @@ fn toolchain_here() -> Option<cpp_code_analysis::Toolchain> {
     let found = discover(
         &files,
         &DiskCommands,
-        None,
+        cpp_code_analysis::BuildStatement::default(),
         Path::new("probe.cpp"),
         &Environment::current(),
         &cpp_code_analysis::include::msvc::WindowsLayout::current(),
@@ -364,3 +364,4 @@ fn a_project_with_no_build_system_is_read_with_the_compilers_environment() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+

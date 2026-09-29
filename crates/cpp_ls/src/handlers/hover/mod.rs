@@ -33,7 +33,7 @@
 
 use cpp_code_analysis::{
     DeclFact, DeclKind, DiskFiles, FactGuard, FileView, Known, ProjectDefinition, ProjectMacro,
-    Session,
+    Session, UnknownReason,
 };
 use cpp_parser::CppDocComment;
 use lsp_types::{
@@ -110,11 +110,86 @@ pub fn hover(session: &Session<DiskFiles>, view: &FileView, offset: usize) -> Op
 
     match session.definition(view, offset) {
         Known::Yes(found) => Some(markdown(declaration_markdown(session, view, &found))),
+        // **A name with several declarations is a popup with several signatures**, not none. `std::format` is four
+        // overloads, so the name question has always answered `Ambiguous` — and `Ambiguous` used to fall through to
+        // the *expression* question, which has nothing to say about a name that is not in an expression: hovering
+        // `std::format` showed an empty popup on the most ordinary call in modern C++. The list is what the reader
+        // is asking for ("what can I call here"), and the index can now show each one's parameters.
+        Known::Unknown(UnknownReason::Ambiguous(_)) => match session.definitions(view, offset) {
+            Known::Yes(found) if found.found.len() > 1 => {
+                Some(markdown(overloads_markdown(session, &found)))
+            }
+            _ => expression_markdown(session, view, offset).map(markdown),
+        },
         // `No` and `Unknown` both leave the name question unanswered: the first says the analysis looked and there
         // is no such declaration, the second that it cannot say yet (the file's includes are still being read).
         // Either way the cursor may still be *in* something the analysis can type — `this`, `*p`, `f(1)` — which is
         // a different question about the same position, and the one a reader on a keyword is asking.
         Known::No | Known::Unknown(_) => expression_markdown(session, view, offset).map(markdown),
+    }
+}
+
+/// **Every declaration of one name**, as one popup — what a hover says about an overloaded function.
+///
+/// # Why a signature per declaration rather than each declaration's text
+///
+/// Because the question is a choice: a reader hovering `std::format` wants to know what they can call, and a code
+/// block holding four whole definitions (bodies and all) answers a different question at four times the size. The
+/// line is built from the fact — the return type and the parameter list, both of which the index records — so this
+/// costs no parsing, whoever's header it is.
+///
+/// A declaration whose parameters were never read (a fact written before the field existed) still gets a line, with
+/// the `(…)` the old detail line used: less than the truth, and not more.
+fn overloads_markdown(
+    session: &Session<DiskFiles>,
+    found: &cpp_code_analysis::ProjectDefinitions,
+) -> String {    let mut lines = String::new();
+    for declaration in &found.found {
+        lines.push_str(&signature_line(&declaration.fact));
+        lines.push('\n');
+    }
+
+    let first = &found.found[0];
+    let qualified = first.fact.qualified_name();
+    let mut out = code_block(lines.trim_end());
+
+    out.push_str(&format!(
+        "\n`{qualified}` — {} declarations. Which one a call means is decided by the arguments, so they are all \
+         here rather than one of them being guessed at.\n",
+        found.found.len()
+    ));
+
+    if found.conditional > 0 {
+        out.push_str(&format!(
+            "\n{} more declaration(s) of this name are reachable only through a conditional `#include`, so whether \
+             they are in scope depends on the compilation.\n",
+            found.conditional
+        ));
+    }
+
+    let files: std::collections::BTreeSet<&std::path::Path> = found
+        .found
+        .iter()
+        .map(|declaration| declaration.file.as_path())
+        .collect();
+    out.push_str(&format!(
+        "\nDeclared in {}",
+        where_clause(session, first.file.as_path(), first.fact.name_range.start_offset)
+    ));
+    if files.len() > 1 {
+        out.push_str(&format!(" and {} other file(s)", files.len() - 1));
+    }
+
+    out
+}
+
+/// One declaration, as the line a hover shows: `string format(const _Fmt, _Args...)`.
+fn signature_line(fact: &DeclFact) -> String {
+    match (&fact.returns, &fact.parameter_list) {
+        (Some(returns), Some(parameters)) => format!("{returns} {}{parameters}", fact.name),
+        (Some(returns), None) => format!("{returns} {}(…)", fact.name),
+        (None, Some(parameters)) => format!("{}{parameters}", fact.name),
+        (None, None) => format!("{} {}", kind_words(fact), fact.qualified_name()),
     }
 }
 

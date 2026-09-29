@@ -173,6 +173,49 @@ pub(crate) fn parameter_list_of(view: &FileView, offset: usize) -> Option<CppSyn
     cpp_parser::first_child_of_kind(&declarator, &[CppSyntaxKind::ParameterList])
 }
 
+/// The **text** of that list, as the file writes it — `(_Ty* _First, size_type _Count)`, parentheses included.
+///
+/// One function for the two readers that want the spelling rather than the nodes: a declaration's fact
+/// ([`crate::sema::declarations::parameter_list_at`], which is what a completion shows beside a name) and anything
+/// that has to print a signature without walking it.
+///
+/// # The layout is taken out, and the spelling is not
+///
+/// A node's text is the *source* text, which is laid out for a reader of the file rather than for a one-line
+/// summary: measured on MSVC's `<istream>`, `basic_istream<_Elem, _Traits>&& _Istr` arrives with a `\r\n` and four
+/// spaces of indentation in the middle, and a **cooked** reading arrives with the rendering's own separator — one
+/// space between every token, so `format_string<_Types...>` is spelled `format_string < _Types ... >`.
+///
+/// So whitespace runs become one space, and the space inside the brackets this list is made of goes: after `(` and
+/// before `)` and `,`. Those three are safe to decide lexically — a parameter list's own parentheses and commas are
+/// never comparison operators — while `<`, `>` and `...` are deliberately left alone, because `(bool _B = 1 < 2)`
+/// is a parameter list too and a rule that pulled `1 <2` together would be inventing a different expression.
+///
+/// What is *not* done is the rest of the rendering's spacing (`_Elem * ()`, `_NODISCARD _CONSTEXPR20 size_type`):
+/// that is how every spelling in a fact is written, and a parameter list that read differently from the return type
+/// beside it would be two conventions in one line.
+pub(crate) fn parameter_list_text(declarator: &CppSyntaxNode) -> Option<String> {
+    let list = cpp_parser::first_child_of_kind(declarator, &[CppSyntaxKind::ParameterList])?;
+    let text = list.text().to_string();
+
+    let mut out = String::with_capacity(text.len());
+    let mut pending_space = false;
+
+    for word in text.split_whitespace() {
+        // A space is written only where it is not inside the brackets: after `(` and before `)` and `,`.
+        let after_an_open = out.ends_with('(') || out.ends_with('[');
+        let before_a_close = word.starts_with(')') || word.starts_with(']') || word.starts_with(',');
+
+        if pending_space && !after_an_open && !before_a_close {
+            out.push(' ');
+        }
+        out.push_str(word);
+        pending_space = true;
+    }
+
+    Some(out)
+}
+
 /// The argument expressions of a call, in order.
 ///
 /// The call's children **after the callee**, which is the shape the grammar keeps for every call it can read —

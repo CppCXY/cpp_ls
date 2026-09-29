@@ -64,7 +64,7 @@ fn main() {
     let toolchain = discover(
         &files,
         &DiskCommands,
-        None,
+        cpp_code_analysis::BuildStatement::default(),
         &entry,
         &Environment::current(),
         &cpp_code_analysis::include::msvc::WindowsLayout::current(),
@@ -129,3 +129,4 @@ fn main() {
         println!("\nwrote {} paths to {}", index.indexed.len(), list.display());
     }
 }
+

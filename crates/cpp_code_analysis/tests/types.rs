@@ -653,3 +653,34 @@ int f() { std::vector v; return 0; }
         "the parameter list is read out of the declaration"
     );
 }
+
+/// **A class template written inside another one declares its *own* parameters**, and the answer must be the inner
+/// list: `outer<int>::inner<char>` pairs `_Uty` with `char`, and a reader that took the outer `_Ty` would pair the
+/// wrong argument with the wrong name — the same defect the partial-specialization rule above exists to avoid.
+///
+/// The two templates are nested, so both specifier sequences contain the binding and *both* are answers to "which
+/// template introduces this class"; the innermost one is the one that does.
+#[test]
+fn a_nested_class_template_declares_its_own_parameters() {
+    let source = "\
+namespace std {
+template <class _Ty>
+struct outer {
+    template <class _Uty>
+    struct inner { _Uty u; };
+};
+}
+int f() { return 0; }
+";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+
+    let names = session
+        .index()
+        .template_parameters_of("std::outer::inner", &view.path);
+    assert_eq!(
+        names,
+        vec!["_Uty".to_string()],
+        "the innermost template is the one that introduces the class"
+    );
+}

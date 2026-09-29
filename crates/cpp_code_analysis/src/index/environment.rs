@@ -167,19 +167,27 @@ pub fn compilation_environment(
 ) -> Marked {
     let mut marked = Marked::default();
 
+    // **What the configuration itself decides** — the standard it was compiled with, the target it was compiled
+    // for — applied **under** the compiler's own table, which is the correction of an order that used to be the
+    // other way round. The old argument was that a toolchain's `-dM` output answers for the compiler's *default*
+    // invocation while `-std=c++11` in the database is what the project asked for, so the configuration's number
+    // had to win. That argument is gone: the standard is passed to the compiler now
+    // (`toolchain::discover_with`), including the standard the *analysis* assumes when nothing states one, so the
+    // table is the compiler's own answer **for that same standard** — and a table cannot know it. Concretely:
+    // `-std=c++23` makes this `g++` print `__cplusplus = 202100L` while the derived table says `202302L`, and
+    // `c++latest` has no number at all; a condition like `#if __cplusplus >= 202302L` would then answer a
+    // confident **true** where the compiler answers false, which is the one failure this layer does not accept.
+    //
+    // The derived table keeps its job as the **fallback**: a toolchain that could not be asked has no macros, and
+    // then the configuration's standard is all anybody knows about `__cplusplus`.
+    for definition in crate::predefined_macros_of(config) {
+        marked.define_on_the_command_line(&definition.name, definition.value.as_deref());
+    }
+
     if let Some(toolchain) = toolchain {
         for (name, value) in toolchain.macros() {
             marked.define_on_the_command_line(name, value);
         }
-    }
-
-    // **What the configuration itself decides** — the standard it was compiled with, the target it was compiled
-    // for. A toolchain's `-dM` output answers for the *compiler's own default invocation*, which is a different
-    // question from the one the project asked: `-std=c++11` in the compile database means `__cplusplus` is
-    // `201103L` however the compiler would have been run by hand. Applied over the toolchain and under the
-    // project's own `-D`s, which are the last word.
-    for definition in crate::predefined_macros_of(config) {
-        marked.define_on_the_command_line(&definition.name, definition.value.as_deref());
     }
 
     for definition in &config.defines {

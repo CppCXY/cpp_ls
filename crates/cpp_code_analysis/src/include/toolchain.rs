@@ -497,6 +497,24 @@ pub fn search_paths(
     compiler: &Path,
     standard: Option<&str>,
 ) -> Option<Toolchain> {
+    // **What the project stated, or the newest the compiler takes.** See [`ASSUMED_STANDARDS_GNU`]: the last
+    // candidate is "no flag at all", so a compiler that knows neither spelling is still asked rather than skipped.
+    for candidate in standards_to_try(standard, &ASSUMED_STANDARDS_GNU) {
+        if let Some(found) = search_paths_with(runner, compiler, candidate, standard.is_none()) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
+/// One attempt: ask `compiler` with `standard` (or with no `-std=` at all, for `None`).
+fn search_paths_with(
+    runner: &impl CommandRunner,
+    compiler: &Path,
+    standard: Option<&str>,
+    assumed: bool,
+) -> Option<Toolchain> {
     // `-E` stops after preprocessing, `-v` prints what the driver is doing, `-x c++` says which language's
     // directories to list (without it, `g++` would still list C++'s, but `gcc` would list C's), and `-` reads an
     // empty translation unit from standard input. `-dM` adds the predefined macros to that output.
@@ -529,10 +547,28 @@ pub fn search_paths(
         system_include_paths,
         builtin_macros,
         dialect,
+        standard: standard.map(str::to_string),
         // Overwritten by the caller that knows which step of the order found this compiler.
         source: ToolchainSource::Path,
-        note: None,
+        note: assumed
+            .then(|| assumed_standard_note(standard))
+            .flatten(),
     })
+}
+
+/// What a report says when the analysis chose the standard because nothing else did.
+///
+/// `None` for the last candidate of the assumed list — the compiler's own default is not an assumption the analysis
+/// made, it is the compiler answering the question it was asked, and claiming otherwise would be a note about
+/// nothing. See [`ASSUMED_STANDARD_MSVC`] for why the assumed path exists at all.
+fn assumed_standard_note(standard: Option<&str>) -> Option<String> {
+    let standard = standard?;
+
+    Some(format!(
+        "no build configuration states a language standard (no compile_commands.json, no CMakeLists.txt, no \
+         .cppls.toml), so the compiler was asked for its newest (`{standard}`); a project that builds as an older \
+         standard says so in .cppls.toml"
+    ))
 }
 
 /// The macros a compiler predefines, from `-dM`'s `#define NAME value` lines.
@@ -566,6 +602,37 @@ pub fn parse_builtin_macros(output: &str) -> Vec<CommandLineMacro> {
         .collect()
 }
 
+/// **What the project says about how this file is built** — the two statements a compiler has to be asked about,
+/// and the reason they travel together.
+///
+/// The database is per file and says both the compiler and the flags; `.cppls.toml` (and CMake's cache) may state
+/// the language standard with no database at all. They are one value because the question they answer is one
+/// question — *what language version is this file built as* — and the compiler's macro table is only useful if it
+/// was printed for that version: `__cplusplus` is what every `#if` in every header asks, and a table printed for
+/// some other standard is a table that silently says `<format>` is empty.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BuildStatement<'a> {
+    /// The compile database, when the project has one.
+    pub commands: Option<&'a CompileCommands>,
+    /// The language standard the project stated, when the database states none: `-std=c++17` in `.cppls.toml`'s
+    /// `[compile] args`, or `CMAKE_CXX_STANDARD` in the build tree.
+    pub standard: Option<&'a str>,
+}
+
+impl BuildStatement<'_> {
+    /// The standard this file is built with, when anything said so.
+    ///
+    /// The database first, because it is per file: a project with one C++17 target and one C++20 target is what a
+    /// compile database exists to describe, and a single statement in `.cppls.toml` cannot express it.
+    fn standard_for(&self, for_file: &Path) -> Option<String> {
+        self.commands
+            .and_then(|commands| commands.command_for(for_file))
+            .and_then(|command| command.to_config().standard)
+            .map(|standard| standard.to_string())
+            .or_else(|| self.standard.map(str::to_string))
+    }
+}
+
 /// Find a compiler and ask it. The one call a caller needs.
 ///
 /// # The order, and what each step is worth
@@ -594,7 +661,7 @@ pub fn parse_builtin_macros(output: &str) -> Vec<CommandLineMacro> {
 pub fn discover(
     files: &impl FileProvider,
     runner: &impl CommandRunner,
-    commands: Option<&CompileCommands>,
+    statement: BuildStatement<'_>,
     for_file: &Path,
     environment: &Environment,
     layout: &crate::include::msvc::WindowsLayout,
@@ -603,14 +670,14 @@ pub fn discover(
     // first one: the project saying which compiler builds *this* file. A caller that also knows what `.cppls.toml`
     // and `CMakeCache.txt` say uses [`discover_with`], which takes the whole ordered list — including this one,
     // because it is the caller that knows where it ranks (`.cppls.toml` above it, CMake below).
-    let from_database = database_compiler(commands, for_file)
+    let from_database = database_compiler(statement.commands, for_file)
         .map(|compiler| (compiler, ToolchainSource::CompileDatabase));
 
     discover_with(
         files,
         runner,
         from_database.as_slice(),
-        commands,
+        statement,
         for_file,
         environment,
         layout,
@@ -652,12 +719,15 @@ pub fn discover_with(
     files: &impl FileProvider,
     runner: &impl CommandRunner,
     named: &[(PathBuf, ToolchainSource)],
-    commands: Option<&CompileCommands>,
+    statement: BuildStatement<'_>,
     for_file: &Path,
     environment: &Environment,
     layout: &crate::include::msvc::WindowsLayout,
 ) -> Option<Toolchain> {
-    let standard = standard_for(commands, for_file);
+    // **The standard the compiler is asked about**: what the project says this file is built as, or — when nobody
+    // says — the newest the compiler takes. See [`Toolchain::standard`] for why the answer travels back, and
+    // [`ASSUMED_STANDARD_MSVC`] for why the last case is not left to the compiler's own default.
+    let standard = statement.standard_for(for_file);
 
     // 1. The project's own answers.
     for (name, source) in named {
@@ -727,16 +797,48 @@ pub fn discover_with(
     system_headers_fallback(runner, layout)
 }
 
-/// The standard the file is built with, from the database's entry for it.
+/// **The language standard assumed when nothing states one** — Microsoft's spelling of "the newest".
 ///
-/// It decides the value of `__cplusplus` in a compiler's predefined table, and with it every
-/// `#if __cplusplus >= …` in every header. Asking a compiler for its default instead would answer a question
-/// nobody asked, with a number that looks right.
-fn standard_for(commands: Option<&CompileCommands>, for_file: &Path) -> Option<String> {
-    commands
-        .and_then(|commands| commands.command_for(for_file))
-        .and_then(|command| command.to_config().standard)
-        .map(|standard| standard.to_string())
+/// # Why there is a default at all, and why it is the newest
+///
+/// A project with no `compile_commands.json`, no `CMakeLists.txt` and no `.cppls.toml` states nothing, and the
+/// question "what is `__cplusplus` here" then has three candidate answers: the compiler's own default, the newest
+/// the compiler takes, or `Unknown`. The compiler's default is the one that reads as an answer while being about
+/// nobody's build — measured on a real project (a single `.cpp` and an empty `.vscode/settings.json`): MSVC's
+/// default is C++14, so `<format>` was **empty**, `std::format` was not a member of `std`, and a reader typing
+/// `#include <format>` got nothing from completion, hover or the signature — while the analysis was, technically,
+/// describing that configuration exactly. `Unknown` is worse still: every `#if __cplusplus >= …` in every header
+/// would take no branch, which is how a standard library disappears.
+///
+/// So the default is **the newest standard the compiler will take**, which is what a reader writing `#include
+/// <format>` is asking about, and it is a *stated* assumption rather than a silent one: the toolchain carries it
+/// ([`Toolchain::standard`]), the report says it ([`Toolchain::note`]), and a project overrides it exactly as it
+/// overrides anything else — `[compile] args = ["-std=c++17"]` or `remove_args`.
+///
+/// `/std:c++latest` rather than `/std:c++23preview`: the first is what MSVC calls "newest" at every version, and a
+/// spelling a toolset does not know is a compiler that answers **nothing** — see [`standards_to_try`], which falls
+/// back to asking with no flag rather than losing the toolchain.
+const ASSUMED_STANDARD_MSVC: &str = "c++latest";
+
+/// The same, for GCC and Clang, in the order to try: `c++23` where it is known, the older `c++2b` spelling where it
+/// is not, and then no flag at all.
+const ASSUMED_STANDARDS_GNU: [&str; 2] = ["c++23", "c++2b"];
+
+/// The standards to ask a compiler about, in order.
+///
+/// `Some(one)` when the project stated one — one question, one answer, and a compiler that rejects the spelling is
+/// a toolchain that could not be asked, which is the honest outcome. The assumed path ends with **`None`**: asking
+/// with no flag is still an answer (an older one), and it is better than skipping the candidate and analysing the
+/// project against no compiler at all.
+fn standards_to_try<'a>(stated: Option<&'a str>, assumed: &[&'a str]) -> Vec<Option<&'a str>> {
+    match stated {
+        Some(stated) => vec![Some(stated)],
+        None => assumed
+            .iter()
+            .map(|standard| Some(*standard))
+            .chain(std::iter::once(None))
+            .collect(),
+    }
 }
 
 /// Ask one compiler by name, whichever kind it is.
@@ -807,12 +909,28 @@ fn ask_msvc(
         msvc.toolset.cl = named;
     }
 
-    let macros = crate::include::msvc::predefined_macros(runner, &msvc, standard);
+    // **The project's standard, or the newest this compiler takes** — see [`ASSUMED_STANDARD_MSVC`]. The macro
+    // table is what carries `_MSVC_LANG` and `__cplusplus`, so the standard has to be settled *before* the compiler
+    // is asked: a table printed for the default C++14 is a table that says `<format>` is empty, and no later step
+    // can tell that apart from a project that really is C++14.
+    let mut asked = None;
+    let mut macros = None;
+    let mut assumed = false;
+
+    for candidate in standards_to_try(standard, &[ASSUMED_STANDARD_MSVC]) {
+        if let Some(found) = crate::include::msvc::predefined_macros(runner, &msvc, candidate) {
+            asked = candidate;
+            macros = Some(found);
+            assumed = standard.is_none();
+            break;
+        }
+    }
 
     let (builtin_macros, version, note) = match macros {
         Some(macros) => {
             let version = crate::include::msvc::version_line(&msvc, &macros);
-            (macros, Some(version), None)
+            let note = assumed.then(|| assumed_standard_note(asked)).flatten();
+            (macros, Some(version), note)
         }
         None => (
             Vec::new(),
@@ -833,6 +951,7 @@ fn ask_msvc(
         // Knowing the compiler is `cl` is knowing the dialect, whether or not it answered: MSVC's reading of
         // `__int128`, of attributes and of the preprocessor's own syntax is what the parser needs to know.
         dialect: Some(Dialect::Msvc),
+        standard: asked.map(str::to_string),
         source: ToolchainSource::PlatformDefault,
         note,
     })
@@ -851,6 +970,10 @@ fn system_headers_fallback(
         system_include_paths: found.directories,
         builtin_macros: Vec::new(),
         dialect: None,
+        // Nothing was asked, so nothing was assumed: the standard is part of what a compiler's answer carries, and
+        // there is no compiler here. A project in this state is one where every condition naming `__cplusplus` is
+        // `Unknown`, which the note says.
+        standard: None,
         source: ToolchainSource::SystemHeaders,
         note: Some(format!(
             "no compiler could be asked; using the system's own header directories ({}), so compiler macros \
@@ -890,6 +1013,15 @@ pub struct Toolchain {
     /// From the macro table when there is one (`_MSC_VER`, `__GNUC__`), and from the compiler's *name* when there
     /// is not and the name is unambiguous — a `cl` that could not be asked is still MSVC.
     pub dialect: Option<Dialect>,
+    /// **The language standard the compiler was asked about** — what the project stated, or the assumption this
+    /// analysis made because nothing stated one.
+    ///
+    /// It is kept because the answer is not reproducible from anything else: the value of `__cplusplus` in
+    /// [`Toolchain::builtin_macros`] is the value for *this* standard, and a reader comparing two runs of the same
+    /// project — or asking why `<format>` is empty — needs to see which one it was. [`Toolchain::config`] puts it
+    /// into the configuration, where [`crate::include::config::predefined_macros_of`] uses it to state
+    /// `__cplusplus`/`_MSVC_LANG` even when the compiler could not be asked. See [`ASSUMED_STANDARD_MSVC`].
+    pub standard: Option<String>,
     /// How this toolchain was found, which is the first thing to check when an analysis is wrong.
     pub source: ToolchainSource,
     /// Something a user should know about this answer, when there is something: that the macros are unknown, that
@@ -995,6 +1127,15 @@ impl Toolchain {
     /// the same conclusion out loud: `ignoring duplicate directory …`.)
     pub fn config(&self, base: &CompilerConfig) -> CompilerConfig {
         let mut config = base.clone();
+
+        // **The standard the compiler was asked about**, when the project did not state one. It is the same
+        // question `__cplusplus` answers, and the configuration is where that answer is kept for the layers that
+        // never see a toolchain: a condition, the parser's dialect, and the `#if` in a header nobody has read yet.
+        if config.standard.is_none()
+            && let Some(standard) = &self.standard
+        {
+            config = config.with_standard(standard.clone());
+        }
 
         for directory in &self.system_include_paths {
             let wanted = normalize_path(directory, cfg!(windows));
@@ -1310,6 +1451,14 @@ End of search list.
                 status: Some(0),
                 succeeded: true,
             })
+        }
+    }
+
+    /// **A database the project wrote**, as the statement a toolchain is asked about.
+    fn from_database(commands: &CompileCommands) -> super::BuildStatement<'_> {
+        super::BuildStatement {
+            commands: Some(commands),
+            standard: None,
         }
     }
 
@@ -1666,8 +1815,7 @@ End of search list.
         let toolchain = discover(
             &files,
             &runner,
-            None,
-            Path::new("/p/main.cpp"),
+            super::BuildStatement::default(),            Path::new("/p/main.cpp"),
             &environment(),
             &crate::include::msvc::WindowsLayout::default(),
         )
@@ -1675,8 +1823,94 @@ End of search list.
 
         assert_eq!(toolchain.compiler.as_deref(), Some(Path::new("/usr/bin/g++")));
         assert_eq!(toolchain.source, ToolchainSource::Path);
-        assert!(toolchain.note.is_none());
+        assert_eq!(
+            toolchain.standard.as_deref(),
+            Some("c++23"),
+            "nothing stated a standard, so the newest this compiler takes is what it was asked about"
+        );
+        assert!(
+            toolchain
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("newest") && note.contains("c++23")),
+            "and the report says so rather than leaving it implicit: {:?}",
+            toolchain.note
+        );
         assert_eq!(toolchain.system_include_paths.len(), 3);
+    }
+
+    /// **Nothing states a standard → the compiler is asked for its newest one**, and the analysis says so.
+    ///
+    /// The measurement this comes from is a real project with no `compile_commands.json`, no `CMakeLists.txt` and an
+    /// empty `.vscode/settings.json`: MSVC then builds as C++14, `<format>` is empty, and a reader typing
+    /// `#include <format>` gets nothing — while the compiler itself says `STL4038: The contents of <format> are
+    /// available only with C++20 or later` and C2039. A default that is nobody's build is not a neutral choice.
+    #[test]
+    fn a_project_that_states_no_standard_is_asked_for_the_newest() {
+        let files = MemoryFiles::new().with_file("/usr/bin/g++", "");
+        let runner = Answers {
+            program: "g++",
+            output: GCC,
+        };
+
+        let toolchain = discover(
+            &files,
+            &runner,
+            super::BuildStatement::default(),            Path::new("/p/main.cpp"),
+            &environment(),
+            &crate::include::msvc::WindowsLayout::default(),
+        )
+        .expect("the compiler answers");
+
+        assert_eq!(toolchain.standard.as_deref(), Some("c++23"));
+
+        // …and it reaches the configuration, where a condition's answer is decided.
+        let config = toolchain.config(&CompilerConfig::new());
+        assert_eq!(config.standard.as_deref(), Some("c++23"));
+        let stated = crate::include::config::predefined_macros_of(&config);
+        assert!(
+            stated.iter().any(|define| define.name.as_ref() == "__cplusplus"
+                && define.value.as_deref() == Some("202302L")),
+            "`__cplusplus` is what every `#if __cplusplus >= …` in every header asks: {stated:?}"
+        );
+    }
+
+    /// **A project that states a standard keeps it.** The assumption is a floor, not a policy: `-std=c++17` in a
+    /// compile database is a statement about how the project is built, and answering a newer standard's macros
+    /// would make every `#if` in the standard library disagree with the compiler.
+    #[test]
+    fn a_standard_the_project_states_is_not_replaced_by_the_assumption() {
+        let files = MemoryFiles::new().with_file("/usr/bin/g++", "");
+        let runner = Answers {
+            program: "g++",
+            output: GCC,
+        };
+
+        let mut commands = command_line("/usr/bin/g++");
+        commands.commands[0]
+            .arguments
+            .push("-std=c++17".to_string());
+
+        let toolchain = discover(
+            &files,
+            &runner,
+            from_database(&commands),
+            Path::new("/p/main.cpp"),
+            &environment(),
+            &crate::include::msvc::WindowsLayout::default(),
+        )
+        .expect("the compiler answers");
+
+        assert_eq!(toolchain.standard.as_deref(), Some("c++17"));
+        assert!(
+            toolchain.note.is_none(),
+            "nothing was assumed, so there is nothing to report: {:?}",
+            toolchain.note
+        );
+        assert_eq!(
+            toolchain.config(&CompilerConfig::new()).standard.as_deref(),
+            Some("c++17")
+        );
     }
 
     #[test]
@@ -1698,7 +1932,7 @@ End of search list.
         let toolchain = discover(
             &files,
             &runner,
-            Some(&commands),
+            from_database(&commands),
             Path::new("/p/main.cpp"),
             &environment,
             &crate::include::msvc::WindowsLayout::default(),
@@ -1734,8 +1968,7 @@ End of search list.
         let found = discover(
             &files,
             &runner,
-            None,
-            Path::new("/p/main.cpp"),
+            super::BuildStatement::default(),            Path::new("/p/main.cpp"),
             &environment,
             &crate::include::msvc::WindowsLayout::default(),
         );
@@ -1776,6 +2009,7 @@ End of search list.
             system_include_paths: vec!["/gcc/include/c++".into(), "/gcc/include".into()],
             builtin_macros: Vec::new(),
             dialect: None,
+            standard: None,
             source: ToolchainSource::Path,
             note: None,
         };
@@ -1804,6 +2038,7 @@ End of search list.
             system_include_paths: vec!["/gcc/include".into(), "/gcc/include".into()],
             builtin_macros: Vec::new(),
             dialect: None,
+            standard: None,
             source: ToolchainSource::Path,
             note: None,
         };
@@ -1822,5 +2057,4 @@ End of search list.
         );
     }
 }
-
 

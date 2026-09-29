@@ -156,6 +156,25 @@ pub struct DeclFact {
     /// is right for it and wrong for the primary template — see [`crate::ProjectIndex::template_parameters_of`],
     /// which takes the first *template* it finds rather than the first declaration.
     pub parameters: Vec<String>,
+    /// **The parameter list a function was declared with**, as the file spells it — `(_Ty* _First, size_type _Count)`,
+    /// parentheses and all. `None` for everything that is not a function, and for a function whose declarator the
+    /// shapes could not reach.
+    ///
+    /// # Why a spelling rather than a structured list
+    ///
+    /// Because the two consumers want different things from it and the text serves both. A **completion's detail
+    /// line** shows it as written — that is the whole point, and a reader comparing `format(fmt, args)` with their
+    /// call is comparing spellings. A **signature help** needs the parameters *split* and each one's span inside the
+    /// label, and it already builds that by parsing the declaring file ([`crate::signature::signature_at`]), because
+    /// splitting on commas is wrong the moment a default argument mentions `std::pair<int, int>`.
+    ///
+    /// What it replaces is the `(…)` a completion used to show for every function in another file: the fact had a
+    /// return type and nothing else, so `std::format` and `f()` were described identically. Measured on the project
+    /// this was written against, the list is what makes `format` recognizable in a hundred-name popup.
+    ///
+    /// Defaults, `...`, and the names are all kept as written for the same reason [`DeclFact::type_of`] is: this is
+    /// what the file says, and a consumer that needs more reads the declaration.
+    pub parameter_list: Option<String>,
     /// The whole declaration, for a "go to definition" highlight.
     pub range: cpp_parser::SourceRange,
     /// Just the name, which is what a reference search matches. Separate from `range` for the reason

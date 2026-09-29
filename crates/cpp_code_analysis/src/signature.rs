@@ -8,11 +8,19 @@
 //! # What this is, and what it is not
 //!
 //! It is the *declaration's own text*: the callee's spelling and the parameter list it wrote, with each
-//! parameter's span inside that label so that a client can bold the one the cursor is in. It is **not** a set of
-//! overloads. The analysis resolves a call to one declaration — the same resolution the parameter hints use — and
-//! a name the lookup calls [`Ambiguous`] is answered with nothing at all. Listing every plausible overload would
-//! mean deciding which of them a half-typed argument list means, which is overload resolution; a wrong signature
-//! list is worse than none, because the reader *picks from it*.
+//! parameter's span inside that label so that a client can bold the one the cursor is in.
+//!
+//! # One call, several declarations — and that is the answer, not a guess
+//!
+//! A call to an overloaded function has more than one declaration, and the protocol's `SignatureHelp.signatures`
+//! is a **list** for exactly that reason: the reader picks, and a client lets them cycle. This module used to
+//! answer one signature and refuse when the name had several — which meant that a call to `std::format` (four
+//! overloads) answered **nothing at all**: not a wrong signature, an empty popup, on the most ordinary call in
+//! modern C++. Sending every declaration the name has claims nothing about which one will be chosen; the
+//! alternative was not a better answer, it was no answer.
+//!
+//! The order is the index's, which is file order and then declaration order — the order the declarations are
+//! written in the headers.
 //!
 //! Types are the **written** spellings, as everywhere else in this crate: `const Widget&` is those three tokens,
 //! and an alias is its own name.
@@ -24,7 +32,7 @@ use std::path::{Path, PathBuf};
 
 use cpp_parser::{CppDocComment, CppSyntaxElement, CppSyntaxKind, CppSyntaxNode, CppTokenKind};
 
-use crate::index::project::callee_of_a_call;
+use crate::index::project::callees_of_a_call;
 use crate::inlay::parameter_list_of;
 use crate::sema::scopes::parameters_of;
 use crate::{FileView, Known, ProjectIndex};
@@ -44,7 +52,7 @@ pub struct CallSignature {
     pub declared_at: usize,
     /// The comment the declaration is documented by, when the file writes one.
     ///
-    /// Left `None` here, because reading it needs a session: [`crate::Session::signature_at`] fills it in, and that
+    /// Left `None` here, because reading it needs a session: [`crate::Session::signatures_at`] fills it in, and that
     /// is the layer that can reach another file's text.
     pub documentation: Option<CppDocComment>,
 }
@@ -57,39 +65,48 @@ pub struct CallSignature {
 /// `view_of` is how a callee declared in another file is read: the file being edited is already parsed and is
 /// never asked for, and a header is parsed once for the answer (see [`crate::inlay::parameter_hints`], which has
 /// the same shape and the same cost).
-pub fn signature_at<F>(
+/// **The signatures of the call the cursor at `offset` is inside** — one per declaration the callee names.
+///
+/// Empty for every position that is not inside a call's arguments — including a cursor *on the callee*
+/// (`|make(1)` is a question about `make`, not about the call), and including a callee this layer cannot resolve.
+///
+/// # Why a list, and what it is a list of
+///
+/// A call to an overloaded function has several answers, and the protocol's `SignatureHelp.signatures` is a list for
+/// exactly that reason. This used to answer **one** signature and refuse when the name had more than one
+/// declaration — `std::format(` therefore answered nothing at all, four overloads being four declarations. Sending
+/// all of them claims nothing: it is the reader who picks, and the alternative was not "one answer" but no answer.
+///
+/// The order is the index's ([`crate::ProjectIndex::definitions`]), which is file order and then declaration order —
+/// the order the declarations are written in the headers, which is the order a compiler's own popup shows.
+///
+/// `view_of` is how a callee declared in another file is read: the file being edited is already parsed and is never
+/// asked for, and **each other file is parsed at most once for one answer**, however many overloads it holds —
+/// `<format>` declares four `format`s in one header, and four parses for one popup would be three too many.
+pub fn signatures_at<F>(
     index: &ProjectIndex,
     view: &FileView,
     offset: usize,
     mut view_of: F,
-) -> Option<CallSignature>
+) -> Vec<CallSignature>
 where
     F: FnMut(&Path) -> Option<FileView>,
 {
-    let call = call_around(&view.root, offset)?;
-    let callee = call.children().next()?;
+    let Some(call) = call_around(&view.root, offset) else {
+        return Vec::new();
+    };
+    let Some(callee) = call.children().next() else {
+        return Vec::new();
+    };
 
-    let Known::Yes(declared) = callee_of_a_call(index, &view.scopes, &view.root, &view.path, &call)
+    let Known::Yes(candidates) = callees_of_a_call(index, &view.scopes, &view.root, &view.path, &call)
     else {
-        return None;
+        return Vec::new();
     };
 
-    // The file being edited is already parsed; another file is parsed for this answer, once.
-    let owned;
-    let declared_in: &FileView = if declared.file == view.path {
-        view
-    } else {
-        owned = view_of(&declared.file)?;
-        &owned
-    };
-
-    let list = parameter_list_of(declared_in, declared.name_offset)?;
-
-    // The label is what the declaration writes: the callee's own name and the list's text, trivia trimmed.
-    //
-    // **The member's name, not the whole access**: a reader who wrote `w.scaled(` already knows the object, and
-    // the popup is about which function and which parameter. A `::`-qualified name is kept whole, because there
-    // the qualifier is part of the name.
+    // **The callee's spelling, not the whole call**: a reader who wrote `w.scaled(` already knows the object, and
+    // the popup is about which function and which parameter. A `::`-qualified name is kept whole, because there the
+    // qualifier is part of the name.
     let callee_text = callee.text().to_string();
     let callee_text = callee_text.trim();
     let member = callee_text
@@ -100,31 +117,57 @@ where
         .max();
     let spelling = member.map_or(callee_text, |at| &callee_text[at..]);
 
-    let list_text = list.text().to_string();
-    let list_text = list_text.trim_end();
-    let list_start = spelling.len();
-    let label = format!("{spelling}{list_text}");
+    let active = active_parameter(&call, offset);
+    let mut parsed: std::collections::HashMap<PathBuf, Option<FileView>> = std::collections::HashMap::new();
+    let mut signatures = Vec::new();
 
-    let list_begin = usize::from(list.text_range().start());
-    let parameters: Vec<(Range<usize>, String)> = parameters_of(&list)
-        .into_iter()
-        .map(|(parameter, _)| {
-            let text = parameter.text().to_string();
-            let text = text.trim_end();
-            let start =
-                list_start + (usize::from(parameter.text_range().start()) - list_begin);
-            (start..start + text.len(), text.to_string())
-        })
-        .collect();
+    for candidate in candidates {
+        // The file being edited is already parsed; every other file is parsed once and kept for the rest of this
+        // answer. A file that cannot be read — or a declaration whose declarator has no parameter list, which is
+        // every class name and every variable — contributes no signature rather than an empty one.
+        let declared_in: &FileView = if candidate.file == view.path {
+            view
+        } else {
+            let held = parsed
+                .entry(candidate.file.clone())
+                .or_insert_with(|| view_of(&candidate.file));
+            let Some(held) = held.as_ref() else {
+                continue;
+            };
+            held
+        };
 
-    Some(CallSignature {
-        label,
-        parameters,
-        active_parameter: active_parameter(&call, offset),
-        declared_in: declared.file.clone(),
-        declared_at: declared.name_offset,
-        documentation: None,
-    })
+        let Some(list) = parameter_list_of(declared_in, candidate.name_offset) else {
+            continue;
+        };
+
+        let list_text = list.text().to_string();
+        let list_text = list_text.trim_end();
+        let list_start = spelling.len();
+        let label = format!("{spelling}{list_text}");
+
+        let list_begin = usize::from(list.text_range().start());
+        let parameters: Vec<(Range<usize>, String)> = parameters_of(&list)
+            .into_iter()
+            .map(|(parameter, _)| {
+                let text = parameter.text().to_string();
+                let text = text.trim_end();
+                let start = list_start + (usize::from(parameter.text_range().start()) - list_begin);
+                (start..start + text.len(), text.to_string())
+            })
+            .collect();
+
+        signatures.push(CallSignature {
+            label,
+            parameters,
+            active_parameter: active,
+            declared_in: candidate.file.clone(),
+            declared_at: candidate.name_offset,
+            documentation: None,
+        });
+    }
+
+    signatures
 }
 
 /// The innermost call whose **arguments** contain `offset`.

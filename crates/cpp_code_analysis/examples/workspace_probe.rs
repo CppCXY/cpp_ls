@@ -442,6 +442,76 @@ fn main() {
              (largest {})",
             sizes.iter().max().copied().unwrap_or(0)
         );
+
+        // **How many of those candidates are one declaration recorded twice** — the measurement a "same entity"
+        // rule has to be built on, and the one that decides *where* it may merge.
+        //
+        // The three numbers are deliberately apart:
+        //   · pairs that differ in nothing a consumer can read, and stand in the **same file** — a redeclaration
+        //     inside one header, which is what `cin` is (`<iostream>` writes it plain and again behind
+        //     `_EXPORT_STD`). Merging these is what the code's own note asks for.
+        //   · the same, in **different files** — `int count;` in two headers. The project's position, pinned by
+        //     `two_declarations_of_one_name_are_a_list_for_a_consumer_that_shows_one`, is that these are **two
+        //     answers**, so a rule that merged them would be wrong however identical they look.
+        //   · pairs that differ only in a field the model does not fill in (an empty parameter list, a type that was
+        //     never read) — indistinguishable here, and *not* the same entity in fact: two overloads of `f` whose
+        //     parameters the evidence does not carry.
+        let readable = |fact: &cpp_code_analysis::DeclFact, other: &cpp_code_analysis::DeclFact| {
+            fact.name == other.name
+                && fact.scope == other.scope
+                && fact.local == other.local
+                && fact.kind == other.kind
+                && fact.type_of == other.type_of
+                && fact.returns == other.returns
+                && fact.bases == other.bases
+                && fact.parameters == other.parameters
+        };
+
+        let (mut same_file, mut across_files, mut model_is_silent) = (0usize, 0usize, 0usize);
+        let mut samples: Vec<String> = Vec::new();
+        for (name, _, _) in &candidate_sizes {
+            let Known::Yes(found) = session.index().definitions(name, &file) else {
+                continue;
+            };
+            for (index, one) in found.found.iter().enumerate() {
+                for other in found.found.iter().skip(index + 1) {
+                    if !readable(&one.fact, &other.fact) {
+                        continue;
+                    }
+                    // **Does the model say anything that could tell two declarations apart?** A function's
+                    // parameter list, a variable's type, a function's return type, a class's bases. Without one of
+                    // those, two facts that agree agree *because nothing was recorded* — and `std::getline`'s four
+                    // overloads in `<string>` are exactly that: four functions whose parameters this model does not
+                    // carry. Merging those would be inventing an identity out of silence.
+                    let says_something = !one.fact.parameters.is_empty()
+                        || one.fact.type_of.is_some()
+                        || one.fact.returns.is_some()
+                        || !one.fact.bases.is_empty();
+
+                    if !says_something {
+                        model_is_silent += 1;
+                    } else if one.file == other.file {
+                        same_file += 1;
+                        if samples.len() < 8 {
+                            samples.push(format!(
+                                "{name} in {}",
+                                one.file.file_name().unwrap_or_default().to_string_lossy()
+                            ));
+                        }
+                    } else {
+                        across_files += 1;
+                    }
+                }
+            }
+        }
+        println!(
+            "  identical candidates: {same_file} pair(s) in **one file** with something recorded to tell them \
+             apart, {across_files} across files (two answers), {model_is_silent} that agree only because nothing \
+             is recorded (parameters, type, returns and bases all empty)"
+        );
+        if !samples.is_empty() {
+            println!("     in one file: {}", samples.join(" | "));
+        }
     }
 
     println!("\n--- the type of every identifier, deduplicated (what a hover has to show) ---");    let mut ranked: Vec<(String, usize)> = type_outcomes.into_iter().collect();
@@ -663,6 +733,52 @@ fn main() {
     }
     println!("   {moved} files changed either reading's `std` count");
 
+    // ---------------------------------------------------------------------------------------------
+    // **What one keystroke in a function body costs** — the measurement the "boundary rule" has to be
+    // built on (Claude's review §6 item 3, from `plan-units.md` §5 阶段 3).
+    //
+    // `Session::buffer_changed` drops **every translation unit** on any edit, so the next cook re-walks the
+    // whole closure — 138 files here — to answer a question a body edit cannot have changed. The instrument
+    // is the one already in the crate: `Stage::Walk` is the walk, `Stage::Closure` its closure read, and the
+    // session's own `pending_work` says how much work the edit queued.
+    // ---------------------------------------------------------------------------------------------
+    println!("\n--- ten edits in a function body ---");
+    {
+        let body = session
+            .text(&file)
+            .expect("the file the probe was pointed at");
+        session.did_open(&file, &body);
+        session.index_everything();
+
+        let before = std::time::Instant::now();
+        let mut edited = body.clone();
+
+        // **Two passes, and only the second one is measured.** The first run of this held the disk cache cold, and
+        // that difference alone was a factor of two between two runs of the same code (`1.271 s` against
+        // `0.556 s`) — a number that changes with the state of a cache is not a measurement of the code. The warm-up
+        // is the same ten edits, thrown away.
+        let edit = |edited: &mut String, session: &mut cpp_code_analysis::Session| {
+            if let Some(at) = edited.find("shutdownRequested = false;") {
+                edited.insert(at, ' ');
+            }
+            session.did_change(&file, edited);
+            session.index_everything();
+        };
+        for _ in 0..10 {
+            edit(&mut edited, &mut session);
+        }
+
+        cpp_code_analysis::stages::StageTimes::reset();
+        let measured = std::time::Instant::now();
+        for _ in 0..10 {
+            edit(&mut edited, &mut session);
+        }
+        let wall = measured.elapsed();
+        let _ = before;
+
+        println!("   10 body edits, warm: {wall:?} wall — every stage, in this window only:");
+        print!("{}", cpp_code_analysis::stages::StageTimes::read().report());
+    }
     // **What the unit's cooked reading actually says** — the scopes, not the count. A cooked `std` count of zero
     // beside 57 files that have a reading means the scope walk over the unit's rendering never opened `std`; the
     // three lines below say whether that is "no scopes at all" or "scopes that are not `std`", which are two

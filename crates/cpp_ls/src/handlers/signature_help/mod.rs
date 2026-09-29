@@ -3,25 +3,27 @@
 //! ```text
 //! make(|)              →  make(int count, double factor)     the first parameter is active
 //! make(1, |)           →  make(int count, double factor)     the second
+//! std::format(|)       →  four signatures, and the reader cycles
 //! ```
 //!
-//! The analysis answers with the declaration's own text ([`Session::signature_at`]) and this layer renders it:
-//! one signature, each parameter's span inside the label, and the index of the one the cursor is in.
+//! The analysis answers with the declarations' own text ([`Session::signatures_at`]) and this layer renders them:
+//! each signature's parameters with their spans inside the label, and the index of the one the cursor is in.
 //!
-//! # One signature, and why that is the honest answer
+//! # Why a list, and what it does not claim
 //!
-//! The protocol allows a list of overloads with an `activeSignature`. This server sends **one**, because one is
-//! what it resolved: the same lookup the definition, the hover and the parameter hints use. With several
-//! declarations of a name the analysis either resolves to one of them or declines with `Ambiguous`, and a declined
-//! call answers nothing here rather than a list of every candidate — choosing between them for a half-typed
-//! argument list *is* overload resolution, and a signature list the reader picks from must not be a guess.
+//! The protocol allows a list of overloads with an `activeSignature`, and this server used to send **one** — on the
+//! argument that choosing between candidates for a half-typed argument list *is* overload resolution. That argument
+//! is sound about *choosing* and it was the wrong conclusion: the alternative to a list is not one signature, it is
+//! none. `std::format` is four declarations, the name therefore answered `Ambiguous`, and a reader typing
+//! `std::format(` got an empty popup on the most ordinary call in modern C++. Sending all four claims nothing —
+//! the client shows them stacked and the reader picks, which is what `activeSignature` is for.
 //!
 //! # Where the parameters come from
 //!
-//! The callee's declaration, so a call into a header parses that header for this answer. The types are the written
-//! spellings (`const Widget&` is those three tokens, an alias is its own name), and the documentation above the
-//! declaration travels with the signature — that is the popup's whole value: the parameter being typed is the one
-//! the `@param` line describes.
+//! The callee's declarations, so a call into a header parses that header for this answer — once per file, however
+//! many overloads it holds. The types are the written spellings (`const Widget&` is those three tokens, an alias is
+//! its own name), and the documentation above each declaration travels with its signature — that is the popup's
+//! whole value: the parameter being typed is the one the `@param` line describes.
 //!
 //! Nothing is answered while the index is still being read: which call this is depends on where the callee is
 //! declared, and a signature for the wrong declaration would be confidently wrong rather than missing.
@@ -63,32 +65,25 @@ pub async fn on_signature_help(
             return None;
         }
 
-        let signature = session.signature_at(&view, offset)?;
-        Some(signature_help_of(&signature))
+        let signatures = session.signatures_at(&view, offset);
+        if signatures.is_empty() {
+            return None;
+        }
+
+        Some(signature_help_of(&signatures))
     })
     .await
 }
 
-/// One signature, as the protocol's shape.
+/// The signatures of one call, as the protocol's shape.
 ///
-/// A function of its own rather than a closure in the handler, because the three decisions worth testing directly
-/// are here: which span each parameter occupies **inside the label** (a client bolds it), which one is active, and
-/// that the documentation is rendered the same way the hover renders it.
-pub fn signature_help_of(signature: &cpp_code_analysis::signature::CallSignature) -> SignatureHelp {
-    let parameters: Vec<ParameterInformation> = signature
-        .parameters
+/// A function of its own rather than a closure in the handler, because the four decisions worth testing directly
+/// are here: which span each parameter occupies **inside the label** (a client bolds it), which one is active, which
+/// signature is active, and that the documentation is rendered the same way the hover renders it.
+pub fn signature_help_of(signatures: &[cpp_code_analysis::signature::CallSignature]) -> SignatureHelp {
+    let rendered: Vec<SignatureInformation> = signatures
         .iter()
-        .map(|(range, _)| ParameterInformation {
-            // Offsets inside the label rather than a substring: the protocol's two shapes are equivalent, and
-            // offsets keep the parameter's *own* text in the label where the reader sees the declaration's
-            // spelling.
-            label: ParameterLabel::LabelOffsets([range.start as u32, range.end as u32]),
-            documentation: None,
-        })
-        .collect();
-
-    SignatureHelp {
-        signatures: vec![SignatureInformation {
+        .map(|signature| SignatureInformation {
             label: signature.label.clone(),
             documentation: signature
                 .documentation
@@ -100,13 +95,33 @@ pub fn signature_help_of(signature: &cpp_code_analysis::signature::CallSignature
                         value,
                     })
                 }),
-            parameters: Some(parameters),
-            active_parameter: None,
-        }],
-        // One signature, so the active one is the only one — and it is stated rather than left out, because a
-        // client that has to choose would have nothing to choose between.
+            parameters: Some(
+                signature
+                    .parameters
+                    .iter()
+                    .map(|(range, _)| ParameterInformation {
+                        // Offsets inside the label rather than a substring: the protocol's two shapes are
+                        // equivalent, and offsets keep the parameter's *own* text in the label where the reader sees
+                        // the declaration's spelling.
+                        label: ParameterLabel::LabelOffsets([range.start as u32, range.end as u32]),
+                        documentation: None,
+                    })
+                    .collect(),
+            ),
+            // **Per signature**, which is the field that survives when a client lets the reader cycle: the second
+            // overload of `format` does not take the same number of parameters as the first, and a single count for
+            // the popup would highlight the wrong one the moment the reader switched.
+            active_parameter: signature.active_parameter.map(|at| at as u32),
+        })
+        .collect();
+
+    SignatureHelp {
+        // The first is the active one, and it is stated rather than left out: a client that has to choose would
+        // have nothing to choose between. Which of them the *language* would choose is overload resolution, and
+        // this layer does not do it — see the module documentation.
+        active_parameter: rendered.first().and_then(|first| first.active_parameter),
+        signatures: rendered,
         active_signature: Some(0),
-        active_parameter: signature.active_parameter.map(|at| at as u32),
     }
 }
 
@@ -155,7 +170,7 @@ mod tests {
     /// slicing the label with them, which is the only thing a client does with them.
     #[test]
     fn a_parameter_is_a_span_inside_the_label() {
-        let help = signature_help_of(&a_signature());
+        let help = signature_help_of(&[a_signature()]);
 
         assert_eq!(help.signatures.len(), 1);
         let label = &help.signatures[0].label;
@@ -180,7 +195,33 @@ mod tests {
     /// A signature with no documentation sends none, rather than an empty popup section.
     #[test]
     fn a_signature_without_documentation_sends_none() {
-        let help = signature_help_of(&a_signature());
+        let help = signature_help_of(&[a_signature()]);
         assert!(help.signatures[0].documentation.is_none());
+    }
+
+    /// **An overload set is sent as a list**, each signature with its own active parameter — so a client that lets
+    /// the reader cycle between them highlights the right one after the switch, and the popup is not empty.
+    #[test]
+    fn every_overload_is_sent_with_its_own_active_parameter() {
+        let first = a_signature();
+        let second = CallSignature {
+            label: "scale(double factor)".to_string(),
+            parameters: vec![(9..9 + "double factor".len(), "double factor".to_string())],
+            active_parameter: None,
+            ..first.clone()
+        };
+
+        let help = signature_help_of(&[first, second]);
+
+        assert_eq!(help.signatures.len(), 2);
+        assert_eq!(help.signatures[0].label, "scale(int count, double factor)");
+        assert_eq!(help.signatures[1].label, "scale(double factor)");
+        assert_eq!(
+            help.signatures[0].active_parameter,
+            Some(1),
+            "the signature's own count, not the popup's"
+        );
+        assert_eq!(help.signatures[1].active_parameter, None);
+        assert_eq!(help.active_parameter, Some(1), "and the first is the active one");
     }
 }

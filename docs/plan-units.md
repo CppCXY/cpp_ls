@@ -1046,3 +1046,574 @@ two_declarations_of_one_name_are_a_list_for_a_consumer_that_shows_one
 **教训(这一轮第四次同一个)**:这一整天里"先写实现后量"把我按住了四次 ——
 §11 单元读数先于账目、§20 的 27 秒、"我以为形状表是元凶"、和这次的去重键。
 **先量再定不是流程装饰**:这四次里有三次是量出来的结论与我的判断相反。
+
+---
+
+## 23. `Ambiguous` 去重:量完之后规则自己出来了(19 → 12 个歧义标识符)
+
+按 §22 的结论,先量"候选之间差在哪个字段"。量法是在 `workspace_probe` 里把每个歧义名字的候选**两两配对**,
+按三档分类(同一个文件 / 跨文件 / 模型里什么都没记)。第一次分类器写错了 —— 它把"模型分辨不出"和"真是同一条"
+混在一起,`std::getline` 的 6 对就跑进了"同一文件"那一档;按 kind 分开之后读数才对:
+
+```text
+19 个歧义标识符,候选两两配对:
+   97 对:同一个文件里、且每个可读字段都相同(其中 getline 那类仍是"模型没记参数"的假相同)
+    0 对:跨文件
+```
+
+**这两行直接决定了规则**,而且是三条各自独立的理由:
+
+| 条件 | 为什么 |
+|---|---|
+| **必须是同一个文件** | 跨文件是**两个位置**:`int count;` 在两个头里是两条真答案,项目里已有测试钉住("这两条都是真答案");而且量出来跨文件的一对都没有 —— 重复**全在头文件内部**(MSVC 的 `<iostream>` 把 `cin` 写了两遍,一遍朴素、一遍在 `_EXPORT_STD` 后面) |
+| **能分辨的字段必须"有值",而不只是"相等"** | 变量的**类型**、函数的**参数表**。两边都空不是一致:`std::getline` 在 `<string>` 的四个重载共享返回类型、而参数表这个模型没记 —— "它们相同"就是从沉默里编出一个身份,重载集会整片塌成一条。所以**参数表读不到的函数永不合并** |
+| **其余字段全等** | `the_same_declaration`:只排除"写在哪"(`range`)与"读得多好"(`clean`/`guard`) |
+
+类**故意不参与合并**:这个模型不记成员表,所以同名两个类既分辨不出、又确实不同。把 `struct S;` 与
+`struct S { … };` 合成一条的不是这条规则 —— 那对在这个模型里本来就是**一条** `DeclFact`。
+
+**读数(用户的真实工程,同一个探针):**
+
+| | 改前 | 改后 |
+|---|---|---|
+| `std::cout` 的 `Ambiguous` | 4 处 | **解决** |
+| `std::cin` 的 `Ambiguous` | 3 处 | **解决** |
+| `definition` 答"在头文件里解析到" | 50 | **57** |
+| 歧义标识符 | **19** | **12** |
+
+剩下 12 个**全部**是重载集(`find` 12 条、`data` 12、`rfind` 9、`back` 7、`getline` 4、`eof` 4、`substr` 3、
+`stoul` 2)与类模板+特化(`char_traits` 14)—— 正是模型不该合并、也合并不了的那些。
+
+**这一条修的是代码自己抱怨过的那个症状**:`declared_type_of` 的注释里写着"`std::cin` 被声明两次,
+所以每个用到它的地方都丢了类型:8 个偏移"。类型那一侧早就有了 `agreeing_type` 这个绕法,
+**名字这一侧现在才跟上**,两侧终于一致。
+
+`cargo test -p cpp_code_analysis` 全部 target 绿(548 lib + 集成),clippy 零警告。
+
+---
+
+## 24. 下一步的前提被量否掉了:"每次按键重新走查整个单元"**不成立**
+
+§5 阶段 3 与 Claude review §6 第 3 条都写着"`buffer_changed` 每次按键 `units.clear()`,所以下一次熟读要把
+整个闭包(138 文件)重走一遍 —— 最大的单点浪费"。按纪律先量再改,量法是现成的:`workspace_probe` 里
+`did_open` → `index_everything` → 连做 10 次**函数体**编辑(`did_change` + `index_everything`),
+`StageTimes` 在每个阶段上都有计数器。
+
+```text
+第一次:10 次函数体编辑 1.271 s 墙钟 | walk 0ns | closure 0ns | parse 4.6ms | sweep 2.6ms
+第二次:10 次函数体编辑 0.556 s 墙钟 | walk 0ns | closure 0ns | parse 0ns   | sweep 0ns
+```
+
+**`walk` 两次都是 0** —— 单元**没有**被重新走查。`units.clear()` 确实在跑,但下一次
+`translation_unit_of` 走的是**磁盘缓存**(`TranslationUnitCache`),而那条路今天没有付出一次走查。
+所以"最大的单点浪费"这句话**在这份代码上不成立**:这条前提是 review 写代码之前的状态,和 §3.1/A2/A1 一样过时
+(见 §21:那三条已实现)。
+
+**能确定的**:一次按键的代价是 **55–127 ms**(两次读数相差一倍,冷热缓存之别),`parse`/`sweep` 只在第一次
+非零(4.6 + 2.6 ms),所以钱不在解析上,也不在走查上。
+
+**不能确定的**:花在哪一段。两次读数不一致,而且探针里那张阶段表印在**普查之后**、我的编辑循环之前——
+**instrument 的时间窗口没罩住被测的东西**,这是 §8 第 15 条那个病的同一个形状(插桩插在候选怀疑对象上,
+量出来的却是别人的时间)。
+
+### 收紧窗口之后的归因(同一天,同一条命令)
+
+修法是把循环写成**两遍**:第一遍热身(结果丢掉),第二遍才计时,并且印**整张**阶段表而不是四段。
+
+```text
+10 次函数体编辑(warm,只量第二遍):阶段合计 45.7 ms —— 即 4.6 ms/次
+   encode 14.6(32%)| parse 5.3 | bodied-scan 4.0 | render-parse 4.0 | read 3.9
+   include-scan 3.1 | sweep 2.4 | render-sweep 2.4 | index-insert 0.4 | 其余 <1
+   walk 0 | closure 0        ← 单元没有被重新走查
+```
+
+**结论:一次函数体按键 4.6 ms,最大的一项是把编辑后文件的摘要写盘(1.5 ms/次)** ——
+既不是单元走查(0),也不是解析(0.5 ms)。而上一轮那两个 `0.556–1.271 s` 是**冷跑**:
+**一个随缓存状态变化的数不是对代码的测量**。这条和 §2.1 记的"仪器先修好再读"是同一件事,
+只是这次错在我自己的探针里。
+
+所以"每次按键是最大的单点浪费"这条**彻底不成立**,阶段 3 的边界规则**不是**为了性能而必要;
+它剩下的价值只在语义那一侧(见 §5 阶段 3 的原意:一次函数体编辑不该让任何**别的**文件的读数作废),
+而那需要单独量一次"编辑后有多少**依赖者**的读数被丢掉",不是拿按键延迟当理由。
+
+**所以这一轮不实现那个优化**:前提被量否掉之后,先做的是**把窗口收紧**(在编辑循环前后各取一次
+`StageTimes`,并把两次读数打出来),再看 55–127 ms 落在哪一段;归因之后才谈改不改。
+
+**今天第五次"先量再定"否掉了计划自己的判断**(前面四次:§11 单元读数先于账目、§20 的 27 秒、
+"形状表是元凶"、§22 的去重键)。这五次里有四次,量出来的结论与写到计划里的判断**相反** ——
+这不是纪律的装饰,是这份文档最该有的那一半。
+
+---
+
+## 25. A4 也过时了:我实现了它,编译器才告诉我 `UnitTable` 早就有上限
+
+这一轮的清单上写着 review 的 A4(§3.2:`units` 没有上限)。我照着写完了才去编译,得到:
+
+```text
+error[E0599]: no method named `len` found for struct `UnitTable`
+error[E0599]: no method named `remove` found for struct `UnitTable`
+```
+
+**`self.units` 不是 `HashMap`,是 `UnitTable`** —— 而它从 [117ec18] 起就是一张**有上限的 LRU 表**:
+
+```rust
+const MAX_UNITS: usize = 16;
+struct UnitTable { held: HashMap<String, (u64, Arc<TranslationUnit>)>, clock: u64 }
+// insert(): 不在表里且已满 16 时,先淘汰 `used` 最小的那一条
+```
+
+我加的那份是 `MAX_HELD_UNITS = 8` + **按 `HashMap::keys()` 任意顺序**淘汰 —— 比已有的更小、且把
+LRU 换成了随机。**它一次都没跑过**(编译不过),已 `git checkout` 撤回。
+
+所以 A4 的状态和 A1/A2/A3(§21)一样:评审的**风险表**(第 361–364 行)写的是改动**之前**的状态,
+而它自己的**修复表**(第 19 行)已经把这三件事都列为"已做"。**看风险表要先看修复表** —— 这条今天用掉了
+三次,这是第四次。
+
+**没做的一件小事**:`MAX_UNITS` 这条上限**没有测试**。写它的测试要造 17 个真单元(17 个闭包),
+代价不划算;它的边界规则(`layout` 变了才清 `units`)由 `a_unit_survives_typing_in_a_body_and_not_a_change_to_a_directive`
+挡着。登记,不修。
+
+### 顺带发现:围栏早就建好了,而且**接进了** `read_the_unit`
+
+§19 的"下一轮第一件事"里第 2、3 条已经不存在了 —— 代码里(117ec18 起)有:
+
+```text
+brace_crossings(tree, stream)        ← 找出**跨两个文件**配对上的括号
+RenderedUnit::without / ::only       ← 把泄漏文件的 token 抽出去,再单独读它
+gate: if indexed.crossings == 0      ← 门已经不是"errors != 0",而是"还有没有跨文件的配对"
+UnitReading { quarantined, crossings }  ← 读数自己报告它隔离了谁、还漏不漏
+```
+
+两条测试挡着它:`a_file_whose_scope_leaks_is_read_alone_and_the_program_is_still_read`、
+`a_program_whose_files_keep_their_scopes_quarantines_nothing`。所以 **§19 第 3 条("渲染解析出错就把出错点之后
+标成作用域不可断言")不是待做项,而是已经做过的另一条路**:不是"出错就不落盘",是"**跨文件的配对**才不落盘,
+漏的那一个文件拿出来单独读"。这比原提案更好,理由是它**只**隔离真正的病(§19 ④:token 是平的,配对才漏)。
+
+**但接线开关还关着**(`session.rs:1219` 的 `// self.read_a_looked_at_unit();`),理由写的是**围栏之前**那次测量
+(2008 → 1959、`std::size_t` 从"在头文件里"变成"索引里没这个名字")。那条理由的前提——"不知道 49 个名字
+为什么消失"——已经在 §19 查清并被围栏修掉了,所以这一轮的活是:**用围栏后的代码重测那三个读数**,
+对了就把开关合上。量它的工具也已经在库里:`examples/unit_read.rs`(逐文件读数 → 单元读数 + 围栏报告 → 再读数)。
+
+### 库代码里留着一台仪器(已删)
+
+`index_unit_rendering` 里留着两处调试输出,是 15a40b0 提交进来的:
+
+```rust
+eprintln!("TMP round {round}: ...");          // 每次单元读数,每一轮解析
+for k in 1..=20 { ... CppParser::parse(&program.text[..cut]) ... }   // 把整个程序重解析 20 遍
+```
+
+第二处不是打印,是**把 1.8 MB 的流按 20 个前缀各解析一遍**,每次单元读数都跑。删掉了(14 行),
+**删之前没有跑它**:它回答的是"解析代价落在流的哪一段",而现在没有任何决定依赖这个数(单元读数没接进泵,
+按键代价见 §24)。它属于例子、不属于索引路径 —— 这一族("实验仪器最终住进了产品")今天第三次出现(§8 第 15 条)。
+
+**今天第六次:读代码推翻了计划里的判断**(A4 不存在)。
+
+### 围栏之后的重测:三个读数变好了,而**代价**是十倍 —— 现在修掉了
+
+`examples/unit_read.rs`(它本来就是为这个问题写的)在同一个工作区上,围栏之后的读数是:
+
+```text
+per file   declarations_in("std") =  1959 | std::size_t Unknown(NotDeclaredHere) | std::string in xstring
+unit read in 12.15s: 138 files filed, 332755 tokens, 0 missing, 0 unplaced
+  errors 26 | crossings 0 | quarantined [sourceannotations.h, type_traits, atomic, memory] | braces 0
+with unit  declarations_in("std") =  2452 | std::size_t Unknown(Ambiguous)          | std::string in xstring
+```
+
+**"加熟读反而少 49 个名字"已经不成立了** —— 现在是 **+493**(1959 → 2452),`std::string` 依然在 `xstring`。
+`crossings: 0` 且隔离了 4 个文件(§19 只认出 1 个:`sourceannotations.h` 不是唯一的泄漏源)。
+`std::size_t` 从"这个文件里没有这个名字"变成 `Ambiguous` —— 两个读数**都是"不知道"**,但后者说的是
+"索引里有好几个 `size_t`",这一条要单独查(见下)。
+
+**新问题是代价:12.15 s**,而 per-file 那条路整个冷启动才 1.17 s。阶段表说钱花在哪:
+
+```text
+[cooking] 10220 ms = render-parse 971 + render-sweep 9249
+   detail: facts 9108  ← 而 type-of 67 + alias 0.4 + returns 39 + bases 3 + shapes 87 ≈ 197
+```
+
+**`Facts` 里 8.9 s 没有归属** —— 因为 `fact_for` 里唯一没有被计时的那件事就是它:
+`declared_template_parameters_of` 对**每一个类绑定**做一次 `root.descendants()`。在 per-file 的树上是 66 ms,
+在单元读的树上是 332 755 个 token × 几千个类绑定。**这是同一个病的第四次**(§20:`declarator_declaring`、
+`declared_type_of`、`using_alias_target`,加上登记未修的这一个)。
+
+修法不是加缓存,是**把那条关系放进 `DeclarationShapes` 的那一趟**:`template <…>` 与它引入的类是**兄弟**,
+中间那层 `DeclSpecifierSeq` 自己不是 shape,所以遍历时顺手把 `(引入的 specifier 范围, 参数表节点)` 记下来
+(§20 修 `using_alias_target` 的同一个手法)。查询因此变成"扫这个文件的模板声明",语义**逐字保持**:
+按文档序取**第一个**包住这个名字的 —— 嵌套类模板取到的是**外层**那个,和改之前一样(那条我没动,登记)。
+
+```text
+                    改之前        改之后
+unit read          12.15 s       3.08 s
+  render-sweep     9249.1 ms     482.6 ms
+    facts          9108.0 ms     335.9 ms
+    template-params  (未计时)      1.8 ms      ← 顺带加了这个 detail 阶段,否则它永远藏在"其余"里
+三个读数          1959→2452      1959→2452    ← 一模一样
+```
+
+**代价变了,答案没变** —— 这才是想要的形状。548 + 全部集成测试绿。
+
+### 接线这道门:**四项里有三项变好,第四项是"另一种不知道"**,而代价是 +3.2 s 启动
+
+`examples/unit_read.rs` 现在把**同一个进程里、读数前后**的 `definition` 普查也打出来(`Ambiguous` 按名字列出)。
+这是"总量会盖住'一个文件赚了另一个文件亏了'"那条纪律要的形状:
+
+```text
+                     per file    with unit
+resolved here            55          55
+resolved in a header     53          56     ← +3
+the index has no such name 12          8     ← −4(四条从"没这个名字"变成能解析)
+UnparsableName            4           4
+Ambiguous(用途计数)       14          15     ← +1
+   新增的那一个:std::size_t —— 它以前是"没这个名字"
+declarations_in("std") 1959        2452     ← +493
+```
+
+**围栏之前那条"答案变坏"的理由已经全部消失**:`std` 名字是**多**了 493 个,不是少 49 个;
+四个找不到的名字变成找得到;唯一变动的 `Ambiguous` 是 `std::size_t`,而它**以前也是"不知道"**
+(`NotDeclaredHere`),现在只是把"不知道"换成了"索引里有两个 `size_t`"。按项目的规则(两个文件各声明一次
+= 两个答案,`two_declarations_of_one_name_are_a_list_for_a_consumer_that_shows_one` 钉着),这是**规则的正确输出**,
+不是缺陷;跨文件"同一个实体"的合并是 Claude 清单上 P0 的另一条(cross-file references)。
+
+**所以这道门过了。但开关这一轮没合**,理由是代价换了个位置:
+
+```text
+单元读数            3.18 s(修完模板参数之后)
+  render-parse       912.8 ms     ← 把 1.8 MB 的流解析一次,这是这一层的地板
+  render-sweep       530.8 ms
+  其余               ~1.7 s       ← **没有阶段覆盖**:cook_the_unit 的渲染、按文件分摊事实、流本身
+per-file 冷启动      1.17 s       ← 接线之后第一次 drain 会变成 ~4.4 s
+```
+
+这一次不是"答案不对",是**启动时间**:用户这一轮刚刚说过启动性能是重点(Claude 那半天做的就是这个),
+拿 +3.2 s 的首屏换一批头文件的熟读事实,是**产品取舍**,不是我能替用户定的。
+而且没有阶段覆盖的那 1.7 s 是同一个病的**第五次**(§24:插桩插在候选怀疑对象上,量出来的却是别人的时间)。
+
+**所以下一件事**:把单元读数剩下那 1.7 s 归因(`cook_the_unit` 之后到落盘之间),再决定接线还是改成
+"某个请求点名了头文件才读这个单元"—— 后者已经有先例(`want_cooked_reading` / `want_the_closure_cooked`
+就是把"整个闭包"收窄到"打开的文件 + 被点名的文件"的那次测量)。
+
+### 那 1.7 s 归因完了:它就是"把整个程序读一遍",而阶段表现在罩得住整个读数
+
+三个新阶段(都在 `units` 家族里,和 `walk`/`closure` 并列):`unit-render`(`cook_the_unit` 的 lex + 宏展开 + 拼接)、
+`unit-fence`(`brace_crossings` + `without`/`only`)、`unit-files`(按文件分摊事实)。
+
+```text
+unit read 2.67 s(同一台机器,这次运行)
+  [units]     1452.1 ms  56.6%
+    unit-render  1302.8   ← 138 个文件、332 755 个 token 的 lex + 展开 + 拼接
+    unit-fence    142.8
+    unit-files      6.5
+  [cooking]   1111.6 ms  43.4%
+    render-parse  694.0
+    render-sweep  417.6
+  stages total 2563.8 ms ≈ 2.67 s 墙钟(96%)      ← 之前是 1.44 s / 3.18 s(45%)
+```
+
+**没有"浪费"可以再砍了**:最大的两项就是编译器也要做的那两件事 —— 把 2.86 MB 的闭包预处理成 1.80 MB 的流
+(1.30 s),再把流解析一遍(0.69 s)。同一个单元上 `cl /Zs`(语法+语义)+ `cl /E`(预处理)**各一遍 = 1.91 s**,
+也就是说**整个单元读数(2.67 s)是编译器自己前端代价的 1.4 倍**,而它比编译器多做的事是:每个事实映射回它被写下的
+文件、跨文件括号围栏、把熟读事实按文件落进索引。这不是"慢",这是**这件事本身的价钱**。
+
+### 决定:**不接线**,并把 `session.rs:1213` 那条**已经变成假话**的理由换掉
+
+留一个过时的理由在代码里,就是这个 session 里反复抓到的那个病(§21/A1–A4、§25 开头)。那条注释今天还在说
+"接了线 `std` 少 49 个名字、`std::size_t` 从解析到变成没这个名字" —— **现在两句都是假的**(+493、`Ambiguous`)。
+所以换成了量出来的那一条:
+
+> 代价:2.7 s,而它是**一个不可分的步骤**(渲染 + 解析 + 落盘),放进 `advance` 的 idle 分支就是**握着 writer
+> 等 2.7 s** —— 首个 drain 之后每一次打开文件的空档都会这样。这正是 `want_the_closure_cooked` 当初被收窄要保护的那笔
+> 预算(11.7 s/启动),而它换来的东西,按需熟读(`want_cooked_reading`)对**被点名的**文件已经能拿到。
+> 所以能力是**被请求的,不是被排程的**:`read_the_unit` / `read_a_looked_at_unit` 是 API,`units_read` 保证
+> 每个文件每次指令变动只读一次。
+
+**这条决定本身是可推翻的**,而且推翻它的条件是清楚的:把"一次不可分的 2.7 s"变成"每次 `advance` 一片"
+(比如按 frame 分片拼接),或者证明首屏那 2.7 s 买到的答案比 `want_cooked_reading` 多得多。两条都还没量。
+
+### 顺带关掉一个"登记未修":嵌套类模板的参数表取错了那一个
+
+改这一趟时我**故意**把语义保持原样(文档序取第一个 = 最外层),并记了一句"嵌套类模板取到外层,登记"。
+现在用一条测试把那条登记变成事实:
+
+```rust
+template <class _Ty> struct outer { template <class _Uty> struct inner { _Uty u; }; };
+// template_parameters_of("std::outer::inner")
+//   改之前:["_Ty"]    ← 外层那个,配对的是 outer 的参数
+//   改之后:["_Uty"]   ← 引入 inner 的是内层那个
+```
+
+测试 `a_nested_class_template_declares_its_own_parameters` 先跑出来 `left: ["_Ty"]`,再改成取**最内层**
+(表按文档序,最后一个包住名字的就是引入它的那个)才绿。**旧的那次 `root.descendants()` 走查也给不出正确答案**
+—— 它取第一个,也就是最外层 —— 所以这是**关掉了一个真缺陷**,不是这次重构引入的。
+
+真语料上它是**惰性的**:同一个工作区重跑 `unit_read`,三个读数和普查一个字没变(1959/2452、53→56、12→8、
+`size_t` 仍是 `Ambiguous`),说明这份闭包里没有嵌套类模板 —— 也就是说这条修复今天赚不到钱,但它有测试,
+而且下一次有人写嵌套模板时不会再错。
+
+---
+
+## 26. 用户点名的三件事:"语义分析啥都没做" —— 逐条量,三条里两条是**我们的**,一条是**配置**
+
+用户的原话:`<format>` 补全里没有 `format`、没有参数列表、hover 也没结果;`private` 这些作用域没搞好;
+`auto` 没有推断。"你语义分析啥都没做就来搞重命名合适吗" —— 合适不合适不用争,把三条各量一遍。
+
+量它的工具是新的 `examples/editor_probe.rs`:**把用户的文件当缓冲区打开**(不碰磁盘),前面加一行
+`#include <format>`,后面加几行问题代码(`auto`、`std::format(...)`、`std::string::`),再打印
+补全 / hover / signature 三样东西的答案,**并且在每个答案旁边打印索引自己知道什么** ——
+"补全是空的"和"这个名字根本不在索引里"是两个缺陷、一个症状。
+
+### ① `<format>`:编译器自己说这个项目里 `std::format` **不存在**
+
+```text
+cl /nologo /Zs /EHsc format_probe.cpp                    (项目现在的配置:没有 /std:)
+  format(43): warning STL4038: The contents of <format> are available only with C++20 or later.
+  format_probe.cpp(5): error C2039: "format": 不是 "std" 的成员
+cl /nologo /Zs /EHsc /std:c++20 format_probe.cpp         → exit=0
+```
+
+这个项目里没有 `CMakeLists.txt`、没有 `compile_commands.json`,`.vscode/settings.json` 是 **2 字节**,
+所以没有任何 `/std:` —— MSVC 的默认是 C++14,而 `<format>` 的全部内容在 `<format>(42)` 的
+`#ifndef __cpp_lib_concepts` 之后。**分析是对的**:`definition("std::format")` 答 `NotDeclaredHere`,
+和编译器答 `C2039` 是同一句话。
+
+索引里的证据也摆着:`.cppls` 之外,`include/format` 的 **raw** 摘要 1109 条声明(逐分支读数,里面有
+`std::format_error`、`std::formatter`)、**cooked 读数 0 条**(照编译器看,这个头是空的)。两者都对。
+
+**所以这一条要改的不是补全,是"用户凭什么知道"**:项目没有构建配置时,分析用的是**编译器默认标准**,
+而这一点今天没有任何地方说出来。这是登记项(见文末),不是接线项。
+
+### ② 补全里"没有 format"的**真原因**:列表在**文件顺序**上被砍,而客户端被告知"完整"
+
+量出来的三件事,一条比一条具体:
+
+```text
+① std:: 补全:175 个名字,truncated **false**
+   带 names: cin / cout / getline / make_optional / nullopt / stod …
+   不带 names: string、basic_string、size_t —— 而索引里**有**这三个
+② std::string:: 补全:**0** 个名字(而 members_of("std::basic_string") = 202)
+③ 那 175 是怎么来的:declarations_in_where 的预算是 MAX_COLLECTED_NAMES = 400,
+   按**可见文件的遍历顺序**花掉;用户的直接包含是大头,<xstring>(string 所在)排在后面
+   → 400 花完就 break,后面再有什么名字都进不来
+```
+
+于是 `crates/cpp_ls/src/handlers/completion/mod.rs` 里那句
+
+```rust
+is_incomplete: session.pending() > 0 && !found.truncated,     // 旧
+is_incomplete: session.pending() > 0 || found.truncated,      // 新
+```
+
+是**这条投诉的另一半**:列表被预算砍到 200 条,**却告诉客户端"这是完整的"** —— 于是 VS Code 不再发请求,
+只在收到的 200 行里本地过滤,用户输入 `std::str` 得到**空**。而前缀过滤是在**索引层、克隆之前**做的,
+同一个请求带上 `str` 会精确答出 `string`。旧的注释写着"被砍的列表再问一次还是同一个列表",这句只在
+**客户端用同样的前缀再问**时成立,而没有客户端这么做。
+
+三处改动:
+
+| 改什么 | 在哪 | 量出来的效果 |
+| --- | --- | --- |
+| 一个**具名作用域**用新的预算 `MAX_COLLECTED_IN_A_SCOPE = 4096`(全局名字空间仍是 400) | `index/project.rs::declarations_in_where` | `std::` 收集 2146 条、送 200 条、`truncated: true`;`size_t` 回到列表里 |
+| 限定名指向**类型**时问 `members_of`(别名、模板拼写、基类都在里面) | `index/project.rs::names_in_a_scope` 的 `None` 分支 | `std::string::` **0 → 63** 个成员,带 `_CONSTEXPR20 void (…)` 这样的 detail |
+| 被砍的列表要如实报 `isIncomplete` | `cpp_ls/handlers/completion` | 输入 `std::str` 由"空"变成命中 |
+
+两条新测试(**先证明它们会红**):`a_name_in_a_late_file_of_a_namespace_is_still_offered`
+(旧预算下:420 个名字,`zebra` 恰好被砍掉 —— 红)、
+`the_members_of_a_class_template_reached_through_an_alias_are_offered`。
+
+### 我第一版改错了:一条"能用"的假修复
+
+第一版是"先问 `members_of`,失败再退回 `declarations_in`"。它让 `std::string::` 从 0 变 63、让 `std::`
+从 175 变 200,**看起来全对了** —— 但测试在旧预算下**照样绿**,这才露了馅:
+
+```text
+OFFERED 421 | fillers 420 | … zebra        ← 400 的预算根本没生效
+```
+
+因为 `members_of` **对名字空间也照样回答**(它列的是"scope 等于这个名字"的声明),所以每一个
+`std::`、`ns::` 限定符都被送进了**没有预算、没有隐藏去重**的成员查询。改成先问索引
+`definition(spelling).kind == DeclKind::Type`(名字空间是 `DeclKind::Namespace`)之后,测试立刻红了:
+
+```text
+with the old 400 budget:  420 names offered, none of them `zebra`   ← 复现
+with MAX_COLLECTED_IN_A_SCOPE:   421 names, `zebra` last            ← 修好
+```
+
+**"先量再定"今天第七次推翻了我自己的判断** —— 这一次推翻的是我上一小时刚写下的"修复"。
+
+### 还没做的三件(用户点名的后两件 + hover 的一个)
+
+1. **参数列表根本不在事实模型里**:`DeclFact.parameters` 是**类模板**的参数名,函数的形参一个字段都没有,
+   所以 `detail_of` 只能写 `returns (…)` —— 补全详情里那个 `(…)` 是真的空,不是显示问题。
+   跨文件 signature help 也一样要有它(`signature.rs` 今天是现场解析声明所在文件,一个请求一次解析)。
+2. **`auto`**:`auto y = x.back()` 现在答 `_NODISCARD _CONSTEXPR20 reference` —— 既没剥掉库自己的宏,
+   也没把 `reference` 换成 `char&`。初始值表达式那一步是通的(`x` 答 `std::string`),卡在**类型拼写**上。
+3. **`private` / `protected` 今天完全没有建模**:没有任何地方记录成员的访问级别,所以补全和解析都不会过滤。
+4. 顺带:`type_at("std::string::size_type")` 仍是 `UnknownType`(限定名穿过别名的那条路,和 ② 是同一个病,
+   但走的是 resolve 而不是 completion)。
+
+顺序:参数列表(用户点了两次,而且是 `(…)` 的直接原因)→ `auto` 的类型拼写 → 访问级别 → 限定名解析。
+
+---
+
+## 27. 内建默认配置:没有构建配置时,**以编译器支持的最新标准**去问它,并把这件事说出来
+
+用户的吩咐:"如果目标工作区没有 `.cppls.toml` 和 `compile_commands`,我们可以内建一个默认配置,并以最新的
+C++ 标准去访问编译器获得对应的宏变量"。
+
+### 改之前的链条,以及它为什么会给出一个"没人要的答案"
+
+```text
+discover_with → standard_for(commands, for_file) → 没有数据库 = **None**
+             → cl 被问的时候没有任何 /std:  → 它答自己的默认 = _MSVC_LANG 201402L
+             → <format> 的 #ifndef __cpp_lib_concepts 不成立 → 整个头是空的
+```
+
+也就是说:**"没有配置"被翻译成了"编译器默认",而编译器默认是 C++14** —— 一个谁也没要求过的标准。
+更糟的是另一头:`.cppls.toml` 里写的 `-std=c++17`(或 CMake 的 `CMAKE_CXX_STANDARD`)**根本不会传到
+编译器那一次调用**里(`standard_for` 只读数据库),于是宏表答的还是默认标准,而
+`compilation_environment` 又把配置推导出来的 `__cplusplus` **盖在**编译器自己的宏表上。
+
+### 三处改动
+
+| 改什么 | 在哪 |
+| --- | --- |
+| 没人说标准时,按"编译器能接受的最新"去问:`/std:c++latest`(MSVC)、`-std=c++23`→`-std=c++2b`→不带参数(GCC/Clang) | `include/toolchain.rs`:`ASSUMED_STANDARD_MSVC` / `ASSUMED_STANDARDS_GNU` + `standards_to_try` |
+| 项目自己说的标准(数据库**或** `.cppls.toml`/CMake)一定传到编译器那一次调用 | `BuildStatement { commands, standard }`(原来 8 个参数,clippy 顶回来之后按项目的老规矩收成一个类型) |
+| **编译器自己的宏表赢过配置推导出来的那张表** | `index/environment.rs::compilation_environment`:两段换位 |
+
+第三处是这个功能的**前提**,不是搭头:配置那张表是"从 `-std=` 拼出来的",它给 `c++23` 写的是 `202302L`,
+而这个 `cl /std:c++latest` 自己答 `202100L`(g++ 11 的 `-std=c++23` 也答 `202100L`);
+**旧顺序会让 `#if __cplusplus >= 202302L` 答出一个自信的 true**,而编译器答 false —— 这是这一层唯一不接受
+的失败方式。换位之后配置的表退回它本来的位置:**编译器没被问成时的兜底**。
+
+### 读数(用户的工程,release,同一个进程里前后对照)
+
+```text
+standard = Some("c++latest") | toolchain Some("c++latest")
+note     = "no build configuration states a language standard (no compile_commands.json, no CMakeLists.txt,
+            no .cppls.toml), so the compiler was asked for its newest (`c++latest`); a project that builds
+            as an older standard says so in .cppls.toml"
+
+include/format 的熟读读数          Some(0) → **6** 条(名字现在真的在索引里)
+definition("std::format")          NotDeclaredHere → **Ambiguous**(四个重载,诚实)
+std:: 补全                         **format / format_to / format_to_n / formatted_size / vformat 都在**
+std::string:: 补全                 0 → **64**
+```
+
+"Ambiguous 四个重载"不是失败:那个名字现在**存在**了,而"该用哪一个"是下一节的问题(签名与参数列表)。
+
+### 顺带把"默认配置"变成了**看得见的**东西
+
+一个内建默认值最怕的是"用户不知道自己在用什么标准"。现在它有三条出口:`Toolchain::standard`(报告里读数)、
+`Toolchain::note`(上面那句话,写在一行里)、`session.config().standard`(分析真正在用的那个);
+要覆盖它,就是 `.cppls.toml` 的 `[compile] args`,和覆盖别的任何东西一样。
+
+**两条新测试**:`a_project_that_states_no_standard_is_asked_for_the_newest`(含 `__cplusplus` 落到配置里)、
+`a_standard_the_project_states_is_not_replaced_by_the_assumption`。552 + 全部集成测试绿,clippy 干净。
+
+---
+
+## 28. 参数列表进了事实模型:补全里那个 `(…)` 原来是**真的空**
+
+用户点名的第二件("也没有他的参数列表")。查下去发现比"显示得不好"严重:`DeclFact.parameters` 是**类模板**的
+参数名,**函数的形参一个字段都没有** —— 所以 `detail_of` 只能写 `returns (…)`,那个 `(…)` 不是省略号,是空白。
+
+### 改动
+
+| 改什么 | 在哪 |
+| --- | --- |
+| `DeclFact` 多一个字段 `parameter_list: Option<String>`:函数声明时写的形参表,**连括号**,按文件拼写 | `summary.rs`、`summary_codec.rs`(CODEC_VERSION 17 → **18**) |
+| 读法:名字所在位置**最内层 `Declarator` 祖先**的 `ParameterList` 子节点 —— 和 `inlay::parameter_list_of` 同一个读法(`void (*f(int a))(int b)` 有两个表,函数体里的变量上面还挂着外层函数的表) | `sema/declarations.rs::parameter_list_at`(由 `fact_for` 和 `fact_from_binding` **两条生产者**都填) |
+| 布局被抹掉:`<istream>` 的 `getline` 原本带着 `\r\n` 和四个空格缩进,熟读读数还带着渲染器的"每 token 一个空格"(`format_string < _Types ... >`) | `inlay.rs::parameter_list_text`:空白折叠成一个空格,`(` 后 / `)` 与 `,` 前不留空格;`<`、`>`、`...` **故意不动**(`(bool _B = 1 < 2)` 也是参数表) |
+| 补全详情:`returns (…)` → `returns (const format_string < _Types ... > _Fmt, _Types && ... _Args)` | `completion/mod.rs::detail_of` |
+
+### 顺带修好一条**从来没有生效过**的实体规则
+
+`the_same_declaration_in_one_file` 要求"能把两条声明分开的字段必须**在场**",函数的那个字段写的是
+`!parameters.is_empty()` —— 而 `parameters` 是**模板**参数名,普通函数永远没有。**所以函数从来没被合并过**:
+MSVC 那种"`void f(int);` 写一遍、再在 `_EXPORT_STD` 后面写一遍"的写法,在索引里一直是两个答案。
+现在证据换成了参数表本身,并且参数表也进了 `the_same_declaration` 的比较:
+
+```text
+namespace ns { void f(int); void f(int); void f(double); }
+    旧规则:3 个实体(一个都没合并)      ← 新测试在旧规则下**红**:left: 3, right: 2
+    新规则:2 个实体(重复的 (int) 合一,(double) 是重载)
+```
+
+**这是这个 session 里第三次"某条规则其实一直没生效"**(前两次:§22 的去重键、§26 的 `members_of` 假修复)。
+
+### 读数(用户的工程,release)
+
+```text
+std:: 补全      format    string (const format_string < _Types ... > _Fmt, _Types && ... _Args)
+                vformat   string (const string_view _Fmt, const format_args _Args)
+                getline   basic_istream<_Elem, _Traits> & (basic_istream<_Elem, _Traits>&& _Istr,
+                                                          basic_string<_Elem, _Traits, _Alloc>& _Str, const _Elem _Delim)
+std::string::   push_back _CONSTEXPR20 void (const _Elem _Ch)
+                size      _NODISCARD _CONSTEXPR20 size_type ()      ← 无参函数说 `()`,不再说 `(…)`
+```
+
+**还剩一件**(下一条):`std::format(` 的 **signature 仍然是"没有"** —— 它有四个重载,而 `signature_at` 要求
+**一个**被调用者,`callee_of_a_call` 答 `Ambiguous` 就退出了。LSP 的 `SignatureHelp.signatures` 本来就是**列表**,
+所以正确的形状是"把这一组重载都发过去";hover 也一样(今天对 `std::format` 只能说 `Ambiguous`)。
+现在事实里有参数表了,这两处都有东西可写。
+
+---
+
+## 29. 重载集合:把"我不猜"从**空弹窗**改成**一份列表**(推翻一条写在代码里的决定)
+
+上一条的收尾。两处的实际行为:
+
+```text
+std::format(           signature:**没有**(四个重载 → callee 解析 Ambiguous → 直接退出)
+hover std::format      **没有弹窗**(Ambiguous 落到"表达式"那个问题,而这个名字不在表达式里)
+```
+
+而 `cpp_ls/src/handlers/signature_help/mod.rs` 顶上写着一条**明确的决定**:"本服务器只发**一个**签名,因为
+它只解析出一个;几个候选之间选一个**就是重载决议**,而一份"让读者自己挑"的签名列表不能是猜的。"
+
+**那条论证对"挑"是对的,对被它推出来的结论是错的**:列表的替代品不是"一个签名",而是**没有**。
+`std::format` 是四个声明,于是 `std::format(` 在现代 C++ 最常见的那个调用上弹出**空**。发四个什么都不声明 ——
+客户端堆叠显示、读者用方向键选,这正是 `activeSignature` 存在的理由。所以这一轮推翻了那条决定,
+并把理由写回原处。
+
+### 改动(三处)
+
+| 改什么 | 在哪 |
+| --- | --- |
+| **复数名字解析**成为原语:`definitions_at` 返回**同一个作用域里的全部绑定**(C++ 的普通查找在第一个声明了该名字的作用域就停,但那个作用域里的**所有**重载都算数);`definition_at` 变成它的"取第一个" | `sema/resolve.rs`(`first_binding_of` → `bindings_named`,两个调用点都改成复数) |
+| `callees_of_a_call`:名字走复数查询(`ProjectIndex::definitions`),**成员调用保持单数**(`members_of` 是"整个成员表"而不是"一个名字的声明们" —— 登记为下一步) | `index/project.rs` |
+| `signatures_at`:每个候选一个 `CallSignature`,**同一个文件只解析一次**(`<format>` 的四 `format` 在一个头里,四次解析是三次多余) | `signature.rs`、`session.rs`(`Session::signature_at` → `signatures_at`) |
+
+LSP 侧:`signature_help_of` 收一个切片,**每个签名带自己的 `active_parameter`** —— 四个 `format` 的参数个数
+不一样,一个全局计数在读者切换签名的那一刻就会指错。hover 侧:`Ambiguous` 不再落到表达式那个问题,而是走复数查询,
+把每个声明的 `returns name(参数表)` 列成一个代码块(从**事实**拼,不解析任何文件)。
+
+### 读数(用户的工程,release)
+
+```text
+--- signature ---
+label: std::format(const format_string<_Types...> _Fmt, _Types&&... _Args)
+label: std::format(const wformat_string<_Types...> _Fmt, _Types&&... _Args)
+label: std::format(const locale& _Loc, const format_string<_Types...> _Fmt, _Types&&... _Args)
+label: std::format(const locale& _Loc, const wformat_string<_Types...> _Fmt, _Types&&... _Args)
+  每个都带 parameters / active Some(0) / declared in .../include/format
+
+--- hover on an overloaded name ---
+definition(std::format) = None        ← 一个名字回答不了
+definitions: 4 declaration(s)         ← 弹窗就是用这四行拼的
+   string  format(const format_string < _Types ... > _Fmt, _Types && ... _Args)
+   wstring format(const wformat_string < _Types ... > _Fmt, _Types && ... _Args)
+   string  format(const locale & _Loc, const format_string < _Types ... > _Fmt, _Types && ... _Args)
+   wstring format(const locale & _Loc, const wformat_string < _Types ... > _Fmt, _Types && ... _Args)
+```
+
+**一个副作用值得记下来**:同一个声明现在有两种拼写 —— signature 的 label 来自**那次解析的文件原文**
+(`format_string<_Types...>`),补全详情来自**熟读事实**(`format_string < _Types ... >`,渲染器每 token 一个空格)。
+两个都是"文件怎么写",只是两个读数;要不要统一是**排版策略**,今天没动。
+
+**测试**:`tests/signature.rs` 两条新测试(缓冲区里的重载集合、同一个头里的重载 + 每个签名自己的 active parameter)、
+LSP 侧一条新测试(每个重载带自己的 active parameter)+ 两条适配。看齐:554 + 全部集成测试绿,clippy 干净。
+
+**下一步**(登记,顺序按价值):① **成员调用的重载集合**(`s.push_back(` 今天只报 `direct_member` 挑的那一个);
+② `auto` 的类型拼写;③ `private`/`protected` 的访问级别。

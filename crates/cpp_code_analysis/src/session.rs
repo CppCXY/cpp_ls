@@ -444,10 +444,18 @@ impl Session<DiskFiles> {
             &files,
             &DiskCommands,
             &named,
-            discovery
-                .database
-                .as_ref()
-                .map(|database| &database.commands),
+            // **What the project says this file is built as**: the database's entry for it, or — when the database
+            // states nothing — the standard the configuration already resolved (`[compile] args = ["-std=c++17"]`,
+            // CMake's `CMAKE_CXX_STANDARD`). The compiler has to be asked about *that* standard: its
+            // `__cplusplus` is what every `#if` in every header is a question about, and a table printed for some
+            // other language version is a table that silently says `<format>` is empty.
+            toolchain::BuildStatement {
+                commands: discovery
+                    .database
+                    .as_ref()
+                    .map(|database| &database.commands),
+                standard: base.standard.as_deref(),
+            },
             &for_file,
             &environment,
             &layout,
@@ -1210,11 +1218,28 @@ impl<F: FileProvider + Clone> Session<F> {
         // A **slice**, like the indexing steps: cooking a file is a unit walk, a parse and an index, and a session
         // that did a whole closure in one call would hold the writer for seconds while the user types.
         if self.is_idle() {
-            // **NOT WIRED, ON PURPOSE — see the note on [`Session::read_the_unit`].** The unit read is implemented
-            // and tested, and calling it here makes a measured answer **worse** (49 names in `std` disappear, and
-            // `std::size_t` goes from "resolved in a header" to "the index has no such name"), which I have not
-            // explained yet. Shipping an unexplained change in answers to buy a capability is the trade this
-            // project does not make: the capability waits for the explanation.
+            // **NOT WIRED, ON PURPOSE — and the reason has changed.** It used to be "the answers get worse": with a
+            // unit read, `declarations_in("std")` *fell* by 49 and `std::size_t` went from "resolved in a header" to
+            // "the index has no such name". That reason is **gone** — it was one file's unclosed scope swallowing
+            // the rest of the program, which the crossing fence in `index_unit_rendering` now quarantines. Measured
+            // again with the fence in place (`examples/unit_read.rs`, one process, before and after):
+            //
+            //     declarations_in("std")     1959 → 2452   (+493)
+            //     definition: in a header      53 → 56
+            //     definition: no such name     12 →  8
+            //     per file                    every file's raw count unchanged, cooked 0 → N   (nothing lost)
+            //     the one new `Ambiguous`     std::size_t, which was `NotDeclaredHere` before
+            //
+            // What keeps the switch off now is **cost, measured**: a unit read is 2.7 s on the 138-file project
+            // (render 1.30 s, parse of the rendering 0.69 s, sweep 0.42 s, fence 0.14 s) and it is one indivisible
+            // step, so calling it here holds the writer — the token stream, hovers, every request — for all of it,
+            // on the first drain after a file is opened. That is the same budget [`Session::want_the_closure_cooked`]
+            // was narrowed to protect (11.7 s of every startup), and the value it buys is the one that on-demand
+            // cooking already reaches for the files a question names.
+            //
+            // So the capability is **requested, not scheduled**: [`Session::read_the_unit`] and
+            // [`Session::read_a_looked_at_unit`] are the API, `units_read` keeps it to once per file per directive
+            // change, and a caller that wants the whole program read as a compiler reads it says so.
             //
             // self.read_a_looked_at_unit();
             //
@@ -1737,7 +1762,10 @@ impl<F: FileProvider + Clone> Session<F> {
 
         let definitions = unit.definitions();
         let seed = MacroTable::from_marked(self.store.index().macros());
-        let stream = unit.cook_the_unit(&sources, &definitions, Some(&seed), true);
+        let stream = {
+            let _render = crate::stages::StageTimer::new(crate::stages::Stage::UnitRender);
+            unit.cook_the_unit(&sources, &definitions, Some(&seed), true)
+        };
 
         let key = SummaryKey::new(0, self.store.context_hash(&root));
         let indexer = FileIndexer::new(&self.files, &self.config);
@@ -2276,23 +2304,32 @@ impl<F: FileProvider + Clone> Session<F> {
         crate::folding::folding_ranges(&view.source, view.tree.get_tokens())
     }
 
-    /// **The signature of the call the cursor is inside** — see [`crate::signature`].
+    /// **The signatures of the call the cursor is inside** — see [`crate::signature`].
     ///
-    /// The parameters come from the *callee's* declaration, so a call into a header parses that header for this
-    /// answer (once — the file being edited is already parsed). What the analysis resolves is **one** declaration:
-    /// a name with several of them is either resolved to one or answered with nothing, and neither is a guess
-    /// about which overload a half-typed argument list means.
+    /// A list, because a call to an overloaded function has more than one declaration and the protocol's
+    /// `SignatureHelp.signatures` is a list: `std::format(` is four of them, and answering one — or none, which is
+    /// what this did while the name looked ambiguous — is a popup with nothing in it. The reader picks; this layer
+    /// claims nothing about which overload a half-typed argument list means.
     ///
-    /// The documentation above the declaration is read here rather than by the caller: it is the same declaration
+    /// The parameters come from the *callee's* declarations, so a call into a header parses that header for this
+    /// answer — **once per file**, however many overloads it holds.
+    ///
+    /// The documentation above each declaration is read here rather than by the caller: it is the same declaration
     /// the signature came from, and asking twice would be two lookups for one popup.
-    pub fn signature_at(&self, view: &FileView, offset: usize) -> Option<crate::signature::CallSignature> {
-        let mut signature =
-            crate::signature::signature_at(self.store.index(), view, offset, |path| self.view(path))?;
+    pub fn signatures_at(
+        &self,
+        view: &FileView,
+        offset: usize,
+    ) -> Vec<crate::signature::CallSignature> {
+        let mut signatures =
+            crate::signature::signatures_at(self.store.index(), view, offset, |path| self.view(path));
 
-        signature.documentation =
-            self.documentation(view, &signature.declared_in, signature.declared_at);
+        for signature in &mut signatures {
+            signature.documentation =
+                self.documentation(view, &signature.declared_in, signature.declared_at);
+        }
 
-        Some(signature)
+        signatures
     }
 
     /// The members of a type, as a file's own scopes and the index together know them.
@@ -4768,6 +4805,7 @@ mod tests {
             system_include_paths: vec![PathBuf::from("/usr/include")],
             builtin_macros: Vec::new(),
             dialect: None,
+            standard: None,
             source: ToolchainSource::SystemHeaders,
             note: Some("no compiler could be asked".to_string()),
         };

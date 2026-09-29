@@ -32,11 +32,20 @@
 //!
 //! * **the analysis still has files to read** ([`Session::pending`]) — a name may be missing for the only reason
 //!   that nothing has read the file it is in yet, so the client should **ask again** as the user types;
-//! * **the budget cut this list** ([`CompletionSet::truncated`]) — the answer is as good as it can be, and asking
-//!   again would return the same list for ever.
+//! * **the budget cut this list** ([`CompletionSet::truncated`]) — there are more names than one message can carry.
 //!
-//! So the flag is set for the first and cleared for the second. Sending `true` for a capped list is what makes a
-//! client re-request on every keystroke for an answer that cannot change.
+//! Both are set, and the second one is the correction of a mistake this file made for a long time: it reasoned that
+//! a capped list "would return the same list for ever", so it cleared the flag. That is true only for a client that
+//! re-asks with the **same** prefix, and no client does: the prefix is applied in the index **where the names are
+//! still borrowed** (`declarations_in_scope`), so the next keystroke runs a *narrower query* rather than filtering a
+//! list — and it is exact, because a query with `str` written collects the names beginning with `str` and nothing
+//! else. Measured on a file that includes `<cstdio>`, `<iostream>`, `<optional>`, `<string>` and `<format>`:
+//! completion after `std::` collects **2 146** declarations and sends the best **200**, `string` and `basic_string`
+//! among those it does not send, and with the flag cleared the client filtered those 200 rows locally for ever —
+//! typing `std::str` showed *nothing*, while the same query asked of the server answers `string` first.
+//!
+//! The cost of setting it is one request per keystroke while a big namespace is being typed through, which is the
+//! request a client sends anyway when it does not know the answer.
 
 use cpp_code_analysis::{CompletionItem as AnalysisItem, DiskFiles, ItemKind, Session};
 use lsp_types::{
@@ -97,8 +106,9 @@ pub async fn on_completion(
         );
 
         Some(CompletionResponse::List(lsp_types::CompletionList {
-            // See the module documentation: pending work means "ask again", a capped list means "do not".
-            is_incomplete: session.pending() > 0 && !found.truncated,
+            // See the module documentation: pending work means "a file may not have been read yet", a capped list
+            // means "there are more names than fitted, and the next keystroke asks a narrower question".
+            is_incomplete: session.pending() > 0 || found.truncated,
             items: found
                 .items
                 .iter()

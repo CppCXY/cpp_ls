@@ -32,6 +32,10 @@ fn session_with(files: &[(&str, &str)]) -> Session<MemoryFiles> {
 ///
 /// The marker is the whole point of the fixture: the states under test differ by *where* the cursor is, so a test
 /// that passed an offset by hand would be a test of the arithmetic rather than of the analysis.
+///
+/// **One** signature, because that is what all but one of these fixtures declare — the overload case is its own test
+/// below, and it is the plural that is the API: a name with four declarations has four signatures, and a test helper
+/// that took the first would hide exactly the thing worth pinning.
 fn signature_where_marked(source: &str) -> (String, Option<CallSignature>) {
     let offset = source.find('|').expect("the fixture marks the cursor");
     let without_marker = source.replace('|', "");
@@ -39,7 +43,7 @@ fn signature_where_marked(source: &str) -> (String, Option<CallSignature>) {
     let session = session_with(&[("/p/a.cpp", &without_marker)]);
     let view = session.view("/p/a.cpp").expect("the file is held");
 
-    (without_marker, session.signature_at(&view, offset))
+    (without_marker, session.signatures_at(&view, offset).into_iter().next())
 }
 
 /// The label at the cursor, and the text each declared span points at.
@@ -134,11 +138,74 @@ fn a_callee_in_another_file_reports_its_signature() {
     let session = session_with(&[("/p/a.cpp", &without_marker), ("/p/b.h", header)]);
     let view = session.view("/p/a.cpp").expect("the file is held");
     let signature = session
-        .signature_at(&view, offset)
+        .signatures_at(&view, offset)
+        .into_iter()
+        .next()
         .expect("the header declares the callee");
 
     assert_eq!(signature.label, "scale(int count, double factor)");
     assert_eq!(signature.declared_in, std::path::Path::new("/p/b.h"));
+}
+
+/// **A call to an overloaded function answers every overload**, and that is the answer to "which one is this":
+/// the reader picks, and the client cycles. The alternative this replaced was an empty popup — `std::format` is
+/// four declarations, the name answered `Ambiguous`, and the signature was refused.
+///
+/// The order is the declarations' own, and each signature carries its **own** active parameter: the overloads of a
+/// real function do not take the same number of parameters, so one count for the whole popup would highlight the
+/// wrong one as soon as the reader switched.
+#[test]
+fn a_call_to_an_overloaded_function_answers_every_overload() {
+    let source = "\
+int scale(int count);
+double scale(double factor, int places);
+int f() { return scale(1, |); }
+";
+    let offset = source.find('|').expect("the fixture marks the cursor");
+    let without_marker = source.replace('|', "");
+
+    let session = session_with(&[("/p/a.cpp", &without_marker)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let signatures = session.signatures_at(&view, offset);
+
+    let labels: Vec<&str> = signatures.iter().map(|found| found.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        ["scale(int count)", "scale(double factor, int places)"],
+        "both declarations, in the order they are written"
+    );
+    assert_eq!(
+        signatures[0].active_parameter,
+        Some(1),
+        "the cursor is past one comma, which is the *second* parameter — and the first overload has no second one"
+    );
+    assert_eq!(
+        signatures[1].active_parameter,
+        Some(1),
+        "the count is the call's, and each signature reports it against its own list"
+    );
+}
+
+/// A callee in another file with several overloads: each is read from the same header, and the header is parsed
+/// once for the answer rather than once per overload.
+#[test]
+fn overloads_in_one_header_are_read_from_it_once() {
+    let header = "int scale(int count);\ndouble scale(double factor, int places);\n";
+    let source = "#include \"b.h\"\nint f() { return scale(|); }\n";
+    let offset = source.find('|').expect("the fixture marks the cursor");
+    let without_marker = source.replace('|', "");
+
+    let session = session_with(&[("/p/a.cpp", &without_marker), ("/p/b.h", header)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let signatures = session.signatures_at(&view, offset);
+
+    assert_eq!(signatures.len(), 2);
+    assert!(
+        signatures
+            .iter()
+            .all(|found| found.declared_in == std::path::Path::new("/p/b.h")),
+        "both are the header's declarations"
+    );
 }
 
 /// A callee nothing declares has no signature — the same refusal the parameter hints make, for the same reason.

@@ -1356,17 +1356,41 @@ fn names_in_a_scope(
         }
         // Not in the buffer at all: the project's answer, or nothing.
         None => {
-            let found = declarations_in(spelling, index, path, written);
-            if found.is_empty() {
-                // Empty is either "declared and empty" or "no such scope", and the difference is the *name* — the
-                // same distinction `direct_members` makes, for the same reason.
-                return match index.definition(spelling, path) {
-                    Known::Yes(found) if found.fact.qualified_name() == spelling => Known::Yes(Vec::new()),
-                    Known::Unknown(reason) => Known::Unknown(reason),
-                    _ => Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(spelling))),
-                };
+            // **A qualifier that names a *type* rather than a scope in this file.** The scope tree is the buffer's
+            // own, so `std::string` — an alias of a class template, declared in `<xstring>` — is not a scope it can
+            // name, and `Some(Class)` above never sees it. A class is defined once, so its members are the answer,
+            // and `members_of` is the query that resolves an alias, a template spelling and the bases: measured on
+            // a file that includes `<string>`, completion after `std::string::` offered **0** names before this and
+            // every member of `basic_string` after it.
+            //
+            // **Asked only of a name the index says is a type**, and that test is the whole reason this is not
+            // simply tried first: `members_of` answers for a spelling that no class declares — it lists the
+            // declarations whose *scope* is that name — so a namespace qualifier sent down this path (`ns::`,
+            // `std::`) silently took the member route, which has no budget and no dedup by hiding. A namespace is
+            // [`DeclKind::Namespace`] and is answered below, where the collection budget applies.
+            let names_a_type = matches!(
+                index.definition(spelling, path),
+                Known::Yes(found) if found.fact.kind == crate::DeclKind::Type
+            );
+
+            if names_a_type {
+                match names_of_a_class(index, scopes, root, path, spelling) {
+                    Known::Yes(members) => names.extend(offered(members, 0)),
+                    Known::Unknown(_) | Known::No => {}
+                }
+            } else {
+                let found = declarations_in(spelling, index, path, written);
+                if found.is_empty() {
+                    // Empty is either "declared and empty" or "no such scope", and the difference is the *name* —
+                    // the same distinction `direct_members` makes, for the same reason.
+                    return match index.definition(spelling, path) {
+                        Known::Yes(found) if found.fact.qualified_name() == spelling => Known::Yes(Vec::new()),
+                        Known::Unknown(reason) => Known::Unknown(reason),
+                        _ => Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(spelling))),
+                    };
+                }
+                names.extend(offered(found, 0));
             }
-            names.extend(offered(found, 0));
         }
     }
 
@@ -1433,7 +1457,7 @@ impl Candidate {
     }
 }
 
-/// How many declarations from **other files** one name query will collect.
+/// How many declarations from **every visible file at once** one name query will collect.
 ///
 /// A backstop on work rather than a statement about the answer, and the number is derived from what the answer can
 /// be: `crate::completion` shows at most two hundred items, and every one of them is scored by *how near the cursor
@@ -1444,7 +1468,31 @@ impl Candidate {
 ///
 /// The file's **own** declarations are not capped: they come from the scope tree rather than from here, they are
 /// the tier that ranks first, and there are as many of them as the reader wrote.
+///
+/// This is the budget for the **global** name space (`::`, and a cursor at file scope). For one named scope see
+/// [`MAX_COLLECTED_IN_A_SCOPE`], which is a different question with a different answer.
 const MAX_COLLECTED_NAMES: usize = 400;
+
+/// How many declarations one **named scope** may contribute to a list — `std::`, `ns::`, `Widget::`.
+///
+/// # Why this is not [`MAX_COLLECTED_NAMES`]
+///
+/// Because that budget is spent in **file order**, and a scope's names are spread over the files that declare them.
+/// Measured on a file that includes `<cstdio>`, `<iostream>`, `<optional>`, `<string>` and `<format>`: completion
+/// after `std::` offered **175** names, and the ones it offered were whatever the first 400 declarations of the
+/// visibility walk happened to be — `cin`, `cout`, `getline`, `make_optional`, `nullopt` — while `string` (declared
+/// in `<xstring>`, reached through `<string>`) and everything in `<format>` were past the cut. The list a reader
+/// saw therefore depended on the order of their own `#include` lines, which is not a property of the program.
+///
+/// The honest number is the size of the scope, because a namespace holds what it holds: `std` is **2 008**
+/// declarations on this project, and every namespace in the C++ standard library is inside that. The display budget
+/// ([`crate::completion`]'s `ITEM_BUDGET`, two hundred items) is what keeps the *message* small, and it reports
+/// itself as `truncated` so the client re-asks as the reader types — where the prefix filter, which is applied
+/// before anything is cloned, makes the list exact.
+///
+/// The cost of the larger budget is one `DeclFact` clone per surviving name, and only for a cursor whose prefix is
+/// short enough to keep them: the walk itself is one pass over the closure.
+const MAX_COLLECTED_IN_A_SCOPE: usize = 4096;
 
 /// How many declarations one name may have before a workspace search stops ordering them — see
 /// `ProjectIndex::open_group`.
@@ -1533,11 +1581,12 @@ fn declarations_in_scope(
         }),
     };
 
-    // The names a reader has **not** written are the last tier of the answer, and past this many of them there is
-    // nothing left that could reach the top of a list two hundred long. See [`MAX_COLLECTED_NAMES`].
-    let found = found.into_iter().take(MAX_COLLECTED_NAMES);
-
+    // **Each of the two queries applied its own budget**, and this function must not apply a third: the global
+    // name space is unbounded in size and the tier it produces ranks last ([`MAX_COLLECTED_NAMES`]), while one named
+    // scope holds what it holds ([`MAX_COLLECTED_IN_A_SCOPE`]). A second cut here is what made `std::` offer 175 of
+    // its 2 008 names.
     found
+        .into_iter()
         .map(|declaration| {
             Candidate::new(
                 declaration.file.clone(),
@@ -2749,6 +2798,87 @@ pub(crate) struct Callee {
     pub name_offset: usize,
 }
 
+/// **Every declaration a call's callee names** — one for an ordinary function, all of them for an overload set.
+///
+/// [`callee_of_a_call`] is the singular question ("where is *the* function this calls") and it is the right one for
+/// a parameter *hint*, which labels one declaration's parameters. It is the wrong one for signature help: a call to
+/// an overloaded function has several answers, the protocol's `SignatureHelp` carries a **list**, and declining with
+/// `Ambiguous` — which is what this analysis did — leaves a reader typing `std::format(` with nothing at all.
+/// Measured on the project this was written against: `std::format` is four overloads, so the popup was empty.
+///
+/// # What is plural, and what is not
+///
+/// A **name** goes through the plural lookup ([`ProjectIndex::definitions`]), which is the query that exists for
+/// exactly this: it answers with every declaration of the name the cursor can see, in file order, each carrying the
+/// fact — including the parameter list, which is what a signature is rendered from.
+///
+/// A **member call** (`s.push_back(`) stays singular: resolving it means the object's type and then the member, and
+/// the member query that exists ([`members_of`]) answers with the class's whole member list rather than one name's
+/// declarations. An overloaded member therefore reports the one `direct_member` picks, which is where this layer was
+/// before — a smaller answer, not a wrong one, and the plural member query is its own piece of work.
+pub(crate) fn callees_of_a_call(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    call: &cpp_parser::CppSyntaxNode,
+) -> Known<Vec<Callee>> {
+    let written = call.text().to_string();
+    let written = written.trim();
+
+    let Some(callee) = call.children().next() else {
+        return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
+    };
+
+    if crate::sema::resolve::member_access_of(&callee).is_some() {
+        return match callee_of_a_call(index, scopes, root, path, call) {
+            Known::Yes(one) => Known::Yes(vec![one]),
+            Known::Unknown(reason) => Known::Unknown(reason),
+            Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+        };
+    }
+
+    // Everything else is a name — `make`, `ns::make`, `std::format`. The qualified spelling a name resolves to is
+    // what the index is asked about, and it is the answer's *failure* shapes that carry it: a name this file cannot
+    // place is either absent from the index or declared there more than once, and both are questions for the plural
+    // lookup.
+    let offset = end_of_the_written_name(&callee);
+
+    match crate::sema::resolve::definitions_at(scopes, root, offset) {
+        // Declared in this buffer: every overload of it, and the file being edited is where they are. **All** of
+        // them, which is the whole point of this function: `void scale(int); double scale(double, int);` in one
+        // file is one name with two declarations in one scope, and a signature list that showed one of them would
+        // be the old behaviour with extra steps.
+        Known::Yes(bindings) if !bindings.is_empty() => Known::Yes(
+            bindings
+                .iter()
+                .map(|binding| Callee {
+                    file: path.to_path_buf(),
+                    name_offset: binding.name_range.start_offset,
+                })
+                .collect(),
+        ),
+        Known::Yes(_) => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+        Known::Unknown(UnknownReason::NotDeclaredHere(name))
+        | Known::Unknown(UnknownReason::Ambiguous(name)) => match index.definitions(&name, path) {
+            Known::Yes(found) => Known::Yes(
+                found
+                    .found
+                    .iter()
+                    .map(|declaration| Callee {
+                        file: declaration.file.clone(),
+                        name_offset: declaration.fact.name_range.start_offset,
+                    })
+                    .collect(),
+            ),
+            Known::Unknown(reason) => Known::Unknown(reason),
+            Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+        },
+        Known::Unknown(reason) => Known::Unknown(reason),
+        Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+    }
+}
+
 /// The declaration a call names, as **a place in a file**: the file it is in, and the offset of its name.
 ///
 /// [`type_of_a_call`]'s question asked for a different answer: "what does a call of this have" needs the
@@ -3163,6 +3293,21 @@ fn fact_from_binding(root: &cpp_parser::CppSyntaxNode, class: &str, binding: &cr
         // A member list's facts carry no parameters: this path answers *which members* a class has, and substitution
         // is the caller's step — it is the caller that knows the arguments. See [DeclFact::parameters].
         parameters: Vec::new(),
+        // …but the **parameter list as written** is here, because this is the path a member list's detail line is
+        // built from: `size()` and `size_type size() const` are two rows a reader tells apart by exactly this, and
+        // the declaration is in the buffer, so reading it costs one walk up the tree. See
+        // [DeclFact::parameter_list].
+        parameter_list: match binding.kind {
+            crate::BindingKind::Function
+            | crate::BindingKind::Constructor
+            | crate::BindingKind::Destructor
+            | crate::BindingKind::ConversionFunction
+            | crate::BindingKind::OperatorFunction
+            | crate::BindingKind::LiteralOperator => {
+                crate::sema::declarations::parameter_list_at(root, binding.name_range.start_offset)
+            }
+            _ => None,
+        },
         range: binding.range,
         name_range: binding.name_range,
         clean: true,
@@ -3931,7 +4076,7 @@ impl ProjectIndex {
         self.visible_declarations_upto(
             visible_from,
             &|fact: &DeclFact| fact.scope.as_deref() == Some(scope) && accepts(fact),
-            MAX_COLLECTED_NAMES,
+            MAX_COLLECTED_IN_A_SCOPE,
             Narrow::Scoped(scope),
         )
     }
@@ -4367,12 +4512,31 @@ impl ProjectIndex {
     /// leaving the order alone would make the list depend on hashing, and a client's peek list would reorder
     /// itself between two identical requests.
     pub fn definitions(&self, name: &str, visible_from: &Path) -> Known<ProjectDefinitions> {
-        let (mut certain, conditional) = match self.certain_declarations(name, visible_from) {
+        let (certain, conditional) = match self.certain_declarations(name, visible_from) {
             Ok(candidates) => candidates,
             Err(reason) => return Known::Unknown(reason),
         };
 
-        // See the note above: one namespace, however many declarations spell it.
+        // **One entity, or two answers?** The measurement this rests on — 19 ambiguous identifiers in one real
+        // file, their candidates paired up — produced **97 pairs that stand in the same file and agree on every
+        // field a consumer can read**, against **0 across files**: the duplicates are *inside* one header (MSVC's
+        // `<iostream>` writes `cin` plain and again behind `_EXPORT_STD`), while two files declaring one name are
+        // two places a reader may want to go. See [`the_same_declaration_in_one_file`] for the conditions.
+        let mut distinct: Vec<ProjectDeclaration> = Vec::new();
+        for found in certain {
+            if distinct
+                .iter()
+                .any(|kept| the_same_declaration_in_one_file(kept, &found))
+            {
+                continue;
+            }
+            distinct.push(found);
+        }
+        let mut certain = distinct;
+
+        // See the note above: one namespace, however many declarations spell it. This rule is **wider** than the one
+        // above — it also collapses two namespaces that differ in scope, which is the reading `std`'s fifty-eight
+        // declarations needed and which the identity rule alone would leave as several answers.
         if certain
             .iter()
             .all(|found| found.fact.kind == DeclKind::Namespace)
@@ -5390,6 +5554,9 @@ impl ProjectDefinition {
                 returns: None,
                 bases: Vec::new(),
                 parameters: Vec::new(),
+                // Nor a parameter list, for exactly that reason: this fact is a place to jump to, and the file it
+                // points at has the summary that says what the declaration looks like.
+                parameter_list: None,
                 range: binding.range,
                 name_range: binding.name_range,
                 // And no answer about diagnostics either, for the same reason `guard` has none: the binding came
@@ -5588,6 +5755,84 @@ fn rank_of(qualified: &str, name: &str, wanted: &str) -> Option<usize> {
     }
 
     None
+}
+
+/// **Are these two recordings the same declaration?**
+///
+/// The comparison is the model's own identity: every field a consumer can *read*. Two facts that agree on all of
+/// them are one entity as far as any answer here is concerned — a hover would print the same type and the same
+/// scope, a completion would show one entry, a jump would land where the name is declared.
+///
+/// # What is deliberately not compared
+///
+/// * `range` and `name_range` — *where* the declaration was written. Whether two recordings may be merged across
+///   files is a separate question, and [`the_same_declaration_in_one_file`] answers it with "no".
+/// * `clean` and `guard` — *how well* it was read and *which* `#if` it stands in. Two recordings of one declaration
+///   legitimately disagree (one summary may have been built while that file had errors), and neither difference is
+///   one a consumer could observe in an answer.
+///
+/// # What is compared, and why each
+///
+/// `name` and `scope` are the qualified name — the identity the index is keyed by. `local` separates a file-scope
+/// name from a local one with the same spelling, which nothing outside its own body can name. `kind` separates a
+/// class from a function of the same name. `type_of`, `returns`, `bases` and `parameters` are what a
+/// **redeclaration** must agree about: a forward declaration and a definition differ in exactly these.
+///
+/// `parameter_list` is the sixth, and it was added late because the model did not have it: without it two overloads
+/// of one function that share a return type — `string format(const string_view)`, `wstring format(const
+/// wstring_view)`… and the four `std::format`s that *are* distinguishable only here — read as one recording of one
+/// declaration. A fact that did not record it says `None` on both sides, which is the honest answer: "nothing here
+/// tells them apart" is what `None == None` means, and it is why [`the_same_declaration_in_one_file`] still demands
+/// the **presence** of evidence rather than its equality.
+fn the_same_declaration(one: &DeclFact, other: &DeclFact) -> bool {
+    one.name == other.name
+        && one.scope == other.scope
+        && one.local == other.local
+        && one.kind == other.kind
+        && one.type_of == other.type_of
+        && one.returns == other.returns
+        && one.bases == other.bases
+        && one.parameters == other.parameters
+        && one.parameter_list == other.parameter_list
+}
+
+/// Are these two candidates **one declaration recorded twice**, as far as this index can tell?
+///
+/// # The three conditions, and why each is there
+///
+/// 1. **The same file.** `int count;` in two headers is two answers, not one — the position this project pinned in
+///    `two_declarations_of_one_name_are_a_list_for_a_consumer_that_shows_one`, and the language agrees: one name
+///    written in two translation units is two objects or an error, and a reader asking where `count` is declared is
+///    owed both places. Measured on one real file: of the candidate pairs that agree on everything readable,
+///    **97 stand in the same file and 0 across files** — the duplicates are *inside* a header (MSVC's `<iostream>`
+///    writes `cin` plain and again behind `_EXPORT_STD`), which is what this exists for.
+/// 2. **A field that can tell two declarations apart must be _present_, not merely equal.** A variable's or an
+///    alias's **type**; a function's **parameter list**. Equal-and-empty is not agreement: two overloads that share
+///    a return type and whose parameters were never read would "agree" on everything, and an identity invented out
+///    of silence collapses every overload set into one answer — which is what `std::getline`'s four overloads did
+///    before the parameter list was recorded. A function whose parameters are unread is therefore **never** merged.
+/// 3. **Everything else about them is equal** — see [`the_same_declaration`].
+///
+/// A class is deliberately not mergeable: this model records no member list, so two classes of one name in one file
+/// are indistinguishable *and* genuinely different. What collapses a class's own redeclaration (`struct S;` then
+/// `struct S { … };`) is not this rule — such a pair is one `DeclFact` here to begin with.
+fn the_same_declaration_in_one_file(one: &ProjectDeclaration, other: &ProjectDeclaration) -> bool {
+    if one.file != other.file || !the_same_declaration(&one.fact, &other.fact) {
+        return false;
+    }
+
+    match one.fact.kind {
+        // A variable, and an alias (which this model records as a `Type` with a spelling): the type tells two of
+        // them apart, and an absent one is silence rather than agreement.
+        DeclKind::Variable | DeclKind::Type => one.fact.type_of.is_some(),
+        // A function: the parameter list, which is the field that separates overloads and the one this model reads
+        // out of the declarator. `parameters` — the *template* parameter names — is not evidence about a function:
+        // an ordinary function has none, so requiring it here would refuse to merge anything.
+        DeclKind::Function => one.fact.parameter_list.is_some(),
+        // A namespace has its own, wider rule at the call site; a macro and an anonymous construct have nothing here
+        // that could tell two of them apart.
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -5985,6 +6230,33 @@ mod tests {
             1,
             "one namespace, however many files reopen it: a peek list of fifty-eight entries answers a question \
              nobody asked"
+        );
+    }
+
+    #[test]
+    fn one_function_declared_twice_is_one_entity_and_an_overload_is_two() {
+        // The rule that needed a parameter list to exist at all. `the_same_declaration_in_one_file` demands
+        // **evidence** that can tell two declarations apart before it merges them, and for a function that evidence
+        // is the parameter list — which the model did not record. So the gate `!parameters.is_empty()` was asking
+        // about the *template* parameter names, which an ordinary function never has: **no function was ever
+        // merged**, and the two halves of MSVC's `<iostream>` idiom (`void f(int);` written plain and again behind
+        // `_EXPORT_STD`) stayed two answers where one is the truth.
+        //
+        // Both directions in one fixture, because a rule that merged everything would pass the first half alone:
+        // the same declaration twice is one entity, and `(double)` beside `(int)` is a second one.
+        let index = index(&[(
+            "/p/lib.h",
+            "namespace ns {\n  void f(int);\n  void f(int);\n  void f(double);\n}\n",
+        )]);
+
+        let Known::Yes(found) = index.definitions("ns::f", Path::new("/p/lib.h")) else {
+            panic!("three declarations of `ns::f`, and two entities among them");
+        };
+
+        assert_eq!(
+            found.found.len(),
+            2,
+            "the twice-declared `(int)` is one entity; `(double)` is an overload: {found:?}"
         );
     }
 
@@ -8179,9 +8451,77 @@ mod tests {
         }
     }
 
+    /// **A name is offered however far into its namespace's files it is written.**
+    ///
+    /// The budget that used to apply here was spent in **file order**: the walk took whole files until it had
+    /// collected 400 declarations, so a namespace whose first file is large — every standard header is — pushed the
+    /// rest out of the answer. Measured on a file that includes `<cstdio>`, `<iostream>`, `<optional>`, `<string>`
+    /// and `<format>`: completion after `std::` offered **175** names, `cin` and `cout` among them, and `string`
+    /// (declared in `<xstring>`, one include further along) was not there at all — so the list a reader saw depended
+    /// on the order of their `#include` lines. See [`MAX_COLLECTED_IN_A_SCOPE`].
     #[test]
-    fn a_qualified_scope_offers_the_names_written_in_it() {
-        let source = "namespace ns {\n  struct Widget { };\n  int helper();\n}\nvoid f() {\n  ns::\n}\n";
+    fn a_name_in_a_late_file_of_a_namespace_is_still_offered() {
+        // More than the old budget, so that the file after this one is never read under it.
+        let mut big = String::from("namespace ns {\n");
+        for index in 0..(super::MAX_COLLECTED_NAMES + 20) {
+            big.push_str(&format!("  int filler{index};\n"));
+        }
+        big.push_str("}\n");
+
+        let late = "namespace ns {\n  int zebra;\n}\n";
+        // **`late.h` is reached through `big.h`**, which is the shape the defect had: the header that fills the
+        // budget is a *direct* include of the file being typed in, and the one holding the wanted name is one step
+        // further along the walk — `string` lives in `<xstring>`, which `<string>` includes.
+        let big_with_include = format!("#include \"late.h\"\n{big}");
+        let source = "#include \"big.h\"\nvoid f() {\n  ns::\n}\n";
+        let files = [
+            ("/p/big.h", big_with_include.as_str()),
+            ("/p/late.h", late),
+            ("/p/a.cpp", source),
+        ];
+
+        let found = names_at(&files, "/p/a.cpp", source, "ns::");
+        let names = offered(&found);
+
+        assert!(
+            names.iter().any(|name| name == "zebra"),
+            "the name is declared in a file the cursor can see, and the list must not stop before it: \
+             {} names offered, none of them `zebra`",
+            names.len()
+        );
+    }
+
+    /// **The members of a class template reached through an alias**: `std::string::` is how a reader asks this
+    /// every day, and the class it names is not a scope *in the buffer's tree* — it is an alias declared in a header.
+    ///
+    /// The query that answers it is the same one a member access uses ([`members_of`]), which resolves the alias, the
+    /// template spelling and the bases; asking only `declarations_in("std::string")` — what this used to do — finds
+    /// nothing at all, because no declaration in the program has that scope. Measured on a file that includes
+    /// `<string>`: **0** members before this, **63** of `basic_string`'s after.
+    #[test]
+    fn the_members_of_a_class_template_reached_through_an_alias_are_offered() {
+        let header = "namespace ns {\n\
+                      template <class _Ty>\n\
+                      struct Basic {\n\
+                        unsigned long size() const;\n\
+                        _Ty* data();\n\
+                      };\n\
+                      using String = Basic<char>;\n\
+                      }\n";
+        let source = "#include \"basic.h\"\nvoid f() {\n  ns::String::\n}\n";
+        let files = [("/p/basic.h", header), ("/p/a.cpp", source)];
+
+        let found = names_at(&files, "/p/a.cpp", source, "ns::String::");
+        let names = offered(&found);
+
+        assert!(
+            names.iter().any(|name| name == "size") && names.iter().any(|name| name == "data"),
+            "`ns::String` is `ns::Basic<char>`, and its members are the answer: {names:?}"
+        );
+    }
+
+    #[test]
+    fn a_qualified_scope_offers_the_names_written_in_it() {        let source = "namespace ns {\n  struct Widget { };\n  int helper();\n}\nvoid f() {\n  ns::\n}\n";
         let found = names_at(&[], "/p/a.cpp", source, "ns::");
 
         assert_eq!(offered(&found), ["Widget", "helper"], "sorted within the scope");
@@ -9016,3 +9356,4 @@ mod name_index_agrees_with_the_scan {
         assert!(index.symbols_matching("w", 10).is_empty());
     }
 }
+
