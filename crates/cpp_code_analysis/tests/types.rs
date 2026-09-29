@@ -67,6 +67,76 @@ fn last_word(source: &str, spelling: &str) -> usize {
 }
 
 /// The five shapes a modern codebase actually writes, each deduced from what the declaration wrote.
+/// **A `using` alias declares the type after its `=`** — and nothing next to it inherits it.
+///
+/// `using X = Y;` writes the type on the **right of the `=`**, in a `TypeId` of its own: not in a declarator, not
+/// in a specifier sequence, which is why the reader that answers "what type does this name declare" needs a branch
+/// that reads neither. The review registered this path as having no test of its own ("`using X = Y;` 与 `typedef`
+/// … 这条路还没有专门的测试"), and it is the branch that reads `Shape::type_id`.
+///
+/// The question is asked of **member accesses** rather than of the declarations: a declaration answers with the
+/// spelling the file wrote (`size_type value;` *is* a `size_type`), and following the alias is what the use-side
+/// reader does. Asking the declaration and expecting `unsigned long` is a test that fails against correct code —
+/// which is how this one started.
+///
+/// The **neighbours** are the other half, and they are why this is not one assertion: a target read out of the
+/// wrong node — which is what picking the enclosing construct instead of the innermost one does — shows up first
+/// as a neighbour with the alias's type.
+#[test]
+fn a_using_alias_member_declares_the_type_after_the_equals() {
+    let source = "\
+struct Widget {
+    using size_type = unsigned long;
+    size_type value;
+    int count;
+    char* name;
+};
+unsigned long use(Widget w) {
+    w.count;
+    w.name;
+    return w.value;
+}
+";
+    assert_eq!(
+        type_of_use(source, "count"),
+        Some("int".to_string()),
+        "the member declared after the alias keeps its own type"
+    );
+    assert_eq!(
+        type_of_use(source, "name"),
+        Some("char*".to_string()),
+        "and so does the one after that"
+    );
+    assert_eq!(
+        type_of_use(source, "value"),
+        Some("unsigned long".to_string()),
+        "the member declared *with* the alias is what the alias names"
+    );
+}
+
+/// **Two aliases in one class each keep their own target.**
+///
+/// The lookup asks "the innermost `using` this name is inside", and a class with two of them is where "innermost"
+/// and "the one the file wrote first" stop being the same answer. Both are pinned because the failure mode is
+/// silent: the second alias answering with the first one's target is a type that is *wrong*, not missing.
+#[test]
+fn two_using_aliases_in_one_class_keep_their_own_targets() {
+    let source = "\
+struct Widget {
+    using first = int;
+    using second = unsigned long;
+    first a;
+    second b;
+};
+int use(Widget w) {
+    w.b;
+    return w.a;
+}
+";
+    assert_eq!(type_of_use(source, "a"), Some("int".to_string()));
+    assert_eq!(type_of_use(source, "b"), Some("unsigned long".to_string()));
+}
+
 #[test]
 fn an_auto_declaration_takes_the_type_of_its_initializer() {
     let cases = [

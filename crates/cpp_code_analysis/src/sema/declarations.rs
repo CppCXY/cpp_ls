@@ -101,7 +101,7 @@ pub fn build_facts(
 /// `None` for a declaration that declares no type: a class, a namespace, a function, an alias. See
 /// [`DeclFact::type_of`].
 pub fn declared_type_of(root: &CppSyntaxNode, binding: &Binding) -> Option<String> {
-    declared_type_of_with(root, &DeclarationShapes::of(root), binding)
+    declared_type_of_with(&DeclarationShapes::of(root), binding)
 }
 
 /// [`declared_type_of`] for a caller that has the file's shapes already — which is every caller with more than one
@@ -138,26 +138,34 @@ pub fn declared_type_of(root: &CppSyntaxNode, binding: &Binding) -> Option<Strin
 /// The name is matched by **being inside the declaration** rather than by equality, because a `using` can declare
 /// several names in one line only as a template, and the range a binding records is the name's own:
 /// `template <class T> using Vec = vector<T>;` binds `Vec`, and the `TypeId` is what its type is.
-fn using_alias_target(root: &CppSyntaxNode, name: cpp_parser::SourceRange) -> Option<String> {
-    let declaration = root
-        .descendants()
-        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::UsingDecl)
-        .filter(|node| {
-            let own = node.text_range();
-            usize::from(own.start()) <= name.start_offset && usize::from(own.end()) >= name.end_offset()
-        })
-        .min_by_key(|node| {
-            usize::from(node.text_range().end()) - usize::from(node.text_range().start())
-        })?;
-
-    let target = declaration
-        .children()
-        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TypeId)?
-        .text()
-        .to_string();
-    let target = target.trim().to_string();
-
-    (!target.is_empty()).then_some(target)
+/// **The type a `using` alias names**, asked of the shapes rather than of a walk from the root.
+///
+/// # Why the tree is not asked
+///
+/// It was — `root.descendants()`, filtered to the innermost `UsingDecl` holding the name — and this question is
+/// asked **once per binding**, so one pass over the file became quadratic in its bindings. Measured on a real
+/// project (138 files): indexing **1.93 s → 27.0 s**, of which the `type-of` stage alone reported **66.5 s**
+/// (stage time sums every call; the calls overlap in wall time).
+///
+/// It is the same defect the note above [`declared_type_of_with`] records — `declarator_declaring` walking from
+/// the root, measured then at 2.9 s → 24.9 s on 356 files — which is what [`DeclarationShapes`] exists to answer
+/// in one pass. A `using` declaration **is** one of the shapes, and the `TypeId` written after its `=` is recorded
+/// with it, so the same answer costs a walk up the ancestor chain.
+fn using_alias_target(shapes: &DeclarationShapes, name: cpp_parser::SourceRange) -> Option<String> {
+    // **The innermost `using` the name is inside**: `on_the_path` visits outermost first, so the last one that
+    // holds the name is the one that declares it — which is what "the smallest such node" meant when this walked.
+    let mut target = None;
+    shapes.on_the_path(name.start_offset, |shape| {
+        if shape.kind == CppSyntaxKind::UsingDecl
+            && let Some(type_id) = &shape.type_id
+        {
+            let spelling = type_id.text().to_string().trim().to_string();
+            if !spelling.is_empty() {
+                target = Some(spelling);
+            }
+        }
+    });
+    target
 }
 
 /// Does this declarator's span reach the start of the name it is being read for?
@@ -170,11 +178,7 @@ fn reaches_the_name(node: &CppSyntaxNode, name: cpp_parser::SourceRange) -> bool
     usize::from(span.start()) <= name.start_offset && usize::from(span.end()) >= name.start_offset
 }
 
-fn declared_type_of_with(
-    root: &CppSyntaxNode,
-    shapes: &DeclarationShapes,
-    binding: &Binding,
-) -> Option<String> {
+fn declared_type_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
     // **The kinds that name a type.** A field and a parameter are `Variable` too — they are what a member access is
     // asked *from* — and so is an **alias**, which is the kind this list was missing: `typedef _Ty& reference;`
     // records nothing under a rule that only allows `Variable`, so every member a class declares with its own
@@ -232,7 +236,7 @@ fn declared_type_of_with(
     // declarator, `using` reads the type id — and both end in the same field. Measured: without this branch a
     // `using` alias answered `void`, because the specifiers of the *enclosing* class were what the walk had last
     // seen.
-    if let Some(target) = using_alias_target(root, binding.name_range) {
+    if let Some(target) = using_alias_target(shapes, binding.name_range) {
         return Some(target);
     }
 
@@ -890,7 +894,7 @@ fn fact_for(
     // them dominates is the difference between four different fixes. See `crate::stages`.
     let type_of = {
         let _timer = crate::stages::StageTimer::new(crate::stages::Stage::TypeOf);
-        declared_type_of_with(root, shapes, binding)
+        declared_type_of_with(shapes, binding)
     }
     .or_else(|| {
         let _timer = crate::stages::StageTimer::new(crate::stages::Stage::Alias);
@@ -2167,5 +2171,6 @@ mod tests {
         assert_eq!(of("plain").returns.as_deref(), Some("void"));
     }
 }
+
 
 

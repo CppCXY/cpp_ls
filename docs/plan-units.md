@@ -897,3 +897,152 @@ declarations_in("std")  2008 → 2008        ← 什么也没变差(不设门时
 2. `sourceannotations.h` 的 `/analyze` 语法(SAL 注解在声明里的位置)是**具体缺口**,不再是"非缺口";
 3. 如果还要更稳:**渲染的解析一旦出错,就把出错点之后的事实标成"作用域不可断言"**,而不是整条读数作废
    —— 那是把门从"关着"改成"只关一半",代价是熟读事实要重新有 guard。
+
+---
+
+## 20. 我拉下去的那 27 秒:一个"从根遍历"落在**每绑定**的路径上
+
+用户报的是"中午 Claude 重做性能、启动快了很多,下午晚上你继续做分析/类型检查之后又慢回去了"。
+量出来的形状很干净:
+
+```text
+基线(修前)   indexed 138 files in 27.003 s
+              sweep 68 081 ms → facts 67 613 ms → type-of 66 480 ms
+              shapes 210 ms      ← 形状表本身只有 0.2 秒:钱花在表建好**之后**
+```
+
+元凶是 `declared_type_of_with` 里的一行:
+
+```rust
+if let Some(target) = using_alias_target(root, binding.name_range) { return Some(target); }
+```
+
+而 `using_alias_target` 的实现是 `root.descendants()` 全树遍历 + 过滤 `UsingDecl` + 取最小的那个。
+**它每个绑定调用一次**,于是"一遍过"变成了"绑定数 × 节点数"。
+
+**这是同一个形状第三次咬人**,三次都记在同一个文件里:
+
+| 第几次 | 谁 | 读数 |
+|---|---|---|
+| 一 | `declarator_declaring` 从根走(Claude 量到并修掉) | 356 文件 2.9 s → 24.9 s |
+| 二 | `declared_type_of`/`declared_returns_of` 从根下潜(§12) | 冷启动 14.4 s → 76 ms |
+| 三 | `using_alias_target` 从根遍历(本轮) | 冷启动 **27.0 s → 1.17 s** |
+
+修法沿用第二条的答案:形状表**已经**为这个问题记好了东西(`Shape.type_id` 就是 `using` 的 `=` 右边),
+所以只把那一行换成"沿祖先链走一遍"。**`root` 参数随之变成未使用,被我删掉了** —— 那是个好信号:
+它说明那处全树遍历是该函数里**唯一**的一处。
+
+**读数(同一工作区、同一个探针、冷启动):**
+
+| | 修前 | 修后 |
+|---|---|---|
+| `indexed 138 files in` | **27.0 s** | **1.17 s** |
+| `type-of` | 66 480 ms | **139 ms** |
+| `facts` | 67 613 ms | 1 308 ms |
+| `sweep` | 68 081 ms | 1 838 ms |
+
+答案不变:`declarations_in("std")` 1959 → 2008、`basic_istream/basic_ostream/basic_string` 成员 42/24/202。
+`cargo test -p cpp_code_analysis`(全部 target)**全绿**(548 lib + 各集成测试)。
+
+### 两条要记住的
+
+1. **阶段表现在会超过墙钟**(`stages account for 4817 ms of the 1173.9 ms`)—— 因为 Claude 第三轮把
+   `parse + sweep` 并行了,阶段时间是**各线程之和**。`stages total` 从这一轮起**不能再当墙钟读**:
+   它是"哪一段",不是"多久"。这一条要写进 `stages.rs` 的文档。
+2. **同形状的雷还剩一个,已量、未修**:`declarations.rs:740` 的 `declared_template_parameters_of`
+   也是 `root.descendants()` + 过滤 `TemplateDecl`,**每个 class 绑定一次**。本语料上它只值 66 ms
+   (`returns` 那一段),但 class 密集的头文件里就是下一个 66 秒。它的语义有讲究(模板声明与它引入的类是
+   **兄弟**而不是父子,所以要看"父节点的 `DeclSpecifierSeq` 是否含这个偏移"),修它要把那一层关系也搬进形状表,
+   所以**单独一轮**,不在本轮顺手改。
+
+---
+
+## 21. "做好索引"这条:Claude 的评审 §3.1 已经**过时**,而它要的东西已经在代码里
+
+用户这一轮的吩咐是"做语义分析,做好索引"。先量了索引那条线,结论要先说清楚:
+
+**§3.1(A3:`ProjectIndex` 缺少名字倒排)描述的状态已经不存在了。** 现在的 `ProjectIndex` 有:
+
+```text
+order: BTreeMap<u32, String>      + sequence: HashMap<String, u32> + next_sequence
+names: NameIndex                  ← 倒排(见 crate::index::names)
+files_defining_macro / files_declaring / symbols_matching   ← 都是表查询
+```
+
+读数(`index_scale`,5 000 文件 / 130 000 条声明 / 30 050 个不同名字,release,一次运行内对照):
+
+| 查询 | 表 | 全扫 | 比值 |
+|---|---|---|---|
+| `symbols_matching("wid", 100)` | **42.6 µs** | 56.4 ms | 1 300× |
+| `symbols_matching("e", 100)` | **184 µs** | 53.1 ms | 290× |
+| `files_declaring("Widget7_1")` | **884 µs** | 3.2 ms | 3.6× |
+| `declarations_in("ns7")` | **838 µs** | 3.1 ms | 3.7× |
+| 一次编辑(forget + insert) | **285 µs** | — | — |
+
+所以**不需要再做一遍**:门禁虽然还没达到(< 20 ms 早已满足,`files_declaring` 那一档比全扫只快 3.6×
+是因为全扫本身只走可见闭包),但这条线已经不是瓶颈。
+
+### 这一轮实际做了什么
+
+1. **修掉了 27 秒的回归**(§20):`using_alias_target` 从"每绑定一次全树遍历"改成形状表查询。
+2. **补上审阅点名缺失的那条语义测试**(§9.6 第 3 条:`using X = Y;` 这条路没有专门的测试):
+   `a_using_alias_member_declares_the_type_after_the_equals` 与
+   `two_using_aliases_in_one_class_keep_their_own_targets`。两条都钉**相邻**声明不被别名污染、
+   以及同类里两个别名各归各的 —— 也就是我这次改动的两种失败方式。
+
+### 一条测试写法上的教训(值得记)
+
+我第一版把这两条测试写成问**声明本身**的类型(`size_type value;` 里 `value` 的类型),期望
+`unsigned long`,结果得到 `size_type` —— **测试对着正确的代码红了**。原因不是代码:声明答的是**文件写下的拼写**,
+穿透别名发生在**使用**那一侧(`w.value`)。所以问题问错了层,不是答案错了。
+
+规则:**"这个名字是什么类型"有两个读者,问声明和问使用是两个问题**;写测试时先确认问的是哪一个 ——
+这正是 §8 第 19 条("同一个事实有两个读者")的镜像:那次是两个读者给出不同答案,这次是一个读者被问了它不回答的问题。
+
+### 下一步(按 Claude 的执行顺序,取其中价值最高的)
+
+1. **`Ambiguous` 去重(2 034 次)** —— 语义线上最大的未做项;先量"这些候选里有多少其实是同一个实体
+   (同名 + 同类 + 同一文件/同一模板的多次声明)",再定去重键。**先量再定**。
+2. **A1 依赖作废判据**(`invalidate_dependents` 用编辑**前**的摘要判断是否定义宏,漏掉新增 `#define`、
+   增删 `#include`):改成"指令事实前后是否相同",同一个函数还能复用于阶段 3 的边界规则。
+3. **A2 缓存清扫**:缓存目录只写不删,每次指纹变化留一整套孤儿分片。
+4. **A4**:`Session.units` 无上限、`units_for_the_pass` 的 `candidates.contains` 是 O(N²) —— 都是我这轮的代码。
+
+---
+
+## 22. `Ambiguous` 去重:我实现了,三条测试把我按住了 —— **规则是错的,撤回**
+
+按 §21 的顺序做第 1 项,但我**先写实现、后量**,顺序反了。做法是给 `definitions` 加一条"同一个实体只留一条"的
+收敛(判据 = 消费者能读到的每个字段都相同:`name/scope/local/kind/type_of/returns/bases/parameters`),
+本意是让 `cin` 那种"一个头里写两遍"的名字不再 `Ambiguous`。
+
+三条既有测试立刻红,而我读完之后认为**它们是对的、我的规则是错的**:
+
+```text
+two_declarations_of_one_name_are_a_list_for_a_consumer_that_shows_one
+    /p/one.h: "int count;"      /p/two.h: "int count;"
+    断言:definitions("count") 是**两条**的名单,顺序按文件
+    理由(测试自己的注释):"`Ambiguous` 是'哪一个'的诚实答案,而能显示名单的客户端永远不必被告知它
+                        —— **这两条都是真答案**"
+```
+
+三条各自否掉我的一个假设:
+
+| 测试 | 我错在哪 |
+|---|---|
+| 两个头各写 `int count;` | **跨文件的两条不是"同一条记录两遍"**,是两个位置;藏掉一个就是少给一个答案 |
+| `struct Widget` 在两个头里 | 一个类的**身份不在 `DeclFact` 里**(没有成员、没有基类时,两条看起来一模一样),所以"字段全同 ⇒ 同一实体"对类是假的 |
+| 重载集 `f(int)/f(double)/f(char)` | 这条**没被我的规则破坏**(参数不同 → 不合并)✓,但它证明了这条规则的边界在哪:参数表是唯一真正能分辨函数的字段 |
+
+所以真正的问题是:**`DeclFact` 里没有足够的信息去判断"同不同一个实体"** ——
+函数要看参数表(有),变量要看类型(有),类要看成员(没有)。而 §9.3 那句话里的"同一声明被多个文件重复记录"
+到底指哪一类,是**必须先量的东西**:得把 2 034 次 `Ambiguous` 按"候选之间**差在哪个字段**"分类
+(0 个字段不同 = 真重复 / 只在参数上不同 = 重载 / 只在文件上不同 = 两个位置 / 差在类型或基类 = 真不同实体),
+有了这张分布表才能定键。
+
+**这一轮的状态**:`project.rs` 已 `git checkout` 回退,548 条 lib 测试全绿;
+上一轮的回归修复与两条别名测试**保留**(那三处是 `declarations.rs` / `tests/types.rs`,与本次回退无关)。
+
+**教训(这一轮第四次同一个)**:这一整天里"先写实现后量"把我按住了四次 ——
+§11 单元读数先于账目、§20 的 27 秒、"我以为形状表是元凶"、和这次的去重键。
+**先量再定不是流程装饰**:这四次里有三次是量出来的结论与我的判断相反。
