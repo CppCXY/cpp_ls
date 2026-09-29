@@ -328,6 +328,12 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// have changed the environment any file reads it in, or the timeline of any unit it is part of — so it drops
     /// neither. See [`crate::preprocess::directive::DirectiveSignature`].
     directive_signatures: std::collections::HashMap<String, crate::preprocess::directive::DirectiveSignature>,
+    /// **Files already read and parsed, waiting for the queue to reach them** — see [`Session::advance`].
+    ///
+    /// Bounded by what one `advance` asked for, and emptied by anything that could make a prepared answer describe a
+    /// text the file no longer has: an edit, a close, a filesystem event. It is a read-ahead, never a source of
+    /// truth: an entry that is not here is simply read when its turn comes.
+    prefetched: HashMap<String, crate::index::store::Prepared>,
     /// **The translation unit each cooked file was read in**, kept across cooks.
     ///
     /// The one-walk timeline ([`crate::TranslationUnit`]) is what makes a *file's* environment a position in a walk
@@ -601,6 +607,7 @@ impl<F: FileProvider + Clone> Session<F> {
             units: UnitTable::default(),
             units_read: std::collections::HashSet::new(),
             directive_signatures: std::collections::HashMap::new(),
+            prefetched: HashMap::new(),
             headers,
         };
 
@@ -779,6 +786,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // knows any more, and a view built on it would answer about an edit nobody saved.
         self.vfs.close(path);
         self.store.forget(path);
+        self.prefetched.clear();
         self.directive_signatures.remove(&queue_key(path));
         self.units.clear();
         self.units_read.clear();
@@ -804,6 +812,9 @@ impl<F: FileProvider + Clone> Session<F> {
 
     /// [`Session::changed`] for a caller that did its own coalescing.
     pub fn respond(&mut self, batch: &ChangeBatch) -> Response {
+        // Anything read ahead was read before this batch said the world moved.
+        self.prefetched.clear();
+
         // **What the batch's files said, before the store takes their summaries away**: a watched change is the same
         // event as an edit as far as a dependent's reading is concerned, and the reverse walk needs the edges and the
         // macro facts that are still there.
@@ -875,6 +886,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 self.directive_signatures.insert(queue_key(path), before);
             }
         let moved = self.directives_moved(path, Some(text));
+        self.prefetched.clear();
 
         self.documents.open(path, text);
         self.vfs.insert(path, text, true);
@@ -1112,37 +1124,55 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn advance(&mut self, steps: usize) -> Vec<Step> {
         let mut done = Vec::new();
 
-        let mut prepared: HashMap<String, crate::index::store::Prepared> = HashMap::new();
-
         for taken in 0..steps {
             let Some((path, priority, depth)) = self.queue.pop() else {
                 break;
             };
 
-            // **A file nobody prepared is the front of a wave**: the file just popped, and whatever is queued behind
-            // it, are prepared together — so the first file of a closure is read alone, its includes (now queued) as a
-            // group, their includes as the next group, and the width of the group is the width of the include graph.
+            // **A file nobody prepared is the front of a wave**: the file just popped, the files queued behind it,
+            // and — this is the part that makes the wave as wide as the project — everything *they* include, found by
+            // scanning `#include` lines before any of them is parsed ([`SummaryStore::prepare_closure`]). The first
+            // file of a closure is read alone; the moment it has been lexed, every core is reading what it names.
+            //
+            // Bounded by what this call was asked to do, twice over: at most two calls' worth of files are read
+            // ahead, and the rest wait for the next call — a slice that read a whole closure would hold the writer
+            // for the whole of a cold start.
             let key = queue_key(&path);
             let left = steps - taken;
-            if left > 1 && !prepared.contains_key(&key) {
+            if left > 1 && !self.prefetched.contains_key(&key) {
                 let mut wave = vec![path.clone()];
                 wave.extend(
                     self.queue
                         .peek(left - 1)
                         .into_iter()
-                        .filter(|queued| !prepared.contains_key(&queue_key(queued))),
+                        .filter(|queued| !self.prefetched.contains_key(&queue_key(queued))),
                 );
 
-                if wave.len() > 1 {
-                    let made = self.store.prepare_many(&wave);
-                    for (path, made) in wave.iter().zip(made) {
-                        prepared.insert(queue_key(path), made);
-                    }
+                let room = (steps * 4).saturating_sub(self.prefetched.len());
+                let made = {
+                    let queue = &self.queue;
+                    let prefetched = &self.prefetched;
+                    self.store.prepare_closure(
+                        &wave,
+                        |target| {
+                            !queue.is_worked(target) && !prefetched.contains_key(&queue_key(target))
+                        },
+                        room.min(steps * 2).max(wave.len()),
+                    )
+                };
+                for (path, made) in made {
+                    self.prefetched.insert(queue_key(&path), made);
                 }
             }
 
-            let ready = prepared.remove(&key);
+            let ready = self.prefetched.remove(&key);
             done.push(self.index_one(path, priority, depth, ready));
+        }
+
+        // Nothing left to read means nothing left to read *ahead*: what is still here was prepared for a queue that
+        // has since been emptied by something else, and would be stale by the next time it is looked at.
+        if self.queue.pending() == 0 {
+            self.prefetched.clear();
         }
 
         // **The second pass, at the moment the closure is in hand**. `SummaryStore::get` reads one file with
@@ -2646,6 +2676,11 @@ impl Work {
 
     fn pending(&self) -> usize {
         self.queued
+    }
+
+    /// Has this path already been worked?
+    fn is_worked(&self, path: &Path) -> bool {
+        matches!(self.standing.get(&queue_key(path)), Some(Standing::Worked))
     }
 
     /// The next `how_many` files [`Work::pop`] would answer with, **without taking them** — in the order it would.

@@ -40,6 +40,9 @@ pub enum Stage {
     Hash,
     /// Looking a summary up on disk: the entry read, the key check, and the include re-check.
     Lookup,
+    /// Scanning a file's `#include` lines — lex, directive scan, resolution — **before** its parse, so that the files
+    /// it names can be read in parallel with it (`SummaryStore::prepare_closure`).
+    IncludeScan,
     /// Parsing a file's **own text** into the real syntax tree.
     Parse,
     /// Walking that tree to the file's facts (scope walk and declaration sweep) and building the summary.
@@ -154,10 +157,11 @@ impl Stage {
 }
 
 /// Every stage, in the order the table prints them.
-pub const STAGES: [Stage; 36] = [
+pub const STAGES: [Stage; 37] = [
     Stage::Read,
     Stage::Hash,
     Stage::Lookup,
+    Stage::IncludeScan,
     Stage::Parse,
     Stage::Sweep,
     Stage::Encode,
@@ -200,6 +204,7 @@ impl Stage {
             Stage::Read => "read",
             Stage::Hash => "hash",
             Stage::Lookup => "lookup",
+            Stage::IncludeScan => "include-scan",
             Stage::Parse => "parse",
             Stage::Sweep => "sweep",
             Stage::Encode => "encode",
@@ -247,6 +252,7 @@ impl Stage {
             Stage::Read
             | Stage::Hash
             | Stage::Lookup
+            | Stage::IncludeScan
             | Stage::Parse
             | Stage::Sweep
             | Stage::Encode

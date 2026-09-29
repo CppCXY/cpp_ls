@@ -30,6 +30,16 @@
 | 第二遍 pass 的重读并行 | 有单元时间线覆盖的文件用 `parallel_map` 一起重解析,再顺序提交;没有时间线的调用方(探针、测试)仍走原来的串行闭包环境路径 | 2.25 s → **1.7–1.8 s**(约 1.9×) |
 | 结果一致性 | 与改动前逐行对比 `workspace_probe` 输出(147 行,含 `reused/rebuilt/unstored` 与全部 definition 表)**一致**;新增测试:并行 prepare + 顺序 commit 与逐个 `get` 得到相同的索引,写盘的条目能被下一次运行完整读回 | 全部 1 479 个用例通过,clippy 零警告 |
 
+### 第四轮:预扫描 `#include`
+
+| 项 | 做了什么 | 读数(同上) |
+|---|---|---|
+| 预扫描 | `FileIndexer::scan_includes`:只做词法 + 指令扫描 + 解析 include 路径(约为解析成本的 1/10),在**解析之前**就得出该文件的 include 列表 | 冷启动 1.7–1.8 s → **1.3 s**(相对最初的 3.3 s 是 2.5×);暖启动 ~450 ms → **~235 ms** |
+| `SummaryStore::prepare_closure` | 各核共享一个"待读文件"前沿:worker 取一个文件,先扫描它的 include 并把目标放进前沿,再去解析它——第一个文件一词法完,其余核就在并行读它引用的整个图(广度优先),并行宽度 = include 图的宽度,而不是"一层"的宽度 | 预算与过滤:`Session::advance` 每次最多预读 `2×steps` 个,且跳过已经读过的文件;编辑/关闭/文件事件时清空预读表 |
+| 不重复搜索 | 扫描解析出的路径通过 `with_scanned_includes` 交给随后的解析,只对**完全相同的指令**复用(形式/目标/`include_next` 都一致才用),所以 include 路径的文件系统搜索只做一次 | 详细计时里 `includes` 102 ms → 38 ms;原有测试"命中时不搜索、构建时每个候选只探测一次"仍通过 |
+| 与解析一致 | 引号形式 `#include "x.h"` 词法只给 `StringLiteral`,解析器才会折成 `HeaderName`;预扫描按同一条规则(无转义)折叠,并有测试断言"预扫描的 include = 解析记录的 include" | 与改动前逐行对比 `workspace_probe` 输出一致 |
+| 遇到 panic 不死锁 | worker 里 `catch_unwind`,记下 payload,等所有 worker 停下后在调用线程重新抛出 | — |
+
 `INDEX_SLICE` 由 16 提到 32(并行后同样的锁占用时间里能读更多文件)。已知的上限:include 图的关键路径是串行的(先解析才知道 include 什么),
 所以并行度受图的宽度限制;再往下要靠"预扫描 `#include` 行"提前发现文件(词法 147 MB/s,比解析便宜两个数量级)。
 

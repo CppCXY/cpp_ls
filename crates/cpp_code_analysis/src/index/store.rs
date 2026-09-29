@@ -88,6 +88,13 @@ pub struct SummaryStore<F: FileProvider = DiskFiles> {
     stats: StoreStats,
 }
 
+/// More threads than this stop paying: the parse is memory-bound long before it is core-bound.
+const PARALLEL_WORKERS: usize = 8;
+
+/// The stack of an indexing worker. Larger than the default because the parser recurses on nesting depth and a
+/// worker must not be the place a deeply nested header first overflows.
+const WORKER_STACK: usize = 16 * 1024 * 1024;
+
 /// `work` applied to every item, on as many threads as the machine has cores — the answers **in the order of the
 /// items**, so a caller that applies them in that order gets exactly what a loop would have.
 ///
@@ -101,13 +108,9 @@ where
     T: Sync,
     R: Send,
 {
-    /// More threads than this stop paying: the parse is memory-bound long before it is core-bound.
-    const MOST_WORKERS: usize = 8;
-    const WORKER_STACK: usize = 16 * 1024 * 1024;
-
     let workers = std::thread::available_parallelism()
         .map_or(1, |cores| cores.get())
-        .min(MOST_WORKERS)
+        .min(PARALLEL_WORKERS)
         .min(items.len());
 
     if workers <= 1 {
@@ -413,6 +416,17 @@ impl<F: FileProvider> SummaryStore<F> {
     /// and [`SummaryStore::commit`] — the half that needs `&mut self` — applied to them in whatever order the caller
     /// wants the index to see them.
     pub fn prepare(&self, path: &Path) -> Prepared {
+        self.prepare_telling(path, &mut |_| {})
+    }
+
+    /// [`SummaryStore::prepare`] that says what the file includes **as soon as it knows** — before the parse.
+    ///
+    /// A file the disk has an answer for names its includes in that answer; a file that has to be parsed has its
+    /// `#include` lines scanned first ([`FileIndexer::includes_of`]), which costs a fraction of the parse and is the
+    /// same answer the parse will give. Either way `includes` is called once, with the resolved targets, before the
+    /// expensive part starts — which is what lets [`SummaryStore::prepare_closure`] have other cores reading those
+    /// files while this one is still busy with this one.
+    fn prepare_telling(&self, path: &Path, includes: &mut dyn FnMut(&[PathBuf])) -> Prepared {
         let Some(source) = ({
             let _read = crate::stages::StageTimer::new(crate::stages::Stage::Read);
             self.files.read(path)
@@ -430,11 +444,25 @@ impl<F: FileProvider> SummaryStore<F> {
                 && stored.key == key
                 && self.resolution_still_holds(path, &stored)
             {
+                let targets: Vec<PathBuf> = stored
+                    .includes
+                    .iter()
+                    .filter_map(|include| include.resolved.clone())
+                    .collect();
+                includes(&targets);
                 return Prepared(PreparedOutcome::Stored(stored));
             }
         }
 
-        let summary = FileIndexer::new(&self.files, &self.config).index(path, &source, key);
+        let scanned = {
+            let _scan = crate::stages::StageTimer::new(crate::stages::Stage::IncludeScan);
+            let scanned = FileIndexer::new(&self.files, &self.config).scan_includes(path, &source);
+            includes(&scanned.targets());
+            scanned
+        };
+        let summary = FileIndexer::new(&self.files, &self.config)
+            .with_scanned_includes(&scanned)
+            .index(path, &source, key);
 
         // The one rule about the filesystem: a summary that records a *failed* search must not be stored, because
         // nothing in the key would notice the header appearing. See the module documentation.
@@ -474,6 +502,146 @@ impl<F: FileProvider> SummaryStore<F> {
                 self.index.summary(path)
             }
         }
+    }
+
+    /// **Prepare `roots` and — while they are being prepared — the files they include, and theirs**, on every core.
+    ///
+    /// # What this buys
+    ///
+    /// [`SummaryStore::prepare_many`] can only be as wide as the list it is given, and the list a session has is
+    /// short at exactly the moment it matters: a project is one `.cpp` file whose closure is a hundred and fifty
+    /// headers, and the headers are not on any list until the file naming them has been parsed. So a cold start reads
+    /// the closure a level at a time, and a level is often three files wide.
+    ///
+    /// This does not wait for the parse. A worker that takes a file **scans its `#include` lines first** and puts the
+    /// targets on the shared frontier, *then* parses — so the moment the first file has been lexed the whole graph
+    /// below it is being walked by every other worker, breadth first, and the width of the work is the width of the
+    /// include graph rather than of the level.
+    ///
+    /// # What it will not do
+    ///
+    /// * It reads only files `wanted` accepts — a session says "not one that is already in the index" — and only as
+    ///   many as `budget` allows in total, so a call has a bounded cost whatever the closure is.
+    /// * It changes nothing in the store: the answers are [`Prepared`] values, and what the caller does with them
+    ///   (commit them, keep them for later, drop them) is its own decision. A file prepared and never committed
+    ///   cost a parse and left a cache entry, which is where it would have been anyway.
+    /// * It names no order. The caller commits in the order *it* wants the index to see files in.
+    ///
+    /// A panic in a worker is carried out of the call and raised on the calling thread, after every worker has
+    /// stopped: a worker that died holding "one file in flight" would otherwise leave the others waiting for a
+    /// result that is never coming.
+    pub fn prepare_closure(
+        &self,
+        roots: &[PathBuf],
+        wanted: impl Fn(&Path) -> bool + Sync,
+        budget: usize,
+    ) -> Vec<(PathBuf, Prepared)> {
+        use std::sync::{Condvar, Mutex};
+
+        struct Frontier {
+            waiting: std::collections::VecDeque<PathBuf>,
+            seen: HashSet<String>,
+            in_flight: usize,
+            done: Vec<(PathBuf, Prepared)>,
+            panic: Option<Box<dyn std::any::Any + Send>>,
+        }
+
+        let mut frontier = Frontier {
+            waiting: std::collections::VecDeque::new(),
+            seen: HashSet::new(),
+            in_flight: 0,
+            done: Vec::new(),
+            panic: None,
+        };
+        for root in roots {
+            if frontier.seen.insert(normalize_path(root, cfg!(windows))) {
+                frontier.waiting.push_back(root.clone());
+            }
+        }
+        let budget = budget.max(frontier.waiting.len());
+
+        let shared = (Mutex::new(frontier), Condvar::new());
+        let lock = || shared.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let work = || {
+            loop {
+                let path = {
+                    let mut frontier = lock();
+                    loop {
+                        if frontier.panic.is_some() {
+                            break None;
+                        }
+                        if let Some(path) = frontier.waiting.pop_front() {
+                            frontier.in_flight += 1;
+                            break Some(path);
+                        }
+                        if frontier.in_flight == 0 {
+                            break None;
+                        }
+                        frontier = shared.1.wait(frontier).unwrap_or_else(|poisoned| poisoned.into_inner());
+                    }
+                };
+                let Some(path) = path else {
+                    shared.1.notify_all();
+                    return;
+                };
+
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.prepare_telling(&path, &mut |targets| {
+                        let mut frontier = lock();
+                        let mut added = false;
+                        for target in targets {
+                            if frontier.seen.len() >= budget {
+                                break;
+                            }
+                            if !wanted(target) || !frontier.seen.insert(normalize_path(target, cfg!(windows))) {
+                                continue;
+                            }
+                            frontier.waiting.push_back(target.clone());
+                            added = true;
+                        }
+                        drop(frontier);
+                        if added {
+                            shared.1.notify_all();
+                        }
+                    })
+                }));
+
+                let mut frontier = lock();
+                frontier.in_flight -= 1;
+                match outcome {
+                    Ok(prepared) => frontier.done.push((path, prepared)),
+                    Err(payload) => frontier.panic = Some(payload),
+                }
+                drop(frontier);
+                shared.1.notify_all();
+            }
+        };
+
+        let workers = std::thread::available_parallelism()
+            .map_or(1, |cores| cores.get())
+            .min(PARALLEL_WORKERS);
+
+        if workers <= 1 {
+            work();
+        } else {
+            std::thread::scope(|scope| {
+                for _ in 0..workers {
+                    let _ = std::thread::Builder::new()
+                        .name("cppls-index".to_string())
+                        .stack_size(WORKER_STACK)
+                        .spawn_scoped(scope, work);
+                }
+                // The calling thread is a worker too — and the one that finishes the job if no thread could start.
+                work();
+            });
+        }
+
+        let mut frontier = shared.0.into_inner().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(payload) = frontier.panic.take() {
+            std::panic::resume_unwind(payload);
+        }
+        frontier.done
     }
 
     /// [`SummaryStore::prepare`] for many files at once, on as many threads as the machine has cores.
@@ -1387,6 +1555,89 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root_one);
         let _ = std::fs::remove_dir_all(&root_together);
+    }
+
+    /// **The include scan says what the parse will say.** It is only useful to act on if it is the same answer.
+    #[test]
+    fn scanning_the_include_lines_gives_the_includes_the_parse_records() {
+        let files = MemoryFiles::new()
+            .with_file("/p/a.h", "#pragma once\n#include \"b.h\"\n#if 0\n#include \"c.h\"\n#endif\n#include \"gone.h\"\nint a;\n")
+            .with_file("/p/b.h", "int b;\n")
+            .with_file("/p/c.h", "int c;\n");
+        let (mut store, root) = store("include-scan", &files);
+        let config = CompilerConfig::default();
+        let source = crate::FileProvider::read(&files, Path::new("/p/a.h")).expect("the fixture is there");
+
+        let scanned = crate::FileIndexer::new(&files, &config).includes_of(Path::new("/p/a.h"), &source);
+        let recorded: Vec<std::path::PathBuf> = store
+            .get(Path::new("/p/a.h"))
+            .expect("reads")
+            .includes
+            .iter()
+            .filter_map(|include| include.resolved.clone())
+            .collect();
+
+        assert_eq!(scanned, recorded);
+        assert_eq!(scanned.len(), 2, "b.h and the one behind `#if 0`; the missing one is not resolved: {scanned:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **Reading a closure together reads the closure** — every file once, none the caller did not want, and never
+    /// more than the budget — and what it prepared commits to the index a one-by-one walk builds.
+    #[test]
+    fn preparing_a_closure_reaches_every_file_it_includes_within_its_limits() {
+        let mut files = MemoryFiles::new().with_file("/p/main.cpp", "#include \"h0.h\"\n#include \"h1.h\"\nint main;\n");
+        for number in 0..30 {
+            // A diamond-ridden graph with a cycle (h29 includes h0): each header includes the next two.
+            files.insert(
+                format!("/p/h{number}.h"),
+                format!(
+                    "#include \"h{}.h\"\n#include \"h{}.h\"\nstruct H{number} {{ int v; }};\n",
+                    (number + 1) % 30,
+                    (number + 2) % 30
+                ),
+            );
+        }
+        let (store, root) = store("prepare-closure", &files);
+        let main = std::path::PathBuf::from("/p/main.cpp");
+
+        let everything = store.prepare_closure(std::slice::from_ref(&main), |_| true, 1000);
+        let mut reached: Vec<String> = everything.iter().map(|(path, _)| path.to_string_lossy().into_owned()).collect();
+        reached.sort();
+        reached.dedup();
+        assert_eq!(reached.len(), 31, "main and thirty headers, each once: {}", everything.len());
+        assert_eq!(everything.len(), 31, "and no file was prepared twice");
+
+        let limited = store.prepare_closure(std::slice::from_ref(&main), |_| true, 10);
+        assert!(limited.len() <= 10, "the budget bounds the call: {}", limited.len());
+        assert!(limited.iter().any(|(path, _)| path == &main), "the root is always prepared");
+
+        let refusing = store.prepare_closure(std::slice::from_ref(&main), |path| !path.ends_with("h1.h"), 1000);
+        assert!(refusing.iter().all(|(path, _)| !path.ends_with("h1.h") || path == &main));
+
+        // Committing what was prepared, in any order, gives the index of reading the same files one at a time.
+        let (mut together, root_together) = store_named("prepare-closure-commit", &files);
+        for (path, prepared) in everything {
+            let _ = together.commit(&path, prepared);
+        }
+        let (mut one_by_one, root_one) = store_named("prepare-closure-one", &files);
+        for path in &reached {
+            let _ = one_by_one.get(Path::new(path));
+        }
+        assert_eq!(together.index().len(), one_by_one.index().len());
+        for summary in one_by_one.index().summaries() {
+            let other = together.index().summary(&summary.path).expect("indexed");
+            assert_eq!(other.declarations, summary.declarations);
+            assert_eq!(other.includes, summary.includes);
+        }
+
+        for directory in [root, root_together, root_one] {
+            let _ = std::fs::remove_dir_all(&directory);
+        }
+    }
+
+    fn store_named(name: &str, files: &MemoryFiles) -> (SummaryStore<MemoryFiles>, std::path::PathBuf) {
+        store(name, files)
     }
 
     #[test]

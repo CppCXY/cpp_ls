@@ -102,6 +102,35 @@ pub struct FileIndexer<'a, F: FileProvider> {
     /// A **unit's timeline** ([`crate::MacroView`]) is such a value: it answers the parser's questions positionally
     /// out of one walk, where the alternative was materialising a map per file.
     macro_facts: Option<&'a dyn cpp_parser::MacroFacts>,
+    /// The includes a scan already resolved — see [`FileIndexer::scan_includes`]. Resolving an include is a
+    /// filesystem search, so a caller that has done it once passes the answers along instead of paying twice.
+    scanned: Option<&'a ScannedIncludes>,
+}
+
+/// The `#include`s of one file, found and resolved **before** its parse — see [`FileIndexer::scan_includes`].
+#[derive(Debug, Default)]
+pub struct ScannedIncludes {
+    /// By the offset the directive starts at. The directive itself is kept too, so that an answer is only reused
+    /// for the same include: a scan that read a line differently from the parser would find its answer refused, not
+    /// wrongly used.
+    found: std::collections::HashMap<usize, (crate::preprocess::directive::IncludeForm, Box<str>, bool, Option<PathBuf>)>,
+    order: Vec<usize>,
+}
+
+impl ScannedIncludes {
+    /// The resolved targets, in the order the file writes them.
+    pub fn targets(&self) -> Vec<PathBuf> {
+        self.order
+            .iter()
+            .filter_map(|at| self.found.get(at)?.3.clone())
+            .collect()
+    }
+
+    fn resolved(&self, at: usize, include: &crate::preprocess::directive::Include) -> Option<Option<PathBuf>> {
+        let (form, target, is_next, resolved) = self.found.get(&at)?;
+        (*form == include.form && **target == *include.target && *is_next == include.is_next)
+            .then(|| resolved.clone())
+    }
 }
 
 impl<'a, F: FileProvider> FileIndexer<'a, F> {
@@ -111,7 +140,14 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             config,
             bodies: None,
             macro_facts: None,
+            scanned: None,
         }
+    }
+
+    /// Index with includes a scan already resolved, so that the parse does not search for them a second time.
+    pub fn with_scanned_includes(mut self, scanned: &'a ScannedIncludes) -> Self {
+        self.scanned = Some(scanned);
+        self
     }
 
     /// Index with what the file's includes say about the macros it invokes.
@@ -142,6 +178,11 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
     /// and no caller can describe it more accurately than hashing it — while a caller that got it wrong would
     /// store a summary under a name that does not describe its own text, which is a wrong answer rather than a
     /// cache miss. The authority is here because the text is here.
+    ///
+    /// # See also
+    ///
+    /// [`FileIndexer::includes_of`], which answers the one thing about a file that *other* files' reading waits for —
+    /// what it includes — without building any of the rest.
     pub fn index(&self, path: &Path, source: &str, key: SummaryKey) -> FileSummary {
         // Parsed **for the configuration's target**: which compiler's reserved spellings mean what is part of the
         // compilation, not of the text — `__int128` is a type to g++ and a name to cl.exe. See
@@ -175,6 +216,52 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             drop(tree);
         }
         summary
+    }
+
+    /// **The files `source` includes**, resolved — without parsing it.
+    ///
+    /// The include graph is what decides how much of a project can be read at once, and it is only known by reading:
+    /// a file's includes are a product of its text. But they are not a product of its *tree*. A `#include` is a
+    /// line, the lexer finds every line that begins with a `#`, and the directive scan reads the ones that are
+    /// includes — a pass that runs at the speed of the lexer (a hundred and fifty megabytes a second) where the parse
+    /// that follows it is an order of magnitude slower. So a caller that wants to start reading a header's includes
+    /// **before it has finished parsing the header** can: this is the answer `summary.includes` will hold, obtained
+    /// early.
+    ///
+    /// It is the same answer, not an approximation of it — the same directives, the same resolver, the same search
+    /// path and the same directory — which is what lets a caller act on it: every file named here is a file
+    /// `index` will record as an include of this one. Order is the text's, and a target the search did not find is
+    /// simply not in the list (the summary records it as unresolved).
+    pub fn includes_of(&self, path: &Path, source: &str) -> Vec<PathBuf> {
+        self.scan_includes(path, source).targets()
+    }
+
+    /// [`FileIndexer::includes_of`], keeping the resolutions so that [`FileIndexer::with_scanned_includes`] can hand
+    /// them to the parse that follows — a search of the include path is paid for once, not once per pass.
+    pub fn scan_includes(&self, path: &Path, source: &str) -> ScannedIncludes {
+        let (mut tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+        fold_quoted_header_names(source, &mut tokens);
+
+        let mut interner = PathInterner::new(cfg!(windows));
+        let resolver = IncludeResolver::new(self.files, self.config);
+        let directory = path.parent().unwrap_or(Path::new("."));
+
+        let mut scanned = ScannedIncludes::default();
+        for spanned in crate::preprocess::directive::scan_directives(source, &tokens) {
+            let Directive::Include(include) = &spanned.directive else {
+                continue;
+            };
+            let Some(fact) = include_fact(&spanned.directive, spanned.range, directory, &resolver, &mut interner, None) else {
+                continue;
+            };
+
+            let at = spanned.range.start_offset;
+            scanned
+                .found
+                .insert(at, (include.form, include.target.clone(), include.is_next, fact.resolved));
+            scanned.order.push(at);
+        }
+        scanned
     }
 
     /// **Index a file through its cooked stream** — the reading a compiler would parse, with every range turned
@@ -431,6 +518,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
                         directory,
                         &resolver,
                         &mut interner,
+                        self.scanned,
                     )
                 })
                 .collect();
@@ -870,6 +958,44 @@ fn is_one_parenthesised_group(tokens: &[cpp_parser::CppTokenKind]) -> bool {
     false
 }
 
+/// Give `#include "local.h"` the token the parser gives it: a header name.
+///
+/// The parser folds the name after `#include` into one `HeaderName` token while it parses, because only the parser
+/// knows a header name is expected there; the lexer alone leaves a quoted one as a string literal, and the directive
+/// reader — which reads `HeaderName` — would call the line an unreadable directive. A scan that runs before the parse
+/// has to do the same relabelling itself, by the same rule the parser uses (no escapes: a header name has none). The
+/// angle form needs nothing: the directive reader already reassembles `<a/b.h>` from the tokens between the brackets.
+fn fold_quoted_header_names(source: &str, tokens: &mut [cpp_parser::CppTokenData]) {
+    use cpp_parser::CppTokenKind;
+
+    let next_significant = |tokens: &[cpp_parser::CppTokenData], from: usize| {
+        (from..tokens.len()).find(|&at| !cpp_parser::is_trivia(tokens[at].kind))
+    };
+
+    for at in 0..tokens.len() {
+        if tokens[at].kind != CppTokenKind::Hash {
+            continue;
+        }
+        let Some(name) = next_significant(tokens, at + 1) else {
+            continue;
+        };
+        let word = &source[tokens[name].range.start_offset..tokens[name].range.end_offset()];
+        if word != "include" && word != "include_next" {
+            continue;
+        }
+        let Some(target) = next_significant(tokens, name + 1) else {
+            continue;
+        };
+        if tokens[target].kind != CppTokenKind::StringLiteral {
+            continue;
+        }
+        let text = &source[tokens[target].range.start_offset..tokens[target].range.end_offset()];
+        if !text.contains('\\') {
+            tokens[target].kind = CppTokenKind::HeaderName;
+        }
+    }
+}
+
 /// The [`IncludeFact`] for an `#include`, or `None` for every other directive.
 ///
 /// A resolution failure is not an error here: an include that was not found is stored with its spelling and no
@@ -880,15 +1006,21 @@ fn include_fact<F: FileProvider>(
     including: &Path,
     resolver: &IncludeResolver<'_, F>,
     interner: &mut PathInterner,
+    scanned: Option<&ScannedIncludes>,
 ) -> Option<IncludeFact> {
     let Directive::Include(include) = directive else {
         return None;
     };
 
-    let resolved: Option<PathBuf> = resolver
-        .resolve(include, including, None, interner)
-        .resolved()
-        .map(|resolved| resolved.path.clone());
+    // A search of the include path is a filesystem search: a scan that already made it is believed, but only for
+    // the very same directive.
+    let resolved: Option<PathBuf> = match scanned.and_then(|scanned| scanned.resolved(range.start_offset, include)) {
+        Some(resolved) => resolved,
+        None => resolver
+            .resolve(include, including, None, interner)
+            .resolved()
+            .map(|resolved| resolved.path.clone()),
+    };
 
     Some(IncludeFact {
         form: include.form,
@@ -1640,6 +1772,7 @@ mod tests {
                     Path::new("/p"),
                     &resolver,
                     &mut interner,
+                    None,
                 )
             })
             .collect();
