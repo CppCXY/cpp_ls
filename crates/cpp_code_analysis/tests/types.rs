@@ -46,8 +46,7 @@ fn type_of_use(source: &str, spelling: &str) -> Option<String> {
 }
 
 /// The offset of the last **whole-word** occurrence of a spelling.
-fn last_word(source: &str, spelling: &str) -> usize {
-    let is_word = |character: char| character.is_alphanumeric() || character == '_';
+fn last_word(source: &str, spelling: &str) -> usize {    let is_word = |character: char| character.is_alphanumeric() || character == '_';
     let mut found = None;
     let mut from = 0usize;
 
@@ -68,8 +67,7 @@ fn last_word(source: &str, spelling: &str) -> usize {
 
 /// The five shapes a modern codebase actually writes, each deduced from what the declaration wrote.
 #[test]
-fn an_auto_declaration_takes_the_type_of_its_initializer() {
-    let cases = [
+fn an_auto_declaration_takes_the_type_of_its_initializer() {    let cases = [
         (
             "int count();\nint f() { auto n = count(); return n; }\n",
             "n",
@@ -350,5 +348,117 @@ fn a_qualified_name_declared_in_a_header_has_its_type() {
         type_of_use_in(&session, "/p/a.cpp", source, "size").as_deref(),
         Some("int"),
         "and the member access through it reads the member"
+    );
+}
+
+/// **A member of a class template has the type its arguments make it, not the parameters it was written with.**
+///
+/// This is the shape a standard container is made of, and until the parameters were paired with the arguments the
+/// answer was a type called `_Ty` — which is not a class, so `*v.data()` and a completion after it had nothing. The
+/// header is a separate file on purpose: the parameter names are written **there**, and a query asking about `v`
+/// holds only `a.cpp`.
+///
+/// The members here are written with `_Ty` **directly** rather than through a nested alias (`reference` is
+/// `_Ty&`). That is deliberate and it is the boundary this feature stops at: substituting into `_Ty&` is this
+/// layer's own operation, while `front()` returning `reference` needs the *alias* to be resolved before there is
+/// anything to substitute into — a template member whose type is another template's nested type, which is a
+/// separate problem with its own test ([`a_member_whose_type_is_a_nested_alias_is_not_substituted`]).
+#[test]
+fn a_member_of_a_class_template_takes_its_type_from_the_arguments() {
+    let header = "\
+namespace std {
+template <class _Ty, class _Alloc = int>
+struct vector {
+    _Ty& front;
+    _Ty* data;
+};
+}
+";
+    let source = "\
+#include \"vector.h\"
+int f() {
+    std::vector<int> v;
+    return *v.data + v.front;
+}
+";
+    let session = session_with(&[("/p/a.cpp", source), ("/p/vector.h", header)]);
+
+    assert_eq!(
+        type_of_use_in(&session, "/p/a.cpp", source, "v").as_deref(),
+        Some("std::vector<int>"),
+        "the declaration's own type is the type it was written with"
+    );
+    assert_eq!(
+        type_of_use_in(&session, "/p/a.cpp", source, "data").as_deref(),
+        Some("int*"),
+        "`data` is declared `_Ty*`, and `_Ty` is `int` here"
+    );
+    assert_eq!(
+        type_of_use_in(&session, "/p/a.cpp", source, "front").as_deref(),
+        Some("int&"),
+        "and `front` is declared `_Ty&`"
+    );
+}
+
+/// **The boundary, stated as a test**: a member whose type is *another* member of the same template is not
+/// substituted, because the alias has to be resolved before the substitution has anywhere to land.
+///
+/// `reference` is `_Ty&` and `front` is declared with it. Substituting the arguments into `reference` replaces
+/// nothing — that spelling does not mention `_Ty` — so the answer is the **name** `reference`, which nothing
+/// declares. This layer reports it as the name it is rather than guessing that `reference` means `_Ty&`: the guess
+/// is right for `std::vector` and wrong for every template that declares a nested name with a different meaning,
+/// and nothing at this level can tell them apart. What it would take is resolving `std::vector<int>::reference` as
+/// its own member lookup *with the same argument pairing* — a step this layer does not take yet.
+#[test]
+fn a_member_whose_type_is_a_nested_alias_is_not_substituted() {
+    let header = "\
+namespace std {
+template <class _Ty>
+struct vector {
+    typedef _Ty& reference;
+    reference front;
+};
+}
+";
+    let source = "\
+#include \"vector.h\"
+int f() {
+    std::vector<int> v;
+    return v.front;
+}
+";
+    let session = session_with(&[("/p/a.cpp", source), ("/p/vector.h", header)]);
+
+    assert_eq!(
+        type_of_use_in(&session, "/p/a.cpp", source, "front").as_deref(),
+        Some("reference"),
+        "the name, unresolved — and a caller asking whether it names a class gets `None`, which is the honest \
+         answer rather than a wrong type"
+    );
+}
+
+/// **A class template written without arguments keeps its parameters**, which is the answer that must not become a
+/// guess: `std::vector` with no argument has no `_Ty` to pair, so a member's type stays `_Ty&` — a name a caller can
+/// see is unfinished rather than a type that happens to be wrong.
+#[test]
+fn a_template_without_arguments_keeps_its_parameters() {
+    let source = "\
+namespace std {
+template <class _Ty>
+struct vector { typedef _Ty& reference; };
+}
+int f() { std::vector v; return 0; }
+";
+    // The declaration is in this file, so the parameters come from its own syntax.
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+
+    let names = session
+        .index()
+        .template_parameters_of("std::vector", &view.path);
+    assert_eq!(
+        names,
+        vec!["_Ty".to_string()],
+        "the parameter list is read out of the declaration"
     );
 }

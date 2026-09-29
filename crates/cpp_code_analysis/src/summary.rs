@@ -135,6 +135,27 @@ pub struct DeclFact {
     /// on macros and includes `D` never mentions. A stored copy would therefore go stale while `D`'s own text and
     /// key stayed identical, so nothing would invalidate it. `bases` is a spelling; the chain is a query.
     pub bases: Vec<String>,
+    /// **The names a class template declares its parameters with** — `["_Ty", "_Alloc"]` for `std::vector`, empty
+    /// for anything that is not a class template.
+    ///
+    /// The one field in a fact that is not about the declaration's own name but about the types *inside* it, and it
+    /// is here because a member's type is written with those names: `std::vector`'s `reference` is declared `_Ty&`,
+    /// so a lookup of `std::vector<int>::reference` has a type that says `_Ty` and a binding that says `int`. Pairing
+    /// the two is [`crate::Type::substituted`], and the pairing is positional — first parameter with first argument
+    /// — which is why the order here is the declaration's order and not sorted.
+    ///
+    /// # Why it is stored rather than read when it is wanted
+    ///
+    /// Because a query holds one file and the parameters are written in another. `member_fact` is asked about
+    /// `std::vector<int>::reference` from a `.cpp` that includes `<vector>`; the parameter list is in `<vector>`,
+    /// whose text the index does not keep. Re-parsing that header per member query is the cost this field exists to
+    /// avoid — and it is a *name*, not a conclusion, so it goes stale exactly when its own file changes, like every
+    /// other field here.
+    ///
+    /// A **partial specialization** records its own list (`template <class T> struct vector<T*>` records `T`), which
+    /// is right for it and wrong for the primary template — see [`crate::ProjectIndex::template_parameters_of`],
+    /// which takes the first *template* it finds rather than the first declaration.
+    pub parameters: Vec<String>,
     /// The whole declaration, for a "go to definition" highlight.
     pub range: cpp_parser::SourceRange,
     /// Just the name, which is what a reference search matches. Separate from `range` for the reason

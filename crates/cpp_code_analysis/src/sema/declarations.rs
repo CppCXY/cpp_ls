@@ -632,6 +632,65 @@ fn before(text: &str, node: &CppSyntaxNode, name: cpp_parser::SourceRange) -> St
     text[..to].trim().to_string()
 }
 
+/// **The names a class template declares its parameters with** — `["_Ty", "_Alloc"]` for `std::vector`.
+///
+/// Empty for anything that is not a class template, which includes an ordinary class *and* a partial
+/// specialization: `template <class T> struct vector<T*>` declares parameters of its own, and a caller that took
+/// them for the primary template's would substitute the wrong argument into the wrong place.
+///
+/// # Why the walk goes through the template declaration
+///
+/// Because that is where the list is: `template <…>` is a `TemplateDecl` and the class it introduces is a
+/// *sibling* of it rather than a child, so the list, the class body and the binding are three nodes whose only
+/// common ancestor is the declaration they share. The walk asks it from the top and keeps the one whose specifier
+/// sequence contains the binding — which also gives the partial specializations away, since a file with two of them
+/// has two template declarations and the offsets are what tell them apart.
+///
+/// A pass over the file's template declarations **per class**, not per declaration: it is called once for each kind
+/// of thing a class fact records, and a file has a handful of templates rather than a handful of thousands.
+pub fn declared_template_parameters_of(root: &CppSyntaxNode, binding: &Binding) -> Vec<String> {
+    if binding.kind != BindingKind::Class {
+        return Vec::new();
+    }
+
+    let at = binding.name_range.start_offset;
+
+    for declaration in root.descendants() {
+        if CppSyntaxKind::from(declaration.kind()) != CppSyntaxKind::TemplateDecl {
+            continue;
+        }
+
+        let Some(list) = declaration
+            .children()
+            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TemplateParameterList)
+        else {
+            continue;
+        };
+
+        // **The class this template introduces, by containment** — and the class is a *sibling* of the template
+        // declaration, not a child of it: `template <…>` and `struct vector { … }` are two children of one
+        // `Declaration`. So the specifier sequence that holds the body is looked for among the parent's children.
+        //
+        // Both obvious readings of this are wrong, and both were measured: searching the template's *descendants*
+        // finds the `DeclSpecifierSeq` inside a `TemplateParameter` (`class _Ty` spells one) and decides the
+        // template introduces whatever is being asked about; searching its *children* finds only the parameter
+        // list, so no template ever introduces anything.
+        let introduces_it = declaration.parent().is_some_and(|owner| {
+            owner.children().any(|node| {
+                CppSyntaxKind::from(node.kind()) == CppSyntaxKind::DeclSpecifierSeq && {
+                    let range = node.text_range();
+                    usize::from(range.start()) <= at && usize::from(range.end()) >= at
+                }
+            })
+        });
+
+        if introduces_it {
+            return crate::sema::types::template_parameter_names(&list);
+        }
+    }
+
+    Vec::new()
+}
 /// The base classes a class-like declaration was written with, in declaration order.
 ///
 /// Public for the same reason [`declared_type_of`] is: the query layer needs it for a class in the file being
@@ -723,6 +782,7 @@ fn strip_declaration_specifiers(spelling: &str) -> String {
 /// A free function rather than a method so that the borrow of the fact list and the borrow of the scope tree
 /// cannot be confused for each other while the walk is filling one from the other.
 fn fact_for(
+    root: &CppSyntaxNode,
     shapes: &DeclarationShapes,
     binding: &Binding,
     scope: Option<String>,
@@ -759,6 +819,10 @@ fn fact_for(
         let _timer = crate::stages::StageTimer::new(crate::stages::Stage::Bases);
         declared_bases_of_with(shapes, binding)
     };
+    // The class template's parameter names, for the members whose types are written with them. Read from the tree
+    // rather than from the shapes because the list is a sibling of the class body and not on the path to the name
+    // — see [`declared_template_parameters_of`].
+    let parameters = declared_template_parameters_of(root, binding);
 
     Some(DeclFact {
         kind: DeclKind::from_binding_kind(binding.kind),
@@ -771,6 +835,7 @@ fn fact_for(
         type_of,
         returns,
         bases,
+        parameters,
         range: binding.range,
         name_range: binding.name_range,
         // The one field that comes from the diagnostics rather than from the tree — see [`DeclFact::clean`] for
@@ -888,6 +953,10 @@ fn overlaps(one: SourceRange, other: SourceRange) -> bool {
 struct DeclarationFacts<'a> {
     scopes: &'a ScopeTree,
     preprocessing: &'a FilePreprocessing,
+    /// The tree the shapes were read from, kept for the **one** question that is not on the path to a name: a
+    /// class template's parameter list is a sibling of the class body, so it is found by walking the tree rather
+    /// than by following the shapes' parent chain — see [declared_template_parameters_of].
+    root: &'a CppSyntaxNode,
     /// **The file's declarations, read once** — where a declared type's spelling comes from. Built here rather than
     /// per binding: that difference is 14.4 s against a lookup, see [`DeclarationShapes`].
     shapes: DeclarationShapes,
@@ -908,6 +977,7 @@ impl<'a> DeclarationFacts<'a> {
         DeclarationFacts {
             scopes,
             preprocessing,
+            root,
             shapes: {
                 let _shapes = crate::stages::StageTimer::new(crate::stages::Stage::Shapes);
                 DeclarationShapes::of(root)
@@ -924,6 +994,7 @@ impl<'a> DeclarationFacts<'a> {
         let DeclarationFacts {
             scopes,
             preprocessing,
+            root,
             shapes,
             declarations,
             mut guards,
@@ -940,7 +1011,7 @@ impl<'a> DeclarationFacts<'a> {
             let local = scopes.declares_a_local(ScopeId(index));
 
             for binding in &scope.bindings {
-                if let Some(fact) = fact_for(&shapes, binding, prefix.clone(), local, &declarations) {
+                if let Some(fact) = fact_for(root, &shapes, binding, prefix.clone(), local, &declarations) {
                     facts.push(fact);
                 }
             }

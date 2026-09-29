@@ -42,7 +42,7 @@ use super::names::{NameIndex, Posting};
 use crate::guard::Visibility;
 use crate::include::graph::Marked;
 use crate::file::paths::normalize_path;
-use crate::sema::types::{Type, parse_type_spelling, type_of_declaration};
+use crate::sema::types::{Type, TypeBindings, parse_type_spelling, type_of_declaration};
 use crate::summary::{DeclFact, DeclKind, FactGuard, FileSummary, MacroFact};
 use crate::preprocess::directive::IncludeForm;
 use crate::symbol::{Known, UnknownReason};
@@ -562,6 +562,11 @@ pub fn member_across_files(
         return Known::Unknown(UnknownReason::UnknownType(Box::from(written.to_string())));
     };
 
+    // **No template substitution here**, and the boundary is worth stating: this query answers "where is this
+    // member declared", which is a *place* rather than a type. The pairing that finishes a member of a class
+    // template is applied by the callers that ask for its type — see [`NamedDeclaration::type_of`] — and applying
+    // it here as well would have to rewrite the fact's own spelling, which is what
+    // `DeclFact::type_of` is documented to be *as the file wrote it*.
     let found = member_fact(index, scopes, root, path, &class, &access.member);
     let Known::Yes((fact, file)) = found else {
         let Known::Unknown(reason) = found else {
@@ -1923,6 +1928,11 @@ pub(crate) fn type_of_expression(
         // asks the index for the **name** from the file the declaration is in, which is the same lookup whenever
         // that file sees exactly one such name — and no answer at all (with the first reason kept) when it sees
         // several, which is the direction this layer fails in.
+        //
+        // **The arguments the use wrote**, which is what turns a member's own _Ty& into int&: the parameter names
+        // are the declaring class's ([DeclFact::parameters]) and the arguments are the object type's, and the pairing
+        // is positional — see [crate::TypeBindings].
+        let arguments = inner_type.arguments();
         let found = member_fact(index, scopes, root, path, &class, &inner.member);
         let found = match found {
             Known::Yes(found) => Known::Yes(found),
@@ -1942,8 +1952,16 @@ pub(crate) fn type_of_expression(
             return Known::Unknown(reason);
         };
 
+        // **A member of a class template is finished here**, and this is the one place it can be: the argument list
+        // is the object type's, which is what this arm just computed, and the parameter names are the declaring
+        // class's. `v.data()` on a `std::vector<int>` is `_Ty*` in the header and `int*` here — without this the
+        // answer is a type called `_Ty`, which is not a class, so nothing can follow it.
         return match fact.type_of.as_deref() {
-            Some(type_of) => Known::Yes((parse_type_spelling(type_of), file)),
+            Some(type_of) => Known::Yes((
+                member_bindings(index, scopes, root, path, &class, arguments)
+                    .applied_to(&parse_type_spelling(type_of)),
+                file,
+            )),
             None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
         };
     }
@@ -2106,8 +2124,14 @@ fn pointee_type_name(written: &str) -> Option<String> {
 enum NamedDeclaration {
     /// A binding of the file being edited. Its spellings come from the tree the caller has.
     Here(crate::Binding),
-    /// A declaration in an indexed file, with the file it is in.
-    Indexed(DeclFact, PathBuf),
+    /// A declaration in an indexed file, with the file it is in — and, when it was found **through a class**
+    /// that had template arguments, the pairing that finishes its type.
+    ///
+    /// The arguments belong to the *lookup* rather than to the declaration: `std::vector<int>::data` and
+    /// `std::vector<float>::data` are one declaration whose type is `_Ty*`, and which of the two a use means is
+    /// decided by the object expression. Carrying them here is what lets both questions a consumer asks — "what
+    /// type does this have" and "what does a call of it give" — finish the same way, instead of only the first.
+    Indexed(DeclFact, PathBuf, TypeBindings),
 }
 
 impl NamedDeclaration {
@@ -2115,7 +2139,7 @@ impl NamedDeclaration {
     fn file(&self, here: &Path) -> PathBuf {
         match self {
             NamedDeclaration::Here(_) => here.to_path_buf(),
-            NamedDeclaration::Indexed(_, file) => file.clone(),
+            NamedDeclaration::Indexed(_, file, _) => file.clone(),
         }
     }
 
@@ -2146,9 +2170,11 @@ impl NamedDeclaration {
             // **Read from the spelling**, which is all the index has: a fact is a `String` on disk and the file
             // it came from is not open. `parse_type_spelling` is the bridge, and `class_name` the one field of
             // it that a member query needs.
-            NamedDeclaration::Indexed(fact, _) => {
+            NamedDeclaration::Indexed(fact, _, bindings) => {
                 let _ = scopes;
-                fact.type_of.as_deref().map(parse_type_spelling)
+                fact.type_of
+                    .as_deref()
+                    .map(|written| bindings.applied_to(&parse_type_spelling(written)))
             }
         }
     }
@@ -2170,7 +2196,10 @@ impl NamedDeclaration {
                 crate::sema::declarations::declared_returns_of(root, binding)
                     .map(|returns| parse_type_spelling(&returns))
             }
-            NamedDeclaration::Indexed(fact, _) => what_a_call_has_in(fact),
+            // A **call of a member**: `v.data()` has what `data` returns, and what it returns is written with the
+            // class template's parameters — so the same pairing that finishes a member's type finishes this.
+            NamedDeclaration::Indexed(fact, _, bindings) => what_a_call_has_in(fact)
+                .map(|returns| bindings.applied_to(&returns)),
         }
     }
 
@@ -2182,7 +2211,7 @@ impl NamedDeclaration {
     fn name_offset(&self) -> usize {
         match self {
             NamedDeclaration::Here(binding) => binding.name_range.start_offset,
-            NamedDeclaration::Indexed(fact, _) => fact.name_range.start_offset,
+            NamedDeclaration::Indexed(fact, _, _) => fact.name_range.start_offset,
         }
     }
 }
@@ -2543,7 +2572,11 @@ fn declaration_of_expression(
     match crate::sema::resolve::definition_at(scopes, root, offset) {
         Known::Yes(binding) => Known::Yes(NamedDeclaration::Here(binding)),
         Known::Unknown(UnknownReason::NotDeclaredHere(name)) => match index.definition(&name, path) {
-            Known::Yes(found) => Known::Yes(NamedDeclaration::Indexed(found.fact, found.file)),
+            Known::Yes(found) => Known::Yes(NamedDeclaration::Indexed(
+                found.fact,
+                found.file,
+                TypeBindings::default(),
+            )),
             // **Several declarations of one name, and one type between them.** A name query answers `Ambiguous`
             // when more than one declaration is visible, and that is right for "where is this declared" — but the
             // question here is *what type it has*, and a type is not ambiguous when every declaration spells it the
@@ -2553,7 +2586,11 @@ fn declaration_of_expression(
             // one file. Candidates that **disagree**, and functions (which have no type as a name), keep the
             // `Unknown` that the name query gave.
             Known::Unknown(UnknownReason::Ambiguous(_)) => match agreeing_type(index, path, &name) {
-                Some(found) => Known::Yes(NamedDeclaration::Indexed(found.0, found.1)),
+                Some(found) => Known::Yes(NamedDeclaration::Indexed(
+                    found.0,
+                    found.1,
+                    TypeBindings::default(),
+                )),
                 None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
             },
             // The declaration is nowhere this analysis can see, so there is no type to read. Reporting the *name*
@@ -2640,9 +2677,11 @@ fn declaration_of_a_callee(
         let Some(class) = member_access_class(&object) else {
             return Known::Unknown(UnknownReason::UnknownType(Box::from(object.to_string())));
         };
+        let arguments = object.arguments();
+        let bindings = member_bindings(index, scopes, root, path, &class, arguments);
 
         return match member_fact(index, scopes, root, path, &class, &access.member) {
-            Known::Yes((fact, file)) => Known::Yes(NamedDeclaration::Indexed(fact, file)),
+            Known::Yes((fact, file)) => Known::Yes(NamedDeclaration::Indexed(fact, file, bindings)),
             Known::Unknown(reason) => Known::Unknown(reason),
             Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
         };
@@ -2776,6 +2815,54 @@ fn member_fact(
     Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(format!(
         "{class}::{member}"
     ))))
+}
+
+/// The parameter names a class was declared with, from the buffer or from the index.
+///
+/// Two sources for the two-layer split every query in this module makes: a class the file being edited declares is
+/// in its scope tree (and its parameters are in its syntax), while a class a header declares is a fact, and the
+/// parameters travel with it. A class neither holds answers nothing, which is the ordinary case for an ordinary
+/// class.
+/// **The pairing that finishes a member's type**: the class's parameters against the use's arguments.
+///
+/// Its own function because two callers need the same pairing for two different questions — the member's own type
+/// (`std::vector<int>::data` is `_Ty*` and therefore `int*`) and what a call of it returns (`_Ty*` again) — and a
+/// second copy of "which names go with which arguments" is a second place to get the pairing wrong.
+fn member_bindings(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+    arguments: &[Type],
+) -> crate::sema::types::TypeBindings {
+    if arguments.is_empty() {
+        return crate::sema::types::TypeBindings::default();
+    }
+
+    let names = class_template_parameters(index, scopes, root, path, class);
+    crate::sema::types::TypeBindings::new(names, arguments.to_vec())
+}
+
+fn class_template_parameters(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+) -> Vec<String> {
+    if let Some(scope) = scopes.scope_with_qualified_name(class)
+        && let Some(binding) = scopes
+            .scope(scope)
+            .and_then(|scope| scope.bindings.iter().find(|binding| binding.kind == crate::BindingKind::Class))
+    {
+        let found = crate::sema::declarations::declared_template_parameters_of(root, binding);
+        if !found.is_empty() {
+            return found;
+        }
+    }
+
+    index.template_parameters_of(class, path)
 }
 
 /// How many aliases deep a type spelling is followed before the walk gives up.
@@ -3025,6 +3112,9 @@ fn fact_from_binding(root: &cpp_parser::CppSyntaxNode, class: &str, binding: &cr
         // return type of a member function that the file being edited declares. See [`DeclFact::returns`].
         returns: crate::sema::declarations::declared_returns_of(root, binding),
         bases: crate::sema::declarations::declared_bases_of(root, binding),
+        // A member list's facts carry no parameters: this path answers *which members* a class has, and substitution
+        // is the caller's step — it is the caller that knows the arguments. See [DeclFact::parameters].
+        parameters: Vec::new(),
         range: binding.range,
         name_range: binding.name_range,
         clean: true,
@@ -3702,6 +3792,46 @@ impl ProjectIndex {
         self.names.distinct_names()
     }
 
+    /// **The parameters of a class template**, in declaration order, as the names its members' types are written
+    /// with — `["_Ty", "_Alloc"]` for `std::vector`.
+    ///
+    /// The half of substitution that is a *lookup*: the arguments are written at the use (`std::vector<int>`, which
+    /// is the `Type` a caller has), and the names are written at the declaration, once. Pairing them is
+    /// [`crate::Type::substituted`], and this is where the names come from.
+    ///
+    /// # Why this reads a fact rather than a tree
+    ///
+    /// Because the declaration is usually in **another file**. A member query is asked about
+    /// `std::vector<int>::reference` from a `.cpp` that includes `<vector>`, and the index holds summaries rather
+    /// than the text it read them from — so the parameter names travel with the fact
+    /// ([`DeclFact::parameters`]), which is the same reason every other thing a cross-file answer needs is stored.
+    ///
+    /// # The first declaration that **is a template**, not the first declaration
+    ///
+    /// A class template is normally declared several times: a forward declaration (`template <class T> class
+    /// vector;`), the definition, and possibly a partial specialization or two. The first may have no parameter
+    /// list that says anything, and a partial specialization has one that says the *wrong* thing — so the search is
+    /// for the first fact that actually records parameters. That is a heuristic, and the honest version of it is:
+    /// a partial specialization's list is indistinguishable from a primary template's in a `DeclFact`, because
+    /// both are just names. It is the right answer whenever the first such declaration is the primary template,
+    /// which is the ordinary case, and it is never a *made-up* answer — a name paired with an argument it does not
+    /// belong to is still a name that appears in the class.
+    pub fn template_parameters_of(&self, class: &str, visible_from: &Path) -> Vec<String> {
+        let bare = class.strip_prefix("::").unwrap_or(class);
+        let last = bare.rsplit("::").next().unwrap_or(bare);
+
+        let mut candidates = self.files_declaring(class, visible_from);
+        if candidates.is_empty() {
+            candidates = self.files_declaring(last, visible_from);
+        }
+
+        candidates
+            .iter()
+            .map(|found| &found.fact.parameters)
+            .find(|parameters| !parameters.is_empty())
+            .cloned()
+            .unwrap_or_default()
+    }
     /// The files in which `name` is visible, in insertion order.
     ///
     /// `name` is matched against a declaration's **qualified** name first — `ns::Widget` — and against its bare
@@ -5211,6 +5341,7 @@ impl ProjectDefinition {
                 type_of: None,
                 returns: None,
                 bases: Vec::new(),
+                parameters: Vec::new(),
                 range: binding.range,
                 name_range: binding.name_range,
                 // And no answer about diagnostics either, for the same reason `guard` has none: the binding came

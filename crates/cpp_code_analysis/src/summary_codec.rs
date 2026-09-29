@@ -155,7 +155,18 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// (a member access's class, a completion's list, a hover's answer) would be reading a spelling the current reader
 /// would never write. "An entry that decodes but says something the producer no longer believes" is exactly what
 /// [`FORMAT_VERSION`] is for, so both numbers move and the old cache is dropped on sight.
-pub const CODEC_VERSION: u32 = 16;
+///
+/// # Version 15
+///
+/// A fact gained `parameters` — the bump to version 17: **the names a class template declares its parameters with**,
+/// which is what turns a member's own `_Ty&` into `int&` once a use says what `_Ty` is. It is stored rather than read
+/// when it is wanted because the declaration is usually in *another file*: a member query holds `a.cpp`, the
+/// parameters are written in `<vector>`, and the index keeps summaries rather than the text they came from.
+///
+/// Only [`CODEC_VERSION`] moves, which is the ordinary case for a new field: an entry written before it existed has
+/// no parameters for its class templates, so its members' types stay `_Ty&` — a *weaker* answer rather than a wrong
+/// one, and the reader rejects it on the version number anyway.
+pub const CODEC_VERSION: u32 = 17;
 
 /// Write a summary as bytes.
 ///
@@ -183,6 +194,10 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
         put_u32(&mut out, fact.bases.len() as u32);
         for base in &fact.bases {
             put_str(&mut out, base);
+        }
+        put_u32(&mut out, fact.parameters.len() as u32);
+        for parameter in &fact.parameters {
+            put_str(&mut out, parameter);
         }
         put_range(&mut out, fact.range);
         put_range(&mut out, fact.name_range);
@@ -534,6 +549,13 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
                     bases.push(reader.string()?);
                 }
                 bases
+            },
+            parameters: {
+                let mut parameters = Vec::new();
+                for _ in 0..reader.count()? {
+                    parameters.push(reader.string()?);
+                }
+                parameters
             },
             range: reader.range()?,
             name_range: reader.range()?,
@@ -1036,6 +1058,9 @@ mod tests {
                     returns: None,
                     // A base list, so that branch of the format is covered too: two bases, one of them qualified.
                     bases: vec!["Base".to_string(), "ns::Other".to_string()],
+                    // And a parameter list, which is the other list-shaped field: a class template's parameter
+                    // names, in the order the declaration wrote them.
+                    parameters: vec!["_Ty".to_string(), "_Alloc".to_string()],
                     range: range(10, 20),
                     name_range: range(17, 6),
                     // Both flags' `true` branch here, and the other facts below cover `false` — a round trip that
@@ -1053,6 +1078,7 @@ mod tests {
                     type_of: None,
                     returns: Some("ns::Container<int>".to_string()),
                     bases: Vec::new(),
+                    parameters: Vec::new(),
                     range: range(40, 15),
                     name_range: range(48, 6),
                     local: false,
@@ -1066,6 +1092,7 @@ mod tests {
                     type_of: None,
                     returns: None,
                     bases: Vec::new(),
+                    parameters: Vec::new(),
                     range: range(60, 8),
                     name_range: range(60, 0),
                     local: false,

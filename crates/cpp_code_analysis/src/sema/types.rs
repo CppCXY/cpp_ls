@@ -289,17 +289,36 @@ impl Type {
     ///   `int`, which is what makes `second` answerable and `first` not.
     pub fn substituted(&self, substitutions: &TypeSubstitutions<'_>) -> Type {
         match self {
+            // **A name that is in the parameter list *is* the parameter**, and this arm is why the substitution can
+            // be done at all for a member read out of a header. A template parameter is not a kind of type that a
+            // reader can recognise from the text: `template <class _Ty> struct vector { _Ty& front; };` writes
+            // `_Ty` and spells it exactly like a class name, because at that point it *is* one — what makes it a
+            // parameter is the list it was declared in, and that list belongs to the class rather than to the
+            // member. So the pairing is asked, by name, and an empty list means the name is an ordinary class.
+            //
+            // A class genuinely called `_Ty`, used inside a class template whose parameters are named `_Ty`, would
+            // be substituted wrongly. That is not a readable program (the parameter hides the class inside its own
+            // body — C++ would resolve it to the parameter too), so this is the language's rule rather than a
+            // guess, and getting it wrong in the other direction costs every member of every standard container.
+            Type::Named { name, arguments } => {
+                if arguments.is_empty()
+                    && let Some(argument) = substitutions.get(name)
+                {
+                    return argument.clone();
+                }
+
+                Type::Named {
+                    name: name.clone(),
+                    arguments: arguments
+                        .iter()
+                        .map(|argument| argument.substituted(substitutions))
+                        .collect(),
+                }
+            }
             Type::TemplateParameter { name } => substitutions
                 .get(name)
                 .cloned()
                 .unwrap_or_else(|| self.clone()),
-            Type::Named { name, arguments } => Type::Named {
-                name: name.clone(),
-                arguments: arguments
-                    .iter()
-                    .map(|argument| argument.substituted(substitutions))
-                    .collect(),
-            },
             Type::Pointer { to } => Type::Pointer {
                 to: Arc::new(to.substituted(substitutions)),
             },
@@ -396,10 +415,10 @@ impl fmt::Display for Type {
 
 /// What a set of template parameter names stands for, by name — the map [`Type::substituted`] reads.
 ///
-/// A newtype over a slice rather than a `HashMap`, because of how it is built and used: a class template's
+/// A newtype over slices rather than a `HashMap`, because of how it is built and used: a class template's
 /// parameters are a short list in declaration order, the caller has just read them, and linear search over four
 /// names is faster than hashing them. It also makes the *pairing* explicit — the names and the arguments are two
-/// slices that must line up — which is the thing a bug here would get wrong.
+/// lists that must line up — which is the thing a bug here would get wrong.
 #[derive(Debug, Clone, Copy)]
 pub struct TypeSubstitutions<'a> {
     names: &'a [String],
@@ -419,6 +438,58 @@ impl<'a> TypeSubstitutions<'a> {
     pub fn get(&self, name: &str) -> Option<&Type> {
         let at = self.names.iter().position(|parameter| parameter == name)?;
         self.arguments.get(at)
+    }
+}
+
+/// **A substitution the caller owns** — the same pairing as [`TypeSubstitutions`], with the lists held rather than
+/// borrowed.
+///
+/// The two exist because they are built in two different places, and the difference is lifetime rather than taste:
+/// a caller that has the names and the arguments **in hand** (a query holding an argument list it just read) passes
+/// slices and borrows nothing; a caller that had to *ask* for the names (a member lookup, whose parameter list is
+/// the declaring file's) has a `Vec` of its own and needs a map that outlives the call. Making one type do both
+/// would mean every caller allocating, and the ordinary case here is a class that is not a template at all.
+#[derive(Debug, Clone, Default)]
+pub struct TypeBindings {
+    names: Vec<String>,
+    arguments: Vec<Type>,
+}
+
+impl TypeBindings {
+    /// The pairing of a class template's parameters with the arguments a use wrote.
+    ///
+    /// The pairing is **positional**, and a mismatch in length is not an error to report: `std::vector` written
+    /// without arguments has no argument for `_Ty`, and a parameter with nothing to stand for stays itself. See
+    /// [`TypeBindings::is_empty`] for the ordinary case.
+    pub fn new(names: Vec<String>, arguments: Vec<Type>) -> TypeBindings {
+        TypeBindings { names, arguments }
+    }
+
+    /// Nothing to substitute — an ordinary class, or a class template written without arguments.
+    ///
+    /// Asked before anything else by a caller about to walk a member's type, because it is the common case by a wide
+    /// margin and because a substitution that changes nothing is work whose result a reader would have to compare to
+    /// be sure of.
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty() || self.arguments.is_empty()
+    }
+
+    pub fn as_substitutions(&self) -> TypeSubstitutions<'_> {
+        TypeSubstitutions::new(&self.names, &self.arguments)
+    }
+
+    /// `written` with every parameter in this map replaced — the whole reason the map exists.
+    ///
+    /// Takes and returns a `Type` rather than a spelling because the spellings are exactly what cannot be
+    /// substituted textually: `_Ty&` and `_Ty*` and `std::vector<_Ty>` all contain the same four characters, and
+    /// replacing them by text would also rewrite a class actually called `_Ty&` — or, in a real header, `_Ty` inside
+    /// a longer identifier.
+    pub fn applied_to(&self, written: &Type) -> Type {
+        if self.is_empty() {
+            return written.clone();
+        }
+
+        written.substituted(&self.as_substitutions())
     }
 }
 
@@ -718,6 +789,55 @@ impl ArgumentSplit for str {
 
         arguments
     }
+}
+
+/// **The names a template parameter list introduces**, in declaration order — `["_Ty", "_Alloc"]` for
+/// `<class _Ty, class _Alloc = allocator<_Ty>>`.
+///
+/// # Why this is the half that was missing
+///
+/// [`Type::substituted`] pairs a parameter list with the arguments a use wrote, and it has existed since the model
+/// did. What did not exist was anybody to hand it the names: a class template's parameters are written **once**, at
+/// the declaration, and every use of the template says only what it passes. So a member's own recorded type keeps
+/// saying `_Ty` — `std::vector<int>::reference` is declared `_Ty&` and *is* `int&` — and the layer answered about a
+/// type called `_Ty`, which no class would be found for.
+///
+/// # What a parameter looks like, and the one cut that matters
+///
+/// ```text
+/// <class _Ty>                     → `_Ty`
+/// <class _Alloc = allocator<_Ty>> → `_Alloc`      the default is a *value* for the parameter, not its name
+/// <int N>                         → `N`           a non-type parameter is a name too, and substituting it is the
+///                                                 same textual operation — `std::array<int, N>` with `N = 4`
+/// <typename... Args>              → `Args`        a pack, whose arguments are several instead of one
+/// ```
+///
+/// So the name is everything before the first `=` (a default argument) — **not** the first word, because a
+/// constrained parameter (`template <SomeConcept T>`) has words in front of the name that are not it. Taking the
+/// **last** identifier before the `=` gets every shape above right and is what this does.
+pub fn template_parameter_names(list: &CppSyntaxNode) -> Vec<String> {
+    let mut names = Vec::new();
+
+    for parameter in list.children() {
+        if CppSyntaxKind::from(parameter.kind()) != CppSyntaxKind::TemplateParameter {
+            continue;
+        }
+
+        let written = parameter.text().to_string();
+        let before_a_default = written.split('=').next().unwrap_or(&written);
+
+        // The last identifier of what is left. `class _Ty` ends in the name; `SomeConcept T` does too, and the
+        // concept is the word before it — which is why this is not "the first word".
+        let name = before_a_default
+            .split(|character: char| !character.is_alphanumeric() && character != '_')
+            .rfind(|word| !word.is_empty());
+
+        if let Some(name) = name {
+            names.push(name.to_string());
+        }
+    }
+
+    names
 }
 
 /// **Read a declared type from a declaration's syntax** — the specifier sequence plus the declarator around a name.

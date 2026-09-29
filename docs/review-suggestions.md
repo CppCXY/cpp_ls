@@ -227,6 +227,52 @@ int                           内建词表里没有它            → `int` 被�
 
 ---
 
+## 第八轮:类模板的形参与实参配对(依赖类型的第一半)
+
+第 2 阶段之后剩下的最大一块是**依赖类型**:`std::vector<int>` 的成员类型写着 `_Ty&`,而 `_Ty` 在
+`<vector>` 里,查询手里只有 `a.cpp`。这一轮把"形参名"和"实参"配起来,`std::vector<int>::front` 于是答 `int&`。
+
+### 三件事
+
+| | 做了什么 | 为什么必须这样 |
+|---|---|---|
+| **形参名随事实存下来** | `DeclFact` 新增 `parameters: Vec<String>`;`declared_template_parameters_of` 从**模板声明的父节点**里找类体,`template_parameter_names` 读名字 | 查询手里是**另一个文件**:`member_fact` 被问 `std::vector<int>::reference` 时,形参表写在 `<vector>` 里,而索引不保存文本。重新解析那个头文件 = 每次成员查询一次解析 |
+| **配对** | `TypeBindings`(自持有)与 `TypeSubstitutions`(借用)一对:`member_bindings` 把类的形参名与对象的实参按**位置**配对 | 一处是"手里就有",一处是"得去问",生命周期不同;合成一个类型等于让所有调用方都分配 |
+| **替换** | `Type::substituted` 现在把**名字在形参表里的 `Named`** 也当作形参 | 形参不是一种能从文本认出来的类型:`template <class _Ty> struct vector { _Ty& front; };` 里的 `_Ty` 拼写和类名**完全一样** —— 让它成为形参的是它被声明的那张表,而那张表属于类、不属于成员 |
+
+替换落在**一处**:`NamedDeclaration::type_of` 与 `what_a_call_has`。中间试过在 `member_fact` 里替换并写回拼写,
+结果是**替换跑了两次** —— `int&` 再替换一次,`int` 被当形参弄丢,答案又变回 `_Ty&`。教训是这类"改写结果"的步骤
+只能有一个执行点。
+
+### 读数与测试
+
+新增 3 条测试(`tests/types.rs`),都经由索引、跨文件:
+
+- `std::vector<int>` 的 `front`(声明为 `_Ty&`)→ **`int&`**;`data`(声明为 `_Ty*`)→ **`int*`**;
+- `std::vector` 不带实参时形参表**原样保留**(`["_Ty"]`),不猜;
+- **边界写成测试**:成员的类型是**同模板里的别名**(`reference` 是 `_Ty&`,`front` 声明为 `reference`)时,
+  替换无处落脚 —— 答案是名字 `reference` 本身,`class_name()` 给 `None`。要往下走就得把
+  `std::vector<int>::reference` 当成一次**带同一套配对的成员查询**,这一步这一层还没做。
+
+`cargo test --release --workspace`:**49 个二进制全绿**;`clippy` 零警告。这样本轮的每次验证都是 release。
+
+### 这轮修掉的两个真实错误
+
+1. **"这个模板引入了哪个类"判断错了两次**。`template <…>` 是 `TemplateDecl`,类体在**兄弟节点**里:搜它的
+   *后代* 会撞上 `TemplateParameter` 自己的 `DeclSpecifierSeq`(`class _Ty` 就是一个),于是"是,这就是我的类";
+   搜它的*子节点*只有形参表,于是没有任何模板引入任何类。两个方向都量过,最后是"看父节点的子节点"。
+2. **`type_at` 的偏移取错了**:名字**开头**的偏移落在对象上(`v.front` 的 `v` 上),不是成员上。这不是产品
+   的错,是我的探针/测试的错,但它让"替换没生效"和"取错了位置"看起来一模一样。
+
+### 还没做
+
+- **嵌套别名**(上面第三条):需要"带配对的成员查询"再走一层。
+- **`v.data()` 这条调用路径**:成员访问能替换了,但成员**函数调用**的返回类型还没接上(调用走
+  `declaration_of_a_callee` → `what_a_call_has`,配对照理应在那里生效,但要单独量)。
+- **`Ambiguous` 的 2 034 次**:同一模板的多次声明仍然一律 `Ambiguous`,需要一个"这些声明是同一个实体"的规则。
+
+---
+
 ## 0. 总评
 
 **强项**
