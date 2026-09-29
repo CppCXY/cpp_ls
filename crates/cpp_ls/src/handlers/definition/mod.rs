@@ -66,6 +66,12 @@ pub async fn on_goto_definition_handler(
     // open is already held by `didOpen`, and this covers the request that arrives about one that is not.
     if let Some(path) = uri_to_file_path(&uri) {
         context.analysis().prepare(&path).await;
+
+        // **The module interface units this file imports.** A name that arrives through `import std;` is declared in
+        // a file the project never scanned — `<VC>/Tools/MSVC/<version>/modules/std.ixx` is outside it — so a
+        // go-to-definition on `std::string` in a file that says `import std;` has nothing to point at until that file
+        // is read. `false`: this handler has no edit to catch up on, so the read does it itself.
+        crate::handlers::read_the_modules(&context, &path, false).await;
     }
 
     snapshot_query(context.analysis(), cancel_token, move |session| {

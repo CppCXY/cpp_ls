@@ -575,8 +575,7 @@ fn a_header_unit_resolves_along_an_include_path() {
 
 /// A module shipped only as a prebuilt BMI — no source anywhere — is the unknown case in its purest form.
 ///
-/// `import std;` is the everyday example, and the reason the outcome cannot be "the module is empty". The
-/// BMI exists on the build machine and the analysis has no source for it, so the names it exports are
+/// The BMI exists on the build machine and the analysis has no source for it, so the names it exports are
 /// *unknown*: reporting them as absent would flag every `std::` use as an error, and reporting the import as
 /// resolved would fabricate a file that does not exist. The analysis says neither.
 ///
@@ -584,12 +583,12 @@ fn a_header_unit_resolves_along_an_include_path() {
 /// known, which is a different thing from the names being known to be missing.
 #[test]
 fn a_module_available_only_as_a_bmi_is_unknown() {
-    // A configured project: include paths that exist, a standard library that is not source here. Nothing
-    // in `files` declares any of these modules, which is exactly the situation on a real machine.
+    // A configured project: include paths that exist, a module that is not source here. Nothing in `files`
+    // declares any of these modules, which is exactly the situation on a real machine.
     let files = MemoryFiles::new()
         .with_file(
             "main.cpp",
-            "import std;\nimport <vector>;\nimport third_party.lib;\nint main() {}\n",
+            "import std.compat;\nimport <vector>;\nimport third_party.lib;\nint main() {}\n",
         )
         .with_file("include/vector", "int v;\n");
 
@@ -597,10 +596,15 @@ fn a_module_available_only_as_a_bmi_is_unknown() {
     let (graph, interner) = scan_with(&files, "main.cpp", &config);
     let edges = imports_of(&graph, &interner, "main.cpp");
 
-    // `std` is a named module with no source: unknown.
+    // A named module with no source: unknown. **`std.compat` rather than `std`**, because a compiler that ships a
+    // standard module ships its *source* (`<VC>/Tools/MSVC/<version>/modules/std.ixx`), so `import std;` resolves on
+    // a machine with that toolchain installed and this test would then be assert about the machine — see
+    // `a_module_whose_interface_unit_is_outside_the_project_is_read_in` for that case, and why it is the good one.
     assert_eq!(
         edges[0].outcome,
-        ImportOutcome::UnknownModule { name: "std".into() }
+        ImportOutcome::UnknownModule {
+            name: "std.compat".into()
+        }
     );
 
     // `<vector>` resolved to the header that *is* here — a header unit is built from a header, so having the
@@ -987,3 +991,398 @@ fn interface_units_are_found_by_module_name() {
     );
     let _ = interner;
 }
+
+/// **A module's names are found through the interface unit's own directory**, not through whatever directory the
+/// analysis happens to be running in.
+///
+/// Measured on the fixture in `tests/fixtures/modules` (a real C++20 module project, built by
+/// `target/build_modules.bat`): `import mathlib;` in `main.cpp` beside `mathlib.ixx` answered "no file in this
+/// project declares module `mathlib`" — the naming convention had proposed `mathlib.ixx`, and that spelling was
+/// read as a relative path against the *process's* directory. The importing file's directory is joined here, and
+/// this test is the shape of that mistake: files named relative to `main.cpp`.
+#[test]
+fn a_module_beside_the_importing_file_is_found_from_that_file() {
+    let files = MemoryFiles::new()
+        .with_file("src/main.cpp", "import mathlib;\n")
+        .with_file("src/mathlib.ixx", "export module mathlib;\nexport int add(int, int);\n");
+
+    let (graph, _interner) = scan(&files, "src/main.cpp");
+
+    let interface = graph
+        .interface_unit("mathlib")
+        .expect("`mathlib.ixx` is beside the file that imports it");
+    assert_eq!(
+        interface.path.to_string_lossy().replace('\\', "/"),
+        "src/mathlib.ixx",
+        "and it was found *there* rather than relative to the process"
+    );
+}
+
+/// **A header unit is a header**, so the names in it are visible to the file that imports it — `import <vector>;`
+/// and `import "local.h";` alike, because the search that finds the header is the include search and the
+/// declarations are the header's own.
+///
+/// The fixture this comes from is `tests/fixtures/modules/header_units.cpp`, built and run by
+/// `target/build_header_units.bat` (it prints `42`): both spellings, a quoted header beside the importing file and
+/// `<iostream>` from the include path.
+#[test]
+fn a_header_unit_makes_the_headers_declarations_visible() {
+    use cpp_code_analysis::{
+        DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter,
+    };
+
+    let memory = MemoryFiles::new()
+        .with_file(
+            "local_math.h",
+            "#pragma once\ninline int twice(int value) { return value * 2; }\n",
+        )
+        .with_file(
+            "main.cpp",
+            "import \"local_math.h\";\nint f() { return twice(21); }\n",
+        );
+
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        ".",
+        providers,
+        WatchFilter::new("."),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from("local_math.h"),
+        std::path::PathBuf::from("main.cpp"),
+    ]);
+    session.index_everything();
+
+    let found = session.index().definition("twice", Path::new("main.cpp"));
+
+    assert!(
+        matches!(found, Known::Yes(_)),
+        "`main.cpp` imports the header as a unit, so `twice` is in view: {found:?}"
+    );
+
+    let _ = DiskFiles;
+}
+
+/// **A declaration that is not exported is not visible to an importer** — the rule the module fixture caught: its
+/// interface unit writes `export namespace mathlib { … }` and, outside it, `int hidden_helper(int);`, and offering
+/// that second name to a file that says `import mathlib;` is offering something that does not compile.
+///
+/// The shape that made this subtle is in the grammar: `export int f();` puts the keyword **inside** the declaration
+/// and `export namespace n { … }` puts it **beside** the namespace, so a reader that only looked for the first
+/// spelling found no exported name at all in the fixture — measured, the completion went from one name too many to
+/// none.
+#[test]
+fn only_exported_names_are_visible_through_an_import() {
+    use cpp_code_analysis::{
+        DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter,
+    };
+
+    let memory = MemoryFiles::new()
+        .with_file(
+            "mathlib.ixx",
+            "export module mathlib;\n\
+             export namespace mathlib { int add(int, int); }\n\
+             namespace mathlib { int hidden_helper(int); }\n",
+        )
+        .with_file(
+            "main.cpp",
+            "import mathlib;\nint f() { return mathlib::add(1, 2); }\n",
+        );
+
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        ".",
+        providers,
+        WatchFilter::new("."),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from("mathlib.ixx"),
+        std::path::PathBuf::from("main.cpp"),
+    ]);
+    session.index_everything();
+
+    let exported = session
+        .index()
+        .definition("mathlib::add", Path::new("main.cpp"));
+    assert!(
+        matches!(exported, Known::Yes(_)),
+        "`add` is inside an exported namespace: {exported:?}"
+    );
+
+    let hidden = session
+        .index()
+        .definition("mathlib::hidden_helper", Path::new("main.cpp"));
+    assert!(
+        !matches!(hidden, Known::Yes(_)),
+        "`hidden_helper` is written outside every `export`, so an importer may not name it: {hidden:?}"
+    );
+
+    let _ = DiskFiles;
+}
+
+/// **A module whose interface unit is outside the project** — `import std;`, the C++23 spelling — is found through
+/// the include paths' sibling `modules` directory, and once found it answers for the names it exports.
+///
+/// This is the shape MSVC ships: `import std;` is not in the project and not in an include path, it is
+/// `<VC>/Tools/MSVC/<version>/modules/std.ixx` — **beside** the include directory — and the file it names is
+/// `export module std;` followed by an `#include` of every standard header. So there is nothing exotic to read: the
+/// declarations are in the headers, and a file the project never scanned is the only reason `std::string` used to
+/// answer `None` from a file that says `import std;`.
+///
+/// The layout here is the machine's, not a convention invented for the test: `lib/include` is an include path,
+/// `lib/modules/std.ixx` is its sibling, and the importing file is in neither directory.
+#[test]
+fn a_module_whose_interface_unit_is_outside_the_project_is_read_in() {
+    use cpp_code_analysis::{
+        DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter,
+    };
+
+    let files = MemoryFiles::new()
+        .with_file(
+            "lib/modules/std.ixx",
+            "export module std;\n#include <string>\n",
+        )
+        .with_file("lib/include/string", "namespace std { class string {}; }\n")
+        .with_file("src/main.cpp", "import std;\nstd::string greeting;\n");
+
+    let config = CompilerConfig::new().with_include_path("lib/include");
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(".", providers, WatchFilter::new("."), config);
+    session.add_project_files([std::path::PathBuf::from("src/main.cpp")]);
+    session.index_everything();
+
+    // Before the read: the import resolves to a file the index has never seen, so `std::string` is unknown. This is
+    // the state the test exists to change, and asserting it first is what makes the second assertion mean something
+    // — a `Yes` here would say the answer came from somewhere other than the module.
+    let before = session.index().definition("std::string", Path::new("src/main.cpp"));
+    assert!(
+        !matches!(before, Known::Yes(_)),
+        "no summary of `lib/modules/std.ixx` exists yet, so nothing can answer for `std`: {before:?}"
+    );
+
+    let read_in = session.read_the_modules_a_file_imports(Path::new("src/main.cpp"));
+    assert_eq!(read_in, 1, "one interface unit: `std.ixx`, and nothing else");
+
+    assert_eq!(
+        session.index().interface_unit_of("std"),
+        Some("lib/modules/std.ixx"),
+        "and the index now knows which file an `import std;` reaches"
+    );
+
+    let after = session.index().definition("std::string", Path::new("src/main.cpp"));
+    assert!(
+        matches!(after, Known::Yes(_)),
+        "`std::string` is declared in the header the interface unit includes: {after:?}"
+    );
+
+    // Idempotent, and that is the property the request-driven design rests on: a query asks on every keystroke, and
+    // the second ask must cost nothing rather than re-read the standard library.
+    assert_eq!(
+        session.read_the_modules_a_file_imports(Path::new("src/main.cpp")),
+        0,
+        "an interface unit already in the index is not read again"
+    );
+
+    let _ = DiskFiles;
+}
+
+/// **The name a reader types after `import std;`** — the completion, which is the answer this whole path exists for.
+///
+/// The test above stops at the query layer, where a name is a name. This one is the thing a user sees: a cursor after
+/// `std::` in a file whose only import is the standard module, and the list that comes back. Both halves have to be
+/// right and they are different halves — the module read is what puts the standard library's headers in the index,
+/// and the qualified-name query is what walks them.
+///
+/// The layout is the machine's again (`lib/include` is an include path, `lib/modules/std.ixx` is its sibling), and
+/// the module is a *sketch* of MSVC's: `export module std;` followed by the headers that hold the names. That is not
+/// a simplification for the test's sake — MSVC's `std.ixx` is 3 194 bytes and every one of them is a declaration of
+/// the module and an `#include` line, with no declarations of its own.
+#[test]
+fn a_names_imported_from_the_standard_module_are_offered_after_the_scope() {
+    use cpp_code_analysis::{
+        DiskFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+    };
+
+    let main = "import std;\n\nstd::string greeting{\"hi\"};\n";
+    let files = MemoryFiles::new()
+        .with_file(
+            "lib/modules/std.ixx",
+            "export module std;\n#include <string>\n#include <vector>\n",
+        )
+        .with_file(
+            "lib/include/string",
+            "namespace std { class string {}; }\n",
+        )
+        .with_file(
+            "lib/include/vector",
+            "namespace std { template <class T> class vector {}; }\n",
+        )
+        .with_file("src/main.cpp", main);
+
+    let config = CompilerConfig::new().with_include_path("lib/include");
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(".", providers, WatchFilter::new("."), config);
+    session.add_project_files([std::path::PathBuf::from("src/main.cpp")]);
+    session.index_everything();
+
+    // The read is the step under test, so it is asked for by name rather than left to a handler.
+    assert_eq!(
+        session.read_the_modules_a_file_imports(Path::new("src/main.cpp")),
+        1,
+        "the standard module's interface unit is read in"
+    );
+
+    let view = session.view("src/main.cpp").expect("the file is held");
+    // The cursor the completion is asked about: **after `std::` and before the name**, which is where a reader is
+    // when the popup appears. The offset is found from the text rather than written as a number, because a fixture
+    // edited above must not silently move the question.
+    let after_the_scope = main.find("std::").expect("the fixture writes `std::`") + "std::".len();
+    let found = session.completions(&view, after_the_scope);
+
+    let labels: Vec<&str> = found.items.iter().map(|item| item.label.as_str()).collect();
+
+    assert_eq!(
+        found.scope, "std",
+        "the answer is the names of that scope, and saying which scope it listed is part of the answer"
+    );
+    assert!(
+        labels.contains(&"string") && labels.contains(&"vector"),
+        "both headers `std.ixx` includes contribute their names: {labels:?}"
+    );
+
+    let _ = DiskFiles;
+}
+
+/// **What a reader is told when an import names a module nothing in the project declares** — the note, on the line
+/// that wrote it.
+///
+/// This is the other half of the pair that makes `import std;` honest. Reading the standard module in is what makes
+/// its names answerable (the tests above); this is what happens when it *cannot* be read — a module the compiler
+/// keeps outside the project and nobody has built — where the failure mode this project keeps having to remove is
+/// silence. The note is not an error and not a warning: nothing is wrong with the file.
+///
+/// The range is asserted, not just the text: a note about an import is worth nothing if it is not on the line the
+/// import is on, and that is the half that needs the file's tree rather than its summary.
+#[test]
+fn an_import_nothing_declares_gets_a_note_on_the_line_that_wrote_it() {
+    use cpp_code_analysis::{
+        DiskFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+    };
+
+    let source = "// a file whose module is not in this project\nimport mylib;\n\nint main() { return 0; }\n";
+    let files = MemoryFiles::new().with_file("src/main.cpp", source);
+
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        ".",
+        providers,
+        WatchFilter::new("."),
+        CompilerConfig::new(),
+    );
+    session.add_project_files([std::path::PathBuf::from("src/main.cpp")]);
+    session.index_everything();
+
+    let view = session.view("src/main.cpp").expect("the file is held");
+    let notes = session.notes_about_the_modules(&view);
+
+    assert_eq!(notes.len(), 1, "one import, one note: {notes:?}");
+
+    let note = &notes[0];
+    assert!(
+        note.message.contains("mylib"),
+        "the note names the module: {}",
+        note.message
+    );
+    assert!(
+        note.message.contains("unknown rather than absent"),
+        "and never claims its names do not exist: {}",
+        note.message
+    );
+
+    // The range covers the `import mylib;` declaration: it starts at the keyword (the note is *about* that line) and
+    // it does not run past the declaration — the node's range carries the blank line after it, which is the parser's
+    // statement about trivia rather than a second declaration, so the assertion is on where it *starts* and on what
+    // it contains.
+    let line = "import mylib;";
+    let start = source.find(line).expect("the fixture writes it");
+    assert_eq!(note.start, start, "the note starts at the `import`");
+    assert!(
+        source[note.start..note.end].starts_with(line),
+        "and the range covers the declaration: {:?}",
+        &source[note.start..note.end]
+    );
+    assert!(
+        !source[note.start..note.end].contains("int main"),
+        "and stops before the next declaration: {:?}",
+        &source[note.start..note.end]
+    );
+
+    // A module the project **does** declare gets no note: the reader can go to it, and telling them where their
+    // compiler keeps modules would answer a question they did not ask.
+    let files = MemoryFiles::new()
+        .with_file("src/main.cpp", "import mylib;\n")
+        .with_file("src/mylib.ixx", "export module mylib;\n");
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        ".",
+        providers,
+        WatchFilter::new("."),
+        CompilerConfig::new(),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from("src/main.cpp"),
+        std::path::PathBuf::from("src/mylib.ixx"),
+    ]);
+    session.index_everything();
+
+    let view = session.view("src/main.cpp").expect("the file is held");
+    assert!(
+        session.notes_about_the_modules(&view).is_empty(),
+        "a module this project declares is not a note"
+    );
+
+    let _ = DiskFiles;
+}
+
+#[test]
+fn an_import_makes_the_modules_names_visible() {
+    use cpp_code_analysis::{
+        DiskFiles, Known, OpenDocuments, Session, SessionFiles, WatchFilter,
+    };
+
+    let mut memory = MemoryFiles::new()
+        .with_file(
+            "mathlib.ixx",
+            "export module mathlib;\nexport namespace mathlib { int add(int, int); }\n",
+        )
+        .with_file("main.cpp", "import mathlib;\nint f() { return mathlib::add(1, 2); }\n");
+
+    memory = memory.with_file("unrelated.h", "int elsewhere;\n");
+
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        ".",
+        providers,
+        WatchFilter::new("."),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from("mathlib.ixx"),
+        std::path::PathBuf::from("main.cpp"),
+    ]);
+    session.index_everything();
+
+    let found = session
+        .index()
+        .definition("mathlib::add", Path::new("main.cpp"));
+
+    assert!(
+        matches!(found, Known::Yes(_)),
+        "`main.cpp` says `import mathlib;`, so what the module exports is in view: {found:?}"
+    );
+
+    let _ = DiskFiles;
+}
+

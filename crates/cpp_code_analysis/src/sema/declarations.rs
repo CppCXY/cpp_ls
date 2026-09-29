@@ -34,7 +34,7 @@ use crate::preprocess::directive::{Directive, DirectiveKind, SpannedDirective};
 use crate::preprocess::FilePreprocessing;
 use crate::sema::symbol::{Binding, BindingKind, ScopeId, ScopeTree};
 use crate::summary::{
-    ConditionalRegion, DeclFact, DeclKind, FactGuard, GuardBranch, MacroFact, MacroKind,
+    Access, ConditionalRegion, DeclFact, DeclKind, FactGuard, GuardBranch, MacroFact, MacroKind,
     SummaryGuards,
 };
 use cpp_parser::CppSyntaxKind;
@@ -307,6 +307,19 @@ struct Shape {
     /// The node's own range — the interval that decides which bindings it is the shape *for*.
     at: cpp_parser::SourceRange,
     kind: CppSyntaxKind,
+    /// **Who may name a declaration written here** — the access level in force in the class body this node is in,
+    /// or `None` outside every class body. Recorded per shape rather than looked up per binding because the pass
+    /// that builds this table is already walking the tree in document order, and the level is a property of *where*
+    /// the declaration is written (see [`Access`], and [`declared_access_with`] for the query).
+    access: Option<Access>,
+    /// **Is a declaration written here exported** from the module this file declares — `export int f();`,
+    /// `export namespace n { … }`, `export { … }`?
+    ///
+    /// A property of *where* it is written, like [`Shape::access`], and recorded in the same pass for the same
+    /// reason. It decides whether an importer may name it: a declaration in a module interface unit that is not
+    /// exported is invisible to `import`, which is the difference between a completion that compiles and one that
+    /// does not — see `crate::ModuleReading` and the visibility walk that applies it.
+    exported: bool,
     /// Its `DeclSpecifierSeq` child, if it has one.
     specifiers: Option<CppSyntaxNode>,
     /// Its `TrailingReturnType` child, if it has one.
@@ -338,6 +351,11 @@ impl DeclarationShapes {
         let mut chain: Vec<u32> = Vec::new();
         // The class templates, recorded in the same pass — see the field's note.
         let mut templates: Vec<(cpp_parser::SourceRange, CppSyntaxNode)> = Vec::new();
+        // The class bodies the walk has entered and the access level in force in each, innermost last — see
+        // [`Shape::access`].
+        let mut bodies: Vec<(usize, Access)> = Vec::new();
+        // The `export`ed regions the walk has entered, innermost last — see [`Shape::exported`].
+        let mut exports: Vec<usize> = Vec::new();
 
         for node in root.descendants() {
             let at = cpp_parser::source_range(node.text_range());
@@ -350,7 +368,54 @@ impl DeclarationShapes {
                 chain.pop();
             }
 
+            // …and the same for the **class bodies** the walk has entered: the access level is a property of the
+            // region a declaration sits in, so a body that has ended cannot still be in force.
+            while bodies
+                .last()
+                .is_some_and(|(end, _)| *end <= at.start_offset)
+            {
+                bodies.pop();
+            }
+
+            // …and for the **exported regions**. `export` heads three shapes and the grammar writes the keyword in
+            // two different places — inside the declaration it exports and inside an export block, but *beside* a
+            // namespace — so one function reads both spellings. See [`begins_an_exported_region`].
+            while exports.last().is_some_and(|end| *end <= at.start_offset) {
+                exports.pop();
+            }
+            if begins_an_exported_region(&node) {
+                exports.push(at.end_offset());
+            }
+
             let kind = CppSyntaxKind::from(node.kind());
+
+            // **A class body opens an access region, and `public:`/`private:`/`protected:` change it.** The level in
+            // force is what a consumer needs to decide whether a member may be *named* where the cursor is, and it
+            // is a property of the text's own structure rather than of any resolution — which is why it is recorded
+            // in this pass (one walk, no store) rather than asked per binding.
+            //
+            // The default before any label is the class key's: `class` is private, `struct` and `union` are public.
+            // Read from the *parent* node, which is the class definition this body belongs to.
+            if kind == CppSyntaxKind::ClassBody {
+                let default = match node
+                    .parent()
+                    .map(|owner| CppSyntaxKind::from(owner.kind()))
+                {
+                    Some(CppSyntaxKind::StructDef | CppSyntaxKind::UnionDef) => Access::Public,
+                    // A `class` — and anything else this walk does not recognise, which is the conservative
+                    // direction for a *member*: the private reading hides a name rather than offering one the
+                    // reader cannot write.
+                    _ => Access::Private,
+                };
+                bodies.push((at.end_offset(), default));
+            } else if let Some((_, level)) = bodies.last_mut() {
+                match kind {
+                    CppSyntaxKind::PublicAccess => *level = Access::Public,
+                    CppSyntaxKind::ProtectedAccess => *level = Access::Protected,
+                    CppSyntaxKind::PrivateAccess => *level = Access::Private,
+                    _ => {}
+                }
+            }
 
             // **The one relation that is not on the path to a name**, recorded while the pass is here anyway: a
             // template declaration and the class it introduces are siblings, so the pair is remembered by the range
@@ -378,6 +443,8 @@ impl DeclarationShapes {
             shapes.push(Shape {
                 at,
                 kind,
+                access: bodies.last().map(|(_, level)| *level),
+                exported: !exports.is_empty(),
                 specifiers: read.specifiers,
                 trailing: read.trailing,
                 declarator: read.declarator,
@@ -424,6 +491,28 @@ impl DeclarationShapes {
     /// How many shapes the file has — what a caller prints when it wants to know whether the walk was worth it.
     pub fn len(&self) -> usize {
         self.shapes.len()
+    }
+
+    /// **Who may name a declaration written at this offset** — the access level in force there, or `None` outside
+    /// every class body.
+    ///
+    /// The **innermost** shape containing the offset decides, which is the same direction every other query here
+    /// reads: a member's own declarator sits inside its class body's region, and a nested class's members sit inside
+    /// the nested body's — see [`Shape::access`] for why the level is recorded rather than looked up.
+    pub fn access_at(&self, offset: usize) -> Option<Access> {
+        let mut found = None;
+        self.on_the_path(offset, |shape| found = shape.access);
+        found
+    }
+
+    /// **Is a declaration written at this offset exported** from the module the file declares?
+    ///
+    /// `false` outside every `export`ed region, which is the answer for an ordinary translation unit and for a
+    /// module interface unit's private part alike — see [`Shape::exported`].
+    pub fn exported_at(&self, offset: usize) -> bool {
+        let mut found = false;
+        self.on_the_path(offset, |shape| found = shape.exported);
+        found
     }
 
     pub fn is_empty(&self) -> bool {
@@ -766,6 +855,125 @@ fn before(text: &str, node: &CppSyntaxNode, name: cpp_parser::SourceRange) -> St
     text[..to].trim().to_string()
 }
 
+/// **Who may name a declaration written at `offset`** — the access level in force there, or `None` outside every
+/// class body.
+///
+/// The tree-side twin of [`DeclarationShapes::access_at`], for the one producer that has no shapes table: a fact
+/// built from the **buffer's** scope tree ([`crate::index::project::fact_from_binding`]) is handed a node and a
+/// binding, and a completion after `.` on the buffer's own class is exactly where this answer is shown.
+///
+/// The walk is up from the name to the innermost class body containing it, then along that body's own children for
+/// the **last** access label before the name — the level in force. The class key decides the default before any
+/// label: `struct` and `union` are public, `class` is private.
+pub fn declared_access_at(root: &CppSyntaxNode, offset: usize) -> Option<Access> {
+    let token = cpp_parser::token_at(root, offset)?;
+
+    let body = token
+        .parent_ancestors()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ClassBody)?;
+
+    let default = match body.parent().map(|owner| CppSyntaxKind::from(owner.kind())) {
+        Some(CppSyntaxKind::StructDef | CppSyntaxKind::UnionDef) => Access::Public,
+        _ => Access::Private,
+    };
+
+    let mut level = default;
+    for child in body.children() {
+        // Only the labels **before** the name are in force: a `private:` written below it does not change what this
+        // declaration is, which is the same rule the file's own text follows.
+        if usize::from(child.text_range().start()) >= offset {
+            break;
+        }
+
+        level = match CppSyntaxKind::from(child.kind()) {
+            CppSyntaxKind::PublicAccess => Access::Public,
+            CppSyntaxKind::ProtectedAccess => Access::Protected,
+            CppSyntaxKind::PrivateAccess => Access::Private,
+            _ => continue,
+        };
+    }
+
+    Some(level)
+}
+
+/// **Is a declaration written at `offset` exported** from the module the file declares?
+///
+/// The tree-side twin of [`DeclarationShapes::exported_at`], for the producer that has no shapes table — see
+/// [`declared_access_at`], whose shape this shares.
+///
+/// The rule is [`begins_an_exported_region`], asked of every node the declaration is written inside: `export`
+/// itself, an `export { … }` block, or an exported namespace all govern what is written within them.
+pub fn declared_exported_at(root: &CppSyntaxNode, offset: usize) -> bool {
+    let Some(token) = cpp_parser::token_at(root, offset) else {
+        return false;
+    };
+
+    token.parent_ancestors().any(|node| begins_an_exported_region(&node))
+}
+
+/// **Does `export` govern what is written inside this node?**
+///
+/// Two spellings, because the grammar writes the keyword in two places, and reading only one of them is wrong in a
+/// way that hides a whole library:
+///
+/// ```text
+/// export int f();            the keyword is the *first token* of the declaration
+/// export { int f(); }        …and of the export block
+/// export namespace n { … }   the keyword is a **sibling** of the namespace, not inside it
+/// ```
+///
+/// Measured on the module fixture (`tests/fixtures/modules`), whose interface unit is
+/// `export module mathlib; export namespace mathlib { … }`: with only the first rule every member of an exported
+/// namespace came out unexported, so a file that says `import mathlib;` could name **none** of them — the answer
+/// went from "one name too many" to "nothing at all".
+///
+/// Trivia between the keyword and the node is skipped: `export` and the declaration it exports may be separated by
+/// a newline, a comment, or both.
+///
+/// # The file itself is not a region, and that is not a detail
+///
+/// A file whose **first** declaration is `export module m;` begins with the `export` token — so a rule that asked
+/// the first-token question of every ancestor answered `true` for every declaration in the file, exported or not.
+/// Measured on the four-line fixture in `a_declaration_is_exported_only_where_export_reaches_it`: all four names,
+/// including one below a `namespace` with no `export` anywhere above it, came out exported; and on the real module
+/// fixture (`tests/fixtures/modules`, which *does* start with `export module mathlib;`) it would have offered
+/// `hidden_helper` again — the very name this whole reading exists to hide. `export` heads a **declaration**; a
+/// translation unit is not one.
+fn begins_an_exported_region(node: &CppSyntaxNode) -> bool {
+    if node.parent().is_none() {
+        return false;
+    }
+
+    let starts_with_export = node
+        .children_with_tokens()
+        .find_map(|element| element.into_token())
+        .is_some_and(|token| {
+            cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::ExportKeyword
+        });
+
+    if starts_with_export {
+        return true;
+    }
+
+    let mut previous = node.prev_sibling_or_token();
+    while let Some(element) = previous {
+        if let Some(token) = element.as_token() {
+            if cpp_parser::is_trivia(cpp_parser::CppTokenKind::from(token.kind())) {
+                previous = token.prev_sibling_or_token();
+                continue;
+            }
+
+            return cpp_parser::CppTokenKind::from(token.kind())
+                == cpp_parser::CppTokenKind::ExportKeyword;
+        }
+
+        // A *node* before this one: the keyword is not there, whatever it is.
+        return false;
+    }
+
+    false
+}
+
 /// **The parameter list a declaration at `offset` was written with**, as the file spells it — parentheses included.
 ///
 /// The **innermost `Declarator` ancestor** of the name, and *its* `ParameterList` child, which is the same reading
@@ -982,6 +1190,12 @@ fn fact_for(
         let _timer = crate::stages::StageTimer::new(crate::stages::Stage::TemplateParameters);
         declared_template_parameters_with(shapes, binding)
     };
+    // **Who may name it.** Recorded on the shape the binding's name sits in, which the pass that built this table
+    // already knows — see [`Shape::access`]. `None` for a name no class body contains.
+    let access = shapes.access_at(the_offset_to_descend_by(binding));
+    // **…and whether an importer may.** The other half of "who may name it", for a file that declares a module:
+    // see [`Shape::exported`] and [`crate::ProjectIndex::visible_files`], which is where it is applied.
+    let exported = shapes.exported_at(the_offset_to_descend_by(binding));
     // **What the function was declared with**, which is the one thing a reader picking a name out of a hundred
     // needs and a fact did not carry: `format` and `format_to` are two rows of a completion that used to read
     // `string (…)` and `_OutputIt (…)`. Read from the tree at the name's own offset — see
@@ -1009,6 +1223,8 @@ fn fact_for(
         bases,
         parameters,
         parameter_list,
+        access,
+        exported,
         range: binding.range,
         name_range: binding.name_range,
         // The one field that comes from the diagnostics rather than from the tree — see [`DeclFact::clean`] for
@@ -1787,6 +2003,41 @@ mod tests {
     use crate::sema::scopes::build_scopes;
     use crate::summary::{DeclKind, FactGuard};
     use cpp_parser::{CppParser, ParserConfig};
+
+    /// **`export` governs two spellings, and the namespace one is the case that hid a whole library.**
+    ///
+    /// `export int f();` puts the keyword inside the declaration it exports; `export namespace n { … }` puts it
+    /// **beside** the namespace, as a sibling token. A reader that only looked for the first spelling found nothing
+    /// exported in the fixture's interface unit (`tests/fixtures/modules`), and a file that says `import mathlib;`
+    /// could name none of its members.
+    ///
+    /// Both directions in one fixture, because the mistake this replaces was in the *hiding* direction too: a
+    /// namespace declared again **without** `export` must not inherit its neighbour's.
+    #[test]
+    fn a_declaration_is_exported_only_where_export_reaches_it() {
+        let source = "export module m;\n\
+                      export namespace ns { int inside(); }\n\
+                      namespace ns { int outside(); }\n\
+                      export int alone();\n\
+                      int plain();\n";
+        let (facts, _) = facts(source);
+
+        let exported = |name: &str| {
+            facts
+                .iter()
+                .find(|fact| fact.name == name)
+                .unwrap_or_else(|| panic!("{name} must be a fact"))
+                .exported
+        };
+
+        assert!(exported("inside"), "inside an exported namespace");
+        assert!(
+            !exported("outside"),
+            "the second namespace has no `export`, so a declaration in it is not exported"
+        );
+        assert!(exported("alone"), "`export int alone();`");
+        assert!(!exported("plain"), "and a declaration with no `export` above it");
+    }
 
     #[test]
     fn an_alias_records_the_type_it_points_at() {

@@ -149,6 +149,7 @@ pub use index::{
 };
 pub use macros::{MacroBody, MacroDef, MacroTable, Parameter, ParameterKind};
 pub use module_info::{ImportDeclaration, ImportTarget, ModuleInfo, ModuleUnit};
+pub use summary::ModuleReading;
 pub use modules::{
     ImportEdge, ImportOutcome, MAX_IMPORT_DEPTH, ModuleGraph, ModuleScanner, ModuleUnitEntry,
     scan_imports,
@@ -178,8 +179,8 @@ pub use scopes::{NoMacroBodies, build_scopes, declared_module_names};
 // folder the owner of the others.
 pub use inlay::ParameterHint;
 pub use session::{
-    CookedReading, DiagnosticReading, ExpressionType, FileDiagnostic, FileDiagnostics, OpenDocuments,
-    Session, SessionFiles,
+    CookedReading, DiagnosticReading, ExpressionType, FileDiagnostic, FileDiagnostics, ModuleNote,
+    OpenDocuments, Session, SessionFiles,
 };
 // The *file* layer's two public faces: a view is one file parsed (what a cursor query is answered against), and a
 // VFS is the set of files being held (their text, and the line index of that text). They live in `file` rather
@@ -191,5 +192,4 @@ pub use symbol::{
     QualifiedName, Scope, ScopeId, ScopeKind, ScopeTree, UnknownReason,
 };
 pub use token::Token;
-
 

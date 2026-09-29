@@ -470,6 +470,15 @@ pub struct ProjectIndex {
     names: NameIndex,
     /// For each file, the files that include it. Derived from the summaries; see the module documentation.
     included_by: HashMap<String, BTreeSet<String>>,
+    /// **Which file declares each module** — the second visibility edge, beside `included_by`.
+    ///
+    /// An `import m;` names a *module*, and the file behind it is the project's business rather than the
+    /// preprocessor's: this is the map that turns the name into a file. Only **primary interface units** are here
+    /// (see [`ProjectIndex::insert_at`]), because those are the units an importer sees.
+    ///
+    /// Derived from the summaries like `included_by`, and for the same reason: the visibility walk that needs it
+    /// holds summaries and nothing else.
+    module_interfaces: HashMap<String, String>,
     /// The macros a **compilation** starts with, which no summary can hold: the compiler's predefined names and the
     /// command line's `-D`s.
     ///
@@ -597,6 +606,162 @@ fn member_access_class(written: &Type) -> Option<String> {
     }
 
     written.pointee()?.class_name().map(str::to_string)
+}
+
+/// **The class a member access is asked of, and the arguments that finish its members' types.**
+///
+/// The two halves come from one place because they come from one *step*, and there are two callers — the member
+/// read as a value (`v.front`) and the member called (`v.back()`) — which had them apart and disagreed for exactly
+/// as long as that lasted. Measured: `x.back()` on a `std::string` answered `char&` while `auto y = x.back()`
+/// answered `_Elem&`, because the second caller paired the class's parameters with an empty argument list.
+///
+/// The arguments are the ones the **use** wrote when it wrote any (`std::vector<int>::data`), and otherwise the
+/// ones the **alias** carried (`std::string` → `basic_string<char, char_traits<char>, allocator<char>>`): a use
+/// that wrote none has not said nothing, it has said "whatever the name it used stands for". See
+/// [`resolve_aliases_with_arguments`].
+fn member_access_class_and_arguments(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+    written: &Type,
+) -> (String, Vec<Type>) {
+    let (class, from_the_alias) = resolve_aliases_with_arguments(index, scopes, root, path, class);
+
+    let arguments = if written.arguments().is_empty() {
+        from_the_alias
+    } else {
+        written.arguments().to_vec()
+    };
+
+    (class, arguments)
+}
+
+/// **What of a member list may be offered at this cursor** — both rules, in one place, and the count of what the
+/// second one kept out.
+///
+/// # The two rules
+///
+/// 1. **The names the implementation owns are not offered**, the same rule the name completion applies — and this is
+///    where a user meets them first: `line.` on a `std::string` listed 202 members of MSVC's `basic_string`, half of
+///    them `_Alty`, `_ALLOC_MASK`, `_Apply_annotation`. See [`is_reserved_to_the_implementation`].
+/// 2. **A member the reader cannot name is not offered.** `private` and `protected` are the difference between what
+///    a class *has* and what may be written at a cursor, and offering one is a mistake the reader only discovers by
+///    compiling. The level travels on the fact ([`DeclFact::access`]) and is checked against the cursor's own
+///    classes — the one it is written in and what that derives from, which are the two the language lets a
+///    non-public member be named from.
+///
+/// # Why one function, when there are two callers
+///
+/// Because they had one rule each, and a rule with two readers is how this area's bugs have all started: the
+/// completion layer reads the shape itself (it already has one from the context reader) while
+/// [`member_completions_at`] reads it again, and both then need the same two filters. The filters live here, and the
+/// second is *counted* rather than dropped in silence so that a `.` which offers nothing can say which of the two
+/// reasons it was — "the class has no members" and "every member of it is `private` from here" are different facts
+/// about the program, and only one of them has a fix the reader can apply.
+pub(crate) fn offerable_members(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    offset: usize,
+    members: &mut MemberList,
+) -> usize {
+    members
+        .members
+        .retain(|member| !is_reserved_to_the_implementation(&member.fact));
+
+    let open_to_the_cursor = classes_the_cursor_is_in(index, scopes, root, path, offset);
+    let before = members.members.len();
+
+    members.members.retain(|member| {
+        let Some(access) = member.fact.access else {
+            return true;
+        };
+        if access.is_open_to_everyone() {
+            return true;
+        }
+
+        member
+            .fact
+            .scope
+            .as_deref()
+            .is_some_and(|owner| open_to_the_cursor.iter().any(|seen| seen == owner))
+    });
+
+    before - members.members.len()
+}
+
+/// **The classes a cursor is "inside", for access** — the innermost class its offset is written in, and every class
+/// that one derives from.
+///
+/// # Why those two, and only those two
+///
+/// C++ lets a class name its own `private` members and its descendants name its `protected` ones. So the "us" of
+/// `private:` is the class itself and the "us" of `protected:` is the class and everything below it — and one list
+/// answers both, because a member's level only has to be checked against the class it is declared in being *in*
+/// this list. A member of a class outside it is invisible, whatever its level: a `protected` member of an unrelated
+/// class is as unreachable as a `private` one.
+///
+/// # What it deliberately does not do
+///
+/// * **Friends.** `friend class X;` and `friend void f();` make declarations visible to something that is not a
+///   descendant, and this model records no friends, so a friend's access is reported as unreachable — a member not
+///   offered that the reader could in fact write. That is the direction chosen for the whole feature: a name that
+///   is missing is a smaller mistake than a name that cannot be written (see [`crate::completion`]).
+/// * **Local classes and lambdas inside a member function.** The cursor's class is found from the *scopes* the
+///   offset is in, which a lambda's body shares with the enclosing member — so a lambda in a member function sees
+///   what the member function sees, which is what the language says.
+///
+/// Empty when the cursor is not in a class at all — the ordinary case for a `.cpp` file — and the caller then
+/// offers only public members.
+pub(crate) fn classes_the_cursor_is_in(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    offset: usize,
+) -> Vec<String> {
+    // The innermost class, from the scope the offset is in. `qualification_prefix_of` is what turns a `ScopeId`
+    // into the spelling a `DeclFact` records, and only a class-like scope has one that names a class.
+    let Some(innermost) = scopes.scope_at(offset) else {
+        return Vec::new();
+    };
+
+    let mut classes: Vec<String> = scopes
+        .scope_chain(innermost)
+        .into_iter()
+        .filter(|scope| {
+            scopes
+                .scope(*scope)
+                .is_some_and(|data| matches!(data.kind, crate::ScopeKind::Class | crate::ScopeKind::Enum))
+        })
+        .filter_map(|scope| scopes.qualification_prefix_of(scope))
+        .collect();
+
+    // …and outward, one level of bases at a time, the same walk [`members_of`] makes in the other direction. A base
+    // that cannot be resolved stops its own branch rather than the whole answer: what is known is still known.
+    let mut level: Vec<String> = classes.clone();
+    let mut depth = 0usize;
+
+    while !level.is_empty() && depth < MAX_NESTED_TYPE_DEPTH {
+        let mut next: Vec<String> = Vec::new();
+
+        for class in &level {
+            for base in bases_of(index, scopes, root, path, class).value().unwrap_or_default() {
+                if !classes.contains(&base) {
+                    classes.push(base.clone());
+                    next.push(base);
+                }
+            }
+        }
+
+        level = next;
+        depth += 1;
+    }
+
+    classes
 }
 
 /// Every member a type has: its own, and the ones it inherits.
@@ -919,6 +1084,11 @@ pub struct MemberCompletions {
     /// all of `size`, because the range is what gets replaced and the prefix is what gets matched. A consumer that
     /// used the whole spelling for both would offer nothing while the user is plainly typing.
     pub prefix: String,
+    /// **How many members the access level kept out of the list** — counted rather than dropped in silence, so that
+    /// a `.` which offers nothing can say which of the two reasons it was: "the class has no members" and "every
+    /// member of it is `private` where the cursor is" are different facts about the program, and only one of them
+    /// has a fix the reader can apply. See [`DeclFact::access`].
+    pub hidden_by_access: usize,
 }
 
 /// The members a completion at `offset` should offer: `w.` and `w.si`, answered with `Widget`'s members.
@@ -990,15 +1160,12 @@ pub fn member_completions_at(
 
     match members_of(index, scopes, root, path, &class) {
         Known::Yes(mut members) => {
-            // **The names the implementation owns are not offered**, the same rule the name completion applies —
-            // and this is where a user meets them first: `line.` on a `std::string` listed 202 members of MSVC's
-            // `basic_string`, half of them `_Alty`, `_ALLOC_MASK`, `_Apply_annotation`. See
-            // [`is_reserved_to_the_implementation`].
-            members.members.retain(|member| !is_reserved_to_the_implementation(&member.fact));
+            let hidden_by_access = offerable_members(index, scopes, root, path, offset, &mut members);
 
             Known::Yes(MemberCompletions {
                 class: class.to_string(),
                 members,
+                hidden_by_access,
                 member_range: access.member_range,
                 prefix: written_before_the_cursor(&access, offset),
             })
@@ -1991,7 +2158,14 @@ pub(crate) fn type_of_expression(
         // **The arguments the use wrote**, which is what turns a member's own _Ty& into int&: the parameter names
         // are the declaring class's ([DeclFact::parameters]) and the arguments are the object type's, and the pairing
         // is positional — see [crate::TypeBindings].
-        let arguments = inner_type.arguments();
+        //
+        // **And when the use wrote none, the alias it named may have carried them.** `std::string` has no
+        // arguments of its own — it is one name — and the class it resolves to was written with three:
+        // `basic_string<char, char_traits<char>, allocator<char>>`. Without them the pairing is empty, `_Elem` has
+        // nothing to be replaced by, and `x.back()` on a `std::string` answers `_Elem&`: measured, and it is the
+        // last step between that and `char&`. See [`member_access_class_and_arguments`].
+        let (class, arguments) =
+            member_access_class_and_arguments(index, scopes, root, path, &class, &inner_type);
         let found = member_fact(index, scopes, root, path, &class, &inner.member);
         let found = match found {
             Known::Yes(found) => Known::Yes(found),
@@ -2306,7 +2480,18 @@ impl NamedDeclaration {
     /// Two answers because C++ has two, and the tokens do not separate them: `make()` is a call of a function and
     /// has what it returns, while `Widget()` — the same shape — is a *temporary* of the class. Only the
     /// declaration says which, which is why this is asked here rather than of the shape.
-    fn what_a_call_has(&self, root: &cpp_parser::CppSyntaxNode) -> Option<Type> {
+    ///
+    /// **The return type is finished the same way a member's type is** — [`finish_a_nested_name`], over the class
+    /// the member is declared in (`DeclFact::scope`). That is the whole of how `auto y = x.back()` gets `y`'s type:
+    /// this is the reader the deduction path goes through, and until it ran the walk it answered with the *name*
+    /// `reference` while the other reader of the same question answered `_Elem&`. One question, one reader.
+    fn what_a_call_has(
+        &self,
+        index: &ProjectIndex,
+        scopes: &crate::ScopeTree,
+        root: &cpp_parser::CppSyntaxNode,
+        path: &Path,
+    ) -> Option<Type> {
         match self {
             NamedDeclaration::Here(binding) => {
                 if binding.kind == crate::BindingKind::Class {
@@ -2319,9 +2504,33 @@ impl NamedDeclaration {
                     .map(|returns| parse_type_spelling(&returns))
             }
             // A **call of a member**: `v.data()` has what `data` returns, and what it returns is written with the
-            // class template's parameters — so the same pairing that finishes a member's type finishes this.
-            NamedDeclaration::Indexed(fact, _, bindings) => what_a_call_has_in(fact)
-                .map(|returns| bindings.applied_to(&returns)),
+            // class template's parameters — so the same pairing that finishes a member's type finishes this, and
+            // the same walk over the class's own member names finishes it too.
+            NamedDeclaration::Indexed(fact, file, bindings) => {
+                let returns = what_a_call_has_in(fact)?;
+                let started = bindings.applied_to(&returns);
+
+                let Some(class) = fact.scope.as_deref() else {
+                    // A free function: there is no class whose members could name its return type. An alias at
+                    // file scope (`using size_type = size_t;` and a function returning `size_type`) is resolved by
+                    // the caller that has the file's aliases, not here.
+                    return Some(started);
+                };
+
+                let (finished, _) = finish_a_nested_name(
+                    index,
+                    scopes,
+                    root,
+                    path,
+                    class,
+                    bindings,
+                    started,
+                    file.clone(),
+                    vec![fact.name.clone()],
+                );
+
+                Some(finished)
+            }
         }
     }
 
@@ -2806,7 +3015,7 @@ fn type_of_a_call(
     };
 
     match declaration_of_a_callee(index, scopes, root, path, &callee, written) {
-        Known::Yes(named) => match named.what_a_call_has(root) {
+        Known::Yes(named) => match named.what_a_call_has(index, scopes, root, path) {
             Some(type_of) => Known::Yes((type_of, named.file(path))),
             None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
         },
@@ -2843,8 +3052,13 @@ fn declaration_of_a_callee(
         let Some(class) = member_access_class(&object) else {
             return Known::Unknown(UnknownReason::UnknownType(Box::from(object.to_string())));
         };
-        let arguments = object.arguments();
-        let bindings = member_bindings(index, scopes, root, path, &class, arguments);
+        // The class and the arguments **together**, which is the step this caller used to do half of: it paired
+        // the class's parameters with the arguments the *use* wrote, and a use that wrote none (`std::string`)
+        // therefore had none — while the same question asked of the same object from `type_of_expression` had
+        // `char&`. One question, one reader.
+        let (class, arguments) =
+            member_access_class_and_arguments(index, scopes, root, path, &class, &object);
+        let bindings = member_bindings(index, scopes, root, path, &class, &arguments);
 
         return match member_fact(index, scopes, root, path, &class, &access.member) {
             Known::Yes((fact, file)) => Known::Yes(NamedDeclaration::Indexed(fact, file, bindings)),
@@ -3215,7 +3429,40 @@ fn resolve_aliases(
     path: &Path,
     class: &str,
 ) -> String {
+    resolve_aliases_with_arguments(index, scopes, root, path, class).0
+}
+
+/// **The class a spelling names, following aliases — and the template arguments the alias carried.**
+///
+/// `std::string` is `basic_string<char, char_traits<char>, allocator<char>>`. Following the alias gives the class
+/// `std::basic_string`, and the **arguments are the other half of the answer**: they are what makes `_Elem` mean
+/// `char`, so a member whose type is written `_Elem&` is `char&` for a `std::string` and `wchar_t&` for a
+/// `std::wstring`. Both come back from here because they come from the same step, and a caller that had to ask
+/// twice would have two chances to disagree about which step it was.
+///
+/// # The arguments of the *last* step, and why that is right
+///
+/// Each alias step replaces the spelling with its target, so an earlier step's arguments have already been written
+/// into the target the next step sees: `using A = B<int>; using B = vector<T>;` — no, more simply, the standard
+/// library's shape is one step (`string` → `basic_string<char, …>`), and for two steps the second target's own
+/// arguments are the ones that describe the class finally named. Arguments found on an earlier step are therefore
+/// kept only if the later one carries none, which is the case where the later target is a bare name
+/// (`using B = basic_string;`).
+///
+/// # What it does not do
+///
+/// No substitution: `MyVec<T>` → `std::vector<T>` returns the *argument as written* (`T`), and pairing it with
+/// `_Ty` is the caller's step, because the caller is the one that knows what `T` stands for. See
+/// [`TypeBindings::applied_to`].
+fn resolve_aliases_with_arguments(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+) -> (String, Vec<Type>) {
     let mut current = class.to_string();
+    let mut carried: Vec<Type> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
 
     for _ in 0..MAX_ALIAS_DEPTH {
@@ -3228,9 +3475,17 @@ fn resolve_aliases(
             break;
         };
 
-        let target = base_type_name(&target).to_string();
+        // **Read as a type, not as a name**: the target's own arguments are what the class it names was written
+        // with, and `base_type_name` — which the name-only walk used — is exactly the part that threw them away.
+        let target_type = parse_type_spelling(&target);
+        let Some(target) = target_type.class_name().map(str::to_string) else {
+            break;
+        };
         if target.is_empty() {
             break;
+        }
+        if !target_type.arguments().is_empty() {
+            carried = target_type.arguments().to_vec();
         }
 
         // An unqualified target is written relative to the scope the alias was declared in, so that spelling is
@@ -3255,7 +3510,9 @@ fn resolve_aliases(
         current = next;
     }
 
-    current
+    // The arguments of the **first** step are the ones that describe the type as written when nothing later said
+    // otherwise: `std::string` has none of its own, and the step that resolved it supplied them.
+    (current, carried)
 }
 
 /// What an alias points at, and the scope it was declared in, or `None` when the spelling is not an alias.
@@ -3442,6 +3699,12 @@ fn fact_from_binding(root: &cpp_parser::CppSyntaxNode, class: &str, binding: &cr
             }
             _ => None,
         },
+        // **Who may name it**, read the same way and for the same reason: a member list built from the buffer is
+        // what a completion after `.` offers, and a `private:` member must not be in it. See [DeclFact::access].
+        access: crate::sema::declarations::declared_access_at(root, binding.name_range.start_offset),
+        // …and whether an importer may, which is the same kind of question about the same position — see
+        // [DeclFact::exported]. A buffer's file is very often the module interface unit being edited.
+        exported: crate::sema::declarations::declared_exported_at(root, binding.name_range.start_offset),
         range: binding.range,
         name_range: binding.name_range,
         clean: true,
@@ -3748,6 +4011,26 @@ impl ProjectIndex {
                 .insert(path.clone());
         }
 
+        // **Which file an `import m;` reaches.** The visibility walk ([`ProjectIndex::visible_files`]) holds
+        // summaries and nothing else, so this map is what turns a module *name* into the file that declares it —
+        // built here, where every file's own reading arrives, and rebuilt for a file when its reading changes (an
+        // implementation unit that stops being one takes its name with it).
+        //
+        // Only an **interface unit** is recorded: an implementation unit declares the module and is not what an
+        // importer sees, so pointing `import m;` at one would attribute its declarations to a module that never
+        // exported them. A file that declares no module, or declares one as an implementation, records nothing.
+        self.module_interfaces
+            .retain(|_, declaring| declaring != &path);
+        if summary.modules.is_interface
+            && let Some(module) = &summary.modules.module
+            && summary.modules.partition.is_none()
+        {
+            // A partition interface unit exports to its own module only — nothing outside may `import m:part;` —
+            // so it is not the file an `import m;` in another module reaches.
+            self.module_interfaces
+                .insert(module.to_string(), path.clone());
+        }
+
         self.names.add_declarations(sequence, false, &summary.declarations);
         self.names.add_macros(sequence, &summary.macros);
         self.summaries.insert(path, summary);
@@ -3802,6 +4085,16 @@ impl ProjectIndex {
     /// The summary of the file at `path`, if it has been indexed.
     pub fn summary(&self, path: &Path) -> Option<&FileSummary> {
         self.summaries.get(&normalize(path))
+    }
+
+    /// **The file that declares module `name` to its importers**, if the project took one in.
+    ///
+    /// The map `import m;` is resolved through when a query asks what a file's imports brought into view — see
+    /// [`ProjectIndex::visible_files_with_modules`]. `None` is the honest answer for a module whose interface unit is
+    /// not part of this project (`import std;`, a prebuilt BMI), and a caller that wants to do something about that
+    /// reads the file in itself: [`crate::Session::read_the_modules_a_file_imports`].
+    pub fn interface_unit_of(&self, name: &str) -> Option<&str> {
+        self.module_interfaces.get(name).map(String::as_str)
     }
 
     /// Every summary, in insertion order.
@@ -4283,7 +4576,12 @@ impl ProjectIndex {
         // **Only the files the cursor's file can see are looked at**, and in insertion order. The walk answers with
         // a handful of hundreds even when the project holds a hundred thousand files, so the cost of the question is
         // the size of the closure and not the size of the project.
-        let files = self.visible_in_order(visible_from);
+        //
+        // …and **which of them are in view only through a module import**: those are the files where a declaration
+        // counts only if it is exported, and the distinction is per file rather than per fact because a file reached
+        // by `#include` has no such restriction at all.
+        let (visible_files, through_an_import) = self.visible_files_with_modules(visible_from);
+        let files = self.visible_in_order_of(visible_files);
 
         let mut found = Vec::new();
 
@@ -4359,16 +4657,27 @@ impl ProjectIndex {
             // them — has nothing to union and must not pay for the `raw` list below.
             let cooked = self.cooked.get(key);
 
+            // **A file in view only through an `import` contributes only what it exports.** The rule is per *file*
+            // rather than per fact because it is about how the file became visible: `import m;` brings what the
+            // module interface exported and nothing else, while an `#include` brings the whole file — and a file
+            // that is both is include-visible, so this is false for it (see `visible_files_with_modules`).
+            //
+            // `DeclFact::exported` is the reading; on a file that declares no module it is `false` throughout, and
+            // the walk never asks a file like that this question because it cannot be in `through_an_import` — only
+            // a module *interface unit* is.
+            let only_what_is_exported = through_an_import.contains(key);
+            let contributes = |fact: &DeclFact| accepts(fact) && (!only_what_is_exported || fact.exported);
+
             let mut raw: Vec<&DeclFact> = Vec::new();
 
             match group {
-                None => raw.extend(summary.declarations.iter().filter(|fact| accepts(fact))),
+                None => raw.extend(summary.declarations.iter().filter(|fact| contributes(fact))),
                 Some(group) => raw.extend(
                     group
                         .iter()
                         .filter(|posting| !posting.is_cooked())
                         .filter_map(|posting| summary.declarations.get(posting.index()))
-                        .filter(|fact| accepts(fact)),
+                        .filter(|fact| contributes(fact)),
                 ),
             }
 
@@ -4396,7 +4705,7 @@ impl ProjectIndex {
                 ),
             };
 
-            for fact in candidates.filter(|fact| accepts(fact)) {
+            for fact in candidates.filter(|fact| contributes(fact)) {
                 if raw.iter().any(|known| known.name == fact.name && known.kind == fact.kind) {
                     continue;
                 }
@@ -4413,9 +4722,16 @@ impl ProjectIndex {
 
     /// The files `from` can see, as `(sequence number, how)` in insertion order — the walk's answer put in the order
     /// every declaration query reports in.
-    fn visible_in_order(&self, from: &Path) -> Vec<(u32, IncludeVisibility)> {
-        let mut files: Vec<(u32, IncludeVisibility)> = self
-            .visible_files(from)
+    ///
+    /// [`ProjectIndex::visible_in_order_of`] is the same thing for a caller that has **already walked**: the
+    /// declaration queries need both halves of the walk's answer (the files, and which of them are in view only
+    /// through an `import`) from one walk, and calling this and `visible_files_with_modules` would walk the graph
+    /// twice per question.
+    fn visible_in_order_of(
+        &self,
+        visible: Vec<(String, IncludeVisibility)>,
+    ) -> Vec<(u32, IncludeVisibility)> {
+        let mut files: Vec<(u32, IncludeVisibility)> = visible
             .into_iter()
             .filter_map(|(key, visibility)| Some((*self.sequence.get(&key)?, visibility)))
             .collect();
@@ -4478,6 +4794,22 @@ impl ProjectIndex {
     /// is why a file may be relaxed rather than only visited — the first path found is not necessarily the best,
     /// and a graph with a diamond in it (which every header guard produces) has exactly that shape.
     pub fn visible_files(&self, from: &Path) -> Vec<(String, IncludeVisibility)> {
+        self.visible_files_with_modules(from).0
+    }
+
+    /// [`ProjectIndex::visible_files`], and **which of those files are in view only because of an `import`**.
+    ///
+    /// The second half is what the exported bit is applied against: a declaration written in a module interface
+    /// unit is visible to an importer **only if it is exported** ([`DeclFact::exported`]), while a file reached
+    /// through `#include` has no such restriction — so a query that did not know *how* a file became visible could
+    /// only choose between offering names that do not compile and hiding names that do.
+    ///
+    /// A file that is both included and imported is **not** in the second list: the include makes all of it visible,
+    /// and the narrower rule would hide what the wider one grants.
+    pub fn visible_files_with_modules(
+        &self,
+        from: &Path,
+    ) -> (Vec<(String, IncludeVisibility)>, HashSet<String>) {
         let from = normalize(from);
 
         // The file itself is visible to itself, and unconditionally: a question asked in a file is about what
@@ -4487,6 +4819,8 @@ impl ProjectIndex {
         let mut order: Vec<String> = vec![from.clone()];
         let mut pending: Vec<(String, IncludeVisibility, usize)> =
             vec![(from, IncludeVisibility::Unconditional, 0)];
+        // The files in view **only** through an `import`, which is where the exported bit applies.
+        let mut through_an_import: HashSet<String> = HashSet::new();
 
         while let Some((current, so_far, depth)) = pending.pop() {
             if depth > MAX_VISIBILITY_DEPTH {
@@ -4496,6 +4830,49 @@ impl ProjectIndex {
             let Some(summary) = self.summaries.get(&current) else {
                 continue;
             };
+
+            // **Header units are followed exactly like `#include`s** — `import <vector>;` names a header, and a header
+        // unit exports what the header declares, so nothing about the declarations it brings in is restricted. The
+        // path was resolved when the file was read (the walk can search nothing), and one that could not be resolved
+        // is simply absent.
+        for unit in &summary.modules.header_units {
+            let next = normalize(unit);
+
+            if let std::collections::hash_map::Entry::Vacant(slot) = best.entry(next.clone()) {
+                slot.insert(IncludeVisibility::Unconditional);
+                order.push(next.clone());
+                pending.push((next, IncludeVisibility::Unconditional, depth + 1));
+            }
+        }
+
+        // **A module import is the other visibility edge**, and it is not an `#include` with another spelling:
+            // an import is not textual (no macro travels along it) and it names a *module* rather than a file, so
+            // the file behind it is found through the module the project declares. That is what makes
+            // `import mathlib;` bring `mathlib::add` into view — measured on the module fixture, where the answer
+            // was `None` from a file that imports `mathlib` and whose sibling `mathlib.ixx` exports it.
+            //
+            // `Unconditional`, and that is a simplification with a direction: an `import` inside an `#if` is
+            // recorded here like any other, so a module reached only through a condition the compilation does not
+            // satisfy is offered. The `#include` path above is careful about exactly this (see its own note on
+            // guards); making imports as careful needs the same per-condition machinery and is registered rather
+            // than guessed at — see `plan-units.md` §35.
+            for imported in &summary.modules.imports {
+                let Some(interface) = self.module_interfaces.get(imported.as_ref()) else {
+                    // No file in this project declares it: `import std;` and prebuilt modules land here, and the
+                    // honest reading is "unknown", never "nothing" — a name that cannot be seen is not a name that
+                    // does not exist. Nothing is added, and nothing is claimed.
+                    continue;
+                };
+
+                if best.contains_key(interface) {
+                    continue;
+                }
+
+                best.insert(interface.clone(), IncludeVisibility::Unconditional);
+                order.push(interface.clone());
+                through_an_import.insert(interface.clone());
+                pending.push((interface.clone(), IncludeVisibility::Unconditional, depth + 1));
+            }
 
             for include in &summary.includes {
                 let Some(resolved) = &include.resolved else {
@@ -4578,15 +4955,22 @@ impl ProjectIndex {
                     None => order.push(next.clone()),
                 }
 
+                // **An `#include` makes the whole file visible**, however the file was reached before: a file that
+                // is both included and imported is not subject to the narrower rule, because the wider one already
+                // grants what it would hide.
+                through_an_import.remove(&next);
+
                 best.insert(next.clone(), step);
                 pending.push((next, step, depth + 1));
             }
         }
 
-        order
+        let files = order
             .into_iter()
             .filter_map(|path| best.get(&path).map(|visibility| (path.clone(), *visibility)))
-            .collect()
+            .collect();
+
+        (files, through_an_import)
     }
 
     /// Which declaration a name written in `visible_from` refers to, across the project.
@@ -5691,6 +6075,8 @@ impl ProjectDefinition {
                 // Nor a parameter list, for exactly that reason: this fact is a place to jump to, and the file it
                 // points at has the summary that says what the declaration looks like.
                 parameter_list: None,
+                access: None,
+                exported: false,
                 range: binding.range,
                 name_range: binding.name_range,
                 // And no answer about diagnostics either, for the same reason `guard` has none: the binding came
@@ -8205,9 +8591,101 @@ mod tests {
         )
     }
 
+    /// **A `private` member is not offered from outside the class**, and is offered from inside it.
+    ///
+    /// The two directions in one fixture, because a rule that hid everything would pass the first half alone: what
+    /// the reader may *write* is the question, and C++ answers it by where the cursor is — see
+    /// [`DeclFact::access`] for the field and [`offerable_members`] for the rule.
+    ///
+    /// The default access of a `class` is the other half: `int hidden;` written before any label is private, which
+    /// is why the key matters and not just the labels.
     #[test]
-    fn a_member_access_with_nothing_typed_offers_the_types_members() {
-        // The keystroke that asks the question. `w.` is not a program and does not parse, which is exactly why
+    fn a_private_member_is_offered_inside_the_class_and_not_outside_it() {
+        let outside = "\
+class Widget {
+    int hidden;
+public:
+    int shown;
+};
+void f() {
+    Widget w;
+    w.
+}
+";
+        let Known::Yes(found) = completions_at(&[], "/p/a.cpp", outside, "w.") else {
+            panic!("`w` is a `Widget`");
+        };
+        let offered: Vec<&str> = found.members.members.iter().map(|m| m.fact.name.as_str()).collect();
+        assert_eq!(offered, ["shown"], "`hidden` is private and the cursor is not in `Widget`");
+        assert_eq!(found.hidden_by_access, 1, "and the answer says how many it kept out");
+
+        let inside = "\
+class Widget {
+    int hidden;
+public:
+    int shown;
+    void grow(Widget& other) {
+        other.
+    }
+};
+";
+        let Known::Yes(found) = completions_at(&[], "/p/a.cpp", inside, "other.") else {
+            panic!("`other` is a `Widget`");
+        };
+        let offered: Vec<&str> = found.members.members.iter().map(|m| m.fact.name.as_str()).collect();
+        assert_eq!(
+            offered,
+            ["grow", "hidden", "shown"],
+            "inside the class both are nameable, so both are offered"
+        );
+    }
+
+    /// **A `protected` member is offered in a class derived from the one that declares it** — and not from a free
+    /// function, which is the whole difference between `protected` and `public`.
+    ///
+    /// The base chain is walked from the cursor's own class ([`classes_the_cursor_is_in`]), which is what makes the
+    /// derived case work: the member's own class is not where the cursor is, but it is an ancestor of it.
+    #[test]
+    fn a_protected_member_is_offered_in_a_derived_class() {
+        let source = "\
+class Base {
+protected:
+    int guarded;
+public:
+    int open;
+};
+class Derived : public Base {
+    void grow(Derived& other) {
+        other.
+    }
+};
+void f(Derived& d) {
+    d.
+}
+";
+        let Known::Yes(found) = completions_at(&[], "/p/a.cpp", source, "other.") else {
+            panic!("`other` is a `Derived`");
+        };
+        let offered: Vec<&str> = found.members.members.iter().map(|m| m.fact.name.as_str()).collect();
+        assert_eq!(
+            offered,
+            ["grow", "guarded", "open"],
+            "`guarded` is protected and the cursor is in a class derived from the one that declares it"
+        );
+
+        let Known::Yes(found) = completions_at(&[], "/p/a.cpp", source, "d.") else {
+            panic!("`d` is a `Derived`");
+        };
+        let offered: Vec<&str> = found.members.members.iter().map(|m| m.fact.name.as_str()).collect();
+        assert_eq!(
+            offered,
+            ["open"],
+            "and from a free function the same member is not nameable"
+        );
+    }
+
+    #[test]
+    fn a_member_access_with_nothing_typed_offers_the_types_members() {        // The keystroke that asks the question. `w.` is not a program and does not parse, which is exactly why
         // this is a query over a damaged tree rather than over a compiled one.
         let source = "struct Widget {\n  int size;\n  void grow();\n};\n\
                       void f() {\n  Widget w;\n  w.\n}\n";

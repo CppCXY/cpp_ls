@@ -537,7 +537,56 @@ int f() {
 }
 
 
-/// **A member whose type is *another* member of the same class is resolved, with the same argument pairing.**
+/// **A member reached through an *alias* is finished with the arguments the alias carried.**
+///
+/// `std::string` is one name with no arguments of its own, and the class it names was written with three:
+/// `basic_string<char, char_traits<char>, allocator<char>>`. So `_Elem` has nothing to be replaced by unless the
+/// alias's target supplies the pairing — measured, this is the last step between `x.back()` answering `_Elem&` and
+/// answering `char&`, and it is the same step that makes `std::string::size_type` a `size_t` rather than a name.
+///
+/// The **use** wins when it wrote arguments of its own (`std::vector<int>`), which is what the two lists in the
+/// fixture are for: the alias's arguments are only consulted when the use said nothing.
+#[test]
+fn a_member_of_a_class_reached_through_an_alias_gets_the_aliass_arguments() {
+    let header = "\
+namespace std {
+template <class _Elem>
+struct basic_string {
+    using value_type = _Elem;
+    using reference = value_type&;
+    reference back();
+    reference front;
+};
+using string = basic_string<char>;
+}
+";
+    let source = "\
+#include \"string.h\"
+int f() {
+    std::string s;
+    return s.front;
+}
+int g() {
+    std::string s;
+    auto back = s.back();
+    return back;
+}
+";
+    let session = session_with(&[("/p/a.cpp", source), ("/p/string.h", header)]);
+
+    assert_eq!(
+        type_of_use_in(&session, "/p/a.cpp", source, "front").as_deref(),
+        Some("char&"),
+        "`reference` is `value_type&` is `_Elem&`, and `string` says `_Elem` is `char`"
+    );
+    assert_eq!(
+        type_of_use_in(&session, "/p/a.cpp", source, "back").as_deref(),
+        Some("char&"),
+        "and the same for a member that is *called*: `auto` takes what the call gives"
+    );
+}
+
+/// A member whose type is *another* member of the same class is resolved, with the same argument pairing.
 ///
 /// `_Ty& reference; reference front;` is how the standard library writes almost every member it has: the type of
 /// `front` is the *name* `reference`, which mentions no parameter at all, so substituting the arguments into it

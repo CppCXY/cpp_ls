@@ -93,9 +93,47 @@ pub fn diagnose_file(session: &Session<DiskFiles>, path: &Path) -> Option<(Uri, 
                 ..Diagnostic::default()
             }
         })
+        .chain(module_notes(&found.notes, held))
         .collect();
 
     Some((uri, diagnostics))
+}
+
+/// **The `import`s whose module this project does not contain** — as `INFORMATION` on the line that wrote them.
+///
+/// `import std;` in a project whose compiler ships the standard module's *source* is not a mistake, and a reader who
+/// gets nothing for `std::` deserves to be told where that file is rather than to be left with a silent empty answer
+/// (see [`Session::notes_about_the_modules`], which is where the sentence is put together, and
+/// `FileDiagnostics::notes`, which is where the answer arrives — out of the same parse the errors came from, so a
+/// consumer that asked separately would pay for the file's tree twice).
+///
+/// **Not an error, and deliberately not a warning either**: nothing here is wrong — the import will compile once the
+/// build names the module — and a client that shows warnings as problems would be reporting the project's build
+/// system rather than the file. They are appended **after** the errors so that a reader sees the parse failures
+/// first.
+fn module_notes<'a>(
+    notes: &'a [cpp_code_analysis::ModuleNote],
+    held: &'a cpp_code_analysis::VfsFile,
+) -> impl Iterator<Item = Diagnostic> + 'a {
+    notes.iter().map(move |note| {
+        // `VfsFile` carries the line index of the text the offsets are into, which is the same index the errors
+        // above went through: no second parse and no scan of the file.
+        let range = match (
+            position_in_file(held, note.start),
+            position_in_file(held, note.end),
+        ) {
+            (Some(start), Some(end)) => lsp_types::Range::new(start, end),
+            _ => lsp_types::Range::default(),
+        };
+
+        Diagnostic {
+            range,
+            severity: Some(DiagnosticSeverity::INFORMATION),
+            source: Some("cpp_ls".to_string()),
+            message: note.message.clone(),
+            ..Diagnostic::default()
+        }
+    })
 }
 
 pub struct DiagnosticCapabilities;
@@ -117,6 +155,87 @@ impl RegisterCapabilities for DiagnosticCapabilities {
                 workspace_diagnostics: false,
                 ..Default::default()
             }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::diagnose_file;
+    use cpp_code_analysis::{
+        CompilerConfig, DiskFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
+    };
+    use lsp_types::DiagnosticSeverity;
+    use std::path::PathBuf;
+
+    /// A project whose one file imports a module nothing in it declares — `import std;` on a machine where the
+    /// standard module is the compiler's business, without naming `std` (a test that used it would start reading
+    /// the real standard library on any machine that ships one).
+    ///
+    /// A **temporary directory** rather than `MemoryFiles`, and for a reason that is about the signature under test:
+    /// [`diagnose_file`] takes a `Session<DiskFiles>` — it is the handler the server calls, and the server's session
+    /// is over the disk — so a test that used an in-memory provider would be testing a different function.
+    fn a_project_importing_a_module_nobody_declares(text: &str) -> (Session<DiskFiles>, PathBuf) {
+        let root = std::env::temp_dir().join(format!("cppls-diagnostic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch directory");
+
+        let file = root.join("main.cpp");
+        std::fs::write(&file, text).expect("the fixture");
+
+        let providers = SessionFiles::new(OpenDocuments::new(), DiskFiles);
+        let mut session = Session::with_config(
+            root.clone(),
+            providers,
+            WatchFilter::new(&root),
+            CompilerConfig::default(),
+        );
+
+        session.add_project_files([file.clone()]);
+        session.index_everything();
+
+        (session, file)
+    }
+
+    /// **An unreadable module reaches a client as `INFORMATION` on the `import` line.**
+    ///
+    /// The analysis layer answers with offsets and a sentence; what a *client* does with them is this layer's: the
+    /// severity (nothing is wrong with the file), the range (the line the reader wrote, not the top of the file),
+    /// and the source. Each of those is a decision made here and nowhere else, so each is asserted here.
+    #[test]
+    fn a_module_nothing_declares_becomes_an_information_diagnostic_on_its_line() {
+        let text = "import mylib;\n\nint main() { return 0; }\n";
+        let (session, path) = a_project_importing_a_module_nobody_declares(text);
+
+        let (_, diagnostics) = diagnose_file(&session, &path).expect("the file is held");
+
+        assert_eq!(diagnostics.len(), 1, "one import, one diagnostic: {diagnostics:?}");
+        let note = &diagnostics[0];
+
+        assert_eq!(
+            note.severity,
+            Some(DiagnosticSeverity::INFORMATION),
+            "the file is not wrong — the module is outside the project"
+        );
+        assert_eq!(note.range.start.line, 0, "on the line that wrote the import");
+        assert_eq!(note.range.start.character, 0, "and at the declaration");
+        assert!(
+            note.message.contains("mylib"),
+            "the message names the module: {}",
+            note.message
+        );
+
+        // A file with no imports gets no notes at all, which is the ordinary case and the one a regression would
+        // turn into a diagnostic on every file in a project.
+        let (session, path) = a_project_importing_a_module_nobody_declares("int main() { return 0; }\n");
+        let (_, diagnostics) = diagnose_file(&session, &path).expect("the file is held");
+        assert!(
+            diagnostics.is_empty(),
+            "a file that imports nothing has nothing to be told: {diagnostics:?}"
+        );
+
+        // The scratch tree goes with the test that made it: a test that leaves a directory in the system's temp
+        // directory is a test whose second run starts from somebody else's leftovers.
+        let _ = std::fs::remove_dir_all(path.parent().expect("the scratch root"));
     }
 }
 

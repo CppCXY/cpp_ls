@@ -50,6 +50,11 @@ pub async fn on_signature_help(
 
     if let Some(path) = uri_to_file_path(&uri) {
         context.analysis().prepare(&path).await;
+
+        // `std::format(` in a file that says `import std;` needs the same read the hover and the definition do — and
+        // this handler has its own reason to care: it declines to answer while files are queued, and a module whose
+        // interface unit nobody read is exactly that state. `false`: no edit to catch up on.
+        crate::handlers::read_the_modules(&context, &path, false).await;
     }
 
     snapshot_query(context.analysis(), cancel_token, move |session| {

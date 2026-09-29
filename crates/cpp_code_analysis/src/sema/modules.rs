@@ -399,7 +399,12 @@ impl<'a, F: FileProvider> ModuleScanner<'a, F> {
     /// Nothing else is tried. A full project scan would find modules with unconventional names, and it is
     /// the wrong trade for a per-keystroke analysis: the cost is proportional to the project on every lookup,
     /// and the case it fixes is one a build system has already solved by knowing where its own sources are.
-    pub fn resolve_module(&mut self, name: &str, interner: &mut PathInterner) -> ImportOutcome {
+    pub fn resolve_module(
+        &mut self,
+        name: &str,
+        including: &Path,
+        interner: &mut PathInterner,
+    ) -> ImportOutcome {
         if let Some(entry) = self
             .index
             .get(name)
@@ -408,7 +413,7 @@ impl<'a, F: FileProvider> ModuleScanner<'a, F> {
             return ImportOutcome::Resolved(entry.file);
         }
 
-        for candidate in self.candidate_paths(name) {
+        for candidate in self.candidate_paths(name, including) {
             let Some(source) = self.files.read(&candidate) else {
                 continue;
             };
@@ -449,6 +454,7 @@ impl<'a, F: FileProvider> ModuleScanner<'a, F> {
         &mut self,
         module: Option<&str>,
         partition: &str,
+        including: &Path,
         interner: &mut PathInterner,
     ) -> ImportOutcome {
         let Some(module) = module else {
@@ -466,7 +472,7 @@ impl<'a, F: FileProvider> ModuleScanner<'a, F> {
         // The partition's file may exist and not have been read yet: `m:part` is named after the module, so
         // the same convention applies with the partition appended.
         let qualified = format!("{module}:{partition}");
-        for candidate in self.candidate_paths(&qualified) {
+        for candidate in self.candidate_paths(&qualified, including) {
             let Some(source) = self.files.read(&candidate) else {
                 continue;
             };
@@ -547,7 +553,16 @@ impl<'a, F: FileProvider> ModuleScanner<'a, F> {
     /// my.mod   ->  my/mod.cppm     dots as directories
     ///          ->  my.mod.cppm     kept flat
     /// ```
-    fn candidate_paths(&self, name: &str) -> Vec<PathBuf> {
+    ///
+    /// # The importing file's directory, and why it is not the empty path
+    ///
+    /// Because a candidate is **read**, and a relative path read against the process's working directory is a
+    /// path nobody meant: measured on the module fixture (`tests/fixtures/modules`, built by
+    /// `target/build_modules.bat`), `import mathlib;` in `main.cpp` beside `mathlib.ixx` answered "no file in this
+    /// project declares module `mathlib`" — the convention had proposed `mathlib.ixx`, and that spelling was
+    /// resolved against the analysis's own directory rather than the file that wrote the `import`. So the
+    /// importing file's directory is joined **here**, and the include paths after it.
+    fn candidate_paths(&self, name: &str, including: &Path) -> Vec<PathBuf> {
         let mut candidates = Vec::new();
         let case_insensitive = self.files.is_case_insensitive();
 
@@ -561,7 +576,7 @@ impl<'a, F: FileProvider> ModuleScanner<'a, F> {
             dotted.clone(),
         ];
 
-        for directory in self.search_directories() {
+        for directory in self.search_directories(including) {
             for stem in &stems {
                 for extension in INTERFACE_UNIT_EXTENSIONS {
                     let candidate = join_normalized(
@@ -581,13 +596,39 @@ impl<'a, F: FileProvider> ModuleScanner<'a, F> {
 
     /// The directories a module named after its file would be found in.
     ///
-    /// The empty first entry is the importing file's directory once resolution joins against it, which is
-    /// where a project's own modules live. Putting it first matches the quoted form of `#include`, and for
-    /// modules there is no angle form to distinguish from — a module name is never written in brackets.
-    fn search_directories(&self) -> Vec<PathBuf> {
-        let mut directories = vec![PathBuf::new()];
-        directories.extend(self.config.user_include_paths().map(Path::to_path_buf));
-        directories.extend(self.config.system_include_paths().map(Path::to_path_buf));
+    /// The importing file's own directory first, which is where a project's modules live beside the file that
+    /// imports them, then the include paths — the same order the quoted form of `#include` searches, and for
+    /// modules there is no angle form to distinguish from, because a module name is never written in brackets.
+    ///
+    /// # `../modules`, which is where a *standard* module lives
+    ///
+    /// `import std;` is not in any project and not in an include path: MSVC ships it as
+    /// `<VC>/Tools/MSVC/<version>/modules/std.ixx` — **beside** the include directory, not inside it (measured on
+    /// 14.35.32215: `modules/std.ixx` is 3 194 bytes of `export module std;` followed by an `#include` of every
+    /// standard header, and `modules/std.compat.ixx` re-exports it). So for every include path, its sibling
+    /// `modules` directory is tried as well.
+    ///
+    /// The candidate is still only a *proposal* — it is read and must declare the module — so a directory that does
+    /// not exist costs one failed read, and a compiler that keeps its standard module somewhere else is a module
+    /// this scan does not find rather than one it finds wrongly.
+    fn search_directories(&self, including: &Path) -> Vec<PathBuf> {
+        let mut directories = vec![including.to_path_buf()];
+
+        for directory in self
+            .config
+            .user_include_paths()
+            .chain(self.config.system_include_paths())
+        {
+            directories.push(directory.to_path_buf());
+
+            if let Some(parent) = directory.parent() {
+                let modules = parent.join("modules");
+                if !directories.contains(&modules) {
+                    directories.push(modules);
+                }
+            }
+        }
+
         directories
     }
 }
@@ -684,10 +725,13 @@ fn follow_imports<F: FileProvider>(
 
     for declaration in &info.imports {
         let outcome = match &declaration.target {
-            ImportTarget::Module(name) => scanner.resolve_module(name, interner),
-            ImportTarget::Partition(partition) => {
-                scanner.resolve_partition(info.module_name.as_deref(), partition, interner)
-            }
+            ImportTarget::Module(name) => scanner.resolve_module(name, &including, interner),
+            ImportTarget::Partition(partition) => scanner.resolve_partition(
+                info.module_name.as_deref(),
+                partition,
+                &including,
+                interner,
+            ),
             ImportTarget::HeaderUnit { name, is_angle } => {
                 scanner.resolve_header_unit(name, *is_angle, &including, interner)
             }

@@ -30,8 +30,9 @@ use cpp_parser::SymbolKind;
 use crate::cache::SummaryKey;
 use crate::preprocess::directive::IncludeForm;
 use crate::summary::{
-    ConditionalRegion, DeclFact, DeclKind, FactGuard, FileSummary, GuardBranch, IncludeFact,
-    MacroFact, MacroKind, MacroScopeReading, SummaryGuards, TranslationUnit, TuEvent, TuFrame,
+    Access, ConditionalRegion, DeclFact, DeclKind, FactGuard, FileSummary, GuardBranch, IncludeFact,
+    MacroFact, MacroKind, MacroScopeReading, ModuleReading, SummaryGuards, TranslationUnit, TuEvent,
+    TuFrame,
 };
 
 /// The eight bytes a summary file starts with.
@@ -177,7 +178,7 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 ///
 /// Only [`CODEC_VERSION`] moves: an entry written before it existed has no parameter list, and the detail line
 /// falls back to the `(…)` it used to print — a weaker answer, not a wrong one.
-pub const CODEC_VERSION: u32 = 18;
+pub const CODEC_VERSION: u32 = 22;
 
 /// Write a summary as bytes.
 ///
@@ -216,6 +217,8 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
         put_u8(&mut out, u8::from(fact.local));
         put_u8(&mut out, u8::from(fact.clean));
         put_u32(&mut out, guard_code(fact.guard));
+        put_u8(&mut out, access_code(fact.access));
+        put_u8(&mut out, u8::from(fact.exported));
     }
 
     put_u32(&mut out, summary.macros.len() as u32);
@@ -294,6 +297,22 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
             }
             None => put_u8(&mut out, 0),
         }
+    }
+
+    // **The module reading**, last of all: this file's own module (if any) and the modules it imports — the edge
+    // the visibility walk follows beside `#include`. Last because the decoder reads it last, and a field written
+    // and read in two different places in the stream is a decoder that reads the next field's bytes. See
+    // [`crate::ModuleReading`].
+    put_opt_str(&mut out, summary.modules.module.as_deref());
+    put_opt_str(&mut out, summary.modules.partition.as_deref());
+    put_u8(&mut out, u8::from(summary.modules.is_interface));
+    put_u32(&mut out, summary.modules.imports.len() as u32);
+    for imported in &summary.modules.imports {
+        put_str(&mut out, imported);
+    }
+    put_u32(&mut out, summary.modules.header_units.len() as u32);
+    for unit in &summary.modules.header_units {
+        put_path(&mut out, unit);
     }
 
     out
@@ -575,6 +594,8 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
             local: reader.u8()? != 0,
             clean: reader.u8()? != 0,
             guard: guard_from(reader.u32()?)?,
+            access: access_from(reader.u8()?),
+            exported: reader.u8()? != 0,
         });
     }
 
@@ -676,6 +697,28 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
         });
     }
 
+    // **The module reading, last of all**: the newest field, and the one record an entry written before it existed
+    // cannot carry — which is what `CODEC_VERSION` is for.
+    let modules = ModuleReading {
+        module: reader.optional_string()?.map(Box::from),
+        partition: reader.optional_string()?.map(Box::from),
+        is_interface: reader.u8()? != 0,
+        imports: {
+            let mut imports = Vec::new();
+            for _ in 0..reader.count()? {
+                imports.push(Box::from(reader.string()?.as_str()));
+            }
+            imports
+        },
+        header_units: {
+            let mut units = Vec::new();
+            for _ in 0..reader.count()? {
+                units.push(reader.path()?);
+            }
+            units
+        },
+    };
+
     // Trailing bytes mean the file was written by something this decoder does not agree with — a newer producer,
     // or two records where one was expected. Ignoring them would be accepting a file whose *content* is not what
     // its own encoding says, which is the one thing a cache must not do.
@@ -691,6 +734,7 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
         includes,
         guards,
         macro_readings,
+        modules,
     })
 }
 
@@ -979,6 +1023,28 @@ fn guard_from(code: u32) -> Result<FactGuard, DecodeError> {
     })
 }
 
+/// `0` is **no access level**, which is a value rather than a missing one: a namespace's name has none, and a
+/// member whose class body the reading could not place has none either — see [`DeclFact::access`].
+fn access_code(access: Option<Access>) -> u8 {
+    match access {
+        None => 0,
+        Some(Access::Public) => 1,
+        Some(Access::Protected) => 2,
+        Some(Access::Private) => 3,
+    }
+}
+
+fn access_from(code: u8) -> Option<Access> {
+    match code {
+        1 => Some(Access::Public),
+        2 => Some(Access::Protected),
+        3 => Some(Access::Private),
+        // Anything else — including a byte from a future writer — is "no level recorded", which is a weaker
+        // answer rather than a wrong one: nothing is hidden by it.
+        _ => None,
+    }
+}
+
 fn macro_body_code(body: MacroBody) -> u8 {
     match body {
         MacroBody::Specifier => 1,
@@ -1075,6 +1141,12 @@ mod tests {
                     // names, in the order the declaration wrote them.
                     parameters: vec!["_Ty".to_string(), "_Alloc".to_string()],
                     parameter_list: Some("(int, int)".to_string()),
+                    // A member of a class, with the level its class body gave it — the one field a completion
+                    // filters on, so the round trip has to carry a *some* as well as the `None`s below.
+                    access: Some(super::Access::Protected),
+                    // Exported, which is the other half of what a consumer may show: a fact from a module interface
+                    // unit that an importer can name.
+                    exported: true,
                     range: range(10, 20),
                     name_range: range(17, 6),
                     // Both flags' `true` branch here, and the other facts below cover `false` — a round trip that
@@ -1096,6 +1168,10 @@ mod tests {
                     // The one field a completion's detail line reads: a function with no parameters is written
                     // `()`, which is an answer, and `None` would be "nobody looked".
                     parameter_list: Some("()".to_string()),
+                    // No access level — a free function is not a member — and not exported: the `false` side of
+                    // both fields, which the class above covers the other way round.
+                    access: None,
+                    exported: false,
                     range: range(40, 15),
                     name_range: range(48, 6),
                     local: false,
@@ -1111,6 +1187,8 @@ mod tests {
                     bases: Vec::new(),
                     parameters: Vec::new(),
                     parameter_list: None,
+                    access: None,
+                    exported: false,
                     range: range(60, 8),
                     name_range: range(60, 0),
                     local: false,
@@ -1203,6 +1281,15 @@ mod tests {
                     opens: None,
                 },
             ],
+            // Every field of the module reading set, so that a round trip covers the edge the visibility walk
+            // follows rather than only its default: an interface unit that imports two modules.
+            modules: super::ModuleReading {
+                module: Some("widget.core".into()),
+                partition: Some("detail".into()),
+                is_interface: true,
+                imports: vec!["std".into(), "widget.draw".into()],
+                header_units: vec![std::path::PathBuf::from("/usr/include/c++/v1/vector")],
+            },
         }
     }
 

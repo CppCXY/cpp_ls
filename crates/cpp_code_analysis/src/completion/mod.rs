@@ -451,22 +451,30 @@ fn members(
 
     let mut scored: Vec<Scored> = Vec::new();
 
+    // **The two offer rules are applied before the ranking**, in one place that both consumers of a member list go
+    // through: the names the implementation owns, and the members the reader cannot name from here — see
+    // [`crate::index::project::offerable_members`], which is where the access rule reads [`DeclFact::access`]
+    // against the classes the cursor is in.
+    let members = {
+        let mut members = found;
+        let hidden =
+            crate::index::project::offerable_members(index, scopes, root, path, offset, &mut members);
+        (members, hidden)
+    };
+    let (members, hidden_by_access) = members;
+
     // **One row per spelling.** A class declares `replace` eleven times and `insert` nine, and every one of them is
     // a real declaration a jump should find — but a list is something a reader *picks* from, and eleven rows
     // reading `replace` are one choice offered eleven times. So the member query's list is collapsed by name here,
     // which is the same rule the name query applies and for the same reason. The declarations are not lost: the
     // jump and the hover ask `members_of` / `member_definitions_across_files`, which keep the whole overload set.
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    let mut reserved = 0;
 
-    for member in &found.members {
-        // The names the implementation owns are not offered — the same rule the name list applies, and the one a
-        // reader meets first on line. of a std::string (_Alty, _ALLOC_MASK, …).
-        if crate::index::project::is_reserved_to_the_implementation(&member.fact) {
-            reserved += 1;
-            continue;
-        }
-
+    for member in &members.members {
+        // **A member the reader cannot name is not offered** — and that decision is the *query's*, not this
+        // layer's: `member_completions_at` compares each member's access level with the classes the cursor is in
+        // and reports what it kept out (`MemberCompletions::hidden_by_access`). Filtering here as well would be a
+        // second reader of one rule, which is the shape of every bug in this area.
         if !seen.insert(member.fact.name.as_str()) {
             continue;
         }
@@ -500,10 +508,13 @@ fn members(
 
     let why = if offered > 0 {
         format!("the member query answered, with {offered} members")
-    } else if reserved > 0 {
+    } else if hidden_by_access > 0 {
+        // The distinction matters to whoever reads the log: "the class has no members" and "its members are
+        // `private` from here" are different facts, and the second one has a fix the reader can apply.
         format!(
-            "`{class}` declares {} members and every one of them is reserved to the implementation",
-            found.members.len()
+            "`{class}` declares {} member(s) and {hidden_by_access} of them are `private` or `protected` where the \
+             cursor is",
+            members.members.len() + hidden_by_access
         )
     } else {
         format!("`{class}` is declared and has no members this analysis can see")
@@ -962,6 +973,8 @@ mod tests {
             name_range: cpp_parser::SourceRange::new(0, 0),
             clean: true,
             guard: crate::FactGuard::Unconditional,
+            access: None,
+            exported: false,
         };
 
         assert_eq!(
@@ -987,3 +1000,4 @@ mod tests {
         assert_eq!(detail_of(&fact(None, None)), None, "nothing to say");
     }
 }
+

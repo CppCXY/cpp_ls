@@ -612,6 +612,14 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             mark_settling_macro_facts(&preprocessing, own_guard, &mut macros);
         }
 
+        // **Header units are resolved in the same stage as includes**, because they are the same filesystem search:
+        // `import <vector>;` names a header, and the answer to "which vector" has to be the compiler's answer. See
+        // [`modules_of`].
+        let modules = {
+            let _includes = StageTimer::new(Stage::Includes);
+            modules_of(&root, directory, &resolver, &mut interner)
+        };
+
         FileSummary {
             path: path.to_path_buf(),
             key,
@@ -623,7 +631,70 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             // from the walk rather than recomputed: the walk is the only thing that asked, and asking again here
             // would be a second reader of the same evidence, free to disagree with the scopes it is describing.
             macro_readings: scopes.macro_readings,
+            modules,
         }
+    }
+}
+
+/// **What a file declares about modules**, read from its tree.
+///
+/// The same reading [`crate::ModuleScanner`] makes ([`crate::ModuleInfo::from_tree`]), reduced to the three things
+/// the *visibility* walk needs and stored in the summary so that it can be read without a tree — see
+/// [`crate::ModuleReading`].
+///
+/// Partitions and header units are dropped here on purpose: a partition belongs to the importing file's own module
+/// (so it is not an edge between modules at all), and a header unit is a header, which the `#include` machinery
+/// already reaches by the same search. What is kept is the edge that nothing else can see: **this file's names
+/// become visible to anyone who imports the module it declares.**
+fn modules_of<F: FileProvider>(
+    root: &cpp_parser::CppSyntaxNode,
+    including: &Path,
+    resolver: &IncludeResolver<'_, F>,
+    interner: &mut PathInterner,
+) -> crate::ModuleReading {
+    let info = crate::ModuleInfo::from_tree(root);
+
+    // **A header unit is a header**, and `import <vector>;` finds it by the same search `#include <vector>` uses —
+    // so the same resolver is asked, and a second implementation of "which `vector` did you mean" does not exist to
+    // disagree with the compiler. The *resolved path* is what is recorded rather than the spelling: the visibility
+    // walk holds summaries and cannot search anything.
+    //
+    // `None` for a header that cannot be found (no include paths configured, a header outside them) — the walk
+    // then knows nothing about that import, which is the honest state and not an empty header unit.
+    let header_units: Vec<std::path::PathBuf> = info
+        .imports
+        .iter()
+        .filter_map(|declaration| match &declaration.target {
+            crate::ImportTarget::HeaderUnit { name, is_angle } => {
+                let include = crate::directive::Include {
+                    target: name.to_string().into(),
+                    form: if *is_angle {
+                        crate::directive::IncludeForm::Angle
+                    } else {
+                        crate::directive::IncludeForm::Quote
+                    },
+                    is_next: false,
+                };
+
+                resolver
+                    .resolve(&include, including, None, interner)
+                    .resolved()
+                    .map(|resolved| resolved.path.clone())
+            }
+            _ => None,
+        })
+        .collect();
+
+    crate::ModuleReading {
+        module: info.module_name,
+        partition: info.partition_name,
+        is_interface: info.unit == Some(crate::ModuleUnit::InterfaceUnit),
+        imports: info
+            .imports
+            .iter()
+            .filter_map(|declaration| declaration.target.module_name().map(Box::from))
+            .collect(),
+        header_units,
     }
 }
 
@@ -1995,9 +2066,4 @@ mod tests {
         assert_eq!(files.read(Path::new("/p/other.h")), None);
     }
 }
-
-
-
-
-
 

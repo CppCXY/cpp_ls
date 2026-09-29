@@ -1087,6 +1087,89 @@ impl Toolchain {
         }
     }
 
+    /// **Where this compiler keeps a module the project does not contain, and what would let it find one it does.**
+    ///
+    /// The sentence an analysis owes a reader who wrote `import std;` and got nothing. "No file in this project
+    /// declares module `std`" is true and useless: the file exists on the machine, in a directory only the compiler
+    /// knows, and **which directory that is differs per compiler** — so a message that named one of them would be
+    /// wrong on two thirds of the machines this runs on.
+    ///
+    /// # The three, and what is measured behind each
+    ///
+    /// * **MSVC.** `import std;` is C++23 and `/std:c++latest` ([`ASSUMED_STANDARD_MSVC`] is what this analysis asks
+    ///   for when a project states nothing). The *source* of the standard module ships with the toolchain:
+    ///   `<VC>/Tools/MSVC/<version>/modules/std.ixx`, and the build has to compile it into an `.ifc` and name it —
+    ///   `/reference std=std.ifc`, or `/ifcSearchDir <dir>`. Measured on 14.35.32215: the file is 3 194 bytes, a
+    ///   global module fragment with the C headers, then `export module std;` and an `#include` of every standard
+    ///   header. There is also `std.compat.ixx` beside it, which re-exports `std` **and** the C library's global
+    ///   names.
+    /// * **GCC and Clang.** A module has to have been **built** before anything can import it, and where the result
+    ///   goes is not a directory this analysis can look in and find the answer: GCC writes `gcm.cache/<module>.gcm`
+    ///   beside where the compiler was run, Clang names a prebuilt module file on the command line
+    ///   (`-fmodule-file=<module>=<file>`) or looks in `-fprebuilt-module-path=<dir>`. Neither ships the standard
+    ///   library as a module, so `import std;` needs a build step that a project has to have, and until it does there
+    ///   is no file to read.
+    ///
+    /// [`Dialect`] has two values and these are three compilers, so GCC and Clang share a sentence — and that is
+    /// the honest direction: the fact this layer has is "the compiler is MSVC or it is not", and a sentence that
+    /// guessed which of the two it is would be right half the time for no gain over one that names both mechanisms.
+    ///
+    /// The compiler's *name* is deliberately not in the sentence — the dialect is what decides it, and the reader
+    /// already knows which compiler they are using.
+    pub fn module_note(&self, module: &str) -> String {
+        match self.dialect {
+            Some(Dialect::Msvc) => {
+                let source = if module == "std" {
+                    format!(
+                        " Its source ships with the toolchain, at `{}`.",
+                        self.standard_module_source("std").display()
+                    )
+                } else {
+                    String::new()
+                };
+
+                format!(
+                    "no file this project contains declares module `{module}`. A module outside the project is one \
+                     only the compiler can see: MSVC needs its interface unit compiled into an `.ifc` and named with \
+                     `/reference {module}=<file>.ifc`, or a directory `/ifcSearchDir` names.{source} Until then the \
+                     names it exports are unknown rather than absent."
+                )
+            }
+            _ => format!(
+                "no file this project contains declares module `{module}`. A module outside the project is one only \
+                 the compiler can see, and this one has to have been built before anything can import it — GCC \
+                 writes `gcm.cache/{module}.gcm` beside where it is run (`-fmodules-ts`), Clang takes a prebuilt \
+                 module file by name (`-fmodule-file={module}=<file>`) or by directory \
+                 (`-fprebuilt-module-path=<dir>`). Until then the names it exports are unknown rather than absent."
+            ),
+        }
+    }
+
+    /// Where this toolchain ships the **source** of a standard module, if it ships one at all.
+    ///
+    /// Beside the include directories rather than inside them — `<VC>/Tools/MSVC/<version>/modules/std.ixx` sits in
+    /// a `modules` directory that is a **sibling** of `include`, which is why the module search has to look there
+    /// (see `ModuleScanner::search_directories`) and why this is not just the first include path plus a name.
+    ///
+    /// A path, not a promise: it is returned whether or not the file is there, because the answer is about where the
+    /// toolchain *keeps* such a thing and a caller that wants to know whether it exists can ask the filesystem.
+    pub fn standard_module_source(&self, module: &str) -> PathBuf {
+        for directory in &self.system_include_paths {
+            if let Some(parent) = directory.parent() {
+                let candidate = parent.join("modules").join(format!("{module}.ixx"));
+                if candidate.is_file() {
+                    return candidate;
+                }
+            }
+        }
+
+        // Nothing on disk: the conventional location, so that the sentence names a directory rather than nothing.
+        match self.system_include_paths.first().and_then(|first| first.parent()) {
+            Some(parent) => parent.join("modules").join(format!("{module}.ixx")),
+            None => PathBuf::from("modules").join(format!("{module}.ixx")),
+        }
+    }
+
     /// The predefined macros, as the map a condition is evaluated against.
     ///
     /// A name with no value (`#define __linux`) maps to `None`, which is what `defined(NAME)` asks about; a name
@@ -1228,7 +1311,7 @@ pub fn parse_version(output: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Environment, Output, parse_search_list, parse_version};
+    use super::{Dialect, Environment, Output, parse_search_list, parse_version};
 
     /// GCC 15.1.0 (MinGW-w64), trimmed to three entries — the shape is verbatim, including the `..` segments
     /// and the `#include "..."` block that precedes it.
@@ -2055,6 +2138,113 @@ End of search list.
             already_there,
             "a directory the project already lists is not added again"
         );
+    }
+
+    /// The toolchain a test builds by hand, with only the fields the note reads filled in.
+    fn toolchain_of(dialect: Option<Dialect>, include_paths: &[&str]) -> Toolchain {
+        Toolchain {
+            compiler: None,
+            version: None,
+            system_include_paths: include_paths.iter().map(PathBuf::from).collect(),
+            builtin_macros: Vec::new(),
+            dialect,
+            standard: None,
+            source: ToolchainSource::SystemHeaders,
+            note: None,
+        }
+    }
+
+    /// **The sentence a reader gets for a module this project does not contain, and why it differs per compiler.**
+    ///
+    /// The failure this exists for is not a wrong answer but a useless one: "no file in this project declares module
+    /// `std`" is true, and it leaves the reader with nothing to do — while the fact that actually helps (where
+    /// *their* compiler keeps modules) is one this layer holds and was not saying.
+    ///
+    /// MSVC and everything else are asserted apart, because the two sentences name different mechanisms and a
+    /// regression that collapsed them into one would still read as a reasonable sentence.
+    #[test]
+    fn a_module_nobody_declares_gets_a_note_about_where_the_compiler_keeps_modules() {
+        let msvc = toolchain_of(Some(Dialect::Msvc), &["C:/VC/Tools/MSVC/14.35/include"]);
+
+        let about_std = msvc.module_note("std");
+        assert!(
+            about_std.contains("/reference std="),
+            "MSVC is told the switch that names a module: {about_std}"
+        );
+        assert!(
+            about_std.contains("std.ixx") && about_std.contains("modules"),
+            "and where the standard module's own source is, because that file exists on the machine and is the whole \
+             of the fix: {about_std}"
+        );
+        assert!(
+            about_std.contains("unknown rather than absent"),
+            "the note never claims the names do not exist: {about_std}"
+        );
+        // The separators are the platform's, so the *sentence* is asserted on a path that was not spelled with
+        // them — a test that hardcoded `\` would be a test about Windows.
+        assert!(
+            !about_std.contains("\\\\"),
+            "the path is not escaped as if it were in a string literal: {about_std}"
+        );
+
+        // A module that is not `std` gets the switch and not somebody else's file: MSVC ships one standard module,
+        // and pointing at it for `import mylib;` would be a fabricated path.
+        let about_another = msvc.module_note("mylib");
+        assert!(about_another.contains("/reference mylib="));
+        assert!(
+            !about_another.contains("std.ixx"),
+            "no standard library path for a module that is not one: {about_another}"
+        );
+
+        // GCC and Clang: the module has to have been built, and the note says where such a build puts things.
+        let gnu = toolchain_of(Some(Dialect::Gnu), &["/usr/include/c++/15"]);
+        let about_std = gnu.module_note("std");
+        assert!(
+            about_std.contains("gcm.cache/std.gcm") && about_std.contains("-fmodule-file=std="),
+            "both mechanisms are named, because the dialect does not tell them apart: {about_std}"
+        );
+        assert!(
+            !about_std.contains("/reference"),
+            "and MSVC's switch is not offered on a compiler that would reject it: {about_std}"
+        );
+
+        // Nobody was asked: the note still says the honest thing and claims no switches at all.
+        let unknown = toolchain_of(None, &[]).module_note("std");
+        assert!(
+            unknown.contains("unknown rather than absent") && !unknown.contains("/reference"),
+            "an unknown compiler is not guessed at: {unknown}"
+        );
+    }
+
+    /// **Where a standard module's source is, when the toolchain ships one.** Found by asking the filesystem for
+    /// each include path's sibling `modules` directory — the layout MSVC uses — and answered as the conventional
+    /// location when nothing is there, so that a message names a directory rather than nothing.
+    ///
+    /// The scratch tree is built here rather than borrowed from the machine, for the reason every machine-path test
+    /// in this repository is written this way: a test that asserts about `C:\Program Files\…` passes on this laptop
+    /// and fails on the next one, and the thing being tested is the *search*, not the compiler's installation.
+    #[test]
+    fn a_standard_modules_source_is_looked_for_beside_the_include_directories() {
+        let scratch = std::env::temp_dir().join(format!("cppls-toolchain-{}", std::process::id()));
+        let include = scratch.join("VC").join("Tools").join("MSVC").join("14.35").join("include");
+        let modules = include.parent().expect("a parent").join("modules");
+        std::fs::create_dir_all(&modules).expect("a scratch tree");
+        std::fs::write(modules.join("std.ixx"), "export module std;\n").expect("the shipped source");
+
+        let toolchain = toolchain_of(Some(Dialect::Msvc), &[include.to_string_lossy().as_ref()]);
+
+        assert_eq!(
+            toolchain.standard_module_source("std"),
+            modules.join("std.ixx"),
+            "the file beside the include directory is the one that ships with the toolchain"
+        );
+
+        // …and for a module no toolchain ships, the answer is still under that directory rather than a bare name:
+        // a sentence naming a path is actionable and one naming a file name is not.
+        let absent = toolchain.standard_module_source("mylib");
+        assert_eq!(absent, modules.join("mylib.ixx"));
+
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 }
 

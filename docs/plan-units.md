@@ -1749,3 +1749,400 @@ cooked fact: returns Some("const_reference")
 **看齐**:554 + 全部集成测试绿,clippy 干净。
 
 **下一步**:`auto` 的剩余两步 → ③ `private`/`protected` 访问级别 → §31 的模块第一步。
+
+---
+
+## 33. `auto` 补完:`auto y = x.back()` 现在答 **`char&`** —— 也就是编译器会说的那个
+
+§32 登记的两步都做完了,而且第二步比登记的更宽:**同一段逻辑有两个调用点**。
+
+### 第一步:一个答案的两条实现合成一条
+
+`what_a_call_has` 现在收 `(index, scopes, root, path)`,对自己的 `Indexed` 分支跑**同一个** `finish_a_nested_name`
+(从闭包提成自由函数),类取 `DeclFact::scope` —— 成员声明所在的那个类。于是:
+
+```text
+改之前   `x.back()` → `_Elem&`      `auto y` → `reference`      ← 同一个问题两个答案
+改之后   `x.back()` → `_Elem&`      `auto y` → `_Elem&`         ← 一个读者
+```
+
+### 第二步:别名**带来的**模板实参
+
+`resolve_aliases` 走别名链时用 `base_type_name(&target)` —— 那一步**正是把实参丢掉的地方**。
+新增 `resolve_aliases_with_arguments`(旧的变成它的 `.0`):每步把目标**按类型读**,目标是
+`basic_string<char, char_traits<char>, allocator<char>>` 时把这三个实参带回来;若某步的目标没有实参
+(裸名字),就沿用上一步的。
+
+然后**一个共享的取用点** `member_access_class_and_arguments`:**use 写了实参就用 use 的**(`std::vector<int>`),
+**没写就用别名带来的**(`std::string`)。这个函数之所以存在,是因为这个"半件事"原来在两个调用点上各写了一遍:
+`type_of_expression`(成员当值读)和 `declaration_of_a_callee`(成员被调用)—— 上一步刚把两处的**走查**合成一个,
+这一步把两处的**配对**也合成一个,**它们本来就是同一个答案的两半**。
+
+```text
+x.back()    `_Elem&` → **`char&`**        (别名实参到位)
+auto y      `_Elem&` → **`char&`**        (第二处配对也修了)
+```
+
+### 完整链条(全部量在同一台机器、同一个进程里)
+
+```text
+原始读数                     _NODISCARD _CONSTEXPR20 reference
+① 返回类型按语法读            reference
+② 调用的返回类型也走走查       value_type&
+③ 看 base 而不是整条拼写       _Elem&
+④ 别名带来的模板实参          char&        ← 编译器对 `std::string s; s.back()` 的答案
+```
+
+**新测试** `a_member_of_a_class_reached_through_an_alias_gets_the_aliass_arguments`:一个 `basic_string`
+(带 `value_type`/`reference` 两层别名)+ `using string = basic_string<char>`,同时钉住"成员当值读"和
+"成员被调用后 `auto` 接住"两条路 —— 两条路曾经给出不同答案,所以要一起钉。
+
+**仍然登记的一件**:`type_at("std::string::size_type")` 还是 `UnknownType`。**这条不是同一个病**:
+它走的是 `::` **限定名解析**(`sema/resolve.rs`),不是成员访问 —— 别名实参那步修不到它。
+**看齐**:554 + 全部集成测试绿(类型套件 26 条),clippy 干净。
+
+---
+
+## 34. 访问级别:事实里多一个字节,补全里少一半错名字
+
+用户点名的第 ③ 条("`private` 这些作用域都没搞好")。改之前:**模型里根本没有访问级别** ——
+`DeclFact` 没有这个字段,`public:`/`private:` 那两个 `AccessSpecifier` 节点谁也没读。
+
+### 改动
+
+| 改什么 | 在哪 |
+| --- | --- |
+| `Access { Public, Protected, Private }` + `DeclFact.access: Option<Access>`(`None` = 不是类成员,或类体没读到) | `summary.rs`,codec 里一个 `u8`(**CODEC_VERSION 18 → 19**) |
+| **读法**:`DeclarationShapes` 那一趟里维护一个"类体栈"(`(结束偏移, 当前级别)`),遇到 `ClassBody` 压栈、遇到 `public:`/`private:`/`protected:` 改栈顶,**每个 shape 记下当时在force的级别**;没有标签之前的默认值由类键决定(`class` 私有,`struct`/`union` 公开) | `sema/declarations.rs`(`Shape::access` + `DeclarationShapes::access_at`) |
+| 缓冲区的生产者(`fact_from_binding`)用树上的孪生读法:从名字往上找最内层 `ClassBody`,再扫它自己的子节点取**名字之前最后**一个标签 | `sema/declarations.rs::declared_access_at` |
+| **过滤**:`offerable_members` —— 保留规则(实现保留名)和访问规则**合成一个函数**,完成层和 `member_completions_at` 两个调用点都走它 | `index/project.rs`、`completion/mod.rs` |
+
+**"谁能写这个名字"**:游标所在的类 + 它**派生自**的类(`classes_the_cursor_is_in`,从作用域取最内层类,再沿
+`bases_of` 走出去,有界)。`private` 只有该类自己能写、`protected` 还有它的后代 —— 一个列表同时答两个问题,
+因为检查的是"成员所在的那个类**在不在**这张表里"。`None`(没读到类体)**照常提供** —— 藏起一个判断不了的
+名字,比多给一个错名字更糟。
+
+**计数而不是静默丢弃**:`MemberCompletions::hidden_by_access` 是"因为访问级别没被列出来几个",
+于是"这个类没有成员"和"它的成员在这里全是 `private`"是两句不同的话 —— 后者有一个读者能动手的修法。
+
+### 读数与测试
+
+```text
+std::string:: 补全   64 个成员,**一个没少**(MSVC 的 basic_string 成员都是 public —— 真语料上零代价)
+两条新测试(先证明会红):
+  a_private_member_is_offered_inside_the_class_and_not_outside_it
+     类外 `w.`  → ["shown"]            ← `class` 的默认成员是 private,`int hidden;` 就在里面
+     类内 `other.` → ["grow","hidden","shown"]
+  a_protected_member_is_offered_in_a_derived_class
+     派生类内 `other.` → ["grow","guarded","open"]
+     自由函数 `d.`     → ["open"]      ← `protected` 与 `public` 的区别就在这一行
+```
+
+**登记的两件**(有意不做):`friend`(模型里没有,朋友关系会被当成不可见 —— 与"少一个名字好过多一个写不出的
+名字"一致),以及成员**定义在类外**时(`void C::f() {}`)访问级别的取用(它的 `ClassBody` 不在名字的祖先上)。
+
+**看齐**:556 + 全部集成测试绿,clippy 干净。
+
+---
+
+## 35. 模块:把"支持"拆成三个问题,只有两个能在这条路上答
+
+用户第二次提到模块,所以把 §31 的设计再往下一步 —— 到"可以开始写"的粒度。
+
+### 一个模块,读者会问三件事
+
+```text
+① 这个文件声明/导入了什么?        export module M;  import M;  import <header>;  import :part;
+② `import M;` 让哪些名字可见?      M 的接口单元里 **export** 的那些
+③ `M` 定义在哪个文件里?            项目里哪个文件的文本写着 `export module M;`
+```
+
+**① 和 ③ 是我们能答的** —— 语法层已经会读(`ModuleDecl`/`ImportDecl`/`GlobalModuleFragment`/
+`PrivateModuleFragment`,以及 `CppModuleDecl::{is_interface, get_name, get_partition}`、
+`CppImportDecl::{get_name, get_header_name}`),而"扫项目里的源文件、按模块名建一张表"就是 ③。
+
+**② 只能答一半**,而这一半的边界必须说清楚:`import M;` **不带来任何文本**。能得到 M 的名字只有两条路:
+
+* **BMI**(MSVC `.ifc` / Clang `.pcm` / GCC `gcm.cache/*.gcm`):序列化的 AST,**和编译器版本、标志一一对应**
+  (格式不承诺兼容)。读它 = 复刻一个编译器的内部格式,和本项目"落盘的是事实不是树"正面冲突 —— **不做**。
+* **接口单元的源码**:如果那个文件**在本项目里**,我们就能读懂它导出的声明。这是我们走的路。
+
+所以产品的承诺是:**`import M;` 的模块在本项目里 → 名字可见;不在(标准库的 `import std;`、预编译的第三方
+模块)→ 明确说"读不到",并给出该编译器下"去哪找"的一句话**。这和 §27 给 `<format>` 加的那条 note 是同一个形状。
+
+### 落地的形状(四步,每步都能单独量)
+
+```text
+第 1 步  模块扫描进 summary                                   CODEC_VERSION 20
+         文件 → 声明的模块名 / 是否接口单元 / 分区 / 全局模块片段
+         文件 → import 的模块名(含 `import <header>;` 头单元、`import :part;` 分区)
+         (就是 §31 说的第一步;`#`-指令扫描旁边加一趟,不动 BMI)
+
+第 2 步  ModuleGraph 进 ProjectIndex                          和 include graph 并列
+         模块名 → 接口单元文件(项目内扫描;两个接口单元同名 = 歧义,如实报告)
+         `import M;` 的解析结果(项目内 / 不在项目内),按文件查
+
+第 3 步  "导出"位 + visible_files                            这条最难,也最危险
+         事实需要一个"按模块链接可见"的位,否则接口单元里**非导出**的名字会泄漏给 importer ——
+         那比现在"什么都没有"更难查(用户会以为能写,编译不过)
+         `visible_files`: `#include` 之外,把 `import M;` 解析到的接口单元的导出名字算进来
+
+第 4 步  examples/modules_probe.rs                            量它的工具
+         在一个模块工程上打印:每个文件声明/导入了什么、模块图、每条 import 解析到什么、
+         以及"这个 import 读不到"的诊断
+```
+
+### 按编译器的差异:**只影响第 1、2 步的边角,不影响设计**
+
+| | MSVC | Clang | GCC |
+| --- | --- | --- | --- |
+| 接口单元扩展名 | `.ixx`(也接受 `.cpp`) | `.cppm` | `.cppm` |
+| 编译接口单元 | `/std:c++20 /interface` → `.ifc` | `-std=c++20 -x c++-module --precompile` → `.pcm` | `-fmodules-ts -x c++-module` → `gcm.cache/M.gcm` |
+| 消费方怎么找到它 | `/reference M=x.ifc`,或 `/ifcSearchDir` | `-fmodule-file=M=x.pcm` | **没有标志**:按名字在 `gcm.cache/` 找 |
+| `import std;` | 支持(`/std:c++latest`) | 要先构建 std 模块 | 要先构建 std 模块 |
+| 头单元 | `import <vector>;` | 同 | 同 |
+
+要做的事很小:① `.ixx`/`.cppm` 进项目扫描的默认扩展名(现在只认 `.cpp/.cc/.cxx/...`);
+② 命令行里认出这些模块开关 —— **别当成未知参数,更别当成 include 路径**(`/reference M=x.ifc` 的第二个词长得
+很像路径,`-fmodule-file=M=x.pcm` 里有个 `=`,这两个都是"认错了就会静静答错"的形状);
+③ 上面那条诊断按编译器给出去处。
+
+**不做的,以及为什么**:不读 BMI(理由见上)、不做 `import std;` 的特殊照顾(它的 BMI 由构建系统生成,
+本项目看不到)、不做模块的**语义**(导出名字的可见性用"这个接口单元的 `export` 前缀"来近似,而不是做模块
+链接/可达性分析)。
+
+**下一步的顺序**:模块扫描(第 1 步)→ 模块图(第 2 步)→ 导出位与 `visible_files`(第 3 步)。
+在动手之前想先量一件事:**这个工作区里有没有模块**(用户的项目没有)—— 没有真语料的话,第 3 步的"导出位"
+就只能在合成 fixture 上验证,这一点要提前说清楚,免得又出现"量了半天是空跑"。
+
+---
+
+## 36. 按标准手写一个模块来测 —— 它立刻找出两个真缺陷,而且**图早就在那儿了**
+
+用户说"你自己根据 C++ 标准写个模块来测试就好了"。做了,而且这一步的价值立刻兑现。
+
+### fixture:`tests/fixtures/modules`,由**编译器**证明是合法 C++20
+
+```text
+mathlib.ixx      export module mathlib;         接口单元,一个 export 的命名空间 + 一个**不 export**的函数
+mathlib.cpp      module mathlib;                实现单元(`export` 缺席)
+geometry.cppm    export module geometry;        再导出:`export import mathlib;`
+                 export import mathlib;
+main.cpp         import mathlib; import geometry;
+                 #include <cstdio>                混合写法,过渡期的日常形状
+```
+
+用 `target/build_modules.bat` 真编译并**真跑**:`cl /std:c++latest /EHsc /c /interface …` → 链接 →
+输出 `7 7 12`(三个函数的结果都对)。脚本里三条**量出来的**编译器事实,正是 §35 那张表预测的边角:
+
+```text
+/interface 单独用**仍然会链接**          → 必须加 /c            (否则 LNK1561)
+MSVC **不认 .cppm 扩展名**               → 当对象文件报 LNK1107  → 必须 /TP
+模块分区(module geometry:shapes;)       → C7621,还要额外的 /reference 编排 → 本轮从 fixture 里去掉
+```
+
+### 然后探针(`examples/modules_probe.rs`)把状态一次说清
+
+```text
+① 语法读数             四个文件全对:接口单元 / 实现单元 / 再导出 / 混合写法 —— 而且项目扫描**已经**包含 .ixx/.cppm
+② import 图            改之前:main.cpp --mathlib--> **"no file in this project declares module mathlib"**
+                       ← 命名约定提出了 mathlib.ixx,而那个拼写被当成**相对进程目录**的路径去读了
+③ 产品问题             definition("mathlib::add") = None;`mathlib::` 补全 0 项
+```
+
+**②是两个真缺陷里的第一个**,而且它一句话就能说清:`search_directories` 的第一个目录是**空路径**,注释写着
+"导入文件所在目录**在解析时**会拼上去" —— 但 `resolve_module`/`resolve_partition` 是**直接读**候选文件的,
+`join_normalized("", "mathlib.ixx")` = `mathlib.ixx`,于是 `DiskFiles::read` 拿它去问**进程的当前目录**。
+修法:把导入文件的目录传进 resolve,在那里拼(头单元那条路本来就是这样做的)。
+
+**库里早就有的东西比计划写的多**:`sema/modules.rs` 是完整的模块图 —— `ModuleGraph`、`ModuleScanner`
+(索引 + 命名约定两步解析,候选文件**必须自己声明那个模块**才被接受)、七种诚实的失败(`UnknownModule`、
+`UnknownPartition`、`UnknownHeaderUnit`、`NotDeclaredHere`、`NoModuleToPartition`、`PartitionMismatch`)、
+`dependents_of`(改动作废用),以及"**不携带宏环境**"这条明确的设计。`tests/modules.rs` 有 33 条测试。
+所以 §31/§35 的"第 1、2 步"**是过时清单** —— 我上次写它们之前没读代码,这是同一个病第二次犯在我自己身上。
+
+### 缺的是**接线**:`import` 是第二条可见性边,而可见性走查只读 `#include`
+
+三处改动:
+
+| 改什么 | 在哪 |
+| --- | --- |
+| `ModuleReading { module, partition, is_interface, imports }` 进 **summary**(分区与头单元明确不收:分区属于导入者自己的模块,头单元走 `#include` 那套搜索) | `summary.rs`,codec **CODEC_VERSION 19 → 20** |
+| 索引时从树上读一次(`ModuleInfo::from_tree`)填进 summary | `index/mod.rs::modules_of` |
+| `ProjectIndex::module_interfaces`:模块名 → **接口单元**文件(实现单元不记:`import m;` 要的不是它);`visible_files` 在 `#include` 之外沿 import 走,解析不到就**什么都不加、什么都不声称**(`import std;` 与预编译模块落在这里) | `index/project.rs` |
+
+**读数(同一个 fixture,同一个进程)**:
+
+```text
+definition(mathlib::add)      = .../mathlib.ixx      ← 之前是 None
+definition(mathlib::multiply) = .../mathlib.ixx
+definition(Point)             = .../geometry.cppm    ← 经由 geometry 的 `export import`
+definition(manhattan)         = .../geometry.cppm
+completion after `mathlib::`  → 3 项:add、**hidden_helper**、multiply
+```
+
+**第三项就是那个已知缺口,现在它是可复现的而不是一句话**:fixture 里 `hidden_helper` **没有 export**,
+而我们提供了它 —— 因为"导出位"还没建模(§35 第 3 步剩下的那一半)。方向是**多给**而不是少给,这一点
+§35 已经写明,现在有一个例子钉着它。
+
+**两条新测试**:`a_module_beside_the_importing_file_is_found_from_that_file`(相对目录那个 bug 的形状)、
+`an_import_makes_the_modules_names_visible`(产品那半)。**看齐**:556 + 33 条模块测试全绿,clippy 干净。
+
+**下一步**:导出位(`export` 的声明才可见 —— 有了 fixture,这条现在能在真语料上量:`hidden_helper` 必须消失),
+然后按编译器把 `/reference`、`-fmodule-file`、`gcm.cache/` 那条诊断写出来。
+
+---
+
+## 37. 头单元与 `import std;`:标准库的接口单元**是编译器自己带着的源码**,这条路上没有额外成本
+
+用户接着要求两件事:C++20 的 `import <iostream>;`(头单元)和 C++23 的 `import std;`。两件事**是同一个机制**
+从上到下看两遍:一个不是本项目文件的接口单元,能不能被读进来。
+
+### 事实先量清楚:MSVC 到底在哪里放 `std`
+
+```text
+<VC>/Tools/MSVC/14.35.32215/include/             头文件,加进 include 路径的那个目录
+<VC>/Tools/MSVC/14.35.32215/modules/std.ixx      3 194 字节:**`export module std;` + 把每个标准头 #include 一遍**
+<VC>/Tools/MSVC/14.35.32215/modules/std.compat.ixx
+```
+
+**它在 `include` 的兄弟目录里,不在 `include` 里面** —— 这一条决定了"去哪儿找"。所以
+`ModuleScanner::search_directories` 多了一个目录:每条 include 路径的**兄弟 `modules` 目录**。候选文件仍然只是
+*提议*(读出来必须自己声明那个模块),所以一个不存在的目录代价是一次失败的 `exists`,不是一次误报。
+
+**`import <iostream>;` 那条路早就是对的**:头单元是**头文件**,用 `#include` 的同一套搜索解析,解析结果记进
+summary 的 `header_units`(路径而不是拼写:可见性走查手里只有 summary,搜不了任何东西)。两个 fixture 文件
+`header_units.cpp`(`import <iostream>;` + `import "local_math.h";`,由 `target/build_header_units.bat` 真编译、
+真跑,输出 `42`)和 `std_module.cpp`,量出来都对。
+
+**`import std;` 那条路缺的是"这个文件不在项目里"**:`ProjectIndex::module_interfaces`(模块名 → 接口单元)
+是从**项目扫进来的文件**填的,而 `std.ixx` 在 MSVC 的安装目录里。于是 `std::` 什么都答不出来 ——
+而且不是"答错",是**静默地什么都没有**。
+
+### 量出来的两半:先证明它是空的,再证明它不空
+
+`tests/fixtures/modules/std_only.cpp` 是**只为这一个问题**加的 fixture,因为原有的 `std_module.cpp` 同时
+`import <iostream>;`,而头单元是 `#include` 的另一种拼写 —— `std::string` 在那种文件里本来就能解析,
+那样量出来的数字**说明不了 `import std;` 的任何事**。只 `import std;` 的文件里:
+
+```text
+改之前      definition(std::string) = None    definition(std::cout) = None    `std::` 补全 0 项
+改之后      definition(std::string) = <VC>/include/xstring
+            definition(std::cout)   = <VC>/include/iostream
+```
+
+### 实现:一次"请求驱动的读进来",而不是把标准库塞进每个项目
+
+`Session::read_the_modules_a_file_imports(path)`:读出这个文件(跟着它的 import 图)要的模块名,凡是索引
+**指不出文件的**,用 `ModuleScanner` 解析成文件(同一个解析器,不是第二份实现),把这些接口单元排进队列的
+**open 半边**,然后 `index_everything()`。
+
+为什么是**函数调用**而不是 pump 的一步:冷读是 **401 个文件、6 151 ms**(下面有数),而一个语言服务器
+不能为每个打开的工作区付这笔钱,更不该在没人问 `std` 里的名字时付。这和 `Session::read_the_unit` 是同一个
+形状:**调用者正要做一件需要它的事,所以由调用者说**。第二次调用什么都读不进来(接口单元已经在索引里了)。
+
+为什么必须在这里 drain **整个队列**而不是"只读我排进去的那几个":第一次实现就是这么写的(用一个"这些文件
+还在队列里吗"的谓词收尾),量出来 `std::string` **仍然是 None**。原因不是收尾条件写错了,是**读一个接口单元
+不等于读它包含的东西**:`std.ixx` 全部内容就是 `#include` 每一个标准头,名字在那些头里;而且 `advance` 在队列
+排空时会跑第二遍(`re_read_where_a_body_decides`),MSVC 的 `std::basic_string` 在 `yvals_core.h` 被读之前
+**是文件作用域的 `basic_string`**。所以"读完"这件事的边界只能由队列本身给。
+
+```text
+warm(磁盘上有 summary)
+   definition(std::string) = None  →  读到 1 个接口单元,547.7 ms  →  <VC>/include/xstring
+   definition(std::cout)            = <VC>/include/iostream
+   definition(std::vector)          = None                      ← 见下面那条已知缺口
+   再问一次                          0 个文件,0.004 ms           ← 设计押在这一行上
+
+cold(把 `.cppls` 删掉,同一个 root、同一套发现流程)
+   401 个文件读进来 6 151 ms;第一次请求付的就是这笔钱(实测量到 5 976 ms)
+   接口单元自己的熟读 0.2 ms —— 它的 summary **自己一条声明都没有**(3 194 字节全是 #include)
+```
+
+### 一次量错的冷读,值得写下来
+
+第一版的冷读是**另开一个 session、root 指向临时目录**。它读进了 `std.ixx`,数出 393 个文件,然后
+`std::string` 答 `None` —— 一个**又慢又空**的数字。原因是那个 session 没有第一个 session 发现到的
+toolchain:`with_config` 不跑编译器,于是 `_MSVC_LANG`、`_STL_COMPILER_PREPROCESSOR` 这些宏不在,
+MSVC 的 STL 头在那套环境下读出来的东西不是同一回事。而 393 和 401 的差、以及"路径拼写不同"这两个方向
+我都先追了一遍(前者是巧合,后者不是原因)。
+
+修法就是现在这个形状:**同一个 root、同一次发现,只把磁盘上的 summary 删掉**,并把这个能力作为
+`Session::cache_directory()` 暴露出来(理由写在那个方法的文档里:一个把热数字当冷数字报的基准,是
+五秒卡顿被当成特性的方式)。这条也顺手给"测之前先问清楚自己在测什么"加了一个实例。
+
+### 接线在哪儿,以及为什么不在 `prepare` 里
+
+`AnalysisState::prepare` 是所有 handler 都调的那个"先把文件读进来"的入口,但**它的时刻不对**:`prepare` 之后
+这个文件的 **summary 还可能是旧的或没有的**(编辑会丢 summary,重建是 pump 的事),而没有 summary 就看不见
+它 import 了什么、也就什么都读不进来。所以读被接在 `catch_up` 之后 —— 今天接在**补全、跳定义、hover、
+signature help** 四个 handler 上,共用 `handlers::read_the_modules(context, path, caught_up)` 一个函数
+(`caught_up` 这个参数就是"summary 已经在前面弄干净了吗":补全在同一个请求里已经调过 `catch_up`,另外三个没有,
+由这个函数自己补一次)。
+
+### 没做的,以及为什么
+
+* **不读 BMI**。理由 §35 已经写了,`import std;` 这一轮把它钉得更死:MSVC 的 `std` 之所以能读,是因为它
+  **带了源码**;一个只发 BMI 的模块仍然只能是"读不到"。
+* **`std.ixx` 的导出位**:它 `#include` 进来的那些头里的声明是**通过 `#include` 边**到达 importer 的,
+  所以不受"导出位"过滤(过滤只作用于 import 边)。MSVC 的 STL 用 `_EXPORT_STD` 控制哪些声明真的导出
+  (只有建 std 模块时才展开成 `export`),而我们不模拟它 —— 方向是**多给**,和 §36 记的同一件事。
+* **模块分区**(`import m:part;`)与 `import "header";` 的引号形式:解析和解析器都在,但本轮没有新的真语料,
+  分区还是 §36 记的那句"C7621,还要额外的 `/reference` 编排"。
+
+### 测试
+
+`tests/modules.rs::a_module_whose_interface_unit_is_outside_the_project_is_read_in` —— **不碰机器**:
+`MemoryFiles` 里摆一个机器的布局(`lib/include` 是 include 路径、`lib/modules/std.ixx` 是它的兄弟、
+导入文件在第三个目录),config 里配那条 include 路径。断言四件事:读之前 `std::string` **不是** `Yes`
+(否则这个测试是在测别的东西)、读进来 **1** 个接口单元、`interface_unit_of("std")` 指向那个文件、读之后
+`std::string` 是 `Yes`;最后再断言**第二次调用读进来 0 个**(幂等 —— 请求驱动的设计就押在这上面)。
+
+`a_names_imported_from_the_standard_module_are_offered_after_the_scope` 是**产品那半**:同一个布局,光标停在
+`std::` 之后,断言 `scope == "std"` 且 `string`、`vector` 都在列表里。分两层写是有意的 —— "模块被读进来了"
+和"读者看到了名字"是两件事,而只有第二件是用户的问题。
+
+顺带修了一条**会随机器变**的老测试:`a_module_available_only_as_a_bmi_is_unknown` 原来用 `import std;`
+当"只有 BMI、没有源码"的例子,而这台机器上 `std` **有**源码。改成 `std.compat`(MSVC 也发它,但不在那条
+查找路径上),并且把"为什么不能用 `std`"写进注释。
+
+### 之后补的两件事(同一天,接在 §37 后面)
+
+**① `std::vector` 不是缺口,是我的探针问错了问题。** 它一直被登记成"限定名里类模板的解析缺口",量清楚之后
+完全不是:索引里有 **4 条** `std::vector` —— `<format>` 里的前置声明、`<vector>` 里的主模板、`vector<bool>`
+的偏特化、`vector<bool, _Alloc>` 的偏特化。`definition`(单数)把"多于一条"如实答成
+`Known::Unknown(Ambiguous)`,而我的探针写的是 `.value()`,于是 **`None`** —— 索引答得好好的,是**记录的人
+把它读成了空**。
+
+`goto definition` 那条路本来就是对的:LSP handler 用的是 `session.definitions`(复数),4 条给 4 个位置。
+所以这一条的修法是**把探针改成问复数**(`describe()` helper,打印声明条数与所在文件),不是改产品代码。
+教训和 §36 那条一样,只是这次错的是"量的人":**一个把 `Ambiguous` 显示成 `None` 的探针,会凭空造出一个
+不存在的缺口,然后让下一个人去修它。**
+
+**② 按编译器的模块诊断,现在真的到用户眼前了。** 之前 `ImportOutcome::describe()` 是**解析层**的话
+("no file in this project declares module `std`"),真实、无用:文件在机器上是**有的**,在编译器自己的目录里,
+而那个目录**逐编译器不同**。所以新增:
+
+```text
+Toolchain::module_note(module)      按方言给一句"你的编译器怎么找模块"
+   MSVC    /reference std=<file>.ifc 或 /ifcSearchDir;`std` 再加一句:源码就在 <VC>/.../modules/std.ixx
+   Gnu     gcm.cache/<m>.gcm(-fmodules-ts)/ -fmodule-file=<m>=<file> / -fprebuilt-module-path=<dir>
+           两句都写,因为 Dialect 只有两个值而这三种编译器 —— 拿不准的时候把两种机制都说了
+Toolchain::standard_module_source()  逐条 include 路径问它的兄弟 `modules` 目录,问不到就给约定位置
+Session::notes_about_the_modules(view)  逐条 import 收成 ModuleNote { message, start, end }
+```
+
+**接线**:`FileDiagnostics` 多一个 `notes: Vec<ModuleNote>`,和 `errors` **同一次解析**产出(一个消费者问
+两次就是为同一棵树付两次钱),LSP 侧发成 `INFORMATION` —— 不是 error 也不是 warning:文件没有任何错,
+它只是引用了项目外的模块,而"警告当问题看"的客户端会把构建系统的事报成代码的事。
+
+`lib.rs` 的 `559` 条里新增两条 toolchain 单测(MSVC/GNU/未知方言三句话各断各的,并断言**未知方言不猜开关**)、
+一条 `standard_module_source` 的查找测试(自己搭 scratch 树,不碰机器安装),以及集成测试
+`an_import_nothing_declares_gets_a_note_on_the_line_that_wrote_it`(断言文案**和范围**:note 的字节区间
+正好落在 `import mylib;` 那行 —— 这一半靠 summary 是拿不到的,summary 只记模块名)。
+
+**看齐**:559 库测试 + 全部集成测试绿(模块套件 38 条),clippy 干净。
+
+**下一步**(按价值):① `friend` 与类外成员定义的访问级别(§34 剩下的那一半);② 模块分区的真编译器验证;
+③ `import "header";` 的引号形式在真语料上量一遍。
+

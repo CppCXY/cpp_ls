@@ -70,6 +70,10 @@ pub async fn on_hover(
     // Read in first, under the write lock, so the query itself can be a read (`AnalysisState::prepare` records why).
     if let Some(path) = uri_to_file_path(&uri) {
         context.analysis().prepare(&path).await;
+
+        // A hover over `std::string` in a file that says `import std;` is the same question the definition handler
+        // asks, and it needs the same file read in: `std.ixx` is outside the project. `false`: no edit to catch up on.
+        crate::handlers::read_the_modules(&context, &path, false).await;
     }
 
     snapshot_query(context.analysis(), cancel_token, move |session| {

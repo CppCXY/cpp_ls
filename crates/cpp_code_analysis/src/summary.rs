@@ -219,9 +219,115 @@ pub struct DeclFact {
     /// whether a diagnostic fell inside the declaration this fact was written in.
     pub clean: bool,
     pub guard: FactGuard,
+    /// **Who may name this declaration** — the access an *access specifier* gave it in the class body it was
+    /// written in.
+    ///
+    /// `None` for everything that is not a class member, and for a member whose class body the reading could not
+    /// place: there is no access level to report for a namespace's name, and a guess would be worse than the
+    /// admission — a consumer that treated `None` as "public" shows a name the reader may not write, and one that
+    /// treated it as "private" hides half of every library.
+    ///
+    /// # Why it is recorded rather than asked
+    ///
+    /// Because the class body is in **another file**: a completion after `w.` on a header's class holds the
+    /// cursor's file and the index's facts, and the `private:` label is in the header. The fact is already the
+    /// thing that crosses that boundary, so the level travels with it — one byte on disk.
+    ///
+    /// # What a consumer is expected to do with it
+    ///
+    /// Offer a member when the reader can write it, and **only then**: [`crate::completion`] leaves out a private
+    /// or protected member of a class the cursor is not in. Looking a private member *up* stays possible — a jump
+    /// to a declaration the reader can see in the file is not the same question as offering a name they cannot
+    /// write — which is why this is a field rather than a filter applied where the fact is built.
+    pub access: Option<Access>,
+    /// **Is this declaration exported from the module its file declares?**
+    ///
+    /// A module interface unit's declarations are visible to an importer **only** if exported: `export int f();`,
+    /// anything inside `export { … }`, and everything a `export namespace n { … }` holds. This field is that
+    /// reading, per declaration, and it is what stops a completion from offering a name that does not compile —
+    /// measured on the module fixture (`tests/fixtures/modules`), whose `mathlib::hidden_helper` is written in the
+    /// interface unit and deliberately not exported: it was offered to a file that says `import mathlib;` until this
+    /// field existed.
+    ///
+    /// `false` for a file that declares no module, where "exported" means nothing: the visibility walk applies this
+    /// field **only** to files it reached through an `import`, so an ordinary translation unit's declarations are
+    /// unaffected whatever this says.
+    pub exported: bool,
 }
 
-/// A place where a file's **structure** was read from a macro's replacement list rather than from its own tokens.
+/// Who may name a declaration — see [`DeclFact::access`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Access {
+    /// `public:`, or a `struct`'s members before any label.
+    Public,
+    /// `protected:`.
+    Protected,
+    /// `private:`, or a `class`'s members before any label.
+    Private,
+}
+
+impl Access {
+    /// The word a file writes — `public`, `protected`, `private` — for a report or a test.
+    pub fn words(self) -> &'static str {
+        match self {
+            Access::Public => "public",
+            Access::Protected => "protected",
+            Access::Private => "private",
+        }
+    }
+
+    /// Is this level visible to a consumer that is **not** in the class and not derived from it?
+    ///
+    /// The rule [`crate::completion`] applies, stated here so that the two cannot drift.
+    pub fn is_open_to_everyone(self) -> bool {
+        matches!(self, Access::Public)
+    }
+}
+
+/// What a file declares about **modules** — the reading [`crate::ModuleInfo`] makes of its tree, kept here so that
+/// the index can answer "what does this file's `import` bring in" without parsing anything again.
+///
+/// # Why it is in the summary rather than looked up per query
+///
+/// Because the answer is needed by the *visibility* walk ([`crate::ProjectIndex::visible_files`]), which runs over
+/// every file a cursor can see on every cross-file question. That walk holds summaries and nothing else — no trees,
+/// no text — so a module edge it cannot read from a summary is an edge it cannot follow at all.
+///
+/// # What is *not* here yet, and why the omission is in this direction
+///
+/// `export`: an `export import m;` re-exports `m`'s names, and one without `export` does not. That distinction is
+/// **not** modelled yet, so a name an importer cannot in fact write may be offered — see `plan-units.md` §35 step 3.
+/// The other direction (hiding a name the importer *can* write) is the one this project refuses: a missing answer is
+/// smaller than a wrong one, but a wrong answer here is a completion the reader only discovers by compiling.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModuleReading {
+    /// The module this file declares, without any partition: `my.mod` for `module my.mod;` and for
+    /// `module my.mod:part;` alike. `None` for a file with no module declaration.
+    pub module: Option<Box<str>>,
+    /// Its partition, without the module and without the `:`.
+    pub partition: Option<Box<str>>,
+    /// Is this the unit importers see — `export module m;` rather than `module m;`?
+    ///
+    /// The one field that decides whether the file may be *reached* by an `import m;`: an implementation unit
+    /// declares the module and is not what an importer gets, so resolving to one would attribute its declarations
+    /// to a module that never exported them.
+    pub is_interface: bool,
+    /// The **modules** this file imports, in source order. Partitions (`import :part;`) and header units
+    /// (`import <vector>;`) are deliberately not here: a partition belongs to the importing file's own module, and a
+    /// header unit is a header — it is already reachable through the `#include` machinery, by the same search.
+    pub imports: Vec<Box<str>>,
+    /// **The headers this file imports as header units** — `import <vector>;`, `import "local.h";` — already
+    /// **resolved** by the same search an `#include` goes through (`FileIndexer`'s resolver, at the moment the file
+    /// is read).
+    ///
+    /// Resolved rather than spelt because the visibility walk holds summaries and can search nothing: a header unit
+    /// whose header could not be found is **absent** from this list, and that is the honest state — nothing is known
+    /// about it, rather than an empty header.
+    ///
+    /// The declarations of a header unit are all visible to an importer (a header unit exports what the header
+    /// declares), so these are followed exactly like `#include`s and are **not** subject to [`DeclFact::exported`].
+    pub header_units: Vec<std::path::PathBuf>,
+}
 ///
 /// The one kind of fact in a summary whose evidence is not in the file it describes. MSVC's `<vector>` writes
 /// `_STD_BEGIN` on a line of its own and `namespace std {` nowhere at all — the braces that scope its 165
@@ -2815,6 +2921,9 @@ pub struct FileSummary {
     /// that writes its own braces has nothing to record here. It is stored because it is the one part of a summary
     /// whose evidence is in *another* file, and a consumer that can ask that file again must be able to.
     pub macro_readings: Vec<MacroScopeReading>,
+    /// **What this file declares about modules** — see [`ModuleReading`], and `plan-units.md` §35 for why the
+    /// visibility walk needs it *in* the summary rather than in a lookup beside it.
+    pub modules: ModuleReading,
 }
 
 impl FileSummary {
@@ -2828,6 +2937,7 @@ impl FileSummary {
             includes: Vec::new(),
             guards: SummaryGuards::default(),
             macro_readings: Vec::new(),
+            modules: ModuleReading::default(),
         }
     }
 
@@ -3095,5 +3205,4 @@ impl DeclKind {
 // stored, not a place that knows about directives. There was a `build_declarations` here that took only a scope
 // tree and filled every guard with `Unconditional`; it was deleted rather than kept, because a function whose
 // contract is "the guards are wrong" is one a caller reaches for by accident.
-
 

@@ -89,6 +89,12 @@ pub async fn on_completion(
             .analysis()
             .update_session(move |session| session.catch_up(&read))
             .await;
+
+        // …and the module interface units this file imports, which the index cannot name a file for until something
+        // reads them: `import std;` is `<VC>/Tools/MSVC/<version>/modules/std.ixx`, a file **outside the project**,
+        // and until it is read the completion after `std::` is empty and `std::string` resolves to nothing. See
+        // [`crate::handlers::read_the_modules`] for the measurement and for why the summary has to be current first.
+        crate::handlers::read_the_modules(&context, &path, true).await;
     }
 
     snapshot_query(context.analysis(), cancel_token, move |session| {

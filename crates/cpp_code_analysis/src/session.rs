@@ -99,7 +99,9 @@ use crate::macros::MacroTable;
 use crate::cache::SummaryKey;
 use crate::project::{ConfigReport, ProjectDiscovery};
 use crate::file::vfs::Vfs;
+use crate::sema::modules::{ImportOutcome, ModuleScanner};
 use crate::symbol::{Known, UnknownReason};
+use crate::PathInterner;
 
 /// How many files one drain **cooks**.
 ///
@@ -678,6 +680,17 @@ impl<F: FileProvider + Clone> Session<F> {
 
     pub fn stats(&self) -> StoreStats {
         self.store.stats()
+    }
+
+    /// **Where this session writes the summaries it can reuse**, so that a caller can say what a *second* run costs.
+    ///
+    /// Exposed because "the second time is fast" is a claim about a directory, and a caller measuring the first time
+    /// has to be able to say which directory it means: a benchmark that reports a warm number as a cold one is how a
+    /// five-second stall ships as a feature. Deleting what is here is a safe thing for a caller to do — every entry
+    /// is derived from a file's text and is rebuilt on demand — and it is the only way to measure the cold path on a
+    /// machine that has run before.
+    pub fn cache_directory(&self) -> &Path {
+        self.store.cache_directory()
     }
 
     /// The sources the project scan listed, which is the seed of the rest of the work list.
@@ -1537,6 +1550,64 @@ impl<F: FileProvider + Clone> Session<F> {
     /// so between an edit and the next drain this falls back to the raw reading — and a caller that publishes that
     /// answer will publish the coarser one. The LSP's diagnostic service answers that by re-diagnosing once the
     /// queue drains; a caller that publishes and forgets would show the raw errors until the next edit.
+    /// **Why this toolchain cannot see these modules, and what would let it** — one note per module, each pointing
+    /// at the `import` line that wrote it.
+    ///
+    /// The sentence the analysis owes a reader who wrote `import std;` and got nothing: "no file in this project
+    /// declares module `std`" is true and useless, because the file *does* exist on the machine — it is outside the
+    /// project, in a directory only the compiler knows about, and which directory that is **differs per compiler**.
+    /// See [`crate::Toolchain::module_note`], where the per-compiler facts are written down with the measurement
+    /// behind each one.
+    ///
+    /// Empty when nothing is unreadable, which is the ordinary case for a project whose modules are its own files.
+    ///
+    /// # Where the range comes from, and why the tree rather than the summary
+    ///
+    /// A range is what makes the note *about* the line the reader wrote, and the summary does not keep one — it
+    /// records the module names, because the visibility walk needs names and nothing else. So the file's own tree is
+    /// read here, which the caller has already built ([`crate::FileView`]): the cost is one walk of a tree that
+    /// exists, and the alternative is a second field on every import of every file in the project for a diagnostic
+    /// that appears on a handful of them.
+    ///
+    /// # Why the notes are not [`FileDiagnostics`]
+    ///
+    /// They are not errors, and `FileDiagnostics` is the *errors* — a type whose severity is fixed at one value
+    /// because everything in it is a parse failure. These are information, and merging them would mean a field whose
+    /// only two values are "what everything else in the list is" and "this one", which is a field that says nothing.
+    pub fn notes_about_the_modules(&self, view: &crate::FileView) -> Vec<ModuleNote> {
+        let info = crate::ModuleInfo::from_tree(&view.root);
+
+        info.imports
+            .iter()
+            .filter_map(|declaration| {
+                let module = declaration.target.module_name()?;
+
+                // A module this project declares is not a note: the reader can go to it, and telling them where
+                // their compiler keeps modules would be an answer to a question they did not ask.
+                if self.store.index().interface_unit_of(module).is_some() {
+                    return None;
+                }
+
+                let message = match &self.toolchain {
+                    Some(toolchain) => toolchain.module_note(module),
+                    // No compiler answered, so there is no per-compiler fact to give — and a sentence naming the
+                    // wrong compiler's switches would be worse than one naming none.
+                    None => format!(
+                        "no file this project contains declares module `{module}` — a module outside the project is \
+                         one only the compiler can see, and until then the names it exports are unknown rather than \
+                         absent"
+                    ),
+                };
+
+                Some(ModuleNote {
+                    message,
+                    start: declaration.range.start_offset,
+                    end: declaration.range.end_offset(),
+                })
+            })
+            .collect()
+    }
+
     pub fn diagnostics(&self, path: impl AsRef<Path>) -> Option<FileDiagnostics> {
         let path = path.as_ref();
 
@@ -1553,7 +1624,24 @@ impl<F: FileProvider + Clone> Session<F> {
         // (that is what `index_rendering` did), so answering from it costs a lookup — while the raw answer needs the
         // file's own tree, which is a parse per request. A reading the index holds is a reading of the text the VFS
         // is holding now: a change to the file or to its environment drops it (`forget`, `forget_cooked`).
+        //
+        // **The module notes are taken from the same tree, when there is one.** A caller that asks
+        // [`Session::diagnostics`] and then [`Session::notes_about_the_modules`] with a view of its own parses the
+        // file twice, once for each answer, and the file's tree is the expensive half of both. So the notes are
+        // attached here — from the tree this call already has, or from a view it reads once — and the method that
+        // takes a view stays for a caller that has one and wants nothing else.
+        let mut notes = Vec::new();
+
         if let Some(cooked) = self.store.index().cooked_reading(&key) {
+            // The tree the raw answer would have needed, if the session can still read the file: the notes are about
+            // the imports as they are *written*, and a file that has gone missing since it was indexed has no text to
+            // point at. Reading it here rather than making the caller ask again is what keeps one request to one
+            // parse — and the view is a parse of a file the VFS is already holding, because the cooked reading could
+            // not exist for a file nothing read.
+            if let Some(view) = self.view(path) {
+                notes = self.notes_about_the_modules(&view);
+            }
+
             return Some(FileDiagnostics {
                 reading: DiagnosticReading::Cooked,
                 unplaced: cooked.unplaced,
@@ -1566,10 +1654,13 @@ impl<F: FileProvider + Clone> Session<F> {
                         message: error.message.clone(),
                     })
                     .collect(),
+                notes,
             });
         }
 
         let view = self.view(path)?;
+        let notes = self.notes_about_the_modules(&view);
+
         Some(FileDiagnostics {
             reading: DiagnosticReading::Raw,
             // Every error of the raw reading is about text in this file, by construction: it parsed this file.
@@ -1586,6 +1677,7 @@ impl<F: FileProvider + Clone> Session<F> {
                     }
                 })
                 .collect(),
+            notes,
         })
     }
 
@@ -1837,6 +1929,158 @@ impl<F: FileProvider + Clone> Session<F> {
         let reading = self.read_the_unit(&root);
         self.units_read.insert(queue_key(&root));
         reading
+    }
+
+    /// **The module interface units `path` imports, read in** — the files behind `import m;` that are not part of
+    /// the project.
+    ///
+    /// `import mathlib;` reaches `mathlib.ixx` because the project scan indexed it: the visibility walk holds
+    /// summaries, and a summary of the *importing* file names a module rather than a file, so the index has to know
+    /// which file declares that module. That is `ProjectIndex::module_interfaces`, and it is filled from the files
+    /// the project took in — so a module whose interface unit is **outside the project** is a module nothing can see.
+    ///
+    /// # The case that makes this concrete, and the measurement behind the design
+    ///
+    /// `import std;` (C++23). MSVC ships the *source* of `std` as `<VC>/Tools/MSVC/<version>/modules/std.ixx` —
+    /// 3 194 bytes of `export module std;` followed by an `#include` of every standard header — so the answer is a
+    /// file this analysis can read like any other interface unit, and nothing about it is special except that it is
+    /// not in the project. Measured on the fixture `tests/fixtures/modules/std_only.cpp` (a file whose only import is
+    /// `import std;`), before this existed: `std::string`, `std::vector` and `std::cout` all `None`, and the
+    /// completion after `std::` empty. Measured after it, on the same fixture: the **first** call reads 401 files in
+    /// **6 151 ms** (nothing cached, which is the first time on a machine), the warm call is **547.7 ms**, and a call
+    /// with everything already in the index reads 0 files in **0.004 ms** — `std::string` resolves to `<xstring>` and
+    /// `std::cout` to `<iostream>`.
+    ///
+    /// # Why it is a call and not a step of the pump
+    ///
+    /// Six seconds of indexing is not work a language server may do for every workspace it opens, and it is not work
+    /// to do when nobody asks for a name from `std`. So it is a **request-driven** read, like
+    /// [`Session::read_the_unit`]: the caller that is about to answer a name query on `path` says so, and pays for it
+    /// once — the next call finds the interface unit already in the index and does nothing.
+    ///
+    /// # Recursion is a queue, not a stack
+    ///
+    /// Reading a module in is not reading **one file**. MSVC's `std.ixx` is 3 194 bytes whose entire body is an
+    /// `#include` of every standard header, and *those* are where the names are, so a call that stopped at the
+    /// interface unit would answer `None` for `std::string` with the module read — measured, and the reason the
+    /// interface units are queued in the **open** half and the queue is drained after them rather than left to the
+    /// pump.
+    ///
+    /// `MAX_MODULES_READ_AT_ONCE` bounds the rounds rather than the files: an interface unit that imports a module
+    /// whose interface unit imports it back is a cycle, and a cycle terminates on its own (a path already in the
+    /// index is never read again) — so the cap is for the graph that is merely large, and the honest answer for the
+    /// rest is "not read yet".
+    ///
+    /// Returns how many interface units were read in, so a caller can say whether anything changed.
+    pub fn read_the_modules_a_file_imports(&mut self, path: &Path) -> usize {
+        let mut read_in = 0;
+
+        for _ in 0..MAX_MODULES_READ_AT_ONCE {
+            // The module names the index cannot point at a file for, from the file itself and from every file the
+            // previous round brought in — a fresh walk each round, because a round is a handful of hashmap lookups
+            // and the alternative is a worklist that has to be kept in step with the index.
+            let wanted: Vec<String> = self
+                .modules_in_view_of(path)
+                .into_iter()
+                .filter(|module| self.store.index().interface_unit_of(module).is_none())
+                .collect();
+
+            if wanted.is_empty() {
+                break;
+            }
+
+            let found = self.module_interface_units_of(&wanted, path);
+            if found.is_empty() {
+                break;
+            }
+
+            read_in += found.len();
+            self.add_project_files(found.clone());
+
+            for unit in found {
+                // Queued in the **open** half, and re-armed rather than added: a file that arrived days ago with the
+                // project scan is sitting in the rest half behind everything else, and the point of this call is
+                // that a reader is waiting for a name in it.
+                self.queue.again(unit, Priority::Open, 0);
+            }
+
+            // **Everything this made reachable, read** — the interface units, the headers they include, and the
+            // second pass over the files whose scopes came out of a macro body in one of those headers, which is
+            // what `advance` runs when the queue drains (`std::basic_string` is spelled `basic_string` at file scope
+            // until `yvals_core.h` has been read).
+            //
+            // The whole queue, not only these files: `Session::advance` takes the front of the open half and the
+            // open half is the project, so a drain that spared the rest would leave the module half-read. The cost is
+            // the same work the pump was going to do anyway, moved to the moment a reader asked for an answer that
+            // needs it.
+            self.index_everything();
+        }
+
+        read_in
+    }
+
+    /// **Which file each of these module names is declared in** — resolved the way `scan_imports` resolves them.
+    ///
+    /// The naming convention, the importing file's own directory, and each include path's sibling `modules`
+    /// directory (which is where a standard module lives: `<VC>/Tools/MSVC/<version>/modules/std.ixx` is *beside* the
+    /// include directory, not inside it). Going through [`ModuleScanner`] rather than a second implementation is what
+    /// keeps "which file is module `m`" a question with one answer in this crate.
+    ///
+    /// A file already in the index is dropped here: the caller is asking because the index cannot name a file for the
+    /// module, and a candidate that the index *does* hold a summary of would mean the map and the summaries disagree.
+    fn module_interface_units_of(&self, wanted: &[String], importing: &Path) -> Vec<PathBuf> {
+        let mut found: Vec<PathBuf> = Vec::new();
+        let mut interner = PathInterner::new(self.files.is_case_insensitive());
+        let mut scanner = ModuleScanner::new(&self.files, &self.config);
+
+        for module in wanted {
+            if let ImportOutcome::Resolved(unit) = scanner.resolve_module(module, importing, &mut interner)
+                && let Some(entry) = scanner.units().iter().find(|entry| entry.file == unit)
+            {
+                found.push(entry.path.clone());
+            }
+        }
+
+        found.retain(|unit| self.store.index().summary(unit).is_none());
+        found.sort();
+        found.dedup();
+        found
+    }
+
+    /// **Every module name reachable from `path` through `import`s** — the file's own, and those of every file that
+    /// came into view because of one.
+    ///
+    /// The same walk the visibility rules use ([`ProjectIndex::visible_files_with_modules`]) would be the wrong
+    /// question here: what this needs is not "which files are in view" but "which module names might name a file
+    /// nobody has read", and that is answered by following the import edges from summaries the index holds.
+    fn modules_in_view_of(&self, path: &Path) -> Vec<String> {
+        let mut wanted: Vec<String> = Vec::new();
+        let mut pending: Vec<PathBuf> = vec![path.to_path_buf()];
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        while let Some(current) = pending.pop() {
+            if !seen.insert(queue_key(&current)) {
+                continue;
+            }
+
+            let Some(summary) = self.store.index().summary(&current) else {
+                continue;
+            };
+
+            for imported in &summary.modules.imports {
+                if !wanted.iter().any(|held| held == imported.as_ref()) {
+                    wanted.push(imported.to_string());
+                }
+
+                // …and the file that module is declared in, when the index knows it: a module brought in by a
+                // module is as much a file nobody has read as one the file wrote itself.
+                if let Some(interface) = self.store.index().interface_unit_of(imported) {
+                    pending.push(PathBuf::from(interface));
+                }
+            }
+        }
+
+        wanted
     }
 
     /// How many units of **looked-at** files have not been read as programs yet.
@@ -2422,6 +2666,20 @@ pub struct FileDiagnostic {
     pub message: String,
 }
 
+/// **Something the analysis knows that is not an error** — see [`Session::notes_about_the_modules`].
+///
+/// The same offsets as [`FileDiagnostic`] and a different kind of claim: an import whose module this project does not
+/// contain is not a mistake in the file, it is a fact about where the module lives. A consumer shows it as
+/// information, and a type that merged the two would have to carry a severity field whose only honest values are
+/// "error, for the errors" and "information, for this" — which is the same as having two types, with one of them
+/// harder to read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleNote {
+    pub message: String,
+    pub start: usize,
+    pub end: usize,
+}
+
 /// What a diagnostics channel should say about one file — see [`Session::diagnostics`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileDiagnostics {
@@ -2433,6 +2691,12 @@ pub struct FileDiagnostics {
     /// [`FileDiagnostics::errors`] as the whole truth should mention this number when it is not zero.
     pub unplaced: usize,
     pub errors: Vec<FileDiagnostic>,
+    /// **Things the analysis knows about this file that are not errors** — see
+    /// [`Session::notes_about_the_modules`].
+    ///
+    /// Here rather than in a call of its own because both answers come out of the same tree, and a consumer that
+    /// asked twice would pay for the file's parse twice. Empty is the ordinary case.
+    pub notes: Vec<ModuleNote>,
 }
 
 /// **What reading a file the way a compiler reads it produced** — see [`Session::cook`].
@@ -2464,6 +2728,17 @@ pub struct CookedReading {
 /// enough for the units a reader is working in (the open files' roots and the headers they name) and small enough
 /// that a project of a thousand sources does not hold a thousand timelines.
 const MAX_UNITS: usize = 16;
+
+/// How many rounds [`Session::read_the_modules_a_file_imports`] may read module interface units in.
+///
+/// A round reads every module an already-read file imports and could not name a file for, so the number of rounds is
+/// the **depth** of the module graph rather than its size — one for `import std;`, two for a module that imports a
+/// module that imports a module. Sixteen is far past anything a real project reaches and bounds a graph that is
+/// merely wrong: an interface unit that imports a module whose interface unit imports it back is a cycle, and a cycle
+/// terminates on its own (a path already read is never read again), so this is the guard for the case the cycle rule
+/// does not cover — a module graph that keeps producing *new* files, which only a scan that resolves module names to
+/// the wrong files can do.
+const MAX_MODULES_READ_AT_ONCE: usize = 16;
 
 /// The in-memory translation units, least recently used out first.
 #[derive(Default)]
