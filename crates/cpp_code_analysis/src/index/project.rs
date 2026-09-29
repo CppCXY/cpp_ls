@@ -33,12 +33,16 @@
 //! rest of the crate follows, and the reason [`IncludeFact`](crate::summary::IncludeFact) carries a guard at all.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::path::{Path, PathBuf};
+
+use cpp_parser::CppSyntaxKind;
 
 use super::names::{NameIndex, Posting};
 use crate::guard::Visibility;
 use crate::include::graph::Marked;
 use crate::file::paths::normalize_path;
+use crate::sema::types::{Type, parse_type_spelling, type_of_declaration};
 use crate::summary::{DeclFact, DeclKind, FactGuard, FileSummary, MacroFact};
 use crate::preprocess::directive::IncludeForm;
 use crate::symbol::{Known, UnknownReason};
@@ -233,7 +237,7 @@ pub fn member_definitions_across_files(
         return Known::Unknown(UnknownReason::UnparsableName);
     }
 
-    let Known::Yes((written, _)) = type_of_expression(index, scopes, root, path, &access.object, 0)
+    let Known::Yes((object_type, _)) = type_of_expression(index, scopes, root, path, &access.object, 0)
     else {
         let Known::Unknown(reason) =
             type_of_expression(index, scopes, root, path, &access.object, 0)
@@ -243,15 +247,21 @@ pub fn member_definitions_across_files(
         return Known::Unknown(reason);
     };
 
-    let class = base_type_name(&written);
-    if class.is_empty() {
-        return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
-    }
+    // **The class, not the type**: `std::vector<int>` is a type and `std::vector` is what has members — and a query
+    // handed the whole spelling asks about a class nobody declares, which is one of the shapes that made a member
+    // access on a standard container answer nothing. A reference is seen through here because C++ sees through it
+    // (a member of a `Widget&` is a member of `Widget`); a pointer is **not**, because reaching the pointee is a `*`
+    // the caller writes and this query cannot take for it.
+    let Some(class) = member_access_class(&object_type) else {
+        return Known::Unknown(UnknownReason::UnknownType(Box::from(object_type.to_string())));
+    };
 
-    let members = match members_of(index, scopes, root, path, class) {
+    let members = match members_of(index, scopes, root, path, &class) {
         Known::Yes(members) => members,
         Known::Unknown(reason) => return Known::Unknown(reason),
-        Known::No => return Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+        Known::No => {
+            return Known::Unknown(UnknownReason::UnknownType(Box::from(object_type.to_string())))
+        }
     };
 
     let found: Vec<ProjectDefinition> = members
@@ -548,12 +558,11 @@ pub fn member_across_files(
         return Known::Unknown(reason);
     };
 
-    let class = base_type_name(&written);
-    if class.is_empty() {
-        return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
-    }
+    let Some(class) = member_access_class(&written) else {
+        return Known::Unknown(UnknownReason::UnknownType(Box::from(written.to_string())));
+    };
 
-    let found = member_fact(index, scopes, root, path, class, &access.member);
+    let found = member_fact(index, scopes, root, path, &class, &access.member);
     let Known::Yes((fact, file)) = found else {
         let Known::Unknown(reason) = found else {
             unreachable!("the first match established that this is an `Unknown`")
@@ -562,6 +571,27 @@ pub fn member_across_files(
     };
 
     Known::Yes(ProjectDefinition { file, fact })
+}
+
+/// **The class a member access is asked of** — the type's own class, or the class it points at.
+///
+/// `p->size` and `(*p).size` are the same question, and a language server cannot ask the user to write the
+/// second one: a pointer's member access reaches through the pointer, and every consumer of this layer wants
+/// the class on the other side. A **reference** is already seen through by [`Type::class_name`], because C++
+/// does that for free; a **pointer** is not, because reaching a pointee is otherwise a `*` the caller writes.
+///
+/// One level, which is the language's own rule: a `Widget**` needs two `*`s, and a query that kept descending
+/// would answer about a class the expression does not name.
+///
+/// The class is returned **owned** rather than borrowed, because the class of a pointee belongs to a type that
+/// is itself a shared handle — and a borrow of it would have to outlive a local, which is the shape that ends
+/// in unsafe lifetime extension. One `String` per member query is the price of not doing that.
+fn member_access_class(written: &Type) -> Option<String> {
+    if let Some(class) = written.class_name() {
+        return Some(class.to_string());
+    }
+
+    written.pointee()?.class_name().map(str::to_string)
 }
 
 /// Every member a type has: its own, and the ones it inherits.
@@ -949,12 +979,11 @@ pub fn member_completions_at(
         }
     };
 
-    let class = base_type_name(&written);
-    if class.is_empty() {
-        return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
-    }
+    let Some(class) = member_access_class(&written) else {
+        return Known::Unknown(UnknownReason::UnknownType(Box::from(written.to_string())));
+    };
 
-    match members_of(index, scopes, root, path, class) {
+    match members_of(index, scopes, root, path, &class) {
         Known::Yes(mut members) => {
             // **The names the implementation owns are not offered**, the same rule the name completion applies —
             // and this is where a user meets them first: `line.` on a `std::string` listed 202 members of MSVC's
@@ -1726,7 +1755,7 @@ pub(crate) fn type_of_expression(
     path: &Path,
     expression: &cpp_parser::CppSyntaxNode,
     depth: usize,
-) -> Known<(String, PathBuf)> {
+) -> Known<(Type, PathBuf)> {
     let text = expression.text().to_string();
     let written = text.trim();
 
@@ -1744,7 +1773,7 @@ pub(crate) fn type_of_expression(
     if written == "this" {
         let offset = usize::from(expression.text_range().start());
         return match enclosing_class(scopes, offset) {
-            Some(class) => Known::Yes((class, path.to_path_buf())),
+            Some(class) => Known::Yes((Type::named(class), path.to_path_buf())),
             None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
         };
     }
@@ -1784,9 +1813,10 @@ pub(crate) fn type_of_expression(
             // which is what the initializer wrote.
             Known::Yes((type_of, file)) => Known::Yes((type_of, file)),
             _ => match declaration_of_expression(index, scopes, root, path, &first) {
-                Known::Yes(named) if named.type_of(root).is_none() => {
-                    Known::Yes((first.text().to_string().trim().to_string(), named.file(path)))
-                }
+                Known::Yes(named) if named.type_of(root, scopes).is_none() => Known::Yes((
+                    Type::named(first.text().to_string().trim()),
+                    named.file(path),
+                )),
                 _ => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
             },
         };
@@ -1812,8 +1842,11 @@ pub(crate) fn type_of_expression(
     if let Some(operand) = unary_operand_with(expression, "*") {
         let operand_type = type_of_expression(index, scopes, root, path, &operand, depth + 1);
         return match operand_type {
-            Known::Yes((type_of, file)) => match pointee_type_name(&type_of) {
-                Some(pointee) => Known::Yes((pointee, file)),
+            // **A `*` is the type model's own operation.** `Widget**` gives `Widget*`, an array gives its
+            // element, and a class with an `operator*` gives nothing — that one needs the class's members and
+            // therefore the index, and inventing a pointee would be a wrong answer rather than a missing one.
+            Known::Yes((type_of, file)) => match type_of.pointee() {
+                Some(pointee) => Known::Yes(((*pointee).clone(), file)),
                 // An operand whose type has no `*` on it: the program is ill-formed, and a type invented here
                 // would be a wrong answer rather than a missing one.
                 None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
@@ -1830,8 +1863,15 @@ pub(crate) fn type_of_expression(
         let operand_type = type_of_expression(index, scopes, root, path, &operand, depth + 1);
         return match operand_type {
             Known::Yes((type_of, file)) => {
-                let pointed_at = pointee_type_name(&type_of).unwrap_or(type_of);
-                Known::Yes((format!("{pointed_at}*"), file))
+                // `&x` is a pointer to `x`, and the decay first is what makes `&arr` a pointer to the array's
+                // *element* — C++'s own rule, and the reason this is not simply "wrap it in a pointer".
+                let pointed_at = type_of.decay();
+                Known::Yes((
+                    Type::Pointer {
+                        to: Arc::new(pointed_at),
+                    },
+                    file,
+                ))
             }
             Known::Unknown(reason) => Known::Unknown(reason),
             Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
@@ -1844,9 +1884,15 @@ pub(crate) fn type_of_expression(
     if let Some(base) = subscript_base(expression) {
         let base_type = type_of_expression(index, scopes, root, path, &base, depth + 1);
         return match base_type {
-            Known::Yes((type_of, file)) => match element_type_name(&type_of) {
-                Some(element) => Known::Yes((element, file)),
-                None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+            // **An array's element is the model's own operation**, and a *class* with an `operator[]` is the case
+            // this arm deliberately leaves alone: `v[0]` on a `std::vector` gives the template's `reference`, which
+            // needs the class looking up — taking the first template argument instead would be right for a
+            // `vector` and wrong for a `map`, and nothing here can tell them apart.
+            Known::Yes((type_of, file)) => match type_of.pointee() {
+                Some(element) if matches!(type_of, Type::Array { .. }) => {
+                    Known::Yes(((*element).clone(), file))
+                }
+                _ => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
             },
             Known::Unknown(reason) => Known::Unknown(reason),
             Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
@@ -1866,10 +1912,9 @@ pub(crate) fn type_of_expression(
             return Known::Unknown(reason);
         };
 
-        let class = base_type_name(&inner_type);
-        if class.is_empty() {
-            return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
-        }
+        let Some(class) = member_access_class(&inner_type) else {
+            return Known::Unknown(UnknownReason::UnknownType(Box::from(inner_type.to_string())));
+        };
 
         // **The class as the declaration spelled it, and then as the name that spelling resolves to.** A type
         // written inside a namespace is spelled there *without* its qualifier — MSVC's `<iostream>` writes
@@ -1878,10 +1923,10 @@ pub(crate) fn type_of_expression(
         // asks the index for the **name** from the file the declaration is in, which is the same lookup whenever
         // that file sees exactly one such name — and no answer at all (with the first reason kept) when it sees
         // several, which is the direction this layer fails in.
-        let found = member_fact(index, scopes, root, path, class, &inner.member);
+        let found = member_fact(index, scopes, root, path, &class, &inner.member);
         let found = match found {
             Known::Yes(found) => Known::Yes(found),
-            Known::Unknown(reason) => match declared_class(index, &declared_in, class) {
+            Known::Unknown(reason) => match declared_class(index, &declared_in, &class) {
                 Some(qualified) => match member_fact(index, scopes, root, path, &qualified, &inner.member) {
                     Known::Yes(found) => Known::Yes(found),
                     Known::Unknown(_) | Known::No => Known::Unknown(reason),
@@ -1897,8 +1942,8 @@ pub(crate) fn type_of_expression(
             return Known::Unknown(reason);
         };
 
-        return match fact.type_of {
-            Some(type_of) => Known::Yes((type_of, file)),
+        return match fact.type_of.as_deref() {
+            Some(type_of) => Known::Yes((parse_type_spelling(type_of), file)),
             None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
         };
     }
@@ -2045,43 +2090,6 @@ fn pointee_type_name(written: &str) -> Option<String> {
     (!pointee.is_empty()).then_some(pointee)
 }
 
-/// What a subscript on this spelling gives, for the one case this layer can compute: an **array**.
-///
-/// ```text
-/// Widget[4]     →  Widget
-/// int[2][3]     →  int[2]      the last `[ … ]` is the one the subscript applies to
-/// ```
-///
-/// `None` for everything else, and the case that matters is a *class*: subscripting a `std::vector<Widget>`
-/// gives a `Widget&`, and reaching that means **instantiating** the template rather than reading a spelling.
-/// `None` becomes [`UnknownReason::UnknownType`] at the call site, which is the honest answer until that layer
-/// exists — the alternative, taking the first template argument of whatever the spelling names, would be right
-/// for a `vector` and wrong for a `map`, and nothing here can tell them apart.
-fn element_type_name(written: &str) -> Option<String> {
-    let trimmed = written.trim_end();
-    if !trimmed.ends_with(']') {
-        return None;
-    }
-
-    // From the right, so that the *last* bracket pair is the one found: `int[2][3]` is an array of arrays.
-    let mut depth = 0isize;
-    for (index, character) in trimmed.char_indices().rev() {
-        match character {
-            ']' => depth += 1,
-            '[' => {
-                depth -= 1;
-                if depth == 0 {
-                    let element = trimmed[..index].trim();
-                    return (!element.is_empty()).then(|| element.to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-
-    None
-}
-
 /// The declaration an expression **names**, from the file being edited or from the index.
 ///
 /// The reconciliation the two-layer split needs, in one place: the buffer answers with a [`crate::Binding`] whose
@@ -2115,12 +2123,33 @@ impl NamedDeclaration {
     ///
     /// `None` for a function — `make` is not a `Widget` and has no members — which is the distinction
     /// [`DeclFact::type_of`] documents.
-    fn type_of(&self, root: &cpp_parser::CppSyntaxNode) -> Option<String> {
+    fn type_of(&self, root: &cpp_parser::CppSyntaxNode, scopes: &crate::ScopeTree) -> Option<Type> {
         match self {
+            // **Read from the syntax**, which is where a type is written: the specifier sequence and the
+            // declarator, handed to the one reader that knows how to assemble them. For a declaration in this
+            // file that is the better source by a wide margin — `const Widget* const p` is a shape with two
+            // qualifier positions, and no parser of the *spelling* can put them back where the file had them.
             NamedDeclaration::Here(binding) => {
-                crate::sema::declarations::declared_type_of(root, binding)
+                let declarator = declarator_declaring(root, binding.name_range)?;
+                let specifiers = declarator.ancestors().find_map(|node| {
+                    node.children().find(|child| {
+                        CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq
+                    })
+                })?;
+
+                Some(type_of_declaration(
+                    &specifiers,
+                    Some(&declarator),
+                    binding.name_range,
+                ))
             }
-            NamedDeclaration::Indexed(fact, _) => fact.type_of.clone(),
+            // **Read from the spelling**, which is all the index has: a fact is a `String` on disk and the file
+            // it came from is not open. `parse_type_spelling` is the bridge, and `class_name` the one field of
+            // it that a member query needs.
+            NamedDeclaration::Indexed(fact, _) => {
+                let _ = scopes;
+                fact.type_of.as_deref().map(parse_type_spelling)
+            }
         }
     }
 
@@ -2129,16 +2158,17 @@ impl NamedDeclaration {
     /// Two answers because C++ has two, and the tokens do not separate them: `make()` is a call of a function and
     /// has what it returns, while `Widget()` — the same shape — is a *temporary* of the class. Only the
     /// declaration says which, which is why this is asked here rather than of the shape.
-    fn what_a_call_has(&self, root: &cpp_parser::CppSyntaxNode) -> Option<String> {
+    fn what_a_call_has(&self, root: &cpp_parser::CppSyntaxNode) -> Option<Type> {
         match self {
             NamedDeclaration::Here(binding) => {
                 if binding.kind == crate::BindingKind::Class {
                     return binding
                         .name
                         .identifier_text()
-                        .map(|name| name.to_string());
+                        .map(Type::named);
                 }
                 crate::sema::declarations::declared_returns_of(root, binding)
+                    .map(|returns| parse_type_spelling(&returns))
             }
             NamedDeclaration::Indexed(fact, _) => what_a_call_has_in(fact),
         }
@@ -2156,6 +2186,31 @@ impl NamedDeclaration {
         }
     }
 }
+
+/// **The declarator that declares the name at `range`** — the innermost one whose text holds it.
+///
+/// Innermost, because a declaration holds the declarators of what it declares *and* of the parameters it takes:
+/// `void f(Widget* p)` has a `Declarator` for `f` whose text contains `p`, and the one that declares `p` is the
+/// parameter's own. The shortest match is the innermost, and it is also the only one whose specifiers are the
+/// *parameter's* specifiers.
+fn declarator_declaring(
+    root: &cpp_parser::CppSyntaxNode,
+    name: cpp_parser::SourceRange,
+) -> Option<cpp_parser::CppSyntaxNode> {
+    root.descendants()
+        .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+        .filter(|child| {
+            let own = child.text_range();
+            usize::from(own.start()) <= name.start_offset
+                && usize::from(own.end()) >= name.end_offset()
+                && child
+                    .descendants()
+                    .any(|inner| CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::NameExpr)
+        })
+        .min_by_key(|child| {
+            usize::from(child.text_range().end()) - usize::from(child.text_range().start())
+        })
+    }
 
 /// The type a declaration was written with — or, where it wrote `auto`, the type its **initializer** has.
 ///
@@ -2191,33 +2246,33 @@ fn declared_type(
     path: &Path,
     named: &NamedDeclaration,
     depth: usize,
-) -> Known<String> {
-    let Some(written) = named.type_of(root) else {
+) -> Known<Type> {
+    let Some(declaration) = named.type_of(root, scopes) else {
         return Known::No;
     };
 
-    if !writes_auto(&written) {
-        return Known::Yes(written);
+    // **The declaration reads its own type**, and the only case left over is the placeholder: for anything else
+    // the shape the reader built *is* the answer, qualifiers and operators and all.
+    let placeholder = declaration.to_string();
+    if !writes_auto(&placeholder) {
+        return Known::Yes(declaration);
     }
 
-    let unknown = || Known::Unknown(UnknownReason::UnknownType(Box::from(written.trim())));
+    let unknown = || Known::Unknown(UnknownReason::UnknownType(Box::from(placeholder.clone())));
 
-    // The **written** spelling, rebuilt from the declaration's syntax rather than taken from the recorded type:
-    // the recorded one has already dropped the declaration's specifiers, and `const auto& r = x;` has to deduce a
-    // `const` type — see `deduction_inputs`.
+    // The **written** spelling, with the qualifiers the reader drops: `const auto& r = x;` has to deduce a `const`
+    // type, and `Type` models no qualifiers — so the spelling is carried beside the shape rather than inside it.
+    // See `deduction_inputs`, which is the one place that reads a declaration's text for this reason.
     let Some((as_written, _)) = deduction_inputs(root, named) else {
         return unknown();
     };
-    if !writes_auto(&as_written) {
-        return unknown();
-    }
 
     let Known::Yes((deduced, _)) = initializer_type(index, scopes, root, path, named, depth + 1) else {
         return unknown();
     };
 
     match auto_substituted(&as_written, &deduced) {
-        Some(type_of) => Known::Yes(type_of),
+        Some(type_of) => Known::Yes(parse_type_spelling(&type_of)),
         None => unknown(),
     }
 }
@@ -2241,7 +2296,7 @@ fn initializer_type(
     path: &Path,
     named: &NamedDeclaration,
     depth: usize,
-) -> Known<(String, PathBuf)> {
+) -> Known<(Type, PathBuf)> {
     let Some((_, expression)) = deduction_inputs(root, named) else {
         // Either the declaration is in another file — the initializer is written where the declaration is, and this
         // layer holds one file's syntax — or it has none at all (`auto n;` is ill-formed, and saying so is the
@@ -2366,7 +2421,9 @@ fn node_covering(
 /// (`const`), and the declarator's operators behind (`&`, `*`). The `&&` case is refused here — see
 /// [`declared_type`] — and each `*` has to match a pointer in the deduced type, because a `*` that does not is a
 /// declaration that does not compile rather than a type to report.
-fn auto_substituted(written: &str, deduced: &str) -> Option<String> {
+fn auto_substituted(written: &str, deduced: &Type) -> Option<String> {
+    let deduced = deduced.to_string();
+    let deduced = deduced.as_str();
     // The `auto` **word**, by position: a spelling can hold those four letters inside a longer name
     // (`automatic`), and splitting on words is what keeps the two apart.
     let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
@@ -2416,12 +2473,12 @@ fn auto_substituted(written: &str, deduced: &str) -> Option<String> {
 }
 
 
-fn what_a_call_has_in(fact: &DeclFact) -> Option<String> {
+fn what_a_call_has_in(fact: &DeclFact) -> Option<Type> {
     match fact.kind {
         // `Widget()` is a temporary of `Widget`, so a call of a class has the class. `DeclKind::Type` is exactly
         // "this declaration declares a class-like type", which is the case a call whose callee is a *type* lands in.
-        crate::DeclKind::Type => Some(fact.qualified_name()),
-        _ => fact.returns.clone(),
+        crate::DeclKind::Type => Some(Type::named(fact.qualified_name())),
+        _ => fact.returns.as_deref().map(parse_type_spelling),
     }
 }
 
@@ -2537,7 +2594,7 @@ fn type_of_a_call(
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     call: &cpp_parser::CppSyntaxNode,
-) -> Known<(String, PathBuf)> {
+) -> Known<(Type, PathBuf)> {
     let written = call.text().to_string();
     let written = written.trim();
 
@@ -2580,12 +2637,11 @@ fn declaration_of_a_callee(
             Known::No => return Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
         };
 
-        let class = base_type_name(&object);
-        if class.is_empty() {
-            return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
-        }
+        let Some(class) = member_access_class(&object) else {
+            return Known::Unknown(UnknownReason::UnknownType(Box::from(object.to_string())));
+        };
 
-        return match member_fact(index, scopes, root, path, class, &access.member) {
+        return match member_fact(index, scopes, root, path, &class, &access.member) {
             Known::Yes((fact, file)) => Known::Yes(NamedDeclaration::Indexed(fact, file)),
             Known::Unknown(reason) => Known::Unknown(reason),
             Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
@@ -6650,15 +6706,17 @@ mod tests {
 
     #[test]
     fn a_dereference_of_something_that_is_not_a_pointer_is_an_unknown_type() {
-        // The boundary that is left, and it is a *refusal* rather than a wrong answer: `int* p` dereferenced is
-        // an `int`, and an `int` has no members — so the member lookup on it says "not declared here", which is
-        // the honest thing to tell a consumer. What must not happen is an invented type.
+        // The boundary that is left, and it is a *refusal* rather than a wrong answer: `int* q` dereferenced is an
+        // `int`, and an `int` is not a class — so there is nothing to look a member up in, and the answer says which
+        // type it was that had no members. It used to say "not declared here" (the lookup went looking for a class
+        // called `int`), which reads like a missing file rather than a wrong question. What must not happen, either
+        // way, is an invented type.
         let source = "struct Widget {\n  int size;\n};\nvoid f() {\n  int* q;\n  (*q).size = 1;\n}\n";
         let found = member_of(&[], "/p/a.cpp", source, "size = 1;");
 
         assert!(
-            matches!(found, Known::Unknown(UnknownReason::NotDeclaredHere(_))),
-            "an `int` has no members, and saying so beats inventing a class: {found:?}"
+            matches!(found, Known::Unknown(UnknownReason::UnknownType(_))),
+            "an `int` is not a class, and saying so beats inventing one: {found:?}"
         );
 
         // The other refusal: a subscript on a *class* is `operator[]`, and reaching its element type means

@@ -140,7 +140,22 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// *check* rather than trust — see [`crate::summary::MacroScopeReading`]. Only [`CODEC_VERSION`] moves: the key is
 /// still the text and the compilation context, so an entry written before this field existed is unreachable rather
 /// than wrong, and `cache.rs`'s rule about the macro environment stands.
-pub const CODEC_VERSION: u32 = 15;
+///
+/// # Version 14
+///
+/// A fact's `type_of` is now read from the **syntax** rather than assembled out of the declaration's text — the
+/// bump to version 16. The field is the same field, and the change is what it may contain: the text-based reader
+/// left declaration specifiers in (`const [[nodiscard]] constexpr size_type`), cut a template argument list in the
+/// wrong place (`Point>` for `std::vector<Point>`), and could put a keyword where a type goes
+/// (`friend constexpr iter_difference_t`). Measured on the MinGW standard-library closure, 30 185 declarations:
+/// **11 spellings that are not types before, 0 after**.
+///
+/// This one *does* move [`FORMAT_VERSION`] as well, and the reason is the opposite of the usual one: the bytes of an
+/// old entry still decode, so an old entry is not unreachable — it is **wrong**, and every consumer of `type_of`
+/// (a member access's class, a completion's list, a hover's answer) would be reading a spelling the current reader
+/// would never write. "An entry that decodes but says something the producer no longer believes" is exactly what
+/// [`FORMAT_VERSION`] is for, so both numbers move and the old cache is dropped on sight.
+pub const CODEC_VERSION: u32 = 16;
 
 /// Write a summary as bytes.
 ///

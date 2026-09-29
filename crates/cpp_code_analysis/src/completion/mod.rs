@@ -395,13 +395,15 @@ fn members(
         }
     };
 
-    let class = crate::index::project::base_type_name(&written);
-    if class.is_empty() {
+    // **The class, not the type.** `std::vector<int>` is a type and `std::vector` is what has members; listing the
+    // members of the whole spelling asked about a class nobody declares, which is why a completion after a standard
+    // container's member answered nothing.
+    let Some(class) = written.class_name() else {
         return refused(format!(
             "the type of `{}` is `{written}`, which names no class to list members of",
             access.object.text().to_string().trim()
         ));
-    }
+    };
 
     let found = match crate::index::project::members_of(index, scopes, root, path, class) {
         Known::Yes(found) => found,

@@ -2234,7 +2234,7 @@ impl<F: FileProvider + Clone> Session<F> {
         ) {
             Known::Yes((type_of, file)) => Known::Yes(ExpressionType {
                 expression: written,
-                type_of,
+                type_of: type_of.to_string(),
                 file,
             }),
             Known::Unknown(reason) => Known::Unknown(reason),

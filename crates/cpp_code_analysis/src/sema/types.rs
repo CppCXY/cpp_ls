@@ -1,0 +1,1575 @@
+//! **What a type is**, as a shape rather than as a spelling.
+//!
+//! Everything around this module used to speak about types in `String`s: a declaration recorded the type it was
+//! written with, a member access asked a class by the spelling it read, and the inference layer built answers by
+//! cutting and pasting those strings (`pointee_type_name`, `element_type_name`, `auto_substituted`). That works
+//! while a type is one word and comes apart the moment it is not — and it comes apart **silently**, because the
+//! failure mode is a `String` that looks like a type and is not one:
+//!
+//! ```text
+//! std::map<std::string, int>   handed to a class query whole              → nothing declares `std::map<std::string, int>`
+//! _Cont>                       a template argument whose cut went wrong   → nothing declares `_Cont>`
+//! const [[nodiscard]] …        attributes and specifiers left in          → not a type at all
+//! ```
+//!
+//! # The shape is modelled, the spelling is carried
+//!
+//! ```text
+//! Type::Builtin { spelling }          `int`, `unsigned long long`, `bool`
+//! Type::Named { name, arguments }     `Widget`, `std::vector<int>`, `T`
+//! Type::TemplateParameter { name }    `T` in a context where nothing has said what it stands for
+//! Type::Pointer { to }                `Widget*`
+//! Type::Reference { to, rvalue }      `Widget&`, `Widget&&`
+//! Type::Array { of, extent }          `int[4]`, `int[]`
+//! Type::Function { returns, … }       `int(int)`, `int (*)(int)`
+//! Type::Pack { of }                   `Args...`
+//! Type::Qualified { of }              `const Widget`, `volatile int`
+//! ```
+//!
+//! Three of those exist for reasons worth stating, because each replaced a bug rather than a gap:
+//!
+//! * **`Named` carries a name without its arguments** and the arguments beside it, which is the one distinction a
+//!   member query needs: `std::vector<int>` is a *type*, `std::vector` is the *class* whose members it has, and a
+//!   query handed the first answered "nothing declares it" — true, and useless.
+//! * **`Builtin` is separate from `Named`** so that `int` is not a class called `int`. Reading it as a name made a
+//!   member access on an `int` ask the index for a class by that name and report *"not declared here"*, which a
+//!   reader takes as "this class is missing" rather than "this is not a class".
+//! * **`Qualified` is a wrapper** rather than a flag, because a qualifier belongs to the type it is written on:
+//!   `const Widget*` and `Widget* const` are the same three words in two places and two different types, and only
+//!   the position tells them apart.
+//!
+//! The **spelling** is kept for two reasons, and "why not intern everything" is the obvious question:
+//!
+//! * a consumer shows the type to a user, and the answer must be *what the file wrote* — `std::size_t` and
+//!   `unsigned long long` are one type and two different things to read, and this layer is not entitled to rewrite
+//!   a file's own spelling;
+//! * an **alias** is a name, not a definition: `using Int = int;` makes `Int` a type whose structure this layer does
+//!   not have unless it resolves the alias, which is the index's job and a separate question.
+//!
+//! So the structure is what is *modelled* — enough to ask "what does this type name", "what does a `*` do to it",
+//! "what are its template arguments" — and the spelling is what is *carried*. Equality is by spelling, which is the
+//! honest rule for a layer that does not resolve aliases: two spellings that mean one type are two answers here.
+//!
+//! # The two ways in
+//!
+//! ```text
+//! type_of_declaration(specifiers, declarator, name)   the syntax: what a declaration wrote
+//! parse_type_spelling("std::vector<int>")             the text: what a `DeclFact` recorded on disk
+//! ```
+//!
+//! Both are needed and neither can replace the other: a declaration in the file being edited has syntax and no
+//! need of a spelling, while a declaration the *index* holds is a `String` whose file is not even open. The parser
+//! guarantees exactly one thing — [`Type::class_name`] — because everything else it could get wrong is recoverable
+//! and a wrong class name is not.
+//!
+//! # What this deliberately does not do
+//!
+//! No alias resolution, no template instantiation, no `typedef` chasing, no overload resolution. Each of those is a
+//! query against the index and belongs where the index is; this module is the shape they are asked about. What it
+//! *does* offer towards them is [`Type::substituted`], which pairs a class template's parameters with the arguments
+//! a use wrote — the operation an instantiation would start from, and the one that makes
+//! `std::vector<T>::size_type` answerable once `T` is known.
+
+use std::fmt;
+use std::sync::Arc;
+
+use cpp_parser::{CppSyntaxKind, CppSyntaxNode};
+
+/// A type inside a type, **shared rather than owned**.
+///
+/// Every compound type is a tree, and inference walks that tree constantly: a `substituted`, a `decay`, a
+/// `pointee`, a `class_name` — each one asks about the inside of a type and each one produces a new type. With an
+/// owned child (`TypeOf`) every one of those is a **deep clone of a tree**, so asking "what is `std::map<K,
+/// V>::value_type`" clones the whole spelling of `K` and `V` to look at it, and a chain of member accesses clones
+/// it once per link. The cost is invisible in a test with three identifiers and dominant in a header where the
+/// same type is asked about a thousand times.
+///
+/// [`Arc`] makes the clone a refcount bump, and it buys three things that matter more than the atomic:
+///
+/// ```text
+/// 1. a sub-type can be handed out        `fn inner(&self) -> TypeOf<Type>` returns a handle, not a copy
+/// 2. one spelling is one allocation      `std::string` built a thousand times is one allocation, not a thousand
+/// 3. nothing is mutated through it       `Arc` has no `get_mut` in safe code, so a type is a value
+/// ```
+///
+/// The third is not a consolation prize: a type that could be mutated in place is a cache key that can change
+/// under a map, and this layer hashes types. It is [`Arc`] rather than `Rc` because the index is shared between
+/// the LSP's reader threads — a type crossing a thread boundary is the ordinary case here, not an exotic one.
+pub type TypeOf = Arc<Type>;
+
+/// **A type, as a shape.** See the module documentation for why the spelling is carried beside it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Type {
+    /// A builtin: `int`, `void`, `unsigned long long`, `decltype(auto)`.
+    Builtin { spelling: String },
+    /// A name, with the template arguments it was written with — `Widget`, `std::vector<int>`, `T`.
+    ///
+    /// Declared separately from [`Type::TemplateParameter`] because the difference is a *fact about the context*
+    /// rather than about the text: `T` inside `template <class T> class vector` is a parameter, and `T` in a file
+    /// that has a `struct T` is a class. This variant is the reading that does not know yet; a caller that has the
+    /// template parameter list in hand says so, and [`Type::TemplateParameter`] is that answer.
+    Named {
+        name: String,
+        arguments: Vec<Type>,
+    },
+    /// A template parameter written where nothing has said what it stands for: the `T` of a template body.
+    TemplateParameter { name: String },
+    Pointer {
+        to: TypeOf,
+    },
+    Reference {
+        to: TypeOf,
+        /// `&&` rather than `&`. Kept apart because it is the one difference deduction turns on — see
+        /// `a_forwarding_reference_is_not_deduced`, which is the rule this field exists for.
+        rvalue: bool,
+    },
+    Array {
+        of: TypeOf,
+        /// `Some(4)` for `int[4]`, `None` for `int[]`.
+        extent: Option<usize>,
+    },
+    /// A function type: what it returns, and how many parameters it takes.
+    Function {
+        returns: TypeOf,
+        parameters: Vec<Type>,
+    },
+    /// A `pack`: `Args...` — a template parameter that stands for several arguments.
+    Pack { of: TypeOf },
+    /// **A qualified type**: `const Widget`, `volatile int`.
+    ///
+    /// A wrapper rather than a flag on every variant, because a qualifier belongs to *the type it is written on*
+    /// and the position is the whole of its meaning: `const Widget*` is a pointer to a const Widget and
+    /// `Widget* const` is a const pointer, the same words in a different place, and the operators between them are
+    /// what tells the two apart. A wrapper is also the shape a peel can build at the moment it knows which type the
+    /// qualifier was written on, which is exactly when it reads it.
+    Qualified { of: TypeOf },
+}
+
+impl Type {
+    pub fn builtin(spelling: impl Into<String>) -> Type {
+        Type::Builtin {
+            spelling: spelling.into(),
+        }
+    }
+
+    pub fn named(name: impl Into<String>) -> Type {
+        Type::Named {
+            name: name.into(),
+            arguments: Vec::new(),
+        }
+    }
+
+    /// **The class this type names**, for a caller about to ask a class question — a member list, a base chain.
+    ///
+    /// This is the method the whole module exists for. `std::vector<int>` is a *type* and `std::vector` is the
+    /// *class* whose members it has; a query that was handed the first and wanted the second answered "nothing
+    /// declares `std::vector<int>`" — which is true and useless.
+    ///
+    /// `None` for a type that names no class: a builtin, a pointer (the caller decays first — see
+    /// [`Type::decay`]), an array, a function, a template parameter. A reference **is** transparent here: C++ says
+    /// `r.size` on a `Widget&` is a member of `Widget`, and the reference is the binding's business, not the
+    /// member's.
+    pub fn class_name(&self) -> Option<&str> {
+        match self {
+            Type::Named { name, .. } if !name.is_empty() => Some(name),
+            // A reference and a qualifier are both **transparent** to this question, and C++ is why: a member of a
+            // `Widget&` is a member of `Widget`, and a member of a `const Widget` is a member of `Widget` — you
+            // cannot assign to it, which is a fact about assignment and not about the class.
+            Type::Reference { to, .. } | Type::Qualified { of: to } => to.class_name(),
+            _ => None,
+        }
+    }
+
+    /// The type's template arguments, when it has a name to hang them on.
+    pub fn arguments(&self) -> &[Type] {
+        match self {
+            Type::Named { arguments, .. } => arguments,
+            Type::Reference { to, .. } | Type::Qualified { of: to } => to.arguments(),
+            _ => &[],
+        }
+    }
+
+    /// **What an expression of this type is when it is *used*** — the two conversions C++ applies before almost
+    /// every operator.
+    ///
+    /// * an **lvalue-to-rvalue** conversion, which drops the top-level reference: `Widget& w` used as a value is a
+    ///   `Widget`, and a member access on it is a member of `Widget` either way;
+    /// * an **array-to-pointer** decay: `int arr[4]` used as a value is an `int*`, which is why `arr[0]` and
+    ///   `p[0]` are the same question.
+    ///
+    /// Functions decay to function pointers, which is spelled rather than modelled — see [`Type::Function`], whose
+    /// callers are a call (`f()`) and an address-of (`&f`), and neither of them needs the pointer.
+    ///
+    /// This is deliberately **not** applied by the reader: a declaration's type is what the declaration wrote
+    /// (`int arr[4]` is an array), and the decay belongs to the use. A layer that decayed at the declaration
+    /// would report `arr` as `int*`, which is a different declaration than the one the file has.
+    /// # The decay is **one level**, and that is the rule rather than a simplification
+    ///
+    /// `int[2][3]` decays to a pointer to the element of the *outer* array, which is itself an array: `int[2]*`. An
+    /// implementation that decayed the element too would answer `int**`, a different type — and the difference
+    /// shows in what a subscript on it gives. It also shares the element rather than copying it, which is what
+    /// [`Arc`] is there for.
+    pub fn decay(&self) -> Type {
+        match self {
+            Type::Reference { to, .. } => to.decay(),
+            Type::Array { of, .. } => Type::Pointer {
+                to: Arc::clone(of),
+            },
+            // **A qualifier survives the decay**, because the thing it qualifies does: `const int arr[4]` used as a
+            // value is a pointer to a const `int`. Dropping it here would make `const` disappear from exactly the
+            // types a `auto p = &arr;` deduces.
+            Type::Qualified { of } => Type::Qualified {
+                of: Arc::new(of.decay()),
+            },
+            other => other.clone(),
+        }
+    }
+
+    /// The type a `*` on this one gives: the pointee, for a pointer or an array — **as a shared handle**, because
+    /// the pointee is already an allocation inside this type and a caller asking for it is looking at it rather
+    /// than taking it away.
+    ///
+    /// `None` for everything else, **including a reference**: a reference has no `operator*`, and the reason a
+    /// caller wants a pointee is to apply one. `Type::Reference` is seen through by [`Type::class_name`] and
+    /// [`Type::decay`], where C++ does see through it, and not here, where it does not. Nor for a `Named` type that
+    /// has an `operator*` of its own — that needs the class's members and therefore the index. A caller that gets
+    /// `None` has an ill-formed `*` **or** a class this layer cannot look inside, and those are the same answer at
+    /// this level.
+    pub fn pointee(&self) -> Option<TypeOf> {
+        match self {
+            Type::Pointer { to } | Type::Array { of: to, .. } => Some(Arc::clone(to)),
+            // **A qualifier is transparent here too**, and C++ is again why: `*p` on a `const Widget*` gives a
+            // `const Widget`, which is the pointee. Only the operators are peeled.
+            Type::Qualified { of } => of.pointee(),
+            _ => None,
+        }
+    }
+
+    /// Is this a template parameter, or does it *contain* one anywhere?
+    ///
+    /// The predicate a caller uses to tell "the answer is not known yet" from "the answer is not here": a type
+    /// holding a template parameter is one that only instantiation can finish, and this analysis does not
+    /// instantiate. It is a fact about the type rather than about a position, which is what makes it cheap enough
+    /// to ask before every index query.
+    pub fn depends_on_a_parameter(&self) -> bool {
+        match self {
+            Type::TemplateParameter { .. } => true,
+            Type::Named { arguments, .. } => arguments.iter().any(Type::depends_on_a_parameter),
+            Type::Pointer { to }
+            | Type::Reference { to, .. }
+            | Type::Pack { of: to }
+            | Type::Qualified { of: to } => to.depends_on_a_parameter(),
+            Type::Array { of, .. } => of.depends_on_a_parameter(),
+            Type::Function {
+                returns,
+                parameters,
+            } => {
+                returns.depends_on_a_parameter()
+                    || parameters.iter().any(Type::depends_on_a_parameter)
+            }
+            Type::Builtin { .. } => false,
+        }
+    }
+
+    /// **This type with the template parameters in `substitutions` replaced** — the one operation that makes a
+    /// member of a class template answerable.
+    ///
+    /// `std::vector<T>::size_type` with `T = int` is `std::size_t`, and the substitution is by **name**: the
+    /// parameters of a class template are a fixed list, the arguments are written at the use, and the pairing
+    /// between them is positional. This is not instantiation — no body is re-read, no overload is chosen, no
+    /// dependent name is resolved — and the limits are worth stating rather than discovering:
+    ///
+    /// * a parameter that appears **inside an expression** (`T::value_type`, `decltype(sizeof(T))`) is
+    ///   substituted as a name and not evaluated: the first is answered because it is a named type, the second is
+    ///   not a type at all and was refused when it was read;
+    /// * a **dependent** name (`typename T::value_type`) has nothing to substitute *into* until `T` is known, and
+    ///   this returns it unchanged — see [`Type::depends_on_a_parameter`], which is how a caller avoids asking a
+    ///   question whose answer this cannot be;
+    /// * a **partial** substitution is the ordinary case: `std::pair<T, int>` with `T` unknown substitutes the
+    ///   `int`, which is what makes `second` answerable and `first` not.
+    pub fn substituted(&self, substitutions: &TypeSubstitutions<'_>) -> Type {
+        match self {
+            Type::TemplateParameter { name } => substitutions
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| self.clone()),
+            Type::Named { name, arguments } => Type::Named {
+                name: name.clone(),
+                arguments: arguments
+                    .iter()
+                    .map(|argument| argument.substituted(substitutions))
+                    .collect(),
+            },
+            Type::Pointer { to } => Type::Pointer {
+                to: Arc::new(to.substituted(substitutions)),
+            },
+            Type::Reference { to, rvalue } => Type::Reference {
+                to: Arc::new(to.substituted(substitutions)),
+                rvalue: *rvalue,
+            },
+            Type::Array { of, extent } => Type::Array {
+                of: Arc::new(of.substituted(substitutions)),
+                extent: *extent,
+            },
+            Type::Function {
+                returns,
+                parameters,
+            } => Type::Function {
+                returns: Arc::new(returns.substituted(substitutions)),
+                parameters: parameters
+                    .iter()
+                    .map(|parameter| parameter.substituted(substitutions))
+                    .collect(),
+            },
+            Type::Pack { of } => Type::Pack {
+                of: Arc::new(of.substituted(substitutions)),
+            },
+            Type::Qualified { of } => Type::Qualified {
+                of: Arc::new(of.substituted(substitutions)),
+            },
+            Type::Builtin { .. } => self.clone(),
+        }
+    }
+}
+
+impl fmt::Display for Type {
+    /// The type **as a file would write it**, which is what a consumer shows: the spelling each part was read
+    /// with, put back together in the order the syntax wrote it.
+    ///
+    /// This is a writer for a human, not a parser's inverse: `int* const` and `const int*` differ by which side
+    /// the `const` was on, and that difference is in the spelling of the parts rather than in the shape. Where
+    /// this layer *does* know better than the source — a class named by a template's arguments — it still writes
+    /// what the source wrote, because a consumer comparing the answer against the file is the ordinary case.
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Type::Builtin { spelling } => write!(out, "{spelling}"),
+            Type::TemplateParameter { name } => write!(out, "{name}"),
+            Type::Named { name, arguments } => {
+                write!(out, "{name}")?;
+                if !arguments.is_empty() {
+                    write!(out, "<")?;
+                    for (at, argument) in arguments.iter().enumerate() {
+                        if at > 0 {
+                            write!(out, ", ")?;
+                        }
+                        write!(out, "{argument}")?;
+                    }
+                    write!(out, ">")?;
+                }
+                Ok(())
+            }
+            Type::Pointer { to } => write!(out, "{to}*"),
+            Type::Reference { to, rvalue } => {
+                if *rvalue {
+                    write!(out, "{to}&&")
+                } else {
+                    write!(out, "{to}&")
+                }
+            }
+            Type::Array { of, extent } => match extent {
+                Some(size) => write!(out, "{of}[{size}]"),
+                None => write!(out, "{of}[]"),
+            },
+            Type::Function {
+                returns,
+                parameters,
+            } => {
+                write!(out, "{returns}(")?;
+                for (at, parameter) in parameters.iter().enumerate() {
+                    if at > 0 {
+                        write!(out, ", ")?;
+                    }
+                    write!(out, "{parameter}")?;
+                }
+                write!(out, ")")
+            }
+            Type::Pack { of } => write!(out, "{of}..."),
+            // `const Widget`, in the position the file wrote it — which is what makes `const Widget*` and
+            // `Widget* const` two different answers here rather than one.
+            Type::Qualified { of } if matches!(**of, Type::Pointer { .. } | Type::Array { .. }) => {
+                write!(out, "{of} const")
+            }
+            Type::Qualified { of } => write!(out, "const {of}"),
+        }
+    }
+}
+
+/// What a set of template parameter names stands for, by name — the map [`Type::substituted`] reads.
+///
+/// A newtype over a slice rather than a `HashMap`, because of how it is built and used: a class template's
+/// parameters are a short list in declaration order, the caller has just read them, and linear search over four
+/// names is faster than hashing them. It also makes the *pairing* explicit — the names and the arguments are two
+/// slices that must line up — which is the thing a bug here would get wrong.
+#[derive(Debug, Clone, Copy)]
+pub struct TypeSubstitutions<'a> {
+    names: &'a [String],
+    arguments: &'a [Type],
+}
+
+impl<'a> TypeSubstitutions<'a> {
+    pub fn new(names: &'a [String], arguments: &'a [Type]) -> TypeSubstitutions<'a> {
+        TypeSubstitutions { names, arguments }
+    }
+
+    /// What `name` stands for, if this map says.
+    ///
+    /// A parameter with **no** argument is mapped to nothing rather than to itself: `std::vector` written without
+    /// arguments is not a `std::vector<T>` whose `T` happens to be called `T`, and answering the parameter name
+    /// would be answering with a placeholder as if it were a type.
+    pub fn get(&self, name: &str) -> Option<&Type> {
+        let at = self.names.iter().position(|parameter| parameter == name)?;
+        self.arguments.get(at)
+    }
+}
+
+/// **Read a type out of the spelling a `DeclFact` records.**
+///
+/// # Why a spelling parser exists at all, when the syntax is the better source
+///
+/// Because two layers of this crate do not have the syntax, and cannot get it cheaply:
+///
+/// ```text
+/// a declaration the index holds      `DeclFact::type_of` is a `String` on disk, and a query that needs the class
+///                                     it names has no tree to walk — the declaring file is not even open
+/// a type written as a template arg    `std::map<std::string, int>` arrives as text inside a name node
+/// ```
+///
+/// So this is the **inverse of [`Type::Display`]**, and it is deliberately a *reading* rather than a validator:
+/// it takes the spelling, peels the operators off the outside in, and answers with the shape. What it cannot
+/// recognise becomes a [`Type::Named`] holding the spelling — which is what makes it usable on the shapes this
+/// layer does not model, and is why [`Type::class_name`] is the question a caller should ask rather than
+/// inspecting the variants.
+///
+/// # The one thing it must get right
+///
+/// [`Type::class_name`]. Everything else here is recoverable — a caller that gets `Type::Named("int")` instead of
+/// `Type::Builtin` loses nothing it was going to ask about — while a **class name** that is wrong sends a member
+/// query to a class that does not exist. So the peeling is written around that: the trailing declarator operators
+/// come off first (they are written last), then the array extents, then the name and its arguments.
+///
+/// # What it does not do
+///
+/// Qualifiers (`const`, `volatile`) are **dropped**, from the front and from the back: they change what may be
+/// assigned to a type and not which class it is, and this layer models no assignment. A spelling whose parts this
+/// parser splits differently from how it was written still answers the same class — see the tests, which pin the
+/// round trip for the shapes a fact actually records.
+pub fn parse_type_spelling(written: &str) -> Type {
+    let trimmed = written.trim();
+    if trimmed.is_empty() {
+        return Type::builtin("void");
+    }
+
+    // **The qualifiers written last come off first.** `Widget* const` is a pointer with a `const` *after* the
+    // operator, so peeling the `*` before the `const` would look for one at a position where it is not — the
+    // spelling would end in `const` and the operator would end up inside the name. A qualifier on either side of a
+    // type changes what may be assigned to it and not which class it names, and this layer models no assignment.
+    let trimmed = strip_trailing_qualifiers(trimmed);
+
+    // **Array extents, from the right.** `int[4]` is an array of four; `int[2][3]` is an array of two arrays of
+    // three, and the *last* bracket pair belongs to the innermost array — so peeling from the right builds the
+    // nesting in the order the type was written.
+    if trimmed.ends_with(']')
+        && let Some((element, extent)) = split_trailing_extent(trimmed)
+    {
+        return Type::Array {
+            of: Arc::new(parse_type_spelling(element)),
+            extent,
+        };
+    }
+
+    // **The declarator operators, outside in.** A trailing `*` is a pointer *to* whatever is on its left; `&&`
+    // before `&` before `*`, because that is the order they can be written in and the longer token must win.
+    //
+    // Each strip is tested by **matching on the stripped value**, not by `strip_suffix(..).map(..) && !empty`: that
+    // form parses as `strip_suffix('*').map(str::trim_end && !rest.is_empty())` — the `&&` binds into the closure —
+    // so the strip is never taken and the operator ends up inside the *name* (`Widget*` read as a class called
+    // `Widget*`, which is a member query against a class that does not exist). Written this way there is nothing
+    // for the precedence to get wrong.
+    for (operator, rvalue) in [("&&", true), ("&", false)] {
+        if let Some(rest) = trimmed.strip_suffix(operator).map(str::trim_end)
+            && !rest.is_empty()
+        {
+            return Type::Reference {
+                to: Arc::new(parse_type_spelling(rest)),
+                rvalue,
+            };
+        }
+    }
+
+    if let Some(rest) = trimmed.strip_suffix('*').map(str::trim_end)
+        && !rest.is_empty()
+    {
+        return Type::Pointer {
+            to: Arc::new(parse_type_spelling(rest)),
+        };
+    }
+
+    // **A function type**: `int(int, double)`. Recognised by a parameter list at the very end whose opening
+    // parenthesis belongs to the base rather than to a declarator — which is the whole of the difference between
+    // `int f(int)` and `int(int)`: the first has a name between the two, and a spelling a fact records has none.
+    if trimmed.ends_with(')')
+        && let Some((returns, parameters)) = split_trailing_parameters(trimmed)
+        && !returns.is_empty()
+        && !returns.contains('(')
+    {
+        return Type::Function {
+            returns: Arc::new(parse_type_spelling(returns)),
+            parameters: parameters
+                .split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(parse_type_spelling)
+                .collect(),
+        };
+    }
+
+    // **The base, and the qualifier written on it.** `const` is kept as a wrapper around whatever it qualifies
+    // rather than dropped, because it is part of the type a reader is shown and part of what `auto` deduces:
+    // `const auto& r = x` is a `const int&`, and a layer that answered `int&` would have lost the one word the
+    // declaration was written to add.
+    let (qualifier, base) = split_leading_qualifiers(trimmed);
+    if base.is_empty() {
+        return Type::builtin("void");
+    }
+
+
+    let qualified = match base.find('<') {
+        Some(at) if base.ends_with('>') => {
+            let name = base[..at].trim_end().to_string();
+            let arguments = base[at + 1..base.len() - 1]
+                .split_arguments()
+                .into_iter()
+                .map(|argument| parse_type_spelling(&argument))
+                .collect();
+            Type::Named { name, arguments }
+        }
+        // **A builtin is not a class**, and the difference is not cosmetic: `int` as a `Named` type answers
+        // `Type::class_name` with `int`, so a member access on an `int` would send the index looking for a class
+        // called `int` and report "not declared here" — which a reader takes as "this class is missing" rather
+        // than "this is not a class". The words are the language's own list, and a builtin spelled in several
+        // words (`unsigned long long`) is on it as one spelling.
+        _ if is_a_builtin(base) => Type::builtin(base),
+        // Anything else is a name this layer cannot place — a dependent name, a macro that expands to a type — and
+        // carrying it as a name is what makes it usable by a caller that resolves names.
+        _ => Type::Named {
+            name: base.to_string(),
+            arguments: Vec::new(),
+        },
+    };
+
+    match qualifier {
+        Some(_qualifier) => Type::Qualified {
+            of: Arc::new(qualified),
+        },
+        None => qualified,
+    }
+}
+
+/// `int[4]` → `("int", Some(4))`, and `int[]` → `("int", None)` — the **last** extent, from the right.
+///
+/// From the right because the last bracket pair is the one that applies to the whole type on its left:
+/// `int[2][3]` is an array of two of `int[3]`, so the outer peel takes `[3]` and leaves `int[2]` to the recursion.
+fn split_trailing_extent(written: &str) -> Option<(&str, Option<usize>)> {
+    let mut depth = 0isize;
+
+    for (index, character) in written.char_indices().rev() {
+        match character {
+            ']' => depth += 1,
+            '[' => {
+                depth -= 1;
+                if depth == 0 {
+                    let element = written[..index].trim_end();
+                    if element.is_empty() {
+                        return None;
+                    }
+                    let inside = written[index + 1..written.len() - 1].trim();
+                    return Some((element, inside.parse().ok()));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+/// `int(int, double)` → `("int", "int, double")`, when the closing parenthesis is the last thing written.
+///
+/// The **first** `(` at depth zero opens it, because a return type can hold parentheses of its own
+/// (`int (*)(int)` is a pointer, and has been peeled above by the time this runs).
+fn split_trailing_parameters(written: &str) -> Option<(&str, &str)> {
+    let mut depth = 0isize;
+
+    for (index, character) in written.char_indices().rev() {
+        match character {
+            ')' => depth += 1,
+            '(' => {
+                depth -= 1;
+                if depth == 0 {
+                    let returns = written[..index].trim_end();
+                    let parameters = &written[index + 1..written.len() - 1];
+                    return Some((returns, parameters));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+/// Is this spelling one of the language's own type words?
+///
+/// The set is every word a builtin can be spelled with **and the combinations**: `unsigned long long` and
+/// `long double` are builtins whose spelling is several words, so the test is on the whole spelling. Nothing here is
+/// a keyword this layer handles earlier for another reason (`auto`, `decltype`) — those are read as the placeholders
+/// they are before this function is reached.
+fn is_a_builtin(spelling: &str) -> bool {
+    matches!(
+        spelling,
+        "void" | "bool" | "char" | "char8_t" | "char16_t" | "char32_t" | "wchar_t"
+            | "short" | "int" | "long" | "float" | "double" | "signed" | "unsigned"
+            | "short int" | "long int" | "long long" | "long long int" | "long double"
+            | "unsigned short" | "unsigned int" | "unsigned long" | "unsigned long long"
+            | "unsigned short int" | "unsigned long int" | "unsigned long long int"
+            | "signed short" | "signed int" | "signed long" | "signed long long"
+            | "signed short int" | "signed long int" | "signed long long int"
+            | "signed char" | "unsigned char"
+    )
+}
+
+/// The spelling with its **trailing** qualifiers removed: `Widget* const` → `Widget*`.
+///
+/// Trailing only, because the leading ones are handled where the base is read ([`without_qualifiers`]) and doing
+/// both in one place would have to know whether the qualifier it is looking at belongs to the type or to the
+/// pointer — which is the question the *position* answers and nothing else does.
+fn strip_trailing_qualifiers(written: &str) -> &str {
+    let mut end = written.trim_end();
+
+    loop {
+        let Some(word) = end.split_whitespace().next_back() else {
+            return end;
+        };
+        if !matches!(word, "const" | "volatile") || word.len() == end.len() {
+            return end;
+        }
+        end = end[..end.len() - word.len()].trim_end();
+    }
+}
+
+/// A spelling split into the **qualifier it leads with** and the type underneath — `const Widget` →
+/// `(Some("const"), "Widget")`.
+///
+/// The elaborated keywords (`struct`, `class`, `enum`, `typename`) are stepped over and **not** reported: they are
+/// how a type is disambiguated rather than anything about it, and `struct Widget` and `Widget` are one type. A
+/// qualifier is reported because it is not.
+fn split_leading_qualifiers(written: &str) -> (Option<&str>, &str) {
+    let mut rest = written.trim();
+    let mut qualifier: Option<&str> = None;
+
+    while let Some(word) = rest.split_whitespace().next() {
+        if word.len() == rest.len() {
+            break;
+        }
+        match word {
+            "const" if qualifier.is_none() => qualifier = Some("const"),
+            "volatile" if qualifier.is_none() => qualifier = Some("volatile"),
+            "struct" | "class" | "enum" | "typename" => {}
+            _ => break,
+        }
+        rest = rest[word.len()..].trim_start();
+    }
+
+    (qualifier, rest.trim_end())
+}
+
+
+/// Split a template argument list on the commas that are **not** inside a nested list.
+///
+/// A trait rather than a function so it can be written where it reads best — `.split_arguments()` on the string —
+/// and because it is the one splitting rule in this module: `std::map<std::string, int>` is two arguments and
+/// `std::vector<std::pair<int, int>>` is one.
+trait ArgumentSplit {
+    fn split_arguments(&self) -> Vec<String>;
+}
+
+impl ArgumentSplit for str {
+    fn split_arguments(&self) -> Vec<String> {
+        let mut arguments = Vec::new();
+        let mut depth = 0isize;
+        let mut start = 0usize;
+
+        for (index, character) in self.char_indices() {
+            match character {
+                '<' => depth += 1,
+                '>' => depth -= 1,
+                ',' if depth == 0 => {
+                    arguments.push(self[start..index].trim().to_string());
+                    start = index + 1;
+                }
+                _ => {}
+            }
+        }
+
+        let last = self[start..].trim();
+        if !last.is_empty() {
+            arguments.push(last.to_string());
+        }
+
+        arguments
+    }
+}
+
+/// **Read a declared type from a declaration's syntax** — the specifier sequence plus the declarator around a name.
+///
+/// # Why both halves are needed
+///
+/// A C++ type is written in two places and neither is complete on its own:
+///
+/// ```text
+/// const Widget* const p;      the specifiers say `const Widget`   the declarator says `* const  p`
+/// int (*cb)(int);             the specifiers say `int`            the declarator says `(* cb)(int)`
+/// ```
+///
+/// The specifier sequence holds the *base* type and its leading qualifiers; the declarator holds everything that
+/// wraps it — pointers, references, arrays, a parameter list — nested inside one another in a way that has to be
+/// walked from the name **outward**. So this takes the two nodes and the name's own span (which is how the
+/// parameters of a function pointer are told from the parameters of the function being declared, the same
+/// distinction [`crate::scopes::parameters_of`] makes).
+///
+/// # What it does with what it cannot read
+///
+/// A node it has no rule for contributes its **own spelling** as a [`Type::Named`], which is the honest reading of
+/// "the file wrote this here and this layer does not know what shape it is" — and it is what makes the answer
+/// usable in the cases this layer does not model (`decltype(x)`, `auto`, an attribute, a macro that expands to a
+/// type). A caller that needs to know the difference asks [`Type::class_name`], which answers only for a name.
+pub fn type_of_declaration(
+    specifiers: &CppSyntaxNode,
+    declarator: Option<&CppSyntaxNode>,
+    name: cpp_parser::SourceRange,
+) -> Type {
+    let base = read_specifiers(specifiers);
+
+    let Some(declarator) = declarator else {
+        return base;
+    };
+
+    // **The name's own range, found in the declarator.** The range a caller passes is the one the *model* has — a
+    // binding's `name_range`, which for a qualified declarator (`ns::Inner a`) or a pointer (`Widget* p`) may not
+    // line up with a syntax node at all — so the declarator's own reading is the one the walk below uses.
+    let name = declared_name_range(declarator).unwrap_or(name);
+
+    // The node the wrapping starts from: the declarator whose direct child is the name. Everything outside it is
+    // written *around* the name and is therefore part of the type — see [`wrap`].
+    let inner = declarator_holding_the_name(declarator, name);
+
+    wrap(base, declarator, &inner, name)
+}
+
+/// **The range of the identifier a declarator declares** — its first `NameExpr`, which is the name.
+///
+/// First and not last, and the order is the opposite of the one `parameters_of` uses for a good reason: a
+/// declarator's own name is written **before** everything that belongs to what it declares — a parameter list
+/// (`f(int x)`), an array extent (`arr[N]`), an initializer (`x = f()`). So the first name in a declarator is the
+/// declared one, and every name after it belongs to something else.
+fn declared_name_range(declarator: &CppSyntaxNode) -> Option<cpp_parser::SourceRange> {
+    declarator
+        .descendants()
+        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)
+        .map(|child| cpp_parser::source_range(child.text_range()))
+}
+
+/// The specifier sequence's contribution: the base type, with its leading `const`/`volatile` kept.
+///
+/// **Attributes and declaration specifiers are dropped**, and that is the bug this function was written for: the
+/// old spelling-based reader answered `const [[nodiscard]] constexpr size_type` for a return type, because it
+/// stripped a list of known keywords from text rather than reading the syntax. Here the only nodes that contribute
+/// are the ones that *are* the type's name — a builtin, a name, a `decltype`, an elaborated keyword — and
+/// everything else (`const`, `volatile`, storage class, `constexpr`, attributes) is dropped because it is not part
+/// of what the type is *called*.
+///
+/// # Why the builtin words are gathered rather than taken from the first node
+///
+/// `unsigned long long` parses as **three** `BuiltinType` nodes — one per word — so reading the first gives
+/// `unsigned`, which is a different type from the one the file wrote. They are joined in the order they appear,
+/// which is the order the words are written in, and that is the whole rule: a builtin type's name *is* its words.
+///
+/// The qualifiers are dropped rather than modelled, and the reason is the same one [`Type`] gives for keeping
+/// spellings: this layer does not resolve aliases, so `const Int` and `Int` are already two names for one type, and
+/// a `const` on the base would be a third axis no query here asks about.
+fn read_specifiers(specifiers: &CppSyntaxNode) -> Type {
+    let mut builtin: Vec<String> = Vec::new();
+    // The **last** name in the sequence, and the last unmodelled node — see the two notes below.
+    let mut named: Option<Type> = None;
+    let mut spelling = None;
+
+    for child in specifiers.children_with_tokens() {
+        let Some(node) = child.into_node() else {
+            continue;
+        };
+
+        match CppSyntaxKind::from(node.kind()) {
+            // The words of a builtin, in order — see the note above about `unsigned long long`.
+            CppSyntaxKind::BuiltinType => {
+                let word = node.text().to_string().trim().to_string();
+                if !word.is_empty() {
+                    builtin.push(word);
+                }
+            }
+            // A name: `Widget`, `std::vector<int>`, `T`, and the dependent form `typename T::value_type`.
+            CppSyntaxKind::TemplateType | CppSyntaxKind::TypenameType | CppSyntaxKind::QualifiedType => {
+                if let Some(found) = read_named(&node) {
+                    named = Some(found);
+                }
+            }
+            // **`auto` and `decltype` are types this layer does not model**, and each is a spelling a caller
+            // resolves elsewhere: `auto` is the placeholder the inference layer substitutes into, and
+            // `decltype(x)` is an expression this layer would have to type to know. Keeping the spelling is what
+            // lets the caller recognise them.
+            CppSyntaxKind::AutoType | CppSyntaxKind::DecltypeType => {
+                let written = node.text().to_string().trim().to_string();
+                if !written.is_empty() && named.is_none() {
+                    named = Some(Type::named(written));
+                }
+            }
+            // Not part of what the type is called. Qualifiers, attributes, storage class, `constexpr`, `inline`,
+            // `friend` — a caller that needs to know a declaration was `static` or `friend` asks the declaration.
+            CppSyntaxKind::ConstQual
+            | CppSyntaxKind::VolatileQual
+            | CppSyntaxKind::RestrictQual
+            | CppSyntaxKind::Attribute
+            | CppSyntaxKind::AttributeList
+            | CppSyntaxKind::FriendDecl
+            | CppSyntaxKind::StaticSpec
+            | CppSyntaxKind::ExternSpec
+            | CppSyntaxKind::ThreadLocalSpec
+            | CppSyntaxKind::MutableSpec
+            | CppSyntaxKind::RegisterSpec
+            | CppSyntaxKind::InlineSpec
+            | CppSyntaxKind::VirtualSpec
+            | CppSyntaxKind::ExplicitSpec
+            | CppSyntaxKind::ConstexprSpec
+            | CppSyntaxKind::NoexceptSpec
+            | CppSyntaxKind::AlignasSpec => {}
+            // **An elaborated specifier whose class body is here**: `struct Widget { … }` is a definition, and the
+            // type it declares is named by the `NameExpr` inside it — which the arms above have already returned,
+            // because the body is a *child* of this node rather than a sibling.
+            CppSyntaxKind::ClassDef
+            | CppSyntaxKind::StructDef
+            | CppSyntaxKind::UnionDef
+            | CppSyntaxKind::EnumDef
+            | CppSyntaxKind::EnumClassDef => {}
+            // **Anything else is not a type's name**, and the rule is the converse of the one above: what a file
+            // writes in a specifier sequence that this layer has no rule for is a *keyword* far more often than it
+            // is a type. Measured, the fallback that used to stand here produced `friend constexpr
+            // iter_difference_t` for a friend declaration — a spelling that is not a type and cannot resolve. So a
+            // node with no rule is kept only as a **last resort**, for the file that writes something this layer
+            // does not model and would otherwise answer `void` for.
+            _ => {
+                let written = node.text().to_string().trim().to_string();
+                if !written.is_empty() && spelling.is_none() {
+                    spelling = Some(Type::named(written));
+                }
+            }
+        }
+    }
+
+    if !builtin.is_empty() {
+        return Type::builtin(builtin.join(" "));
+    }
+
+    // **The last name wins**, and the shape the rule exists for is a macro standing where a specifier goes: the
+    // grammar reads `_EXPORT_STD extern "C++" __PURE_APPDOMAIN_GLOBAL _CRTDATA2_IMPORT istream cin;` as one
+    // specifier sequence holding three names, and the type is the **last** of them. No C++ type is spelled as two
+    // unqualified names in a row — `unsigned long` is two *keywords*, and a keyword is not a `NameExpr` — so the
+    // count is the whole rule.
+    //
+    // Measured, and it is what made `std::cin` unanswerable: MSVC's `<iostream>` declares `cin` twice, and a reader
+    // that took the first name recorded `__PURE_APPDOMAIN_GLOBAL` where the cooked reading of the same line recorded
+    // `istream`, so the two declarations disagreed about the type and neither answered.
+    if let Some(named) = named {
+        return named;
+    }
+
+    spelling.unwrap_or_else(|| Type::builtin("void"))
+}
+
+/// A name **without** its arguments, and the arguments beside it: `std::vector<int>` is the class `std::vector`
+/// with one argument.
+///
+/// # Why one node gives both, and why the name is cut rather than taken
+///
+/// The parser folds a whole qualified name — qualifiers, the template argument list and all — into **one
+/// `NameExpr`**, so its text is `std::vector<int>` and the argument list is a *child* of it. So the two readings a
+/// caller needs come from one node, and the cut between them is the first `<`:
+///
+/// ```text
+/// what a class question asks        `std::vector`     what has members
+/// what a consumer shows             `std::vector<int>`  [`Type::Display`] writes it back
+/// ```
+///
+/// Keeping the arguments **out** of the name rather than in it is what makes [`Type::class_name`] a field read
+/// instead of a second parse, and what makes a type with arguments compare unequal to the same class without them —
+/// `std::vector` and `std::vector<int>` are different types, and a `std::vector` written as a template argument is
+/// not a vector of nothing.
+///
+/// The arguments are read from their own child rather than by parsing the text, because an argument's text can
+/// contain commas and parentheses that a splitter would get wrong.
+fn read_named(node: &CppSyntaxNode) -> Option<Type> {
+    let written = node.text().to_string().trim().to_string();
+    if written.is_empty() {
+        return None;
+    }
+
+    let (name, arguments) = match written.find('<') {
+        Some(at) => {
+            let list = node
+                .descendants()
+                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TemplateArgumentList)
+                .map(|list| read_template_arguments(&list))
+                .unwrap_or_default();
+            (written[..at].trim_end().to_string(), list)
+        }
+        None => (written, Vec::new()),
+    };
+
+    if name.is_empty() {
+        return None;
+    }
+
+    Some(Type::Named { name, arguments })
+}
+
+/// The types written in a template argument list, in order.
+///
+/// Three shapes, and each is a different answer rather than a different syntax:
+///
+/// * a **type** (`std::vector<int>`) is read as one;
+/// * a **non-type argument** (`std::array<int, 4>`) is a value, and this layer models no values — so it is read as
+///   the name of what was written, which is what makes `std::array<int, 4>` ask about `std::array` and not about
+///   `std::array<int, 4>`;
+/// * a **pack expansion** (`std::tuple<Args...>`) is a parameter standing for several arguments, which is a shape
+///   of its own because substituting into it is not substituting into a name.
+fn read_template_arguments(list: &CppSyntaxNode) -> Vec<Type> {
+    let mut arguments = Vec::new();
+
+    for child in list.children() {
+        let kind = CppSyntaxKind::from(child.kind());
+
+        // A pack expansion is written as an argument ending in `...` — the parser gives it a node of its own, and
+        // a spelling that ends in the ellipsis is the reading that does not depend on which node it chose.
+        let text = child.text().to_string();
+        let trimmed = text.trim();
+        if trimmed.ends_with("...") {
+            let inner = trimmed.trim_end_matches('.').trim();
+            arguments.push(Type::Pack {
+                of: Arc::new(Type::named(inner)),
+            });
+            continue;
+        }
+
+        match kind {
+            CppSyntaxKind::TemplateArgument => {
+                arguments.push(read_argument(&child));
+            }
+            _ => arguments.push(Type::named(trimmed)),
+        }
+    }
+
+    arguments
+}
+
+/// One template argument: its type if it writes one, and its own spelling otherwise.
+fn read_argument(node: &CppSyntaxNode) -> Type {
+    // `typename T::type` is a dependent name: the parser wraps it, and the `typename` keyword is a claim that what
+    // follows is a type. The name is what this layer can carry.
+    for child in node.children_with_tokens() {
+        let Some(inner) = child.into_node() else {
+            continue;
+        };
+
+        match CppSyntaxKind::from(inner.kind()) {
+            CppSyntaxKind::TemplateType => {
+                if let Some(found) = read_named(&inner) {
+                    return found;
+                }
+            }
+            CppSyntaxKind::BuiltinType => {
+                return Type::builtin(inner.text().to_string().trim());
+            }
+            _ => {}
+        }
+    }
+
+    Type::named(node.text().to_string().trim())
+}
+
+/// Does this node's span take in the whole of that range?
+fn covers(node: &CppSyntaxNode, range: cpp_parser::SourceRange) -> bool {
+    let own = node.text_range();
+    usize::from(own.start()) <= range.start_offset && usize::from(own.end()) >= range.end_offset()
+}
+
+/// Does this node's span **contain the start** of that range?
+///
+/// The weaker test, and the right one for walking *down* a declarator: a declarator's span ends at its own last
+/// child, and for `* p` that is the `NameExpr`'s end — except in the shapes where a trailing space puts the end one
+/// byte past the name and an extent or a parameter list puts it further. Asking whether the node's span contains
+/// the name **whole** is therefore the wrong question on the way down (`* p`'s inner declarator ends where the name
+/// does, so it does not "cover" it), while asking whether it contains the name's *start* is exactly the question
+/// every level of the chain answers yes to.
+fn reaches(node: &CppSyntaxNode, range: cpp_parser::SourceRange) -> bool {
+    let own = node.text_range();
+    usize::from(own.start()) <= range.start_offset && usize::from(own.end()) >= range.start_offset
+}
+
+/// The declarator **whose direct child is the name** — the bottom of the chain, where wrapping starts.
+///
+/// A declarator tree puts the name at the bottom: `* p` is a `Declarator` holding a `Declarator` holding the
+/// `PointerType`, and a `NameExpr` holding `p`. This is the node whose *direct* child is that name, and finding it
+/// is the whole of the walk below.
+///
+/// # Why the descent is by the name's *start*
+///
+/// Because a declarator's span is not required to contain the name whole. `* p`'s inner declarator spans `"* "` —
+/// `(6, 8)` — while the name is `(8, 9)`: the end is one byte short, so a descent that asked "does this child
+/// contain the name" would refuse the very node it is looking for and stop at the outer one, which is the shape
+/// that read `Widget* p` as `Widget`.
+fn declarator_holding_the_name(declarator: &CppSyntaxNode, name: cpp_parser::SourceRange) -> CppSyntaxNode {
+    let mut node = declarator.clone();
+
+    loop {
+        let next = node
+            .children()
+            .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+            .find(|child| reaches(child, name));
+
+        match next {
+            Some(child) => node = child,
+            None => return node,
+        }
+    }
+}
+
+/// **Wrap `base` in everything the declarator wrote between itself and the name.**
+///
+/// The declarator nests from the outside in — `* const p` is a `Declarator` holding a `PointerType` and a
+/// `Declarator` holding `p` — so this walks from the outermost declarator down to the one holding the name, and
+/// applies each level's operators in the order it meets them.
+///
+/// The three levels that matter, and what each does to the type so far:
+///
+/// ```text
+/// PointerType          `*` / `* const`     wraps what is inside in a pointer
+/// ReferenceType        `&` / `&&`          wraps it in a reference
+/// ArrayType            `[4]` / `[]`        wraps it in an array of that extent
+/// ```
+///
+/// A `ParameterList` is **not** one of them. `int f(int x)`'s parameter list belongs to `f`'s *function type*, and
+/// so does `int (*cb)(int)`'s — but the second is a pointer to a function while the first is a function, which is
+/// exactly the difference the pointer level above it makes. So the list is read where it is met, as a wrapper of
+/// the type read so far: a function-typed declarator is a [`Type::Function`] whose `returns` is what the
+/// specifiers said.
+///
+/// A node that **is the way down** contributes nothing of its own, and that is not a special case but the rule:
+/// the operators of a declaration are the nodes that are *not* on the path from the type to the name.
+fn wrap(
+    base: Type,
+    outermost: &CppSyntaxNode,
+    innermost: &CppSyntaxNode,
+    name: cpp_parser::SourceRange,
+) -> Type {
+    /// One operator at one level, applied to the type read so far.
+    ///
+    /// `None` for a node that is not an operator, which is most of them: a `NameExpr`, a `DeclSpecifierSeq`, an
+    /// initializer, an attribute. The caller loops rather than matching, because a level can hold more than one
+    /// operator (`int (*p)[4]`) and the order among them is the order they are written in — left to right is
+    /// outermost to innermost, and this is called on one level at a time.
+    fn apply(wrapped: &Type, node: &CppSyntaxNode) -> Option<Type> {
+        Some(match CppSyntaxKind::from(node.kind()) {
+            CppSyntaxKind::PointerType => Type::Pointer {
+                to: Arc::new(wrapped.clone()),
+            },
+            CppSyntaxKind::ReferenceType | CppSyntaxKind::RValueReferenceType => Type::Reference {
+                to: Arc::new(wrapped.clone()),
+                rvalue: node.text().to_string().trim().starts_with("&&"),
+            },
+            CppSyntaxKind::ArrayType => Type::Array {
+                of: Arc::new(wrapped.clone()),
+                extent: array_extent(node),
+            },
+            // A parameter list is the function being declared: `int f(int)` is a function `int(int)`, and a
+            // function *pointer* is that same list one level further in (`(*p)(int)`), which is what makes the
+            // order of these levels the whole of the difference between the two.
+            CppSyntaxKind::ParameterList => Type::Function {
+                returns: Arc::new(wrapped.clone()),
+                parameters: read_parameters(node),
+            },
+            _ => return None,
+        })
+    }
+
+    // **The chain of declarators from the name outward**, innermost first — which is the order a type is built in:
+    // `* p` is a pointer *to* the base, and `int (*p)[4]` is a pointer to an array of four, so the level nearest
+    // the name carries the outermost operator.
+    //
+    // Built by walking **up**, because of where the operators sit: the `*` of `Widget* p` is a child of the
+    // declarator *around* the one holding `p`. A walk that descended would have to decide, at every level, whether
+    // the child in front of it is the way down or an operator — and "contains the name" answers that *wrongly* for
+    // the `Declarator` that wraps the way down, because it contains the name too. That mistake is what read
+    // `Widget* p` as `Widget`. Walking up visits each level once, and the way down is where it came from.
+    let mut chain: Vec<CppSyntaxNode> = vec![innermost.clone()];
+    let mut current = innermost.clone();
+    while current.text_range() != outermost.text_range() {
+        let Some(up) = current
+            .parent()
+            .filter(|up| CppSyntaxKind::from(up.kind()) == CppSyntaxKind::Declarator)
+        else {
+            break;
+        };
+        chain.push(up.clone());
+        current = up;
+    }
+
+    let mut wrapped = base;
+    for level in chain {
+        for child in level.children_with_tokens() {
+            let Some(child) = child.into_node() else {
+                continue;
+            };
+            // **The way down is not an operator.** A child whose span covers the name is either the level below —
+            // a `Declarator` — or the name itself, and neither is written around the type.
+            if covers(&child, name) {
+                continue;
+            }
+            if let Some(next) = apply(&wrapped, &child) {
+                wrapped = next;
+            }
+        }
+    }
+
+    wrapped
+}
+
+/// The `[4]` of an array declarator, when it is a number this layer can read.
+///
+/// `None` for `[]` **and** for `[N]` — a size that is a name is a value this layer does not have, and the extent
+/// of an array is not a question any query here asks. It is recorded so that a consumer showing the type can write
+/// it back.
+fn array_extent(node: &CppSyntaxNode) -> Option<usize> {
+    let text = node.text().to_string();
+    let inside = text.trim().trim_start_matches('[').trim_end_matches(']').trim();
+    inside.parse().ok()
+}
+
+/// The parameters of a `ParameterList`, as types — for a function type's shape.
+fn read_parameters(list: &CppSyntaxNode) -> Vec<Type> {
+    let mut parameters = Vec::new();
+
+    for parameter in list.children() {
+        if CppSyntaxKind::from(parameter.kind()) != CppSyntaxKind::Parameter {
+            continue;
+        }
+
+        let specifiers = parameter
+            .children()
+            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq);
+        let declarator = parameter
+            .children()
+            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator);
+
+        let Some(specifiers) = specifiers else {
+            continue;
+        };
+
+        // A parameter with no declarator (`void f(int)`) declares no name: the whole of it is the type.
+        match declarator {
+            Some(declarator) => {
+                let name = declarator
+                    .descendants()
+                    .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)
+                    .map(|child| cpp_parser::source_range(child.text_range()))
+                    .unwrap_or_else(|| cpp_parser::source_range(declarator.text_range()));
+                parameters.push(type_of_declaration(&specifiers, Some(&declarator), name));
+            }
+            None => parameters.push(read_specifiers(&specifiers)),
+        }
+    }
+
+    parameters
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cpp_parser::{CppParser, ParserConfig};
+
+    /// The type of `name`, read the way a query reads it — see [`type_of_declarator`].
+    ///
+    /// The **last** declaration of that name, because every fixture declares before it uses and the question these
+    /// tests ask is about the declaration's own type.
+    fn type_of(source: &str, name: &str) -> Type {
+        type_of_declarator(source, name)
+    }
+
+    fn written(source: &str, name: &str) -> String {
+        type_of(source, name).to_string()
+    }
+
+    /// The type of `name` read the way **a query reads it**: the specifier sequence, the declarator, and the range
+    /// of the name the declarator declares.
+    ///
+    /// The **shortest** declarator containing the name is the one that declares it: a declaration holds the
+    /// declarators of what it declares *and* of the parameters it takes, and both contain the name — so a search
+    /// that took the first would answer about `g` when the question was about `value`.
+    fn type_of_declarator(source: &str, name: &str) -> Type {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        let root = tree.get_red_root();
+
+        let declared = root
+            .descendants()
+            .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+            .filter(|child| {
+                child
+                    .descendants()
+                    .any(|inner| {
+                        CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::NameExpr
+                            && inner.text().to_string().trim() == name
+                    })
+            })
+            .min_by_key(|child| {
+                usize::from(child.text_range().end()) - usize::from(child.text_range().start())
+            })
+            .unwrap_or_else(|| panic!("{name} is declared in {source:?}"));
+
+        let specifiers = declared
+            .ancestors()
+            .find_map(|node| {
+                node.children()
+                    .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq)
+            })
+            .unwrap_or_else(|| panic!("{name} has a specifier sequence in {source:?}"));
+
+        type_of_declaration(
+            &specifiers,
+            Some(&declared),
+            cpp_parser::source_range(declared.text_range()),
+        )
+    }
+
+    #[test]
+    fn a_builtin_is_its_words_in_order() {
+        assert_eq!(written("int x;", "x"), "int");
+        assert_eq!(written("unsigned long long big;", "big"), "unsigned long long");
+        assert_eq!(written("char c;", "c"), "char");
+    }
+
+    /// **The pointer lives in the declarator and the base in the specifiers**, and the two have to be joined in
+    /// the right order — outermost operator nearest the type.
+    #[test]
+    fn a_pointer_and_a_reference_are_read_out_of_the_declarator() {
+        assert_eq!(written("Widget* p;", "p"), "Widget*");
+        assert_eq!(written("Widget** pp;", "pp"), "Widget**");
+        assert_eq!(written("Widget& r;", "r"), "Widget&");
+        assert_eq!(written("Widget&& rr;", "rr"), "Widget&&");
+        assert_eq!(written("const Widget* q;", "q"), "Widget*");
+    }
+
+
+    /// **A name is read without its template arguments and with them.** The class question wants the first, the
+    /// type a consumer shows is the second, and both come from one node.
+    #[test]
+    fn a_name_keeps_its_arguments_and_offers_its_class() {
+        let found = type_of("std::vector<int> v;", "v");
+        assert_eq!(found.to_string(), "std::vector<int>");
+        assert_eq!(found.class_name(), Some("std::vector"));
+        assert_eq!(found.arguments().len(), 1);
+        assert_eq!(found.arguments()[0].to_string(), "int");
+
+        let nested = type_of("std::map<std::string, int> m;", "m");
+        assert_eq!(nested.class_name(), Some("std::map"), "{nested}");
+        assert_eq!(nested.arguments().len(), 2, "{nested}");
+
+        // **The bug this was written for**: the whole spelling handed to a class query. `_Cont>` and
+        // `std::vector<int>` are not class names, and a query given one answers "nothing declares it".
+        let no_arguments = type_of("std::vector<int> v;", "v");
+        assert_ne!(no_arguments.class_name(), Some("std::vector<int>"));
+    }
+
+    /// An array's extent is kept, and an array **decays** to a pointer when it is used — which is the difference
+    /// between what a declaration says and what an expression of it is.
+    #[test]
+    fn an_array_keeps_its_extent_and_decays_when_used() {
+        let array = type_of("int arr[4];", "arr");
+        assert_eq!(array.to_string(), "int[4]");
+        assert_eq!(array.decay().to_string(), "int*");
+        assert_eq!(array.class_name(), None);
+
+        let unknown = type_of("int arr[];", "arr");
+        assert_eq!(unknown.to_string(), "int[]");
+    }
+
+    /// A reference **decays to what it refers to**, which is what makes `Widget& w; w.size` a member of `Widget`.
+    #[test]
+    fn a_reference_decays_to_what_it_refers_to() {
+        let reference = type_of("Widget& r;", "r");
+        assert_eq!(reference.decay().to_string(), "Widget");
+        assert_eq!(reference.class_name(), Some("Widget"), "a class question sees through it");
+    }
+
+    /// A `*` on a pointer gives the pointee, and on anything else gives nothing — a class with an `operator*` needs
+    /// the index, and an ill-formed `*` needs a diagnostic this layer does not write.
+    #[test]
+    fn a_pointee_is_read_out_of_a_pointer() {
+        assert_eq!(
+            type_of("Widget* p;", "p").pointee().map(|found| found.to_string()),
+            Some("Widget".to_string())
+        );
+        assert_eq!(type_of("int x;", "x").pointee(), None);
+    }
+
+    /// **A function's type is what it returns and what it takes**, and the parameters of a function *pointer*
+    /// belong to the pointer's pointee rather than to the declaration.
+    #[test]
+    fn a_function_type_keeps_its_parameters() {
+        let found = type_of("int f(int a, double b);", "f");
+        assert_eq!(found.to_string(), "int(int, double)");
+    }
+
+    /// **A template parameter is a name nothing has defined yet**, which is a different answer from a class of the
+    /// same spelling — and a caller tells them apart by what it knows, not by the text.
+    #[test]
+    fn a_parameter_in_a_template_body_is_read_as_a_name() {
+        let found = type_of("template <class T> void f(T value) { }", "value");
+        assert_eq!(found.to_string(), "T");
+        assert_eq!(found.class_name(), Some("T"), "the text is a name either way");
+
+        let parameter = Type::TemplateParameter {
+            name: "T".to_string(),
+        };
+        assert!(parameter.depends_on_a_parameter());
+        assert!(!Type::named("Widget").depends_on_a_parameter());
+    }
+
+    /// **Substitution is by name and by position** — the operation that makes a member of `std::vector<T>`
+    /// answerable once the use says what `T` is.
+    #[test]
+    fn a_parameter_is_substituted_by_name() {
+        let names = vec!["T".to_string(), "Alloc".to_string()];
+        let arguments = vec![Type::builtin("int"), Type::named("std::allocator<int>")];
+        let substitutions = TypeSubstitutions::new(&names, &arguments);
+
+        let reference = Type::Reference {
+            to: Arc::new(Type::TemplateParameter {
+                name: "T".to_string(),
+            }),
+            rvalue: false,
+        };
+        assert_eq!(reference.substituted(&substitutions).to_string(), "int&");
+
+        let pair = Type::Named {
+            name: "std::pair".to_string(),
+            arguments: vec![
+                Type::TemplateParameter {
+                    name: "T".to_string(),
+                },
+                Type::TemplateParameter {
+                    name: "Alloc".to_string(),
+                },
+            ],
+        };
+        assert_eq!(
+            pair.substituted(&substitutions).to_string(),
+            "std::pair<int, std::allocator<int>>"
+        );
+
+        // A parameter with no argument stays itself rather than becoming nothing: a `std::vector` written without
+        // arguments is not a vector of nothing.
+        let none = TypeSubstitutions::new(&names, &[]);
+        assert_eq!(
+            Type::TemplateParameter {
+                name: "T".to_string()
+            }
+            .substituted(&none)
+            .to_string(),
+            "T"
+        );
+    }
+
+    /// A type that holds a parameter anywhere is one only instantiation can finish — the predicate a caller uses
+    /// before spending an index query on it.
+    #[test]
+    fn a_type_that_holds_a_parameter_says_so() {
+        assert!(Type::Pointer {
+            to: Arc::new(Type::TemplateParameter {
+                name: "T".to_string()
+            })
+        }
+        .depends_on_a_parameter());
+
+        assert!(
+            Type::Named {
+                name: "std::vector".to_string(),
+                arguments: vec![Type::TemplateParameter {
+                    name: "T".to_string()
+                }],
+            }
+            .depends_on_a_parameter()
+        );
+
+        assert!(!Type::named("std::vector<int>").depends_on_a_parameter());
+    }
+
+    /// **Attributes and declaration specifiers are not part of a type.** The old reader answered
+    /// `const [[nodiscard]] constexpr size_type` for a return type, because it stripped a list of keywords from
+    /// text; the syntax says which nodes are the type, and everything else is dropped.
+    #[test]
+    fn attributes_and_specifiers_are_not_part_of_the_type() {
+        assert_eq!(written("static const int count = 1;", "count"), "int");
+        assert_eq!(written("constexpr int size = 2;", "size"), "int");
+        assert_eq!(written("[[nodiscard]] int f();", "f"), "int()");
+    }
+
+    /// **A macro standing where a specifier goes is not the type** — the **last** name in the sequence is.
+    ///
+    /// The shape is MSVC's, and it is not a corner: `<iostream>` declares `cin` as
+    /// `_EXPORT_STD extern "C++" __PURE_APPDOMAIN_GLOBAL _CRTDATA2_IMPORT istream cin;`, which the grammar reads as
+    /// a specifier sequence holding three names. A reader that took the first recorded
+    /// `__PURE_APPDOMAIN_GLOBAL` where the cooked reading of the same line recorded `istream` — so the two
+    /// declarations of `cin` disagreed about the type and **neither answered**: `std::cin`, `std::cin.read` and a
+    /// completion after `std::cin.` all had nothing to say.
+    #[test]
+    fn the_last_name_in_a_specifier_sequence_is_the_type() {
+        assert_eq!(
+            written(
+                "extern \"C++\" __PURE_APPDOMAIN_GLOBAL _CRTDATA2_IMPORT istream cin;",
+                "cin"
+            ),
+            "istream"
+        );
+        // And the ordinary single-name case is unaffected.
+        assert_eq!(written("Widget w;", "w"), "Widget");
+    }
+
+    /// **A spelling read back into a shape**, which is what the index path needs: a `DeclFact` records the type as
+    /// text, and a member query needs the *class* in it.
+    ///
+    /// The one thing pinned here is [`Type::class_name`], because everything else a wrong reading loses is
+    /// recoverable and a wrong class name is not: it sends a member query to a class that does not exist.
+    #[test]
+    fn a_spelling_is_read_back_into_the_class_it_names() {
+        let class_of = |written: &str| parse_type_spelling(written).class_name().map(str::to_string);
+        assert_eq!(class_of("Widget"), Some("Widget".to_string()));
+        assert_eq!(class_of("std::vector<int>"), Some("std::vector".to_string()));
+        assert_eq!(
+            class_of("std::map<std::string, int>"),
+            Some("std::map".to_string()),
+            "the commas inside the argument list are not the type's own"
+        );
+        assert_eq!(class_of("Widget*"), None, "a pointer names no class — decay first");
+        assert_eq!(class_of("const Widget&"), Some("Widget".to_string()));
+        assert_eq!(class_of("Widget&&"), Some("Widget".to_string()));
+        assert_eq!(
+            class_of("const Widget* const"),
+            None,
+            "the `const` on either side does not make it a class"
+        );
+        assert_eq!(class_of("std::vector<std::pair<int, int>>&"), Some("std::vector".to_string()));
+        // **A builtin is not a class**, which is why `parse_type_spelling` carries the language's own list of words:
+        // reading `int` as a name would make a member access on an `int` ask the index for a class called `int` and
+        // report "nothing declares it" — which a reader takes as "this class is missing" rather than "this is not a
+        // class at all".
+        assert_eq!(class_of("int"), None);
+    }
+
+    /// **The operators come off in the order they were written**, which is the order that makes the last one the
+    /// outermost.
+    #[test]
+    fn a_spelling_peels_its_operators_outside_in() {
+        let pointed = parse_type_spelling("Widget*");
+        assert!(
+            matches!(pointed, Type::Pointer { .. }),
+            "a trailing `*` is a pointer, whatever it is written after: {pointed:?}"
+        );
+        assert_eq!(pointed.to_string(), "Widget*");
+        assert_eq!(parse_type_spelling("Widget**").to_string(), "Widget**");
+        assert_eq!(parse_type_spelling("Widget&").to_string(), "Widget&");
+        assert_eq!(parse_type_spelling("Widget&&").to_string(), "Widget&&");
+
+        // A reference to a pointer and a pointer to a reference are the same spelling read from the two ends, and
+        // the difference is which end was peeled first: the last operator written is the outermost one.
+        let reference_to_pointer = parse_type_spelling("Widget*&");
+        assert!(
+            matches!(reference_to_pointer, Type::Reference { .. }),
+            "the outermost operator is the one written last: {reference_to_pointer:?}"
+        );
+        // **A reference is not a pointer**, and the two questions are deliberately different: `pointee` answers
+        // "what does a `*` give", which a reference has no operator for, while `decay` and `class_name` see through
+        // it because C++ does.
+        assert!(
+            reference_to_pointer.pointee().is_none(),
+            "`*` on a reference is not the pointer it refers to"
+        );
+        // A reference to a *class*, which is the shape a member access is written on, does see through.
+        assert_eq!(
+            parse_type_spelling("Widget&").class_name(),
+            Some("Widget"),
+            "a member access on a reference is a member of what it refers to"
+        );
+
+        // Arrays nest from the right: `int[2][3]` is two arrays of three, so peeling `[3]` leaves `int[2]` for the
+        // recursion and the *outer* type is the `[2]`.
+        let nested = parse_type_spelling("int[2][3]");
+        assert_eq!(nested.to_string(), "int[2][3]");
+        assert_eq!(
+            nested.decay().to_string(),
+            "int[2]*",
+            "an array decays to a pointer to its element, and the element here is itself an array"
+        );
+    }
+
+    /// **A function type keeps what it takes.** `int(int, double)` is what a `DeclFact::returns` records for a
+    /// function, and reading it back must not lose the parameters — a call query asks how many there are.
+    #[test]
+    fn a_function_spelling_keeps_its_parameters() {
+        let found = parse_type_spelling("int(int, double)");
+        assert_eq!(found.to_string(), "int(int, double)");
+
+        let Type::Function {
+            returns,
+            parameters,
+        } = &found
+        else {
+            panic!("a parameter list at the end is a function type: {found:?}");
+        };
+        assert_eq!(returns.to_string(), "int");
+        assert_eq!(parameters.len(), 2);
+    }
+
+    /// **A sub-type is shared, not copied.** This is the property the [`Arc`] is there for, and it is worth a test
+    /// because the failure is invisible: an owned child still *works*, it just clones a whole tree every time a
+    /// query looks inside a type.
+    ///
+    /// `Arc::ptr_eq` is the check that cannot pass by accident: two equal types built separately are two
+    /// allocations, so a `pointee` that answered with a fresh one would fail here.
+    #[test]
+    fn a_sub_type_is_handed_out_shared_rather_than_copied() {
+        let pointee: TypeOf = Arc::new(Type::named("Widget"));
+        let pointer = Type::Pointer {
+            to: Arc::clone(&pointee),
+        };
+
+        let handed_out = pointer.pointee().expect("a pointer has a pointee");
+        assert!(
+            Arc::ptr_eq(&handed_out, &pointee),
+            "the pointee is the same allocation, not a copy of it"
+        );
+
+        // A clone of a compound type shares its children rather than copying them down.
+        let cloned = pointer.clone();
+        let Type::Pointer { to } = &cloned else {
+            panic!("a clone of a pointer is a pointer");
+        };
+        assert!(Arc::ptr_eq(to, &pointee));
+    }
+}

@@ -77,7 +77,15 @@ use std::path::{Path, PathBuf};
 /// A source change is caught automatically by [`READING_FINGERPRINT`], so this is for the changes that leave no
 /// trace in the sources this workspace owns: a dependency bump that changes a reading, or a build whose inputs
 /// differ some other way. The number is still the blunt instrument — every entry becomes unreachable.
-pub const FORMAT_VERSION: u32 = 1;
+///
+/// # Why this moved for version 14 of the codec
+///
+/// A fact's `type_of` is read from the syntax now rather than assembled out of a declaration's text, and the two
+/// readers disagree about **what a type is called**: the old one answered `const [[nodiscard]] constexpr size_type`
+/// and `Point>` where the new one answers `size_type` and `std::vector<Point>`. The bytes are the same shape, so an
+/// old entry still decodes — which is exactly why this number has to move rather than the codec's: an entry that
+/// decodes but says something this build would not write is the case this constant exists for.
+pub const FORMAT_VERSION: u32 = 2;
 
 /// The fingerprint of the code that **reads** a file into a summary, computed by `build.rs` from the text of the
 /// grammar and of this crate's semantic layer.

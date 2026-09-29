@@ -106,6 +106,29 @@ pub fn declared_type_of(root: &CppSyntaxNode, binding: &Binding) -> Option<Strin
 
 /// [`declared_type_of`] for a caller that has the file's shapes already — which is every caller with more than one
 /// question to ask. See [`DeclarationShapes`] for what building them costs and why that is the right trade.
+///
+/// # What changed, and what it cost to learn
+///
+/// This used to assemble a spelling out of **text**: it took the specifier sequence's words, cut the name and the
+/// initializer out of the declarator's own text, and joined what was left. It is the same idea as
+/// [`crate::sema::types::type_of_declaration`] and it is wrong in ways that only show up on real headers, because
+/// the two halves of a type are not a text concatenation:
+///
+/// ```text
+/// const [[nodiscard]] constexpr size_type   a list of keywords stripped from text leaves the attributes
+/// std::map<std::string, int>                a class question needs `std::map`, not the whole spelling
+/// friend constexpr iter_difference_t        a specifier the keyword list did not know became the type
+/// ```
+///
+/// So the reading moved to [`type_of_declaration`], which walks the syntax; what is left here is finding the two
+/// nodes and handing them over. Measured on the MinGW standard-library closure (30 185 declarations,
+/// `examples/member_probe.rs`): **11 malformed spellings before, 0 after**.
+///
+/// # Why the name's range is still handed over
+///
+/// Because a `Binding` records it, and the reader uses it to descend — while a declarator's last `NameExpr` may
+/// belong to a parameter (`int f(int x)`) or a trailing return type. The reader prefers its own reading of the name
+/// when it can find one, and this range is what it falls back to.
 fn declared_type_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
     // The kinds that have a type in this sense. A field and a parameter are `Variable` too — they are what a
     // member access is asked *from* — while a class and a function are not: a class *is* a type and a function
@@ -118,81 +141,26 @@ fn declared_type_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Optio
     // **innermost on the path**, which is what "the last one passed on the way down" meant when this was a
     // descent: for a parameter the outermost declarator is the *function's* (`f(Widget* p)`), and the one that
     // holds `p` is the parameter's own.
-    let mut found = None;
+    let mut specifiers = None;
     let mut declarator = None;
     shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
         if let Some(node) = &shape.specifiers {
-            found = Some(node.clone());
+            specifiers = Some(node.clone());
         }
         if let Some(node) = &shape.declarator {
             declarator = Some(node.clone());
         }
     });
 
-    let spelling = strip_declaration_specifiers(&type_spelling_of(&found?));
-    let Some(declarator) = declarator else {
-        return (!spelling.is_empty()).then_some(spelling);
-    };
+    let specifiers = specifiers?;
+    let found = crate::sema::types::type_of_declaration(
+        &specifiers,
+        declarator.as_ref(),
+        binding.name_range,
+    );
 
-    // **The declarator's own type syntax**, which the specifier sequence does not have: the `*` of `Widget* p`,
-    // the `[4]` of `Widget arr[4]`, the `(*)(int)` of a function pointer. Cut out of the declarator's text are
-    // the name itself and every **initializer** — `Widget w(1, 2)` is a `Widget` and not a `Widget(1, 2)`, and
-    // the parentheses of a direct-initialisation live *inside* the declarator, which is what makes this more
-    // than one cut.
-    //
-    // This is the same arithmetic [`declared_alias_target`] does with one span (a `typedef`'s declarator has no
-    // initializer), and the reason both need it is the same: the type a declaration is about is written in two
-    // places, and a spelling assembled from one of them is missing the operators.
-    let initializers: Vec<cpp_parser::SourceRange> = declarator
-        .descendants()
-        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Initializer)
-        .map(|node| cpp_parser::source_range(node.text_range()))
-        .collect();
-
-    let mut spans = vec![binding.name_range];
-    spans.extend(initializers);
-
-    let declarator_type = without_spans(&declarator.text().to_string(), &declarator, &spans);
-    let spelling = format!("{spelling} {declarator_type}");
-    let spelling = spelling.split_whitespace().collect::<Vec<_>>().join(" ");
-
-    (!spelling.is_empty()).then_some(spelling)
-}
-
-/// `text` with every span in `spans` removed, trimmed and re-spaced.
-///
-/// The many-span form of [`without`], which is what a declarator needs: the name is one cut and an
-/// initializer's parentheses are another, and they are nested inside one another's text.
-fn without_spans(text: &str, node: &CppSyntaxNode, spans: &[cpp_parser::SourceRange]) -> String {
-    let start = usize::from(node.text_range().start());
-
-    let mut cuts: Vec<(usize, usize)> = spans
-        .iter()
-        .map(|span| {
-            (
-                span.start_offset.saturating_sub(start),
-                span.end_offset().saturating_sub(start),
-            )
-        })
-        .filter(|(from, to)| {
-            from <= to && *to <= text.len() && text.is_char_boundary(*from) && text.is_char_boundary(*to)
-        })
-        .collect();
-    cuts.sort_unstable();
-
-    let mut kept = String::new();
-    let mut at = 0usize;
-    for (from, to) in cuts {
-        if from > at {
-            kept.push_str(&text[at..from]);
-        }
-        at = at.max(to);
-    }
-    if at < text.len() {
-        kept.push_str(&text[at..]);
-    }
-
-    kept.split_whitespace().collect::<Vec<_>>().join(" ")
+    let written = found.to_string();
+    (!written.is_empty()).then_some(written)
 }
 
 /// Which offset the walks in this module descend by: the **name**, not the binding's range.
@@ -733,31 +701,6 @@ const DECLARATION_SPECIFIERS: &[&str] = &[
 
 /// The type a specifier sequence spells: its own text, or — when it holds **several names** — from the last one on.
 ///
-/// A macro standing where a declaration specifier goes is an ordinary name to the grammar, so
-/// `_EXPORT_STD extern "C++" __PURE_APPDOMAIN_GLOBAL _CRTDATA2_IMPORT istream cin;` holds **three** names in one
-/// specifier sequence and the type is the last of them. No C++ type is spelled as two unqualified names in a row —
-/// `unsigned long` is two *keywords*, and a keyword is not a `NameExpr` — so the count is the whole rule, and it is
-/// the shape the name reader already documents: a reader that took the first name bound `_CRTDATA2_IMPORT`.
-///
-/// Measured, and it is what made `std::cin` unanswerable: MSVC's `<iostream>` declares `cin` twice, and the second
-/// declaration recorded the type as `__PURE_APPDOMAIN_GLOBAL _CRTDATA2_IMPORT istream` where the cooked reading of
-/// the same line recorded `istream`. A name query answers `Ambiguous` for two declarations of one variable, and the
-/// type query that is supposed to settle it could not: the two spellings disagreed, so `std::cin`, `std::cin.read`
-/// and a completion after `std::cin.` all had nothing to say.
-fn type_spelling_of(specifiers: &CppSyntaxNode) -> String {
-    let names: Vec<CppSyntaxNode> = specifiers
-        .descendants()
-        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NameExpr)
-        .collect();
-
-    let Some(last) = names.last().filter(|_| names.len() > 1) else {
-        return specifiers.text().to_string();
-    };
-
-    let from = usize::from(last.text_range().start()) - usize::from(specifiers.text_range().start());
-    specifiers.text().to_string()[from..].to_string()
-}
-
 /// Remove declaration specifiers from the front of a type spelling, and trim what is left.
 fn strip_declaration_specifiers(spelling: &str) -> String {
     let mut rest = spelling.trim();

@@ -76,6 +76,157 @@
 
 ---
 
+## 第六轮:类型推断与类型检查(第 1 阶段:基线 + 类型模型)
+
+这一轮的目标是**先量出类型这一层到底坏在哪**,再落地一个能承载推断的类型模型。读数全部来自新探针
+[`member_probe.rs`](../crates/cpp_code_analysis/examples/member_probe.rs)(MinGW 标准库闭包 356 文件,release)。
+
+### 基线:成员访问在哪一步停下
+
+一个成员访问要连续过三关,任何一关失败都只表现为"没有答案":
+
+```text
+1. 成员名写出来了        `w.` 后面还没写,那是补全不是跳转        → 14 453 个有名字,56 个正在输入
+2. 对象有类型            声明里的 `type_of`、`auto`、`*p`、`f()`    → 5 934 个有类型(41%)
+3. 那个类型的成员列得出来 类在索引里、基类能解析、名字不歧义        → 1 307 个(9%)
+```
+
+失败原因的分布,这才是可执行的清单:
+
+| 计数 | 停在哪 | 说明 |
+|---|---|---|
+| 8 237 | `type: UnknownType` | 类型读不出来。其中"对象是个名字"7 001、"成员访问"1 058、"调用"385 |
+| 2 808 | `members: NotDeclaredHere` | 类型读出来了,但那个类名**没被索引到** |
+| 1 723 | `members: Ambiguous` | 同名类有多条声明(`lldiv_t`、`pair`),没有东西在它们之间做选择 |
+| 282 | `type: NotDeclaredHere` | 名字本身没解析到 |
+| 96 | 列出来是空的 | 类找到了但没有成员 |
+
+### 建了什么:[`sema/types.rs`](../crates/cpp_code_analysis/src/sema/types.rs)
+
+问题不在于"没有类型",而在于**类型一直是一个 `String`**。所以修法是把它变成一个形状:
+
+```text
+Type::Builtin / Named{name, arguments} / TemplateParameter / Pointer / Reference{rvalue}
+     / Array{extent} / Function{returns, parameters} / Pack
+```
+
+三件事是这一轮真正落地的:
+
+1. **从语法读类型,而不是剪字符串**。`type_of_declaration(specifiers, declarator, name)`:specifier
+   序列给基类型(`unsigned long long` 是**三个** `BuiltinType` 节点),declarator 给操作符(`*`、`&`、`[4]`、
+   `(int)`),按"离名字最近的层是最外层操作符"的顺序装配。属性、`static`、`constexpr`、`friend` 一律**不进类型**。
+2. **类名与类型名分开**:`std::vector<int>` 是类型,`std::vector` 是类;`Type::class_name()` 就是那条缝。
+   这就是"`_Cont>` / `std::map<std::string, int>` 被整个当成类名去问"这个错误的修法。
+3. **模板参数替换**:`Type::substituted(&TypeSubstitutions)` 按**名字和位置**把 `T` 换成实参,并有
+   `depends_on_parameter()` 让调用方在花一次索引查询之前就知道"这个答案只有实例化能给"。
+
+   子类型用 **`Arc<Type>`(`TypeOf`)而不是 `Box<Type>`**:类型是一棵树,而推断会不停地往里看
+   (`substituted` / `decay` / `pointee` / `class_name`),`Box` 下每一次"往里看"都是**整棵树的深拷贝**——
+   问一次 `std::map<K, V>::value_type` 要把 `K`、`V` 的拼写整个复制一遍才看得见,而一条成员访问链会每个环节复制一次。
+   `Arc` 把这件事变成一次引用计数自增,顺带买到三样:`inner()` 能返回**句柄**而不是副本、
+   同一个拼写只分配一次、以及**安全代码里没有 `get_mut`** —— 类型是值,不会在作为 map 键的时候被人改掉。
+   用 `Arc` 而不是 `Rc`,因为索引要在 LSP 的读线程之间共享,类型跨线程是常规而不是特例。
+   测试 `a_sub_type_is_handed_out_shared_rather_than_copied` 用 `Arc::ptr_eq` 钉住这条性质 ——
+   它不会因为"两个相等的类型"而误过:分开构造的两个相等类型是两次分配。
+
+同时把**已接线的**那条路换掉了:[`declared_type_of_with`](../crates/cpp_code_analysis/src/sema/declarations.rs)
+原来剪字符串,现在把两个节点交给新读者。这一步立刻修掉了一个真实缺陷 ——
+**MSVC 的 `cin` 声明**:`_EXPORT_STD extern "C++" __PURE_APPDOMAIN_GLOBAL _CRTDATA2_IMPORT istream cin;`
+里 specifier 序列有三个名字,类型是**最后**一个。老读者取第一个,于是同一条声明在裸读里是
+`__PURE_APPDOMAIN_GLOBAL`、在熟读里是 `istream`,两者不一致 → `std::cin` 永远 `Ambiguous`。
+这条规则原本写在 `type_spelling_of` 里,而它**没有任何调用者**(唯一调用者就是我刚换掉的那段)。
+
+### 读数
+
+| | 改前 | 改后 |
+|---|---|---|
+| 畸形类型拼写(30 185 条声明) | 11(7 条残留 specifier + 4 条丢名字的 `_Cont>`) | **0** |
+| `friend constexpr iter_difference_t` 这类"关键字当类型" | 出现 | 0 |
+| `std::map<std::string, int>` 被当成类名去问 | 是 | 否(问 `std::map`) |
+| `cargo test --workspace` | 全绿 | 全绿(543 + 全部集成);clippy 零警告 |
+
+畸形计数**到 0 的过程本身是一条证据链**:先修 `friend`/`ClassDef` 一类的 specifier 分桶(7 → 0 中的 7),
+再把"没有规则的节点当类型名"这条兜底收成**最后手段** —— 一个关键字当类型名的代价是假的类型,
+而拒绝的代价是一个调用方看得出来的 `void`。
+
+### 还没做(下一阶段,按读数排序)
+
+1. **表达式类型还挂在旧读者上**:`type_of_expression` 仍返回 `String`,`auto` 去重也用文本手术
+   (`deduction_inputs`)。这一步把推断层换成 `Known<Type>`,成员访问/补全/hover 才能拿到规范化的类名。
+2. **类模板的成员**:`std::vector<int>::size_type` 需要"类模板参数列表 ↔ 实参"的配对;
+   `Type::substituted` 已经是那个操作,缺的是"从声明里读出参数列表"。
+3. **同名类多声明时的选择**(1 723 次):现在一律 `Ambiguous`,而 `std::pair` 的若干声明
+   其实是同一个模板的多次声明。
+
+### 第 2 阶段:推断层换成 `Type`(已完成,见下)
+
+---
+
+## 第七轮:类型推断与类型检查(第 2 阶段:推断层接线 + 类型拼写解析)
+
+第 1 阶段把"声明 → 类型"做成了形状;这一阶段把**整条推断链**从 `String` 换成 `Type`,并补上反向的那一半:
+把索引里记的拼写读回形状。
+
+### 改了什么
+
+| 位置 | 改前 | 改后 |
+|---|---|---|
+| `type_of_expression` | `Known<(String, PathBuf)>`,用 `pointee_type_name` / `element_type_name` 剪字符串 | `Known<(Type, PathBuf)>`;`*` 是 `Type::pointee()`、`&` 是 `decay()` 加一层指针、下标是数组的 `pointee()` |
+| `declared_type` / `NamedDeclaration::type_of` | 拿摘要里的 `type_of` 字符串 | 本文件走**语法**(`type_of_declaration` + 定位声明者 declarator),索引里的走**拼写解析**(`parse_type_spelling`) |
+| 成员查询的"类" | `base_type_name("std::vector<int>")` → `std::vector<int>`(一个没人声明的类) | `member_access_class(&Type)`:`class_name()`,并且**看穿一层指针**(`p->size` / `(*p).size`) |
+| `auto` 的合并 | 文本替换 | 文本拼写决定**限定符位置**,形状由 `Type` 决定 |
+| `const` | 被丢掉(不在模型里) | `Type::Qualified` 包装:`const Widget*` 与 `Widget* const` 是两个不同的类型,`Display` 按位置写回去 |
+| 缓存 | `CODEC_VERSION 15` / `FORMAT_VERSION 1` | **16 / 2** —— 见下 |
+
+### 新增的那个东西:`parse_type_spelling`
+
+索引里的事实是磁盘上的一个 `String`,它来自的文件根本没打开 —— 所以"类型"必须能从**拼写**读回来。
+这函数是 `Type::Display` 的逆,而且它只保证一件事做对:**`class_name()`**。其余都丢得起(把 `int` 读成
+`Type::Named("int")` 只是丢了一个标签),而一个**错的类名**会把成员查询送去一个不存在的类 —— 所以剥离顺序是
+围着它写的:先脱尾部的 `const`(`Widget* const` 的 `const` 在操作符**后面**),再脱 `&&`/`&`/`*`,再脱数组维度,
+最后才是名字与实参表。
+
+顺手修掉的两个真实形状错误:
+
+```text
+std::map<std::string, int>   逗号在实参表里,不是类型的   → 切分按尖括号深度走
+int                           内建词表里没有它            → `int` 被当作类名,成员访问去问"谁声明了 int"
+```
+
+第二条是一类错误的样板:`int` 读成 `Named("int")` 时,对 `(*q).size` 的回答是
+**"`int` 没有在这个文件里声明"**,读起来像"这个类丢了"而不是"这不是个类";现在答案是 `UnknownType("int")`。
+
+### 读数(MinGW 标准库闭包 356 文件,14 453 个成员访问,release)
+
+| | 第 1 阶段基线 | 现在 |
+|---|---|---|
+| 读出了类型 | 5 934(41%) | **5 959(41%)** |
+| 列得出成员 | 1 307(9% / 有类型的 22%) | **1 348(9% / 有类型的 23%)** |
+| `members: Ambiguous` | 1 723 | 2 034 |
+| 畸形类型拼写(30 185 条声明) | 11 | **0** |
+
+**`Ambiguous` 涨了 311,这是好消息**,而且这是这一阶段最值得看的一行:以前这些访问撞上的是
+`_Cont>`、`Point>` 这种**没人声明的假类名**(报 `NotDeclaredHere`),现在是
+`::__gnu_cxx::__normal_iterator<_Ite, _Cont>` —— **一个格式正确的类名,只是索引里有多条声明**。
+失败原因从"这个名字不存在"变成"这个类有多个声明",而后者是可以用一条规则解决的(下一阶段的第 3 项)。
+
+### 缓存版本:两个数字都要动
+
+`DeclFact::type_of` **还是同一个字段**,但它现在可能装的东西变了:老读者会把
+`const [[nodiscard]] constexpr size_type` 和 `friend constexpr iter_difference_t` 写进这个字段。
+字节格式没变,所以老条目**能解码** —— 这正是 `FORMAT_VERSION` 存在的情形:"能解码,但说的是这个构建
+不会再写的东西"。所以 `CODEC_VERSION` 15 → 16、`FORMAT_VERSION` 1 → 2,老缓存下次启动就清掉。
+
+### 诚实登记
+
+- `type_of_expression` 仍然只认识**名字 / `this` / 初值列表 / 调用 / 括号 / `*` / `&` / 下标 / 成员访问**。
+  算术、比较、`new`、`?:` 一律 `UnknownType`,这是有意的。
+- 6980 个"对象是个名字但读不出类型"里,最大的一块是**依赖类型**:`declval<_Tp&>()._Tp`、
+  `__t._Tp`、`typename T::value_type` —— 要实例化才有答案,而这一层不实例化。这是下一阶段的主项。
+- `Type` 仍然**不解析别名**:`using Int = int;` 之后 `Int` 与 `int` 是两个类型。相等仍是按拼写。
+
+---
+
 ## 0. 总评
 
 **强项**
