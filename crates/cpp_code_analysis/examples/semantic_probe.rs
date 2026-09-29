@@ -1,20 +1,28 @@
-//! What a semantic highlighter would cost: one classification per identifier, and where the answers come from.
+//! What a semantic highlighter costs, and **where each colour came from**.
 //!
-//! A highlighter's question is "what is this name here", asked once per identifier in a file. The cheap halves are
-//! the file's **own** bindings (the scope tree already has them, with a kind) and the **macro** names in force at
-//! that offset (the preprocessor's table). The expensive half is a name the file does not declare: that is a
-//! question for the index, and the index is a search over the files that include this one.
-//!
-//! This probe measures the three, so that the design of the feature can be decided by a number rather than by a
-//! guess about which half dominates. Run it on a corpus list:
+//! A highlighter's question is "what is this name here", asked once per identifier in a file. The shipping path is
+//! `Session::classified_names`, and this probe measures exactly that call — not a model of it — on a corpus list,
+//! and prints the distribution of the answers by kind and by [`Provenance`], which is the layer that answered.
 //!
 //! ```text
 //! cargo run --release --example semantic_probe -- <list> [--limit <n>]
 //! ```
+//!
+//! `--limit` is how many of the listed files to classify (the index always reads all of them), and the default is
+//! small because the interesting number is per file rather than per corpus.
+//!
+//! # What the distribution is for
+//!
+//! `Provenance::Held` is an answer from **this file's scope tree** and `Found` one from the **index**: the first is
+//! a lookup in a table the file's own parse produced, the second is a question that walks the files this one can
+//! see. A run whose `Found` count dominates is a run whose cost is the index's, and one whose `Held` count does is
+//! a run that costs what the parse costs. Printing both is what makes a timing number attributable.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
+
+use cpp_code_analysis::semantic::Provenance;
 
 fn main() {
     let list = std::env::args().nth(1).expect("a file list");
@@ -55,6 +63,10 @@ fn main() {
         session.pending()
     );
 
+    let mut total = std::time::Duration::ZERO;
+    let mut identifiers_total = 0usize;
+    let mut classified_total = 0usize;
+
     for path in paths.iter().take(limit) {
         let Some(view) = session.view(path) else {
             println!("{}: not held", path.display());
@@ -75,9 +87,18 @@ fn main() {
         let elapsed = started.elapsed();
 
         let mut by_kind: HashMap<String, usize> = HashMap::new();
+        let mut by_provenance: HashMap<&str, usize> = HashMap::new();
         for name in &names {
             *by_kind
                 .entry(format!("{:?}", name.kind))
+                .or_default() += 1;
+            *by_provenance
+                .entry(match name.provenance {
+                    Provenance::DeclaredHere => "declared-here",
+                    Provenance::Held => "held",
+                    Provenance::Found => "found",
+                    Provenance::Macro => "macro",
+                })
                 .or_default() += 1;
         }
         let declarations = names.iter().filter(|name| name.declaration).count();
@@ -85,8 +106,11 @@ fn main() {
         let mut kinds: Vec<(String, usize)> = by_kind.into_iter().collect();
         kinds.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
 
+        let mut provenance: Vec<(&str, usize)> = by_provenance.into_iter().collect();
+        provenance.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+
         println!(
-            "{:<24} {:>7} identifiers | {:>6} classified ({:>6} declarations) | {:?} | {}",
+            "{:<24} {:>7} identifiers | {:>6} classified ({:>6} declarations) | {:?} | {} | {}",
             path.file_name().unwrap_or_default().to_string_lossy(),
             identifiers,
             names.len(),
@@ -95,6 +119,11 @@ fn main() {
             kinds
                 .iter()
                 .map(|(kind, count)| format!("{kind} {count}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            provenance
+                .iter()
+                .map(|(source, count)| format!("{source} {count}"))
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -116,5 +145,16 @@ fn main() {
             "{}: an empty token cannot be encoded",
             path.display()
         );
+
+        total += elapsed;
+        identifiers_total += identifiers;
+        classified_total += names.len();
     }
+
+    let per_identifier = total.as_secs_f64() * 1e6 / (identifiers_total.max(1) as f64);
+    println!(
+        "classified {classified_total} of {identifiers_total} identifiers in {total:?} across {limit} file(s) \
+         ({per_identifier:.2} µs per identifier)"
+    );
+    println!("{}", cpp_code_analysis::stages::StageTimes::read().report());
 }

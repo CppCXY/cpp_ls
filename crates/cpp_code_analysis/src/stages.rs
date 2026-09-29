@@ -125,6 +125,15 @@ pub enum Stage {
     ReEnv,
     /// *Detail*: the mention filter of the second pass's second loop, inside the same pass.
     ReFilter,
+    /// **Classifying a file's names for a semantic highlighter** (`semantic::classified_names`) — asked once per
+    /// `textDocument/semanticTokens/full`, which is once per edit in the file being edited, and therefore on the
+    /// interactive path rather than the indexing one.
+    ///
+    /// Detail rather than a top-level stage because it does not belong to either of the two families: it is neither
+    /// what a file costs to be *known* nor what it costs to be read as a compiler reads it, it is what one
+    /// *question* costs. Measured on a 3 711-identifier header it is a handful of milliseconds — see
+    /// `examples/semantic_probe.rs`, which is where the number is read.
+    Classify,
 }
 
 impl Stage {
@@ -152,12 +161,13 @@ impl Stage {
                 | Stage::BodiedEnv
                 | Stage::ReEnv
                 | Stage::ReFilter
+                | Stage::Classify
         )
     }
 }
 
 /// Every stage, in the order the table prints them.
-pub const STAGES: [Stage; 37] = [
+pub const STAGES: [Stage; 38] = [
     Stage::Read,
     Stage::Hash,
     Stage::Lookup,
@@ -195,6 +205,7 @@ pub const STAGES: [Stage; 37] = [
     Stage::IndexInsert,
     Stage::ReEnv,
     Stage::ReFilter,
+    Stage::Classify,
 ];
 
 impl Stage {
@@ -238,6 +249,7 @@ impl Stage {
             Stage::IndexInsert => "index-insert",
             Stage::ReEnv => "re-env",
             Stage::ReFilter => "re-filter",
+            Stage::Classify => "classify",
         }
     }
 
@@ -274,7 +286,11 @@ impl Stage {
             | Stage::Drop
             | Stage::Shapes
             | Stage::BodiedPlain
-            | Stage::BodiedEnv => Family::Indexing,
+            | Stage::BodiedEnv
+            // Detail-only, so the family is what it is *not* counted in rather than where it belongs: this stage
+            // is measured inside neither of the two halves — see its own documentation. `Indexing` is the closer
+            // of the two, because what it spends its time on is asking the index.
+            | Stage::Classify => Family::Indexing,
             Stage::Lex
             | Stage::Macros
             | Stage::Render

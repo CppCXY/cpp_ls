@@ -26,11 +26,20 @@
 //!
 //! # What is not sent
 //!
-//! A name the analysis cannot place (see the `semantic` module: a name nothing declares). The client draws those
-//! identifiers with its own default colour, which is the honest drawing of "this analysis has nothing to say
-//! about this name" — and it is also why this server sends **no** token for `int`, `return`, or a string literal:
-//! a client that already lexes C++ draws keywords and literals itself, and two answers for one span is a
-//! disagreement the user would see as flicker.
+//! A name the analysis cannot place (see the `semantic` module: a name nothing declares, or one whose spelling
+//! several unrelated declarations share). The client draws those identifiers with its own default colour, which is
+//! the honest drawing of "this analysis has nothing to say about this name" — and it is also why this server sends
+//! **no** token for `int`, `return`, or a string literal: a client that already lexes C++ draws keywords and
+//! literals itself, and two answers for one span is a disagreement the user would see as flicker.
+//!
+//! # The one question this layer answers that the analysis does not
+//!
+//! **Nothing is published while the index is still reading.** A name a header declares is classified *through* the
+//! index, so before that header has been read the name has no classification — and an answer now would be a
+//! *shorter* list, which this protocol's client is entitled to keep until the next edit. The protocol has a word for
+//! "ask again later", which is `null`, and that is what [`on_semantic_tokens`] answers. The cost is that a file
+//! being edited while the project is still being read shows no colours until the drain finishes; the alternative
+//! costs a client that shows the wrong ones.
 
 use cpp_code_analysis::semantic::{Name, NameKind};
 use cpp_code_analysis::VfsFile;
@@ -45,20 +54,70 @@ use super::RegisterCapabilities;
 use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
 use crate::util::{position_in_file, uri_to_file_path};
 
-/// The token types this server uses, in the order the encoding's numbers refer to.
+/// Where a name kind sits in the legend, which is also the number the encoding sends for it.
+///
+/// The `index` is written out rather than taken from the position in this list, and the two are asserted equal by
+/// a test: the numbers in an answer are indices into the advertised legend, so a list that disagreed with itself
+/// would colour every name as whatever sits at that index — a wrong answer that looks exactly like a right one.
+struct Legend {
+    /// The number a token of this kind carries.
+    index: u32,
+    /// The classification this number means.
+    kind: NameKind,
+    /// The protocol's name for it, advertised to the client.
+    token_type: SemanticTokenType,
+}
+
+/// **The token types this server uses**, in the order the encoding's numbers refer to.
 ///
 /// Fixed, and advertised once in `initialize`: the numbers in the answer are indices into this list, so a legend
 /// that changed per request would make every number mean something different.
-const TOKEN_TYPES: &[(NameKind, SemanticTokenType)] = &[
-    (NameKind::Namespace, SemanticTokenType::NAMESPACE),
-    (NameKind::Type, SemanticTokenType::TYPE),
-    (NameKind::TypeParameter, SemanticTokenType::TYPE_PARAMETER),
-    (NameKind::EnumMember, SemanticTokenType::ENUM_MEMBER),
-    (NameKind::Function, SemanticTokenType::FUNCTION),
-    (NameKind::Method, SemanticTokenType::METHOD),
-    (NameKind::Variable, SemanticTokenType::VARIABLE),
-    (NameKind::Parameter, SemanticTokenType::PARAMETER),
-    (NameKind::Macro, SemanticTokenType::MACRO),
+const LEGEND: &[Legend] = &[
+    Legend {
+        index: 0,
+        kind: NameKind::Namespace,
+        token_type: SemanticTokenType::NAMESPACE,
+    },
+    Legend {
+        index: 1,
+        kind: NameKind::Type,
+        token_type: SemanticTokenType::TYPE,
+    },
+    Legend {
+        index: 2,
+        kind: NameKind::TypeParameter,
+        token_type: SemanticTokenType::TYPE_PARAMETER,
+    },
+    Legend {
+        index: 3,
+        kind: NameKind::EnumMember,
+        token_type: SemanticTokenType::ENUM_MEMBER,
+    },
+    Legend {
+        index: 4,
+        kind: NameKind::Function,
+        token_type: SemanticTokenType::FUNCTION,
+    },
+    Legend {
+        index: 5,
+        kind: NameKind::Method,
+        token_type: SemanticTokenType::METHOD,
+    },
+    Legend {
+        index: 6,
+        kind: NameKind::Variable,
+        token_type: SemanticTokenType::VARIABLE,
+    },
+    Legend {
+        index: 7,
+        kind: NameKind::Parameter,
+        token_type: SemanticTokenType::PARAMETER,
+    },
+    Legend {
+        index: 8,
+        kind: NameKind::Macro,
+        token_type: SemanticTokenType::MACRO,
+    },
 ];
 
 /// The one modifier this server can honestly set: "this is where the name is declared".
@@ -73,7 +132,10 @@ const TOKEN_MODIFIERS: &[lsp_types::SemanticTokenModifier] =
 /// The legend, as advertised in `initialize` and as the encoding indexes it.
 fn legend() -> SemanticTokensLegend {
     SemanticTokensLegend {
-        token_types: TOKEN_TYPES.iter().map(|(_, kind)| kind.clone()).collect(),
+        token_types: LEGEND
+            .iter()
+            .map(|entry| entry.token_type.clone())
+            .collect(),
         token_modifiers: TOKEN_MODIFIERS.to_vec(),
     }
 }
@@ -145,14 +207,14 @@ pub fn encode(
     let mut previous: Option<(u32, u32)> = None;
 
     for name in names {
-        let Some(index) = type_index(name.kind) else {
+        let Some(entry) = legend_entry(name.kind) else {
             continue;
         };
 
         // The kind is one this server knows and the client cannot draw: sending its number would be sending a
         // number the client maps to nothing.
         if let Some(types) = drawable
-            && !types.contains(&TOKEN_TYPES[index as usize].1)
+            && !types.contains(&entry.token_type)
         {
             continue;
         }
@@ -183,7 +245,7 @@ pub fn encode(
             delta_line,
             delta_start,
             length,
-            token_type: index,
+            token_type: entry.index,
             token_modifiers_bitset: if name.declaration { 1 } else { 0 },
         });
     }
@@ -191,12 +253,9 @@ pub fn encode(
     tokens
 }
 
-/// Which number means this kind — the position in [`TOKEN_TYPES`], which is the advertised legend.
-fn type_index(kind: NameKind) -> Option<u32> {
-    TOKEN_TYPES
-        .iter()
-        .position(|(known, _)| *known == kind)
-        .map(|at| at as u32)
+/// Where this kind sits in [`LEGEND`] — the number the encoding sends, and the type the filter compares.
+fn legend_entry(kind: NameKind) -> Option<&'static Legend> {
+    LEGEND.iter().find(|entry| entry.kind == kind)
 }
 
 pub struct SemanticTokenCapabilities;
@@ -261,6 +320,7 @@ mod tests {
             range: SourceRange::new(start, length),
             kind,
             declaration,
+            provenance: cpp_code_analysis::semantic::Provenance::DeclaredHere,
         }
     }
 
@@ -303,7 +363,7 @@ mod tests {
             "the client's own reconstruction: {tokens:?}"
         );
         assert!(
-            tokens.iter().all(|token| token.token_type == type_index(NameKind::Variable).unwrap()),
+            tokens.iter().all(|token| token.token_type == index_of(NameKind::Variable)),
             "every one is a variable"
         );
         assert!(
@@ -367,20 +427,41 @@ mod tests {
         assert_eq!(encode(file, &names, &None).len(), 1);
     }
 
-    /// The advertised legend and the numbers in the answer are the same list: a token's type index has to point at
-    /// the type the client was told about, or every colour is off by whatever the two lists disagree about.
+    /// **The advertised legend and the numbers in the answer are the same list**, position by position: a token's
+    /// type index has to point at the type the client was told about, or every colour is off by whatever the two
+    /// lists disagree about. The `index` field is written out by hand, so this is the assertion that keeps it
+    /// honest.
     #[test]
     fn the_advertised_legend_is_the_list_the_numbers_index() {
         let advertised = legend();
-        assert_eq!(advertised.token_types.len(), TOKEN_TYPES.len());
+        assert_eq!(advertised.token_types.len(), LEGEND.len());
         assert_eq!(advertised.token_modifiers, TOKEN_MODIFIERS.to_vec());
 
-        for (index, (_, kind)) in TOKEN_TYPES.iter().enumerate() {
+        for (position, entry) in LEGEND.iter().enumerate() {
             assert_eq!(
-                advertised.token_types[index],
-                *kind,
-                "the number {index} means this type"
+                entry.index, position as u32,
+                "the number is the position it is advertised at"
             );
+            assert_eq!(
+                advertised.token_types[position], entry.token_type,
+                "and the type at that position is the one the entry names"
+            );
+        }
+
+        // Every kind this server can classify has somewhere to be drawn: a kind with no entry is a name the
+        // analysis resolved and this layer silently drops.
+        for kind in [
+            NameKind::Namespace,
+            NameKind::Type,
+            NameKind::TypeParameter,
+            NameKind::EnumMember,
+            NameKind::Function,
+            NameKind::Method,
+            NameKind::Variable,
+            NameKind::Parameter,
+            NameKind::Macro,
+        ] {
+            assert!(legend_entry(kind).is_some(), "{kind:?} has a legend entry");
         }
     }
 
@@ -396,5 +477,10 @@ mod tests {
         let drawable = Some(vec![SemanticTokenType::COMMENT, SemanticTokenType::STRING]);
 
         assert!(encode(file, &names, &drawable).is_empty());
+    }
+
+    /// The number the encoding sends for a kind, for a test that wants to name it rather than spell it.
+    fn index_of(kind: NameKind) -> u32 {
+        legend_entry(kind).expect("the kind is in the legend").index
     }
 }

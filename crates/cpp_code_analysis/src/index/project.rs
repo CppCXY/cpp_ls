@@ -39,7 +39,7 @@ use super::names::{NameIndex, Posting};
 use crate::guard::Visibility;
 use crate::include::graph::Marked;
 use crate::file::paths::normalize_path;
-use crate::summary::{DeclFact, FactGuard, FileSummary, MacroFact};
+use crate::summary::{DeclFact, DeclKind, FactGuard, FileSummary, MacroFact};
 use crate::preprocess::directive::IncludeForm;
 use crate::symbol::{Known, UnknownReason};
 
@@ -4133,10 +4133,83 @@ impl ProjectIndex {
     /// leaving the order alone would make the list depend on hashing, and a client's peek list would reorder
     /// itself between two identical requests.
     pub fn definitions(&self, name: &str, visible_from: &Path) -> Known<ProjectDefinitions> {
+        let (mut certain, conditional) = match self.certain_declarations(name, visible_from) {
+            Ok(candidates) => candidates,
+            Err(reason) => return Known::Unknown(reason),
+        };
+
+        // See the note above: one namespace, however many declarations spell it.
+        if certain
+            .iter()
+            .all(|found| found.fact.kind == DeclKind::Namespace)
+        {
+            certain.truncate(1);
+        }
+
+        Known::Yes(ProjectDefinitions {
+            found: certain
+                .into_iter()
+                .map(|found| ProjectDefinition {
+                    file: found.file,
+                    fact: found.fact,
+                })
+                .collect(),
+            conditional,
+        })
+    }
+
+    /// **What kind of thing a name is, when every declaration the index holds for it agrees** — and
+    /// [`UnknownReason::Ambiguous`] when they do not.
+    ///
+    /// The question a semantic highlighter asks about a name it cannot resolve to one declaration: it has to draw a
+    /// colour, and a colour is a claim about the *kind*. An overload set is one kind (`pick(int)` and `pick(double)`
+    /// are both functions, and a reader who sees both drawn as functions has been told the truth about both), while
+    /// `size` as a member of one class and a free function somewhere else is genuinely two answers, and a client
+    /// shown either one of them has been told something false about the other.
+    ///
+    /// This is not [`ProjectIndex::definition`] with a looser rule — it is the same candidate set, read for the two
+    /// fields a highlighter needs instead of cloned whole into an answer a jump would use. See
+    /// [`crate::semantic::classified_names`], which is its only caller.
+    pub fn kind_of(&self, name: &str, visible_from: &Path) -> Known<IndexedKind> {
+        let (certain, _) = match self.certain_declarations(name, visible_from) {
+            Ok(candidates) => candidates,
+            Err(reason) => return Known::Unknown(reason),
+        };
+
+        let mut kinds: Vec<IndexedKind> = certain
+            .into_iter()
+            .map(|found| IndexedKind {
+                kind: found.fact.kind,
+                scope: found.fact.scope.map(Box::from),
+            })
+            .collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+
+        match kinds.as_slice() {
+            [only] => Known::Yes(only.clone()),
+            [] => Known::Unknown(UnknownReason::ConditionalCompilation),
+            _ => Known::Unknown(UnknownReason::Ambiguous(Box::from(name))),
+        }
+    }
+
+    /// The declarations the index holds for `name` and `visible_from` can see: the ones that are certainly in scope,
+    /// in the order every declaration answer reports in, plus a **count** of the ones reachable only through a
+    /// conditional `#include`.
+    ///
+    /// The walk [`ProjectIndex::definitions`] and [`ProjectIndex::kind_of`] share. It is a function rather than two
+    /// copies because the rule it applies — a declaration the file writes itself wins over one it includes, ordered
+    /// by file then offset, with the conditional ones counted rather than offered — is the part of a definition
+    /// answer that is easy to get subtly different in two places.
+    fn certain_declarations(
+        &self,
+        name: &str,
+        visible_from: &Path,
+    ) -> Result<(Vec<ProjectDeclaration>, usize), UnknownReason> {
         let mut candidates = self.files_declaring(name, visible_from);
 
         if candidates.is_empty() {
-            return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(name)));
+            return Err(UnknownReason::NotDeclaredHere(Box::from(name)));
         }
 
         // A declaration the file itself writes wins over one it includes, and is the one a reader means: a
@@ -4159,44 +4232,23 @@ impl ProjectIndex {
             .filter(|found| found.visibility == IncludeVisibility::Conditional)
             .count();
 
-        let mut certain: Vec<&VisibleDeclaration<'_>> = candidates
-            .iter()
+        let mut certain: Vec<ProjectDeclaration> = candidates
+            .into_iter()
             .filter(|found| found.visibility == IncludeVisibility::Unconditional)
+            .map(|found| ProjectDeclaration::of(&found))
             .collect();
 
         if certain.is_empty() {
-            return Known::Unknown(UnknownReason::ConditionalCompilation);
+            return Err(UnknownReason::ConditionalCompilation);
         }
 
         certain.sort_by(|one, other| {
             one.file
                 .cmp(&other.file)
-                .then_with(|| {
-                    one.fact
-                        .name_range
-                        .start_offset
-                        .cmp(&other.fact.name_range.start_offset)
-                })
+                .then_with(|| one.start_offset.cmp(&other.start_offset))
         });
 
-        // See the note above: one namespace, however many declarations spell it.
-        if certain
-            .iter()
-            .all(|found| found.fact.kind == crate::DeclKind::Namespace)
-        {
-            certain.truncate(1);
-        }
-
-        Known::Yes(ProjectDefinitions {
-            found: certain
-                .into_iter()
-                .map(|found| ProjectDefinition {
-                    file: found.file.clone(),
-                    fact: found.fact.clone(),
-                })
-                .collect(),
-            conditional,
-        })
+        Ok((certain, conditional))
     }
 
     /// What the macro name `name` is at `offset` in the file at `visible_from`.
@@ -4896,6 +4948,42 @@ pub struct VisibleDeclaration<'a> {
     pub file: PathBuf,
     pub fact: &'a DeclFact,
     pub visibility: IncludeVisibility,
+}
+
+/// One declaration a name resolved to, **owned** so that the walk that found it can hand it back: a
+/// [`VisibleDeclaration`] borrows the index, and the two queries built on this want to sort, dedup and truncate the
+/// list before they answer.
+struct ProjectDeclaration {
+    file: PathBuf,
+    fact: DeclFact,
+    start_offset: usize,
+}
+
+impl ProjectDeclaration {
+    fn of(found: &VisibleDeclaration<'_>) -> ProjectDeclaration {
+        ProjectDeclaration {
+            file: found.file.clone(),
+            fact: found.fact.clone(),
+            start_offset: found.fact.name_range.start_offset,
+        }
+    }
+}
+
+/// **What the index says a name is**, as the two facts a colour is drawn from — the answer to
+/// [`ProjectIndex::kind_of`].
+///
+/// The pair and not a [`DeclFact`], because a highlighter asks this once per distinct spelling in a file and a
+/// `DeclFact` is five owned strings deep: cloning one per spelling to read two fields off it is most of what such a
+/// request would cost. See [`ProjectIndex::kind_of`] for why agreement among the candidates is the rule.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct IndexedKind {
+    pub kind: DeclKind,
+    /// The qualified scope the declaration was written in, or `None` at file scope.
+    ///
+    /// Part of the answer rather than a detail: it is what tells a **member** from a free name (`std::string::size`
+    /// from `::size`), and it is also why this type is ordered — two candidates are one answer only when both
+    /// fields agree.
+    pub scope: Option<Box<str>>,
 }
 
 /// The answer to a cross-file definition question.

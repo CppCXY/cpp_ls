@@ -403,11 +403,13 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             let mut round = 0;
             loop {
                 let current = working.as_ref().unwrap_or(stream);
+                let t0 = std::time::Instant::now();
                 let tree = {
                     let _parse = StageTimer::new(Stage::RenderParse);
                     CppParser::parse(&current.text, config())
                 };
                 let crossing = brace_crossings(&tree, current);
+                eprintln!("TMP round {round}: {:?} tokens {} crossing {}", t0.elapsed(), current.len(), crossing.len());
 
                 if crossing.is_empty() || round == 2 {
                     break (tree, crossing.len());
@@ -419,6 +421,18 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             }
         };
         let program: &crate::RenderedUnit = working.as_ref().unwrap_or(stream);
+        {
+            let mut prev = 0.0f64;
+            for k in 1..=20usize {
+                let mut cut = program.text.len() * k / 20;
+                while cut < program.text.len() && (!program.text.is_char_boundary(cut) || program.text.as_bytes()[cut] != b' ') { cut += 1; }
+                let t0 = std::time::Instant::now();
+                let _tree = CppParser::parse(&program.text[..cut], config());
+                let ms = t0.elapsed().as_secs_f64() * 1000.0;
+                eprintln!("TMP prefix {k}/20: {ms:.0} ms (+{:.0}) at {:?}", ms - prev, program.file_at(cut.saturating_sub(1)).map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())));
+                prev = ms;
+            }
+        }
         let summary = {
             let _sweep = StageTimer::new(Stage::RenderSweep);
             self.index_tree(root, &program.text, &tree, key)

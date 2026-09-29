@@ -5,7 +5,7 @@
 //! in the C++ tree at all). Each of them is pinned here, and so is the refusal: a name this analysis cannot place
 //! gets **no** classification rather than a plausible one.
 
-use cpp_code_analysis::semantic::{Name, NameKind};
+use cpp_code_analysis::semantic::{Name, NameKind, Provenance};
 use cpp_code_analysis::{
     CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
 };
@@ -56,6 +56,15 @@ fn kind_of(source: &str, spelling: &str) -> Option<NameKind> {
         .collect();
 
     found.first().copied()
+}
+
+/// Every classification of one spelling, as `(kind, is a declaration)` in source order.
+fn all_of(source: &str, spelling: &str) -> Vec<(NameKind, bool)> {
+    classified(source)
+        .into_iter()
+        .filter(|(text, _, _)| text == spelling)
+        .map(|(_, kind, declaration)| (kind, declaration))
+        .collect()
 }
 
 /// **Every kind the model can tell apart**, in one file: the cases that look alike from the text are the ones
@@ -220,4 +229,142 @@ int count(Widget& w) { int local = LIMIT; return local + w.size; }
         );
     }
     assert!(names.iter().all(|name| name.range.length > 0));
+}
+
+/// **A use is classified by what it resolves to, and a shadowed name resolves to the shadowing declaration.**
+///
+/// The case a spelling map cannot answer: this file declares a member `Widget::size`, a free `size(int)`, and a
+/// parameter called `size`, and every use of the spelling has to be drawn as the one it means. The first version of
+/// this pass classified all of them by the spelling, so the parameter came out as a free **function**.
+#[test]
+fn a_use_resolves_to_the_declaration_it_names_not_to_the_spelling() {
+    let source = "\
+struct Widget { int size; };
+int size(int value);
+int scaled(int size) { return size * size; }
+int area(Widget& w) { return w.size; }
+";
+    let size = all_of(source, "size");
+    assert_eq!(
+        size,
+        vec![
+            // The member's declaration, the free function's declaration, the parameter's declaration and its two
+            // uses — and then **nothing** for the member access, see the test below.
+            (NameKind::Variable, true),
+            (NameKind::Function, true),
+            (NameKind::Parameter, true),
+            (NameKind::Parameter, false),
+            (NameKind::Parameter, false),
+        ],
+        "a parameter is not the file-scope function that shares its spelling"
+    );
+}
+
+/// **A member access is not the file-scope declaration that shares its spelling** — the shape that made the old
+/// spelling map most visibly wrong.
+///
+/// `w.size` is looked up in the type of `w`, which a scope chain cannot do, so the index is asked — and when the
+/// class is not among the files this one can see, the question is asked about a *name*, where the file's own free
+/// `size` is a different declaration with the same spelling. That is genuinely ambiguous, and an ambiguous name gets
+/// **no** colour rather than one of the two: drawing `w.size` as a free function is the mistake this module was
+/// rewritten to stop making, and drawing it as a member would be a guess from the spelling.
+#[test]
+fn a_member_access_whose_spelling_is_ambiguous_is_left_unclassified() {
+    let source = "\
+struct Widget { int size; };
+int size(int value);
+int area(Widget& w) { return w.size; }
+";
+    let size = all_of(source, "size");
+    assert_eq!(
+        size,
+        vec![
+            (NameKind::Variable, true),
+            (NameKind::Function, true),
+        ],
+        "the two declarations are drawn; the member access is not"
+    );
+}
+
+/// **A member access whose class the index knows is classified from that class.** `w.size` is a member of whatever
+/// `w` is, and the index is what knows a class's members — the same `Widget::size` question
+/// `textDocument/definition` asks.
+#[test]
+fn a_member_access_is_classified_from_the_class_it_is_a_member_of() {
+    let header = "struct Widget { int size; };\n";
+    let source = "#include \"b.h\"\nint measure(Widget& w) { return w.size; }\n";
+    let session = session_with(&[("/p/a.cpp", source), ("/p/b.h", header)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let names: Vec<(String, NameKind, Provenance)> = session
+        .classified_names(&view)
+        .into_iter()
+        .map(|name| {
+            (
+                source[name.range.start_offset..name.range.end_offset()].to_string(),
+                name.kind,
+                name.provenance,
+            )
+        })
+        .collect();
+
+    assert!(
+        names.contains(&("size".to_string(), NameKind::Variable, Provenance::Found)),
+        "the member's declaration is what `w.size` names: {names:?}"
+    );
+}
+
+/// **Which layer answered is part of the answer.** A declaration's own name, a use the file's own scopes resolved,
+/// a name only the index knows, and a macro are four different kinds of evidence, and a consumer that draws a
+/// colour is entitled to tell them apart.
+#[test]
+fn the_provenance_says_which_layer_answered() {
+    let header = "struct Widget { int size; };\n";
+    let source = "\
+#include \"b.h\"
+#define LIMIT 8
+int scale(int factor) { return factor * LIMIT; }
+int measure(Widget& w) { return w.size; }
+";
+    let session = session_with(&[("/p/a.cpp", source), ("/p/b.h", header)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+
+    let provenance = |spelling: &str| -> Vec<Provenance> {
+        session
+            .classified_names(&view)
+            .into_iter()
+            .filter(|name| {
+                &source[name.range.start_offset..name.range.end_offset()] == spelling
+            })
+            .map(|name| name.provenance)
+            .collect()
+    };
+
+    assert_eq!(provenance("scale"), vec![Provenance::DeclaredHere], "written here");
+    assert_eq!(
+        provenance("factor"),
+        vec![Provenance::DeclaredHere, Provenance::Held],
+        "a parameter's own name, then the use the scope chain resolved"
+    );
+    assert_eq!(
+        provenance("size"),
+        vec![Provenance::Found],
+        "a member of a class in another file is the index's answer"
+    );
+    assert_eq!(provenance("Widget"), vec![Provenance::Found], "and so is the class itself");
+    assert_eq!(provenance("LIMIT"), vec![Provenance::Macro, Provenance::Macro], "a #define, not a declaration");
+}
+
+/// A client asked for a colour on a name it cannot have one on: `int`, `return` and a literal are not identifiers,
+/// which is the filter this pass applies before it looks anything up.
+#[test]
+fn keywords_and_literals_are_not_classified() {
+    let source = "struct Widget { int size; };\nint f() { return 1; }\n";
+    let kinds = classified(source);
+
+    for (text, _, _) in &kinds {
+        assert!(
+            !matches!(text.as_str(), "int" | "return" | "struct"),
+            "`{text}` is not a name this layer classifies: {kinds:?}"
+        );
+    }
 }
