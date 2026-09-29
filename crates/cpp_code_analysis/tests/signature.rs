@@ -186,6 +186,76 @@ int f() { return scale(1, |); }
     );
 }
 
+/// **A member call to an overloaded member answers every overload too** — `s.push_back(` is two declarations in
+/// `basic_string`, and the member path had been left singular while the name path became plural.
+///
+/// The base's overloads count as well, which is why this goes through the member *list* rather than through the
+/// one member a direct lookup picks: what a reader can call on a derived object includes what its bases declare.
+#[test]
+fn a_member_call_answers_every_overload_of_the_member() {
+    let source = "\
+struct Widget {
+    void scaled(int factor);
+    void scaled(double factor, int places);
+    void grow();
+};
+int f(Widget& w) { return w.scaled(|); }
+";
+    let offset = source.find('|').expect("the fixture marks the cursor");
+    let without_marker = source.replace('|', "");
+
+    let session = session_with(&[("/p/a.cpp", &without_marker)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let signatures = session.signatures_at(&view, offset);
+
+    let labels: Vec<&str> = signatures.iter().map(|found| found.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        ["scaled(int factor)", "scaled(double factor, int places)"],
+        "both member overloads, and not the one that is not called"
+    );
+}
+
+/// **A member inherited from a base is a candidate too**, and its parameters come from the base's declaration.
+#[test]
+fn a_member_call_answers_an_inherited_overload() {
+    let source = "\
+struct Base { void scaled(int factor); };
+struct Widget : Base { };
+int f(Widget& w) { return w.scaled(|); }
+";
+    let offset = source.find('|').expect("the fixture marks the cursor");
+    let without_marker = source.replace('|', "");
+
+    let session = session_with(&[("/p/a.cpp", &without_marker)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let signatures = session.signatures_at(&view, offset);
+
+    assert_eq!(
+        signatures.iter().map(|found| found.label.as_str()).collect::<Vec<_>>(),
+        ["scaled(int factor)"],
+        "the base declares it, and the derived class inherits it"
+    );
+}
+
+/// **A declaration laid out over several lines is one line in the popup**, and the spans still point at the
+/// parameters. Measured on MSVC's `<xstring>`: three of `basic_string::append`'s nine overloads are wrapped, so this
+/// is the ordinary shape in the headers this analysis reads, not a corner. The tidying is the same rule the fact's
+/// own `parameter_list` gets — one implementation — and the byte map is why it can be applied to a label at all.
+#[test]
+fn a_wrapped_parameter_list_is_one_line_and_the_spans_follow_it() {
+    let (label, spans, active) = label_where_marked(
+        "int scale(int count,\n          double factor);\nint f() { return scale(|); }\n",
+    );
+
+    assert_eq!(
+        label, "scale(int count, double factor)",
+        "the declaration's newline and indentation are the file's layout, not the signature"
+    );
+    assert_eq!(spans, vec!["int count".to_string(), "double factor".to_string()]);
+    assert_eq!(active, Some(0));
+}
+
 /// A callee in another file with several overloads: each is read from the same header, and the header is parsed
 /// once for the answer rather than once per overload.
 #[test]

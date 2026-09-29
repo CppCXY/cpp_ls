@@ -29,6 +29,11 @@ void probe_auto() {
     std::format("{}", n);
     std::string::iterator it;
 }
+
+void probe_member() {
+    std::string s;
+    s.append("x");
+}
 "#;
 
 fn main() {
@@ -186,6 +191,56 @@ fn main() {
     }
 
     // ---------------------------------------------------------------------------------------------
+    // **The same two questions after the declaring header has been read the way a compiler reads it.**
+    //
+    // `auto y = x.back()` answers `_NODISCARD _CONSTEXPR20 reference` today, and that spelling can be wrong in two
+    // different ways with two different fixes: the library's own macros standing where specifiers go (a *reading*
+    // problem — the cooked rendering has them expanded), or a member alias (`reference` is `typedef _Ty& reference`)
+    // that the substitution step did not follow (a *type* problem). Cooking the header separates them: if the answer
+    // becomes `char&`, the fix is to have the cooked reading; if it stays `reference`, the alias step is what needs
+    // the work.
+    // ---------------------------------------------------------------------------------------------
+    if let Some(back) = after("auto y = x.back", "auto y = x.".len())
+        && let Known::Yes(declaring) = session.type_at(&view, back)
+    {
+        println!("\n--- after cooking {} ---", declaring.file.display());
+        session.want_cooked_reading(&declaring.file);
+        let mut rounds = 0usize;
+        while (session.pending() > 0 || session.pending_cooking() > 0) && rounds < 10_000 {
+            session.advance(64);
+            rounds += 1;
+        }
+
+        if let Some(y) = after("auto y", "auto ".len()) {
+            println!("the `y` of `auto y`   {:?}", session.type_at(&view, y));
+        }
+        println!("`back` in the call    {:?}", session.type_at(&view, back));
+
+        // **What the two readings of that header say about `back`**, because "the cook did not change the answer"
+        // has two causes: the cooked reading does not exist (the cook did not run), or it exists and spells the
+        // return type the same way. Only the second one means the macros are not the problem.
+        let raw = session
+            .index()
+            .summary(&declaring.file)
+            .map(|summary| summary.declarations.iter().filter(|fact| fact.name == "back").count());
+        let cooked = session
+            .index()
+            .cooked_declarations(&declaring.file)
+            .map(|facts| facts.iter().filter(|fact| fact.name == "back").count());
+        println!("declarations named `back`: raw {raw:?}, cooked {cooked:?}");
+        if let Some(facts) = session.index().cooked_declarations(&declaring.file)
+            && let Some(fact) = facts.iter().find(|fact| fact.name == "back")
+        {
+            println!("the cooked fact: returns {:?} type_of {:?}", fact.returns, fact.type_of);
+        }
+        if let Some(summary) = session.index().summary(&declaring.file)
+            && let Some(fact) = summary.declarations.iter().find(|fact| fact.name == "back")
+        {
+            println!("the raw fact:    returns {:?} type_of {:?}", fact.returns, fact.type_of);
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------
     // **What a hover on an overloaded name has to work with**: the name question answers `Ambiguous`, and the
     // plural question is what the popup is built from — one line per declaration, from the facts alone.
     // ---------------------------------------------------------------------------------------------
@@ -230,6 +285,16 @@ fn main() {
                 signature.active_parameter,
                 signature.declared_in.display()
             );
+        }
+    }
+
+    // …and the same question about a **member** call: `s.append(` is where an overload set is the difference between
+    // a popup that lists what the reader can write and one that shows whichever overload happened to be picked.
+    if let Some(offset) = after("s.append(\"x\"", "s.append(".len() + 1) {
+        let signatures = session.signatures_at(&view, offset);
+        println!("s.append( → {} signature(s)", signatures.len());
+        for signature in signatures.iter().take(12) {
+            println!("   {}", signature.label);
         }
     }
 }

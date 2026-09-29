@@ -1617,3 +1617,135 @@ LSP 侧一条新测试(每个重载带自己的 active parameter)+ 两条适配�
 
 **下一步**(登记,顺序按价值):① **成员调用的重载集合**(`s.push_back(` 今天只报 `direct_member` 挑的那一个);
 ② `auto` 的类型拼写;③ `private`/`protected` 的访问级别。
+
+---
+
+## 30. 成员调用的重载集合:9 个 `append`,以及签名被折行的那个问题
+
+第 ① 条。`callees_of_a_call` 的成员分支原来退回单数(`direct_member` 挑一个),现在走 `members_of` ——
+**整个成员表、含基类** —— 再按写下的名字过滤:
+
+```text
+s.append( → 9 signature(s)                ← MSVC 的 basic_string::append,一个不少
+std::format( → 4 signature(s)             ← 上一轮那条,没退化
+```
+
+顺带补了两条测试:同一个类里的两个成员重载、**继承来的**成员重载(基类声明、派生类调用)。
+
+### 折行:签名 label 里的换行
+
+第一次量出来是这样的(9 条里 3 条):
+
+```text
+append(
+        _In_reads_(_Count) const _Elem* const _Ptr, _CRT_GUARDOVERFLOW const size_type _Count)
+```
+
+`signature.rs` 用的是节点原文,而原文是**给读文件的人排版**的。这和我两轮前给事实的 `parameter_list` 做的净化
+是**同一条规则**,所以现在只有一份实现:`inlay::tidy_list_text`(空白折叠、`(` 后 / `)` 与 `,` 前不留空格)。
+
+**但签名多一个约束**:它的 `parameters` 是 label **内部的字节区间**(客户端拿它加粗),所以净化必须**带回一张
+字节映射** —— `map[i]` = 原文第 `i` 个字节落到了哪;否则去掉换行的同时把高亮挪到了错的字节上,那比换行更糟。
+`tidy_list_text` 因此返回 `(净化后的文本, map)`,`parameter_list_text` 用前者、`signatures_at` 两个都用。
+
+新测试 `a_wrapped_parameter_list_is_one_line_and_the_spans_follow_it`:声明跨两行 → label 一行,且
+按 span 切出来的两段仍然正好是两个参数。
+
+**看齐**:554 + 全部集成测试绿(签名套件 15 条),clippy 干净。
+
+---
+
+## 31. C++ 模块:**语法层已经有了,分析层一个事实都没有** —— 以及按编译器的设计
+
+用户在 ① 做完之后要求"考虑支持 C++ 的模块,需要针对不同编译器"。先把现状量清楚(读代码,不是猜):
+
+**parser 已经支持模块语法** —— `ModuleDecl` / `ImportDecl` / `GlobalModuleFragment` / `PrivateModuleFragment`,
+以及 AST 取用:`CppModuleDecl::{is_interface, get_name, get_partition}`、`CppModuleName::get_name_text`、
+`CppImportDecl::{get_name, get_header_name}`。**分析层是零**:没有"这个文件声明了模块 M"的事实,没有
+`import M;` 的边,没有模块图,`visible_files` 只看 `#include`。所以 `import M;` 之后,模块里的名字全部不可见 ——
+和 `<format>` 那次一样,是"静默地什么都没有"。
+
+### 决定设计的那条差别:`import M;` **不带来任何文本**
+
+能带来文本的只有两样:
+
+1. **编译器的产物(BMI)**:MSVC `.ifc`、Clang `.pcm`、GCC `gcm.cache/*.gcm`。它们都是**序列化的 AST**,
+   和编译器版本、标志一一对应(格式不保证兼容),读它们等于复刻一个编译器的内部格式 —— 和本项目
+   "落盘的是事实不是树"那条原则正面冲突。
+2. **项目里的接口单元源码**:`export module M;` 所在的那个 `.ixx` / `.cppm` / `.cpp`。**这是我们能读的**,
+   而且项目扫描已经在读它。
+
+**所以设计是**:模块是**第二条可见性边**,和 `#include` 并列,而不是第二个前端:
+
+```text
+新的 summary 事实   文件 → 声明的模块名 / 是否接口单元 / 分区 / 全局模块片段
+                    文件 → import 的模块名(含 `import <header>;` 头单元、`import :part;`)
+新的 ModuleGraph     模块名 → 接口单元文件(项目内扫描;两个接口单元同名 = 歧义,如实报告)
+visible_files        `#include` 之外,`import M;` 解析到的接口单元的**导出**名字也算可见
+```
+
+**"导出"必须建模,否则更糟**:接口单元里只有 `export` 的名字对 importer 可见,所以事实需要一个
+(按模块链接)的可见性位;把模块内的私有名字泄漏出去,比现在"什么都没有"更难查。
+
+**诚实的分界**:`import std;` 和第三方预编译模块在项目里**找不到**声明它们的文件。这时不能假装可见,
+要给一条明确的诊断("这个模块不在本项目里;BMI 这种格式本分析不读"),并**按编译器说清去哪找**。
+这和 §27 给 `<format>` 加的那条 note 是同一个形状:用户有权利知道"为什么这里是空的"。
+
+### 按编译器的差异(只影响怎么构建,不影响上面的设计)
+
+| | MSVC | Clang | GCC |
+| --- | --- | --- | --- |
+| 接口单元扩展名 | `.ixx` | `.cppm` | `.cppm` |
+| 编译接口单元 | `/std:c++20 /interface` → `.ifc` | `-std=c++20 -x c++-module --precompile` → `.pcm` | `-fmodules-ts -x c++-module` → `gcm.cache/M.gcm` |
+| 消费方怎么找到它 | `/reference M=x.ifc`(或 `/ifcSearchDir`) | `-fmodule-file=M=x.pcm` | **没有标志**:按名字在 `gcm.cache/` 里找 |
+| `import std;` | 支持(`/std:c++latest`) | 要先构建 std 模块 | 要先构建 std 模块 |
+
+所以要做的三件"针对不同编译器"的事,都很小:① `.ixx`/`.cppm` 要进 `workspace.source_extensions` 的默认值;
+② 命令行里认出这些模块开关(别当成未知参数、更别当成 include 路径);
+③ 那条"找不到模块"的诊断按编译器给出去处(`/reference`、`-fmodule-file`、`gcm.cache/`)。
+
+**第一步(小,可量)**:在 `#`-指令扫描旁边加一趟**模块扫描**(一个文件声明的模块名 + import 列表),
+进 summary 的新字段(CODEC_VERSION 19),然后 `examples/modules_probe.rs` 在一个模块工程上打印模块图和
+每条 import 解析到什么。**不碰 BMI**,也不假装能读它。
+
+---
+
+## 32. `auto`:三个各自独立的缺陷,量出来两个共同原因
+
+用户点名的第 ② 条。起点是一个数字:`auto y = x.back();` 的 hover 答 **`_NODISCARD _CONSTEXPR20 reference`**。
+
+我先把"这可能是两个不同的问题"变成一次实验:如果**把声明所在的头按编译器的方式读一遍**(熟读),答案会不会变?
+答案是**不会**(熟读读数存在、`back` 有 3 条,但 `type_at` 还是老样子),于是把两个读数的事实并排打出来:
+
+```text
+raw fact:    returns Some("_NODISCARD constexpr const_reference")
+cooked fact: returns Some("const_reference")
+```
+
+**同一份文本的两个读数对同一个声明说了不同的话** —— 熟读那份是对的,而查询用的是 raw 那份。三个缺陷因此定位:
+
+| # | 缺陷 | 修法 | 读数 |
+| --- | --- | --- | --- |
+| ① | **返回类型是"文本剥关键字"读的**:`DECLARATION_SPECIFIERS` 里没有库自己的宏(`_NODISCARD`、`_CONSTEXPR20`),所以整个宏前缀留在拼写里 | 换成**按语法读**(`read_specifiers`,和 `type_of` 同一个读法):宏站在那里就是一个 `NameExpr`,而"没有 C++ 类型是连续两个非限定名字",所以**取最后一个名字**,别的按节点种类丢掉 | `back` 的 returns:`_NODISCARD _CONSTEXPR20 reference` → **`reference`**;补全详情里 `size` 从 `_NODISCARD _CONSTEXPR20 size_type ()` 变成 `size_type ()`,`push_back` 从 `_CONSTEXPR20 void (…)` 变成 `void (…)` |
+| ② | **嵌套别名走查只跑在成员变量的 `type_of` 上,没跑在调用的 `returns` 上** | 把那段走查提成一个闭包,两处都走(`v.front` 和 `x.back()` 是同一个问题) | `x.back()`:`reference` → **`value_type&`** |
+| ③ | **走查要求"整条拼写是个裸名字"**,而 `value_type&` 不是 —— 于是差一步停下 | 改成看**类型的 base**(`Type::class_name()`,引用是透明的),替换时**保留操作符**:新增 `Type::replacing(name, with)`(和 `substituted` 同一趟结构走查,区别只是替换的是"名字"还是"模板参数") | `x.back()`:`value_type&` → **`_Elem&`** |
+
+②③ 合起来是 MSVC 的 `<xstring>` 真实需要的两步链:`reference` → `value_type&` → `_Elem&`。
+每一步都是同一个类的成员别名,而每一步之后**都不是**一个裸名字。
+
+### 这一轮**没做完**的两件,以及它们各自为什么
+
+量到 `_Elem&` 就停了,剩下两步各有各的原因,都不是"再试一次":
+
+1. **`auto y` 自己还是 `reference`**,而同一行的 `x.back()` 已经是 `_Elem&`。因为"一次调用有什么"有**两个读者**:
+   `what_a_call_has_in`(成员访问那条路,**这轮加了走查**)和 `NamedDeclaration::what_a_call_has`(`auto` 的推断从
+   `initializer_type` → `type_of_a_call` 走这条,**没有走查**)。按这个项目自己的规矩,两个读者必须合成一个 ——
+   合成需要把 `index`/`scopes`/`path` 传给后者,是一次重构而不是一个补丁。
+2. **`_Elem&` → `char&`**:类是通过**别名**到的(`std::string` → `basic_string<char, char_traits<char>, allocator<char>>`),
+   而 `resolve_aliases` 只解析**名字**、把目标里的模板实参丢了 —— 于是 `member_bindings` 拿到空配对,
+   `_Elem` 没东西可换。这条同时解释了另一个老现象:`type_at("std::string::size_type")` 是 `UnknownType`。
+
+两条都登记在下面,顺序就是它们应该被做的顺序(先 1 再 2:1 是一个答案有两条实现,2 才是缺一步)。
+**看齐**:554 + 全部集成测试绿,clippy 干净。
+
+**下一步**:`auto` 的剩余两步 → ③ `private`/`protected` 访问级别 → §31 的模块第一步。

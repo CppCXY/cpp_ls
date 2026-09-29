@@ -711,11 +711,30 @@ fn declared_returns_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Op
         .filter(|operators| operators.chars().all(|c| c == '*' || c == '&' || c.is_whitespace()))
         .unwrap_or_default();
 
-    let spelling = format!(
-        "{} {}",
-        strip_declaration_specifiers(&specifiers?.text().to_string()),
-        before_the_name
-    );
+    // **The specifiers are read as syntax, not as text**, which is the rule [`crate::sema::types::read_specifiers`]
+    // states and the one that already fixed `std::cin`: a macro standing where a specifier goes is a *name* to the
+    // grammar, no C++ type is spelled as two unqualified names in a row, so **the last name wins** — and everything
+    // that is not a type's name (attributes, `constexpr`, storage class) is dropped by node kind rather than by
+    // being on a list of keywords.
+    //
+    // What the text-based rule cost, measured on MSVC's `<xstring>`: `_NODISCARD _CONSTEXPR20 reference back()`
+    // recorded `_NODISCARD _CONSTEXPR20 reference` as the return type, because neither macro is in
+    // `DECLARATION_SPECIFIERS`. Nothing can resolve that spelling — the macros are the library's, the name is last —
+    // so `auto y = x.back()` answered with it, and `y` had no type at all. Read as syntax the same declaration says
+    // `reference`, which is a member alias the substitution step can follow (`typedef _Ty& reference` with
+    // `_Ty = char` → `char&`).
+    //
+    // An **empty** specifier sequence is still `None` rather than `void`: a constructor spells no return type, and
+    // the node-based reader's fallback (`void`) is the right answer for "this declaration wrote nothing as a type"
+    // only when there is a declaration — see the `None` half of this function's contract.
+    let specifiers = specifiers?;
+    let spelling = if specifiers.text().to_string().trim().is_empty() {
+        String::new()
+    } else {
+        crate::sema::types::read_specifiers(&specifiers).to_string()
+    };
+
+    let spelling = format!("{spelling} {before_the_name}");
     let spelling = spelling.split_whitespace().collect::<Vec<_>>().join(" ");
 
     // A **deduced** return type is not a type this layer can name. `auto` and `decltype(auto)` are the two

@@ -141,19 +141,33 @@ where
             continue;
         };
 
+        // **The label is one line, and the spans follow it.** The declaration's list is laid out for a reader of the
+        // file (MSVC wraps three of `basic_string::append`'s nine overloads), and a popup label with a newline in it
+        // is a popup with a broken signature — so the same tidying the fact's `parameter_list` gets is applied here,
+        // *with its byte map*, because the spans a client bolds are offsets into this label.
         let list_text = list.text().to_string();
         let list_text = list_text.trim_end();
-        let list_start = spelling.len();
-        let label = format!("{spelling}{list_text}");
-
         let list_begin = usize::from(list.text_range().start());
-        let parameters: Vec<(Range<usize>, String)> = parameters_of(&list)
+        let raw: Vec<(Range<usize>, String)> = parameters_of(&list)
             .into_iter()
             .map(|(parameter, _)| {
                 let text = parameter.text().to_string();
                 let text = text.trim_end();
-                let start = list_start + (usize::from(parameter.text_range().start()) - list_begin);
+                let start = usize::from(parameter.text_range().start()) - list_begin;
                 (start..start + text.len(), text.to_string())
+            })
+            .collect();
+
+        let (tidy, moved) = crate::inlay::tidy_list_text(list_text);
+        let list_start = spelling.len();
+        let label = format!("{spelling}{tidy}");
+        let parameters: Vec<(Range<usize>, String)> = raw
+            .into_iter()
+            .map(|(range, text)| {
+                (
+                    list_start + moved[range.start]..list_start + moved[range.end],
+                    text,
+                )
             })
             .collect();
 
@@ -166,6 +180,17 @@ where
             documentation: None,
         });
     }
+
+    // **One row per signature**, which is the same rule the member and name lists apply and for the same reason: a
+    // list is something a reader *picks* from, and two identical labels are one choice offered twice. It is not
+    // hypothetical — a declaration the **raw** reading and the **cooked** reading both found arrives as two
+    // candidates with the same name in the same file, and MSVC's headers declare many members twice on purpose
+    // (`push_back` for an lvalue and for an rvalue prints two different signatures, which is right; the same
+    // declaration found by two readings prints one, twice).
+    //
+    // The first of a pair is kept, which is the declaration the index's own order reached first.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    signatures.retain(|signature| seen.insert(signature.label.clone()));
 
     signatures
 }

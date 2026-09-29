@@ -349,12 +349,74 @@ impl Type {
             Type::Builtin { .. } => self.clone(),
         }
     }
+    /// **This type with one name in it replaced** — `value_type&` with `value_type` = `char` is `char&`.
+    ///
+    /// The companion of [`Type::substituted`], and the difference is what is being replaced: that one replaces a
+    /// *template parameter* by the argument a use paired with it, this one replaces a name by whatever that name
+    /// turned out to mean. Both walk the same structure for the same reason — spellings cannot be edited as text —
+    /// and the walk is the whole point here: `value_type&` is not a bare name, so a reader that only ever looked at
+    /// whole spellings stopped one step short of the answer.
+    ///
+    /// Measured, in MSVC's `<xstring>`: `back()` returns `reference`, which is `value_type&`, which is `_Ty&`,
+    /// which is `char&` for a `std::string`. Every step is a member alias of the same class, and every step after
+    /// the first is the **base** of a type rather than the whole of it.
+    ///
+    /// The operators around the name stay where they are, which is the language's rule: `value_type&` with
+    /// `value_type` = `_Ty*` is `_Ty*&` — a reference to a pointer — and dropping either would answer a different
+    /// type. A name carrying template arguments of its own (`value_type<int>`) is deliberately **not** replaced:
+    /// the arguments would have to be substituted into the replacement, and a member alias of a class this walk is
+    /// about is not a template in any case it exists for.
+    pub fn replacing(&self, name: &str, with: &Type) -> Type {
+        match self {
+            Type::Named {
+                name: found,
+                arguments,
+            } if arguments.is_empty() && found == name => with.clone(),
+            Type::Named {
+                name: found,
+                arguments,
+            } => Type::Named {
+                name: found.clone(),
+                arguments: arguments
+                    .iter()
+                    .map(|argument| argument.replacing(name, with))
+                    .collect(),
+            },
+            Type::TemplateParameter { .. } | Type::Builtin { .. } => self.clone(),
+            Type::Pointer { to } => Type::Pointer {
+                to: Arc::new(to.replacing(name, with)),
+            },
+            Type::Reference { to, rvalue } => Type::Reference {
+                to: Arc::new(to.replacing(name, with)),
+                rvalue: *rvalue,
+            },
+            Type::Array { of, extent } => Type::Array {
+                of: Arc::new(of.replacing(name, with)),
+                extent: *extent,
+            },
+            Type::Function {
+                returns,
+                parameters,
+            } => Type::Function {
+                returns: Arc::new(returns.replacing(name, with)),
+                parameters: parameters
+                    .iter()
+                    .map(|parameter| parameter.replacing(name, with))
+                    .collect(),
+            },
+            Type::Pack { of } => Type::Pack {
+                of: Arc::new(of.replacing(name, with)),
+            },
+            Type::Qualified { of } => Type::Qualified {
+                of: Arc::new(of.replacing(name, with)),
+            },
+        }
+    }
 }
 
 impl fmt::Display for Type {
     /// The type **as a file would write it**, which is what a consumer shows: the spelling each part was read
     /// with, put back together in the order the syntax wrote it.
-    ///
     /// This is a writer for a human, not a parser's inverse: `int* const` and `const int*` differ by which side
     /// the `const` was on, and that difference is in the spelling of the parts rather than in the shape. Where
     /// this layer *does* know better than the source — a class named by a template's arguments — it still writes
@@ -1047,7 +1109,7 @@ fn declared_name_range(declarator: &CppSyntaxNode) -> Option<cpp_parser::SourceR
 /// The qualifiers are dropped rather than modelled, and the reason is the same one [`Type`] gives for keeping
 /// spellings: this layer does not resolve aliases, so `const Int` and `Int` are already two names for one type, and
 /// a `const` on the base would be a third axis no query here asks about.
-fn read_specifiers(specifiers: &CppSyntaxNode) -> Type {
+pub(crate) fn read_specifiers(specifiers: &CppSyntaxNode) -> Type {
     let mut builtin: Vec<String> = Vec::new();
     // The **last** name in the sequence, and the last unmodelled node — see the two notes below.
     let mut named: Option<Type> = None;

@@ -178,13 +178,21 @@ pub(crate) fn parameter_list_of(view: &FileView, offset: usize) -> Option<CppSyn
 /// One function for the two readers that want the spelling rather than the nodes: a declaration's fact
 /// ([`crate::sema::declarations::parameter_list_at`], which is what a completion shows beside a name) and anything
 /// that has to print a signature without walking it.
+pub(crate) fn parameter_list_text(declarator: &CppSyntaxNode) -> Option<String> {
+    let list = cpp_parser::first_child_of_kind(declarator, &[CppSyntaxKind::ParameterList])?;
+
+    Some(tidy_list_text(&list.text().to_string()).0)
+}
+
+/// **A list as one line, and where every byte of the original went.**
 ///
 /// # The layout is taken out, and the spelling is not
 ///
 /// A node's text is the *source* text, which is laid out for a reader of the file rather than for a one-line
 /// summary: measured on MSVC's `<istream>`, `basic_istream<_Elem, _Traits>&& _Istr` arrives with a `\r\n` and four
-/// spaces of indentation in the middle, and a **cooked** reading arrives with the rendering's own separator — one
-/// space between every token, so `format_string<_Types...>` is spelled `format_string < _Types ... >`.
+/// spaces of indentation in the middle, and MSVC's `<xstring>` wraps three of `basic_string::append`'s nine
+/// overloads the same way. A **cooked** reading arrives with the rendering's own separator instead — one space
+/// between every token, so `format_string<_Types...>` is spelled `format_string < _Types ... >`.
 ///
 /// So whitespace runs become one space, and the space inside the brackets this list is made of goes: after `(` and
 /// before `)` and `,`. Those three are safe to decide lexically — a parameter list's own parentheses and commas are
@@ -194,26 +202,55 @@ pub(crate) fn parameter_list_of(view: &FileView, offset: usize) -> Option<CppSyn
 /// What is *not* done is the rest of the rendering's spacing (`_Elem * ()`, `_NODISCARD _CONSTEXPR20 size_type`):
 /// that is how every spelling in a fact is written, and a parameter list that read differently from the return type
 /// beside it would be two conventions in one line.
-pub(crate) fn parameter_list_text(declarator: &CppSyntaxNode) -> Option<String> {
-    let list = cpp_parser::first_child_of_kind(declarator, &[CppSyntaxKind::ParameterList])?;
-    let text = list.text().to_string();
-
+///
+/// # Why the map comes back with it
+///
+/// Because the other reader is a **signature**, whose parameters are byte spans *inside* the label it builds
+/// ([`crate::signature::CallSignature::parameters`]) — a client bolds them. Tidying the text without moving the
+/// spans would put the highlight on the wrong bytes, which is worse than the newline it removed. `map[i]` is where
+/// byte `i` of `text` ended up, with one entry per byte plus one for the end, so a span `a..b` becomes
+/// `map[a]..map[b]` whatever the two ends are.
+pub(crate) fn tidy_list_text(text: &str) -> (String, Vec<usize>) {
+    let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
-    let mut pending_space = false;
+    let mut map = vec![0usize; text.len() + 1];
+    let mut wrote_a_word = false;
+    let mut at = 0usize;
 
-    for word in text.split_whitespace() {
-        // A space is written only where it is not inside the brackets: after `(` and before `)` and `,`.
-        let after_an_open = out.ends_with('(') || out.ends_with('[');
-        let before_a_close = word.starts_with(')') || word.starts_with(']') || word.starts_with(',');
+    while at < bytes.len() {
+        if bytes[at].is_ascii_whitespace() {
+            // Whitespace lands where the next word will start, before the separator is decided: no span begins or
+            // ends in it — a span is a whole parameter, and each is trimmed.
+            map[at] = out.len();
+            at += 1;
+            continue;
+        }
 
-        if pending_space && !after_an_open && !before_a_close {
-            out.push(' ');
+        let mut end = at;
+        while end < bytes.len() && !bytes[end].is_ascii_whitespace() {
+            end += 1;
+        }
+        let word = &text[at..end];
+
+        if wrote_a_word {
+            let after_an_open = out.ends_with('(') || out.ends_with('[');
+            let before_a_close =
+                word.starts_with(')') || word.starts_with(']') || word.starts_with(',');
+            if !after_an_open && !before_a_close {
+                out.push(' ');
+            }
+        }
+
+        for (offset, slot) in map[at..end].iter_mut().enumerate() {
+            *slot = out.len() + offset;
         }
         out.push_str(word);
-        pending_space = true;
+        wrote_a_word = true;
+        at = end;
     }
 
-    Some(out)
+    map[text.len()] = out.len();
+    (out, map)
 }
 
 /// The argument expressions of a call, in order.

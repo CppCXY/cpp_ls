@@ -2034,45 +2034,37 @@ pub(crate) fn type_of_expression(
         // is the object type's, which is what this arm just computed, and the parameter names are the declaring
         // class's. `v.front` on a `std::vector<int>` is `_Ty&` in the header and `int&` here — without this the
         // answer is a type called `_Ty`, which is not a class, so nothing can follow it.
+        //
+        // **A member whose type is another member of the same class**: `_Ty& reference; reference front;`. The
+        // substitution has nothing to replace in `reference` — that spelling does not mention `_Ty` — so the name
+        // is resolved as a member of the *same* class with the same argument pairing, and the walk repeats while
+        // the type is still a bare name.
+        //
+        // A chain of two is real and common: `size_type` → `size_t` is how every standard container declares
+        // `size()`, `capacity()`, `max_size()`. The walk is bounded by [`MAX_NESTED_TYPE_DEPTH`] rather than by an
+        // argument about termination, because the argument is nearly — not exactly — true: each step asks about a
+        // *different* name and a class has finitely many members, but two members can name each other (`a b; b a;`
+        // is not valid C++ and *is* writable text), and a walk that trusted validity would not terminate on the
+        // file a language server has to survive.
+        //
+        // **A call's return type is finished the same way**, which is what the closure is for: `x.back()` answers
+        // `reference` in MSVC's `<xstring>` (`typedef _Ty& reference;`), and that is one more bare name standing for
+        // a member of the same class. Without the second use of this walk, `auto y = x.back()` recorded the *name*
+        // `reference` as `y`'s type — measured, and it is what a reader saw when hovering an `auto` variable: a type
+        // that is not a type, on a declaration the compiler types as `char&`.
         if let Some(type_of) = fact.type_of.as_deref() {
             let finished = bindings.applied_to(&parse_type_spelling(type_of));
-
-            // **A member whose type is another member of the same class**: `_Ty& reference; reference front;`. The
-            // substitution has nothing to replace in `reference` — that spelling does not mention `_Ty` — so the
-            // name is resolved as a member of the *same* class with the same argument pairing, and the walk
-            // repeats while the type is still a bare name.
-            //
-            // A chain of two is real and common: `size_type` → `size_t` is how every standard container declares
-            // `size()`, `capacity()`, `max_size()`. The walk is bounded by [`MAX_NESTED_TYPE_DEPTH`] rather than
-            // by an argument about termination, because the argument is nearly — not exactly — true: each step
-            // asks about a *different* name and a class has finitely many members, but two members can name each
-            // other (`a b; b a;` is not valid C++ and *is* writable text), and a walk that trusted validity would
-            // not terminate on the file a language server has to survive.
-            let mut current = finished;
-            let mut current_file = file;
-            let mut asked: Vec<String> = vec![fact.name.clone()];
-
-            for _ in 0..MAX_NESTED_TYPE_DEPTH {
-                let nested = current.to_string();
-                if !writes_a_name(&nested) || asked.contains(&nested) {
-                    break;
-                }
-                asked.push(nested.clone());
-
-                let Known::Yes((inner, inner_file)) =
-                    member_fact(index, scopes, root, path, &class, &nested)
-                else {
-                    break;
-                };
-                let Some(inner_type) = inner.type_of.as_deref() else {
-                    break;
-                };
-
-                current = bindings.applied_to(&parse_type_spelling(inner_type));
-                current_file = inner_file;
-            }
-
-            return Known::Yes((current, current_file));
+            return Known::Yes(finish_a_nested_name(
+                index,
+                scopes,
+                root,
+                path,
+                &class,
+                &bindings,
+                finished,
+                file,
+                vec![fact.name.clone()],
+            ));
         }
 
         // No `type_of`: the declaration is a function (or a class). For a function being **called**, the answer is
@@ -2080,7 +2072,17 @@ pub(crate) fn type_of_expression(
         if being_called
             && let Some(returns) = what_a_call_has_in(&fact)
         {
-            return Known::Yes((bindings.applied_to(&returns), file));
+            return Known::Yes(finish_a_nested_name(
+                index,
+                scopes,
+                root,
+                path,
+                &class,
+                &bindings,
+                bindings.applied_to(&returns),
+                file,
+                vec![fact.name.clone()],
+            ));
         }
 
         return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
@@ -2337,6 +2339,73 @@ impl NamedDeclaration {
 }
 
 
+
+/// **A type that is still a member's name is followed to what that member declares** — one step at a time, with
+/// the class's own template pairing applied at each one.
+///
+/// # Why it exists, and why it is one function
+///
+/// `_Ty& reference; reference front;` is how the standard library writes almost every type it has: the type of
+/// `front` is the *name* `reference`, which mentions no parameter at all, so substituting the arguments into it
+/// replaces nothing. The step that finishes it is a member lookup — `reference` in the same class, with the same
+/// pairing — and the walk repeats while the type is still a name.
+///
+/// Measured, in MSVC's `<xstring>`: `back()` returns `reference`, which is `value_type&`, which is `_Elem&`, which
+/// is `char&` for a `std::string`. **Two callers need this** — the member read as a value (`v.front`) and the
+/// member *called* (`v.back()`) — and they had it twice with different answers: the second one skipped the walk
+/// entirely, so `auto y = x.back()` recorded the *name* `reference` as `y`'s type. It is one function now, which
+/// is this crate's rule for a question with two readers.
+///
+/// # What it looks up, and where it stops
+///
+/// The name looked up is the type's **base** rather than its whole spelling ([`Type::class_name`], to which a
+/// reference is transparent): `value_type&` is a reference to the member alias `value_type`, and it is the alias
+/// that has to be followed. A pointer is where the walk stops, because following one is a *decay* — a decision
+/// about the expression rather than about the declaration, and the caller's to make.
+///
+/// The operators stay where they are written ([`Type::replacing`]): `value_type&` with `value_type` = `_Ty*` is
+/// `_Ty*&`, and dropping either would answer a different type.
+///
+/// The walk is bounded by [`MAX_NESTED_TYPE_DEPTH`] rather than by an argument about termination: each step asks
+/// about a *different* name and a class has finitely many members, but two members can name each other (`a b; b a;`
+/// is not valid C++ and *is* writable text), and a walk that trusted validity would not terminate on the file a
+/// language server has to survive.
+#[allow(clippy::too_many_arguments)]
+fn finish_a_nested_name(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+    bindings: &crate::sema::types::TypeBindings,
+    mut current: Type,
+    mut current_file: PathBuf,
+    mut asked: Vec<String>,
+) -> (Type, PathBuf) {
+    for _ in 0..MAX_NESTED_TYPE_DEPTH {
+        let Some(nested) = current.class_name().map(str::to_string) else {
+            break;
+        };
+        if !writes_a_name(&nested) || asked.contains(&nested) {
+            break;
+        }
+        asked.push(nested.clone());
+
+        let Known::Yes((inner, inner_file)) = member_fact(index, scopes, root, path, class, &nested)
+        else {
+            break;
+        };
+        let Some(inner_type) = inner.type_of.as_deref() else {
+            break;
+        };
+
+        let resolved = bindings.applied_to(&parse_type_spelling(inner_type));
+        current = current.replacing(&nested, &resolved);
+        current_file = inner_file;
+    }
+
+    (current, current_file)
+}
 
 /// The type a declaration was written with — or, where it wrote `auto`, the type its **initializer** has.
 ///
@@ -2812,10 +2881,11 @@ pub(crate) struct Callee {
 /// exactly this: it answers with every declaration of the name the cursor can see, in file order, each carrying the
 /// fact — including the parameter list, which is what a signature is rendered from.
 ///
-/// A **member call** (`s.push_back(`) stays singular: resolving it means the object's type and then the member, and
-/// the member query that exists ([`members_of`]) answers with the class's whole member list rather than one name's
-/// declarations. An overloaded member therefore reports the one `direct_member` picks, which is where this layer was
-/// before — a smaller answer, not a wrong one, and the plural member query is its own piece of work.
+/// A **member call** (`s.push_back(`) goes through [`members_of`], the class's whole member list, filtered by the
+/// name written — **bases included**, which is what a member call needs and what `direct_member` alone does not
+/// give: `std::string::push_back` is two overloads, and a class that inherits an overloaded member inherits all of
+/// it. The object's type is worked out exactly as the singular path works it out, because that is the question the
+/// two share.
 pub(crate) fn callees_of_a_call(
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
@@ -2830,11 +2900,22 @@ pub(crate) fn callees_of_a_call(
         return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
     };
 
-    if crate::sema::resolve::member_access_of(&callee).is_some() {
-        return match callee_of_a_call(index, scopes, root, path, call) {
-            Known::Yes(one) => Known::Yes(vec![one]),
-            Known::Unknown(reason) => Known::Unknown(reason),
-            Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+    if let Some(access) = crate::sema::resolve::member_access_of(&callee) {
+        let members = member_callees(index, scopes, root, path, &access);
+
+        // A member whose set could not be listed — the object's type is unknown, the class is not declared
+        // anywhere the index can see — falls back to the singular path, which reports *why* rather than an empty
+        // list. An empty list and an unanswerable question are different answers.
+        return match members {
+            Known::Yes(found) if !found.is_empty() => Known::Yes(found),
+            other => match other {
+                Known::Unknown(reason) => Known::Unknown(reason),
+                _ => match callee_of_a_call(index, scopes, root, path, call) {
+                    Known::Yes(one) => Known::Yes(vec![one]),
+                    Known::Unknown(reason) => Known::Unknown(reason),
+                    Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+                },
+            },
         };
     }
 
@@ -2877,6 +2958,59 @@ pub(crate) fn callees_of_a_call(
         Known::Unknown(reason) => Known::Unknown(reason),
         Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
     }
+}
+
+/// **Every declaration of one member name in the object's class** — the member-call half of [`callees_of_a_call`].
+///
+/// The class comes from the object's **type**, which is the same step [`declaration_of_a_callee`] makes: the two
+/// questions differ only in what they then ask for (one member, or all of them), and a second way of working out
+/// what `s` is would be a second answer to it.
+///
+/// `None`-typed objects, unknown types and classes nothing declares are reported as they are —
+/// [`UnknownReason`] — rather than as an empty list, for the reason the plural name lookup gives: "there are no
+/// members" and "this analysis cannot say" are different answers and a caller shows them differently.
+fn member_callees(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    access: &crate::sema::resolve::MemberAccess,
+) -> Known<Vec<Callee>> {
+    let object = match type_of_expression(index, scopes, root, path, &access.object, 0) {
+        Known::Yes((type_of, _)) => type_of,
+        Known::Unknown(reason) => return Known::Unknown(reason),
+        Known::No => {
+            return Known::Unknown(UnknownReason::UnknownType(Box::from(
+                access.object.text().to_string(),
+            )));
+        }
+    };
+
+    let Some(class) = member_access_class(&object) else {
+        return Known::Unknown(UnknownReason::UnknownType(Box::from(object.to_string())));
+    };
+
+    // **The member's name is looked up in every class it could come from**, which is what `members_of` answers and
+    // what an overloaded member needs: `push_back` is declared twice in `basic_string` itself, and a base's
+    // overloads are the derived class's overloads unless something hides them.
+    let found = match members_of(index, scopes, root, path, &class) {
+        Known::Yes(found) => found,
+        Known::Unknown(reason) => return Known::Unknown(reason),
+        Known::No => return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(class))),
+    };
+
+    let wanted = &*access.member;
+    let candidates: Vec<Callee> = found
+        .members
+        .iter()
+        .filter(|member| member.fact.name == wanted)
+        .map(|member| Callee {
+            file: member.file.clone(),
+            name_offset: member.fact.name_range.start_offset,
+        })
+        .collect();
+
+    Known::Yes(candidates)
 }
 
 /// The declaration a call names, as **a place in a file**: the file it is in, and the offset of its name.
