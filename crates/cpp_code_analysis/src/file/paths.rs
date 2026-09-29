@@ -42,7 +42,10 @@ impl FileId {
 }
 
 /// Reads files. The only thing in this layer that touches a filesystem.
-pub trait FileProvider {
+///
+/// `Sync`, because a provider is shared by the threads that index a project's files at once — every provider here
+/// is a handle over a lock or a unit struct, so the bound costs the implementations nothing.
+pub trait FileProvider: Sync {
     /// The contents of a file, or `None` if it cannot be read.
     ///
     /// `None` rather than an error, because every reason a file cannot be read — missing, a directory,

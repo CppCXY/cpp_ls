@@ -40,10 +40,11 @@ pub use client_config::{ClientConfig, get_client_config};
 /// How many files one background slice reads before it lets the runtime run something else.
 ///
 /// A slice is a transaction against the analysis: it takes the write lock once and gives it back, so a query
-/// arriving mid-index waits for a slice and not for a project. Sixteen files is a few milliseconds of parsing
-/// (measured) — short enough that a keystroke does not feel it, long enough that the
-/// indexing does not spend its time taking locks.
-const INDEX_SLICE: usize = 16;
+/// arriving mid-index waits for a slice and not for a project. A slice's files are parsed on all the cores at once
+/// (`Session::advance`), so thirty-two files hold the lock for about what sixteen did when they were parsed one at a
+/// time — short enough that a keystroke does not feel it, long enough that the indexing does not spend its time
+/// taking locks.
+const INDEX_SLICE: usize = 32;
 
 /// How long the pump sleeps when there is nothing to read, before looking again.
 ///

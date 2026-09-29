@@ -1099,15 +1099,50 @@ impl<F: FileProvider + Clone> Session<F> {
     /// A caller decides how much: one step per idle tick is a server that stays responsive, `advance(64)` is a
     /// server that catches up after a notification, and the loop in [`Session::index_everything`] is what a test or
     /// a batch caller wants.
+    ///
+    /// # The parallel half, and why it changes no answer
+    ///
+    /// Reading a file into the index is a parse, and a parse is a pure function of the file: the summary is made of
+    /// the text, the configuration and the filesystem, and never of what the index already holds
+    /// ([`SummaryStore::prepare`]). So the files at the head of the queue are **prepared together**, on the machine's
+    /// cores, before the loop starts — and then the loop is what it always was: pop the next file, put its summary in
+    /// the index, queue what it includes. The order the index sees files in, the order includes are discovered in and
+    /// what a step reports are all the sequential ones; only the waiting is shared out. A prepared file the loop does
+    /// not reach in this call (a file it discovers outranks it) is simply dropped and read again when its turn comes.
     pub fn advance(&mut self, steps: usize) -> Vec<Step> {
         let mut done = Vec::new();
 
-        for _ in 0..steps {
+        let mut prepared: HashMap<String, crate::index::store::Prepared> = HashMap::new();
+
+        for taken in 0..steps {
             let Some((path, priority, depth)) = self.queue.pop() else {
                 break;
             };
 
-            done.push(self.index_one(path, priority, depth));
+            // **A file nobody prepared is the front of a wave**: the file just popped, and whatever is queued behind
+            // it, are prepared together — so the first file of a closure is read alone, its includes (now queued) as a
+            // group, their includes as the next group, and the width of the group is the width of the include graph.
+            let key = queue_key(&path);
+            let left = steps - taken;
+            if left > 1 && !prepared.contains_key(&key) {
+                let mut wave = vec![path.clone()];
+                wave.extend(
+                    self.queue
+                        .peek(left - 1)
+                        .into_iter()
+                        .filter(|queued| !prepared.contains_key(&queue_key(queued))),
+                );
+
+                if wave.len() > 1 {
+                    let made = self.store.prepare_many(&wave);
+                    for (path, made) in wave.iter().zip(made) {
+                        prepared.insert(queue_key(path), made);
+                    }
+                }
+            }
+
+            let ready = prepared.remove(&key);
+            done.push(self.index_one(path, priority, depth, ready));
         }
 
         // **The second pass, at the moment the closure is in hand**. `SummaryStore::get` reads one file with
@@ -1224,15 +1259,26 @@ impl<F: FileProvider + Clone> Session<F> {
     /// file is loaded into the VFS before it is read (so everything the analysis reads it is also holding), and its
     /// resolved includes are cloned out before the queue is touched (`get` borrows the store, and the queue is a
     /// field of the same struct).
-    fn index_one(&mut self, path: PathBuf, priority: Priority, depth: usize) -> Step {
+    ///
+    /// `ready` is the file already read and parsed, when [`Session::advance`] prepared it alongside its neighbours;
+    /// `None` reads it here.
+    fn index_one(
+        &mut self,
+        path: PathBuf,
+        priority: Priority,
+        depth: usize,
+        ready: Option<crate::index::store::Prepared>,
+    ) -> Step {
         {
             let _load = crate::stages::StageTimer::new(crate::stages::Stage::Load);
             self.vfs.load(&path);
         }
         let before = self.store.stats();
-        let includes: Vec<PathBuf> = self
-            .store
-            .get(&path)
+        let summary = match ready {
+            Some(ready) => self.store.commit(&path, ready),
+            None => self.store.get(&path),
+        };
+        let includes: Vec<PathBuf> = summary
             .map(|summary| {
                 summary
                     .includes
@@ -1297,11 +1343,11 @@ impl<F: FileProvider + Clone> Session<F> {
     /// scope — because `std::string` was not in the index yet and nothing had read the headers that declare it.
     pub fn catch_up(&mut self, path: &Path) {
         if self.queue.forget(path) {
-            self.index_one(path.to_path_buf(), Priority::Open, 0);
+            self.index_one(path.to_path_buf(), Priority::Open, 0, None);
         }
 
         for include in self.unread_includes_of(path) {
-            self.index_one(include, Priority::Open, 1);
+            self.index_one(include, Priority::Open, 1, None);
         }
     }
 
@@ -2600,6 +2646,35 @@ impl Work {
 
     fn pending(&self) -> usize {
         self.queued
+    }
+
+    /// The next `how_many` files [`Work::pop`] would answer with, **without taking them** — in the order it would.
+    ///
+    /// The queue as it stands now: a file a step discovers later can outrank these, which is why the caller treats
+    /// the answer as a hint about what to prepare and pops for real.
+    fn peek(&self, how_many: usize) -> Vec<PathBuf> {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut ahead = Vec::new();
+
+        let halves = [(&self.open, Priority::Open), (&self.rest, Priority::Rest)];
+        for (half, priority) in halves {
+            for (path, _) in half {
+                if ahead.len() >= how_many {
+                    return ahead;
+                }
+
+                let key = queue_key(path);
+                let queued_here = matches!(
+                    self.standing.get(&key),
+                    Some(Standing::Queued(held)) if *held == priority
+                );
+                if queued_here && seen.insert(key) {
+                    ahead.push(path.clone());
+                }
+            }
+        }
+
+        ahead
     }
 }
 

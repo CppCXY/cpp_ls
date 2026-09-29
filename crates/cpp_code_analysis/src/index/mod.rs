@@ -916,7 +916,14 @@ pub fn write_summary(summary: &FileSummary, cache_directory: &Path) -> std::io::
         std::fs::create_dir_all(directory)?;
     }
 
-    let temporary = path.with_extension("bin.tmp");
+    // Unique per write: two files with the same text share a key, and workers writing them at once must not share a
+    // temporary — one would rename the other's half-written bytes into place.
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let temporary = path.with_extension(format!(
+        "{}.{}.tmp",
+        std::process::id(),
+        WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     std::fs::write(&temporary, &bytes)?;
     std::fs::rename(&temporary, &path)?;
 

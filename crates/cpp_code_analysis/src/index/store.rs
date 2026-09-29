@@ -88,6 +88,82 @@ pub struct SummaryStore<F: FileProvider = DiskFiles> {
     stats: StoreStats,
 }
 
+/// `work` applied to every item, on as many threads as the machine has cores — the answers **in the order of the
+/// items**, so a caller that applies them in that order gets exactly what a loop would have.
+///
+/// A single item (or a single core) runs on the calling thread: a thread is not worth starting for one parse. The
+/// workers take the next unfinished item from a shared counter rather than a fixed share each, because the items are
+/// wildly unequal (a 3 KB header beside a 400 KB one) and a fixed split leaves cores idle behind the biggest. Their
+/// stacks are larger than the default, because the parser recurses on nesting depth and a worker must not be the
+/// place a deeply nested header first overflows.
+fn parallel_map<T, R>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R>
+where
+    T: Sync,
+    R: Send,
+{
+    /// More threads than this stop paying: the parse is memory-bound long before it is core-bound.
+    const MOST_WORKERS: usize = 8;
+    const WORKER_STACK: usize = 16 * 1024 * 1024;
+
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |cores| cores.get())
+        .min(MOST_WORKERS)
+        .min(items.len());
+
+    if workers <= 1 {
+        return items.iter().map(work).collect();
+    }
+
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let slots: Vec<std::sync::Mutex<Option<R>>> = items.iter().map(|_| std::sync::Mutex::new(None)).collect();
+
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let worker = || {
+                loop {
+                    let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(item) = items.get(at) else {
+                        break;
+                    };
+                    let made = work(item);
+                    *slots[at].lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(made);
+                }
+            };
+
+            // A thread that cannot be started leaves its share to the others: the counter is shared, so the work
+            // still gets done — by the calling thread below, if by nobody else.
+            let _ = std::thread::Builder::new()
+                .name("cppls-index".to_string())
+                .stack_size(WORKER_STACK)
+                .spawn_scoped(scope, worker);
+        }
+    });
+
+    slots
+        .into_iter()
+        .zip(items)
+        .map(|(slot, item)| {
+            slot.into_inner()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(|| work(item))
+        })
+        .collect()
+}
+
+/// A file read, looked up and — when the disk had nothing — parsed, waiting to be put in the index.
+///
+/// Opaque on purpose: the only things to do with one are hand it to [`SummaryStore::commit`], or drop it.
+pub struct Prepared(PreparedOutcome);
+
+enum PreparedOutcome {
+    /// The file could not be read.
+    Unreadable,
+    /// The disk had the answer.
+    Stored(FileSummary),
+    /// The disk did not; this was parsed, and `stored` says whether it was written down.
+    Built { summary: FileSummary, stored: bool },
+}
+
 /// What the store did, so that a caller can see the cache working.
 ///
 /// A counter rather than a log line, because the four numbers says to measure before
@@ -324,9 +400,24 @@ impl<F: FileProvider> SummaryStore<F> {
     /// **re-checked** against the filesystem — see `resolution_still_holds` below — which is the one thing about a
     /// summary that its key cannot name. What a hit does not do is parse, search for a *new* include, or write.
     pub fn get(&mut self, path: &Path) -> Option<&FileSummary> {
-        let source = {
+        let prepared = self.prepare(path);
+        self.commit(path, prepared)
+    }
+
+    /// **Everything [`SummaryStore::get`] does that does not change the store**: read the file, hash it, ask the
+    /// disk, and — when the disk has nothing — parse it and write the answer down.
+    ///
+    /// Split out because it is the expensive half and it is a **pure function of the file**: a summary is made from
+    /// the text, the configuration and the filesystem, with no reference to what the index already holds (the
+    /// macro environment left the key for that reason — see `crate::cache`). So many files can be prepared at once,
+    /// and [`SummaryStore::commit`] — the half that needs `&mut self` — applied to them in whatever order the caller
+    /// wants the index to see them.
+    pub fn prepare(&self, path: &Path) -> Prepared {
+        let Some(source) = ({
             let _read = crate::stages::StageTimer::new(crate::stages::Stage::Read);
-            self.files.read(path)?
+            self.files.read(path)
+        }) else {
+            return Prepared(PreparedOutcome::Unreadable);
         };
         let key = {
             let _hash = crate::stages::StageTimer::new(crate::stages::Stage::Hash);
@@ -339,33 +430,64 @@ impl<F: FileProvider> SummaryStore<F> {
                 && stored.key == key
                 && self.resolution_still_holds(path, &stored)
             {
-                self.stats.reused += 1;
-                // Filed under the path that asked, which is not necessarily the one recorded in the entry: the key
-                // names the text, so two files with the same text share an entry. See `ProjectIndex::insert_at`.
-                self.index.insert_at(path, stored);
-                return self.index.summary(path);
+                return Prepared(PreparedOutcome::Stored(stored));
             }
         }
 
-        self.stats.rebuilt += 1;
         let summary = FileIndexer::new(&self.files, &self.config).index(path, &source, key);
 
         // The one rule about the filesystem: a summary that records a *failed* search must not be stored, because
         // nothing in the key would notice the header appearing. See the module documentation.
-        if has_unresolved_includes(&summary) {
-            self.stats.unstored += 1;
-        } else {
+        let stored = !has_unresolved_includes(&summary);
+        if stored {
             let _encode = crate::stages::StageTimer::new(crate::stages::Stage::Encode);
             // A failed write is not a failed lookup: the answer is in hand and in the index. Reporting it would
             // turn a read-only checkout — a perfectly ordinary way to work — into a broken editor.
             let _ = write_summary(&summary, &self.cache);
         }
 
-        {
-            let _insert = crate::stages::StageTimer::new(crate::stages::Stage::IndexInsert);
-            self.index.insert(summary);
-            self.index.summary(path)
+        Prepared(PreparedOutcome::Built { summary, stored })
+    }
+
+    /// Put what [`SummaryStore::prepare`] made into the index, and count it.
+    ///
+    /// `path` is the file it was prepared for. The answer is what [`SummaryStore::get`] answers: the summary, or
+    /// `None` for a file that could not be read.
+    pub fn commit(&mut self, path: &Path, prepared: Prepared) -> Option<&FileSummary> {
+        match prepared.0 {
+            PreparedOutcome::Unreadable => None,
+            PreparedOutcome::Stored(stored) => {
+                self.stats.reused += 1;
+                // Filed under the path that asked, which is not necessarily the one recorded in the entry: the key
+                // names the text, so two files with the same text share an entry. See `ProjectIndex::insert_at`.
+                self.index.insert_at(path, stored);
+                self.index.summary(path)
+            }
+            PreparedOutcome::Built { summary, stored } => {
+                self.stats.rebuilt += 1;
+                if !stored {
+                    self.stats.unstored += 1;
+                }
+
+                let _insert = crate::stages::StageTimer::new(crate::stages::Stage::IndexInsert);
+                self.index.insert(summary);
+                self.index.summary(path)
+            }
         }
+    }
+
+    /// [`SummaryStore::prepare`] for many files at once, on as many threads as the machine has cores.
+    ///
+    /// The answers are in the order of `paths`, so a caller that commits them in that order gets exactly the index
+    /// it would have got one file at a time. A single file (or a single core) is prepared on the calling thread:
+    /// a thread is not worth starting for one parse.
+    ///
+    /// The workers take the next unprepared file from a shared counter rather than a fixed share each, because the
+    /// files are wildly unequal (a 3 KB header beside a 400 KB one) and a fixed split leaves cores idle behind the
+    /// biggest. Their stacks are larger than the default, because the parser recurses on nesting depth and a
+    /// worker must not be the place a deeply nested header first overflows.
+    pub fn prepare_many(&self, paths: &[PathBuf]) -> Vec<Prepared> {
+        parallel_map(paths, |path| self.prepare(path))
     }
 
     /// Index `entry` **and everything it includes**, so that the declarations the file can see are in the index.
@@ -774,6 +896,13 @@ impl<F: FileProvider> SummaryStore<F> {
         let mut definitions = crate::summary::MacroDefinitions::default();
         let mut re_read = 0usize;
 
+        // **Two kinds of re-read, and only one of them waits for the other.** A file a unit's timeline covers is
+        // re-read through that timeline — a pure function of the file, the configuration and the walk the pass
+        // already paid for — so those are done together, on every core. A file no unit covers falls back to walking
+        // its own closure, which needs the pass's shared definition cache and the index as it stands; those are done
+        // here, one at a time, exactly as they always were.
+        let mut through_a_timeline: Vec<(&PathBuf, &String)> = Vec::new();
+
         for path in indexed {
             let Some(source) = sources.get(&normalize_path(path, cfg!(windows))) else {
                 continue;
@@ -785,44 +914,68 @@ impl<F: FileProvider> SummaryStore<F> {
             if !mentioned {
                 continue;
             }
-            // **The unit's timeline again, and this is the half that used to walk a closure per file** (3 363 ms,
-            // `re-env`, of a 5.46 s cold index). The file was read once before its includes were in the index and
-            // is read here as the program reads it: `MacroView` is a *position* in the walk the pass already paid
-            // for, and it answers the parser's questions — `kind_of`, `body_text_of`, the in-force bodies — out of
-            // that walk rather than out of a map materialised for this file alone.
-            let view = units.iter().find_map(|unit| unit.environment_of(path));
+
+            if units.iter().any(|unit| unit.environment_of(path).is_some()) {
+                through_a_timeline.push((path, source));
+                continue;
+            }
 
             let key = SummaryKey::new(content_hash(source), self.context_hash(path));
             let indexer = FileIndexer::new(&self.files, &self.config);
-            let rebuilt = match view {
-                Some(view) => indexer.with_macro_bodies(&view).index(path, source, key),
-                // **A caller with no timeline** — a probe indexing a closure from an entry point, a test — keeps
-                // the reading this pass has always had: the file's own closure, walked once for it. The session
-                // passes units and never comes here; dropping this arm would silently unscope every declaration
-                // behind a namespace-opening macro for those callers (`tests/scopes.rs` is one).
-                None => {
-                    let Some(environment) = self.closure_environment(path, &sources, &mut definitions)
-                    else {
-                        continue;
-                    };
-                    indexer.with_macro_bodies(&environment).index(path, source, key)
-                }
+            // **A caller with no timeline** — a probe indexing a closure from an entry point, a test — keeps
+            // the reading this pass has always had: the file's own closure, walked once for it. The session
+            // passes units and never comes here; dropping this arm would silently unscope every declaration
+            // behind a namespace-opening macro for those callers (`tests/scopes.rs` is one).
+            let Some(environment) = self.closure_environment(path, &sources, &mut definitions) else {
+                continue;
             };
+            let rebuilt = indexer.with_macro_bodies(&environment).index(path, source, key);
 
-            self.stats.rebuilt += 1;
-            re_read += 1;
-
-            if truncated || has_unresolved_includes(&rebuilt) {
-                self.stats.unstored += 1;
-            } else {
+            let stored = !truncated && !has_unresolved_includes(&rebuilt);
+            if stored {
                 let _encode = crate::stages::StageTimer::new(crate::stages::Stage::Encode);
                 let _ = write_summary(&rebuilt, &self.cache);
             }
+            self.commit_reread(rebuilt, stored);
+            re_read += 1;
+        }
 
-            self.index.insert(rebuilt);
+        // **The unit's timeline again, and this is the half that used to walk a closure per file** (3 363 ms,
+        // `re-env`, of a 5.46 s cold index). The file was read once before its includes were in the index and
+        // is read here as the program reads it: `MacroView` is a *position* in the walk the pass already paid
+        // for, and it answers the parser's questions — `kind_of`, `body_text_of`, the in-force bodies — out of
+        // that walk rather than out of a map materialised for this file alone.
+        let rebuilt = parallel_map(&through_a_timeline, |(path, source)| {
+            let view = units.iter().find_map(|unit| unit.environment_of(path))?;
+
+            let key = SummaryKey::new(content_hash(source), self.context_hash(path));
+            let rebuilt = FileIndexer::new(&self.files, &self.config)
+                .with_macro_bodies(&view)
+                .index(path, source, key);
+
+            let stored = !truncated && !has_unresolved_includes(&rebuilt);
+            if stored {
+                let _encode = crate::stages::StageTimer::new(crate::stages::Stage::Encode);
+                let _ = write_summary(&rebuilt, &self.cache);
+            }
+            Some((rebuilt, stored))
+        });
+
+        for (rebuilt, stored) in rebuilt.into_iter().flatten() {
+            self.commit_reread(rebuilt, stored);
+            re_read += 1;
         }
 
         re_read
+    }
+
+    /// Count a re-read summary and put it in the index.
+    fn commit_reread(&mut self, rebuilt: FileSummary, stored: bool) {
+        self.stats.rebuilt += 1;
+        if !stored {
+            self.stats.unstored += 1;
+        }
+        self.index.insert(rebuilt);
     }
 
     /// Read `path`'s text into `sources` under the normalized spelling the walk asks with, unless it is there.
@@ -1168,6 +1321,72 @@ mod tests {
         assert_eq!(reopened.stats().hit_rate(), Some(1.0));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **Preparing files together and committing them in order is reading them one at a time.**
+    ///
+    /// The parallel half of the pump rests on this: the same summaries, the same counters, and cache entries that
+    /// read back whole — including for files that share a text (so share a cache key, and were written by two
+    /// workers at once), a file that includes something that is not there (parsed, not stored) and a path that
+    /// cannot be read.
+    #[test]
+    fn preparing_files_together_gives_the_index_reading_them_one_by_one_gives() {
+        let mut files = MemoryFiles::new();
+        let mut paths: Vec<std::path::PathBuf> = Vec::new();
+        for number in 0..48 {
+            let text = match number % 8 {
+                // Six files with one text between them: one cache key, several concurrent writers.
+                0 => "struct Same { int v; };\n".to_string(),
+                // A search that fails, so the answer is not stored.
+                1 => format!("#include \"missing{number}.h\"\nint one{number};\n"),
+                _ => format!("#include \"f{}.h\"\nstruct S{number} {{ int v; }};\n", number.max(2) - 1),
+            };
+            let path = format!("/p/f{number}.h");
+            files.insert(&path, &text);
+            paths.push(path.into());
+        }
+        paths.push("/p/nowhere.h".into());
+
+        let (mut one_by_one, root_one) = store("prepared-sequential", &files);
+        for path in &paths {
+            let _ = one_by_one.get(path);
+        }
+
+        let (mut together, root_together) = store("prepared-together", &files);
+        for (path, prepared) in paths.iter().zip(together.prepare_many(&paths)) {
+            let _ = together.commit(path, prepared);
+        }
+
+        // Files that share a text may be parsed twice when their workers reach them together (neither has written
+        // the entry yet), so the split between `reused` and `rebuilt` can differ; the totals and the answers cannot.
+        let (a, b) = (together.stats(), one_by_one.stats());
+        assert_eq!((a.reused + a.rebuilt, a.unstored), (b.reused + b.rebuilt, b.unstored));
+        assert_eq!(together.index().len(), one_by_one.index().len());
+        for summary in one_by_one.index().summaries() {
+            let other = together.index().summary(&summary.path).expect("the same files are indexed");
+            assert_eq!(other.declarations, summary.declarations, "{:?}", summary.path);
+            assert_eq!(other.includes, summary.includes, "{:?}", summary.path);
+        }
+
+        // What the workers wrote is what a later run reads back: every stored entry decodes, and none is torn.
+        let mut reopened = SummaryStore::with_provider(&root_together, CompilerConfig::default(), files.clone());
+        for path in &paths {
+            let _ = reopened.get(path);
+        }
+        assert_eq!(
+            reopened.stats().reused + reopened.stats().rebuilt,
+            paths.len() - 1,
+            "every readable file was read"
+        );
+        assert_eq!(
+            reopened.stats().rebuilt,
+            together.stats().unstored,
+            "only the answers that were deliberately not stored are parsed again: {:?}",
+            reopened.stats()
+        );
+
+        let _ = std::fs::remove_dir_all(&root_one);
+        let _ = std::fs::remove_dir_all(&root_together);
     }
 
     #[test]

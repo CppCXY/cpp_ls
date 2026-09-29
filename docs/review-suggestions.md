@@ -21,6 +21,18 @@
 | 第二遍 pass 不再读全项目 | `re_read_what_a_body_changes` 在有单元时只读"被重解析的文件"与"定义了它们提到的宏的文件",候选由 `files_defining_any_macro` 查出;没有时间线的调用方(探针、测试)仍走原来的全量路径 | 真实 MSVC STL 工程(158 文件)A/B:与 HEAD **逐行一致**(147 行输出,含 `reused/rebuilt/unstored` 与全部 definition 表) |
 | 文档 | `architecture.md` 视为已废弃:README / `Cargo.toml` 里对它和 `ls-architecture.md` 的引用已去掉,设计契约以模块文档注释为准 | — |
 
+### 第三轮:冷启动并行(性能)
+
+| 项 | 做了什么 | 读数(本机 6 核,MSVC STL 工程,158 文件,冷启动,release) |
+|---|---|---|
+| 摘要读取拆成 `prepare`(纯函数:读 → 哈希 → 查盘 → 解析 → 写盘)与 `commit`(写索引 + 计数) | `SummaryStore::prepare / commit / prepare_many`;`FileProvider` 加了 `Sync` 约束;摘要写盘的临时文件名改为每次唯一(相同文本的两个文件共享一个 key,并发写会互相覆盖) | — |
+| `Session::advance` 按"波"并行 | 弹出一个还没准备好的文件时,把它和队列里排在后面的文件**一起**并行 prepare,再按原顺序逐个提交;所以索引看到文件的顺序、include 的发现顺序、`Step` 的内容都和串行时一致,只是等待被分摊到各核上 | 3.3 s → 2.25 s |
+| 第二遍 pass 的重读并行 | 有单元时间线覆盖的文件用 `parallel_map` 一起重解析,再顺序提交;没有时间线的调用方(探针、测试)仍走原来的串行闭包环境路径 | 2.25 s → **1.7–1.8 s**(约 1.9×) |
+| 结果一致性 | 与改动前逐行对比 `workspace_probe` 输出(147 行,含 `reused/rebuilt/unstored` 与全部 definition 表)**一致**;新增测试:并行 prepare + 顺序 commit 与逐个 `get` 得到相同的索引,写盘的条目能被下一次运行完整读回 | 全部 1 479 个用例通过,clippy 零警告 |
+
+`INDEX_SLICE` 由 16 提到 32(并行后同样的锁占用时间里能读更多文件)。已知的上限:include 图的关键路径是串行的(先解析才知道 include 什么),
+所以并行度受图的宽度限制;再往下要靠"预扫描 `#include` 行"提前发现文件(词法 147 MB/s,比解析便宜两个数量级)。
+
 **没做(诚实登记)**:子串搜索(`"widget7_1"` 这种不是任何名字前缀的查询)仍是对 12 万个名字的一次扫描,8 ms;要更快需要 trigram 倒排。
 括号/作用域"栅栏"(§1.2(a))、文件级并行(§3.3)、`project.rs` / `session.rs` 拆分(§4.1)、跨文件 references(§5)都还没动。
 
