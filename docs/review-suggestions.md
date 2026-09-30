@@ -344,6 +344,82 @@ int                           内建词表里没有它            → `int` 被�
 
 ---
 
+## 第十轮:SAL 的问题不在 SAL —— 一处语法缺口赔上整个翻译单元
+
+`plan-units.md` §44 登记了"SAL 宏链没展开完",并给了起手式。照那条路量下去,**结论是反的**:
+
+```text
+单元渲染            1 175 164 字节(<xstring> 原文 170 303)
+  class basic_string        出现 1 次
+  _In_reads_ / _SA_annotes3 / _SAL2_Source_   各 0 次
+把这份渲染单独解析  0 个错误,类节点 93 971 字节,类体完整
+```
+
+宏链展开得很干净,解析器也读得动那个类。真问题是**别处的一处错误把整份文件的作用域搞坏了**:
+
+```text
+一处解析错误 -> 恢复时留下没有配对的 {
+             -> 它属于 namespace vc_attributes(sourceannotations.h)
+             -> 后面拼进来的每个文件都成为它的成员
+             -> std::basic_string 的限定名成了 vc_attributes::std::basic_string
+             -> std::string 在任何地方都查不到声明
+```
+
+所以这一轮**没有继续找宏链**,而是把那条链路上的每一个语法缺口逐个修掉,并量它们对整份单元的影响。
+
+### 10.1 修好的形状
+
+| 形状 | 修前 | 修后 |
+| --- | --- | --- |
+| `[repeatable] [source_annotation_attribute(All)] struct X { … };` | 单括号按**下标**读 → 恢复留下未闭合的 `{` | 新增 `at_a_single_bracket_attribute`,只在**说明符位置**认它(判据:标识符 + 可选一层配平括号 + `]`);`a[2]`、`a[i]`、lambda 捕获全部不受影响 |
+| `class [[nodiscard]] X { … };` | 属性在**名字之前**,类被读成匿名、类体丢给语句规则 | 类头在名字**之前**先吃属性(与名字之后的那个循环并存,`class [[a]] X [[b]]` 两个都读) |
+| `(ts + ... + init)` | 只认 `ts + ...` 与 `(... + ts)`,**二元折叠**把第二个运算符留给了调用者 | `parse_binary_expr_with_precedence` 补上"运算符在 `...` 两侧都写"的那一半 |
+| `requires C<T> [[nodiscard]] T f();` | 约束里的 `[` 按下标读 → 约束失败 → 声明失败 | 后缀循环在**约束内部**见到 `[[` 停下 —— 属性就是约束的结尾 |
+
+读数(106 文件的真实工程,**同一个探针**):
+
+```text
+单元解析错误      61 -> 2
+被栅栏隔离的文件  sourceannotations.h, xutility, type_traits, xmemory -> xutility, type_traits
+```
+
+### 10.2 两次走错的路,都留在了代码注释里
+
+这两条比结论本身值钱,因为它们是"看起来更严格"的那种错:
+
+1. **`[[` 一律不当下标** —— 三个测试同时红。`template <typename _Tp, int _Nm> constexpr bool d<_Tp[_Nm]> = true;`
+   里的内层 `[_Nm]` 是**真正的下标**,只是它出现在**操作数**位置;把它拒掉会静默丢掉 `ArrayType`。
+   最后放在**后缀循环 + 约束内**这一对条件里:后缀位置的下标永远在完整表达式**之后**,而约束是唯一
+   "属性紧跟表达式"的位置。
+2. **在声明入口吃属性** —— 反而把 `#if` 与声明之间那条缝弄坏了。`int a;` / `#if` / `[[deprecated(…)]]` /
+   `#endif` / `void reserve();` 这个顺序里,属性属于**下一条**声明,而"入口先吃"把它绑到了上一处。
+   回退掉,靠说明符序列自己认。
+
+### 10.3 诚实登记:这一项**没做完**
+
+`std::string` 仍然查不到声明。剩下的:
+
+- **2 个解析错误**,同一种形状:语句位置的 `[[msvc::constexpr]]`
+  (`[[msvc::constexpr]] return ::new (…) _Ty[1]();`)—— 属性在**语句**之前,目前没有规则读它。
+- **2 个文件仍留着未闭合的作用域**(`xutility`、`type_traits`),栅栏把它们拿掉了,而 `basic_string`
+  就在那条闭包里 —— 所以这是当前唯一的阻塞。
+- **失败模式本身没有改**:栅栏仍然是**事后**的(解析 → 找跨文件的括号对 → 隔离 → 最多再解析两轮)。
+  真正值钱的是**解析前**按文件加栅栏,让一处缺口不再赔上整个单元。七个形状里六个是**小语法缺口**,
+  代价却全部来自"恢复时留下未配对的作用域"。
+
+### 10.4 验证
+
+`cargo test --release --workspace`:**49 个二进制全绿**;`clippy --all-targets`:**0 警告**。
+
+- 新增 `a_construct_the_grammar_refuses_does_not_take_the_rest_with_it`:六种形状,每种都断言文件里**两个
+  namespace 仍然平级**(泄漏会让第二个变成第一个的孩子,这正是 `vc_attributes::std` 的成因)。
+- `modern_constructs_produce_the_right_nodes` 增加 `requires` + 属性一条(要同时得到 `RequiresClause`
+  与 `AttributeList`)。
+- `session.rs` 的两条:单括号属性**不再**需要隔离(因此原来的隔离断言改强);真泄漏的文件**仍然**被隔离,
+  用一份**文字配平但解析不配平**的 fixture(`#if 0` 让 `{` 不可见)。
+
+---
+
 ## 0. 总评
 
 **强项**

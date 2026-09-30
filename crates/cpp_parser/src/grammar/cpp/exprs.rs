@@ -573,26 +573,52 @@ fn parse_ternary_expr(p: &mut CppParser) -> ParseResult {
 fn parse_binary_expr_with_precedence(p: &mut CppParser, min_prec: u8) -> ParseResult {
     let mut left = parse_unary_expr(p, true)?;
 
-    // A **fold expression** whose operator is at the cursor: `(ts + ...)`, `(... + ts)`.
+    // A **fold expression** whose operator is at the cursor. Three spellings, and the `...` is what tells them
+    // apart:
     //
-    // The `...` is the operator's other operand — the one standing for the rest of the pack — and `ts + ...`
-    // is therefore one binary expression rather than a binary expression missing its right side. Read here,
-    // before the ordinary operator loop, because that loop would consume the `+` and then fail to find an
-    // operand at the `...`.
+    // ```text
+    // (ts + ...)        a left fold    the `...` is the operator's right operand
+    // (... + ts)        a right fold   the `...` is the left operand, read by the primary rule
+    // (ts + ... + init) a binary fold  **both** sides of the `...` are written
+    // ```
     //
-    // `(... + ts)` needs nothing: the `...` is read as the *left* operand by the primary rule, and the loop
-    // below then sees the `+` and builds the same shape with the sides swapped — which is exactly what a left
-    // fold is.
+    // The right fold needs nothing here: `...` arrives as the left operand and the loop below builds the same
+    // shape with the sides swapped, which is exactly what a right fold is.
+    //
+    // # Why the binary fold has to be handled in this one place
+    //
+    // Because returning after the `...` leaves the **second operator** for the caller, and a caller that is a
+    // parenthesised expression then reports ``expected )`` at it. Measured on MSVC's `<type_traits>`:
+    // `constexpr unsigned char _Classify_category = _Comparison_category{(... | ... | ...)};` — one token the
+    // grammar did not accept cost far more than one expression, because the recovery from it left a `{` unclosed
+    // and the enclosing `namespace vc_attributes` (from `sourceannotations.h`) swallowed the rest of the
+    // translation unit. That is what made `std::basic_string` a member of `vc_attributes` and `std::string`
+    // unanswerable in every file that included `<string>`.
     if is_fold_operator(p, p.current_token())
         && p.peek_next_token() == CppTokenKind::Ellipsis
         && let Some(prec) = get_operator_precedence(p, p.current_token())
         && prec >= min_prec
     {
+        let operator = p.current_token();
         let m = left.precede(p, CppSyntaxKind::BinaryExpr);
         p.bump(); // the operator
         let fold = p.mark(CppSyntaxKind::FoldExpr);
         p.bump(); // `...`
         fold.complete(p);
+
+        // The second half of a **binary** fold, and only when the operator repeats: `+ ... +`. A different
+        // operator after the `...` is not a fold continuation, and the loop below reads it as the ordinary next
+        // term of the chain.
+        if is_fold_operator(p, p.current_token())
+            && p.current_token() == operator
+            && let Some(prec) = get_operator_precedence(p, p.current_token())
+            && prec >= min_prec
+        {
+            p.bump(); // the operator again
+            parse_binary_expr_with_precedence(p, prec + 1)?;
+            return Ok(m.complete(p));
+        }
+
         return Ok(m.complete(p));
     }
 
@@ -1543,6 +1569,32 @@ fn parse_postfix_suffixes(
 
                 expr = m.complete(p);
             }
+            // **An attribute after a constraint ends it.** An expression cannot write `[[` — the second `[` has
+            // nothing to read as an operand — so when one is there, the constraint is over and what follows belongs
+            // to the declaration. MSVC's standard library writes exactly that:
+            //
+            // ```cpp
+            // template <class _Ty, _Tuple_like _Tuple> requires _Can_make_from_tuple<_Ty, _Tuple>
+            // [[nodiscard]] constexpr _Ty make_from_tuple(_Tuple&& _Tpl) noexcept { … }
+            // ```
+            //
+            // Without this the subscript rule claimed the `[`, the constraint failed to parse, the requires-clause
+            // was refused, and the *declaration* failed with it — leaving the recovery to swallow the rest of the
+            // unit. Measured: most of the 27 errors left in a 2.1 MB translation unit were this one shape.
+            //
+            // **Only inside a constraint.** Saying it for every expression was tried and three tests failed at
+            // once, because a `[[` in operand position is a real subscript of a real array:
+            // `template <typename _Tp, int _Nm> constexpr bool d<_Tp[_Nm]> = true;` is a partial specialization
+            // over an array, and refusing the subscript there lost the `ArrayType` — a wrong tree, silently. A
+            // constraint is the one position where no subscript can be followed by an attribute, because the
+            // attribute is what ends the constraint.
+            CppTokenKind::LeftBracket
+                if p.is_in_a_constraint()
+                    && p.peek_next_token() == CppTokenKind::LeftBracket
+                    && p.peek_token_kind_at(1..3).last() == Some(&CppTokenKind::Identifier) =>
+            {
+                break
+            }
             CppTokenKind::LeftBracket => {
                 // 数组访问
                 let m = expr.precede(p, CppSyntaxKind::IndexExpr);
@@ -1702,7 +1754,8 @@ fn parse_postfix_suffixes(
 ///
 /// `fold_operand` is threaded down from [`parse_parenthesized_expression`] and is what licenses a bare `...` to
 /// be an operand; anywhere else it is refused so that the constructs which spell `...` themselves keep it.
-fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {    match p.current_token() {
+fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
+    match p.current_token() {
         // 字面量
         CppTokenKind::IntegerLiteral
         | CppTokenKind::FloatingLiteral

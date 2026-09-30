@@ -682,7 +682,7 @@ fn a_parameter_list_follows_the_attributes(p: &CppParser) -> bool {
 }
 
 pub fn parse_decl_specifier_seq(p: &mut CppParser) -> ParseResult {
-    parse_decl_specifier_seq_with(p, true)
+    parse_decl_specifier_seq_with(p, true, true)
 }
 
 /// Parse a decl-specifier-seq that must not run past the type, for contexts where a following name
@@ -692,7 +692,7 @@ pub fn parse_decl_specifier_seq(p: &mut CppParser) -> ParseResult {
 /// the comma separates them. A specifier sequence allowed to greedily take a second name would run
 /// the two parameters together.
 fn parse_decl_specifier_seq_stopping_at_one_name(p: &mut CppParser) -> ParseResult {
-    parse_decl_specifier_seq_with(p, false)
+    parse_decl_specifier_seq_with(p, false, false)
 }
 
 /// `allow_second_name` decides whether another identifier may join the specifier sequence.
@@ -708,7 +708,11 @@ fn parse_decl_specifier_seq_stopping_at_one_name(p: &mut CppParser) -> ParseResu
 /// the name is still part of the type) and `Point p` (where it is the declarator), and guessing
 /// wrong there loses the whole declaration — once the loop eats `p` as part of the type there is no
 /// declarator left and the `;` never matches.
-fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> ParseResult {
+fn parse_decl_specifier_seq_with(
+    p: &mut CppParser,
+    allow_second_name: bool,
+    reading_a_declaration: bool,
+) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::DeclSpecifierSeq);
 
@@ -734,6 +738,48 @@ fn parse_decl_specifier_seq_with(p: &mut CppParser, allow_second_name: bool) -> 
     // `a_further_name_may_join` below — and on `#else`, which moves it forward: the evidence is per branch.
     let mut specifiers_from = p.current_event_count();
     loop {
+        // **An attribute where a specifier goes.** `[[…]]` is one of the things the grammar allows in a
+        // decl-specifier-sequence, and reading it is what keeps a declaration that *starts* with one from being
+        // refused: MSVC's `sourceannotations.h` writes every one of its structs this way,
+        //
+        // ```cpp
+        // [repeatable] [source_annotation_attribute(All)] struct PreAttribute { … };
+        // ```
+        //
+        // and a sequence that stopped at the `[` left it to the expression rules, which read it as an **array
+        // subscript** and reported `expected primary expression` — once per attribute, and the recovery from each
+        // one left a brace unclosed. Measured on a project that includes `<string>`: 22 of those errors inside
+        // `sourceannotations.h` were enough for its `namespace vc_attributes` to swallow the remaining 2.1 MB of
+        // the translation unit, which is why `std::string` had no declaration anywhere and `std::basic_string`
+        // could not be found as a member of `std`.
+        //
+        // [`at_an_attribute`] is the same test every other position uses, so an array bound (`int a[2];`) and a
+        // lambda's capture list are untouched: neither is spelled `[[` here. The second half of the condition is
+        // MSVC's single-bracket spelling ([`at_a_single_bracket_attribute`]), which only a *declaration* may use —
+        // which is exactly the position this loop is in.
+
+        // **MSVC's single-bracket attribute where a specifier goes.** `[repeatable] [source_annotation_attribute(All)]
+        // `struct PreAttribute { … };` — `codeanalysis/sourceannotations.h` writes every declaration it has this
+        // way, and a sequence that stopped at the `[` left it to the expression rules, which read it as an *array
+        // subscript* and reported `expected primary expression` once per attribute. Measured on a project that
+        // includes `<string>`: the recovery from those errors left `namespace vc_attributes` open, so the rest of
+        // the 2.1 MB translation unit — `<xstring>`, `<vector>`, `main.cpp` — was read as a member of it, and
+        // `std::basic_string` lived in `vc_attributes::std`.
+        //
+        // **Only the single-bracket spelling**, which is what makes this safe to do in a specifier sequence: `[[`
+        // here is *not* an attribute. This loop also reads template arguments
+        // (`parse_decl_specifier_seq_stopping_at_one_name`), where a `[[` is a subscript of a subscript —
+        // `template <typename _Tp, int _Nm> constexpr bool d<_Tp[_Nm]> = true;` — and claiming it there lost the
+        // `ArrayType` and failed three tests at once. MSVC's spelling passes the shape test in
+        // [`at_a_single_bracket_attribute`], which a subscript cannot.
+        if reading_a_declaration
+            && at_a_single_bracket_attribute(p)
+            && let Err(err) = parse_attribute_specifiers_where_a_declaration_may_write_them(p)
+        {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+
         // A **compiler keyword** is stepped over *here*, outside [`parse_one_decl_specifier`], and the reason is
         // one the two functions have to agree about: that function decides "did this specifier name a type?" by
         // looking at the last token the specifier consumed, and one of these keywords is an *identifier* —
@@ -2390,6 +2436,32 @@ fn parse_class_like_head(p: &mut CppParser) -> ParseResult {
     let m = p.mark(class_like_kind(keyword).unwrap_or(CppSyntaxKind::ClassDef));
 
     p.bump(); // `class` / `struct` / `union` / `enum`
+
+    // **Attributes between the class-key and the name**, which is where MSVC's standard library puts them:
+    //
+    // ```cpp
+    // class [[nodiscard]] exception { … };          // <exception>
+    // class [[nodiscard]] bad_alloc : public exception { … };
+    // ```
+    //
+    // Read here rather than with the attributes after the name (below), because the name is what this rule reads
+    // next: with the attribute in front of it, `p.current_token()` is `[` and the name lookup finds nothing, so the
+    // class is recorded as *anonymous* and the body is then read as a compound statement at file scope. Measured on
+    // MSVC's `<xstring>` closure: every `class [[nodiscard]] X` lost its name and its body, and the `{` that was
+    // read as a function body left a scope open — which the fence then reported as a brace crossing and answered by
+    // quarantining four headers, including `<type_traits>` and `<xmemory>`. What that cost was not those classes:
+    // it was the whole translation unit, so `std::string` had no declaration anywhere in a project that included
+    // `<string>`.
+    //
+    // Two spellings of one construct, and both are legal; a class may also carry attributes in both places at once
+    // (`class [[a]] X [[b]] { }`), which is why this does not replace the loop below.
+    while p.current_token() == CppTokenKind::LeftBracket
+        && p.peek_next_token() == CppTokenKind::LeftBracket
+    {
+        if parse_attribute_specifier(p).is_err() {
+            break;
+        }
+    }
 
     // A **macro between the class-key and the name**, which is where a compiler's alignment attribute is written:
     //
@@ -5514,6 +5586,147 @@ pub fn parse_attribute_specifiers(p: &mut CppParser) -> ParseResult {
     }
 
     Ok(CompleteMarker::empty())
+}
+
+/// Read a run of attribute specifiers **where a declaration may write one**, which includes the single-bracket
+/// spelling ([`at_a_single_bracket_attribute`]).
+///
+/// The one caller is the decl-specifier sequence, and the restriction is the same one the language makes: MSVC's
+/// `[repeatable]` is accepted where a specifier goes and nowhere else. Keeping the wider reader for that one
+/// position is what stops `a[i]` in an expression from ever reaching these rules — an index is a single bracket
+/// around an expression, and a reader that claimed it everywhere would take the subscript out of every array use
+/// in every file.
+fn parse_attribute_specifiers_where_a_declaration_may_write_them(p: &mut CppParser) -> ParseResult {
+    loop {
+        if at_an_attribute(p) {
+            parse_attribute_specifier(p)?;
+            continue;
+        }
+        if at_a_single_bracket_attribute(p) {
+            parse_single_bracket_attribute(p)?;
+            continue;
+        }
+        return Ok(CompleteMarker::empty());
+    }
+}
+
+/// Is the cursor on **MSVC's single-bracket pseudo-attribute** — `[repeatable]`, `[source_annotation_attribute(All)]`?
+///
+/// # What this spelling is, and why it is read here
+///
+/// It is not standard C++ and it is not `[[…]]`: it is the annotation syntax the *source-annotation* headers are
+/// written in, and the compiler that owns them accepts it in exactly one position — where a decl-specifier goes.
+/// MSVC's `sal.h` produces it from a macro (`#define REPEATABLE [repeatable]`) and
+/// `codeanalysis/sourceannotations.h` writes it literally:
+///
+/// ```cpp
+/// [source_annotation_attribute(SA(Method))] struct __M_impl { … };
+/// REPEATABLE [source_annotation_attribute(SA(ReturnValue))] struct __R_impl { … };
+/// ```
+///
+/// # Why it has to be read rather than reported
+///
+/// Because of what the recovery from it costs, which was measured rather than assumed. A decl-specifier sequence
+/// that stopped at the single `[` left it to the expression rules, which read it as an **array subscript** and
+/// reported `expected primary expression`; the recovery from each one left a brace unclosed, and 22 of them were
+/// enough for `namespace vc_attributes` to swallow the remaining 2.1 MB of a translation unit that included
+/// `<string>`. `std::basic_string` then lived in `vc_attributes::std`, so `std::string` — and every member query
+/// through it — had no declaration anywhere.
+///
+/// # Why the shape test is this narrow
+///
+/// `[` means at least four other things, and all of them are legal in a declaration, so this refuses anything that
+/// is not the exact shape above:
+///
+/// ```text
+/// [name]                  accepted    the whole attribute
+/// [name( … )]              accepted    its arguments, one balanced group
+/// [2]         / []         refused     a bound is an expression, not a name
+/// [name, other]            refused     a subscript with a comma operator
+/// [name][2]                refused     an attribute followed by an array bound: read the bound
+/// [name( … )][name]        refused     two subscripts
+/// ```
+///
+/// The difference from `[[` is one token, so this is the *other* branch of the same decision rather than a second
+/// spelling of it: [`at_an_attribute`] answers for both, and the reader below consumes whichever it finds.
+pub fn at_a_single_bracket_attribute(p: &CppParser) -> bool {
+    if p.current_token() != CppTokenKind::LeftBracket {
+        return false;
+    }
+
+    // The tokens after the `[`, up to a bound: the attribute is an identifier, an optional balanced argument
+    // group, and a `]`. Anything longer than that is not one, and the bound is what keeps this from being a scan
+    // of the rest of the file in a position that fires for every declaration.
+    const LONGEST: usize = 64;
+    let kinds = p.peek_token_kind_at(1..LONGEST);
+    let mut at = 0usize;
+
+    if kinds.first() != Some(&CppTokenKind::Identifier) {
+        return false;
+    }
+    at += 1;
+
+    if kinds.get(at) == Some(&CppTokenKind::LeftParen) {
+        let mut depth = 0i32;
+        loop {
+            match kinds.get(at) {
+                Some(CppTokenKind::LeftParen) => depth += 1,
+                Some(CppTokenKind::RightParen) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        at += 1;
+                        break;
+                    }
+                }
+                // A bracket inside the arguments ends the reading: it is either a nested attribute (not this
+                // spelling) or an index, and neither is a shape this reader claims.
+                Some(CppTokenKind::LeftBracket)
+                | Some(CppTokenKind::RightBracket)
+                | None => return false,
+                Some(_) => {}
+            }
+            at += 1;
+        }
+    }
+
+    kinds.get(at) == Some(&CppTokenKind::RightBracket)
+}
+
+/// Read the single-bracket spelling, into the same [`CppSyntaxKind::AttributeList`] node as the other three.
+///
+/// The contents are kept as **tokens inside the node**, not parsed: what is written between the brackets is the
+/// annotation's own language (`source_annotation_attribute(SA(Method))` names a macro that expands to an
+/// identifier), and nothing in this layer may interpret it. That is the same rule the `__attribute__` spelling
+/// follows, and it is why a consumer asking "which attributes does this declaration carry" reads the node's text.
+fn parse_single_bracket_attribute(p: &mut CppParser) -> ParseResult {
+    let base = p.open_marks();
+    let m = p.mark(CppSyntaxKind::AttributeList);
+
+    p.bump(); // `[`
+    let mut depth = 1usize;
+
+    while !p.is_eof() {
+        match p.current_token() {
+            CppTokenKind::LeftBracket => {
+                p.bump();
+                depth += 1;
+            }
+            CppTokenKind::RightBracket => {
+                p.bump();
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(m.complete(p));
+                }
+            }
+            _ => p.bump(),
+        }
+    }
+
+    p.close_marks_above(base);
+    Err(CppParseError::syntax_error_from(
+        "unterminated attribute",
+        p.current_token_range(),
+    ))
 }
 
 /// Parse an attribute specifier, in any of the three spellings, into one [`CppSyntaxKind::AttributeList`].

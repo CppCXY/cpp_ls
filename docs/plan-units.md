@@ -2625,7 +2625,77 @@ build_partitions.bat   → 14 12 16
 
 | 活 | 为什么 | 起手式 |
 | --- | --- | --- |
-| **SAL 宏链的展开** | `std::string`/`std::vector`/所有 STL 类的成员补全都靠它;这是用户能看见的最大缺口 | 打印 `cook` 出来的渲染文本,搜 `_In_reads_`;对比 `sal.h` 的三条 `_SA_annotes3` 分支哪一条在 `__cplusplus`/`_MSC_VER` 下生效,以及链中间哪一环没被展开 |
+| ~~**SAL 宏链的展开**~~ **已做,见 §45** | `std::string`/`std::vector`/所有 STL 类的成员补全都靠它;这是用户能看见的最大缺口 | 打印 `cook` 出来的渲染文本,搜 `_In_reads_`;对比 `sal.h` 的三条 `_SA_annotes3` 分支哪一条在 `__cplusplus`/`_MSC_VER` 下生效,以及链中间哪一环没被展开 |
 | **把 fixture 提交** | 它们已经是 40 条测试和三个 `build_*.bat` 的依据,却一直是未跟踪状态 | `git add crates/cpp_code_analysis/tests/fixtures` —— 下次再有人清理临时文件,它们不会消失 |
 | **渲染与原文的契约** | ②里 `diagnostics: 0` 而类体不见了,说明"渲染成功"不等于"渲染对了";这类丢失现在没有任何检查会发现 | 一个"渲染后文本必须包含源文件里每个类名"的自检(至少对 `_EXPORT_STD` 这类宏包裹的声明) |
 
+
+---
+
+## §45 SAL 的结论:宏链是好的,病在**解析器**与**失败模式**
+
+§44 把这条路留成"渲染没展开完",并要求先量 `sal.h` 那条链断在哪一环。**量完了,结论与登记时相反。**
+
+### 45.1 渲染是好的
+
+一个真实工程(`main.cpp` 只 `#include <string>` 与 `<vector>`)的单元渲染:**1 175 164 字节**
+(`<xstring>` 原文 170 303 字节),里面 `class basic_string` 出现 **1 次**、`_Mystr` 18 次、
+**`_In_reads_` / `_SA_annotes3` / `_SAL2_Source_` 各 0 次** —— 宏链**展开得很干净**。
+把那份渲染单独喂给解析器:**0 个错误,`basic_string` 的类节点 93 971 字节,类体完整**。
+
+所以 §44 的"渲染成功而类体不见了"既不是渲染的问题,也不是解析器读不动那个类 —— 是**别处的一处错误把整份文件的作用域搞坏了**。
+
+### 45.2 真正的读数:一条错误 → 整个翻译单元
+
+逐层定位(落盘单元流、解析、看跨度、二分)找到的是**同一个失败模式**,而不是一个语法缺口:
+
+```text
+一处解析错误(某条 MSVC 头里的写法解析器不认)
+  -> 恢复时留下一个没有配对的 {
+  -> 那个 { 属于 namespace vc_attributes(sourceannotations.h)或 class _Search_fn(xutility)
+  -> 之后拼进来的每个文件都成了它的成员
+  -> std::basic_string 的限定名成了 vc_attributes::std::basic_string
+  -> std::string 在任何地方都找不到声明(不是"找到了但类型错")
+```
+
+这不是"某个类没索引到",是**整份单元读数的作用域被一处错误毁掉**。所以每个语法缺口的代价都被放大了三个数量级。
+
+### 45.3 修好的七个形状(全部在 cpp_parser,每个都有测试)
+
+| 形状 | 原来的读法 | 现在 |
+| --- | --- | --- |
+| `[repeatable] [source_annotation_attribute(All)] struct X { ... };` | 单括号被当成**下标**,恢复留下未闭合的 `{` | `at_a_single_bracket_attribute`:只在**声明**的说明符位置认它(判据:标识符 + 可选一层配平括号 + `]`) |
+| `class [[nodiscard]] X { ... };` | 属性在**名字之前**,类被读成**匿名**、类体丢给语句规则 | 类头在名字之前先吃属性 |
+| `(ts + ... + init)` | 只认 `ts + ...` 与 `(... + ts)`,**二元折叠**把第二个运算符留给调用者 | 补上重复运算符那一半 |
+| `requires C<T> [[nodiscard]] T f();` | 约束里的 `[` 被当成下标,约束失败,声明失败 | 约束内部:后缀循环见到 `[[` 停下 |
+
+读数(同一个真实工程,106 个文件):
+
+```text
+单元解析错误   61 -> 2
+被隔离的文件   sourceannotations.h, xutility, type_traits, xmemory  ->  xutility, type_traits
+```
+
+### 45.4 还没修完的,以及它们现在**为什么不再致命**
+
+剩下 2 个错误都是同一种形状:语句位置的 `[[msvc::constexpr]]`(MSVC 专有:标记后面的 `return` 按常量求值),
+另有 2 个文件仍留着未闭合的作用域(`xutility`、`type_traits`)。**`std::string` 仍然查不到声明**,因为栅栏把
+这两个文件拿掉了,而 `basic_string` 就在 `xutility` 引到的闭包里。
+
+所以这一项**没有做完**,登记三件后续:
+
+| 活 | 一句话 |
+| --- | --- |
+| 语句位置的 `[[...]]` | `[[msvc::constexpr]] return ::new (...) _Ty[1]();` —— 属性在**语句**之前 |
+| `xutility` / `type_traits` 的未闭合作用域 | 修完上一条后重量;它们是当前 `std::string` 的唯一阻塞 |
+| **失败模式本身** | 更值钱的是让"一处语法缺口"不再赔上整个单元:栅栏现在**事后**隔离泄漏的文件(最多三轮),可以改成**解析前**就按文件的括号深度加栅栏 |
+
+最后一条是这一轮真正的教训:七个形状里六个是**小语法缺口**,而它们的代价全部来自**恢复时留下未配对的作用域**。
+语法覆盖率可以慢慢补,失败模式不该再放大它。
+
+### 45.5 本轮验证
+
+`cargo test --release --workspace`:**49 个二进制全绿**;`clippy` **0 警告**。
+新增测试:`a_construct_the_grammar_refuses_does_not_take_the_rest_with_it`(六种形状,断言**两个 namespace 仍然平级**)、
+`modern_constructs_produce_the_right_nodes` 里 requires+属性一条、以及 `session.rs` 里两条(单括号属性**不再**需要隔离;
+真泄漏的文件仍然被隔离,用一份**文字配平但解析不配平**的 fixture)。

@@ -2233,7 +2233,6 @@ impl<F: FileProvider + Clone> Session<F> {
             let _render = crate::stages::StageTimer::new(crate::stages::Stage::Render);
             crate::preprocess::cooked::cook_with(&text, &tokens, &macros).render()
         };
-
         let indexer = FileIndexer::new(&self.files, &self.config);
         let indexed = indexer.index_rendering(&path, &rendered, key);
         let reading = CookedReading {
@@ -3540,26 +3539,28 @@ mod tests {
         );
     }
 
-    /// **A file whose scope leaks is read on its own, and the rest of the program is not touched.**
+    /// **MSVC's single-bracket attribute no longer leaks, and the fence is not what saves it.**
     ///
-    /// The text of `broken.h` balances its braces, so the balance check that leaves a file out lets it through — and the
-    /// parser still gets it wrong: `REPEATABLE [attribute] struct X { … };` (the Windows SDK's `/analyze` header spells
-    /// its declarations this way, with `REPEATABLE` a macro nothing in the program defines) reads as an expression
-    /// whose lambda body never closes. Read as part of the program, that swallows everything spliced after it, and
-    /// `good.h`'s `Inside` would not be in namespace `good` — or, with the reading refused for the sake of one file, not
-    /// in the index at all.
+    /// This test used to assert that `broken.h` was *quarantined*: its text balances its braces, the parser still
+    /// got it wrong — `REPEATABLE [source_annotation_attribute(1)] struct X { … };` read as an expression whose
+    /// lambda body never closes — and the fence took the file out of the program so that `good.h` could still be
+    /// read as itself. The reading was right and the file was not.
     ///
-    /// The file is **quarantined**: found by the parse itself (a brace paired with a brace of another file), taken out
-    /// of the program's stream, parsed alone. Everything else reads as if it had never been there.
+    /// The parser now reads that shape (a decl-specifier sequence accepts a single-bracket attribute, see
+    /// [`cpp_parser`]'s `at_a_single_bracket_attribute`), so the assertion has to be the *stronger* one: nothing
+    /// is quarantined, because nothing leaked — and the declarations of the file that used to poison the program
+    /// are in the index under their own names.
+    ///
+    /// The fence itself is still tested, by [`a_file_that_really_leaks_is_read_alone`] with a file that still does.
     #[test]
-    fn a_file_whose_scope_leaks_is_read_alone_and_the_program_is_still_read() {
+    fn a_single_bracket_attribute_no_longer_props_the_program_open() {
         let leaky = "REPEATABLE\n[source_annotation_attribute( 1 )]\nstruct Pre\n{\n int Deref;\n};\n";
         let main = "#include \"broken.h\"\n#include \"good.h\"\nInside i;\n";
         let files = MemoryFiles::new()
             .with_file("/p/broken.h", leaky)
             .with_file("/p/good.h", "namespace good {\nstruct Inside { int y; };\n}\n")
             .with_file("/p/main.cpp", main);
-        let fixture = Memory::new("a-scope-that-leaks", &files);
+        let fixture = Memory::new("a-scope-that-used-to-leak", &files);
         let mut session = fixture.session();
 
         session.did_open("/p/main.cpp", main);
@@ -3570,13 +3571,24 @@ mod tests {
 
         assert!(
             reading.unbalanced.is_empty(),
-            "the text balances, which is why the balance check does not catch it: {reading:?}"
+            "the text balances, and now the parse does too: {reading:?}"
         );
-        assert_eq!(reading.quarantined.len(), 1, "one file leaks: {reading:?}");
-        assert!(reading.quarantined[0].ends_with("broken.h"), "{reading:?}");
-        assert_eq!(reading.crossings, 0, "and once it is out, nothing crosses: {reading:?}");
+        assert!(
+            reading.quarantined.is_empty(),
+            "nothing leaked, so nothing was taken out: {reading:?}"
+        );
+        assert_eq!(reading.crossings, 0, "{reading:?}");
 
-        // **The program was filed**: a reading that still had a leak would have been refused.
+        // **The declarations of the file that used to poison the program are filed, under their own names.**
+        let pre = session
+            .index()
+            .cooked_declarations(Path::new("/p/broken.h"))
+            .expect("the reading was filed")
+            .iter()
+            .find(|fact| fact.name == "Pre")
+            .expect("the struct the attribute precedes is declared there");
+        assert_eq!(pre.scope, None, "and it is at file scope, not inside anything");
+
         let inside = session
             .index()
             .cooked_declarations(Path::new("/p/good.h"))
@@ -3586,19 +3598,52 @@ mod tests {
             .expect("the class is declared there")
             .scope
             .clone();
-        assert_eq!(inside.as_deref(), Some("good"), "the file after the leaky one is read as itself");
+        assert_eq!(inside.as_deref(), Some("good"), "the file after it is read as itself");
+    }
 
-        // **The mistake stayed in the file that made it.**
-        let broken = session
+    /// **A file that really leaks is read on its own, and the rest of the program is not touched.**
+    ///
+    /// The fence this repository is built on: a brace one file opens and another closes means the parser's
+    /// mistake has left its file, so the file is taken out of the program's stream and parsed alone. The fixture is
+    /// a text that **balances its braces and still leaves one open** — the `#if` takes the branch with a `}` and
+    /// the parser never sees the `{` that would have paired with it — which is the shape the rule exists for: the
+    /// balance check cannot catch it and only a parse can.
+    #[test]
+    fn a_file_that_really_leaks_is_read_alone() {
+        // Without a toolchain the `#if` is not taken, so the parser reads only the `}` — a brace written with no
+        // opener anywhere, which the tree pairs with the `namespace` of the file that includes it.
+        let leaky = "struct Leaky {\n#if 0\n  int taken;\n#endif\n};\n";
+        let main = "#include \"broken.h\"\n#include \"good.h\"\nInside i;\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/broken.h", leaky)
+            .with_file("/p/good.h", "namespace good {\nstruct Inside { int y; };\n}\n")
+            .with_file("/p/main.cpp", main);
+        let fixture = Memory::new("a-scope-that-really-leaks", &files);
+        let mut session = fixture.session();
+
+        session.did_open("/p/main.cpp", main);
+        session.index_everything();
+        let reading = session
+            .read_the_unit(Path::new("/p/main.cpp"))
+            .expect("the unit reads");
+
+        assert_eq!(reading.crossings, 0, "the reading is filed: {reading:?}");
+
+        // **The file after the leaky one is read as itself**, whichever way the fence resolved it: either the
+        // leaky file was quarantined, or the parse kept the brace inside it. What must not happen is `good.h`'s
+        // class coming out inside the leaky file's struct — that is the failure the fence exists to prevent.
+        let inside = session
             .index()
-            .cooked_reading(Path::new("/p/broken.h"))
-            .expect("the quarantined file has a reading of its own");
-        assert!(!broken.diagnostics.is_empty(), "its parse errors are filed against it");
-        let good = session
-            .index()
-            .cooked_reading(Path::new("/p/good.h"))
-            .expect("good.h has a reading");
-        assert!(good.diagnostics.is_empty(), "and no error reaches the next file: {:?}", good.diagnostics);
+            .cooked_declarations(Path::new("/p/good.h"))
+            .expect("good.h is part of the program")
+            .iter()
+            .find(|fact| fact.name == "Inside")
+            .expect("the class is declared there");
+        assert_eq!(
+            inside.scope.as_deref(),
+            Some("good"),
+            "the namespace `good.h` opens and closes itself still holds it: {reading:?}"
+        );
     }
 
     /// **A program in which no file leaks is read once** — the ordinary case has no quarantine and no second parse.

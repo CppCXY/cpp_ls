@@ -2721,6 +2721,64 @@ fn assert_reads(place: Where, constructs: &[&str]) {
     );
 }
 
+/// **A construct the grammar refuses must not take the rest of the file with it.**
+///
+/// Every one of these is a shape MSVC's headers write and the grammar did not accept, and each was measured on a
+/// real project rather than imagined: a declaration that failed to parse left a scope open, the recoverer kept
+/// reading, and everything spliced after the file — `<xstring>`, `<vector>`, the project's own `main.cpp` — came
+/// out inside that file's namespace. The assertions are therefore *two*: the construct reads, and the declaration
+/// after it is still where it was written.
+
+#[test]
+fn a_construct_the_grammar_refuses_does_not_take_the_rest_with_it() {
+    // One file, two namespaces, and the interesting declaration in the second. If the first namespace fails to
+    // close, the second namespace is inside it and the class is in `outer::inner` rather than `inner`.
+    let shapes = [
+        // The single-bracket pseudo-attribute of MSVC's source-annotation headers. `sal.h` produces it from a
+        // macro and `codeanalysis/sourceannotations.h` writes it literally, before every declaration it has.
+        "[repeatable] [source_annotation_attribute(All)] struct Pre { int unreferenced; };",
+        // The same, where a *declaration* begins — a member of a class.
+        "struct Holder { [source_annotation_attribute(All)] int member; };",
+        // A **binary fold**: `x | ... | init`, which is not the left fold `x | ...`. The parser returned after
+        // the `...`, so the second operator belonged to nobody and the enclosing expression reported on it.
+        "template <class... T> constexpr int folded = (f<T>() | ... | 1);",
+        "int called() { return (f<int>() | ... | 1); }",
+        // An attribute between a class-key and the name, which is where MSVC writes `[[nodiscard]]`.
+        "class [[nodiscard]] Warned { int x; };",
+        // …and one after a constraint, which is where MSVC writes the two together.
+        "template <class T> requires C<T> [[nodiscard]] constexpr T identity(T t) { return t; }",
+    ];
+
+    for shape in shapes {
+        let source = format!("namespace outer {{\n{shape}\n}}\nnamespace inner {{\nstruct Inside {{ int y; }};\n}}\n");
+        let tree = CppParser::parse(&source, ParserConfig::default());
+        let errors = tree.get_errors().len();
+
+        // **`Inside` is inside `inner`, and `inner` is not inside `outer`.** The second half is the assertion a
+        // leaked scope fails: the two namespaces are siblings in the source, so the declaration in the *second*
+        // one is only in the second one if the first closed where it said it did. When it does not, everything
+        // after the leak is read as a child of the leaked construct — which is how a real project ended up with
+        // `vc_attributes::std::basic_string` and `std::string` finding nothing at all.
+        let namespaces: Vec<String> = tree
+            .get_red_root()
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::NamespaceDecl)
+            .map(|node| {
+                node.children()
+                    .next()
+                    .map(|name| name.text().to_string().trim().to_string())
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert_eq!(
+            namespaces,
+            vec!["outer".to_string(), "inner".to_string()],
+            "two namespaces of the file, neither inside the other — a leaked scope makes the second one a child: {shape}"
+        );
+        assert_eq!(errors, 0, "`{shape}` must parse cleanly");
+    }
+}
+
 /// Pin a list of constructs as **not** readable, so that each one is a deliberate entry rather than a
 /// surprise. A construct that starts working fails here, which is the signal to move it up.
 #[track_caller]
@@ -5403,6 +5461,18 @@ fn modern_constructs_produce_the_right_nodes() {
         (
             "template <typename T> requires C<T> struct S { };",
             CppSyntaxKind::RequiresClause,
+        ),
+        // **An attribute after a constraint**, which ends it: `requires C<T> [[nodiscard]] T f();`. The
+        // subscript rule used to claim the `[`, the constraint failed, and the declaration failed with it —
+        // which on a real project left the recovering parse with a scope open, so the rest of the translation
+        // unit was read as a member of the file that leaked. See `at_a_single_bracket_attribute`.
+        (
+            "template <typename T> requires C<T> [[nodiscard]] T f(T t) { return t; }",
+            CppSyntaxKind::RequiresClause,
+        ),
+        (
+            "template <typename T> requires C<T> [[nodiscard]] T f(T t) { return t; }",
+            CppSyntaxKind::AttributeList,
         ),
         (
             "template <typename T> concept C = requires(T t) { t.f(); };",
