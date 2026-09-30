@@ -1698,6 +1698,16 @@ impl TranslationUnit {
     ) -> RenderedUnit {
         let mut out = RenderedUnit {
             files: self.frames.iter().map(|frame| frame.file.clone()).collect(),
+            file_lengths: self
+                .frames
+                .iter()
+                .map(|frame| {
+                    sources
+                        .source_of(&frame.file)
+                        .map(|text| text.len())
+                        .unwrap_or_default()
+                })
+                .collect(),
             ..RenderedUnit::default()
         };
         let cook = UnitCook {
@@ -2131,6 +2141,12 @@ pub struct RenderedUnit {
     pub spans: Vec<UnitSpan>,
     /// The files the walk entered, in the order it entered them — what a span's `file` indexes.
     pub files: Vec<std::path::PathBuf>,
+    /// **How long each file's own text is**, parallel to [`RenderedUnit::files`].
+    ///
+    /// The table that makes [`RenderedUnit::written_span`]'s answer checkable: the file it names and the range it
+    /// gives are both about *that file's* text, so the range has to end at or before this length. A file the caller
+    /// had no text for has length 0 — and a range in it is then impossible rather than merely unlikely.
+    pub file_lengths: Vec<usize>,
     /// **The stream's own brace balance**: `{` minus `}` over every token in it.
     ///
     /// One number, and it separates two failures that look identical from outside: a stream that does not balance
@@ -2206,8 +2222,20 @@ impl RenderedUnit {
     ///
     /// The two ends can stand in **different** files — a macro invocation that expands to text from two headers,
     /// or a declaration whose body came out of one and whose name was written in another — and there the honest
-    /// answer is the outermost call site, which is what `written_at` gives for each token: a range the reader can
-    /// see rather than a span across two texts.
+    /// answer is the first token's place: a range the reader can see, rather than a span across two texts.
+    ///
+    /// # Why this is the token's file and not its hint's
+    ///
+    /// `span.file` is which file's cook produced the token — the file it **stands in**, and the only thing that can
+    /// say which file a declaration is in. `span.written` is a *navigation hint*, so reading the file out of it
+    /// would be reading it out of the wrong field.
+    ///
+    /// That distinction turns out **not** to be a live bug, and the reason is worth recording because it is what
+    /// [`RenderedUnit::span_lands_in`] now guards: `ExpandedToken::diagnostic_range` already answers with the
+    /// **outermost call site** for a token that came out of a macro body — a position in the invoking file rather
+    /// than the `#define` — so a hint is a range in the file the token stands in and the two fields agree.
+    /// `a_declaration_starts_in_the_file_it_stands_in` is the shape that separates them, and it is asserted rather
+    /// than argued because nothing else enforces it.
     pub fn written_span(
         &self,
         range: cpp_parser::SourceRange,
@@ -2226,6 +2254,19 @@ impl RenderedUnit {
                 length: last.end_offset() - first.start_offset,
             },
         ))
+    }
+
+    /// **Does this span's answer land in the file the answer names?**
+    ///
+    /// The invariant [`RenderedUnit::written_span`]'s contract implies and that nothing performed: a range that
+    /// names a file it does not fit in is a wrong answer of a kind measured on this project — a 93 971-byte class
+    /// body filed under a 1.2 KB header, with the name, the scope and the range all correct for the file it named.
+    /// [`crate::file_what_was_found`] counts what fails this rather than filing it.
+    pub fn span_lands_in(&self, file: u32, written: cpp_parser::SourceRange) -> bool {
+        match self.file_lengths.get(file as usize) {
+            Some(&length) => written.end_offset() <= length,
+            None => false,
+        }
     }
 
     /// The path a span's file index names.
@@ -2341,6 +2382,9 @@ impl RenderedUnit {
     fn empty_like(&self) -> RenderedUnit {
         RenderedUnit {
             files: self.files.clone(),
+            // The lengths travel with the files: every one of these streams answers about the same texts, and a
+            // `written_span` answer is only checkable while the two agree.
+            file_lengths: self.file_lengths.clone(),
             missing: self.missing,
             unbalanced: self.unbalanced.clone(),
             ..RenderedUnit::default()

@@ -2693,45 +2693,84 @@ spans 是原来那一张  于是 written_span 回答的仍然是还在那里的�
 token 从解析里消失  于是那个文件只贡献长度
 ```
 
-**(b) 映射本身是对的,我一开始读错了。** `written_at(1858469)` 返回的**就是** `xstring`(偏移 22677),
-93 971 字节的类体确实在自己的文件里。当时看到"`basic_string` 归到 `__msvc_formatter.hpp`",那是该文件里
-`class basic_string;` **前置声明**的事实 —— 一件正确的事。
+**(b) 我上一轮的归因是错的 —— `written_span` 本来就是对的。**
 
-**(c) 还没定位的:某个类的 `ClassDef` 没进作用域。** 这一条我追了很久,**没有定论**,把追到哪一步写下来:
+我上一轮报"`basic_string` 归到 `__msvc_formatter.hpp`"。追下去发现:`written_at(1858469)` 返回的**就是**
+`xstring`(偏移 22677),93 971 字节的类体确实在自己的文件里。我看到的那条事实是该文件里
+`class basic_string;` **前置声明**,**一件正确的事**。
+
+这一轮我把"文件由 `span.written`(导航提示)决定,而不是 `span.file`(token 站在哪个文件)"当成一个真 bug
+去修 —— **前提是错的**。`ExpandedToken::diagnostic_range` 对宏展开 token 返回的是**最外层调用点**,也就是
+**调用文件**里的位置,所以 `span.written` 本来就在 `span.file` 的文本里,两个字段一致。用
+`a_declaration_starts_in_the_file_it_stands_in` 那个形状(整个声明由一个跨文件宏展开)量过:旧实现和新实现
+给出**同一个答案**,给的都是调用点 `DECLARE_WIDGET`。
+
+所以这一轮**改了实现又按事实收了回来**,只留下真正新增价值的部分:
+
+| 留下 | 为什么 |
+| --- | --- |
+| `RenderedUnit::file_lengths` | 每个文件自己的文本长度,和 `files` 平行;没有它就无法把"回答落在它命名的文件里"变成一次比较 |
+| `RenderedUnit::span_lands_in` | **这条不变量从来没有人检查过**。`file_what_was_found` 现在对每条事实的两半都查,不通过就计入 `unplaced` —— 一条"范围跑出它命名的文件"的答案会被**计数**,而不是被当成答案 |
+| 那条测试 | 钉住的是**不变量**而不是某个过去的错:`diagnostic_range` 一旦改成返回宏体位置,它就会红 |
+
+这一条记下来的教训比代码本身值钱:**我连着两轮把"我读数的办法"当成了"产品的缺陷"**。第一次是归因方式错
+(把树偏移当文件偏移读),第二次更贵 —— 我按一个没验证的前提改了实现。
+
+**(c) 找到了,而且是一个应用层的真 bug:`mentions_a_qualified_name` 会走进类体。**
+
+`std::string` 查不到的**唯一原因**是这个,和宏、和归属、和栅栏都无关:
 
 ```text
-单元解析            0 错误,3 461 个 ClassDef
-basic_string 的节点 1858469..1952440,直接子节点是 NameExpr("basic_string") + ClassBody —— 完全正常
-手工写的最小形状     template/class/名字/基类/模板成员/嵌套别名/static_assert —— 全部正常绑定,撑到 14 KB 也正常
-真实片段(105 KB)  4 个有类体的类,绑定 0 个;class_like 在整段里一次都没被调用
+declaration_is_qualified(class basic_string { … })      = true       ← 错在这里
+  → names_a_scope_this_file_has                          = false      (限定符是 `allocator_traits`,不是本文件的 scope)
+    → declaration_parts 直接 return
+      → 整个类定义被丢掉:没有绑定、没有 fact、`unplaced` 也是 0
 ```
 
-已经排除的:`declared_name` 的兜底路径(`ClassDef` 的直接子节点总有 `NameExpr`)、尺寸、`extern "C++"` 与
-`namespace std` 的嵌套、基类、模板成员。
+`declaration_is_qualified` 的规则本身是对的 —— 它拦住 `int ns::Widget::count = 0;` 在文件作用域绑出一个
+`count`。但 `mentions_a_qualified_name` 的走法只避开了 **declarator**,没有避开**类体**。而
+`class basic_string` 是 94 KB 的成员,成员里到处都是限定名(`allocator_traits<_Alloc>::…`、
+`pointer_traits<pointer>::…`),于是"这个类定义自己写了限定名"被判为真。
 
-**没排除但没验完的**:从真实流里切片段时,`extern "C++" { namespace std {` 只把 `namespace std {` 带进来了
-——`_EXTERN_CXX_WORKAROUND` 那一半靠在**另一个文件**里定义的宏。片段里因此出现 `std::string s = "hello";`
-这类来自其它文件的残留,它解析成 0 错误但语义上不是一个完整的程序。**下一个动作应该是从这个方向查**:
-让片段自足(把 `_STD_BEGIN` 展开成的东西一起切进来),而不是继续在切出来的残片上调作用域构建。
+**任何类体里出现 `X::y` 的类都会丢**,这是整类形状,不是 MSVC 特有的。
 
-教训:我在这个片段上花了太久,而它的**上下文是错的**。一个够不着的复现比一个像结论的读数更值钱,但先要检查
-复现本身是不是自足的。
+修法是让那个走法**不进入属于别的声明的子树**(`ClassBody` / `Declaration` / `CompoundStat`):本声明的名字只
+可能写在说明符序列或 declarator 里,两者都在所有 body **之外**。
+
+读数(同一个真实工程,106 个文件,零回归):
+
+```text
+                修前        修后
+cooked(xstring) 157 条  →  1 011 条   basic_string 的类体 129 939 字节
+cooked(vector)  273 条  →  1 048 条   std::vector 的类体 76 664 字节
+members_of("std::string")     NotDeclaredHere  →  204 个成员
+members_of("std::vector")     0 个成员        →  176 个成员
+type_at(s)                    No              →  Yes(std::string)
+declarations_in("std")        1 157           →  1 259
+```
+
+回归测试 `a_class_whose_members_write_qualified_names_is_still_declared`(三种形状:成员类型限定、默认实参限定、
+嵌套别名限定),并且**验证过它会失败**:去掉那个 guard 之后它报 `bindings: []`,正是这个 bug 本身。
+
+这一轮的教训还要加一条,而且是前两轮那条的根源:**"未定位"往往是"还没问到那个判定"。** 我前两轮一直在读
+`build_scopes` 的**结果**(绑定数、scope 树),而没有去读那个**决定要不要绑**的布尔。一旦把
+`declaration_is_qualified` / `names_a_scope_this_file_has` 这两个值打出来,答案立刻就在那里。
 
 登记:
 
 | 活 | 一句话 |
 | --- | --- |
-| **那个 `ClassDef` 为什么没进作用域** | 先要一个**自足**的复现:把 `_STD_BEGIN` 展开出来的两个 token 一起切进来,而不是只切 `namespace std {` |
 | `type_traits` 仍被隔离 | 一个未闭合作用域;0 错误的单元里它是唯一剩下的 |
 | **失败模式本身** | 栅栏仍是**事后**的(解析 → 找跨文件括号对 → 隔离 → 最多再解析两轮),而 §45.2 说得很清楚:代价全部来自"恢复时留下未配对的作用域" |
 
-五个形状都是**小语法缺口**,而它们的代价全部来自**恢复时留下未配对的作用域** —— 以及归属错开一个之后
-**没有任何检查会发现**。语法覆盖率可以慢慢补,这两样不该再放大它。
+七个形状都是**小语法缺口**,而它们的代价全部来自**恢复时留下未配对的作用域** —— 以及归属错开一个、和一个
+布尔判错之后**没有任何检查会发现**。语法覆盖率可以慢慢补,这些不该再放大它。
 
 ### 45.5 本轮验证
 
 `cargo test --release --workspace`:**49 个二进制全绿**;`clippy` **0 警告**。
-新增测试:`taking_a_file_out_of_the_stream_keeps_the_offsets`(文本等长、spans 原样、映射仍对)、
+新增测试:`a_class_whose_members_write_qualified_names_is_still_declared`(去掉修复后会红)、
+`a_declaration_starts_in_the_file_it_stands_in`、`taking_a_file_out_of_the_stream_keeps_the_offsets`、
 `a_construct_the_grammar_refuses_does_not_take_the_rest_with_it`(七种形状,断言**两个 namespace 仍然平级**)、
 `modern_constructs_produce_the_right_nodes` 里 requires+属性一条、以及 `session.rs` 里两条(单括号属性**不再**需要隔离;
 真泄漏的文件仍然被隔离,用一份**文字配平但解析不配平**的 fixture)。

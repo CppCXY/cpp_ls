@@ -1066,6 +1066,44 @@ fn a_friend_declaration_binds_nothing() {
     );
 }
 
+/// **A class whose members write qualified names is still a class this file declares.**
+///
+/// The measured case is `std::basic_string`, which is 94 KB of members and writes `::` all over the body
+/// (`allocator_traits<_Alloc>::…`, `pointer_traits<pointer>::…`). `declaration_is_qualified` reads a `::` in the
+/// specifier sequence as "this declaration names something through a qualifier" — the rule that keeps
+/// `int ns::Widget::count = 0;` from binding `count` at file scope — and it used to descend **into the class
+/// body** to find one. So the class was called a qualified declaration, the qualifier (`allocator_traits`) named
+/// no scope this file had built, and `declaration_parts` returned before binding anything.
+///
+/// The result was silence rather than a wrong answer: the class had no binding and therefore no fact, so
+/// `cooked(<xstring>)` held 157 declarations and `basic_string` was not one of them, and `members_of("std::string")`
+/// reported `NotDeclaredHere`.
+///
+/// Two shapes, because both were broken and both are ordinary: a member whose **type** is qualified, and one whose
+/// **default argument** is.
+#[test]
+fn a_class_whose_members_write_qualified_names_is_still_declared() {
+    for text in [
+        "template <class T> class Widget { std::vector<int> values; };\n",
+        "class Widget { int f(std::size_t n = std::numeric_limits<int>::max()); };\n",
+        "struct Widget { using type = std::allocator_traits<Alloc>::value_type; };\n",
+    ] {
+        let table = scopes(text);
+        let names: Vec<String> = table
+            .scope(table.root().unwrap())
+            .unwrap()
+            .bindings
+            .iter()
+            .map(|binding| binding.name.text())
+            .collect();
+
+        assert!(
+            names.iter().any(|name| name == "Widget"),
+            "`Widget` is declared in this file, whatever its members write: {names:?} for {text:?}"
+        );
+    }
+}
+
 /// **A qualified name whose segments are separate nodes does not take the indexing thread down.**
 ///
 /// `Outer<T>::grow` writes `<`, `T` and `>` in a **child node** of the name, so a reader that walks the name node's

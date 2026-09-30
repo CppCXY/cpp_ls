@@ -1537,9 +1537,34 @@ fn declaration_is_qualified(node: &CppSyntaxNode) -> bool {
 ///
 /// `inside_a_declarator` says whether the walk is already inside one: the specifier sequence starts outside, and
 /// every `Declarator` puts the walk inside for the rest of its subtree.
+///
+/// # It stops at the bodies and at the nested declarations, and that is the whole correctness of it
+///
+/// The question is about **this declaration's own name**, which is written either in the specifier sequence or in
+/// a declarator — both of them outside every body. Everything a body encloses is a different declaration's text,
+/// and a qualified name in there says nothing about this one.
+///
+/// Measured, and it is why `std::string` could not be found: `class basic_string { … }` is 94 KB of members, and
+/// members write qualified names all over it (`allocator_traits<_Alloc>::…`, `pointer_traits<pointer>::…`). So the
+/// walk found a `::`, called the class definition a **qualified declaration**, asked whether the qualifier named a
+/// scope *this file* had built, got `false`, and returned before binding anything. The class then had no binding
+/// and therefore no fact: `cooked(<xstring>)` held 157 declarations and `basic_string` was not one of them,
+/// because `declaration_is_qualified` had thrown the definition away.
+///
+/// Note that the declarator rule alone does not cover this — a *class body* is not inside a declarator, which is
+/// exactly how a member's `X::y` came to be read as the class's own name.
 fn mentions_a_qualified_name(node: &CppSyntaxNode, outside_a_declarator: bool) -> bool {
     for child in node.children() {
         let kind = CppSyntaxKind::from(child.kind());
+
+        // Another declaration's text. This declaration's name cannot be in there, and a `::` in it is that other
+        // declaration's business — a class body's members, a nested declaration, a function's body.
+        if matches!(
+            kind,
+            CppSyntaxKind::ClassBody | CppSyntaxKind::Declaration | CppSyntaxKind::CompoundStat
+        ) {
+            continue;
+        }
 
         if outside_a_declarator && kind == CppSyntaxKind::NameExpr && is_qualified(&child) {
             return true;

@@ -398,38 +398,62 @@ int                           内建词表里没有它            → `int` 被�
 
 ### 10.3 诚实登记:语法缺口已清零,归属问题挖出两个真 bug
 
-`std::string` 仍然查不到成员。追下去的结果是**两个真 bug 加一个还没定位的**:
+`std::string` 曾经查不到成员。追下去的结果是**两个真 bug、一次被推翻的前提、以及最后找到的根因**:
 
 **(a) 栅栏删字节,坐标系就错位了 —— 已修。** `RenderedUnit::without` 原来**删除**被隔离文件的 token 并重建
 span 表(2 111 390 → 2 104 969 字节),而**后面的解析仍然用原来那张 span 表**映射。6 100 字节的位移让之后
 每个声明都归到错误的文件。现在改成**用等长空格抹掉**:文本等长、spans 原样、token 从解析里消失。
 契约写进了 `without` 的文档与 `taking_a_file_out_of_the_stream_keeps_the_offsets`。
 
-**(b) 映射本身是对的 —— 我一开始读错了。** `written_at(1858469)` 返回的**就是** `xstring`(偏移 22677)。
-当时看到"`basic_string` 归到 `__msvc_formatter.hpp`",那是该文件里 `class basic_string;` **前置声明**的事实,
-一件正确的事。教训与上一轮同源:**探针的归因方式本身要先被验证**,否则它会把一件对的事报成 bug。
+**(b) `written_span` 本来就是对的 —— 而我按一个没验证的前提改了实现。** `ExpandedToken::diagnostic_range`
+对宏展开 token 返回的是**最外层调用点**(调用文件里的位置),所以 `span.written` 本来就在 `span.file` 的文本里,
+两个字段一致。我把"文件由 `written` 提示决定而不是由 `span.file` 决定"当成真 bug 去改,**前提是错的** ——
+用"整个声明由一个跨文件宏展开"的形状量过,新旧实现给出**同一个答案**。
 
-**(c) 还没定位的:某个类的 `ClassDef` 没进作用域 —— 而我的复现是错的。**
+改了又按事实收回来,只留下真正新增价值的:
+
+- `RenderedUnit::file_lengths` —— 每个文件自己的文本长度,和 `files` 平行。
+- `RenderedUnit::span_lands_in` —— **这条不变量从来没人检查过**:回答必须落在它命名的文件里。
+  `file_what_was_found` 对每条事实的两半都查,不通过计入 `unplaced`(实测仍是 0)。
+- `a_declaration_starts_in_the_file_it_stands_in` —— 钉住**不变量**而不是某个过去的错。
+
+**(c) 根因:`mentions_a_qualified_name` 会走进类体。**
 
 ```text
-单元解析            0 错误,3 461 个 ClassDef
-basic_string 节点   1858469..1952440,子节点 NameExpr("basic_string") + ClassBody —— 正常
-手工最小形状        模板/类/名字/基类/模板成员/嵌套别名/static_assert —— 全部正常,撑到 14 KB 也正常
-真实片段(105 KB)  4 个有类体的类,绑定 0 个;class_like 在整段里一次都没被调用
+declaration_is_qualified(class basic_string { … })  = true     ← 错在这里
+  → names_a_scope_this_file_has                     = false    (限定符 `allocator_traits` 不是本文件的 scope)
+    → declaration_parts 直接 return
+      → 类定义被丢掉:没有绑定、没有 fact,而 `unplaced` 是 0
 ```
 
-已排除:兜底路径、尺寸、`extern "C++"` 嵌套、基类、模板成员。**没验完的**:从真实流里切片段时,
-`extern "C++" { namespace std {` 只把 `namespace std {` 带进来了 —— `_EXTERN_CXX_WORKAROUND` 那一半靠在
-**另一个文件**里定义的宏。片段里因此有 `std::string s = "hello";` 这种来自其它文件的残留,它解析成 0 错误
-但语义上不是完整程序。**下一个动作应该让片段自足**(把 `_STD_BEGIN` 的两个 token 一起切进来),而不是继续
-在残片上调作用域构建。
+规则本身是对的(它拦住 `int ns::Widget::count = 0;` 在文件作用域绑出 `count`),但那个走法只避开了
+**declarator**,没避开**类体**。`class basic_string` 是 94 KB 成员,成员里到处是限定名
+(`allocator_traits<_Alloc>::…`、`pointer_traits<pointer>::…`),于是"这个类定义自己写了限定名"被判为真。
+**任何类体里出现 `X::y` 的类都会丢** —— 整类形状,不是 MSVC 特有。
 
-教训:我在这上面花了太久,而**复现的上下文是错的**。一个够不着的复现比一个像结论的读数更值钱 —— 但先要
-检查复现本身自不自足。
+修法:那个走法不进入属于别的声明的子树(`ClassBody` / `Declaration` / `CompoundStat`)。
 
-登记三件:
+读数(106 文件,同一个工程,零回归):
 
-- **那个 `ClassDef` 为什么没进作用域**:先要**自足**的复现。
+```text
+                             修前                     修后
+cooked(xstring)              157 条              →   1 011 条   (类体 129 939 字节)
+cooked(vector)               273 条              →   1 048 条   (类体 76 664 字节)
+members_of("std::string")    NotDeclaredHere     →   204 个成员
+members_of("std::vector")    0 个成员            →   176 个成员
+type_at(s)                   No                 →   Yes(std::string)
+declarations_in("std")       1 157              →   1 259
+```
+
+回归测试 `a_class_whose_members_write_qualified_names_is_still_declared` 三种形状,并**验证过它会失败**:
+去掉 guard 就报 `bindings: []`,正是这个 bug。
+
+**教训要加一条,而且是前两轮那条的根源**:"未定位"往往是"**还没问到那个判定**"。我前两轮一直在读
+`build_scopes` 的**结果**(绑定数、scope 树),没去读那个**决定要不要绑**的布尔。把
+`declaration_is_qualified` / `names_a_scope_this_file_has` 打出来,答案立刻就在那里。
+
+登记剩下两件:
+
 - **`type_traits` 仍被隔离**:一个未闭合的作用域,是 0 错误单元里唯一剩下的。
 - **失败模式本身没有改**:栅栏仍然是**事后**的(解析 → 找跨文件的括号对 → 隔离 → 最多再解析两轮)。
 
@@ -437,7 +461,9 @@ basic_string 节点   1858469..1952440,子节点 NameExpr("basic_string") + Clas
 
 `cargo test --release --workspace`:**49 个二进制全绿**;`clippy --all-targets`:**0 警告**。
 
+- 新增 `a_class_whose_members_write_qualified_names_is_still_declared`:**去掉修复后会红**(报 `bindings: []`)。
 - 新增 `taking_a_file_out_of_the_stream_keeps_the_offsets`:文本等长、spans 原样、映射仍对、剩下的程序仍然解析。
+- 新增 `a_declaration_starts_in_the_file_it_stands_in`:钉住"回答落在它命名的文件里"这条不变量。
 - 新增 `a_construct_the_grammar_refuses_does_not_take_the_rest_with_it`:**七种**形状,每种都断言文件里**两个
   namespace 仍然平级**(泄漏会让第二个变成第一个的孩子,这正是 `vc_attributes::std` 的成因)。
 - `modern_constructs_produce_the_right_nodes` 增加两条:`requires` + 属性(要同时得到 `RequiresClause`

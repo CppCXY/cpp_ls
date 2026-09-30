@@ -234,7 +234,6 @@ fn the_timeline_answers_what_the_per_file_walk_answered() {
 ///
 /// The old reading gave a header a context built from **one includer**, found by a breadth-first walk of the
 /// corpus, and the doc records what that cost: six headers looked *broken* by a switch when each read cleanly on
-/// its own — the "context" was a property of the file the probe picked, not of the header. The timeline has the
 /// real thing: the state of the translation unit at the `#include`.
 ///
 /// So this test asserts a difference on purpose, in both directions, on one fixture.
@@ -568,6 +567,91 @@ fn the_unit_cooks_as_one_stream_in_include_order() {
     );
 }
 
+/// **A declaration that begins with a token out of another file's macro body is still that file's declaration.**
+///
+/// The contract [`RenderedUnit::written_span`] needs: **the file an answer names and the range it gives are two
+/// facts about one text**, so the range has to end inside it.
+///
+/// A `UnitSpan` carries two different things, and answering with the wrong one would be silent:
+///
+/// ```text
+/// span.file     which file's cook produced the token — the file it **stands in**, and the only thing that
+///               can say which file a declaration is in
+/// span.written  where to act on it — the token's own range, or the call site for one a macro produced
+/// ```
+///
+/// The shape that separates them is a declaration whose **whole text came out of another file's macro body**: the
+/// invocation `DECLARE_WIDGET` is what `decl.h` wrote, and the `struct Widget { … }` in the stream is `macros.h`'s
+/// text pasted in. Read the file out of the *hint* and the answer is a position in `macros.h`'s body while the
+/// declaration stands in `decl.h`.
+///
+/// **It is not a live bug, and this test is why that is a measurement rather than a belief.**
+/// `ExpandedToken::diagnostic_range` already answers with the **outermost call site** — a position in the invoking
+/// file — so the hint and the standing file agree, and the assertion below holds on this crate's implementation.
+/// Nothing *enforced* it before: the failure this class of answer produced elsewhere was a 93 971-byte class body
+/// filed under a 1.2 KB header with every other field of the fact correct. So the test pins the invariant rather
+/// than a past mistake, and [`RenderedUnit::span_lands_in`] is the check that turns a future violation into a
+/// counted `unplaced` instead of a wrong answer.
+#[test]
+fn a_declaration_starts_in_the_file_it_stands_in() {
+    let files = [
+        (
+            "/p/macros.h",
+            "#define DECLARE_WIDGET struct Widget { int size; };\n",
+        ),
+        (
+            "/p/decl.h",
+            "#include \"macros.h\"\nnamespace outer {\nDECLARE_WIDGET\n}\n",
+        ),
+        ("/p/main.cpp", "#include \"decl.h\"\nint use = 0;\n"),
+    ];
+
+    let unit = Unit::new(&files);
+    let mut definitions = MacroDefinitions::default();
+    let timeline = unit.timeline_of("/p/main.cpp", &mut definitions);
+    let shared = timeline.definitions();
+    let stream = timeline.cook_the_unit(&unit.sources, &shared, None, true);
+
+    // The stream has the expansion, not the invocation: `decl.h` wrote a name, the stream has a struct.
+    assert!(
+        stream.text.contains("struct Widget { int size ; } ;"),
+        "the macro expanded into the stream: {}",
+        stream.text
+    );
+
+    let tree = cpp_parser::CppParser::parse(&stream.text, cpp_parser::ParserConfig::default());
+    let widget = tree
+        .get_red_root()
+        .descendants()
+        .find(|node| cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::StructDef)
+        .expect("the struct is in the stream");
+    let range = cpp_parser::source_range(widget.text_range());
+
+    let (file, written) = stream.written_span(range).expect("it maps");
+    assert_eq!(
+        stream.file_of(file),
+        Some(Path::new("/p/decl.h")),
+        "the declaration **stands in** decl.h, which is the file whose invocation produced it"
+    );
+
+    // …and the answer lands in that file — the invariant a hint from another file would break. Asked as a bounds
+    // check rather than through `span_lands_in` so that the test puts the question to the mapping itself, which is
+    // the layer a consumer reads; `span_lands_in` is what the index asks on every fact.
+    let decl = &unit.sources[Path::new("/p/decl.h")];
+    let acted_on = decl
+        .get(written.start_offset..written.end_offset())
+        .unwrap_or_else(|| {
+            panic!(
+                "the answer does not land in the file it names: {written:?} of {} bytes",
+                decl.len()
+            )
+        });
+    assert!(
+        acted_on.contains("DECLARE_WIDGET"),
+        "the range is the declaration as that file spells it — the invocation, not the body: {acted_on:?}"
+    );
+}
+
 /// **Taking a file out of the stream keeps every offset where it was.**
 ///
 /// The quarantine path blanks a file's tokens instead of deleting them, and the difference is not cosmetic: the
@@ -692,7 +776,6 @@ fn a_file_without_text_is_a_hole_in_the_unit() {
 ///
 /// This is the whole reason the index reads the cooked stream: `DECLARE_HANDLE(HWND)` declares `HWND__` and
 /// `HWND` to a compiler and *nothing* to a reader of the file's own text, because the declaration is inside the
-/// macro's replacement list. The same measurement on the SDK corpus (255 files, `std_probe --cooked-index`) is
 /// 3 250 declaration names that exist only after expansion — `DECLARE_HANDLE`'s generated structs and members,
 /// and — the larger half — the *scopes*: every declaration between `_STD_BEGIN` and `_STD_END` is `std::`-qualified
 /// in the cooked reading and at file scope in the raw one, which is the difference between a lookup that finds
@@ -1030,5 +1113,3 @@ fn a_file_cooks_the_same_through_the_unit_as_through_a_table_of_its_own() {
         "and a name nobody defines is nobody's: the seed does not invent one"
     );
 }
-
-

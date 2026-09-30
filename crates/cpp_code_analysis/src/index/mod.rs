@@ -1101,11 +1101,18 @@ fn is_one_parenthesised_group(tokens: &[cpp_parser::CppTokenKind]) -> bool {
 
 /// File the declarations and errors one parse found under the files they were written in.
 ///
-/// Every range goes back through [`crate::RenderedUnit::written_span`]: a token the file wrote keeps its own range, and
-/// one that came out of a macro body answers with the outermost call site. A fact whose **name** and whose **range**
-/// come out in different files is dropped and counted — half in one file and half in another is not "a bit less", it
-/// is a fact about nothing (the same rule [`crate::FileSummary::map_into_the_file`] applies per file). An error that
-/// cannot be placed in any file is counted rather than reported against a text the reader cannot see.
+/// Every range goes back through [`crate::RenderedUnit::written_span`], which answers with the file the tokens
+/// **stand in** and a range in *that* file.
+///
+/// # Two things are counted as unplaced, and the second one used to be silent
+///
+/// A range that maps nowhere, and a range whose answer does not land in the file the answer names — the check is
+/// [`crate::RenderedUnit::span_lands_in`], and it is the one thing that would have caught
+/// `basic_string`'s 93 971-byte class body being filed under a 1.2 KB header. Both halves of a fact are checked
+/// (`range` and `name_range`) and they must agree about the file: half in one file and half in another is not "a
+/// bit less", it is a fact about nothing (the same rule [`crate::FileSummary::map_into_the_file`] applies per file).
+///
+/// An error that cannot be placed in any file is counted rather than reported against a text the reader cannot see.
 fn file_what_was_found(
     declarations: Vec<crate::DeclFact>,
     tree: &CppSyntaxTree,
@@ -1124,6 +1131,10 @@ fn file_what_was_found(
             continue;
         };
         if name_file != file {
+            *unplaced += 1;
+            continue;
+        }
+        if !stream.span_lands_in(file, range) || !stream.span_lands_in(name_file, name_range) {
             *unplaced += 1;
             continue;
         }
