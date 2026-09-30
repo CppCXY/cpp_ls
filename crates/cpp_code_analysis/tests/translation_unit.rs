@@ -669,6 +669,14 @@ fn a_declaration_starts_in_the_file_it_stands_in() {
 /// the spans are the original ones      so `written_span` answers about the text that is still there
 /// the token is gone from the *parse*   so the file contributes nothing but spaces
 /// ```
+///
+/// **The unit reader no longer does this**, and the reason is worth knowing before reading this as a description of
+/// the pipeline: taking a file out of a program because one of its braces was mis-paired costs every declaration in
+/// the file, and that is the plan's gate ①. The reader gives up the **pairing** instead
+/// (`RenderedUnit::neutralized`: two braces become markers that pair with nothing) and reads the file on its own as
+/// well. What survives here is `without`'s own contract, which is still the right answer to "what would this program
+/// be without that file" — and the length-preservation it shares with `neutralized` is the property that makes both
+/// of them usable.
 #[test]
 fn taking_a_file_out_of_the_stream_keeps_the_offsets() {
     let files = [
@@ -731,6 +739,96 @@ fn taking_a_file_out_of_the_stream_keeps_the_offsets() {
     // …and the program without it still parses.
     let tree = cpp_parser::CppParser::parse(&without.text, cpp_parser::ParserConfig::default());
     assert!(tree.get_errors().is_empty(), "{:?}", tree.get_errors());
+}
+
+/// **A file that does not balance its braces contributes its tokens anyway, and is named.**
+///
+/// This is the plan's gate ①, and it used to be all-or-nothing: a frame whose own tokens did not balance was
+/// **left out of the stream** entirely, on the reasoning that keeping the text would let its unclosed scope swallow
+/// every file spliced after it. The hazard was real and the price was not — a file with one unbalanced brace and
+/// eight hundred good declarations contributed **none** of them, which is §4 rule 1 broken in the same way the
+/// `crossings == 0` gate broke it one layer up.
+///
+/// So the text goes in and the crossed pairing is repaired one layer up
+/// (`FileIndexer::index_unit_rendering`). This test is at the **cook** level, where the decision is made, and it
+/// pins the three things that have to hold together:
+///
+/// ```text
+/// the tokens are in the stream           so the file's declarations can be found at all
+/// the file is named in `unbalanced`      so a consumer can doubt it — rule 3
+/// the stream does not balance either     which is why the repair one layer up is load-bearing, not optional
+/// ```
+///
+/// The third is the one worth stating out loud: including the text means the **whole-program stream** now carries
+/// the imbalance, and the only thing that keeps the next file out of the leaked scope is that the reader finds the
+/// crossed brace pair and gives it up. A change that made `brace_crossings` miss this shape would move `Second`
+/// inside `Leaky` — so the session-level test
+/// (`a_file_that_does_not_balance_its_braces_is_named_and_still_read`) asserts the other end of it.
+#[test]
+fn a_file_that_does_not_balance_still_contributes_its_tokens() {
+    let files = [
+        // Opens a namespace and never closes it: what a `/analyze` header does, and what swallows a program.
+        (
+            "/p/leaky.h",
+            "namespace vc_attributes {\nstruct First { int a; };\n",
+        ),
+        ("/p/second.h", "struct Second { int b; };\n"),
+        ("/p/main.cpp", "#include \"leaky.h\"\n#include \"second.h\"\n"),
+    ];
+
+    let unit = Unit::new(&files);
+    let mut definitions = MacroDefinitions::default();
+    let timeline = unit.timeline_of("/p/main.cpp", &mut definitions);
+    let shared = timeline.definitions();
+    let stitched = timeline.cook_the_unit(&unit.sources, &shared, None, true);
+
+    // The tokens are in: this is the half gate ① used to take away.
+    assert!(
+        stitched.text.contains("First"),
+        "the unbalanced file's own declaration is in the stream: {}",
+        stitched.text
+    );
+    assert!(
+        stitched.text.contains("Second"),
+        "and so is the file after it: {}",
+        stitched.text
+    );
+
+    // It is named, which is what a consumer has to be able to see.
+    assert_eq!(
+        stitched.unbalanced,
+        vec![PathBuf::from("/p/leaky.h")],
+        "the file that does not balance is named, and only it"
+    );
+
+    // **And the stream carries the imbalance**, which is the fact the repair one layer up exists for. `braces` is
+    // `{` minus `}` over the whole stream, so a file that opened one scope too many leaves it **positive** — one
+    // closer short, counted backwards.
+    assert!(
+        stitched.braces > 0,
+        "an unclosed `{{` leaves the whole stream one closer short, so the repair is load-bearing: {}",
+        stitched.braces
+    );
+
+    // Every token still maps back to the file it was written in — the property the whole mapping rests on, and the
+    // one a stream built by *skipping* a file never had to be asked about.
+    let second = stitched
+        .text
+        .find("Second")
+        .expect("the file after the unbalanced one is in the stream");
+    let (file, written) = stitched
+        .written_span(cpp_parser::SourceRange::new(second, "Second".len()))
+        .expect("mapped");
+    assert_eq!(
+        stitched.file_of(file),
+        Some(Path::new("/p/second.h")),
+        "a token after the unbalanced file still belongs to its own file"
+    );
+    assert_eq!(
+        written.start_offset,
+        "struct Second { int b; };\n".find("Second").expect("its own text"),
+        "and to its own offset in that file"
+    );
 }
 
 /// **A file the caller has no text for is a hole, not an empty file.**

@@ -1765,7 +1765,7 @@ impl UnitCook<'_> {
         };
 
         let (tokens, _) = cpp_parser::lex(text, &cpp_parser::LexerConfig::default());
-        let cooked = crate::preprocess::cooked::cook_with(
+        let cook = crate::preprocess::cooked::cook_with(
             text,
             &tokens,
             &crate::preprocess::cooked::FileMacros::new(
@@ -1778,11 +1778,10 @@ impl UnitCook<'_> {
 
         let mut next = 0usize;
         // **The frame's own tokens, counted before they are pushed.** A file whose text opens a brace it does not
-        // close would swallow every file spliced after it — see [`RenderedUnit::unbalanced`], which is where the
-        // measurement and the rule are written down. The includes are spliced either way: they are files with
-        // their own text, and what they are worth does not depend on this one balancing.
+        // close would swallow every file spliced after it, so this is the count that finds the file — and it is
+        // **recorded rather than acted on**. See [`RenderedUnit::unbalanced`] for why the text goes in anyway.
         let mut depth = 0i64;
-        for token in &cooked.tokens {
+        for token in &cook.tokens {
             match token.text() {
                 "{" => depth += 1,
                 "}" => depth -= 1,
@@ -1792,11 +1791,9 @@ impl UnitCook<'_> {
 
         if depth != 0 {
             out.unbalanced.push(self.unit.frames[frame as usize].file.clone());
-            self.stitch_included(included, 0, out);
-            return;
         }
 
-        for token in &cooked.tokens {
+        for token in &cook.tokens {
             // **Where the token stands in this file**, which is also what decides whether an include that has not
             // been spliced yet comes first: the call site for an expansion (the text the reader sees) and the
             // token's own range for text the file wrote. Both are monotone in stream order, and both are positions
@@ -2159,9 +2156,9 @@ pub struct RenderedUnit {
     /// A hole rather than an empty file: the stream is missing whatever that file would have contributed, and a
     /// consumer that needs to know whether what it read is the whole program asks this.
     pub missing: usize,
-    /// **Files whose own text does not balance its braces**, so their text was left out of the stream.
+    /// **Files whose own text does not balance its braces** — recorded, and **no longer dropped**.
     ///
-    /// # Why a file's text can be left out
+    /// # Why this field exists
     ///
     /// A brace opened in one file and closed in another is not a defect in C++ — a header that opens a namespace
     /// for its includer to close is a real idiom — but in a **program** stream it is a hazard, and it is the hazard
@@ -2171,14 +2168,32 @@ pub struct RenderedUnit {
     /// standard library — then read as `vc_attributes::std`, and a reader asking about `std::size_t` got "the index
     /// has no such name" while the file in front of them declared it.
     ///
-    /// So a frame whose own tokens do not balance is **left out of the stream** (its includes are still spliced,
-    /// because they are separate files with their own text) and named here. The alternative — keeping the text and
-    /// letting the scopes be wrong — is the failure this field replaces: silent, and it moves every answer in the
-    /// program rather than the one file's.
+    /// # What used to be done about it, and why that was the wrong shape
     ///
-    /// The root cause is elsewhere and is registered rather than papered over: an identifier nobody defines
-    /// evaluates to **0** in `#if`, so `#if defined(_PREFAST_)` is decidable — and answering `Unknown` there is
-    /// what pulls the `/analyze` header into a program that never asks for it.
+    /// The frame's own tokens were **left out of the stream** (its includes were still spliced, being files with
+    /// their own text) and the file was named here. That is the plan's gate ①, and §4 rule 1 is written against it:
+    /// *"任何一层都不允许因为'不确定'而放弃已经确定的答案."* Dropping a file's text because its braces do not
+    /// balance throws away every declaration in it — a file with one unbalanced brace and eight hundred good
+    /// declarations contributed **none** of them — and it is the same all-or-nothing shape as the `crossings == 0`
+    /// gate that used to sit one layer up.
+    ///
+    /// # What is done instead
+    ///
+    /// The text goes **in**, and the crossed pairing it creates is repaired where every other crossed pairing is
+    /// repaired: [`crate::FileIndexer::index_unit_rendering`] finds the `{` this file opened paired with a `}` in
+    /// another file, neutralises **that pair**, and reads this file on its own as well. So the declarations are
+    /// filed at the scope their own file gives them, the file after this one is not swallowed, and this list is the
+    /// **record of which files those were** — a reason to doubt the files named, not a reason to have read nothing.
+    ///
+    /// A file named here is still a file worth looking at: its text genuinely does not balance, which is either a
+    /// real idiom (the open/close-across-includes shape above) or a defect in the file. What changed is that the
+    /// answer to "which" is now visible in the index instead of being priced in silence.
+    ///
+    /// # The root cause is elsewhere, and is still registered
+    ///
+    /// An identifier nobody defines evaluates to **0** in `#if`, so `#if defined(_PREFAST_)` is decidable — and
+    /// answering `Unknown` there is what pulls the `/analyze` header into a program that never asks for it. That is
+    /// §3.2 item 1 (the builtin macro table), and it is the fix that stops this file being in the program at all.
     pub unbalanced: Vec<std::path::PathBuf>,
 }
 
@@ -2320,7 +2335,10 @@ impl RenderedUnit {
 
     /// Append one token — the separator rule `CookedStream::render` uses, so the two renderings spell the same
     /// text for the same tokens.
-    fn push(&mut self, text: &str, file: u32, written: cpp_parser::SourceRange) {
+    ///
+    /// `pub(crate)` rather than private because this crate's tests build a unit token by token to check the mapping,
+    /// and a test that spelled the text itself would be testing its own spelling rather than this rule.
+    pub(crate) fn push(&mut self, text: &str, file: u32, written: cpp_parser::SourceRange) {
         if !self.text.is_empty() {
             self.text.push(' ');
         }
@@ -2342,14 +2360,24 @@ impl RenderedUnit {
     /// is the original, in the original order; a left-out file's includes were spliced as files of their own and
     /// stay.
     ///
+    /// # This is no longer what the indexer does, and the reason is the whole of M0
+    ///
+    /// It **is** still the right way to answer "what would this program be without that file", and its contract —
+    /// the length is preserved, so the original span table still maps every fact — is the one
+    /// [`RenderedUnit::neutralized`] shares. What changed is that the unit reader **stopped asking that question**:
+    /// taking a file out of a program because one of its braces was mis-paired costs every declaration in the file,
+    /// and measured on a real project that is how `<format>` and `<type_traits>` came to be missing from an index
+    /// that had read them. The reader now gives up the **pairing** instead ([`RenderedUnit::neutralized`]) and reads
+    /// the file on its own as well. `tests/translation_unit.rs` is where this is still exercised.
+    ///
     /// # The tokens are blanked, not removed, and that is the whole point
     ///
     /// The text that comes out is **the same length** as the text that went in: every token of a left-out file is
     /// replaced by as many spaces as it occupied, byte for byte, and every other byte is copied as it stands. So an
     /// offset in the result is the same offset in the original — which is what lets a fact found in the blanked
     /// text be mapped back through [`RenderedUnit::written_span`], whose spans are still the original ones. This is
-    /// documented on [`RenderedUnit::only`] as the property a quarantined file's own reading depends on, and
-    /// `without` is the other half of the same contract.
+    /// documented on [`RenderedUnit::only`] as the property a file's own reading depends on, and `without` is the
+    /// other half of the same contract.
     ///
     /// # What removing them cost
     ///
@@ -2366,6 +2394,15 @@ impl RenderedUnit {
     /// Spaces rather than removal also keeps the **braces** where they were, so the second parse sees the same
     /// token positions as the first and its scope pairing is comparable. Trivia is dropped by the parser either
     /// way, so a blanked file contributes nothing but its length.
+    ///
+    /// # The one remaining caller
+    ///
+    /// `tests/translation_unit.rs`'s `taking_a_file_out_of_the_stream_keeps_the_offsets`, which is where the three
+    /// properties above are asserted. Nothing in the pipeline calls this any more: the cook no longer drops an
+    /// unbalanced file ([`RenderedUnit::unbalanced`]) and the reader no longer drops a file whose brace crossed
+    /// ([`RenderedUnit::neutralized`]). It stays because "what would this program be without that file" is a
+    /// question the next mechanism will ask again, and because deleting a function whose contract is documented and
+    /// tested is how the *reason* for not using it gets forgotten.
     pub fn without(&self, left_out: &std::collections::BTreeSet<u32>) -> RenderedUnit {
         let mut out = self.empty_like();
         let mut bytes = self.text.as_bytes().to_vec();
@@ -2387,8 +2424,67 @@ impl RenderedUnit {
         out
     }
 
-    /// **Only the tokens `file` itself wrote** (a token a macro of its own produced counts) — what a quarantined file
-    /// is read from. Its spans are the original ones, so a fact found here maps back through
+    /// **The same program with some tokens replaced by a marker of the same length** — what a fence turns a
+    /// leaked brace into, instead of taking a file's whole text out of the program.
+    ///
+    /// # Why this exists, and what it replaces
+    ///
+    /// [`RenderedUnit::without`] removes a file's tokens because the file leaked a scope, and that is the one
+    /// mechanism the plan calls a gate: the leak is real, the repair is not, and the file's *other* contribution
+    /// goes with it. Measured on the project this was written for, that is how `<format>` and `<type_traits>` left
+    /// a program that includes them.
+    ///
+    /// What is actually wrong when a brace pairs across two files is **one brace pair**. `MACRO_BEGIN` written in a
+    /// header and its `MACRO_END` written by the invoking file is a scope that belongs to the invoking file, and
+    /// the parser, having read the header's text first, paired it with something else. The file did not do anything
+    /// wrong; the pairing did. So the smallest repair is the pairing itself: the two brace tokens are replaced, and
+    /// every other token of every file stays exactly where it was.
+    ///
+    /// # The markers, and why they are spelled this way
+    ///
+    /// A replaced token becomes `;` followed by as many spaces as it had bytes. So:
+    ///
+    /// * **the text is the same length**, so an offset in the result is the same offset in the original and every
+    ///   fact found in it maps back through the **original** span table ([`RenderedUnit::written_span`]) — the same
+    ///   contract [`RenderedUnit::without`] keeps, and the reason neither of them may delete bytes;
+    /// * **a `;` cannot open or close a scope, a template-argument list or an initializer**, which is what "does not
+    ///   pair" has to mean for a repair that must not move anything else. `[]`, `()` and `{}` all pair with
+    ///   something; `;` pairs with nothing, and it is legal almost everywhere a brace is — the exceptions
+    ///   (`struct S { … }` losing its body, `int a[] = { … }` losing its list) are shapes this is never asked
+    ///   about, because a *crossing* brace is by construction one the parser had already mis-paired;
+    /// * **the same length** keeps the map honest even for a multi-byte token: `neutralized` may be handed a span
+    ///   of any width, and a span that begins after the marker begins at the byte after it.
+    pub fn neutralized(&self, spans: &[cpp_parser::SourceRange]) -> RenderedUnit {
+        let mut out = self.empty_like();
+        let mut bytes = self.text.as_bytes().to_vec();
+
+        for span in spans {
+            // A caller that asks for its **own** stream (`only`) passes spans of that stream rather than of this
+            // one, and an offset past the end is then a caller bug rather than a token to mark. Clamped rather than
+            // asserted: a repair that is one byte short is a parse error in one place, and a panic is a lost
+            // session.
+            let end = span.end_offset().min(bytes.len());
+            if span.start_offset >= end {
+                continue;
+            }
+
+            bytes[span.start_offset] = b';';
+            for byte in &mut bytes[span.start_offset + 1..end] {
+                *byte = b' ';
+            }
+        }
+
+        out.text = String::from_utf8(bytes).expect("only spaces replaced bytes of a UTF-8 stream");
+        // **The spans are the original ones** — see `without`, whose contract this shares. That is what lets a fact
+        // found in the repaired text be filed under the file it was written in.
+        out.spans = self.spans.clone();
+        out
+    }
+
+    /// **Only the tokens `file` itself wrote** (a token a macro of its own produced counts) — what a file whose brace
+    /// had to be given up is read from, so that its own scopes are all its own.
+    ///
+    /// Its spans are the original ones, so a fact found here maps back through
     /// [`RenderedUnit::written_span`] exactly as it would from the whole program.
     pub fn only(&self, file: u32) -> RenderedUnit {
         let mut out = self.empty_like();
@@ -3192,21 +3288,50 @@ pub struct IndexedUnit {
     pub files_with_tokens: usize,
     /// How many files the walk reached that the caller had no text for.
     pub missing: usize,
-    /// Files whose own text did not balance its braces and was left out of the stream — see
-    /// [`RenderedUnit::unbalanced`].
+    /// Files whose own text does not balance its braces — see [`RenderedUnit::unbalanced`].
+    ///
+    /// A **report**, not a filter: the files named here contributed their tokens to the stream like every other
+    /// file, and the crossed pairing their imbalance caused was repaired by this very function. A reader sees the
+    /// list to know which files to doubt, which is the plan's rule 3 — an uncertain answer that names what it is
+    /// uncertain about beats both a silent wrong answer and a refusal to answer.
     pub unbalanced: Vec<std::path::PathBuf>,
     /// The stream's own brace balance — see [`RenderedUnit::braces`].
     pub braces: i64,
-    /// Files **quarantined**: the parser paired a brace of theirs with a brace in another file, so their tokens were
-    /// taken out of the program's stream and parsed on their own — see [`crate::FileIndexer::index_unit_rendering`].
-    /// What they declare is still filed; what their parse got wrong stays inside them.
+    /// Files **repaired**: the parser paired a brace of theirs with a brace in another file, so that one pairing was
+    /// neutralised in the stream (`RenderedUnit::neutralized`) and the file was parsed on its own as well — see
+    /// [`crate::FileIndexer::index_unit_rendering`]. What they declare is filed from the program; what their parse
+    /// got wrong stays inside them.
+    ///
+    /// This used to be called *quarantine*, and the name was the mechanism: the file's tokens left the program
+    /// entirely ([`RenderedUnit::without`]), so a file that leaked one brace lost every declaration in it. The plan's
+    /// rule 2 is "a file at most loses itself", and losing all of itself is not that.
     pub quarantined: Vec<std::path::PathBuf>,
-    /// **How many braces the final parse still paired across two files.** This is the gate: zero means no scope
-    /// opened in one file is closed in another, so no file's mistakes reach the next one's names.
-    pub crossings: usize,
+    /// **How many braces were given up to repair a crossing, and none of them is still in the stream.**
+    ///
+    /// Counted as the offsets **actually neutralised** — not as the crossings a parse reported, which is a different
+    /// number for a reason worth knowing: a parse that reports a crossing out of braces already given up has found
+    /// nothing new to fix, and counting it would report a repair that did not happen. Only the new ones count.
+    ///
+    /// It is not a gate, and that is deliberate: a non-zero value here means the parse had to repair something, so
+    /// the declarations nearest those braces are the ones to doubt — not a reason to file nothing. Compare
+    /// [`RenderedUnit::unbalanced`], which records a file whose braces do not balance before the parse even runs;
+    /// this is the after-the-parse half of the same policy, and it is the one that must not scale up to the whole
+    /// program.
+    pub repaired: usize,
+    /// **Crossings the repair could not cure**, one per crossing left in the final parse.
+    ///
+    /// The honest counterpart of [`IndexedUnit::repaired`], and it exists because the two can differ: a parser that
+    /// reports a crossing out of braces that are *already* markers has nothing left for the repair to give up, so the
+    /// loop stops and reports the remainder rather than spinning out its rounds pretending to fix it.
+    ///
+    /// Zero in every case measured, and non-zero is **not** a reason to refuse the reading — it is the same
+    /// all-or-nothing gate this whole milestone removed, one level down. What it means is that the files named in
+    /// [`IndexedUnit::quarantined`] are the ones whose scopes the program's parse got wrong, and that their own
+    /// readings (which are filed instead) are the ones to trust.
+    pub uncured: usize,
     /// Errors the parse of the stream reported.
     ///
-    /// Reported per file (each lands in the file it is in) and no longer the gate — see `crossings`. It was the gate
+    /// Reported per file (each lands in the file it is in) and never the gate — see `repaired`. It was the gate
     /// while the only defence against one file's unclosed scope was to refuse the whole program.
     ///
     /// *The original account, kept because it is the measurement:*
@@ -3240,8 +3365,12 @@ pub struct UnitReading {
     pub missing: usize,
     /// Facts and errors that could not be placed in any file.
     pub unplaced: usize,
-    /// Files whose own text did not balance its braces, so it was left out of the program's stream — see
-    /// [`RenderedUnit::unbalanced`]. Named rather than counted: the file is the thing to look at.
+    /// Files whose own text does not balance its braces — see [`RenderedUnit::unbalanced`]. Named rather than
+    /// counted: the file is the thing to look at.
+    ///
+    /// Being named here is **not** a claim that the file was skipped. Its declarations are in the index, filed at the
+    /// scope its own text gives them; what the name says is that a brace of it could not be paired inside it, and
+    /// that the pairing it got instead had to be given up.
     pub unbalanced: Vec<std::path::PathBuf>,
     /// The stream's own brace balance — see [`RenderedUnit::braces`].
     pub braces: i64,
@@ -3249,10 +3378,19 @@ pub struct UnitReading {
     pub errors: usize,
     /// Files quarantined — see [`IndexedUnit::quarantined`].
     pub quarantined: Vec<std::path::PathBuf>,
-    /// Braces the final parse still paired across two files — see [`IndexedUnit::crossings`]. Non-zero means the
-    /// reading was **not** filed into the index: a scope that leaks from one file into the next is the failure that
-    /// made this reading lose names, and a program that still does it is not asserted.
-    pub crossings: usize,
+    /// Brace pairs the parse made across two files and that were neutralised before the reading was indexed — see
+    /// [`IndexedUnit::repaired`].
+    ///
+    /// **No longer a gate.** It was one, and it was the single most expensive rule in this crate: a non-zero value
+    /// meant the whole reading was thrown away, so one mis-paired brace anywhere in a 5-million-byte program left
+    /// the index exactly as empty as it started — which is how `std::format` came to have no members while the file
+    /// that declares them was in the program. A repair that reports what it cost is a reading that can still be
+    /// used; the two are not the same decision and only one of them is honest about what is known.
+    pub repaired: usize,
+    /// Crossings the repair could **not** cure — see [`IndexedUnit::uncured`]. Non-zero means the files named in
+    /// [`UnitReading::quarantined`] are ones whose scope the program's parse got wrong, and whose own readings are
+    /// the ones the index holds.
+    pub uncured: usize,
 }
 
 /// One thing the parse of a **rendering** found, said in the file's own coordinates.
@@ -3320,4 +3458,160 @@ impl DeclKind {
 // stored, not a place that knows about directives. There was a `build_declarations` here that took only a scope
 // tree and filled every guard with `Unconditional`; it was deleted rather than kept, because a function whose
 // contract is "the guards are wrong" is one a caller reaches for by accident.
+
+#[cfg(test)]
+mod tests {
+    use super::{RenderedUnit, UnitSpan};
+    use cpp_parser::SourceRange;
+
+    /// A unit whose `files[0]` writes `text`, one token per whitespace-separated spelling.
+    ///
+    /// The spanning table is what these tests are about, so it is built the way the cook builds it — one entry per
+    /// token, in the file's own coordinates — rather than hand-written per case. `push` is the real separator rule,
+    /// so the text and the spans cannot disagree about where a token is.
+    fn unit(text: &str) -> RenderedUnit {
+        let mut out = RenderedUnit {
+            files: vec![std::path::PathBuf::from("/p/a.h")],
+            file_lengths: vec![text.len()],
+            ..RenderedUnit::default()
+        };
+
+        let mut at = 0usize;
+        for spelling in text.split_whitespace() {
+            // `str::find` from the last token's end, so the *file's* offsets are the ones recorded — and so a test
+            // with two identical spellings still gets two different offsets.
+            let start = text[at..].find(spelling).expect("the spelling is in the text") + at;
+            out.push(spelling, 0, SourceRange::new(start, spelling.len()));
+            at = start + spelling.len();
+        }
+
+        out
+    }
+
+    /// The spans of the tokens whose spelling is `held`, in the unit's own cooked coordinates.
+    fn spans_of(unit: &RenderedUnit, held: &str) -> Vec<SourceRange> {
+        unit.spans
+            .iter()
+            .filter(|span| &unit.text[span.cooked.start_offset..span.cooked.end_offset()] == held)
+            .map(|span| span.cooked)
+            .collect()
+    }
+
+    /// **The length is the whole point.** A repair that shortened the stream would move every later offset, and the
+    /// declaration after it would be filed under the wrong file — measured once already, as a 93 971-byte class body
+    /// filed under a 1.2 KB header (see `RenderedUnit::without`). So the text keeps its width, and a fact found in
+    /// the repaired text still maps back through the **original** span table.
+    #[test]
+    fn neutralizing_a_brace_keeps_every_offset_where_it_was() {
+        let before = unit("struct S { int x ; } ;");
+        let braces = spans_of(&before, "{");
+
+        let after = before.neutralized(&braces);
+
+        assert_eq!(after.text.len(), before.text.len(), "byte for byte: {after:?}");
+        assert!(after.text.starts_with("struct S ; "), "{:?}", after.text);
+        assert_eq!(
+            after.spans, before.spans,
+            "the table is the original one, which is what makes the map still answer"
+        );
+        assert_eq!(after.file_lengths, before.file_lengths, "and the file's own length travels too");
+    }
+
+    /// Both halves of a crossing are given up, and the marker is a `;` — a token that pairs with **nothing**, so the
+    /// repair cannot move the mistake into a different construct. A `[`, `(` or `{` would all pair with something.
+    #[test]
+    fn a_neutralized_token_becomes_a_marker_that_pairs_with_nothing() {
+        let before = unit("a { b } c");
+        let given_up: Vec<SourceRange> = ["{", "}"]
+            .iter()
+            .flat_map(|spelling| spans_of(&before, spelling))
+            .collect();
+
+        let after = before.neutralized(&given_up);
+
+        assert_eq!(after.text, "a ; b ; c", "{:?}", after.text);
+        assert!(!after.text.contains('{') && !after.text.contains('}'));
+    }
+
+    /// **Nothing else is touched** — the repair is of the two braces the parse mis-paired, not of the file they
+    /// happened to be in. This is the assertion the version before this could not make, because it removed whole
+    /// files: a file that leaked one brace lost every declaration in it, and `<format>` leaving the program took
+    /// `members_of(std::format)` with it.
+    #[test]
+    fn a_neutralized_stream_keeps_every_token_it_was_not_asked_about() {
+        let before = unit("namespace n { struct S { int x ; } ; }");
+        let opener = spans_of(&before, "{")[0];
+
+        let after = before.neutralized(&[opener]);
+
+        assert_eq!(
+            after.text, "namespace n ; struct S { int x ; } ; }",
+            "one brace became a marker and every other spelling is exactly where it was"
+        );
+        assert_eq!(
+            after.spans.len(),
+            before.spans.len(),
+            "and the table still has one entry per token"
+        );
+        assert!(after.text.contains("struct S"), "{:?}", after.text);
+    }
+
+    /// **A range that is entirely the file's own `;` is not corrupted by a repair that missed it** — and a range past
+    /// the end of the text (a caller that passed spans of a *different* stream, which `RenderedUnit::only` makes
+    /// possible) is clamped rather than panicking. A panic here is a lost session; one unmarked byte is a parse
+    /// error in one place.
+    #[test]
+    fn a_repair_of_a_range_that_is_not_there_marks_nothing_rather_than_panicking() {
+        let before = unit("int x ;");
+        let past_the_end = SourceRange::new(before.text.len() + 40, 8);
+
+        let after = before.neutralized(&[past_the_end]);
+
+        assert_eq!(after.text, before.text, "a range outside the text is not a token: {after:?}");
+    }
+
+    /// A marker is written once per span, so asking twice is idempotent — which is what the indexer's bounded repair
+    /// loop relies on: a round that re-found the same brace must not rewrite the byte a second time.
+    #[test]
+    fn repairing_the_same_brace_twice_changes_nothing_the_second_time() {
+        let before = unit("a { b } c");
+        let given_up = spans_of(&before, "{");
+
+        let once = before.neutralized(&given_up);
+        let twice = once.neutralized(&given_up);
+
+        assert_eq!(once.text, twice.text);
+    }
+
+    /// The two mechanisms, side by side, because the difference between them is the whole of this milestone: `only`
+    /// answers "this file by itself" and drops everything else, `neutralized` answers "this program, minus two
+    /// tokens".
+    #[test]
+    fn only_takes_a_file_out_and_neutralized_takes_two_tokens_out() {
+        let mut both = RenderedUnit {
+            files: vec![
+                std::path::PathBuf::from("/p/a.h"),
+                std::path::PathBuf::from("/p/b.h"),
+            ],
+            file_lengths: vec![4, 4],
+            ..RenderedUnit::default()
+        };
+        both.push("a", 0, SourceRange::new(0, 1));
+        both.push("{", 0, SourceRange::new(2, 1));
+        both.push("b", 1, SourceRange::new(0, 1));
+        both.push("}", 1, SourceRange::new(2, 1));
+
+        let alone = both.only(0);
+        assert_eq!(alone.text, "a {", "the other file is gone: {alone:?}");
+
+        let repaired = both.neutralized(&[spans_of(&both, "{")[0]]);
+        assert_eq!(repaired.text, "a ; b }", "and the other file is not: {repaired:?}");
+        assert_eq!(
+            repaired.spans.iter().filter(|span| span.file == 1).count(),
+            2,
+            "both of the other file's tokens still stand in it"
+        );
+        assert!(matches!(repaired.spans[1], UnitSpan { file: 0, .. }));
+    }
+}
 

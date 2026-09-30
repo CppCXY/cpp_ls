@@ -38,6 +38,11 @@
 //! An [`ExpandedToken`] travels with a [`Origin`], so that "where is this?" has an answer even when the
 //! token was written in a different file: navigation reaches the macro, diagnostics reach the call site.
 
+// **Alignment against a real compiler** (`align`) — the one module here whose answer does not come from this crate.
+// It puts our token stream beside a real `-E`'s and reports where they differ, by mechanism; see its module
+// documentation for why that is the measurement every other module is judged by. It is first in this list because
+// everything below it is a claim, and it is the way to check one.
+pub mod align;
 pub mod cache;
 pub mod completion;
 pub mod file;
@@ -68,6 +73,14 @@ pub mod summary_codec;
 pub use cache::{
     CACHE_BUDGET_BYTES, CACHE_DIRECTORY, FORMAT_VERSION, PruneReport, READING_FINGERPRINT, SummaryKey,
     content_hash, fnv1a64, prune,
+};
+// The alignment layer, flattened like the rest: a consumer that wants to check a reading against a compiler needs
+// `Report::of` and `tokenize_preprocessed`, and reaching them through the module hop says nothing a reader benefits
+// from. `MAX_EDIT_DISTANCE` is here because a caller has to be able to say how far a comparison was allowed to go
+// before it reports a `truncated` one.
+pub use align::{
+    Alignment, Difference, DiskTexts, MAX_EDIT_DISTANCE, Reason, Report, Side, StreamToken, UnitTexts, align,
+    files_of, normalized, shared, tokenize_preprocessed, unit_tokens,
 };
 // The *completion* layer is the one place where the answer to a cursor is assembled rather than queried: the two
 // name queries below it answer "what is visible" and "what does this type have", and this decides which of those

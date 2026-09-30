@@ -4,3 +4,8 @@
 # checkout so CI gets the same warm cache as a developer — but it is derived data, so it never belongs in
 # a commit. Deleting it is always safe: every entry is rebuilt from the file it describes.
 .cppls/
+
+# Backups and reports written while repairing this folder's Windows permissions. They are the rollback for a
+# change to an access-control list, which is a fact about one machine and not about the project — so they stay
+# on the machine that needed them. The folder is safe to delete once the write failures it describes are gone.
+.dsh-acl-recovery/

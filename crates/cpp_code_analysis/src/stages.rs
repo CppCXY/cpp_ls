@@ -117,11 +117,15 @@ pub enum Stage {
     /// `render-parse` and `render-sweep` left it out of the total altogether — 3.18 s of wall clock against 1.44 s
     /// of stages, with the difference unattributed.
     UnitRender,
-    /// **Rebuilding a unit's stream around the fence** ([`crate::RenderedUnit::without`] and
-    /// [`crate::RenderedUnit::only`]): the program without a leaking file's tokens, and that file on its own.
+    /// **Repairing a unit's stream at the braces that crossed** ([`crate::RenderedUnit::neutralized`]) and
+    /// **taking one file out of it** ([`crate::RenderedUnit::only`]) for the files that have to be read on their own.
+    ///
+    /// The name is older than the mechanism: this used to be where a leaking file's whole token stream was removed
+    /// from the program (`RenderedUnit::without`), and it is now where one brace *pair* is turned into a marker that
+    /// pairs with nothing. See `FileIndexer::index_unit_rendering` for why the smaller repair is the one that holds.
     UnitFence,
     /// **Splitting what a unit's parse found by the file each fact was written in** (`file_what_was_found`), once
-    /// for the program and once per quarantined file.
+    /// for the program and once per file whose brace was given up.
     UnitFiles,
     /// *Detail*: **destroying a parsed tree**, inside `Sweep` — a green tree is tens of thousands of `Arc`s and
     /// dropping it is not free.
