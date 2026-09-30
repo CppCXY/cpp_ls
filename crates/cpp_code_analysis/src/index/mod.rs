@@ -1177,7 +1177,16 @@ fn brace_crossings(tree: &CppSyntaxTree, stream: &crate::RenderedUnit) -> Vec<u3
     use cpp_parser::CppTokenKind;
 
     let _fence = StageTimer::new(Stage::UnitFence);
-    let frame_at = |offset: usize| stream.written_at(offset).map(|(file, _)| file);
+    // **Which file the token *stands in*, not where its body was written.** The question is "does one file open a
+    // scope another file closes", and it is about the file whose cook produced each brace —
+    // `RenderedUnit::file_standing_at`. `written_at` reports the *navigation hint* as a second field, which for a
+    // token expanded out of a `#define` names the header that wrote the body, so asking it for the file would make
+    // a `{` from a macro and the `}` the invoking file wrote look like a pair spanning two files.
+    //
+    // Measured, and it is **not** what quarantines the files this round was chasing: for the ordinary case the two
+    // readings return the same frame, and switching to `file_standing_at` changed no reading at all (26 crossings
+    // over 12 files, before and after). It is the field that means "stands in", so it is the one to ask.
+    let frame_at = |offset: usize| stream.file_standing_at(offset);
     let mut crossing = Vec::new();
 
     for node in tree.get_red_root().descendants() {

@@ -452,10 +452,29 @@ declarations_in("std")       1 157              →   1 259
 `build_scopes` 的**结果**(绑定数、scope 树),没去读那个**决定要不要绑**的布尔。把
 `declaration_is_qualified` / `names_a_scope_this_file_has` 打出来,答案立刻就在那里。
 
-登记剩下两件:
+登记剩下两件 —— **已被 [`plan-frontend.md`](plan-frontend.md) 接管**:
 
-- **`type_traits` 仍被隔离**:一个未闭合的作用域,是 0 错误单元里唯一剩下的。
-- **失败模式本身没有改**:栅栏仍然是**事后**的(解析 → 找跨文件的括号对 → 隔离 → 最多再解析两轮)。
+- **`type_traits` 仍被隔离** → 那里 M0(给隔离文件补闭合)+ M6(语法)。
+- **失败模式本身没有改** → M0 的"拆闸门":跨文件括号对不再是拒绝整份读数的理由。
+
+**收尾的判断(实测,空工程只有 `#include <format>`):**
+
+```text
+crossings 0 | unplaced 0 | errors 22
+quarantined ["format", "type_traits", "__msvc_ranges_tuple_formatter.hpp", "memory", "atomic"]
+declarations_in("std") = 71        (正常 1259)
+members_of(std::string) / (std::format) = NotDeclaredHere
+```
+
+`format` **自己在被隔离的名单里**,而它被隔离之后是用一份只有自己 token 的流单独解析的 —— MSVC 的头由
+`_STD_BEGIN … _STD_END` 包着,单独解析配错括号就整个文件落进没关的 scope。**所以"没有 std 提示"和
+"format 有报错"是同一个原因,不是两个。**
+
+补了 61 个语法错误到 0、修了 `mentions_a_qualified_name` 让 `std::string` 有 204 个成员 —— 收益是真的;
+**但决定成败的不是错误数量,而是有没有一处 crossing。** 语法补得再多,也会被下游两道闸门吃掉。
+
+**下一步不再从语法开始。** 按 `plan-frontend.md` §5.1:M0 拆闸门 → M1 用真编译器(`cl -d1PP` / `clang -E`)
+对齐做验收 → M2 工具链发现与内建宏。**M1 排在前面,是因为"没有数字"正是这几天反复拉扯的原因。**
 
 ### 10.4 验证
 

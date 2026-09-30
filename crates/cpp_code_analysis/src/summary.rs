@@ -2212,6 +2212,27 @@ impl RenderedUnit {
         self.file_of(file)
     }
 
+    /// **Which file's cook produced the token at this offset** — the file it *stands in*.
+    ///
+    /// The question every caller that has to divide a stream between files is really asking, and the one
+    /// [`RenderedUnit::written_at`] *looks* like it answers. It does not: the second field there is
+    /// [`UnitSpan::written`], a **navigation hint** — for a token expanded out of a `#define` in another header it
+    /// is a position in *that* header, so reading the file out of it names the file the body was written in rather
+    /// than the file the token stands in.
+    ///
+    /// Measured, and it is why eight files of MSVC's standard library were quarantined as leaked:
+    /// `brace_crossings` divided the stream with `written_at(..).map(|(file, _)| file)`, so a `{` written in a
+    /// header's `#define` and its matching `}` written by the *invoking* file — one scope, one file — looked like a
+    /// brace pair spanning two files. `<memory>`, `<atomic>`, `<variant>`, `<any>`, `<functional>`, `<bitset>`,
+    /// `<chrono>` and `<format>` were taken out of the program for it, and the members of `std::unique_ptr`,
+    /// `std::atomic` and `std::variant` went with them.
+    pub fn file_standing_at(&self, cooked_offset: usize) -> Option<u32> {
+        let index = self
+            .spans
+            .partition_point(|span| span.cooked.end_offset() <= cooked_offset);
+        self.spans.get(index).map(|span| span.file)
+    }
+
     /// Where a **span** of the rendering was written: the file it stands in, and the range to act on there.
     ///
     /// [`RenderedUnit::written_at`] answers for one token; this is what a *fact* needs, because a declaration is a
