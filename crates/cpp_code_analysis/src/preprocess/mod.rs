@@ -102,6 +102,15 @@ impl crate::condition::MacroValues for PositionalMacros<'_> {
             .definition_at(name, self.offset)
             .map_or(Lookup::Undefined, Lookup::Defined)
     }
+
+    /// **Forwarded, because this wrapper is the only thing the condition evaluator ever sees.**
+    ///
+    /// The cooks all evaluate through a [`PositionalMacros`], so an operator answered by the table underneath is
+    /// answered here or nowhere: `__has_include` would be `Unknown` in every real cook while its implementation sat
+    /// one layer down, unreachable. The wrapper's whole job is to add the offset, and this question has no offset.
+    fn builtin_operator(&self, name: &str, operand: &str) -> Option<crate::condition::Value> {
+        self.table.builtin_operator(name, operand)
+    }
 }
 
 /// Read a file's directives, macros, and conditionals in one pass.

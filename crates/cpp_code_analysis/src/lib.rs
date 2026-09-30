@@ -117,7 +117,7 @@ pub use summary::{
 pub use preprocess::guard;
 
 pub use condition::{
-    ConditionExpr, EvalError, Lookup, MacroValues, Value, evaluate, parse_condition,
+    ConditionExpr, EvalError, Lookup, MacroValues, NoMacros, Value, evaluate, parse_condition,
 };
 pub use config::{
     CommandLineMacro, CompileCommand, CompileCommands, CompilerConfig, IncludePath,

@@ -738,6 +738,7 @@ pub fn discover_with(
             environment,
             layout,
             standard.as_deref(),
+            for_file,
         ) {
             return Some(toolchain.claiming(*source));
         }
@@ -755,13 +756,14 @@ pub fn discover_with(
             environment,
             layout,
             standard.as_deref(),
+            for_file,
         ) {
             return Some(toolchain.claiming(ToolchainSource::Environment));
         }
     }
 
     // 3. The platform's own toolchain.
-    if let Some(toolchain) = ask_msvc(runner, layout, standard.as_deref(), None) {
+    if let Some(toolchain) = ask_msvc(runner, layout, standard.as_deref(), None, for_file) {
         return Some(toolchain.claiming(ToolchainSource::PlatformDefault));
     }
 
@@ -788,6 +790,7 @@ pub fn discover_with(
             environment,
             layout,
             standard.as_deref(),
+            for_file,
         ) {
             return Some(toolchain.claiming(ToolchainSource::Path));
         }
@@ -849,11 +852,12 @@ fn ask(
     environment: &Environment,
     layout: &crate::include::msvc::WindowsLayout,
     standard: Option<&str>,
+    for_file: &Path,
 ) -> Option<Toolchain> {
     let found = locate(files, name, environment)?;
 
     if is_msvc(&found) {
-        return ask_msvc(runner, layout, standard, Some(found));
+        return ask_msvc(runner, layout, standard, Some(found), for_file);
     }
 
     search_paths(runner, &found, standard)
@@ -899,6 +903,7 @@ fn ask_msvc(
     layout: &crate::include::msvc::WindowsLayout,
     standard: Option<&str>,
     named: Option<PathBuf>,
+    for_file: &Path,
 ) -> Option<Toolchain> {
     if !cfg!(windows) {
         return None;
@@ -918,7 +923,18 @@ fn ask_msvc(
     let mut assumed = false;
 
     for candidate in standards_to_try(standard, &[ASSUMED_STANDARD_MSVC]) {
-        if let Some(found) = crate::include::msvc::predefined_macros(runner, &msvc, candidate) {
+        // **The file's own directory is the fallback** for the scratch file `cl` needs: it is the one directory the
+        // caller definitely has (the analysis was opened on it), so a process that may not write the system
+        // temporary directory can still be told what its compiler predefines. See
+        // `msvc::predefined_macros_with` for what an empty table costs.
+        let fallbacks: Vec<PathBuf> = for_file
+            .parent()
+            .map(|directory| vec![directory.to_path_buf()])
+            .unwrap_or_default();
+
+        if let Some(found) =
+            crate::include::msvc::predefined_macros_with(runner, &msvc, candidate, &fallbacks)
+        {
             asked = candidate;
             macros = Some(found);
             assumed = standard.is_none();

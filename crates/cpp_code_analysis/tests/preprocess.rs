@@ -5,8 +5,8 @@
 //! both depend on the tokens the parser produced.
 
 use cpp_code_analysis::{
-    Directive, DirectiveKind, FilePreprocessing, Include, IncludeForm, MacroValues, Token, Value,
-    Visibility,
+    Directive, DirectiveKind, FilePreprocessing, Include, IncludeForm, Lookup, MacroValues, NoMacros, Token,
+    Value, Visibility,
     directive::parse_directive_tokens,
     guard::{Branch, GuardStack},
     macros::MacroTable,
@@ -1248,3 +1248,113 @@ fn a_condition_expands_a_name_whose_body_names_another() {
         "`(0x1 | 0x2) & 0x2` is `0x2`, so the partition holds"
     );
 }
+
+/// **`__has_include` is answered from a search, and is `Unknown` when nobody looked.**
+///
+/// The operator exists so a header can be used conditionally, and the shape is everywhere: `#if
+/// __has_include(<span>)` is how C++20's `<span>` was written long before every toolchain shipped it. Two things
+/// have to be true for it to be worth anything, and both are asserted here:
+///
+/// ```text
+/// a header that is there   → 1, so the branch that includes it is taken
+/// none of the above        → Unknown, NOT 0
+/// ```
+///
+/// The second is the one that matters. `__has_include(<vector>)` answering **0** on a machine that simply has no
+/// include paths sends the file down the fallback branch — the branch the compiler does not take — and that is the
+/// same class of mistake as deciding an `#if` on an undefined name. `Unknown` costs a reading; a wrong `0` loses
+/// the truth.
+#[test]
+fn has_include_is_answered_from_a_search_or_not_at_all() {
+    /// A search that knows one directory's worth of headers.
+    struct OneDirectory(Vec<&'static str>);
+
+    impl OneDirectory {
+        fn has(&self, name: &str) -> bool {
+            self.0.contains(&name)
+        }
+    }
+
+    impl cpp_code_analysis::preprocess::cooked::HeaderSearch for OneDirectory {
+        fn has(&self, name: &str, _quoted: bool, _directory: &std::path::Path) -> bool {
+            self.0.contains(&name)
+        }
+    }
+
+    /// A table that answers `__has_include` from `search` and knows no macros.
+    struct WithSearch(OneDirectory);
+
+    impl MacroValues for WithSearch {
+        fn lookup(&self, _name: &str) -> Lookup<'_> {
+            Lookup::Undefined
+        }
+
+        fn builtin_operator(&self, name: &str, operand: &str) -> Option<Value> {
+            if name != "__has_include" {
+                return None;
+            }
+            let (header, _quoted) =
+                cpp_code_analysis::preprocess::cooked::split_a_header_operand(operand)?;
+            Some(Value::Known(i128::from(self.0.has(header))))
+        }
+    }
+
+    let table = WithSearch(OneDirectory(vec!["vector", "local.h"]));
+
+    assert_eq!(
+        evaluate("__has_include(<vector>)", &table),
+        Value::Known(1),
+        "the header is in the search, so the branch that includes it is taken"
+    );
+    assert_eq!(
+        evaluate("__has_include(<span>)", &table),
+        Value::Known(0),
+        "and one that is genuinely absent is 0 — a search *was* made"
+    );
+    assert_eq!(
+        evaluate("__has_include(\"local.h\")", &table),
+        Value::Known(1),
+        "the quoted form is a different question and is asked the same way"
+    );
+
+    // **The negative that matters**: a table with no search answers `Unknown`, not `0`.
+    assert_eq!(
+        evaluate("__has_include(<vector>)", &NoMacros),
+        Value::Unknown,
+        "nobody looked, so the answer is not `false`"
+    );
+    // An operand that is not a header name — a macro, an empty one — is a question this layer cannot answer either.
+    assert_eq!(
+        evaluate("__has_include(HEADER)", &table),
+        Value::Unknown,
+        "a macro operand needs an expansion, which is another layer's job"
+    );
+
+    // And the shape it is really used in: the operator deciding a branch, with a fallback.
+    assert_eq!(
+        evaluate("__has_include(<vector>) && 1", &table),
+        Value::Known(1),
+        "an operator composes with the rest of a condition"
+    );
+}
+
+/// **[`split_a_header_operand`] tells the two forms apart, and refuses anything else.**
+///
+/// The brackets are not punctuation to strip — they are *how the search is told which form was written*, and a
+/// quoted `#include "x.h"` searches the including file's own directory first while an angled one does not. So a
+/// splitter that dropped them would make `__has_include` disagree with the `#include` on the next line.
+#[test]
+fn a_header_operand_keeps_the_form_it_was_written_in() {
+    use cpp_code_analysis::preprocess::cooked::split_a_header_operand as split;
+
+    assert_eq!(split("<vector>"), Some(("vector", false)), "the angle form");
+    assert_eq!(split("\"local.h\""), Some(("local.h", true)), "the quoted form");
+    assert_eq!(split("<sys/types.h>"), Some(("sys/types.h", false)), "a path is still a name");
+
+    // Not header names: a macro operand, nothing at all, and a half-written one.
+    assert_eq!(split("HEADER"), None, "a macro operand is not a file name");
+    assert_eq!(split("<>"), None, "an empty angle name is nothing to search for");
+    assert_eq!(split(""), None, "and neither is nothing");
+    assert_eq!(split("<vector"), None, "an unterminated form is a file being typed");
+}
+

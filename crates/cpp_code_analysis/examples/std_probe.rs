@@ -1083,6 +1083,9 @@ standard {}",
             definitions,
             Some(&seed_table),
             !without_in_force_bodies,
+            // The census has no include search here, so `__has_include` answers `Unknown` — which the census counts
+            // rather than decides on, and which is the honest answer for a probe that resolved nothing.
+            None,
         );
         let stitching = stitching.elapsed();
 

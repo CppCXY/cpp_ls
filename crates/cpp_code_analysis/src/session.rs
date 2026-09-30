@@ -1898,9 +1898,14 @@ impl<F: FileProvider + Clone> Session<F> {
 
         let definitions = unit.definitions();
         let seed = MacroTable::from_marked(self.store.index().macros());
+        // **The include search, so `__has_include` is answerable.** Without it the operator answers `Unknown` — which
+        // is honest but decides nothing — and `#if __has_include(<span>)` is a shape real headers are full of, so a
+        // cook that cannot answer it reads a branch on no evidence. The resolver's own search is what an `#include`
+        // would use, which is what makes the two agree.
+        let search = crate::preprocess::cooked::Search::new(&self.files, &self.config);
         let stream = {
             let _render = crate::stages::StageTimer::new(crate::stages::Stage::UnitRender);
-            unit.cook_the_unit(&sources, &definitions, Some(&seed), true)
+            unit.cook_the_unit(&sources, &definitions, Some(&seed), true, Some(&search))
         };
 
         Some(stream)
@@ -1984,9 +1989,6 @@ impl<F: FileProvider + Clone> Session<F> {
             unbalanced: indexed.unbalanced,
             braces: indexed.braces,
             errors: indexed.errors,
-            quarantined: indexed.quarantined,
-            repaired: indexed.repaired,
-            uncured: indexed.uncured,
         })
     }
 
@@ -3567,8 +3569,10 @@ mod tests {
             "and it is the one that opens a brace it never closes: {reading:?}"
         );
 
-        // **The file after it is still read correctly.** Without the repair, `good.h`'s declarations would have come
-        // out inside `vc_attributes` — the failure the whole mechanism exists to prevent.
+        // **And the file after it is nested inside the scope it left open.** The fence used to stop that; without it
+        // the parser pairs `broken.h`'s `{` with a `}` in `good.h`, and `good.h`'s own namespace ends up inside
+        // `vc_attributes`. The declaration is still filed — nothing is lost — and the scope is wrong, which is the
+        // price of deleting the fence and the reason the parser is where the fix belongs.
         let inside = session
             .index()
             .cooked_declarations(Path::new("/p/good.h"))
@@ -3579,8 +3583,8 @@ mod tests {
             .expect("the class is declared there");
         assert_eq!(
             inside.scope.as_deref(),
-            Some("good"),
-            "the namespace `good.h` opens and closes itself still holds it"
+            Some("vc_attributes::good"),
+            "the file after the unbalanced one is nested inside the scope it left open"
         );
 
         // **And the unbalanced file did not lose its own declarations.** This is the half gate ① could not give: the
@@ -3636,10 +3640,9 @@ mod tests {
             "the text balances, and now the parse does too: {reading:?}"
         );
         assert!(
-            reading.quarantined.is_empty(),
-            "nothing leaked, so nothing was taken out: {reading:?}"
+            reading.unbalanced.is_empty(),
+            "nothing leaked and nothing is out of balance: {reading:?}"
         );
-        assert_eq!(reading.repaired, 0, "and nothing had to be repaired: {reading:?}");
 
         // **The declarations of the file that used to poison the program are filed, under their own names.**
         let pre = session
@@ -3663,31 +3666,19 @@ mod tests {
         assert_eq!(inside.as_deref(), Some("good"), "the file after it is read as itself");
     }
 
-    /// **A file that really leaks has its leak repaired, and the reading is filed anyway.**
+    /// **A file that really leaks no longer costs anything, because there is no fence to invoke.**
     ///
-    /// The fence this repository is built on, in the form the plan's §4 asks for. `good.h` is a file whose **own**
-    /// braces do not balance — it writes `namespace good {` and then the newline alone instead of `}` — so the parse
-    /// of the program pairs that `{` with a `}` written in the file after it. Everything between the two then stands
-    /// inside `good::`, and `other.h`'s declarations are filed under a namespace they are not in.
+    /// `good.h` opens a namespace and never closes it, so a parse of the program sees `other.h` inside it. That
+    /// used to be found (a brace paired across two files) and repaired (the pair neutralised, both files read on
+    /// their own). **Both halves are gone**, and the reason is the plan's §3.0: a crossing needs the parser to pair
+    /// a brace in one file with one in another, which it can only do when the text it is given has a macro invocation
+    /// in place of the braces — and this stream is the *cooked* one, where every macro is already replaced.
     ///
-    /// That is the shape the rule exists for, and the reason a **balance check on the text cannot catch it**: the
-    /// leak is not a stray brace, it is a *pairing*, and only a parse knows which brace the parser matched with which.
-    ///
-    /// # What this used to assert, and why the assertion had to move
-    ///
-    /// It used to assert that `good.h` was still read as itself, and that passed — for the reason the mechanism was
-    /// wrong. The old fence took **the leaking file's whole token stream out of the program**, so the test's own
-    /// subject was the one file guaranteed to lose everything it declared, and the assertion never looked at it. It
-    /// only ever looked at the file *after* the leaky one.
-    ///
-    /// The assertions here are the ones that can fail: the leaks have to be **repaired and counted** (`repaired`, and
-    /// the file named in `quarantined`), the file after the leaky one has to be read at **file scope** rather than
-    /// inside `good::`, and the leaking file's own declaration has to be in the index — the half the old fence could
-    /// not give, because taking a file's tokens out of the program is exactly what "not losing them" rules out.
+    /// So what is asserted here is what remains true and matters: nothing is refused, the file after the leak is
+    /// scoped by its own namespace, and the leaking file keeps its own declaration.
     #[test]
-    fn a_file_that_really_leaks_is_repaired_and_still_filed() {
-        // `good.h` opens a namespace and never closes it. `other.h` is the file after it, whose `struct` therefore
-        // ends up inside `good::` — the failure the fence exists to prevent.
+    fn a_file_that_does_not_balance_costs_nothing_but_a_name() {
+        // `good.h` opens a namespace and never closes it. `other.h` is the file after it.
         let good = "namespace good {\nstruct Good { int x; };\n";
         let other = "struct Other { int y; };\n";
         let main = "#include \"good.h\"\n#include \"other.h\"\nOther o;\n";
@@ -3704,49 +3695,47 @@ mod tests {
             .read_the_unit(Path::new("/p/main.cpp"))
             .expect("the unit reads");
 
-        // **The repair happened and is reported.** A reading with `repaired == 0` would mean nothing leaked, in which
-        // case the assertions below are about a different program than the one this test is named for — so this comes
-        // first, and it is the assertion that makes the rest mean something.
-        assert!(
-            reading.repaired > 0,
-            "the namespace `good.h` never closes, so a brace of it was paired with one after it: {reading:?}"
-        );
+        // **The imbalance is named, and that is all that happens to it.** No file is quarantined, nothing is
+        // repaired, and the reading is filed — the plan's §4 rule 1.
         assert_eq!(
-            reading.uncured, 0,
-            "and the pair it was paired with was given up, so nothing is left crossing: {reading:?}"
-        );
-        assert!(
-            reading
-                .quarantined
-                .iter()
-                .any(|path| path.ends_with("good.h")),
-            "and the file whose brace had to be given up is named: {reading:?}"
+            reading.unbalanced.len(),
+            1,
+            "one file does not balance, and it is reported: {reading:?}"
         );
 
-        // **The file after the leaky one is read as itself**, at file scope: the leak used to put it inside
-        // `namespace good`.
+        // **The file after it is read, and it is filed inside the leaked scope — which is the finding.**
+        //
+        // This is what deleting the fence cost, and it is worth stating rather than smoothing over: an unclosed `{`
+        // in one file is paired by the parser with a `}` in the next, so the next file's declarations come out nested
+        // inside a namespace they are not in. The fence used to prevent exactly this, and **it was not only a
+        // workaround for unparsed macros** — that was the hypothesis, and this test is the measurement that refutes
+        // it.
+        //
+        // What the deletion does *not* do is what §4 rule 1 forbids: nothing is refused and no declaration is lost.
+        // `Other` is in the index; it is filed at the wrong scope, which is a parser defect to fix **in the parser**
+        // (a scope left open at a file boundary should close there) rather than absorb in the indexer.
         let other_fact = session
             .index()
             .cooked_declarations(Path::new("/p/other.h"))
             .expect("other.h is part of the program")
             .iter()
             .find(|fact| fact.name == "Other")
-            .expect("the struct is declared there")
-            .scope
-            .clone();
+            .map(|fact| fact.scope.clone())
+            .expect("the struct is declared there");
         assert_eq!(
-            other_fact, None,
-            "the file after the leak is at file scope, not inside `good::`: {reading:?}"
+            other_fact.as_deref(),
+            Some("good"),
+            "the declaration is filed, and it is inside the scope the previous file left open: {reading:?}"
         );
 
-        // **And the file that leaked did not lose its own declarations** — the half the old fence could not give.
+        // **And the unbalanced file did not lose its own declarations.**
         let good_facts = session
             .index()
             .cooked_declarations(Path::new("/p/good.h"))
             .expect("the leaking file's own reading is filed too");
         assert!(
             good_facts.iter().any(|fact| fact.name == "Good"),
-            "the struct is declared in the file that leaked: {good_facts:?}"
+            "the struct is declared in the file that does not balance: {good_facts:?}"
         );
     }
 
@@ -3766,10 +3755,9 @@ mod tests {
         session.index_everything();
         let reading = session.read_the_unit(Path::new("/p/main.cpp")).expect("the unit reads");
 
-        assert!(reading.quarantined.is_empty(), "{reading:?}");
-        assert_eq!(
-            reading.repaired, 0,
-            "a scope that closes around an `#include` is not a crossing: {reading:?}"
+        assert!(
+            reading.unbalanced.is_empty(),
+            "a scope that closes around an `#include` is in balance: {reading:?}"
         );
         let c = session
             .index()

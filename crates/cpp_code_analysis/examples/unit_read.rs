@@ -118,8 +118,8 @@ fn main() {
                 reading.files, reading.tokens, reading.files_with_tokens, reading.missing, reading.unplaced
             );
             println!(
-                "  errors {} | repaired {} | repaired files {:?} | unbalanced {:?} | braces {}",
-                reading.errors, reading.repaired, reading.quarantined, reading.unbalanced, reading.braces
+                "  errors {} | unbalanced {:?} | braces {}",
+                reading.errors, reading.unbalanced, reading.braces
             );
         }
         None => println!("the unit could not be read (no summary for {})", file.display()),

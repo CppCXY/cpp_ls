@@ -142,6 +142,25 @@ fn main() {
         config.defines.len(),
         config.include_paths.len(),
     );
+    // **What the compilation is known to define**, which is what decides an `#ifdef _MSC_VER` — the difference
+    // between reading the program a compiler reads and reading a branch nobody compiles. The count is the
+    // compiler's whole predefined set, so a reader can check it against `cl -d1PP` themselves.
+    {
+        let names = session.index().macros().defined_names();
+        let known = |wanted: &str| names.iter().any(|held| **held == *wanted);
+        let sample = ["_MSC_VER", "__cplusplus", "_MSC_LANG", "__STDC__"]
+            .into_iter()
+            .filter(|name| known(name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if names.is_empty() {
+            println!(
+                "macros   none — the compiler could not be asked, so every condition about a builtin is a guess"
+            );
+        } else {
+            println!("macros   {} predefined names (e.g. {sample})", names.len());
+        }
+    }
 
     // --- our side ---------------------------------------------------------------------------------
     let Some(stream) = session.render_the_unit(&file) else {

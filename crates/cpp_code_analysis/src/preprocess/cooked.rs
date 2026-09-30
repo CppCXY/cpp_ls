@@ -33,6 +33,8 @@
 //! [`CookedStream::assumed_undefined`] rather than being silently believed. With a real configuration (the
 //! architecture's ladder, levels 1 and 2) the count is zero, and the stream is the compiler's own.
 
+use std::path::Path;
+
 use cpp_parser::{CppTokenData, SourceRange};
 
 use crate::{
@@ -40,7 +42,7 @@ use crate::{
     directive::{Directive, DirectiveKind},
     expand::{Diagnostic, ExpandedToken, expand},
     guard::Branch,
-    macros::MacroTable,
+    macros::{MacroBindings, MacroTable},
     token::is_trivia,
 };
 
@@ -712,6 +714,11 @@ impl cpp_parser::MacroBodies for FileMacros<'_> {
 struct Live<'base> {
     own: MacroTable,
     base: &'base dyn crate::macros::MacroBindings,
+    /// **What `__has_include` is answered from**, when the caller supplied a search. `None` makes the operator
+    /// `Unknown`, which is the honest answer for a cook that has no search paths — see [`HeaderSearch`].
+    search: Option<&'base dyn HeaderSearch>,
+    /// The directory of the file being cooked: what the **quoted** form of `__has_include` searches first.
+    directory: &'base Path,
 }
 
 impl crate::macros::MacroBindings for Live<'_> {
@@ -725,6 +732,52 @@ impl crate::macros::MacroBindings for Live<'_> {
         self.own
             .definition(name)
             .or_else(|| self.base.definition(name))
+    }
+}
+
+impl crate::condition::MacroValues for Live<'_> {
+    fn lookup(&self, name: &str) -> crate::condition::Lookup<'_> {
+        // The same answer the expansion path gives for this position: a name this walk has defined shadows what the
+        // file started with. `Live` is only ever used by the condition evaluator through a
+        // [`PositionalMacros`] wrapper, so this arm exists to keep the two spellings of the same question in step.
+        match self.definition(name) {
+            Some(definition) => crate::condition::Lookup::Defined(definition),
+            None => crate::condition::Lookup::Undefined,
+        }
+    }
+
+    /// **`__has_include` and its relatives, answered from the filesystem.**
+    ///
+    /// Only the two include forms are answerable here, and each needs a different amount of the world:
+    ///
+    /// ```text
+    /// __has_include(<vector>)    needs the search paths
+    /// __has_include("local.h")   needs the search paths *and* the directory of this file
+    /// __has_include(HEADER)      needs neither: it needs an expansion, which is a different layer's job
+    /// ```
+    ///
+    /// Everything else — `__has_cpp_attribute`, `__has_builtin`, `__has_feature` — is a question about the
+    /// **compiler**, not about this project, and this layer has no table of what a compiler supports. `None` is the
+    /// truthful answer and it becomes [`crate::Value::Unknown`]; inventing a `false` would send every
+    /// `#if __has_cpp_attribute(nodiscard)` down the branch the compiler does not take.
+    fn builtin_operator(&self, name: &str, operand: &str) -> Option<crate::condition::Value> {
+        use crate::condition::Value;
+
+        // `__has_include_next` asks about the search *after* the directory this file was found in. That needs to know
+        // where the file was found, which this layer is not told — and answering it as if it were `__has_include`
+        // would be a different question with a different answer.
+        if name != "__has_include" {
+            return None;
+        }
+
+        let search = self.search?;
+        let (header, quoted) = split_a_header_operand(operand)?;
+
+        Some(if search.has(header, quoted, self.directory) {
+            Value::Known(1)
+        } else {
+            Value::Known(0)
+        })
     }
 }
 
@@ -763,6 +816,98 @@ impl crate::macros::MacroBindings for Over<'_> {
     }
 }
 
+/// **What `__has_include` asks** — is this header findable from here?
+///
+/// A trait because the answer is a **filesystem search**, and the layer that evaluates a condition is not the layer
+/// that owns the search paths. A caller with no search (a single buffer, a test) supplies `None` and the operator
+/// answers [`crate::Value::Unknown`] — which is the honest answer and the one that keeps a branch from being read the
+/// wrong way. See [`crate::condition::MacroValues::builtin_operator`].
+///
+/// # Why it is not the include resolver
+///
+/// [`crate::IncludeResolver`] **resolves**: it mints a file id, decides `FoundIn`, and hands back a path the index
+/// will file facts under. `__has_include` asks a smaller question — "would a `#include` here find anything" — and a
+/// resolver that answered it would put a resolved edge in the graph for a header that is *never included*. The
+/// measured shape is `#if __has_include(<span>)`, which is how C++20's `<span>` was conditionally used long before
+/// every toolchain shipped it: one line, in a million headers, asking about a file nobody then includes.
+pub trait HeaderSearch {
+    /// Is `name` findable from `directory`?
+    ///
+    /// `quoted` is the form that was written: `#include "x.h"` searches the including file's own directory first,
+    /// `#include <x.h>` does not. The distinction is not cosmetic — a project with its own `vector` beside the file
+    /// and the standard library further along the search path answers differently for the two forms, and a
+    /// `__has_include` that ignored it would disagree with the `#include` on the next line.
+    fn has(&self, name: &str, quoted: bool, directory: &Path) -> bool;
+}
+
+/// Split a `__has_include` operand into the name it asks about and which form it was written in.
+///
+/// `Some((name, quoted))` for the two forms the standard defines, `None` for anything else — a macro operand
+/// (`__has_include(HEADER)` after expansion, which nothing here can answer), an empty one (`__has_include()`), or a
+/// file being typed. The caller turns `None` into [`crate::Value::Unknown`].
+///
+/// The operand arrives with its brackets attached, because that is what makes it a name: **the brackets are not
+/// punctuation to strip, they are how the search is told which form was written.** `<vector>` is the angle form;
+/// `"local.h"` is the quoted one. So this reads the delimiters rather than removing them, and a name that has
+/// neither is refused rather than guessed at.
+pub fn split_a_header_operand(operand: &str) -> Option<(&str, bool)> {
+    if let Some(inner) = operand.strip_prefix('<').and_then(|rest| rest.strip_suffix('>')) {
+        return (!inner.is_empty()).then_some((inner, false));
+    }
+
+    if let Some(inner) = operand
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+    {
+        return (!inner.is_empty()).then_some((inner, true));
+    }
+
+    None
+}
+
+/// **Answer `__has_include` from a file provider and a search path** — the implementation a real cook uses.
+///
+/// The search is the one [`crate::IncludeResolver`] would do, minus everything that makes a resolution a *fact*:
+/// no id is minted, no edge is recorded, and the answer is a boolean. That is the whole difference, and it is why
+/// this is a separate small type rather than a mode of the resolver.
+pub struct Search<'a, F: crate::file::paths::FileProvider> {
+    files: &'a F,
+    config: &'a crate::include::config::CompilerConfig,
+}
+
+impl<'a, F: crate::file::paths::FileProvider> Search<'a, F> {
+    pub fn new(files: &'a F, config: &'a crate::include::config::CompilerConfig) -> Self {
+        Search { files, config }
+    }
+}
+
+impl<F: crate::file::paths::FileProvider> HeaderSearch for Search<'_, F> {
+    fn has(&self, name: &str, quoted: bool, directory: &Path) -> bool {
+        use crate::file::paths::join_normalized;
+
+        // A name with a directory in it is not a search-path lookup in the usual sense, but the same rules apply —
+        // and an absolute one skips the search entirely, exactly as an `#include` does.
+        let wanted = Path::new(name);
+        let case_insensitive = cfg!(windows);
+
+        if wanted.is_absolute() {
+            return self.files.exists(wanted);
+        }
+
+        // The quoted form looks beside the file first. This is the one place the two forms differ.
+        if quoted && self.files.exists(&join_normalized(directory, wanted, case_insensitive)) {
+            return true;
+        }
+
+        // Then the search path, in the configuration's order — the first hit wins, and a miss everywhere is a `false`
+        // that means "searched and not found".
+        self.config.include_paths.iter().any(|path| {
+            self.files
+                .exists(&join_normalized(&path.directory, wanted, case_insensitive))
+        })
+    }
+}
+
 /// Cook one file with the macros a **configuration** starts it with.
 ///
 /// `initial` is what the compilation defines before the file is read: the compiler's own builtins (`-dM`),
@@ -773,10 +918,28 @@ impl crate::macros::MacroBindings for Over<'_> {
 ///
 /// This is what makes the difference between a stream that follows C's rule for names nobody defines — see
 /// [`CookedStream::assumed_undefined`] — and the stream a compiler would actually parse.
+///
+/// `__has_include` answers [`crate::Value::Unknown`] here: no search was supplied. A caller that has one calls
+/// [`cook_with_search`], which is the same walk with the question answerable.
 pub fn cook_with(
     source: &str,
     tokens: &[CppTokenData],
     initial: &dyn crate::macros::MacroBindings,
+) -> CookedStream {
+    cook_with_search(source, tokens, initial, None, Path::new(""))
+}
+
+/// [`cook_with`] with a header search, so `__has_include` can be answered instead of guessed.
+///
+/// `directory` is where the file being cooked sits, which is what the **quoted** form searches first. Both are
+/// needed together: a search without a directory cannot answer `#include "x.h"`, and the honest answer there is
+/// `Unknown` rather than a search that silently skipped a directory.
+pub fn cook_with_search(
+    source: &str,
+    tokens: &[CppTokenData],
+    initial: &dyn crate::macros::MacroBindings,
+    search: Option<&dyn HeaderSearch>,
+    directory: &Path,
 ) -> CookedStream {
     let directives = crate::directive::scan_directives(source, tokens);
 
@@ -787,6 +950,8 @@ pub fn cook_with(
     let mut live = Live {
         own: MacroTable::new(),
         base: initial,
+        search,
+        directory,
     };
     let mut regions: Vec<Region> = Vec::new();
 

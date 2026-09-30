@@ -444,7 +444,32 @@ pub fn predefined_macros(
     msvc: &Msvc,
     standard: Option<&str>,
 ) -> Option<Vec<CommandLineMacro>> {
-    let scratch = Scratch::new()?;
+    predefined_macros_with(runner, msvc, standard, &[])
+}
+
+/// [`predefined_macros`], with directories to try when the system's temporary directory cannot be written.
+///
+/// # Why a caller supplies fallbacks at all
+///
+/// `cl` cannot print its macro table without a source file, so this **has** to write one somewhere. The system
+/// temporary directory is the right first choice and is not always permitted: a process under a file sandbox may be
+/// refused `%TEMP%` while the project directory it was opened on is writable. When that happens the answer used to be
+/// `None` — the same `None` as "this compiler predefines nothing" — and every `#ifdef _MSC_VER` in every header then
+/// reads the branch the compiler does not take.
+///
+/// So the caller passes directories it knows are writable (the project root), and each is tried in turn. An empty
+/// slice is the old behaviour.
+///
+/// Where the file goes does not change the answer: the macros a compiler predefines depend on the **command line**
+/// and the target, not on the directory the translation unit sits in. What it does change is whether there is an
+/// answer at all.
+pub fn predefined_macros_with(
+    runner: &impl CommandRunner,
+    msvc: &Msvc,
+    standard: Option<&str>,
+    fallbacks: &[std::path::PathBuf],
+) -> Option<Vec<CommandLineMacro>> {
+    let scratch = Scratch::new(fallbacks)?;
     let environment = msvc.environment();
 
     // `/std:c++20` **and** `/Zc:__cplusplus`: measured, `/std:` alone leaves `__cplusplus` at `199711L` (MSVC's
@@ -501,13 +526,26 @@ pub fn version_line(msvc: &Msvc, macros: &[CommandLineMacro]) -> String {
 /// source** unless told otherwise — the fact sheet records `empty.obj` appearing in the directory the compiler was
 /// started in. So the file, the object and everything else go in a directory of their own, removed when this is
 /// dropped.
+/// # Why a scratch directory that cannot be written is said out loud
+///
+/// Because the two states are **not** the same and the caller cannot tell them apart: "this compiler predefines
+/// nothing" and "the directory could not be created" both used to produce `None` in silence, and the second one
+/// makes every `#ifdef _MSC_VER` in every header answer `Unknown` — the branch the compiler takes is then read as
+/// the branch nobody takes, and the parser is handed a program that does not exist. Measured on this machine: a
+/// scratch directory under a path the process may not write yields **0** predefined macros where `cl /PD` prints
+/// **59**, and nothing anywhere said so.
 struct Scratch {
     path: PathBuf,
     source: PathBuf,
 }
 
 impl Scratch {
-    fn new() -> Option<Scratch> {
+    /// A directory holding one empty translation unit, from the first base that accepts it.
+    ///
+    /// The system temporary directory first, then whatever the caller offered. `None` only when **every** base was
+    /// refused, and each refusal is reported: an empty macro table is a wrong reading of every `#ifdef` in every
+    /// header, so the reason has to be visible rather than inferred from a count of zero.
+    fn new(fallbacks: &[std::path::PathBuf]) -> Option<Scratch> {
         let unique = format!(
             "cppls-msvc-{}-{:?}",
             std::process::id(),
@@ -517,15 +555,39 @@ impl Scratch {
                 .unwrap_or_default()
         );
 
-        let path = std::env::temp_dir().join(unique);
-        std::fs::create_dir_all(&path).ok()?;
+        let mut bases = vec![std::env::temp_dir()];
+        bases.extend(fallbacks.iter().cloned());
 
-        let source = path.join("predefined.cpp");
-        // Empty: the macro table of a translation unit that includes nothing *is* the compiler's predefined set.
-        // (A file that included a header would print that header's macros too — measured, 1540 lines for `<cstdio>`.)
-        std::fs::write(&source, "").ok()?;
+        for base in bases {
+            let path = base.join(&unique);
+            if let Err(error) = std::fs::create_dir_all(&path) {
+                eprintln!(
+                    "cppls: cannot create the scratch directory {} for asking MSVC its predefined macros: {error}",
+                    path.display()
+                );
+                continue;
+            }
 
-        Some(Scratch { path, source })
+            let source = path.join("predefined.cpp");
+            // Empty: the macro table of a translation unit that includes nothing *is* the compiler's predefined set.
+            // (A file that included a header would print that header's macros too — measured, 1540 lines for
+            // `<cstdio>`.)
+            if let Err(error) = std::fs::write(&source, "") {
+                eprintln!(
+                    "cppls: cannot write the scratch source {} for asking MSVC its predefined macros: {error}",
+                    source.display()
+                );
+                continue;
+            }
+
+            return Some(Scratch { path, source });
+        }
+
+        eprintln!(
+            "cppls: no writable directory for the scratch file, so MSVC's predefined macros are unknown and every \
+             condition that names a builtin will be answered Unknown"
+        );
+        None
     }
 }
 

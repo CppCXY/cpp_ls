@@ -506,7 +506,7 @@ fn the_unit_cooks_as_one_stream_in_include_order() {
     let timeline = unit.timeline_of("/p/main.cpp", &mut definitions);
     let shared = timeline.definitions();
 
-    let stitched = timeline.cook_the_unit(&unit.sources, &shared, None, true);
+    let stitched = timeline.cook_the_unit(&unit.sources, &shared, None, true, None);
     assert_eq!(stitched.missing, 0, "every file the unit reached has text here");
     assert_eq!(
         stitched.files_with_tokens(),
@@ -610,7 +610,7 @@ fn a_declaration_starts_in_the_file_it_stands_in() {
     let mut definitions = MacroDefinitions::default();
     let timeline = unit.timeline_of("/p/main.cpp", &mut definitions);
     let shared = timeline.definitions();
-    let stream = timeline.cook_the_unit(&unit.sources, &shared, None, true);
+    let stream = timeline.cook_the_unit(&unit.sources, &shared, None, true, None);
 
     // The stream has the expansion, not the invocation: `decl.h` wrote a name, the stream has a struct.
     assert!(
@@ -693,7 +693,7 @@ fn taking_a_file_out_of_the_stream_keeps_the_offsets() {
     let mut definitions = MacroDefinitions::default();
     let timeline = unit.timeline_of("/p/main.cpp", &mut definitions);
     let shared = timeline.definitions();
-    let whole = timeline.cook_the_unit(&unit.sources, &shared, None, true);
+    let whole = timeline.cook_the_unit(&unit.sources, &shared, None, true, None);
 
     let leaky = whole
         .files
@@ -780,7 +780,7 @@ fn a_file_that_does_not_balance_still_contributes_its_tokens() {
     let mut definitions = MacroDefinitions::default();
     let timeline = unit.timeline_of("/p/main.cpp", &mut definitions);
     let shared = timeline.definitions();
-    let stitched = timeline.cook_the_unit(&unit.sources, &shared, None, true);
+    let stitched = timeline.cook_the_unit(&unit.sources, &shared, None, true, None);
 
     // The tokens are in: this is the half gate ① used to take away.
     assert!(
@@ -856,7 +856,7 @@ fn a_file_without_text_is_a_hole_in_the_unit() {
     let mut partial: HashMap<PathBuf, String> = unit.sources.clone();
     partial.remove(Path::new("/p/api.h"));
 
-    let stitched = timeline.cook_the_unit(&partial, &shared, None, true);
+    let stitched = timeline.cook_the_unit(&partial, &shared, None, true, None);
     assert_eq!(stitched.missing, 1, "api.h was reached and not read");
     assert!(
         !stitched.text.contains("Api"),

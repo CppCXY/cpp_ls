@@ -231,6 +231,21 @@ pub trait MacroBindings {
     /// (a `#if` evaluated after it, a completion list) means "the last one", and a shared layer may answer it
     /// without resolving any offset at all.
     fn definition(&self, name: &str) -> Option<&MacroDef>;
+
+    /// **The value of a builtin operator whose operand is not a name** — `__has_include(<vector>)`.
+    ///
+    /// Here as well as on [`crate::condition::MacroValues`] because the two are the same question asked by two
+    /// layers, and the layer in the middle must not swallow it: every condition in every cook is evaluated through a
+    /// [`crate::preprocess::PositionalMacros`], which holds a `&dyn MacroBindings` and adds an offset. A method that
+    /// existed only on `MacroValues` would be unreachable from there — the implementation would sit one layer down,
+    /// fully written and never called, and `__has_include` would answer `Unknown` in every real cook.
+    ///
+    /// `None` is "this table cannot speak about that", which the evaluator turns into `Unknown` rather than `0`. The
+    /// default is `None` so that a table which knows nothing about builtins is not forced to say so.
+    fn builtin_operator(&self, name: &str, operand: &str) -> Option<crate::condition::Value> {
+        let _ = (name, operand);
+        None
+    }
 }
 
 impl MacroBindings for MacroTable {

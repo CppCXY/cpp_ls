@@ -35,6 +35,31 @@ use cpp_parser::{CppTokenKind, SourceRange};
 use crate::token::is_trivia;
 use crate::{macros::MacroDef, token::Token};
 
+/// **Is this name one of the preprocessor's builtin operators** — the ones whose operand is not an expression?
+///
+/// The list is the standard's plus the two extensions every real compiler has, and it exists in one place because
+/// three layers have to agree about it: the expander (which must not expand the operand), the parser (which must not
+/// read it as an expression), and the evaluator (which asks the table about it).
+///
+/// `__has_include_next` is separate from `__has_include` rather than a flag, because the two ask **different
+/// questions**: "is this header findable from here" and "is it findable *after* the directory this file was found
+/// in". A table that answers the first cannot answer the second, and folding them together would make a `#if` decide
+/// on the wrong search.
+pub fn is_a_builtin_operator(name: &str) -> bool {
+    matches!(
+        name,
+        "__has_include"
+            | "__has_include_next"
+            | "__has_cpp_attribute"
+            | "__has_builtin"
+            | "__has_feature"
+            | "__has_extension"
+            | "__has_attribute"
+            | "__has_declspec_attribute"
+            | "__is_identifier"
+    )
+}
+
 /// The value of a conditional expression, or the reason there is not one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Value {
@@ -95,6 +120,20 @@ pub enum ConditionExpr {
     Identifier(Box<str>),
     /// A parenthesised expression. Kept as a node so that evaluation re-parses nothing.
     Group(Box<ConditionExpr>),
+    /// **A builtin operator whose operand is not a name** — `__has_include(<vector>)`, `__has_builtin(__make_integer_seq)`.
+    ///
+    /// A node of its own rather than an [`ConditionExpr::Identifier`] because the operand is **not expanded and not
+    /// read as an expression**: `<vector>` is not a token sequence a condition grammar can parse, and `__make_integer_seq`
+    /// is a name-*spelling* to be asked about, not a macro to look up. `expand_condition` already keeps an operator's
+    /// parenthesised operand verbatim (that is what makes `defined (FOO)` work); this is where the evaluator reads it.
+    ///
+    /// The operand keeps its **original spelling** — angle brackets and quotes included — because the question
+    /// `__has_include` asks is about a file name, and `vector` without its brackets is not a name any search path can
+    /// be asked about.
+    Builtin {
+        name: Box<str>,
+        operand: Box<str>,
+    },
     Unary {
         op: UnaryOp,
         operand: Box<ConditionExpr>,
@@ -208,6 +247,25 @@ impl<'a> Lookup<'a> {
 pub trait MacroValues {
     /// What this table knows about `name` at the position being evaluated.
     fn lookup(&self, name: &str) -> Lookup<'_>;
+
+    /// **The value of a builtin operator this table knows how to answer** — `__has_include` and its relatives.
+    ///
+    /// The operators the preprocessor cannot answer from the macro table alone, because their operand is a **file**
+    /// or a language feature rather than a name. `name` is the operator as written (`__has_include`,
+    /// `__has_include_next`, `__has_cpp_attribute`, `__has_builtin`, `__has_feature`), `operand` is its argument with
+    /// the surrounding parentheses already removed and trivia dropped, and the answer is `None` for an operator this
+    /// table cannot speak about — which the evaluator turns into [`Value::Unknown`] rather than into `0`.
+    ///
+    /// # Why the default is `None` and not `0`
+    ///
+    /// `__has_include(<vector>)` is **false** when the header is genuinely absent and **unknown** when nobody looked.
+    /// A table with no include search paths (a test, a single buffer) is the second case: answering `false` there is
+    /// the confident-wrong answer this whole layer is written to avoid, and it reads the `#if` branch the compiler
+    /// does not take.
+    fn builtin_operator(&self, name: &str, operand: &str) -> Option<Value> {
+        let _ = (name, operand);
+        None
+    }
 }
 
 /// A table that defines nothing, so every identifier is `0`.
@@ -275,7 +333,7 @@ fn expand_condition(tokens: &[Token], macros: &impl MacroValues) -> Vec<Token> {
         let token = tokens[index].clone();
 
         let is_a_question_about_a_name = token.kind == CppTokenKind::Identifier
-            && matches!(token.text(), "defined" | "__has_include");
+            && (token.text() == "defined" || is_a_builtin_operator(token.text()));
 
         if !is_a_question_about_a_name {
             run.push(token);
@@ -347,6 +405,13 @@ pub fn eval(expr: &ConditionExpr, macros: &impl MacroValues) -> Value {
             Lookup::Unanswered => Value::Unknown,
         },
         ConditionExpr::Group(inner) => eval(inner, macros),
+        // **A builtin operator**, whose answer is the table's to give. `None` from the table — nobody can be asked,
+        // a search path nobody has — is `Unknown`, never `false`: `__has_include(<vector>)` answering `false` on a
+        // machine that simply did not look is the confident-wrong answer that reads the wrong branch, and the whole
+        // point of the operator is to tell those two apart.
+        ConditionExpr::Builtin { name, operand } => {
+            macros.builtin_operator(name, operand).unwrap_or(Value::Unknown)
+        }
         ConditionExpr::Unary { op, operand } => {
             let Some(value) = eval(operand, macros).known() else {
                 return Value::Unknown;
@@ -774,6 +839,22 @@ impl<'a> Parser<'a> {
                 if token.text() == "defined" {
                     return self.defined();
                 }
+                // **Every other builtin operator takes a parenthesised operand that is not an expression.**
+                // `__has_include(<vector>)` cannot be read by the condition grammar — `<vector>` is not tokens it can
+                // parse — so the operand is taken **verbatim**, spelling and all, and the evaluator asks the table
+                // about it. That is also why `expand_condition` leaves these operands alone: expanding `__has_builtin`
+                // 's argument would answer about a macro instead of about a name the compiler knows.
+                if is_a_builtin_operator(token.text()) {
+                    let name = token.text.clone();
+                    // An operator with no readable operand — `__has_include` with nothing after it, a file being
+                    // typed — cannot be read as an expression at all, which is what `ExpectedOperand` says.
+                    let Some(operand) = self.parenthesised_spelling() else {
+                        return Err(EvalError::ExpectedOperand {
+                            found: self.kind().unwrap_or(CppTokenKind::Eof),
+                        });
+                    };
+                    return Ok(ConditionExpr::Builtin { name, operand });
+                }
                 let token = self.bump().expect("checked");
                 Ok(ConditionExpr::Identifier(token.text.clone()))
             }
@@ -786,6 +867,47 @@ impl<'a> Parser<'a> {
             }
             found => Err(EvalError::ExpectedOperand { found }),
         }
+    }
+
+    /// **The spelling between the parentheses**, with the parentheses consumed and the trivia dropped.
+    ///
+    /// What a builtin operator's operand is: `__has_include(<vector>)` arrives as `<`, `vector`, `>`, and the answer
+    /// has to be about the file name `<vector>` — so the tokens' own spellings are joined **without separators**,
+    /// which is what turns three tokens back into the one name. Whitespace inside is dropped for the same reason:
+    /// `__has_include ( < vector > )` names the same file as `__has_include(<vector>)`, and a search that looked for
+    /// `< vector >` would report it missing.
+    ///
+    /// `None` when there is no parenthesised operand at all — `__has_include` with nothing after it is a file being
+    /// typed, and the caller turns that into [`Value::Unknown`] rather than into `false`.
+    fn parenthesised_spelling(&mut self) -> Option<Box<str>> {
+        // The operator itself is the token at the cursor; the operand follows it.
+        self.index += 1;
+        if !self.eat(CppTokenKind::LeftParen) {
+            return None;
+        }
+
+        let mut spelling = String::new();
+        let mut depth = 1isize;
+        while let Some(token) = self.bump() {
+            match token.kind {
+                CppTokenKind::LeftParen => {
+                    depth += 1;
+                    spelling.push('(');
+                }
+                CppTokenKind::RightParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                    spelling.push(')');
+                }
+                kind if is_trivia(kind) => {}
+                _ => spelling.push_str(token.text()),
+            }
+        }
+
+        // An unterminated operand: mid-edit, and not an answer.
+        (depth == 0).then(|| spelling.into_boxed_str())
     }
 
     /// `defined X` or `defined(X)`.

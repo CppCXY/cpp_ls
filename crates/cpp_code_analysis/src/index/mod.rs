@@ -73,18 +73,6 @@ use crate::stages::{Stage, StageTimer};
 use crate::summary::{FactGuard, FileSummary, IncludeFact, MacroFact};
 use crate::summary_codec::DecodeError;
 
-/// How many times a unit's parse may be repaired before the repair is given up on.
-///
-/// It exists for a reason a bound on a loop usually does not have: **a round can only ever mark a brace that is not
-/// marked yet**, and there are finitely many braces, so the loop already terminates. What it does not bound is how
-/// much of a program a *pathological* tree could ask to have marked — a parser that answered "crossing" from a
-/// stream where every offending brace is already a `;` would go on marking braces that are not the problem.
-///
-/// Three rounds is the same bound the version before this used for its own fence, and the measured case needs one:
-/// an ordinary program finds nothing (`round == 0`), and every program measured here that crossed at all resolved in
-/// the first repair. Rounds past that are reported in [`crate::IndexedUnit::repaired`] like any other.
-const MAX_REPAIR_ROUNDS: usize = 3;
-
 /// Everything needed to turn a file's text into a summary, minus the text.
 ///
 /// The resolver is a [`FileProvider`] and a [`CompilerConfig`] rather than an [`IncludeResolver`] because the
@@ -451,118 +439,42 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             config
         };
 
-        // **Parse, and repair what crossed.** The first parse is of the program the caller cooked; if it paired a
-        // brace across two files, those pairings are neutralised and it is parsed again. Bounded, because each round
-        // can only ever *mark* a brace that is not marked yet, and there are finitely many braces: a round that finds
-        // no new pairing is the last one, and [`MAX_REPAIR_ROUNDS`] is the belt to that suspenders (a parser that
-        // found a fresh crossing from an already-marked stream would otherwise never stop).
+        // **One parse, of the stream the caller cooked.**
         //
-        // # Why one set, for both skipping and re-reading
+        // There used to be a fence here: the stream was checked for a brace the parse paired across two files, the
+        // pair was neutralised, and the files involved were read on their own as well. It is gone, and the reason is
+        // the plan's §3.0 — *"真正做预处理之后,解析器看不到 `MacroCall`"*.
         //
-        // `crossed` holds every file one of whose braces was given up, and it does two jobs:
+        // A crossing needs the parser to pair a brace in one file with a brace in another, and the parser can only do
+        // that if the text it is given has braces whose file it cannot tell. Unparsed macro invocations were where
+        // they came from: `_STD_BEGIN … _STD_END`, `extern "C" { … }` inside a body, the whole family of
+        // open-a-scope-in-a-header macros. **This stream has none of them** — [`crate::RenderedUnit`] is the cooked
+        // text, so every macro is already replaced by what it expands to, and `{`/`}` in it are the braces the
+        // program has. The processor no longer sees a macro call, so it no longer pairs a brace across a file for a
+        // reason that is not in the program.
         //
-        // * the program's facts **for those files** are not filed (`file_what_was_found`'s `skip`), because that parse
-        //   read a text two bytes of which are no longer the file's, and its answers about everything after them are
-        //   answers to a question nobody asked;
-        // * each of those files is parsed **on its own** ([`crate::RenderedUnit::only`]) and filed from there.
+        // # What is kept, and what it costs to keep
         //
-        // The two jobs are one set because they have to be. An earlier version kept a smaller re-read set — only the
-        // files whose *own* braces did not balance, which is the honest description of "the file that leaked" — and
-        // filed the rest from the program's parse. That is a double answer: the balanced end of somebody else's leak
-        // is inside a scope it does not belong in, so its program facts are wrong *and* its own facts are right, and
-        // filing both puts one declaration in the index twice with two different scopes. A file entangled in a
-        // crossing is read once, from its own text.
-        // # What `repaired` counts, and why it is not the same as "crossings found"
+        // [`crate::RenderedUnit::unbalanced`] is still recorded: a file whose *own* text does not balance its braces
+        // is a fact about the input, and naming it is the plan's rule 3. What is gone is the **repair**, and with it
+        // the two counters the repair needed (`repaired`, `uncured`) and the per-file second parse. A file is read
+        // once, by the one parse that reads the program.
         //
-        // It counts the brace offsets that were **actually neutralised**: each round's worth that was new. A parse
-        // that reports a crossing out of braces already given up has found nothing new to fix, and counting it would
-        // report a repair that did not happen — the one direction a "cost" number must never be wrong in.
+        // # If a crossing is seen again
         //
-        // The loop therefore stops on **no progress** rather than only when a parse reports nothing, which is
-        // stricter and is what makes the count honest: a stream whose crossing cannot be repaired (a parser pairing
-        // the same two markers again) leaves `pairs` at the real figure and the last round's crossing count to
-        // report separately.
-        let mut crossed: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
-        let mut marked: std::collections::BTreeMap<usize, cpp_parser::SourceRange> =
-            std::collections::BTreeMap::new();
-        let mut pairs = 0usize;
-        // **Not initialised**, and the compiler enforces why: every way this loop can end assigns it, so a `0` here
-        // would be a value that is never read — which is exactly the warning that showed up when it was one. A
-        // declaration without an initialiser makes "every exit sets it" a checked property rather than a promise.
-        let uncured: usize;
-        let mut edited: Option<crate::RenderedUnit> = None;
-
+        // It would mean a brace pair really is being made across two files by a stream that has no macro invocations
+        // in it — a genuine parser defect, and one that should be fixed **in the parser** rather than absorbed here.
+        // The place to look first is a file whose text does not balance: `RenderedUnit::unbalanced` names them, and
+        // that list is the honest starting point. Absorbing it a second time would be exactly the "越走越远的
+        // workaround" this milestone exists to delete.
         let tree = {
-            let mut round = 0;
-            loop {
-                let current = edited.as_ref().unwrap_or(stream);
-                let tree = {
-                    let _parse = StageTimer::new(Stage::RenderParse);
-                    CppParser::parse(&current.text, config())
-                };
-                let crossings = brace_crossings(&tree, current);
-                if crossings.is_empty() {
-                    uncured = 0;
-                    break tree;
-                }
-
-                // **Every round names its files, not only the first.** A later round can find a crossing between
-                // two files the first parse did not implicate, and those files need the same treatment.
-                for crossing in &crossings {
-                    crossed.insert(crossing.opened_in);
-                    crossed.insert(crossing.closed_in);
-                }
-
-                if round >= MAX_REPAIR_ROUNDS {
-                    uncured = crossings.len();
-                    break tree;
-                }
-
-                // Each crossing carries both ends of the pairing — which is the whole difference from the version
-                // that could only name a file and had to take all of its text out of the program.
-                let before = marked.len();
-                for crossing in &crossings {
-                    // The `{` always goes. `entry().or_insert()` rather than `insert()`: **once marked, never
-                    // re-marked**, so a second round cannot turn one brace into a different byte.
-                    marked.entry(crossing.opener.start_offset).or_insert(crossing.opener);
-
-                    // **The `}` goes only when it is a `}`.** A left-open crossing's other end is the node's last
-                    // token — ordinary code, like the `;` of the next declaration — and marking that would delete a
-                    // token that was never part of the wrong pairing. See `Crossing::closer_is_a_brace`.
-                    if crossing.closer_is_a_brace {
-                        marked
-                            .entry(crossing.closer.start_offset)
-                            .or_insert(crossing.closer);
-                    }
-                }
-
-                if marked.len() == before {
-                    // **A crossing nothing can be done about, and the loop stops here.**
-                    //
-                    // Every brace it names is already a marker, so there is nothing left to give up: the parser paired
-                    // two tokens that no longer pair with anything, which means it is reporting a pairing that is not
-                    // there. Another round would find the same thing and cost a parse of the whole program to learn
-                    // nothing — and, worse, would let `MAX_REPAIR_ROUNDS` be spent pretending to make progress.
-                    //
-                    // Reported rather than hidden: `uncured` is how many pairings the final parse still crosses,
-                    // which is the honest counterpart of `repaired`. Zero in every case measured, and non-zero is not
-                    // a reason to refuse the reading — see `IndexedUnit::uncured`.
-                    uncured = crossings.len();
-                    break tree;
-                }
-
-                pairs += marked.len() - before;
-                round += 1;
-
-                let _repair = StageTimer::new(Stage::UnitFence);
-                edited = Some(stream.neutralized(&marked.values().copied().collect::<Vec<_>>()));
-            }
+            let _parse = StageTimer::new(Stage::RenderParse);
+            CppParser::parse(&stream.text, config())
         };
 
-        let program: &crate::RenderedUnit = edited.as_ref().unwrap_or(stream);
         let summary = {
             let _sweep = StageTimer::new(Stage::RenderSweep);
-            self.index_tree(root, &program.text, &tree, key)
+            self.index_tree(root, &stream.text, &tree, key)
         };
 
         let mut files: Vec<(std::path::PathBuf, crate::CookedFile)> = stream
@@ -571,39 +483,15 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             .map(|path| (path.clone(), crate::CookedFile::default()))
             .collect();
         let mut unplaced = 0usize;
-        let mut errors = tree.get_errors().len();
+        let errors = tree.get_errors().len();
 
         file_what_was_found(
             summary.declarations,
             &tree,
-            program,
+            stream,
             &mut files,
-            &crossed,
             &mut unplaced,
         );
-
-        // **Each crossed file, read alone.** Its tokens are the same tokens, so every range still maps back to the
-        // file the same way; only the parse is separate.
-        for &file in &crossed {
-            let alone = {
-                let _fence = StageTimer::new(Stage::UnitFence);
-                stream.only(file)
-            };
-            let tree = {
-                let _parse = StageTimer::new(Stage::RenderParse);
-                CppParser::parse(&alone.text, config())
-            };
-            let summary = self.index_tree(root, &alone.text, &tree, key);
-            errors += tree.get_errors().len();
-            file_what_was_found(
-                summary.declarations,
-                &tree,
-                &alone,
-                &mut files,
-                &std::collections::BTreeSet::new(),
-                &mut unplaced,
-            );
-        }
 
         crate::IndexedUnit {
             files,
@@ -614,15 +502,6 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             unbalanced: stream.unbalanced.clone(),
             braces: stream.braces,
             errors,
-            // **Every crossed file, not only the one that leaked.** A caller reading this to find out what a repair
-            // cost wants the whole of the damage, and the file on the other end of a mis-paired brace is one whose
-            // scope in the program's parse is not the one its own text describes — even when its braces balance.
-            quarantined: crossed
-                .iter()
-                .filter_map(|file| stream.file_of(*file).map(Path::to_path_buf))
-                .collect(),
-            repaired: pairs,
-            uncured,
         }
     }
 
@@ -1270,19 +1149,16 @@ fn is_one_parenthesised_group(tokens: &[cpp_parser::CppTokenKind]) -> bool {
 ///
 /// An error that cannot be placed in any file is counted rather than reported against a text the reader cannot see.
 ///
-/// # Why a `skip` set
+/// # Why there is no `skip` set any more
 ///
-/// A file one of whose braces was given up ([`Crossing`]) is filed from **its own parse, never from the program's**:
-/// the program's parse read a text two of that file's bytes are no longer part of, so its answers about everything
-/// after them are answers to a question nobody asked. The program's facts for those files are therefore **dropped
-/// here** rather than filed and then contradicted — `files` is a per-file list, and appending both readings would put
-/// every declaration in twice with the worse scope attached to one of the copies.
+/// There used to be one: a file whose brace the fence had given up was filed from a **second parse of its own text**
+/// and not from the program's, because the program's had read a text that was no longer the file's. With the fence
+/// gone there is one parse of one stream, and every fact from it belongs to the file the fact was written in.
 fn file_what_was_found(
     declarations: Vec<crate::DeclFact>,
     tree: &CppSyntaxTree,
     stream: &crate::RenderedUnit,
     files: &mut [(std::path::PathBuf, crate::CookedFile)],
-    skip: &std::collections::BTreeSet<u32>,
     unplaced: &mut usize,
 ) {
     let _files = StageTimer::new(Stage::UnitFiles);
@@ -1303,10 +1179,6 @@ fn file_what_was_found(
             *unplaced += 1;
             continue;
         }
-        if skip.contains(&file) {
-            continue;
-        }
-
         fact.range = range;
         fact.name_range = name_range;
         if let Some((_, cooked)) = files.get_mut(file as usize) {
@@ -1318,12 +1190,6 @@ fn file_what_was_found(
         let range = cpp_parser::source_range(error.range);
         match stream.written_span(range) {
             Some((file, range)) => {
-                // A repaired file's errors come from its own parse, for the reason the declarations above do: the
-                // program's parse read a text in which that file's braces had been given up, and an error about a
-                // text nobody wrote is not a diagnostic.
-                if skip.contains(&file) {
-                    continue;
-                }
                 if let Some((_, cooked)) = files.get_mut(file as usize) {
                     cooked.diagnostics.push(crate::CookedDiagnostic {
                         range,
@@ -1336,151 +1202,6 @@ fn file_what_was_found(
     }
 }
 
-/// **A brace pair the parse made across two files**, with both ends named.
-///
-/// The token, not just the file, and that is what makes the repair possible: a file can be named without knowing
-/// *which* of its braces was given away, and taking all of a file's tokens out of a program (which is what the
-/// version before this did) is what that costs. With both offsets in hand
-/// ([`crate::RenderedUnit::neutralized`]) only the wrong pairing is given up.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Crossing {
-    /// The `{` the parse paired, and where it stands.
-    pub opener: cpp_parser::SourceRange,
-    /// **Which file the `{` was cooked in.** The file that gets read on its own as well, because it is the one whose
-    /// scope the crossing moved.
-    pub opened_in: u32,
-    /// The other end of the pairing, and where it stands.
-    pub closer: cpp_parser::SourceRange,
-    /// Which file that end stood in.
-    pub closed_in: u32,
-    /// **Is the other end a `}` token — or only the token the node happened to stop at?**
-    ///
-    /// The distinction is load-bearing and was missing at first. A *paired* crossing has a real `}` on the other
-    /// side: the parser matched a `{` with a `}`, and both are braces, so replacing both with a marker that pairs
-    /// with nothing takes away exactly the wrong pairing.
-    ///
-    /// The **left-open** crossing — a `{` the node never closed, so the scope ends where the node's last token is —
-    /// has no `}` on the other side at all. That token is ordinary code: `struct Leaky {` in one file and the `;` of
-    /// the next declaration, or a `}` that legitimately closes something *inside* the second file. Replacing it with
-    /// a marker deletes a token that was not part of any wrong pairing, which is exactly what a repair must not do.
-    /// So it is marked, and only the `{` is given up.
-    pub closer_is_a_brace: bool,
-}
-
-/// **The brace pairs the parse made across two files**, one entry per pair.
-///
-/// A brace pair is read off the tree, node by node: the `{` and `}` that are direct children of one node are the
-/// ones the parser paired, in order. A `{` with no `}` beside it is a scope the parser left open, and it *ends* where
-/// its node ends. The pair — or the open scope — crosses when the frame the `{` was written in is not the frame the
-/// `}` (or the node's last token) stands in.
-///
-/// # Why the pairing is kept rather than the file
-///
-/// This returned `Vec<u32>` — *the files that own a crossing* — and the caller could do exactly one thing with that
-/// answer: take each of those files' tokens out of the program ([`crate::RenderedUnit::without`]). Measured, that is
-/// the difference between losing a brace and losing a header: `std::format`'s file leaving the program because one of
-/// its braces had been mis-paired took `members_of(std::format)` with it. Both offsets are what a repair needs, so
-/// both are what this answers.
-///
-/// # Why the tree's node structure is trusted here
-///
-/// The pairing is the parser's, which is the point: this is a check on *what the parser did*, so asking the parser
-/// again through a different route would be asking the same witness. `node.children_with_tokens()` gives the braces a
-/// node directly holds — the ones the grammar paired — and a `{` left in that list is one the node never closed.
-///
-/// # The one historical false positive, kept because it is the shape to avoid
-///
-/// **Which file the token *stands in*, not where its body was written.** The question is "does one file open a scope
-/// another file closes", and it is about the file whose cook produced each brace —
-/// [`crate::RenderedUnit::file_standing_at`]. [`crate::RenderedUnit::written_at`] reports the *navigation hint* as a
-/// second field, which for a token expanded out of a `#define` names the header that wrote the body, so asking it for
-/// the file would make a `{` from a macro and the `}` the invoking file wrote look like a pair spanning two files —
-/// and `<memory>`, `<atomic>`, `<variant>`, `<any>`, `<functional>`, `<bitset>`, `<chrono>` and `<format>` were all
-/// repaired as leaked for it.
-fn brace_crossings(tree: &CppSyntaxTree, stream: &crate::RenderedUnit) -> Vec<Crossing> {
-    use cpp_parser::CppTokenKind;
-
-    let _fence = StageTimer::new(Stage::UnitFence);
-    let frame_at = |offset: usize| stream.file_standing_at(offset);
-    let range_of = |token: &cpp_parser::CppSyntaxToken| {
-        let at = cpp_parser::source_range(token.text_range());
-        (at, frame_at(at.start_offset))
-    };
-
-    let mut crossing = Vec::new();
-
-    for node in tree.get_red_root().descendants() {
-        let mut open: Vec<(cpp_parser::SourceRange, Option<u32>)> = Vec::new();
-
-        for element in node.children_with_tokens() {
-            let Some(token) = element.into_token() else {
-                continue;
-            };
-            let (at, frame) = range_of(&token);
-
-            match CppTokenKind::from(token.kind()) {
-                CppTokenKind::LeftBrace => open.push((at, frame)),
-                CppTokenKind::RightBrace => {
-                    let Some((opener, opened_in)) = open.pop() else {
-                        continue;
-                    };
-                    if let (Some(opened_in), Some(closed_in)) = (opened_in, frame)
-                        && opened_in != closed_in
-                    {
-                        crossing.push(Crossing {
-                            opener,
-                            opened_in,
-                            closer: at,
-                            closed_in,
-                            // A real `}` on both sides: this is a pairing, and the whole of it is wrong.
-                            closer_is_a_brace: true,
-                        });
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        if open.is_empty() {
-            continue;
-        }
-
-        // Left open: it ends where the node's last real token is.
-        let mut last = node.last_token();
-        while let Some(token) = &last {
-            if !cpp_parser::is_trivia(CppTokenKind::from(token.kind())) {
-                break;
-            }
-            last = token.prev_token();
-        }
-        let Some((at, Some(closed_in))) = last.map(|token| range_of(&token)) else {
-            continue;
-        };
-
-        // `iter()` with a `let ... else` rather than `for (opener, Some(opened_in)) in open`: a `for` pattern has to
-        // be irrefutable, and "this token's frame is known" is not something the loop can assume — a span outside the
-        // file table answers `None`, and a crossing about a token nobody can place is not a crossing anybody can
-        // repair.
-        for (opener, opened) in open.iter() {
-            let Some(opened_in) = *opened else {
-                continue;
-            };
-            if opened_in != closed_in {
-                crossing.push(Crossing {
-                    opener: *opener,
-                    opened_in,
-                    closer: at,
-                    closed_in,
-                    // **Not a brace** — see the field's documentation. This is the node's last token, which is
-                    // ordinary code, so only the `{` is given up.
-                    closer_is_a_brace: false,
-                });
-            }
-        }
-    }
-
-    crossing
-}
 
 /// Give `#include "local.h"` the token the parser gives it: a header name.
 ///
