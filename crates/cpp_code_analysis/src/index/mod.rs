@@ -431,6 +431,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         key: SummaryKey,
     ) -> crate::IndexedUnit {
         // Built afresh for each parse: a configuration is consumed by the parser it is given to.
+        //
         let config = || {
             let mut config = ParserConfig::default().with_dialect(self.config.dialect());
             if let Some(bodies) = self.macro_facts {

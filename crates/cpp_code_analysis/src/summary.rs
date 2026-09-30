@@ -2227,6 +2227,54 @@ pub struct UnitSpan {
 }
 
 impl RenderedUnit {
+    /// **Where each file begins in the rendering**, as offsets into [`RenderedUnit::text`] — the boundaries between
+    /// the files a translation unit was stitched from.
+    ///
+    /// The first token of each file that contributes one, in order; the first file's own start is omitted, because
+    /// offset 0 is a boundary everything already has. A file that contributes **no token** — a header that is only
+    /// `#define`s, whose whole body the preprocessor consumed — has no boundary, and that is right: it opened no
+    /// scope either, so nothing needs closing at its end.
+    ///
+    /// # What this is for, and why nothing calls it yet
+    ///
+    /// It exists so a parser of this text can be told where one file ends and the next begins, and can therefore
+    /// close a scope one file left open instead of letting it hold the next file. **That rule does not work as a
+    /// tree-builder rule**, which was measured rather than assumed:
+    ///
+    /// ```text
+    /// boundary None → TranslationUnit → NamespaceDecl → CompoundStat → Declaration
+    /// boundary 0    → TranslationUnit → NamespaceDecl → CompoundStat → Declaration
+    /// boundary 39   → TranslationUnit → NamespaceDecl → CompoundStat → Declaration
+    /// ```
+    ///
+    /// Boundary `0` is satisfied by the first token, so it closes whatever is open at the start of the stream — and
+    /// the shape does not move. The reason is that the holder is a `CompoundStat`: the brace of `namespace first {`
+    /// was paired by the **grammar** with the `}` that ends the file, so the leak is a scope-pairing decision made
+    /// while the tokens were being read, not an imbalance in the event stream that closing a node can repair.
+    ///
+    /// So the fix belongs in the grammar's own scope handling, and this stays as the piece such a fix will need:
+    /// the offsets are a fact about the rendering, computed once, and nothing about them depends on how the parser
+    /// chooses to use them. See `Session`'s tests
+    /// (`a_file_that_does_not_balance_costs_nothing_but_a_name`) for what is currently true and asserted.
+    pub fn file_boundaries(&self) -> Vec<usize> {
+        let mut boundaries = Vec::new();
+        let mut seen = vec![false; self.files.len()];
+
+        // The spans are in cooked order, so the first time a file appears is where it begins.
+        for span in &self.spans {
+            if let Some(slot) = seen.get_mut(span.file as usize)
+                && !*slot
+            {
+                *slot = true;
+                if span.cooked.start_offset != 0 {
+                    boundaries.push(span.cooked.start_offset);
+                }
+            }
+        }
+
+        boundaries
+    }
+
     /// Where a token of the rendering was written, by its offset in the rendering: the file, and the range in it.
     pub fn written_at(&self, cooked_offset: usize) -> Option<(u32, cpp_parser::SourceRange)> {
         let index = self

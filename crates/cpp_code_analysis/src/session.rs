@@ -3569,10 +3569,8 @@ mod tests {
             "and it is the one that opens a brace it never closes: {reading:?}"
         );
 
-        // **And the file after it is nested inside the scope it left open.** The fence used to stop that; without it
-        // the parser pairs `broken.h`'s `{` with a `}` in `good.h`, and `good.h`'s own namespace ends up inside
-        // `vc_attributes`. The declaration is still filed — nothing is lost — and the scope is wrong, which is the
-        // price of deleting the fence and the reason the parser is where the fix belongs.
+        // **And the file after it is not nested inside the scope `broken.h` left open.** `broken.h`'s unclosed
+        // namespace ends at the end of `broken.h`, so `good.h`'s own namespace holds `Inside` and nothing else.
         let inside = session
             .index()
             .cooked_declarations(Path::new("/p/good.h"))
@@ -3583,8 +3581,8 @@ mod tests {
             .expect("the class is declared there");
         assert_eq!(
             inside.scope.as_deref(),
-            Some("vc_attributes::good"),
-            "the file after the unbalanced one is nested inside the scope it left open"
+            Some("good"),
+            "a scope does not cross a file boundary, so `good.h` is scoped by its own namespace"
         );
 
         // **And the unbalanced file did not lose its own declarations.** This is the half gate ① could not give: the
@@ -3703,17 +3701,15 @@ mod tests {
             "one file does not balance, and it is reported: {reading:?}"
         );
 
-        // **The file after it is read, and it is filed inside the leaked scope — which is the finding.**
+        // **The file after it is read as itself, at file scope.**
         //
-        // This is what deleting the fence cost, and it is worth stating rather than smoothing over: an unclosed `{`
-        // in one file is paired by the parser with a `}` in the next, so the next file's declarations come out nested
-        // inside a namespace they are not in. The fence used to prevent exactly this, and **it was not only a
-        // workaround for unparsed macros** — that was the hypothesis, and this test is the measurement that refutes
-        // it.
+        // This is what the fence used to buy, and it is now bought **in the parser**: a scope may not cross a file
+        // boundary, so the `{` that `good.h` never closed is closed at the end of `good.h` rather than paired with a
+        // `}` in `other.h`. See `ParserConfig::file_boundaries` for the rule and `balance_events` for where it is
+        // applied.
         //
-        // What the deletion does *not* do is what §4 rule 1 forbids: nothing is refused and no declaration is lost.
-        // `Other` is in the index; it is filed at the wrong scope, which is a parser defect to fix **in the parser**
-        // (a scope left open at a file boundary should close there) rather than absorb in the indexer.
+        // The distinction matters for who owns the fix: deleting the fence exposed this leak, and the answer was not
+        // to put the fence back — it was a defect **in the parser**, and the parser is where it is now fixed.
         let other_fact = session
             .index()
             .cooked_declarations(Path::new("/p/other.h"))
@@ -3723,9 +3719,8 @@ mod tests {
             .map(|fact| fact.scope.clone())
             .expect("the struct is declared there");
         assert_eq!(
-            other_fact.as_deref(),
-            Some("good"),
-            "the declaration is filed, and it is inside the scope the previous file left open: {reading:?}"
+            other_fact, None,
+            "the file after the unbalanced one is at file scope, not inside `good::`: {reading:?}"
         );
 
         // **And the unbalanced file did not lose its own declarations.**
