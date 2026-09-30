@@ -205,6 +205,35 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
         // Compound statement
         CppTokenKind::LeftBrace => parse_compound_stat(p),
 
+        // **An attribute in front of a statement**, which is where MSVC puts `[[msvc::constexpr]]`:
+        //
+        // ```cpp
+        // _MSVC_CONSTEXPR return ::new (static_cast<void*>(_Location)) _Ty[1]();     // <memory>:547
+        // ```
+        //
+        // `vcruntime.h` defines that macro as `[[msvc::constexpr]]` under `/std:c++20`, and the attribute is read
+        // here because **no statement rule can start at it**: `parse_declaration_or_expression_statement` tries the
+        // declaration reading first and finds no type, then falls through to the expression reading, where `[` in
+        // operand position is an error. The recovery from that is what this costs — measured, the two errors left in
+        // a 2.1 MB translation unit were this one shape, and they left `<xutility>`'s namespace open.
+        //
+        // # Why statement position is the easy place to accept it
+        //
+        // Because a `[[` here has no competitor at all: an expression statement may begin with a name, a literal, a
+        // `(`, a `[` of a *subscript* on something already named — and never with two `[` in a row. The subscript
+        // that makes the same test delicate in the expression grammar is written *after* its subject, so it cannot
+        // be the first token of a statement.
+        //
+        // The attribute is read as its own node and the statement after it is read by this same rule, so
+        // `[[a]] [[b]] return x;` is an attribute run and a return statement rather than a run of nothing.
+        _ if super::types::at_an_attribute(p) => {
+            if let Err(err) = super::types::parse_attribute_specifiers(p) {
+                Err(err)
+            } else {
+                parse_stat(p)
+            }
+        }
+
         // C++20 modules. Checked *before* the label case below: `module : private;` and
         // `module A:B;` both look exactly like `identifier :` — a label — and the label rule would
         // eat the `module` and leave the rest as a stray statement.

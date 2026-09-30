@@ -2660,7 +2660,7 @@ build_partitions.bat   → 14 12 16
 
 这不是"某个类没索引到",是**整份单元读数的作用域被一处错误毁掉**。所以每个语法缺口的代价都被放大了三个数量级。
 
-### 45.3 修好的七个形状(全部在 cpp_parser,每个都有测试)
+### 45.3 修好的形状(全部在 cpp_parser,每个都有测试)
 
 | 形状 | 原来的读法 | 现在 |
 | --- | --- | --- |
@@ -2668,34 +2668,70 @@ build_partitions.bat   → 14 12 16
 | `class [[nodiscard]] X { ... };` | 属性在**名字之前**,类被读成**匿名**、类体丢给语句规则 | 类头在名字之前先吃属性 |
 | `(ts + ... + init)` | 只认 `ts + ...` 与 `(... + ts)`,**二元折叠**把第二个运算符留给调用者 | 补上重复运算符那一半 |
 | `requires C<T> [[nodiscard]] T f();` | 约束里的 `[` 被当成下标,约束失败,声明失败 | 约束内部:后缀循环见到 `[[` 停下 |
+| `[[msvc::constexpr]] return ::new (...) _Ty[1]();` | 语句位置的属性:**没有**语句规则能从这里开始,声明读不出类型、表达式读不出操作数 | `parse_stat` 在语句之前读属性,再读它后面的语句 |
 
 读数(同一个真实工程,106 个文件):
 
 ```text
-单元解析错误   61 -> 2
-被隔离的文件   sourceannotations.h, xutility, type_traits, xmemory  ->  xutility, type_traits
+单元解析错误   61 -> 0
+被隔离的文件   sourceannotations.h, xutility, type_traits, xmemory  ->  type_traits
 ```
 
-### 45.4 还没修完的,以及它们现在**为什么不再致命**
+### 45.4 归属问题:两个真 bug,一个还没定位
 
-剩下 2 个错误都是同一种形状:语句位置的 `[[msvc::constexpr]]`(MSVC 专有:标记后面的 `return` 按常量求值),
-另有 2 个文件仍留着未闭合的作用域(`xutility`、`type_traits`)。**`std::string` 仍然查不到声明**,因为栅栏把
-这两个文件拿掉了,而 `basic_string` 就在 `xutility` 引到的闭包里。
+单元解析现在是 **0 错误**,`std::string` 与 `std::vector` 都作为事实出现在熟读里 —— 但 `members_of("std::string")`
+仍然失败。追下去挖出两个真 bug,和一个还没定位的:
 
-所以这一项**没有做完**,登记三件后续:
+**(a) 栅栏把字节删了,坐标系就错位了。** `RenderedUnit::without` 原来**删除**被隔离文件的 token 并重建 span 表,
+于是 2 111 390 字节的流变成 2 104 969 —— 而**后面的解析仍然用原来那张 span 表**去映射。6 100 字节的位移让之后
+每个声明都归到错误的文件上。现在改成**用等长空格抹掉**,三条性质写进了 `without` 的文档与
+`taking_a_file_out_of_the_stream_keeps_the_offsets` 这条测试:
+
+```text
+文本长度不变        结果里的偏移就是原文里的偏移
+spans 是原来那一张  于是 written_span 回答的仍然是还在那里的文本
+token 从解析里消失  于是那个文件只贡献长度
+```
+
+**(b) 映射本身是对的,我一开始读错了。** `written_at(1858469)` 返回的**就是** `xstring`(偏移 22677),
+93 971 字节的类体确实在自己的文件里。当时看到"`basic_string` 归到 `__msvc_formatter.hpp`",那是该文件里
+`class basic_string;` **前置声明**的事实 —— 一件正确的事。
+
+**(c) 还没定位的:某个类的 `ClassDef` 没进作用域。** 这一条我追了很久,**没有定论**,把追到哪一步写下来:
+
+```text
+单元解析            0 错误,3 461 个 ClassDef
+basic_string 的节点 1858469..1952440,直接子节点是 NameExpr("basic_string") + ClassBody —— 完全正常
+手工写的最小形状     template/class/名字/基类/模板成员/嵌套别名/static_assert —— 全部正常绑定,撑到 14 KB 也正常
+真实片段(105 KB)  4 个有类体的类,绑定 0 个;class_like 在整段里一次都没被调用
+```
+
+已经排除的:`declared_name` 的兜底路径(`ClassDef` 的直接子节点总有 `NameExpr`)、尺寸、`extern "C++"` 与
+`namespace std` 的嵌套、基类、模板成员。
+
+**没排除但没验完的**:从真实流里切片段时,`extern "C++" { namespace std {` 只把 `namespace std {` 带进来了
+——`_EXTERN_CXX_WORKAROUND` 那一半靠在**另一个文件**里定义的宏。片段里因此出现 `std::string s = "hello";`
+这类来自其它文件的残留,它解析成 0 错误但语义上不是一个完整的程序。**下一个动作应该是从这个方向查**:
+让片段自足(把 `_STD_BEGIN` 展开成的东西一起切进来),而不是继续在切出来的残片上调作用域构建。
+
+教训:我在这个片段上花了太久,而它的**上下文是错的**。一个够不着的复现比一个像结论的读数更值钱,但先要检查
+复现本身是不是自足的。
+
+登记:
 
 | 活 | 一句话 |
 | --- | --- |
-| 语句位置的 `[[...]]` | `[[msvc::constexpr]] return ::new (...) _Ty[1]();` —— 属性在**语句**之前 |
-| `xutility` / `type_traits` 的未闭合作用域 | 修完上一条后重量;它们是当前 `std::string` 的唯一阻塞 |
-| **失败模式本身** | 更值钱的是让"一处语法缺口"不再赔上整个单元:栅栏现在**事后**隔离泄漏的文件(最多三轮),可以改成**解析前**就按文件的括号深度加栅栏 |
+| **那个 `ClassDef` 为什么没进作用域** | 先要一个**自足**的复现:把 `_STD_BEGIN` 展开出来的两个 token 一起切进来,而不是只切 `namespace std {` |
+| `type_traits` 仍被隔离 | 一个未闭合作用域;0 错误的单元里它是唯一剩下的 |
+| **失败模式本身** | 栅栏仍是**事后**的(解析 → 找跨文件括号对 → 隔离 → 最多再解析两轮),而 §45.2 说得很清楚:代价全部来自"恢复时留下未配对的作用域" |
 
-最后一条是这一轮真正的教训:七个形状里六个是**小语法缺口**,而它们的代价全部来自**恢复时留下未配对的作用域**。
-语法覆盖率可以慢慢补,失败模式不该再放大它。
+五个形状都是**小语法缺口**,而它们的代价全部来自**恢复时留下未配对的作用域** —— 以及归属错开一个之后
+**没有任何检查会发现**。语法覆盖率可以慢慢补,这两样不该再放大它。
 
 ### 45.5 本轮验证
 
 `cargo test --release --workspace`:**49 个二进制全绿**;`clippy` **0 警告**。
-新增测试:`a_construct_the_grammar_refuses_does_not_take_the_rest_with_it`(六种形状,断言**两个 namespace 仍然平级**)、
+新增测试:`taking_a_file_out_of_the_stream_keeps_the_offsets`(文本等长、spans 原样、映射仍对)、
+`a_construct_the_grammar_refuses_does_not_take_the_rest_with_it`(七种形状,断言**两个 namespace 仍然平级**)、
 `modern_constructs_produce_the_right_nodes` 里 requires+属性一条、以及 `session.rs` 里两条(单括号属性**不再**需要隔离;
 真泄漏的文件仍然被隔离,用一份**文字配平但解析不配平**的 fixture)。

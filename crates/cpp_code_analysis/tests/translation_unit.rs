@@ -568,6 +568,87 @@ fn the_unit_cooks_as_one_stream_in_include_order() {
     );
 }
 
+/// **Taking a file out of the stream keeps every offset where it was.**
+///
+/// The quarantine path blanks a file's tokens instead of deleting them, and the difference is not cosmetic: the
+/// parse that follows maps its declarations back through the **original** span table, so a stream that came out
+/// six kilobytes shorter moved every later offset by six kilobytes and filed every declaration after it under the
+/// wrong file. Measured on a project that includes `<string>`: `basic_string`'s 93 971-byte class body — the one
+/// written in `<xstring>` — was filed under `<__msvc_formatter.hpp>`, whose *forward declaration* of the same name
+/// stands 6 100 bytes earlier. Nothing downstream could notice: the name was right, the scope was right, and the
+/// range was right for the wrong file.
+///
+/// Three properties, and each one is what the mapping needs:
+///
+/// ```text
+/// the text is the same length          so an offset in the result is an offset in the original
+/// the spans are the original ones      so `written_span` answers about the text that is still there
+/// the token is gone from the *parse*   so the file contributes nothing but spaces
+/// ```
+#[test]
+fn taking_a_file_out_of_the_stream_keeps_the_offsets() {
+    let files = [
+        ("/p/first.h", "struct First { int a; };\n"),
+        ("/p/leaky.h", "struct Leaky { int b; };\n"),
+        ("/p/third.h", "struct Third { int c; };\n"),
+        (
+            "/p/main.cpp",
+            "#include \"first.h\"\n#include \"leaky.h\"\n#include \"third.h\"\nint use = 1;\n",
+        ),
+    ];
+
+    let unit = Unit::new(&files);
+    let mut definitions = MacroDefinitions::default();
+    let timeline = unit.timeline_of("/p/main.cpp", &mut definitions);
+    let shared = timeline.definitions();
+    let whole = timeline.cook_the_unit(&unit.sources, &shared, None, true);
+
+    let leaky = whole
+        .files
+        .iter()
+        .position(|path| path == Path::new("/p/leaky.h"))
+        .expect("the file is in the unit") as u32;
+    let mut left_out = std::collections::BTreeSet::new();
+    left_out.insert(leaky);
+    let without = whole.without(&left_out);
+
+    assert_eq!(
+        without.text.len(),
+        whole.text.len(),
+        "the text is the same length, which is what keeps every offset where it was"
+    );
+    assert_eq!(
+        without.text.find("Third"),
+        whole.text.find("Third"),
+        "so a declaration after the left-out file is found at the same place"
+    );
+    assert!(
+        !without.text.contains("Leaky"),
+        "and the left-out file's own tokens are gone: {}",
+        without.text
+    );
+
+    // **The mapping still answers about the text that is there**, which is the property the index depends on.
+    let third = without.text.find("Third").expect("still in the stream");
+    let (file, written) = without
+        .written_span(cpp_parser::SourceRange::new(third, 5))
+        .expect("mapped");
+    assert_eq!(
+        without.file_of(file),
+        Some(Path::new("/p/third.h")),
+        "a token after the left-out file still belongs to its own file"
+    );
+    assert_eq!(
+        written.start_offset,
+        "struct Third { int c; };\n".find("Third").expect("its own text"),
+        "and to its own offset in that file, not to where it stands in the stream"
+    );
+
+    // …and the program without it still parses.
+    let tree = cpp_parser::CppParser::parse(&without.text, cpp_parser::ParserConfig::default());
+    assert!(tree.get_errors().is_empty(), "{:?}", tree.get_errors());
+}
+
 /// **A file the caller has no text for is a hole, not an empty file.**
 ///
 /// The two produce different programs, and a census that conflated them would report "the unit parses" about a

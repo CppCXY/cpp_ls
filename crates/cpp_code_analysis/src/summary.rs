@@ -2277,15 +2277,51 @@ impl RenderedUnit {
     }
 
     /// **The same program without the tokens of `left_out` files** — the stream a fenced parse reads. Everything else
-    /// is token-for-token the original, in the original order; a left-out file's includes were spliced as files of
-    /// their own and stay.
+    /// is the original, in the original order; a left-out file's includes were spliced as files of their own and
+    /// stay.
+    ///
+    /// # The tokens are blanked, not removed, and that is the whole point
+    ///
+    /// The text that comes out is **the same length** as the text that went in: every token of a left-out file is
+    /// replaced by as many spaces as it occupied, byte for byte, and every other byte is copied as it stands. So an
+    /// offset in the result is the same offset in the original — which is what lets a fact found in the blanked
+    /// text be mapped back through [`RenderedUnit::written_span`], whose spans are still the original ones. This is
+    /// documented on [`RenderedUnit::only`] as the property a quarantined file's own reading depends on, and
+    /// `without` is the other half of the same contract.
+    ///
+    /// # What removing them cost
+    ///
+    /// The version before this one *deleted* the left-out tokens and rebuilt the span table as it went, which is
+    /// the same thing the compiler does and was wrong here for a reason that has nothing to do with parsing:
+    /// **the parse that follows maps its declarations back through the original span table**, so deleting six
+    /// kilobytes from the middle of a 2 MB stream moved every later offset by six kilobytes and filed every
+    /// declaration after it under the wrong file. Measured on a project that includes `<string>`:
+    /// `basic_string`'s 93 971-byte class body — written in `<xstring>` — was filed under
+    /// `<__msvc_formatter.hpp>`, the file whose *forward declaration* of the same name stands 6 100 bytes earlier.
+    /// The reading looked right: the name was right, the scope was right (`std`), the reported range was right for
+    /// its own file, and the file was another file's. Nothing else in the pipeline could notice.
+    ///
+    /// Spaces rather than removal also keeps the **braces** where they were, so the second parse sees the same
+    /// token positions as the first and its scope pairing is comparable. Trivia is dropped by the parser either
+    /// way, so a blanked file contributes nothing but its length.
     pub fn without(&self, left_out: &std::collections::BTreeSet<u32>) -> RenderedUnit {
         let mut out = self.empty_like();
+        let mut bytes = self.text.as_bytes().to_vec();
+
         for span in &self.spans {
             if !left_out.contains(&span.file) {
-                out.push(&self.text[span.cooked.start_offset..span.cooked.end_offset()], span.file, span.written);
+                continue;
+            }
+            for byte in &mut bytes[span.cooked.start_offset..span.cooked.end_offset()] {
+                *byte = b' ';
             }
         }
+
+        out.text = String::from_utf8(bytes).expect("only spaces replaced bytes of a UTF-8 stream");
+        // **The spans are the original ones**, so an offset in this text is an offset in that one. That is a
+        // stronger statement than the one `only` makes — it is the same table, not a copy — and it is what the
+        // caller's mapping depends on.
+        out.spans = self.spans.clone();
         out
     }
 

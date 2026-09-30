@@ -2747,6 +2747,8 @@ fn a_construct_the_grammar_refuses_does_not_take_the_rest_with_it() {
         "class [[nodiscard]] Warned { int x; };",
         // …and one after a constraint, which is where MSVC writes the two together.
         "template <class T> requires C<T> [[nodiscard]] constexpr T identity(T t) { return t; }",
+        // …and one in front of a *statement*, which is a different rule from the one in front of a declaration.
+        "int branch(int n) { if (n) { [[msvc::constexpr]] return 1; } return 0; }",
     ];
 
     for shape in shapes {
@@ -5470,6 +5472,14 @@ fn modern_constructs_produce_the_right_nodes() {
             "template <typename T> requires C<T> [[nodiscard]] T f(T t) { return t; }",
             CppSyntaxKind::RequiresClause,
         ),
+        // **An attribute in front of a statement**, which is where MSVC puts `[[msvc::constexpr]]`:
+        // `vcruntime.h` defines `_MSVC_CONSTEXPR` as that attribute and `<memory>` writes
+        // `_MSVC_CONSTEXPR return ::new (…) _Ty[1]();` inside an `if constexpr` branch. No statement rule can
+        // begin at attribute — the declaration reading finds no type and the expression reading finds no
+        // operand — and the recovery cost a scope, which is what made it worth reading rather than reporting.
+        ("[[msvc::constexpr]] return 1;", CppSyntaxKind::AttributeList),
+        ("[[msvc::constexpr]] return 1;", CppSyntaxKind::ReturnStat),
+        ("[[likely]] if (n) { return 1; }", CppSyntaxKind::IfStat),
         (
             "template <typename T> requires C<T> [[nodiscard]] T f(T t) { return t; }",
             CppSyntaxKind::AttributeList,
