@@ -7,7 +7,7 @@
 use crate::{
     grammar::ParseResult,
     kind::{CppSyntaxKind, CppTokenKind},
-    parser::{CppParser, MacroEvidence, MarkerEventContainer},
+    parser::{CppParser, MarkerEventContainer},
     parser_error::CppParseError,
 };
 
@@ -245,41 +245,6 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
             super::decls::parse_declaration(p)
         }
 
-        // **A macro whose body is a brace, asked first**: `#define _STD_BEGIN namespace std {`,
-        // `#define _STD_END }`, and libstdc++'s `_GLIBCXX_BEGIN_NAMESPACE_VERSION`. The body is the strongest
-        // evidence there is about what stands here — stronger than any shape test below, because it *says* what
-        // the tokens do not — so it is asked before the rules that read the invocation as a declaration head, a
-        // call, or a block-carrying statement.
-        //
-        // **Why the order is the fix and not a preference**: asked later, the other rules get there first and
-        // their readings *succeed*, which is what makes this defect silent. `_STD_BEGIN struct vector { … };`
-        // reads as a declaration whose specifier is `_STD_BEGIN` (the whole class becomes its payload, and the
-        // `;` it ends on makes the declaration look complete), and `_STD_BEGIN vector<int> x = {};` reads as two
-        // specifiers in a row. Both are lossless, both are error-free, and both lose the declaration that was
-        // written inside them; see `tests/gaps.rs`, where the two shapes are pinned one after the other.
-        CppTokenKind::Identifier if body_shapes_the_braces(p, p.current_token_index()) => {
-            parse_a_macro_that_stands_for_a_declaration(p)
-        }
-
-        // A **macro invocation used as a statement**: `BOOL_OPTION(tab_width)`, `IF_EXIST(k) { … }`.
-        //
-        // Claimed here, before the declaration/expression question is even asked, and only for a name this file
-        // **`#define`s** — evidence rather than a convention. See [`at_a_macro_call_statement`].
-        //
-        // **A macro that is a declaration head comes first**: `STDMETHOD(QueryInterface) (…) PURE;` is also
-        // "a name this file defines, invoked", and claiming it as a whole statement is what takes the rest of the
-        // line away from the declaration reading. The body is what tells the two apart — see
-        // [`a_macro_head_with_a_parameter_list`].
-        _ if a_macro_head_with_a_parameter_list(p) => parse_a_declaration_head_macro(p),
-
-        _ if at_a_macro_call_statement(p) => parse_macro_call(p),
-
-        // **A macro invocation with no argument list and a block after it** — the same "the body supplies the
-        // block" shape one spelling along, and the one `debug/safe_iterator.h:283` writes. Claimed here, before the
-        // declaration/expression question, because the postfix rule reads the `{` as list-initialisation of the
-        // name (`BEGIN{…}`, which is C++11's `T{…}`) and then every statement in the block is inside a braced list.
-        _ if at_a_macro_statement_with_a_block(p) => parse_a_macro_statement_with_a_block(p),
-
         // A label: `foo:` at the start of a statement.
         CppTokenKind::Identifier
             if p.peek_token_kind_at(1..2).as_slice() == [CppTokenKind::Colon] =>
@@ -328,12 +293,9 @@ pub fn parse_stat(p: &mut CppParser) -> ParseResult {
 ///
 /// That shape has no competitor at statement position: a name followed by a parenthesised group is otherwise a
 /// *call*, and a call is read — the difference is the spelling, and the three spellings are the compilers' own.
-/// The one thing that outranks a spelling here is **evidence**: a file that `#define`s `asm` (or a caller whose
-/// table describes it) is asking for the macro rules instead, and it gets them.
 fn at_an_asm_statement(p: &CppParser) -> bool {
     if p.current_token() != CppTokenKind::Identifier
         || !matches!(p.current_token_text(), "asm" | "__asm" | "__asm__")
-        || p.macro_evidence(p.current_token_text()).is_some()
     {
         return false;
     }
@@ -436,349 +398,30 @@ fn parse_asm_statement(p: &mut CppParser) -> ParseResult {
     Ok(m.complete(p))
 }
 
-/// Does a **macro invocation used as a statement** start at the cursor?///
-/// The shape is a name, a parenthesised group, and then whatever the macro's body supplies — nothing at all for
-/// `#define NUMBER_OPTION(op) if (…) { … }`, a block for `#define IF_EXIST(op) if (…)`, a `;` for an ordinary
-/// function-like macro. What makes the reading available is that the name is one this file **`#define`s**, and
-/// that is the whole point of [`crate::parser::MacroNames`]:
+/// Read the invocation at `start` as a statement — the reader of [`a_macro_invocation_starts_at`].
 ///
-/// ```text
-/// #define BOOL_OPTION(op) … ;   BOOL_OPTION(flag)      a macro whose body is a whole statement — read as one
-///                                g(flag)               a call with its `;` missing — still an error
-/// ```
+/// Two shapes, and the difference is not cosmetic: one carries a group and is read by [`parse_macro_call`], and one
+/// does not and is read by [`parse_a_macro_that_stands_for_a_declaration`]. Asking which shape this is, at the one
+/// place that knows the name has already been claimed, keeps each reader's precondition true.
 ///
-/// The two are the same tokens up to the name. A *spelling* convention (all caps) would accept both, which is why
-/// it is **not** used here: taking this reading means accepting a statement that is not valid C++ unless the macro
-/// supplies the rest, so it needs evidence rather than a guess. The convention stays where it was — as the
-/// fallback for a macro from a header, in [`super::decls::a_macro_definition_follows`], where the alternative is a
-/// syntax error either way.
-///
-/// # The second form: a macro from a header, where the tokens *end* the statement
-///
-/// One family of macros from an included header is used this way and *only* this way — the concept-requirement
-/// macros libstdc++ defines as nothing at all:
-///
-/// ```cpp
-/// __glibcxx_function_requires(_LessThanComparableConcept<_Tp>)     // bits/stl_algobase.h:237
-/// //return __b < __a ? __b : __a;
-/// if (__b < __a)                                                   // the next token cannot continue a call
-///   return __b;
-/// ```
-///
-/// and the same shape at the end of an `#if` branch, where the next token is the directive:
-///
-/// ```cpp
-/// #if __cplusplus < 201103L
-///   __glibcxx_function_requires(_SGIAssignableConcept<_Tp>)        // bits/move.h:233
-/// #endif
-/// ```
-///
-/// Neither name is in any table this parser is handed, and both readings of those tokens are real, so that rule is
-/// drawn as narrowly as the shapes allow — see [`at_a_macro_call_statement_without_evidence`], which is where it
-/// lives and where its three boundaries are written down.
-fn at_a_macro_call_statement(p: &CppParser) -> bool {
-    p.current_token() == CppTokenKind::Identifier
-        && p.peek_next_token() == CppTokenKind::LeftParen
-        && p.macro_evidence(p.current_token_text())
-            .is_some_and(MacroEvidence::may_be_a_statement_without_a_semicolon)
-}
-
-/// Does a macro invocation with **no argument list** stand here, with a block that is its body?
-///
-/// The one shape of "a macro whose body supplies a block" that had no rule, and it is written all over the debug
-/// headers — `debug/safe_iterator.h:283` is where the census found it:
-///
-/// ```cpp
-/// #if __cplusplus >= 202002L && __cpp_constexpr < 202110L
-/// # define _GLIBCXX20_CONSTEXPR_NON_LITERAL_SCOPE_BEGIN [&]() -> void
-/// # define _GLIBCXX20_CONSTEXPR_NON_LITERAL_SCOPE_END ();
-/// #else
-/// # define _GLIBCXX20_CONSTEXPR_NON_LITERAL_SCOPE_BEGIN
-/// # define _GLIBCXX20_CONSTEXPR_NON_LITERAL_SCOPE_END
-/// #endif
-///
-///     if (this->_M_sequence && this->_M_sequence == __x._M_sequence)
-///       _GLIBCXX20_CONSTEXPR_NON_LITERAL_SCOPE_BEGIN {
-///         __gnu_cxx::__scoped_lock __l(this->_M_get_mutex());
-///         …
-///       } _GLIBCXX20_CONSTEXPR_NON_LITERAL_SCOPE_END
-///     else
-/// ```
-///
-/// **Evidence is what makes it safe**, and it is the same evidence the sibling rule above asks for: the tables have
-/// to know the name — this file's own `#define` (the shape above), or a body the include closure carried in. A name
-/// followed by a `{` is otherwise *list-initialisation* (`Point{1, 2};` is an expression statement, and the brace
-/// after a name is read as `InitListExpr` by the postfix rule), and a `{` after a macro invocation is the body the
-/// macro's own definition supplies — which is exactly what the tables can tell apart and the tokens cannot.
-///
-/// The block belongs to the invocation, the same node shape [`parse_macro_call`] produces for
-/// `IF_EXIST(a) { … }`: `MacroCall(NameExpr, CompoundStat)`, with no `ArgumentList` because the file wrote none.
-fn at_a_macro_statement_with_a_block(p: &CppParser) -> bool {
-    if p.current_token() != CppTokenKind::Identifier
-        || p.peek_next_token() != CppTokenKind::LeftBrace
-    {
-        return false;
-    }
-
-    let name = p.current_token_text();
-    p.macro_evidence(name).is_some()
-        || p.macro_body_kinds_at(name, p.current_token_range().start_offset)
-            .is_some()
-}
-
-/// Is there a **macro invocation from an included header** at the token `index`?
-///
-/// The form [`at_a_macro_call_statement`] cannot claim, because no table knows the name. Three boundaries, each
-/// one bought by something going wrong without it:
-///
-/// * the name must be one the **implementation reserved** — it starts with an underscore
-///   ([`super::types::written_in_the_implementations_namespace`]). A name like `FOO` is *also* how a macro is
-///   written, but it is how a user's function is written too, and a file-local macro of their own would be
-///   `#define`d in this file — which is evidence, and this rule has none. `FOO(x)` with no `;` keeps its error
-///   (`a_macro_from_a_header_can_stand_where_a_declaration_goes` says so);
-/// * what follows the group must be a token that **cannot continue the expression** — see [`ends_a_statement`]. A
-///   block is deliberately **not** one of them, because `g(x) { }` is the mistake the block form of this rule
-///   already has to weigh (see [`super::decls::a_macro_definition_follows`]);
-/// * the reading is asked for **after** the declaration reading. At file scope `MACRO(args) name (…)` is a
-///   *declaration whose specifiers are the macro*, and a rule that claimed it first
-///   would take that reading away — the first version of this one did exactly that, and
-///   `a_macro_may_stand_between_the_type_and_the_declarator` caught it.
-///
-/// The declaration-or-expression rule asks this about the token the statement *began* at, because the declaration
-/// reading may have consumed the whole shape and reported nothing: `__glibcxx_function_requires(_Concept<T>)` is a
-/// perfectly good **function declaration** of that name with one unnamed parameter, and what tells the two apart is
-/// that a declaration ends at its `;` — the macro's body supplies that `;`, so there is none, and the token after
-/// the group cannot continue a declaration.
-/// Does a macro invocation stand here **where a declaration head goes**, with the file's own parameter list after it?
-///
-/// `commdlg.h:577` writes, inside the block that `DECLARE_INTERFACE_(IPrintDialogCallback,IUnknown) {` opened:
-///
-/// ```cpp
-///     STDMETHOD(QueryInterface) (THIS_ REFIID riid,LPVOID *ppvObj) PURE;
-/// ```
-///
-/// and `combaseapi.h` — in the branch the condition layer puts in force for a C++ compilation — says
-/// `STDMETHOD(method)` is `virtual COM_DECLSPEC_NOTHROW HRESULT STDMETHODCALLTYPE method`: a declaration head that
-/// **ends at a name**, and that name is the parameter the file's own argument (`QueryInterface`) replaces. So the
-/// head is not a call: a body that is a declaration head cannot be the callee of one, and the declarator the file
-/// wrote — the parameter list — is what follows.
-///
-/// Asked of the **body** rather than of the spelling, because this file's `MacroNames` never saw the definition
-/// (it is in an included header) and the shape alone is a call. Four conditions, and each one is what keeps a
-/// mistake out:
-///
-/// * the body ends at an identifier — the hole the argument fills;
-/// * the body holds a specifier only a **declaration** has (`virtual`, `typedef`, `class`, `struct`, `union`,
-///   `inline`, `static`, `extern`): `#define MAX(a, b) ((a) > (b) ? (a) : (b))` ends at `)` and is not claimed;
-/// * the invocation is followed by `(`, which is the declarator the file wrote for the name the macro holds;
-/// * and **that group is not the end of the statement** — the predicate added after the first attempt was measured
-///   wrong without it. `DECLARE_HANDLE(CO_MTA_USAGE_COOKIE);` and `__glibcxx_numbers(_Float16, F16);` are also
-///   "a body that ends at a name, invoked", and claiming them took the corpus from 435 clean to 432 (and left
-///   `numbers` a *worse* file than before). A declaration head is followed by the **declarator**, so a `(` must
-///   come after the invocation's own group.
-pub(super) fn a_macro_head_with_a_parameter_list(p: &CppParser) -> bool {
-    if p.current_token() != CppTokenKind::Identifier || p.peek_next_token() != CppTokenKind::LeftParen {
-        return false;
-    }
-
-    let index = p.current_token_index();
-    if kind_after_the_balanced_group(p, index) != Some(CppTokenKind::LeftParen) {
-        return false;
-    }
-
-    let offset = p.current_token_range().start_offset;
-    let Some(kinds) = p.macro_body_kinds_at(p.current_token_text(), offset) else {
-        return false;
-    };
-
-    if kinds.last() != Some(&CppTokenKind::Identifier) {
-        return false;
-    }
-
-    kinds.iter().any(|kind| {
-        matches!(
-            kind,
-            CppTokenKind::VirtualKeyword
-                | CppTokenKind::TypedefKeyword
-                | CppTokenKind::ClassKeyword
-                | CppTokenKind::StructKeyword
-                | CppTokenKind::UnionKeyword
-                | CppTokenKind::InlineKeyword
-                | CppTokenKind::StaticKeyword
-                | CppTokenKind::ExternKeyword
-        )
-    })
-}
-
-/// Read a macro invocation that **is** a declaration's head: `NAME ( arguments ) ( parameters ) [ MACRO ] ;`.
-///
-/// The declarator's **name** is in the macro's arguments and is not a token of this file — the one thing this
-/// reading cannot put in the tree, and the reason the head stays a `MacroCall` rather than being dressed up as a
-/// specifier sequence. Everything the file *did* write is read as what it is: the arguments are the macro's, the
-/// parameter list is the declarator's, and the `;` ends the declaration.
-fn parse_a_declaration_head_macro(p: &mut CppParser) -> ParseResult {
-    let base = p.open_marks();
-    let m = p.mark(CppSyntaxKind::Declaration);
-
-    let call = p.mark(CppSyntaxKind::MacroCall);
-    let name = p.mark(CppSyntaxKind::NameExpr);
-    p.bump();
-    name.complete(p);
-    if p.current_token() == CppTokenKind::LeftParen {
-        super::decls::parse_balanced_token_group(p, CppSyntaxKind::ArgumentList)?;
-    }
-    call.complete(p);
-
-    // The declarator the file wrote. Its `(…)` is a **parameter list** and not a call's arguments, which is the
-    // whole difference this reading makes.
-    super::decls::parse_parameter_list(p)?;
-
-    // What stands between the parameter list and the `;`: `PURE` is `= 0` in the same header the head came from,
-    // and it is read as a macro here for the same reason the head is — the body is what says so.
-    while p.current_token() == CppTokenKind::Identifier
-        && p.macro_body_kinds_at(p.current_token_text(), p.current_token_range().start_offset).is_some()
-    {
-        let call = p.mark(CppSyntaxKind::MacroCall);
-        let name = p.mark(CppSyntaxKind::NameExpr);
-        p.bump();
-        name.complete(p);
-        call.complete(p);
-    }
-
-    if p.current_token() == CppTokenKind::Semicolon {
-        p.bump();
-    } else {
-        p.close_marks_above(base);
-        return Err(CppParseError::syntax_error_from(
-            "expected `;` after a declaration a macro heads",
-            p.current_token_range(),
-        ));
-    }
-
-    Ok(m.complete(p))
-}
-
-/// Read the invocation at `start` as a statement.
-///
-/// Two shapes, and the difference is not cosmetic. A macro whose body is a statement or a whole definition
-/// (`TEST(A, B) { … }`) can be followed by a block and a `;`, which [`parse_macro_call`] reads. One whose body
-/// is a **brace** — `namespace __8 {`, `}` — is the whole of what the file wrote: no group, no block, no `;`,
-/// and the group-reading rule refuses a bare name outright.
+/// The reading is asked for **after** the declaration reading, which is what the caller arranges: at file scope
+/// `MACRO(args) name (…)` is a *declaration whose specifiers are the macro*, and a rule that claimed it first would
+/// take that reading away — the first version of this one did exactly that, and
+/// `a_macro_may_stand_between_the_type_and_the_declarator` caught it.
 fn parse_a_macro_invocation_statement(p: &mut CppParser, start: usize) -> ParseResult {
-    // **No group, no [`parse_macro_call`]**: that reader's first act is to read the argument list, and the two
-    // shapes without one — a body that shapes the braces, and a bare invocation — are read by the rule that reads
-    // a name and *optionally* a group. Asking which shape this is, at the one place that knows the name has
-    // already been claimed, is cheaper than a flag inside the reader and keeps each reader's precondition true.
+    // **No group, no [`parse_macro_call`]**: that reader's first act is to read the argument list, and a bare
+    // invocation is read by the rule that reads a name and *optionally* a group. Asking which shape this is, at the
+    // one place that knows the name has already been claimed, is cheaper than a flag inside the reader and keeps
+    // each reader's precondition true.
     let after_the_name = super::decls::next_significant_index(p, start);
-    if body_shapes_the_braces(p, start)
-        || p.token_kind_at(after_the_name) != CppTokenKind::LeftParen
-    {
+    if p.token_kind_at(after_the_name) != CppTokenKind::LeftParen {
         return parse_a_macro_that_stands_for_a_declaration(p);
     }
 
     parse_macro_call(p)
 }
 
-/// Does the macro written at `index` have a body — from this file **or from what it includes** — that opens a
-/// namespace or closes a brace?
-///
-/// The shape it exists for is `bits/c++config.h`'s pair: `inline _GLIBCXX_BEGIN_NAMESPACE_VERSION` and, twenty
-/// lines later, `_GLIBCXX_END_NAMESPACE_VERSION`, whose bodies are `namespace __8 {` and `}`. Nothing among the
-/// file's own tokens says a namespace opened or a brace closed, so the declarations that followed were read as
-/// the continuation of a declaration that never ends — ``expected `;` `` at the `inline`, and then at every `#if`
-/// boundary down the file. The answer is in the body, which the directive rule records as token kinds
-/// ([`CppParser::record_macro_body`]) — no expansion pass, and no interpretation of the body beyond its first
-/// and last token.
-///
-/// The two shapes are the whole of it, and each is what the *construct* is rather than what the name looks like:
-/// a body that opens a namespace is a namespace definition whose head the file wrote as an invocation, and a body
-/// that is `}` closes the innermost brace. `namespace` must be the **first** token: `_GLIBCXX_MATH_NS` is `__8`
-/// (a namespace *name*, not a head) and belongs to the declarator rules, not this one.
-///
-/// # Why the body is asked for **by position**, and not only in this file
-///
-/// MSVC writes the same construct the other way round: `<vector>` has no `namespace std` anywhere in it, only
-/// `_STD_BEGIN` on a line of its own, and the body — `namespace std {` — is in `yvals_core.h`, an **included**
-/// header. The file's own `#define` table has never seen it, so asking only that table answers "no body" and the
-/// invocation is read as the head of a declaration: the whole file becomes one `Declaration` whose specifier is
-/// `_STD_BEGIN` and whose payload is the class it was supposed to introduce. The failure is silent — a tree
-/// like that is still lossless and can still be error-free — which is what calls the A0
-/// class, and why the shape assertion in `tests/gaps.rs` is the thing that pins this rule rather than a count.
-///
-/// [`CppParser::macro_body_kinds_at`] is the positional channel built for exactly this: this file's own
-/// `#define` first (freshest, and it *is* the text being read), then what the includes contribute **at this
-/// offset**. Two bodies are accepted and no more, because two are what the corpus writes: one that *starts*
-/// with `namespace` (`namespace std {`, `namespace __8 {`) and one that is **exactly** `}`. `#define _STD_BEGIN`
-/// with an empty body is refused, and so is a body like `__8` (`_GLIBCXX_MATH_NS`, a namespace *name* rather
-/// than a head) — that is what keeps the rule from claiming a declaration's specifier.
-///
-/// A body that opens a namespace with a specifier in front of it — `inline namespace _V2 {`, which
-/// `_GLIBCXX_BEGIN_INLINE_ABI_NAMESPACE` has — is **not** claimed here, and that is a measurement rather than a
-/// preference: the two spellings it accepts are the two the measured corpora write (`_STD_BEGIN`, `_STDEXT_BEGIN`,
-/// `_STD_END`, `_STDEXT_END`, `_END_EXTERN_C`, `_CATCH_END`, and libstdc++'s namespace-version pair), and
-/// widening the first-token test to "a keyword that can open a block" would claim shapes nobody has measured.
-/// The `inline` spelling keeps the reading it has today, through the shape rules — and if it ever stops working,
-/// the same widening is the fix.
-///
-/// Measured over the closure of `<vector>`, `<string>` and `<map>` on MSVC 14.35: **39** `_STD_BEGIN` sites — 38
-/// of them alone on a line, which is the form the follower count was taken over — and every one of them is
-/// followed by a token that begins a declaration (`_EXPORT_STD` 17, `template` 10, `#if` 5, `#pragma` 3,
-/// `using`/`enum`/`#ifdef` one each). So the reading this rule produces is the one those files need, and the
-/// flat reading it replaces was right there only by the accident of what followed. Where the follower does *not*
-/// begin a declaration the accident does not hold, and only this rule can read the file at all; `tests/gaps.rs`
-/// pins both, because the difference between a rule and a coincidence is the whole value of the rule.
-fn body_shapes_the_braces(p: &CppParser, index: usize) -> bool {
-    if p.token_kind_at(index) != CppTokenKind::Identifier {
-        return false;
-    }
-
-    let Some(offset) = p.token_range_at(index).map(|range| range.start_offset) else {
-        return false;
-    };
-
-    p.macro_body_kinds_at(p.token_text_at(index), offset)
-        .is_some_and(|kinds| {
-            // A **`}`** is the closer of a construct an earlier invocation opened.
-            kinds.as_slice() == [CppTokenKind::RightBrace]
-                // …and a body that **ends at a `{`** opens one: a namespace head (`namespace std {`) or a
-                // statement-level block (`try {`, which `<xstring>` reaches through `_TRY_IO_BEGIN` → `_TRY_BEGIN`).
-                // The `{` is required, so a body that only *starts* like a head — `namespace std`, a namespace
-                // *name* used where a specifier goes — is not an opener here either. The analysis layer's
-                // [`cpp_parser::shape_of_a_body`] asks the same two questions, and `tests/gaps.rs` pins both
-                // readings from either side: two copies of a vocabulary that disagree is how a file gets read one
-                // way by the parser and another way by the walk that reads its scopes.
-                || (kinds.last() == Some(&CppTokenKind::LeftBrace)
-                    && kinds.first().is_some_and(|first| heads_a_block(*first)))
-        })
-}
-
-/// Can this token kind stand at the head of a braced block — the parser's half of the vocabulary
-/// [`cpp_parser::shape_of_a_body`] classifies, with the reasoning for each entry written down there.
-fn heads_a_block(kind: CppTokenKind) -> bool {
-    matches!(
-        kind,
-        CppTokenKind::TryKeyword
-            | CppTokenKind::CatchKeyword
-            | CppTokenKind::DoKeyword
-            | CppTokenKind::SwitchKeyword
-            | CppTokenKind::IfKeyword
-            | CppTokenKind::ElseKeyword
-            | CppTokenKind::ForKeyword
-            | CppTokenKind::WhileKeyword
-            | CppTokenKind::ExternKeyword
-            | CppTokenKind::NamespaceKeyword
-            | CppTokenKind::ClassKeyword
-            | CppTokenKind::StructKeyword
-            | CppTokenKind::UnionKeyword
-            | CppTokenKind::EnumKeyword
-    )
-}
-
 pub(super) fn a_macro_invocation_starts_at(p: &CppParser, index: usize) -> bool {
-    if body_shapes_the_braces(p, index) {
-        return true;
-    }
-
     if p.token_kind_at(index) != CppTokenKind::Identifier {
         return false;
     }
@@ -786,36 +429,15 @@ pub(super) fn a_macro_invocation_starts_at(p: &CppParser, index: usize) -> bool 
     let name = p.token_text_at(index);
     let after = super::decls::next_significant_index(p, index);
 
-    // The form with a group: a name the tables do **not** know, reserved to the implementation, whose group ends
-    // where a statement ends.
-    if p.token_kind_at(after) == CppTokenKind::LeftParen {
-        return p.macro_evidence(name).is_none()
-            && super::types::written_in_the_implementations_namespace(name)
-            && kind_after_the_balanced_group(p, index).is_some_and(ends_a_statement);
-    }
-
-    // …and the form with **no group at all**, which is a macro that stands for a whole statement and writes none of
-    // it. `debug/safe_iterator.h:75-79` defines its two scope macros that way — `[&]() -> void` in one branch (with
-    // `();` for the other end) and **nothing at all** in the other — and the closing one is a bare name inside a
-    // body:
+    // The form with a group: a name reserved to the implementation, whose group ends where a statement ends.
     //
-    // ```cpp
-    //       _GLIBCXX20_CONSTEXPR_NON_LITERAL_SCOPE_BEGIN {
-    //         __gnu_cxx::__scoped_lock __l(this->_M_get_mutex());
-    //         …
-    //       } _GLIBCXX20_CONSTEXPR_NON_LITERAL_SCOPE_END
-    //     else
-    // ```
-    //
-    // Two things make it safe, and both are required. **Evidence**: the tables have to say this name is a macro
-    // and that it may stand without a `;` — the same question [`at_a_macro_call_statement`] asks, and the same
-    // reason, since a bare name inside a body is otherwise a *variable* and a missing `;` the ordinary mistake.
-    // **A follower that ends a statement** ([`ends_a_statement`], which already answers for `}`, `else`, `catch`
-    // and the next statement's keyword): a bare name followed by an operator or a declarator belongs to the
-    // expression or the declaration it is part of, and this rule is reached only after that reading has failed
-    // anyway — see the `Err` arm of `parse_declaration_or_expression_statement`.
-    p.macro_evidence(name).is_some_and(MacroEvidence::may_be_a_statement_without_a_semicolon)
-        && ends_a_statement(p.token_kind_at(after))
+    // The name and the group are the whole of the evidence, and that is the point rather than a shortcut: the
+    // reading has to be the same reading whether or not a toolchain, an include closure, or an index is behind the
+    // parse, and `__glibcxx_function_requires(_Concept<T>)` is written the same way in all three. See
+    // [`super::types::written_in_the_implementations_namespace`] for what "reserved" buys.
+    p.token_kind_at(after) == CppTokenKind::LeftParen
+        && super::types::written_in_the_implementations_namespace(name)
+        && kind_after_the_balanced_group(p, index).is_some_and(ends_a_statement)
 }
 
 /// Does a run of annotation invocations stand **in front of** the declaration it annotates?
@@ -1003,20 +625,6 @@ fn at_a_macro_that_stands_for_a_declaration(p: &CppParser) -> bool {
         return false;
     }
 
-    // Evidence first, and this is the documented order rather than a preference: fixes
-    // symbol queries as **this file's table, then the caller's, then the shape**. A name the file `#define`d, or
-    // one the caller's table describes, is read by the rule that knows what a macro is — the specifier sequence
-    // for `MY_API Widget const w;` (where the macro is part of the *declaration*, which is a better answer than a
-    // sibling `MacroCall`), the definition rule for `TEST(A, B) { }`, the statement rule for `BOOL_OPTION(x)`.
-    //
-    // So this rule is the complement of [`at_a_macro_member`], which *requires* evidence: that one fires where a
-    // table can answer and this one where nothing can, and between them every "a macro stands here" shape has
-    // exactly one owner. Firing on a name the table describes would take a reading away from the rule that has
-    // evidence for it — which is what the table tests in `tests/symbols.rs` caught.
-    if p.macro_evidence(p.current_token_text()).is_some() {
-        return false;
-    }
-
     let after = super::decls::kind_after_the_run_of_names(p);
     starts_a_new_declaration(after) || ends_the_scope(after)
 }
@@ -1061,63 +669,6 @@ pub(super) fn parse_a_macro_that_stands_for_a_declaration(p: &mut CppParser) -> 
 
     if p.current_token() == CppTokenKind::LeftParen {
         super::decls::parse_balanced_token_group(p, CppSyntaxKind::ArgumentList)?;
-    }
-
-    Ok(m.complete(p))
-}
-
-/// Read a macro invocation that has **no argument list** and a block after it.
-///
-/// The reader of [`at_a_macro_statement_with_a_block`], and the same node that rule's doc describes:
-/// `MacroCall(NameExpr, CompoundStat)`. A second function rather than a flag on [`parse_macro_call`], because that
-/// one's first act is to read the argument list — the whole difference between the two shapes — and a reader that
-/// has to ask whether it has arguments before it can read the name is a reader whose callers disagree about which
-/// shape they are looking at.
-fn parse_a_macro_statement_with_a_block(p: &mut CppParser) -> ParseResult {
-    let base = p.open_marks();
-    let m = p.mark(CppSyntaxKind::MacroCall);
-
-    let name = p.mark(CppSyntaxKind::NameExpr);
-    p.bump();
-    name.complete(p);
-
-    if let Err(err) = parse_compound_stat(p) {
-        p.close_marks_above(base);
-        return Err(err);
-    }
-
-    // **The macro that closes what this one opened.** `_GLIBCXX20_CONSTEXPR_NON_LITERAL_SCOPE_END` is `();` in the
-    // header's first branch and nothing at all in the other, and either way it belongs to the same construct: the
-    // two invocations bracket the block. It is read as a child of this node rather than as a sibling statement,
-    // and that is not decoration — a sibling would end the `if`'s branch before its `else`:
-    //
-    // ```cpp
-    //     if (…) SCOPE_BEGIN { … } SCOPE_END else { … }      // one statement once the macros are expanded
-    // ```
-    //
-    // Evidence and a follower, both required, as everywhere else this rule reads a name: the tables must say the
-    // name is a macro that may stand without a `;`, and what follows it must end a statement (or be the `;` this
-    // node then keeps, the way [`parse_macro_call`] keeps one).
-    loop {
-        if p.current_token() != CppTokenKind::Identifier
-            || !p
-                .macro_evidence(p.current_token_text())
-                .is_some_and(MacroEvidence::may_be_a_statement_without_a_semicolon)
-            || !(ends_a_statement(p.peek_next_token())
-                || p.peek_next_token() == CppTokenKind::Semicolon)
-        {
-            break;
-        }
-
-        let closing = p.mark(CppSyntaxKind::MacroCall);
-        let closing_name = p.mark(CppSyntaxKind::NameExpr);
-        p.bump();
-        closing_name.complete(p);
-        closing.complete(p);
-
-        if p.current_token() == CppTokenKind::Semicolon {
-            p.bump();
-        }
     }
 
     Ok(m.complete(p))
@@ -1170,30 +721,6 @@ fn parse_declaration_or_expression_statement(p: &mut CppParser) -> ParseResult {
     // `using` declarations cannot be expressions, so they do not need the speculative path.
     if p.current_token() == CppTokenKind::UsingKeyword {
         return parse_using_declaration(p);
-    }
-
-    // `inline _GLIBCXX_BEGIN_NAMESPACE_VERSION`: the `inline` is the file's own token and everything the
-    // declaration would say after it belongs to a macro whose own body is `namespace __8 {` — so the statement
-    // **is** that invocation, and there is no `;` to expect because the body supplies the `{`. Asked
-    // before the declaration pass, which reads `inline NAME` as a declaration and then reports a missing `;`
-    // at the directive that follows.
-    if p.current_token() == CppTokenKind::InlineKeyword {
-        let index = p.current_token_index();
-        if body_shapes_the_braces(p, super::decls::next_significant_index(p, index)) {
-            let m = p.mark(CppSyntaxKind::MacroCall);
-            p.bump(); // `inline`, part of what the macro stands for
-            let name = p.mark(CppSyntaxKind::NameExpr);
-            p.bump();
-            name.complete(p);
-            return Ok(m.complete(p));
-        }
-    }
-
-    // **A macro that is the declaration's head** — the second route to the same shape: a file that does not
-    // `#define` the name itself never reaches [`parse_stat`]'s macro-statement branch, and the declaration reading
-    // gets no further than the invocation's own group before it reports the `(…)` it cannot place.
-    if a_macro_head_with_a_parameter_list(p) {
-        return parse_a_declaration_head_macro(p);
     }
 
     // Anchors let the speculative declaration pass be skipped: `static`, `class`, `typename` and
@@ -1299,78 +826,8 @@ pub(super) fn parse_preprocessor_directive(p: &mut CppParser) -> ParseResult {
     // `#` alone on a line has none.
     let directive_is_include = p.current_token() == CppTokenKind::Identifier
         && matches!(p.current_token_text(), "include" | "include_next");
-    // `#define` and `#undef` name a macro, and that name is what the rest of the file needs to know: a macro is
-    // expanded before the grammar runs, so an invocation is recognisable only by name. See
-    // [`crate::parser::MacroNames`] — and note that the *name* is all that is recorded: the replacement list is
-    // read as tokens below, like the rest of the directive, and nothing tries to interpret it.
-    let defines_a_macro = p.current_token() == CppTokenKind::Identifier
-        && matches!(p.current_token_text(), "define" | "undef");
-    let undefines_a_macro = defines_a_macro && p.current_token_text() == "undef";
     if p.current_token() == CppTokenKind::Identifier {
         p.bump();
-    }
-
-    // A `#define` body is read as token kinds too, so a later reading can ask what the macro stands
-    // for without parsing its body a second time. Neither the name nor a parameter list that
-    // touches it names a token of the body, so neither is recorded.
-    struct BodyRecording {
-        name: Box<str>,
-        /// The name's end offset: a `(` that touches the name is the parameter list, while
-        /// `#define f (x)` is an object-like macro whose body begins with `(`.
-        name_ends_at: usize,
-        kinds: Vec<CppTokenKind>,
-        /// 0 on the name, 1 inside the parameter list, 2 in the body.
-        state: u8,
-        depth: u32,
-    }
-
-    impl BodyRecording {
-        fn take(&mut self, p: &CppParser) {
-            let kind = p.current_token();
-            match self.state {
-                0 => {
-                    // The name is not a token of the body; it is only what tells a parameter list from a
-                    // body that begins with `(`.
-                    self.state = if kind == CppTokenKind::LeftParen
-                        && p.current_token_range().start_offset == self.name_ends_at
-                    {
-                        self.depth = 1;
-                        1
-                    } else {
-                        2
-                    };
-                }
-                1 => {
-                    if kind == CppTokenKind::LeftParen {
-                        self.depth += 1;
-                    } else if kind == CppTokenKind::RightParen {
-                        self.depth = self.depth.saturating_sub(1);
-                        if self.depth == 0 {
-                            self.state = 2;
-                        }
-                    }
-                }
-                _ => self.kinds.push(kind),
-            }
-        }
-    }
-
-    let mut recording = None;
-
-    if defines_a_macro && p.current_token() == CppTokenKind::Identifier {
-        let name = p.current_token_text().to_string();
-        if undefines_a_macro {
-            p.undefine_macro_name(&name);
-        } else {
-            p.declare_macro_name(&name);
-            recording = Some(BodyRecording {
-                name: Box::from(name.as_str()),
-                name_ends_at: p.current_token_range().end_offset(),
-                kinds: Vec::new(),
-                state: 0,
-                depth: 0,
-            });
-        }
     }
 
     // Reading the rest token by token keeps the text in the tree; the preprocessor layer re-reads
@@ -1392,14 +849,7 @@ pub(super) fn parse_preprocessor_directive(p: &mut CppParser) -> ParseResult {
             }
         }
 
-        if let Some(recording) = recording.as_mut() {
-            recording.take(p);
-        }
         p.bump();
-    }
-
-    if let Some(recording) = recording {
-        p.record_macro_body(&recording.name, recording.kinds);
     }
 
     // **A replacement list is not C++ text**. `shared/apiset.h:64` is

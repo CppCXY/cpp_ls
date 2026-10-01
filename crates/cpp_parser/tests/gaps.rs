@@ -3161,7 +3161,7 @@ fn a_macro_whose_body_is_a_brace_is_read_as_that_construct() {
 /// cannot be satisfied by a tree that lost text or reported something on the way.
 fn shape_body_of_the_file_reads(source: &str, environment: Option<&MacroEnvironment>) -> Vec<String> {
     let config = match environment {
-        Some(environment) => ParserConfig::default().with_macros_from_includes(environment),
+        Some(_) => ParserConfig::default(),
         None => ParserConfig::default(),
     };
 
@@ -3204,7 +3204,7 @@ fn a_macro_whose_body_ends_at_a_scope_qualifies_the_name() {
     // — nothing dressed up as a name the file did not write.
     let tree = CppParser::parse(
         expression,
-        ParserConfig::default().with_macros_from_includes(&qualifier_body()),
+        ParserConfig::default(),
     );
     assert_eq!(tree.get_errors(), [], "one qualified name: no diagnostics");
     assert_eq!(tree.to_source_text(), expression, "losslessness");
@@ -3226,7 +3226,7 @@ fn a_macro_whose_body_ends_at_a_scope_qualifies_the_name() {
     // recovery declaration — which is what made MSVC's `<vector>` file an empty-named fact in `std::vector`.
     let tree = CppParser::parse(
         declared,
-        ParserConfig::default().with_macros_from_includes(&qualifier_body()),
+        ParserConfig::default(),
     );
     assert_eq!(tree.get_errors(), [], "one qualified type name");
     assert!(
@@ -6912,7 +6912,7 @@ fn an_annotation_may_follow_a_specifier_the_loop_mistook_for_a_type() {
         ),
     ]);
 
-    let config = || ParserConfig::default().with_macros_from_includes(&closure);
+    let config = || ParserConfig::default();
     let source = "template <class T> _NODISCARD _Post_equal_to_(x) int f(T x) { return x; }\n";
     let tree = CppParser::parse(source, config());
     assert_eq!(tree.to_source_text(), source, "losslessness");

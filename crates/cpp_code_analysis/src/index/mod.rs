@@ -193,11 +193,12 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // `_STD addressof(*p)` for one qualified name needs to know that `_STD` is `::std::`, and that body is in
         // a header. Without them the parse is the shape-only reading, which is what a buffer on its own
         // gets and all it can get.
-        let mut config =
-            ParserConfig::default().with_dialect(self.config.dialect());
-        if let Some(bodies) = self.macro_facts {
-            config = config.with_macros_from_includes(bodies);
-        }
+        // …and **no macro environment**, deliberately. The parse is of a file's own text and the grammar makes no
+        // reading turn on "is this name a macro": the text it is meant to read has been preprocessed, and the
+        // version that passed a positional environment here was answering a *stream* offset against a *file*
+        // timeline — see `MacroView::applies_here`, which records the trap. The environment is still built and
+        // still used, one layer down, by the scope walk (`sema::scopes::MacroBodies`).
+        let config = ParserConfig::default().with_dialect(self.config.dialect());
 
         let tree = {
             let _parse = StageTimer::new(Stage::Parse);
@@ -297,10 +298,10 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         rendered: &crate::preprocess::cooked::RenderedCooked,
         key: SummaryKey,
     ) -> crate::IndexedRendering {
-        let mut config = ParserConfig::default().with_dialect(self.config.dialect());
-        if let Some(bodies) = self.macro_facts {
-            config = config.with_macros_from_includes(bodies);
-        }
+        // **The stream is already cooked**, so there is nothing for a macro environment to add and a great deal for
+        // it to get wrong: its answers are positional in the original file's coordinates while the parser reads the
+        // rendering's. See the same note in [`FileIndexer::index`].
+        let config = ParserConfig::default().with_dialect(self.config.dialect());
 
         let tree = {
             let _parse = StageTimer::new(Stage::RenderParse);
@@ -432,13 +433,10 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
     ) -> crate::IndexedUnit {
         // Built afresh for each parse: a configuration is consumed by the parser it is given to.
         //
-        let config = || {
-            let mut config = ParserConfig::default().with_dialect(self.config.dialect());
-            if let Some(bodies) = self.macro_facts {
-                config = config.with_macros_from_includes(bodies);
-            }
-            config
-        };
+        // **No macro environment** — see the note in [`FileIndexer::index`], and note that this is the one parse
+        // where it would have been most tempting and most wrong: `stream.text` is a *concatenation of every file's
+        // rendering*, so an offset into it is a coordinate no file in the unit has.
+        let config = || ParserConfig::default().with_dialect(self.config.dialect());
 
         // **One parse, of the stream the caller cooked.**
         //

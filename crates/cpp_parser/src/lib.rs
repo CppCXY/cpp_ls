@@ -13,7 +13,7 @@ pub use lexer::{
     CppLexer, CppTokenData, DocCommentStyle, DocToken, DocTokenKind, LexerConfig, is_block_comment,
     is_doc_whitespace, is_documentation_comment, lex, lex_comment,
 };
-pub use parser::{Checkpoint, CppParser, EventStreamAudit, MacroEvidence, MarkEvent, ParserConfig};
+pub use parser::{Checkpoint, CppParser, EventStreamAudit, MarkEvent, ParserConfig};
 pub use parser_error::{CppParseError, CppParseErrorKind};
 pub use symbols::{
     BODY_CHAIN_LIMIT, BodyFacts, BodyShape, DefinitionFacts, InForceBody, IncludedMacro, MacroBody,

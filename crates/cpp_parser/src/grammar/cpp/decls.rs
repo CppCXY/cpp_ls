@@ -45,7 +45,7 @@
 use crate::{
     grammar::ParseResult,
     kind::{CppSyntaxKind, CppTokenKind},
-    parser::{CompleteMarker, CppParser, MacroEvidence, Marker, MarkerEventContainer, ParseAnchor},
+    parser::{CompleteMarker, CppParser, Marker, MarkerEventContainer, ParseAnchor},
     parser_error::CppParseError,
     symbols::SymbolKind,
 };
@@ -77,7 +77,7 @@ pub(super) fn parse_template_head(p: &mut CppParser) -> ParseResult {
     result
 }
 
-fn parse_template_head_inner(p: &mut CppParser, outer_depth: usize) -> ParseResult {
+fn parse_template_head_inner(p: &mut CppParser, outer_depth: Option<usize>) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::TemplateDecl);
 
@@ -2391,18 +2391,11 @@ pub(super) fn a_macro_definition_follows(p: &CppParser, declarator_from: usize) 
         && a_block_follows_the_group(p)
         // At *declaration* level the shape has no other reading at all, so any name will do. Inside a **body**
         // it competes with a real mistake — a call whose `;` is missing, followed by a block — so the name has to
-        // be evidence: a macro this file `#define`d, or one the caller's table describes, and only then the
-        // spelling convention as the last resort (a macro from a header nobody indexed).
-        //
-        // The statement rule claims most of these shapes before this one is reached, so this consult is normally
-        // redundant — and it is here anyway, because a rule that *depends* on another rule running first is a rule
-        // whose behaviour changes when the order changes. Evidence first, convention second, in both rules.
+        // be written the way a macro is written. See [`looks_like_a_macro_name`], which is the last resort and now
+        // the only test: the grammar no longer consults a macro table, because the text it reads has already been
+        // preprocessed and a macro invocation cannot be in it.
         && (!p.is_inside_a_body()
-            || p.declaration_type_name().is_some_and(|name| {
-                p.macro_evidence(name)
-                    .is_some_and(MacroEvidence::may_be_a_statement_without_a_semicolon)
-                    || looks_like_a_macro_name(name)
-            }))
+            || p.declaration_type_name().is_some_and(looks_like_a_macro_name))
 }
 
 /// Is this name written the way a **macro** is written: `TEST`, `IF_EXIST`, `CHECK_EQ`?
@@ -2573,9 +2566,10 @@ pub fn a_declaration_is_the_better_reading(p: &CppParser, declarator_from: usize
             // Not a type, so not a declaration's type: the reading is refused and the expression statement —
             // the call — is what the tokens really are.
             SymbolKind::Function | SymbolKind::Variable | SymbolKind::Namespace => false,
-            // A macro in type position is not itself a type — what stands there is what its body produced. A table
-            // that knows the body says `MacroBody::Type` for a type macro, and the shape rules handle the rest;
-            // answering "not a type" here keeps a macro name from being taken for one.
+            // A macro in type position is not itself a type — what stands there is what its body produced. The
+            // grammar no longer asks "is this name a macro" (the text it reads is preprocessed), but the
+            // vocabulary is shared with the environment the *scope walk* reads, so the answer still has to be
+            // given a meaning here: not a type.
             SymbolKind::Macro { .. } => false,
         };
     }
@@ -4043,67 +4037,6 @@ pub fn parse_class_body(p: &mut CppParser) -> ParseResult {
     Ok(m.complete(p))
 }
 
-/// Does a **member that is only a macro invocation** start here — `Q_OBJECT`, `Q_PROPERTY(int x READ x)`?
-///
-/// Three conditions, and each is evidence or shape rather than a guess:
-///
-/// * the name is a macro — this file's own `#define`, or the caller's table (see `CppParser::macro_evidence`);
-/// * the body, when the table describes one, is **not** a specifier or a type: `#define MY_INT int` used as
-///   `MY_INT x;` is a declaration, and a table that says `Specifier` settles that on its own;
-/// * a **`(`** invocation must not be followed by a `;`, or it is a plain call statement, which the statement rule
-///   owns rather than the member loop.
-///
-/// The bare spelling is where the two sources of evidence part company, and the distinction is worth recording: a
-/// *described* body that is a statement cannot be part of a declaration's specifiers, so the name is a macro
-/// whatever follows it — which is the only way `Q_OBJECT` can be told from the next member, since that member
-/// begins with a name and so looks exactly like a declarator. A name this file merely `#define`d has **no body to
-/// consult** — the replacement list is not interpreted — so there the shape has to answer, and it answers
-/// conservatively: no declarator may follow.
-fn at_a_macro_member(p: &CppParser) -> bool {
-    if p.current_token() != CppTokenKind::Identifier {
-        return false;
-    }
-
-    let Some(evidence) = p.macro_evidence(p.current_token_text()) else {
-        return false;
-    };
-    if !evidence.may_stand_alone_as_a_member() {
-        return false;
-    }
-
-    if p.peek_next_token() == CppTokenKind::LeftParen {
-        // `Q_PROPERTY(…)`: the group is the macro's, and a `;` after it would make this an ordinary call
-        // statement — which the statement rule owns, not the member loop.
-        return !a_semicolon_follows_the_group(p);
-    }
-
-    match evidence {
-        // A described body that is a statement settles it: a statement cannot be a declaration's specifiers, so
-        // the name is a macro whatever follows — which is the only way `Q_OBJECT` can be told from the member
-        // written after it, that member beginning with a name and so looking exactly like a declarator.
-        MacroEvidence::Described { .. } => true,
-        // A name this file `#define`d has no body to consult, so the shape answers, and it answers
-        // conservatively: `#define MY_INT int` used as `MY_INT x;` is a declaration and must stay one.
-        MacroEvidence::DefinedHere => !super::types::a_declarator_still_follows_the_name(p),
-    }
-}
-
-/// Does a **call-shaped member nothing else could read** start here — a name, a parenthesised group, no `;`?
-///
-/// Kept as a named question even though **nothing calls it**, because the shape it answers for is real and the
-/// answer is "not this way": `bits/stl_vector.h:464` writes `__glibcxx_class_requires(_Tp, _SGIAssignableConcept)`
-/// on a line of its own, and that macro is defined in an *included* file, so [`at_a_macro_member`] cannot see it.
-/// Reading the shape as a macro was tried in `parse_class_body_members` and reverted — the note there has the
-/// measurement (111 members of `std::basic_string` for no file) and the reason. Left here so the next reader finds
-/// the question already asked rather than re-deriving it.
-#[allow(dead_code)]
-fn at_a_call_shaped_macro_member(p: &CppParser) -> bool {
-    p.current_token() == CppTokenKind::Identifier
-        && p.peek_next_token() == CppTokenKind::LeftParen
-        && !a_semicolon_follows_the_group(p)
-}
-
-/// The kind of the first token **after** the balanced group at the cursor.
 ///
 /// Read a **macro standing among a declarator's suffixes**, and say whether there was one.
 ///
@@ -4158,30 +4091,6 @@ pub(super) fn eat_a_macro_suffix(p: &mut CppParser) -> bool {
 
     m.complete(p);
     true
-}
-
-/// Read a macro invocation that stands where a class member goes, into a `MacroCall`.
-///
-/// The same node the statement rule produces, for the same reason: a macro's meaning is not knowable here, and
-/// dressing it up as a declaration would hide that.
-fn parse_macro_member(p: &mut CppParser) -> ParseResult {
-    let m = p.mark(CppSyntaxKind::MacroCall);
-
-    let name = p.mark(CppSyntaxKind::NameExpr);
-    p.bump();
-    name.complete(p);
-
-    if p.current_token() == CppTokenKind::LeftParen {
-        parse_balanced_token_group(p, CppSyntaxKind::ArgumentList)?;
-    }
-
-    // A `;` is not part of the shape this rule is for (that shape is a plain call statement), but a file may
-    // write one, and swallowing it keeps the loop from reporting it as a stray member.
-    if p.current_token() == CppTokenKind::Semicolon {
-        p.bump();
-    }
-
-    Ok(m.complete(p))
 }
 
 fn parse_class_body_members(p: &mut CppParser) -> ParseResult {
@@ -4260,22 +4169,15 @@ fn parse_class_body_members(p: &mut CppParser) -> ParseResult {
             continue;
         }
 
-        // A **member that is nothing but a macro invocation**: `Q_OBJECT`, `Q_PROPERTY(int x READ x)`,
-        // `Q_ENUM(E)`. An attribute-like macro is written where a member goes and carries no `;` — its expansion
-        // supplies whatever declarations it wants — so the member loop has to recognise it before the declaration
-        // rule takes the name for a type and then fails at the next member.
-        //
-        // The evidence is the table's, or this file's own `#define` (see `CppParser::macro_evidence`), and the
-        // shape test is what keeps a *declaration* out of it: `#define MY_INT int` used as `MY_INT x;` has a
-        // declarator after the name, so it is a declaration and never reaches this rule.
+        // A **member that is nothing but a macro invocation** — `Q_OBJECT`, `Q_PROPERTY(int x READ x)`,
+        // `Q_ENUM(E)` — was read here, from a macro table. It cannot be any more: an attribute-like macro is
+        // written where a member goes, but knowing that the *name* is one is macro evidence, and the text this
+        // grammar reads has already been preprocessed. See [`at_a_macro_member`], which is kept as the question
+        // without the answer.
         let before = p.current_token_index();
         // …and what the *brace balance* looked like before the attempt, so a failure can be charged for the
         // braces it consumed and never closed. See `unclosed_braces` above.
         let before_events = p.current_event_count();
-        if at_a_macro_member(p) {
-            parse_macro_member(p)?;
-            continue;
-        }
 
         // # Why a **call-shaped member** is deliberately *not* read here
         //
@@ -4481,18 +4383,6 @@ pub(super) fn kind_after_the_run_of_names(p: &CppParser) -> CppTokenKind {
     p.token_kind_at(index)
 }
 
-/// The kind of the first significant token after the balanced group at the cursor.
-///
-/// The question a rule asks when the cursor is on a macro invocation's group and the reading depends on what
-/// comes next. [`CppTokenKind::None`] when the group never closes: an unbalanced `(` has no "after", and a caller
-/// that read one would be answering about the wrong token.
-pub(super) fn kind_after_the_group(p: &CppParser) -> CppTokenKind {
-    match index_after_the_group(p, p.current_token_index()) {
-        Some(after) => p.token_kind_at(significant_index_at(p, after)),
-        None => CppTokenKind::None,
-    }
-}
-
 /// The index one past the balanced group that opens at `index`, or `None` if it never closes.
 ///
 /// The one place parentheses are counted, so that the four questions asked about "what follows a group" cannot
@@ -4517,11 +4407,6 @@ fn index_after_the_group(p: &CppParser, index: usize) -> Option<usize> {
     }
 
     None
-}
-
-/// Is the balanced group at the cursor followed by a `;`?
-pub(super) fn a_semicolon_follows_the_group(p: &CppParser) -> bool {
-    kind_after_the_group(p) == CppTokenKind::Semicolon
 }
 
 /// Can a declaration begin with this token kind?///

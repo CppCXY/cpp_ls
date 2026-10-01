@@ -1,9 +1,9 @@
 use crate::{
     grammar::parse_cpp_unit,
     kind::{CppSyntaxKind, CppTokenKind, Dialect},
-    lexer::{CppLexer, CppTokenData},
+    lexer::CppTokenData,
     parser_error::CppParseError,
-    symbols::{MacroBody, SymbolKind},
+    symbols::SymbolKind,
     syntax::{CppSyntaxTree, CppTreeBuilder},
     text::SourceRange,
 };
@@ -58,6 +58,16 @@ pub struct Checkpoint {
     /// is *not* here: the difference is whether a speculative region can set the state and then rewind past it.
     /// For this one it can, so it must be restored.
     terminator_came_from_a_branch: bool,
+    /// The bracket depth and the innermost template argument list's, when the checkpoint was taken.
+    ///
+    /// The sixth piece of state outside the event stream, and it is here for the reason the two above are: both are
+    /// moved by *consuming a token*, so a speculative reading moves them just as surely as one that is kept, and
+    /// [`CppParser::rollback`] truncating the events without putting them back would leave the next reading
+    /// answering [`CppParser::greater_than_is_an_operator`] about a bracket that is no longer there. The measured
+    /// shape is a declaration/expression speculation that reads a parenthesised expression and is rewound: the
+    /// depth would come back one too high for every remaining `>` in the file.
+    bracket_depth: usize,
+    innermost_template_argument_list: Option<usize>,
 }
 
 /// A position in the parse, for a question asked later about the tokens around it.
@@ -91,13 +101,6 @@ pub struct EventStreamAudit {
     /// Number of zero-width nodes. Expected to be non-zero — `Marker::complete` drops empty nodes
     /// on purpose — but tracked so the count can be asserted to stay stable.
     pub empty_nodes: usize,
-    /// **How many times the grammar asked what a name is as a macro.** **The measurement expansion is gated on**:
-    /// the work a parse would add is
-    /// `Σ(decision points) × O(body)`, and this is the upper bound of that sum.
-    pub macro_questions: usize,
-    /// How many **distinct** names those questions were about — the number that decides whether the expansion
-    /// work is "per question" or "per name", and therefore whether memoisation by definition makes it cheap.
-    pub macro_question_names: usize,
     /// Kinds of the `NodeStart` events that never received a matching `NodeEnd`. Must be empty.
     pub unclosed: Vec<crate::kind::CppSyntaxKind>,
 }
@@ -105,75 +108,6 @@ pub struct EventStreamAudit {
 impl EventStreamAudit {
     pub fn is_balanced(&self) -> bool {
         self.final_depth == 0 && self.min_depth == 0 && self.unclosed.is_empty()
-    }
-}
-
-/// What a parse can say about a name **as a macro** — see [`CppParser::macro_evidence`], which is the only way to
-/// obtain one and which fixes the order the three sources of evidence are consulted in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MacroEvidence {
-    /// The name is `#define`d in the file being parsed. Its body is in the file but **uninterpreted**: the
-    /// directive's tokens are kept, and nothing evaluates them, so only the name is known.
-    DefinedHere,
-
-    /// The caller's table knows the name is a macro, and says what it expands to.
-    Described {
-        function_like: bool,
-        body: MacroBody,
-    },
-}
-
-impl MacroEvidence {
-    /// Is the macro invoked with arguments — `NAME(x)` — rather than used bare?
-    ///
-    /// A name defined in this file answers "yes" because nothing here reads the replacement list: an
-    /// object-like macro invoked with parentheses (`NAME(x)`) is how a macro that *does* take arguments is
-    /// written, and refusing the reading for a name nobody described would cost the common case.
-    pub fn is_function_like(self) -> bool {
-        match self {
-            MacroEvidence::DefinedHere => true,
-            MacroEvidence::Described { function_like, .. } => function_like,
-        }
-    }
-
-    /// Could an invocation of this macro stand where a **statement** goes, with no `;` of its own?
-    ///
-    /// The question behind the macro-statement rule (), and the one place where a
-    /// wrong "yes" costs a diagnostic: a call whose `;` is missing is exactly this shape. So the answer is "yes"
-    /// only for a body that *is* a statement, and for a name this file defines — where the replacement list is
-    /// unread and taking the reading is what the file's own `#define` licenses.
-    ///
-    /// `Expression` and `Type` bodies answer **no** on purpose: `#define MAX(a, b) ((a) > (b) ? (a) : (b))` used as
-    /// `MAX(x, y)` really is an expression statement, and a missing `;` after it is a typo worth reporting.
-    pub fn may_be_a_statement_without_a_semicolon(self) -> bool {
-        match self {
-            MacroEvidence::DefinedHere => true,
-            MacroEvidence::Described {
-                function_like,
-                body,
-            } => {
-                function_like
-                    && matches!(
-                        body,
-                        MacroBody::Statement | MacroBody::Block | MacroBody::Unknown
-                    )
-            }
-        }
-    }
-
-    /// Could this macro be the **only** thing on a class member's line — `Q_OBJECT`, `Q_PROPERTY(int x READ x)`?
-    ///
-    /// A member that is nothing but a macro invocation, with no `;`, is how an attribute-like macro is written.
-    /// What matters is that the body is *not* a specifier or a type: `#define MY_INT int` used as `MY_INT x;` is a
-    /// declaration, and the shape test beside this one is what keeps the two apart.
-    pub fn may_stand_alone_as_a_member(self) -> bool {
-        match self {
-            MacroEvidence::DefinedHere => true,
-            MacroEvidence::Described { body, .. } => matches!(
-                body,
-                MacroBody::Statement | MacroBody::Block | MacroBody::Unknown
-            ),
-        }
     }
 }
 
@@ -227,12 +161,41 @@ pub struct CppParser<'a> {
     /// marker is closed, so truncating this list to the checkpoint's length names every position that was closed
     /// since — and removing those from the map is precisely what the scan computed.
     closed_marks_journal: Vec<usize>,
-    /// How many template argument lists the cursor is inside, syntactically.
+    /// **Whether a `>` at the cursor closes a list or compares** — the state clang keeps in
+    /// `Parser::GreaterThanIsOperator`, held here as the one number that decides it.
     ///
-    /// Inside one, `>` closes the list rather than comparing: `Vec<A<B>>`, `Vec<1, 2>`. The
-    /// expression grammar cannot know that, so it asks. A counter rather than a flag because the
-    /// lists nest, and the innermost closer belongs to the innermost list.
-    template_argument_depth: usize,
+    /// The rule is the standard's ([temp.names]): inside a *template-argument-list* the **first non-nested** `>`
+    /// is the closing `>` rather than a greater-than operator. **"Non-nested" is the whole of it**, and it is why
+    /// "am I inside template arguments" is the wrong question to ask: in
+    ///
+    /// ```cpp
+    /// _Enable_if_bool_convertible<decltype(declval<const _Lhs&>() > declval<const _Rhs&>())>   xutility
+    /// bc<(1 > 2)>                                                                              cl.exe: no syntax error
+    /// ```
+    ///
+    /// the `>` is *nested* — it is inside parentheses — so it is a greater-than operator and the argument list runs
+    /// on past it. A count of open lists cannot say that; a count of open **brackets** can, and clang's mechanism
+    /// is exactly this pair: `BalancedDelimiterTracker` derives from `GreaterThanIsOperatorScope` and its
+    /// constructor writes `p.GreaterThanIsOperator = true` for every `(`, `[` and `{`
+    /// (`clang/include/clang/Parse/RAIIObjectsForParser.h`), while `ParseTemplateArgumentList` writes `false`.
+    ///
+    /// So: the bracket depth at which the **innermost** list was entered, and [`CppParser::bracket_depth`] now. A
+    /// `>` at the cursor compares exactly when a bracket has been opened since the list began.
+    ///
+    /// Both numbers are maintained where token consumption is already centralised, so **no grammar rule has to
+    /// remember to save and restore anything**: [`CppParser::bump`] moves the depth and [`CppParser::rollback`]
+    /// puts both back. That is deliberate — the version before this one kept a single "am I in template arguments"
+    /// count that no bracket could suspend, and it reported a syntax error on `bc<(1 > 2)>` where cl.exe reports
+    /// none (C2974 is *semantic*: `1 > 2` is not a type).
+    innermost_template_argument_list: Option<usize>,
+    /// How many bracketed groups — `(` `[` `{` — the cursor is inside, as one number. clang's `ParenCount`,
+    /// `BracketCount` and `BraceCount` are the same three, kept apart only because a diagnostic names which one
+    /// ran out; nothing here ever needs to.
+    ///
+    /// Moved by [`CppParser::bump`] **alone**, so it is a function of what has been *consumed* rather than of which
+    /// rule happens to be running — which is what makes it survive the grammar's speculative reads. An unbalanced
+    /// `)` saturates rather than wrapping.
+    bracket_depth: usize,
     /// Is the cursor inside a **constraint** — a requires-clause or a concept's expression?
     ///
     /// One thing changes there, and it is the reason this exists: a `{` after an expression is normally C++11's
@@ -284,45 +247,14 @@ pub struct CppParser<'a> {
     /// parser without this table has to guess. See [`crate::parser::TypeNames`] for what it records and why
     /// recording too little is the safe direction.
     type_names: crate::parser::TypeNames,
-    /// The names this translation unit **`#define`s**.
-    ///
-    /// A macro is gone by the time the grammar runs, so what an invocation leaves behind is whatever the macro
-    /// expanded to — a specifier, a statement, a whole block. The one thing the parser *can* know is the name, and
-    /// knowing it is the difference between reading `BOOL_OPTION(x)` (a macro whose body supplies the `;`) and
-    /// reading `g(x)` with its `;` missing (a typo). See [`crate::parser::MacroNames`].
-    macro_names: crate::parser::MacroNames,
-    /// **How often the grammar asks what a name is as a macro, and about how many distinct names** — the
-    /// measurement gates expansion on ("count the decision points before building it").
-    ///
-    /// Counted here rather than in the probe because the question is asked *inside* the grammar and nowhere else.
-    /// `&self` forces interior mutability: a `Cell` for the count and a `RefCell` for the names, both of which
-    /// cost a store, so the counters can stay on in every build rather than behind a feature flag nobody runs.
-    /// **What each of this file's own `#define`s expands to, as token kinds** — the first piece of the file that a
-    /// rule can *read* rather than guess at, and the reason it is here rather than in the analysis layer:
-    ///
-    /// ```cpp
-    /// #define _GLIBCXX_BEGIN_NAMESPACE_VERSION namespace __8 {
-    /// inline _GLIBCXX_BEGIN_NAMESPACE_VERSION        // the body says what this invocation stands for
-    /// ```
-    ///
-    /// Only the **kinds**, not the spellings: a rule asks "does this body open a namespace", "is it a lone `}`",
-    /// "does it start with a comma" — and the kinds answer all three. The text stays where it is (the directive's
-    /// tokens are in the tree), so nothing here re-spells a body. the expansion section.
-    macro_bodies: std::cell::RefCell<std::collections::HashMap<Box<str>, Vec<CppTokenKind>>>,
-    /// The names this file `#define`d with an **empty** body — see `record_macro_body` for why they are kept apart
-    /// from the shaped bodies.
-    macro_bodies_empty: std::cell::RefCell<std::collections::HashSet<Box<str>>>,
-    macro_questions: std::cell::Cell<usize>,
     /// **What [`a_specifier_follows_the_group`](crate::grammar) answered, by the absolute index of the name it was
     /// asked from.** The question is answered by reading ahead through a *run* — `M(a) M(b) M(c) … int x;` asks it of
     /// each `M` in turn, and each answer is the answer for the rest of the run — so without a memory a run of `n`
     /// annotations is `n²/2` walks of the run, and each walk is a chain of lookups: MSVC's `<intrin.h>` writes eight
     /// hundred of them in a row and took two and a half seconds to read. With one, each position is asked once.
     ///
-    /// The answer depends only on the tokens ahead and on what is known about macros, so it is dropped whenever
-    /// either changes: a token split or folded, a `#define` or `#undef`.
+    /// The answer depends only on the tokens ahead, so it is dropped whenever those change: a token split or folded.
     follower_memo: std::cell::RefCell<std::collections::HashMap<usize, bool>>,
-    macro_question_names: std::cell::RefCell<std::collections::HashSet<Box<str>>>,
     /// The names the **open template heads** declared as parameters that are types.
     ///
     /// The second half of [`CppParser::is_a_known_type_name`], and the construct that made it necessary:
@@ -513,18 +445,14 @@ impl<'a> CppParser<'a> {
             open_marks: Vec::new(),
             closed_marks: std::collections::HashMap::new(),
             closed_marks_journal: Vec::new(),
-            template_argument_depth: 0,
+            innermost_template_argument_list: None,
+            bracket_depth: 0,
             constraint_depth: 0,
             a_template_id_may_be_the_name: false,
             last_declarator_is_function: false,
             type_names: TypeNames::new(),
             template_parameters: Vec::new(),
-            macro_names: crate::parser::MacroNames::new(),
-            macro_bodies: std::cell::RefCell::new(std::collections::HashMap::new()),
-        macro_bodies_empty: std::cell::RefCell::new(std::collections::HashSet::new()),
-            macro_questions: std::cell::Cell::new(0),
             follower_memo: std::cell::RefCell::new(std::collections::HashMap::new()),
-            macro_question_names: std::cell::RefCell::new(std::collections::HashSet::new()),
             declaration_type_name: None,
             previous_declaration_type_name: None,
             declaration_type_is_qualified: false,
@@ -683,6 +611,8 @@ impl<'a> CppParser<'a> {
             errors_len: self.errors.len(),
             terminator_came_from_a_branch: self.terminator_came_from_a_branch,
             closed_marks_journal_len: self.closed_marks_journal.len(),
+            bracket_depth: self.bracket_depth,
+            innermost_template_argument_list: self.innermost_template_argument_list,
         }
     }
 
@@ -715,6 +645,8 @@ impl<'a> CppParser<'a> {
         self.declaration_type_is_qualified = checkpoint.declaration_type_is_qualified;
         self.errors.truncate(checkpoint.errors_len);
         self.terminator_came_from_a_branch = checkpoint.terminator_came_from_a_branch;
+        self.bracket_depth = checkpoint.bracket_depth;
+        self.innermost_template_argument_list = checkpoint.innermost_template_argument_list;
         self.token_index = checkpoint.token_index;
         self.current_token = self
             .tokens
@@ -955,12 +887,20 @@ impl<'a> CppParser<'a> {
         })
     }
 
-    /// Is the cursor inside a template argument list, as far as the grammar has descended?
+    /// **Does a `>` at the cursor compare, or does it close the list the cursor is in?**
     ///
-    /// Inside one, `>` closes the list instead of comparing, so the expression grammar must not
-    /// treat it as an operator. `parse_template_argument_list` is the only place that sets this.
-    pub fn is_in_template_arguments(&self) -> bool {
-        self.template_argument_depth > 0
+    /// The one question the expression grammar asks about template arguments, and the answer is the standard's:
+    /// a `>` closes the list only when it is **not nested** in a bracketed group opened since that list began.
+    /// See [`CppParser::innermost_template_argument_list`] for the mechanism and the input it was measured on.
+    ///
+    /// Outside every list the answer is `true`, which is what keeps `a > b` an ordinary comparison everywhere else
+    /// in the file. `>=` and `>>=` are never this question's business — they are different tokens and stay
+    /// operators either way — and `>>` is, which is why `a >> b` inside `C<(a >> b)>` reads as a shift.
+    pub fn greater_than_is_an_operator(&self) -> bool {
+        match self.innermost_template_argument_list {
+            None => true,
+            Some(entered_at) => self.bracket_depth > entered_at,
+        }
     }
 
     /// Which compiler's own reserved spellings mean what — see [`Dialect`].
@@ -972,16 +912,22 @@ impl<'a> CppParser<'a> {
         self.parse_config.dialect
     }
 
-    /// Enter a template argument list. Returns the previous depth so the caller can restore it.
-    pub fn enter_template_arguments(&mut self) -> usize {
-        let previous = self.template_argument_depth;
-        self.template_argument_depth += 1;
+    /// Enter a template argument list, recording the bracket depth it began at.
+    ///
+    /// Returns what was in force before, for the caller to hand back to [`CppParser::leave_template_arguments`].
+    /// `Option<usize>` rather than `usize` because the two states are **not** the same question: `None` is "no list
+    /// is open, so every `>` compares", while `Some(0)` is "a list began at the outermost bracket depth". The
+    /// version before this one spelled both as the number zero, which is how `C<(1 > 2)>` came to be read as a
+    /// mis-nested list rather than as a comparison inside parentheses.
+    pub fn enter_template_arguments(&mut self) -> Option<usize> {
+        let previous = self.innermost_template_argument_list;
+        self.innermost_template_argument_list = Some(self.bracket_depth);
         previous
     }
 
-    /// Leave a template argument list, restoring the depth `enter_template_arguments` returned.
-    pub fn leave_template_arguments(&mut self, previous: usize) {
-        self.template_argument_depth = previous;
+    /// Leave a template argument list, restoring what [`CppParser::enter_template_arguments`] returned.
+    pub fn leave_template_arguments(&mut self, previous: Option<usize>) {
+        self.innermost_template_argument_list = previous;
     }
 
     /// Is the cursor inside a **constraint**, where a `{` is not a braced initialiser?
@@ -1180,80 +1126,6 @@ impl<'a> CppParser<'a> {
         &self.type_names
     }
 
-    /// Record that `name` is defined as a macro, or — through [`CppParser::undefine_macro_name`] — no longer is.
-    ///
-    /// Called by the directive rule where a `#define` writes its name. See [`crate::parser::MacroNames`] for what
-    /// the table answers and what its absence means.
-    pub fn declare_macro_name(&mut self, name: &str) {
-        self.follower_memo.get_mut().clear();
-        self.macro_names.define(name);
-    }
-
-    /// Record what a `#define`'s **body** is, as token kinds. See [`CppParser::macro_body_kinds`].
-    ///
-    /// An **empty** body is not recorded, and that is deliberate: `None` already means "this file does not say
-    /// what the macro stands for", and one name can be defined twice with different bodies — `bits/c++config.h`
-    /// defines `_GLIBCXX_BEGIN_NAMESPACE_VERSION` as `namespace __8 {` at line 393 and, in the other branch of the
-    /// same `#if`, as nothing at all at line 423. Every branch is read and none is "selected", so an empty body
-    /// must not take the shaped one's place: the empty branch says nothing about the tokens a use site wrote.
-    pub fn record_macro_body(&self, name: &str, kinds: Vec<CppTokenKind>) {
-        if kinds.is_empty() {
-            // An empty body is recorded **as empty** rather than dropped: `#define POINTER_32` says the name
-            // expands to nothing at all, and that is a fact a rule may act on — `basetsd.h` uses it where a pointer
-            // qualifier goes. It is kept **apart** from the shaped bodies so it cannot take a shaped one's place:
-            // `bits/c++config.h` defines `_GLIBCXX_BEGIN_NAMESPACE_VERSION` as `namespace __8 {` in one branch and
-            // as nothing in the other, and every branch is read. What an empty body *means* is each rule's
-            // business — `types.rs` accepts one only where nothing else can stand.
-            self.macro_bodies_empty.borrow_mut().insert(name.into());
-            return;
-        }
-
-        self.macro_bodies.borrow_mut().insert(name.into(), kinds);
-    }
-
-    /// What this file's own `#define` of `name` expands to, as token kinds — `None` when this file does not define
-    /// it (which includes "a header did", the ordinary case) or when its body is empty.
-    ///
-    /// The first piece of the file a rule can **read** instead of guessing at, and the answer expansion needs for
-    /// the shapes that are structural: `namespace __8 {` opens a scope, a lone `}` closes one, a leading `,` is a
-    /// parameter-list fragment.
-    pub fn macro_body_kinds(&self, name: &str) -> Option<Vec<CppTokenKind>> {
-        self.macro_bodies.borrow().get(name).cloned()
-    }
-
-    /// What `name` stands for **at the offset `at`**, from whatever can answer: this file's own `#define` first —
-    /// its text is better evidence than an included header's, and it is the file being read — and then the
-    /// environment the caller built out of the include graph.
-    ///
-    /// This is the reading the whole expansion layer was for. A body that is `namespace __8 {`, `, bool _NE` or
-    /// `virtual HRESULT __stdcall method` decides the *reading* of tokens the file did write, and the file's own
-    /// tokens stay the only thing in the tree. Offsets rather than names because the environment is positional:
-    /// `_GLIBCXX_NOEXCEPT_PARM` is a macro after `bits/c++config.h` is included and an ordinary identifier before.
-    pub fn macro_body_kinds_at(&self, name: &str, at: usize) -> Option<Vec<CppTokenKind>> {
-        if let Some(kinds) = self.macro_body_kinds(name) {
-            return Some(kinds);
-        }
-
-        // `#define NAME` with nothing after it: this file said the name expands to nothing, and an **empty list**
-        // is that answer — distinct from `None`, which means nobody has said.
-        if self.macro_bodies_empty.borrow().contains(name) {
-            return Some(Vec::new());
-        }
-
-        let environment = self.parse_config.macros_from_includes()?;
-
-        // What the includes say, **following a body that is another macro's name**: `_TRY_IO_BEGIN` is
-        // `_TRY_BEGIN`, and `_TRY_BEGIN` is `try {`. One hop is what a rule that reads a body needs, and the
-        // chain is the difference between "nothing structural" and the block opener a statement needed.
-        if let Some(text) = environment.body_text_resolved(name, at) {
-            return Some(kinds_of_a_body_text(text, &self.parse_config));
-        }
-
-        // The second channel is inside `body_text_resolved`, which consults the in-force bodies per hop; reaching
-        // here means neither channel has anything to say about `name`.
-        None
-    }
-
     /// What was remembered for [`CppParser::follower_memo`], if anything.
     pub fn remembered_follower(&self, index: usize) -> Option<bool> {
         self.follower_memo.borrow().get(&index).copied()
@@ -1273,91 +1145,11 @@ impl<'a> CppParser<'a> {
         self.tokens.get(index).map(|token| token.range)
     }
 
-    /// Record an `#undef`.
-    pub fn undefine_macro_name(&mut self, name: &str) {
-        self.follower_memo.get_mut().clear();
-        self.macro_names.undefine(name);
-    }
-
-    /// Does this file `#define` a macro called `name`?
-    ///
-    /// A `false` is "this file does not say so", not "this is not a macro" — a macro from an included header is
-    /// invisible here, and a caller must keep whatever weaker evidence it has. See
-    /// [`crate::parser::MacroNames`].
-    pub fn is_a_known_macro_name(&self, name: &str) -> bool {
-        self.macro_names.is_a_macro(name)
-    }
-
-    /// What this parse can say about `name` **as a macro**, in the order the evidence is consulted.
-    ///
-    /// 1. this file's own `#define`s — the text being parsed, so the freshest thing there is;
-    /// 2. what the file's **includes** contribute **at this offset** — the caller's positional table, which is the
-    ///    only kind that can say "this name is a macro *here*" (see [`crate::MacroFacts`]);
-    /// 3. the caller's flat table — everything the file cannot see, and kept for callers that have one;
-    /// 4. nothing, and the caller falls back to a shape preference.
-    ///
-    /// The order is the one [`crate::symbols`] documents, and the reason it is *this* way round is staleness: an
-    /// index lags the buffer, while a `#define` in the buffer is a fact about the text in front of us.
-    pub fn macro_evidence(&self, name: &str) -> Option<MacroEvidence> {
-        // The decision-point count — see [`CppParser::macro_questions`].
-        self.macro_questions.set(self.macro_questions.get() + 1);
-        if self.macro_question_names.borrow().len() < 4096
-            && !self.macro_question_names.borrow().contains(name)
-        {
-            self.macro_question_names.borrow_mut().insert(name.into());
-        }
-        if self.macro_names.is_a_macro(name) {
-            // The name is `#define`d here. What its body expands to is *in* the file but uninterpreted — the
-            // directive keeps its tokens and nothing evaluates them — so only the name is known.
-            return Some(MacroEvidence::DefinedHere);
-        }
-
-        // **Positional evidence**: what the includes contribute, as of the token being read. A name that a header
-        // defines *later* than this offset is not in force here, which is the whole difference between this table
-        // and the flat one — `_GLIBCXX_BEGIN_NAMESPACE_VERSION` is `namespace __8 {` in one region of a file and
-        // nothing at all in another, and a name's shape is not a property of the name.
-        if let Some(macros) = self.parse_config.macros_from_includes() {
-            match macros.kind_of(name, self.current_token_range().start_offset) {
-                Some(SymbolKind::Macro {
-                    function_like,
-                    body,
-                }) => {
-                    return Some(MacroEvidence::Described {
-                        function_like,
-                        body,
-                    });
-                }
-                // The includes say the name is something else, or an `#undef` took it away: that is an answer —
-                // no evidence — and it must not fall through to a flat table that would contradict it.
-                Some(_) | None if macros.knows(name) => return None,
-                _ => {}
-            }
-        }
-
-        match self.parse_config.symbol_table()?.kind_of(name)? {
-            SymbolKind::Macro {
-                function_like,
-                body,
-            } => Some(MacroEvidence::Described {
-                function_like,
-                body,
-            }),
-            // Every other answer says the name is *not* a macro, which the caller reads as "no evidence": the
-            // question was about macros, and `Some(Function)` does not answer it.
-            _ => None,
-        }
-    }
-
     /// What the caller's table says about `name`, if the caller supplied one.
     ///
     /// `None` is "no evidence from outside" — never "not a type". See [`crate::symbols`].
     pub fn symbol_kind(&self, name: &str) -> Option<SymbolKind> {
         self.parse_config.symbol_table()?.kind_of(name)
-    }
-
-    /// The table itself, for a consumer that wants to audit what the parse recorded.
-    pub fn macro_names(&self) -> &crate::parser::MacroNames {
-        &self.macro_names
     }
 
     /// Start recording the declaration's leading type name; see the field's documentation.
@@ -1602,6 +1394,29 @@ impl<'a> CppParser<'a> {
             .unwrap_or(CppTokenKind::None)
     }
 
+    /// **Record that a bracketed group opened or closed**, for the one question that needs the number:
+    /// whether a `>` at the cursor compares or closes the list it is in.
+    ///
+    /// Called by [`CppParser::bump`] and [`CppParser::consume_current_token`] — the two ways a token leaves the
+    /// cursor — and by nothing else, which is the point. This is the counterpart of clang's `ConsumeParen` /
+    /// `ConsumeBracket` / `ConsumeBrace`, the only writers of `ParenCount` / `BracketCount` / `BraceCount`: the
+    /// depth is a function of what has been **consumed**, so no grammar rule can forget to restore it, and a
+    /// rewound reading rewinds it through [`Checkpoint`].
+    ///
+    /// An unbalanced `)` saturates at zero rather than wrapping. See
+    /// [`CppParser::innermost_template_argument_list`] for what the number is for.
+    fn note_brackets(&mut self, kind: CppTokenKind) {
+        match kind {
+            CppTokenKind::LeftParen | CppTokenKind::LeftBracket | CppTokenKind::LeftBrace => {
+                self.bracket_depth += 1;
+            }
+            CppTokenKind::RightParen | CppTokenKind::RightBracket | CppTokenKind::RightBrace => {
+                self.bracket_depth = self.bracket_depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+
     pub fn bump(&mut self) {
         let consumed_index = self.token_index;
 
@@ -1613,6 +1428,7 @@ impl<'a> CppParser<'a> {
                 kind: token.kind,
                 range: token.range,
             });
+            self.note_brackets(token.kind);
         }
 
         let mut next_index = consumed_index + 1;
@@ -1899,6 +1715,7 @@ impl<'a> CppParser<'a> {
                 kind: token.kind,
                 range: token.range,
             });
+            self.note_brackets(token.kind);
         }
 
         self.token_index = consumed_index + 1;
@@ -2076,8 +1893,6 @@ impl<'a> CppParser<'a> {
             // exactly the leak reported above.
             min_depth: 0,
             empty_nodes: empty_nodes + empty_unclosed,
-            macro_questions: self.macro_questions.get(),
-            macro_question_names: self.macro_question_names.borrow().len(),
             unclosed,
         }
     }
@@ -2092,25 +1907,6 @@ impl<'a> CppParser<'a> {
 /// phase 2 removes `\`-newline before the grammar ever sees it, so `int \<newline> x;` is one
 /// declaration. The preprocessor layer reads the splices back out of the tree when it needs to know
 /// that a directive continued onto the next line.
-/// The token kinds a macro body's **text** lexes to, trivia left out.
-///
-/// An included macro's body reaches the parser as text ([`crate::MacroFacts::body_text_of`]), and the rules compare
-/// shapes — so it is lexed here, at this parse's dialect, rather than re-spelled or classified by hand. One
-/// vocabulary then serves both answers: a body this file wrote ([`CppParser::macro_body_kinds`]) and a body a
-/// header wrote ([`CppParser::macro_body_kinds_at`]) are read by the same lexer. Trivia is dropped so that "the
-/// body's last token is a name" is a question about the body, not about the comment after it.
-fn kinds_of_a_body_text(text: &str, config: &ParserConfig) -> Vec<CppTokenKind> {
-    let mut errors = Vec::new();
-    let mut lexer = CppLexer::new(text, config.lexer_config(), &mut errors);
-
-    lexer
-        .tokenize()
-        .into_iter()
-        .map(|token| token.kind)
-        .filter(|kind| !is_trivia_kind(*kind))
-        .collect()
-}
-
 fn is_trivia_kind(kind: CppTokenKind) -> bool {
     is_comment_kind(kind) || is_line_layout_kind(kind)
 }

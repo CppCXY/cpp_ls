@@ -311,12 +311,9 @@ standard {}",
     // **How many seeds the run actually produced.** A census that is *meant* to change a reading and does not is
     // either a finding or a broken instrument, and the two are indistinguishable without this number: the
     // convenience `summarize` resolves no includes at all (`NoFiles`), so a probe built on it seeds **nothing**.
-    // **How many decision points a parse has**: how often the grammar asks what a name is as a macro, and about how
-    // many distinct names. This is the number gates expansion on — the work expansion adds
-    // is `Σ(decision points) × O(body)`, and it has to be small enough to be invisible next to the parse itself.
-    let mut macro_questions = 0usize;
-    let mut macro_question_names = 0usize;
-    let mut busiest_questions = 0usize;
+    // **How many decision points a parse has** — how often the grammar asks what a name is as a macro — was counted
+    // here, and the counters are gone with the macro evidence itself: see `ParserConfig`. What replaced the question
+    // is the cook, which answers it once for the whole program instead of asking it per name.
     let mut total_seeds = 0usize;
     let mut bodies_with_text = 0usize;
     let mut files_with_seeds = 0usize;
@@ -634,10 +631,11 @@ standard {}",
         let parser_config = || {
             cpp_parser::ParserConfig::default().with_lexer_config(lexer_config)
         };
-        let raw_config = match environment {
-            Some(environment) => parser_config().with_macros_from_includes(environment),
-            None => parser_config(),
-        };
+        // **The environment is not handed to the parse.** The grammar reads a cooked stream and makes no reading
+        // turn on a name's being a macro; see `FileIndexer::index`, which records the coordinate mismatch that made
+        // the old wiring wrong rather than merely useless.
+        let _ = environment;
+        let raw_config = parser_config();
 
         if let Some(environment) = environment {
             for name in &watched {
@@ -840,13 +838,7 @@ standard {}",
             }
             None => cpp_parser::CppParser::parse_with_audit(&source, raw_config),
         };
-        macro_questions += audit.macro_questions;
-        if audit.macro_question_names > macro_question_names {
-            macro_question_names = audit.macro_question_names;
-        }
-        if audit.macro_questions > busiest_questions {
-            busiest_questions = audit.macro_questions;
-        }
+        let _ = audit;
         let errors = tree.get_errors();
 
         // **`--render-to <dir>`: write the rendering out — every file, before the census decides which ones
@@ -1298,8 +1290,7 @@ of rendering for {total_bytes} of text{}{}\n\
 without one {unusable_function_like} | definitions without a body {unusable_without_a_body} | unreadable \
 definitions {unusable_unreadable}\n\
          {unit_stream}         {cooked_index_line}{session_line}seed shapes: {}\n\
-         decision points: {macro_questions} macro questions | {macro_question_names} name-questions, summed \
-over the files | busiest file {busiest_questions}",
+         macro-question counters: removed with the parser's macro evidence",
         paths.len(),
         clean,
         failing,

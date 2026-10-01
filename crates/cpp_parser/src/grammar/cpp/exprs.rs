@@ -11,21 +11,25 @@ use super::{at_requires, expect_token};
 /// 操作符优先级定义
 /// 数值越高，优先级越高
 ///
-/// `p` is consulted for one thing: inside a template argument list, `>` does not mean "greater
-/// than". `Vec<1 > 2>` is not a thing, but `Vec<A<B>>` and `Vec<1, 2>` are, and the closing angle
-/// must reach the template-argument reader rather than being eaten as an operator. See
-/// [`crate::parser::CppParser::is_in_template_arguments`].
+/// `p` is consulted for one thing: whether a `>` at the cursor is a greater-than operator or the `>` that closes
+/// the template-argument-list the cursor is in. See [`CppParser::greater_than_is_an_operator`], which is the
+/// standard's rule — the **first non-nested** `>` closes the list — expressed as the bracket depth a list began at
+/// against the bracket depth now.
 ///
-/// **The refusal is for the two spellings that are a closer, and only those**: `>` and `>>`. `>=` and `>>=`
-/// contain a `>` but are not one, and g++ reads them as operators even where a list is open —
-/// `C<sizeof(int) >= 4>` and `C<(1) >= 2>` are both accepted, while `C<1 > 2>` is the "the first `>` closes"
-/// error. Refusing them here is what kept `enable_if_t<(__i >= sizeof...(_Types))>` from reading: the parenthesis
-/// does not protect the token from this rule, and the argument's own `>` was three tokens further along.
+/// **The parentheses are what make it a comparison, and getting that wrong is what this file used to do.** The
+/// question was once spelled "is a template argument list open at all", on the belief that `C<(1) >= 2>` was
+/// accepted while `C<(1 > 2)>` was not. That belief is false, and `cl.exe` settles it: `bc<(1 > 2)>` reports
+/// `C2974` — *"`T`: the template argument is invalid, a type was expected"* — which is a **semantic** error about
+/// `1 > 2` not being a type, and **no syntax error at all**. The grammar has to parse it, and it does once the
+/// `>` inside the parentheses is an operator again.
 ///
-/// Nothing is lost by allowing them: the list still closes, because the argument that ends at a `>=` at the *top*
-/// level of the list is a **type**, and a type argument is read by the type reading, which stops before it and
-/// leaves the `>=` to [`crate::grammar::cpp::types::split_closing_angle`] — the reading `C<D<int>= 3>` needs, and
-/// the one g++ reports as "'`>=` should be '`> =`' to terminate a template argument list".
+/// **Only the two spellings that are a closer are ever refused**, and only at a depth where they close: `>` and
+/// `>>`. `>=` and `>>=` contain a `>` but are not one, and g++ reads them as operators even where a list is open —
+/// `C<sizeof(int) >= 4>` is accepted, and `enable_if_t<(__i >= sizeof...(_Types))>` is written that way in
+/// `bits/tuple`. Nothing is lost by allowing them: the list still closes, because an argument that ends at a `>=`
+/// at the top level of the list is a **type**, and a type argument is read by the type reading, which stops before
+/// it and leaves the `>=` to [`crate::grammar::cpp::types::split_closing_angle`] — the reading `C<D<int>= 3>`
+/// needs, and the one g++ reports as "'`>=` should be '`> =`' to terminate a template argument list".
 fn get_operator_precedence(p: &CppParser, token: CppTokenKind) -> Option<u8> {
     // A C++ **alternative operator spelling** arrives as an `Identifier`, because the lexer has no keyword for
     // it — so it is recognised by its text and then treated as the operator it stands for. Doing it here, at the
@@ -33,8 +37,8 @@ fn get_operator_precedence(p: &CppParser, token: CppTokenKind) -> Option<u8> {
     // a token kind each; see [`the_alternative_operator`].
     let token = the_alternative_operator(p, token).unwrap_or(token);
 
-    if p.is_in_template_arguments()
-        && matches!(token, CppTokenKind::Greater | CppTokenKind::RightShift)
+    if matches!(token, CppTokenKind::Greater | CppTokenKind::RightShift)
+        && !p.greater_than_is_an_operator()
     {
         return None;
     }
@@ -2019,28 +2023,6 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
                 }
 
                 match p.current_token() {
-                    CppTokenKind::Identifier if super::types::a_macro_qualifies_the_name(p) => {
-                        // **A name whose `::` the macro supplies** — `_STD addressof(*_Ptr)`, with
-                        // `#define _STD ::std::`. The invocation is kept as what it is (`MacroCall(NameExpr)`,
-                        // nothing dressed up), and the loop **continues** to the name it qualifies: the `::`
-                        // between them is in the replacement list, so there is no token here to consume and none
-                        // to expect. Reading it the other way — the invocation ending the name — left two names
-                        // in a row, which is not an expression: the ternary's `:` was never reached and the
-                        // statement's recovery swallowed the rest of the file (3 800 lines of MSVC's `<vector>`).
-                        //
-                        // The predicate is `types.rs`'s, shared with the same case in [`parse_name`]: one
-                        // question, two grammars, and the second copy is where the exception gets forgotten.
-                        let call = p.mark(CppSyntaxKind::MacroCall);
-                        let name = p.mark(CppSyntaxKind::NameExpr);
-                        p.bump();
-                        name.complete(p);
-                        call.complete(p);
-
-                        if !super::types::at_a_name_segment(p) {
-                            break;
-                        }
-                        continue;
-                    }
                     CppTokenKind::Identifier => p.bump(),
                     CppTokenKind::Tilde => {
                         p.bump();
