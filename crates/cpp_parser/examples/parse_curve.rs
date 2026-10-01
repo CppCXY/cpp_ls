@@ -40,9 +40,16 @@
 
 use std::time::Instant;
 
-/// The band a step's per-token growth may fall in and still be called flat. Wide, because a file's mix changes
-/// across a slice and a rule that fires a few more times per byte is not a defect.
-const FLAT: (f64, f64) = (0.80, 1.25);
+/// **The ceiling** a step's per-token growth may reach and still be called flat. Wide, because a file's mix
+/// changes across a slice and a rule that fires a few more times per byte is not a defect.
+///
+/// A **ceiling and not a band**, and the measurement that settled it: with `Vec::insert` in the token split the
+/// curve rose 244 → 847 µs/KB; once the split became `O(1)` the same file gave 0.78, 1.08, 0.92, 0.95, 1.00, 1.00,
+/// 1.02 — all flat — and the two-sided band still fired, on the **0.78**. A step that got *cheaper* per token is
+/// not super-linear behaviour by any reading; it is the first row's cold allocations or a slice that happened to
+/// hold fewer constructs. A verdict that names it sends the reader to the wrong step, which is worse than no
+/// verdict at all.
+const FLAT_CEILING: f64 = 1.25;
 
 fn main() {
     let mut arguments = std::env::args().skip(1);
@@ -114,7 +121,7 @@ fn main() {
             None => (f64::NAN, f64::NAN, f64::NAN),
         };
 
-        let flat = !(per_token_growth.is_finite()) || (FLAT.0..=FLAT.1).contains(&per_token_growth);
+        let flat = !(per_token_growth.is_finite()) || per_token_growth <= FLAT_CEILING;
         if !flat && first_leaving.is_none() {
             first_leaving = Some((per_byte, per_event, per_token_growth, slice.len()));
         }
@@ -149,8 +156,7 @@ fn main() {
              at {per_byte:.3} us/byte and {per_event:.3} us/event."
         ),
         None => println!(
-            "\nVERDICT linear: every step stayed within {:.2}..{:.2}x per token.",
-            FLAT.0, FLAT.1
+            "\nVERDICT linear: no step cost more than {FLAT_CEILING:.2}x per token."
         ),
     }
 }
