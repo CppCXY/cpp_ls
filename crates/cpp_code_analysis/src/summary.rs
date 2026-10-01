@@ -2526,6 +2526,12 @@ struct Walked<'a> {
     conditional_bodies: std::collections::BTreeMap<Box<str>, ConditionalBodyValue>,
     conditional_facts: usize,
     facts_in_force: usize,
+    /// **Includes the walk did not enter because their guard was not in force.**
+    ///
+    /// Counted rather than silent, for the same reason [`Walked::conditional_facts`] is: it is the size of the
+    /// difference between the closure this walk builds and "every file any `#include` names", and a reading that
+    /// entered a file a compiler does not read is a reading of a different program.
+    includes_skipped: usize,
     /// **The timeline, when this walk is building one** — every fact the walk puts in force is also recorded
     /// there, with the file and offset it was written at and the frame it belongs to. `None` for the per-file
     /// walks, which collapse their result into one file's evidence and throw the order away.
@@ -2715,6 +2721,34 @@ fn walk_one_file<'a>(
         let Some(include) = includes.next() else {
             break;
         };
+
+        // **An `#include` is a guarded fact, and the walk asks whether its guard is in force.**
+        //
+        // It did not, and that is not a small omission on a compiler's own headers: *every* conditional include in
+        // them was entered. `sal.h` writes
+        //
+        // ```cpp
+        // #if _USE_ATTRIBUTES_FOR_SAL          // 1561 — which the cooker decides is **0**
+        // #include "CodeAnalysis/sourceannotations.h"
+        // ```
+        //
+        // and the walk descended anyway, pulling 1020 tokens of `/analyze`-only declarations into a program that
+        // never asks for them — 99% of the reading of `#include <sal.h>`, and the first difference against cl.exe on
+        // `#include <vector>`. Meanwhile the *cooker* answered the same guard correctly, which is what made the two
+        // disagree: one layer asked, the other did not.
+        //
+        // A guard that cannot be decided is **`Unknown`, and `a_guard_holds` is false for it** — the same rule the
+        // macro facts below already followed, and the reason `Visibility` has three states rather than two.
+        if !crate::index::environment::a_guard_holds(file, include.guard, include.range.start_offset, |at| {
+            UnitMacros {
+                seed,
+                state: unit,
+                here: Some((path, at)),
+            }
+        }) {
+            walked.includes_skipped += 1;
+            continue;
+        }
 
         if let Some(nested) = include.resolved.as_deref() {
             walk_one_file(

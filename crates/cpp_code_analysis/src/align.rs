@@ -392,6 +392,33 @@ impl Alignment {
     pub fn agrees(&self) -> bool {
         self.differences.is_empty() && !self.truncated
     }
+
+    /// **The files the compiler read and this reading never entered**, each once, in path order.
+    ///
+    /// The names behind [`Reason::MissingHeader`], which is the one **certain** classification this module makes: it
+    /// is asked of a difference whose token carries a file our stream does not mention at all, so it is a fact about
+    /// the two readings rather than a shape being interpreted. A count of those differences says how big the gap is;
+    /// this says *which* search went differently, and that is what a caller can act on.
+    ///
+    /// It earns its own method because of a measurement: on `#include <vector>` against MSVC's own STL, **46 files**
+    /// came out this way while the two streams' total lengths differed by 252 tokens. So the gap was never "we read
+    /// the same files slightly differently" — it was whole files one side read and the other did not, which is a
+    /// different repair.
+    pub fn headers_we_never_entered(
+        &self,
+        our_files: &std::collections::HashSet<&Path>,
+    ) -> Vec<&Path> {
+        let mut missing: Vec<&Path> = self
+            .differences
+            .iter()
+            .filter(|difference| difference.reason(our_files) == Reason::MissingHeader)
+            .filter_map(|difference| difference.theirs.as_ref()?.file.as_deref())
+            .collect();
+
+        missing.sort_unstable();
+        missing.dedup();
+        missing
+    }
 }
 
 /// How far apart two streams may be before the comparison stops looking for the smallest diff.
@@ -968,6 +995,28 @@ impl Report {
     /// Did the two streams agree?
     pub fn agrees(&self) -> bool {
         self.by_reason.is_empty() && !self.truncated
+    }
+
+    /// **The files the compiler read and this reading never entered** — see
+    /// [`Alignment::headers_we_never_entered`] for why the names matter more than the count.
+    ///
+    /// A `Report` carries only a **sample** of the differences (see [`REPORTED_DIFFERENCES`]), so this works from
+    /// that sample: it is a list of *examples* of a search that went differently, not an exhaustive one. The count in
+    /// [`Report::by_reason`] is the exhaustive number.
+    pub fn headers_we_never_entered(
+        &self,
+        our_files: &std::collections::HashSet<&Path>,
+    ) -> Vec<&Path> {
+        let mut missing: Vec<&Path> = self
+            .differences
+            .iter()
+            .filter(|difference| difference.reason(our_files) == Reason::MissingHeader)
+            .filter_map(|difference| difference.theirs.as_ref()?.file.as_deref())
+            .collect();
+
+        missing.sort_unstable();
+        missing.dedup();
+        missing
     }
 
     /// The report as text: the counts, then one line per difference with its mechanism and both tokens.

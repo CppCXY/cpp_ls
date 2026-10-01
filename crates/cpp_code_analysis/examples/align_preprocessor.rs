@@ -267,6 +267,25 @@ fn main() {
 
     println!("\n--- alignment ---\n{}", report.render());
 
+    // **Which files the compiler read and we did not**, by name. The one certain classification, and the one a reader
+    // can act on: a count says how big the gap is, the names say which search differed.
+    {
+        let our_files = cpp_code_analysis::files_of(&ours);
+        let missing = report.headers_we_never_entered(&our_files);
+        if !missing.is_empty() {
+            println!(
+                "--- {} files the compiler read and we never entered",
+                missing.len()
+            );
+            for path in missing.iter().take(60) {
+                println!("  {}", path.display());
+            }
+            if missing.len() > 60 {
+                println!("  … {} more", missing.len() - 60);
+            }
+        }
+    }
+
     // Per-file token counts, which is where a difference usually localises: a header that contributed 0 tokens on
     // our side and 4 000 on the compiler's is an include that did not resolve.
     print_per_file(&ours, &stream.files);
@@ -555,6 +574,24 @@ fn print_per_file(ours: &[StreamToken], files: &[PathBuf]) {
     let silent = listed.iter().filter(|(_, count)| *count == 0).count();
     if silent > 0 {
         println!("  ({silent} files the walk entered contributed no token)");
+    }
+
+    // **The stream itself, when it is short enough to read.** A first difference says *where* two readings parted;
+    // on a small probe the whole stream says *what* each one is, which is what turns "we differ at sal.h:2361" into
+    // "we emit these eighteen tokens and cl emits those twenty-six".
+    if ours.len() <= 260 {
+        println!("\n--- our stream ({} tokens) ---", ours.len());
+        for (index, token) in ours.iter().enumerate() {
+            let file = token
+                .file
+                .as_deref()
+                .map(|path| {
+                    let name = path.to_string_lossy();
+                    name.rsplit(['/', '\\']).next().unwrap_or(&name).to_string()
+                })
+                .unwrap_or_else(|| "<no file>".to_string());
+            println!("  {index:>3}  {:?}  [{file}:{:?}]", token.spelling, token.line);
+        }
     }
 }
 

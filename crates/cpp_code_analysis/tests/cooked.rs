@@ -50,13 +50,18 @@ fn a_macro_argument_is_not_expanded_twice() {
 }
 
 #[test]
-fn the_directives_themselves_are_gone() {
-    // Including the `#include`: a file's stream stops at its own tokens, and the included file is its own
-    // stream. Nothing downstream has a rule for a `#`.
-    assert_eq!(
-        text("#include <vector>\n#pragma once\nint x;\n"),
-        "int x ;"
-    );
+fn the_instructions_to_the_processor_are_gone() {
+    // Including the `#include`: a file's stream stops at its own tokens, and the included file is its own stream.
+    // `#define`, `#if`/`#endif` and `#include` are instructions *to* the processor, so none of them survives into
+    // what the processor produces.
+    assert_eq!(text("#include <vector>\n#define A 1\nint x = A;\n"), "int x = 1 ;");
+
+    // **`#pragma` is the exception, and it is not a special case** — it is the one directive that is a statement
+    // about the program rather than an instruction about the text. Every compiler keeps it in `-E` output, and
+    // `#pragma pack` changes the meaning of declarations after it, so dropping it would be reading a different
+    // program. See `a_pragma_stays_in_the_stream_the_way_the_compiler_keeps_it` for the full rule and the
+    // measurement against `cl.exe`.
+    assert_eq!(text("#pragma once\nint x;\n"), "# pragma once int x ;");
 }
 
 #[test]
@@ -313,6 +318,47 @@ fn the_annotation_families_read_the_same_way_cooked_as_they_do_raw() {
         );
     }
 }
+#[test]
+fn a_pragma_stays_in_the_stream_the_way_the_compiler_keeps_it() {
+    // **A `#pragma` is part of the program, not an instruction that disappears.** Every compiler this server models
+    // keeps pragmas in its preprocessed output — `cl -E` prints `#pragma once`, `#pragma region` and `#pragma pack`,
+    // clang and gcc the same — so a cooker that consumed them was reading a different program from the one compiled.
+    //
+    // Measured against `cl.exe` on `#include <sal.h>` before this: our stream was 38 tokens and the compiler's 42, and
+    // **every one of the four remaining differences was a `#`** (`sal.h:13`, `sal.h:707`, `sal.h:1471`,
+    // `concurrencysal.h:18`). With the `#` kept as well, that file matches exactly: 42 and 42, no differences.
+    let source = "#pragma once\n#pragma pack(push, 1)\n#pragma region Name\nint x;\n#pragma endregion Name\n";
+    let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+    let cooked = cook(source, &tokens);
+
+    // The `#`, the word `pragma`, and the arguments — nothing else, and nothing missing.
+    assert_eq!(
+        cooked.spellings(),
+        "# pragma once # pragma pack ( push , 1 ) # pragma region Name int x ; # pragma endregion Name",
+        "a pragma survives with the arguments that give it meaning: `pack(push, 1)` is not the same pragma as `pack`"
+    );
+
+    // **No trivia**, which is the half that took a second attempt: the first version pushed the directive's whole
+    // span, so the newline after each pragma and any comment on it became tokens, and the count went *up* on a fix
+    // meant to make the two streams agree.
+    assert!(
+        !cooked.spellings().contains('\n'),
+        "whitespace stays out of the stream: {:?}",
+        cooked.spellings()
+    );
+
+    // And a pragma in a **region nobody compiles** is not in the stream, because it is not in the program — the same
+    // rule every other directive follows.
+    let source = "#if 0\n#pragma pack(1)\n#endif\nint y;\n";
+    let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+    let cooked = cook(source, &tokens);
+    assert_eq!(
+        cooked.spellings(),
+        "int y ;",
+        "a pragma in a dead branch is not compiled and does not appear"
+    );
+}
+
 #[test]
 fn an_empty_body_leaves_nothing_behind_and_the_declaration_still_reads() {
     // `_NODISCARD` is the case that needed a shape rule on the raw side: an empty-bodied macro read as a type

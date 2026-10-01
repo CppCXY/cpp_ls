@@ -247,13 +247,29 @@ pub fn a_guard_is_in_force<M: crate::MacroValues>(
     fact: &MacroFact,
     macros_at: impl Fn(usize) -> M,
 ) -> bool {
-    if matches!(fact.guard, FactGuard::Unconditional) {
+    a_guard_holds(file, fact.guard, fact.range.start_offset, macros_at)
+}
+
+/// [`a_guard_is_in_force`] for **any** guarded fact, not only a macro one.
+///
+/// Written because a `#include` is a guarded fact too, and the walk used to descend into one **without asking**.
+/// That is not a small omission on a compiler's own headers: every conditional include in them was entered, so
+/// `sal.h`'s `#if _USE_ATTRIBUTES_FOR_SAL` — which our own cooker decides is **0** — still pulled
+/// `CodeAnalysis/sourceannotations.h` (1020 tokens) into the program. cl.exe does not read that file.
+///
+/// `guard` and `offset` rather than a fact because the two kinds of fact carry them in the same shape and nothing
+/// else is needed: a guard is a region, and the offset is where the fact stands in its file.
+pub fn a_guard_holds<M: crate::MacroValues>(
+    file: &FileSummary,
+    guard: FactGuard,
+    offset: usize,
+    macros_at: impl Fn(usize) -> M,
+) -> bool {
+    if matches!(guard, FactGuard::Unconditional) {
         return true;
     }
 
-    let visibility = file
-        .guards
-        .visibility_of(fact.guard, fact.range.start_offset, &macros_at);
+    let visibility = file.guards.visibility_of(guard, offset, &macros_at);
 
     visibility == Visibility::Active
 }

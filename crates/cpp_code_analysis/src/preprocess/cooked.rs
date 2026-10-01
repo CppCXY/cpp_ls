@@ -39,6 +39,7 @@ use cpp_parser::{CppTokenData, SourceRange};
 
 use crate::{
     Origin,
+    Token,
     directive::{Directive, DirectiveKind},
     expand::{Diagnostic, ExpandedToken, expand},
     guard::Branch,
@@ -1029,6 +1030,34 @@ pub fn cook_with_search(
                     live.own.undefine(name, spanned.range.start_offset);
                 }
             }
+            // **A `#pragma` in a live region is part of the program, and stays in the stream.**
+            //
+            // It used to fall into `_ => {}` and vanish, and that is a difference from every compiler this server
+            // models rather than a simplification:
+            //
+            // ```text
+            // cl.exe  -E   keeps `#pragma once`, `#pragma region`, `#pragma pack`, `#pragma warning`
+            // clang   -E   keeps them too (only `#pragma GCC system_header` is consumed)
+            // gcc     -E   keeps them too
+            // ```
+            //
+            // Measured, on `#include <sal.h>`: our stream was 18 tokens and cl.exe's was 26 — the whole difference
+            // was the four pragma lines (`sal.h:1 #pragma once`, `sal.h:229` region/endregion pair,
+            // `concurrencysal.h:1 #pragma once`), 8 tokens. Everything else matched, including both `extern "C"`
+            // pairs and their braces.
+            //
+            // Two reasons it matters beyond a token count. A pragma can **change the program** — `#pragma pack`
+            // alters every declaration after it — so a stream that drops it is a stream with different types. And
+            // the directives are what a reader *sees*: `#pragma region` is how MSVC headers fold, and a server that
+            // deletes it cannot reproduce the file's shape.
+            //
+            // The kind is not interpreted, which is the same stance [`Directive::Pragma`] already documents: the
+            // tokens go through as they were written, and no layer here has to have an opinion about `pack`.
+            DirectiveKind::Pragma => {
+                if was_live {
+                    push_the_directive(spanned, tokens, source, &mut out);
+                }
+            }
             _ => {}
         }
 
@@ -1059,6 +1088,61 @@ pub fn cook_with_search(
 /// Are the tokens of the innermost region compiled?
 fn is_live(regions: &[Region]) -> bool {
     regions.last().is_none_or(|region| region.live)
+}
+
+/// Put a directive's own tokens into the stream, spelling for spelling and position for position.
+///
+/// For the directives that are **part of the program** rather than instructions to the processor — currently
+/// `#pragma`, which every compiler keeps in its preprocessed output. The tokens are taken from their real ranges in
+/// the source, so each carries the position a reader would point at, and the offset map downstream is unchanged:
+/// this is the only place a directive's tokens enter the stream, and they enter as ordinary source tokens.
+///
+/// **The `#` stays**, which was measured rather than assumed.
+///
+/// The first version of this left it out, on the reasoning that `#` is the marker that makes a line a directive
+/// rather than a token of the program. cl.exe disagrees: on `#include <sal.h>` the last four differences between the
+/// two streams were **all of them `#`** — `sal.h:13`, `sal.h:707`, `sal.h:1471`, `concurrencysal.h:18`, each present
+/// on its side and absent from ours, and nothing else left at all. So a `#pragma` in the compiler's output is
+/// `#` `pragma` and its arguments, and the stream carries exactly that.
+///
+/// It costs one token per pragma and removes a whole class of difference, and it is the same lesson as the guard
+/// bug one layer up: where the compiler has an opinion, the compiler's answer is the one to match.
+fn push_the_directive(
+    spanned: &crate::directive::SpannedDirective,
+    tokens: &[CppTokenData],
+    source: &str,
+    out: &mut CookedStream,
+) {
+    let first = tokens.partition_point(|token| token.range.start_offset < spanned.range.start_offset);
+    let last = tokens.partition_point(|token| token.range.start_offset < spanned.range.end_offset());
+
+    for token in &tokens[first..last] {
+        // **Trivia stays out, which is what keeps the rest of the stream consistent.**
+        //
+        // A `#pragma`'s span runs to the end of its line, so it contains the newline that ends it and any comment
+        // written on it. Emitting those would put comments and `\r\n` into a stream that is otherwise trivia-free —
+        // measured on `#include <vector>`, that was 4 865 tokens of comment text, and `#pragma once` came out as five
+        // tokens (`pragma`, `" "`, `once`, `"\r\n"`, …) where the compiler has two.
+        //
+        // It is also what the first attempt got wrong: the tokens were pushed straight from the directive's span with
+        // no such filter, and the count went **up** on a fix that was supposed to make the two streams agree.
+        if is_trivia(token.kind) {
+            continue;
+        }
+
+        let Some(text) = source.get(token.range.start_offset..token.range.end_offset()) else {
+            continue;
+        };
+        if text.is_empty() {
+            continue;
+        }
+
+        out.tokens.push(ExpandedToken {
+            token: Token::new(token.kind, text, token.range),
+            origin: Origin::Source,
+            space_before: true,
+        });
+    }
 }
 
 /// The first token index at or after `offset`.
