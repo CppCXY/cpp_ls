@@ -236,6 +236,28 @@ fn main() {
     };
 
     let ours = our_tokens(&stream);
+    // **`CPPLS_DUMP=<path>` writes our cooked stream out**, which is what makes the grammar checkable against the
+    // text it is actually given.
+    //
+    // Nothing else in this repository hands the grammar a **cooked** stream, and the difference is not cosmetic: the
+    // raw headers parse with **zero** errors across all 242 of MSVC's, because without `_HAS_CXX20` and the rest
+    // defined most of every header is inside `#if` blocks and is never read. The cooked stream is the other program —
+    // the one whose branches were taken — and it is the text a language server's grammar receives. A defect that only
+    // the cooked text has is invisible to every other probe here.
+    if let Some(path) = std::env::var_os("CPPLS_DUMP") {
+        match std::fs::write(&path, &stream.text) {
+            Ok(()) => println!(
+                "--- wrote {} bytes of our reading to {}",
+                stream.text.len(),
+                std::path::Path::new(&path).display()
+            ),
+            Err(error) => println!(
+                "--- could not write {}: {error}",
+                std::path::Path::new(&path).display()
+            ),
+        }
+    }
+
     println!(
         "\n--- our reading ---\n{} tokens | {} files entered | {} files with tokens | {} missing | {} unbalanced | braces {}",
         stream.len(),

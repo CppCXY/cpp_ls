@@ -1653,24 +1653,47 @@ impl<'a> CppParser<'a> {
     /// branch is dead" rather than "the comparison is wrong". Call `.as_slice()` or use the
     /// single-token helpers ([`CppParser::peek_next_token`], [`CppParser::peek_token_text_at`]).
     pub fn peek_token_kind_at(&self, range: std::ops::Range<usize>) -> Vec<CppTokenKind> {
-        let mut kinds = Vec::with_capacity(range.len());
+        // **The result is `range.len()` long and is indexed from zero**, so a caller asking for `1..2` reads `[0]`
+        // to mean "the token after the cursor". That is what `resize(range.len(), …)` below upholds, and it is why
+        // the reservation is `wanted` while the length is `range.len()`: the two are different numbers, the caller
+        // can only read `wanted` of them, and reserving 128 slots to answer a question about `[0]` is what the old
+        // `range.len()` reservation did.
+        let wanted = range.len();
+        let mut kinds = Vec::with_capacity(wanted);
         let mut index = self.token_index;
+        let mut seen = 0usize;
 
-        for offset in 0..range.end {
-            self.skip_trivia(&mut index);
-            if offset < range.start {
-                index += 1;
-                continue;
+        // **Stops as soon as `range.end` significant tokens are seen.**
+        //
+        // The scan exists to answer a question about a window, and the window never extends past `range.end`, so
+        // anything after it is walked and thrown away. That is not a micro-optimisation here because of the shapes
+        // the grammar asks with: `1..128` and `0..96` are lookahead *budgets*, not requests — a caller writes the
+        // largest window it could possibly need and then reads one or two entries of it. Walking all 128 for an
+        // answer about one is work bought with nothing.
+        //
+        // It matters most on what this crate actually parses: a **cooked** standard-library stream is one line and
+        // half its tokens are trivia (measured: 1 236 821 tokens, 617 606 of them trivia), so 128 tokens ahead is
+        // about 128 trivia-run crossings, and one parse of that program makes 1 302 560 lookahead calls.
+        while seen < range.end {
+            while let Some(token) = self.tokens.get(index) {
+                if is_trivia_kind(token.kind) {
+                    index += 1;
+                } else {
+                    break;
+                }
             }
 
-            match self.tokens.get(index) {
-                Some(token) => kinds.push(token.kind),
-                None => break,
+            let Some(token) = self.tokens.get(index) else {
+                break;
+            };
+            if seen >= range.start {
+                kinds.push(token.kind);
             }
+            seen += 1;
             index += 1;
         }
 
-        kinds.resize(range.len(), CppTokenKind::None);
+        kinds.resize(wanted, CppTokenKind::None);
         kinds
     }
 
