@@ -83,6 +83,39 @@ decidable — and answering Unknown there is what pulls the /analyze header into
 
 **证据**:同一个 `<format>` 工程,一次 `read_the_unit` 是 **27 秒级**(199 文件、540 万字节、106 万 token)。
 
+#### 实测的分解(20 个源文件共享同一堆头)
+
+用 `cargo run --release -p cpp_code_analysis --example unit_scale -- <dir>` 复现,每个 unit 617607 token:
+
+```text
+每个 unit: render 1.2s、parse 3.3s、sweep 3.5s（其中 facts 2.5s、scopes 0.9s）→ 首读 ~7s
+20 个 unit 合计 160-179 秒 —— 40 个源文件即 300+ 秒
+```
+
+`render-parse` / `render-sweep` 各只进入 **20 次**(每 unit 一次),所以这不是"重复调用",而是**每次调用都处理整份程序**。另外 `facts` 全局进入 **397 次**、`scopes` 397 次 —— 说明索引自身在 unit 读取之外还有大量同形状的工作。
+
+#### 这里面最大的一块是 **parser 的超线性**,不是缓存
+
+把 unit 的渲染程序落盘后用 `parse_scale` 直接量:
+
+```text
+       bytes    parse ms   ms/KB      tokens
+      417133       79.3    0.195      139125
+      834267      156.5    0.192      273755
+     1668535      481.5    0.295      573297
+     2002242      856.3    0.438      697549
+     2335949     1325.5    0.581      827869
+     2669656     1912.7    0.734      958035
+     3003363     2558.2    0.872     1099087
+     3170217     2989.5    0.966     1171875
+     3337071     3202.6    0.983     1235213
+```
+
+**倍率恒定而每 KB 成本涨 5 倍**。同样大小的真实源文件(`arm_sve.h`,1.4 MB / 422611 token)只要 0.28 ms/KB,所以这不是"程序大",是**某种随文件规模累积的东西**。一倍处(0.224 ms/KB 已是纯代码的 1.2 倍)就开始偏,只是小到看不出来。
+
+复现物在 `target/corpus/unit_program.cpp`(由 `CPPLS_DUMP=<path>` 从 `unit_scale` 落盘)。
+
+
 ### 缺口 3 —— 函数体全解析
 
 | clang | 我们 |

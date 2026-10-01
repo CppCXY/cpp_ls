@@ -352,6 +352,22 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// Keyed by [`crate::cache::content_hash`] of the stream so nothing large is kept twice, and dropped wherever the
     /// index or the configuration moves, because a program's reading is only valid for the configuration that read it.
     unit_index: Option<(u64, crate::IndexedUnit)>,
+    /// **The last unit this session rendered, and what its inputs were** — one entry, keyed by the *content* of
+    /// every file the walk read.
+    ///
+    /// A render is a walk, a cook of every file in include order, and a stitched stream of megabytes; the plan's
+    /// §5.1 M4 exists because the second one costs exactly as much as the first. What a reader does is ask for the
+    /// same unit again and again — every keystroke that lands on a name, every drain — so the second answer is the
+    /// one worth having cheap.
+    ///
+    /// # The key is the inputs, not the root path
+    ///
+    /// Keyed on the root alone it would answer with a stream built from text the files no longer have: a file the
+    /// reader has open and has **not saved** comes from the overlay, and an edit changes the program without changing
+    /// its name. So the key is a hash of `(path, content hash)` for every file the walk reached, which is exactly
+    /// what the render is a function of. **One entry**, because the interesting repetition is the same unit asked
+    /// for twice in a row, and a map would trade a render for a memory of every stream the session ever built.
+    rendered_unit: Option<(u64, crate::RenderedUnit)>,
     /// **What each edited file's directives said the last time it changed**, by the path the queue keys on.
     ///
     /// The comparison an edit is judged by: an edit that leaves a file's directives where and what they were cannot
@@ -645,6 +661,7 @@ impl<F: FileProvider + Clone> Session<F> {
             units: UnitTable::default(),
             units_read: std::collections::HashSet::new(),
             unit_index: None,
+            rendered_unit: None,
             directive_signatures: std::collections::HashMap::new(),
             prefetched: HashMap::new(),
             headers,
@@ -1956,10 +1973,45 @@ impl<F: FileProvider + Clone> Session<F> {
             }
         }
 
+        // **What this render is a function of**: every file's path and content, folded into one number.
+        //
+        // Not the root path. A file the reader has open and has **not saved** comes from the overlay, so an edit
+        // changes the program without changing its name, and a cache keyed on the name would answer with a stream
+        // built from text the files no longer have. Folding the *content* in is what makes a hit mean "the same
+        // input", which is the only thing that makes reusing the output sound.
+        //
+        // Sorted, so two runs that read the same files in a different order of *this loop* still agree; the include
+        // order that matters is already fixed inside the stream by the walk.
+        let mut inputs: Vec<(&std::path::Path, u64)> = sources
+            .iter()
+            .map(|(path, text)| (path.as_path(), crate::cache::content_hash(text)))
+            .collect();
+        inputs.sort_unstable_by(|left, right| left.0.cmp(right.0));
+        let key = {
+            let mut folded = String::new();
+            for (path, hash) in &inputs {
+                folded.push_str(&path.to_string_lossy());
+                folded.push('|');
+                folded.push_str(&hash.to_string());
+                folded.push(';');
+            }
+            crate::cache::content_hash(&folded)
+        };
+
+        // **The same inputs, already rendered.** A reader asks for the same unit again and again 鈥?every keystroke
+        // that lands on a name, every drain 鈥?and a render is a walk, a cook of every file in include order and a
+        // stitched stream of megabytes. The plan's M4 is this call: the second answer must not cost what the first
+        // did.
+        if let Some((seen, cached)) = self.rendered_unit.as_ref()
+            && *seen == key
+        {
+            return Some(cached.clone());
+        }
+
         let definitions = unit.definitions();
         let seed = MacroTable::from_marked(self.store.index().macros());
-        // **The include search, so `__has_include` is answerable.** Without it the operator answers `Unknown` — which
-        // is honest but decides nothing — and `#if __has_include(<span>)` is a shape real headers are full of, so a
+        // **The include search, so `__has_include` is answerable.** Without it the operator answers `Unknown`, which
+        // is honest but decides nothing, and `#if __has_include(<span>)` is a shape real headers are full of, so a
         // cook that cannot answer it reads a branch on no evidence. The resolver's own search is what an `#include`
         // would use, which is what makes the two agree.
         let search = crate::preprocess::cooked::Search::new(&self.files, &self.config);
@@ -1968,6 +2020,7 @@ impl<F: FileProvider + Clone> Session<F> {
             unit.cook_the_unit(&sources, &definitions, Some(&seed), true, Some(&search))
         };
 
+        self.rendered_unit = Some((key, stream.clone()));
         Some(stream)
     }
 
@@ -2018,21 +2071,6 @@ impl<F: FileProvider + Clone> Session<F> {
 
         let key = SummaryKey::new(0, self.store.context_hash(&root));
         let program = crate::cache::content_hash(&stream.text);
-        if std::env::var_os("CPPLS_TRACE_UNIT").is_some() {
-            match self.unit_index.as_ref() {
-                Some((seen, cached)) => println!(
-                    "cppls-unit: {root:?} program={program} cached={seen} hit={} tokens={} text_len={}",
-                    *seen == program,
-                    cached.tokens,
-                    stream.text.len()
-                ),
-                None => println!(
-                    "cppls-unit: {root:?} program={program} no entry yet tokens={} text_len={}",
-                    stream.len(),
-                    stream.text.len()
-                ),
-            }
-        }
         let indexed = match self.unit_index.as_ref() {
             // **The same program, already read.** The reading is a function of the stream's bytes, and a project's
             // sources share their headers, so this is the common case rather than a lucky one: measured, twenty

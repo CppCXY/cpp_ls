@@ -364,6 +364,10 @@ impl Family {
 /// Nanoseconds per stage, in [`STAGES`] order.
 static NANOS: [AtomicU64; STAGES.len()] = [const { AtomicU64::new(0) }; STAGES.len()];
 
+/// **How many times each stage was entered.** Pairs with [`NANOS`]: one number says what a stage cost in total and
+/// this says how it was spent, and a stage whose total exceeds its enclosing family's is only explicable with it.
+static ENTRIES: [AtomicU64; STAGES.len()] = [const { AtomicU64::new(0) }; STAGES.len()];
+
 /// A running timer for one stage: `let _timer = StageTimer::new(Stage::Parse);`
 ///
 /// RAII rather than a start/stop pair, because the region that returns early is exactly the region that would
@@ -372,6 +376,7 @@ pub struct StageTimer(Stage, Instant);
 
 impl StageTimer {
     pub fn new(stage: Stage) -> StageTimer {
+        ENTRIES[stage as usize].fetch_add(1, Ordering::Relaxed);
         StageTimer(stage, Instant::now())
     }
 
@@ -481,6 +486,11 @@ impl StageTimes {
     ///
     /// Stages that cost nothing are left out: on a run that parsed nothing from disk, a row of zeros is noise, and a
     /// reader looking for the stage that dominates should see the ones that exist.
+    /// How many times a stage was entered, for the same run.
+    pub fn entries(stage: Stage) -> u64 {
+        ENTRIES[stage as usize].load(Ordering::Relaxed)
+    }
+
     pub fn report(&self) -> String {
         let total = self.total().as_secs_f64() * 1000.0;
         let mut out = String::new();
