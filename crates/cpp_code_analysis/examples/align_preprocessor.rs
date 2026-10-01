@@ -242,6 +242,33 @@ fn main() {
         stream.braces,
     );
 
+    // **What the compilation would have said** — every live `#error` and `#warning`, with the file that wrote it.
+    //
+    // This is the tool's **probe channel**: a `#error` at a position fires when the branch it is written in is the one
+    // taken, so placing one and rendering answers "which branch did this chain take" — the question reading the code
+    // does not settle when the walk and the cook disagree.
+    //
+    // It is also the honest form of the trick it replaces. Copying a header and inserting a probe was the only way to
+    // ask, and a copy is **not** the file: measured, the real `xtr1common` had `cl.exe` emit
+    // `[[msvc::no_specializations(...)]]` 17 times while a copy with probes inserted had it emit the attribute zero
+    // times, because the copy's own include guard, include order and `#pragma push_macro`s had all moved. This asks
+    // the real chain, through the real walk.
+    if !stream.messages.is_empty() {
+        println!("\n--- {} messages (#error/#warning) ---", stream.messages.len());
+        for message in stream.messages.iter().take(40) {
+            let file = message
+                .file
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| message.file.display().to_string());
+            let what = if message.fatal { "#error" } else { "#warning" };
+            println!("  {file}:{}  {what} {}", message.at, message.message);
+        }
+        if stream.messages.len() > 40 {
+            println!("  … {} more", stream.messages.len() - 40);
+        }
+    }
+
     if ours_only {
         if record {
             record_ours(&ours, &stream);

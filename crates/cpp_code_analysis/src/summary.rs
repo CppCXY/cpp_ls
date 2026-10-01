@@ -1874,6 +1874,18 @@ impl UnitCook<'_> {
                 .unwrap_or_else(|| Path::new(".")),
         );
 
+        // **What this file said**, in its own coordinates. The messages are collected during the cook — a `#error`
+        // in a branch nobody compiles is not said — and the range each carries is the directive's own, so the offset
+        // here is a position in *this* file rather than in the rendering.
+        for (kind, message, at) in &cook.messages {
+            out.messages.push(UnitMessage {
+                file: self.unit.frames[frame as usize].file.clone(),
+                fatal: matches!(kind, crate::DirectiveKind::Error),
+                message: message.clone(),
+                at: *at,
+            });
+        }
+
         let mut next = 0usize;
         // **The frame's own tokens, counted before they are pushed.** A file whose text opens a brace it does not
         // close would swallow every file spliced after it, so this is the count that finds the file — and it is
@@ -2474,6 +2486,14 @@ impl cpp_parser::MacroFacts for MacroView<'_> {
 pub struct RenderedUnit {
     /// The tokens of every file the unit reached, in the order a compiler would read them.
     pub text: String,
+    /// **The `#error` and `#warning` lines the compilation would have said**, in file order.
+    ///
+    /// A message is not program text, so the stream keeps no token for it — this is the only channel by which it
+    /// survives, and it exists so that a caller can **ask a header a question**: put a `#error` at a position, render,
+    /// and see whether it fires. That is how a real chain's branch is found when two layers disagree, and it is the
+    /// question this crate kept answering by copying a header — which demonstrably does not work, because a copy's
+    /// include guard, include order and `#pragma push_macro`s all move when the text moves.
+    pub messages: Vec<UnitMessage>,
     /// One entry per token of `text`, in the same order.
     pub spans: Vec<UnitSpan>,
     /// The files the walk entered, in the order it entered them — what a span's `file` indexes.
@@ -2535,6 +2555,19 @@ pub struct RenderedUnit {
     /// answering `Unknown` there is what pulls the `/analyze` header into a program that never asks for it. That is
     /// §3.2 item 1 (the builtin macro table), and it is the fix that stops this file being in the program at all.
     pub unbalanced: Vec<std::path::PathBuf>,
+}
+
+/// **One `#error` or `#warning` the compilation would have said**, with where it was written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnitMessage {
+    /// The file that wrote it — a member of [`RenderedUnit::files`].
+    pub file: std::path::PathBuf,
+    /// `true` for `#error`, `false` for `#warning`.
+    pub fatal: bool,
+    /// The message, as written.
+    pub message: String,
+    /// The byte offset of the directive **in that file**, so a caller can say where it is.
+    pub at: usize,
 }
 
 /// One token's place in a unit's rendering, and where it came from.

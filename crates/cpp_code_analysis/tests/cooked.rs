@@ -667,3 +667,28 @@ fn a_fact_that_cannot_be_placed_is_dropped_and_counted() {
         "the declaration's range and its name's range: the report counts ranges"
     );
 }
+
+#[test]
+fn a_live_error_and_warning_are_reported_as_what_the_file_said() {
+    // **A message is not program text**, so the stream keeps no token for it. This is the only channel by which a
+    // `#error` survives a cook, and it is what lets a caller *ask a header a question*: place one and see whether it
+    // fires, which is how a real chain's branch is found when the walk and the cook disagree.
+    //
+    // Only the **live** ones. A message in a branch nobody compiles is not said by the compilation, and reporting it
+    // would be reporting the answer to a condition that came out the other way.
+    let source = "#define FLAG 1\n#if FLAG\n#error IT_FIRED\n#endif\n#if 0\n#error IN_A_DEAD_BRANCH\n#endif\n#warning A_WORD\nint x;\n";
+    let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+    let cooked = cpp_code_analysis::cook_with(source, &tokens, &defines(""));
+
+    let said: Vec<String> = cooked
+        .messages
+        .iter()
+        .map(|(kind, message, _)| format!("{kind:?}:{message}"))
+        .collect();
+
+    assert_eq!(
+        said,
+        vec!["Error:IT_FIRED".to_string(), "Warning:A_WORD".to_string()],
+        "the live message fires and the dead branch's does not: {said:?}"
+    );
+}

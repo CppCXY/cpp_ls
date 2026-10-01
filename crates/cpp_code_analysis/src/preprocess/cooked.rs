@@ -53,6 +53,21 @@ pub struct CookedStream {
     pub tokens: Vec<ExpandedToken>,
     /// Why something was left unexpanded — a macro nobody holds the body of, a budget that ran out.
     pub diagnostics: Vec<Diagnostic>,
+    /// **`#error` and `#warning` lines that were live**, as `(kind, message)`, in source order.
+    ///
+    /// Separate from [`CookedStream::diagnostics`], which answers "why is something unexpanded" — this answers
+    /// "what did the file *say*", and the two are not the same question: a message is a thing a reader wrote for a
+    /// human, and a stream with no expansion trouble can still carry a hundred of them.
+    ///
+    /// Collected because a `#error` is a **probe a header can be asked to answer**: putting one at a position and
+    /// seeing whether it fires is how a reader finds out which branch a real chain took. That is a question no
+    /// amount of reading the code answers when two layers disagree, and it is the question this crate kept having to
+    /// approximate by copying a header and hoping the copy behaved the same — see [`crate::RenderedUnit`] and the
+    /// note on `#pragma once`, where a copy demonstrably did not.
+    ///
+    /// Only **live** ones: a message in a branch nobody compiles is not said by the compilation, and reporting it
+    /// would be reporting the answer to a condition that came out the other way.
+    pub messages: Vec<(DirectiveKind, String, usize)>,
     /// The spans of the regions that were **not** compiled, in source order.
     pub inactive: Vec<SourceRange>,
     /// How many conditional branches were decided by **C's rule that an identifier which is not defined
@@ -1186,6 +1201,17 @@ pub fn cook_with_search(
             //
             // [`expand_run`] filters trivia and keeps each token's real range, so the offset map downstream is
             // unchanged and no comment or newline enters the stream.
+            // **A live `#error` or `#warning` is recorded as what the file said.** The stream keeps no token for
+            // it — a message is not program text — so this is the only channel by which it survives the cook, and a
+            // caller asking "did this line fire" has nowhere else to look.
+            DirectiveKind::Error | DirectiveKind::Warning => {
+                if was_live
+                    && let Directive::Diagnostic { kind, message } = &spanned.directive
+                {
+                    out.messages
+                        .push((*kind, message.clone(), spanned.range.start_offset));
+                }
+            }
             DirectiveKind::Pragma => {
                 if was_live {
                     let first = tokens.partition_point(|token| {
