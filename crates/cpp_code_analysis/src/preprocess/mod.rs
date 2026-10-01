@@ -103,12 +103,28 @@ impl crate::condition::MacroValues for PositionalMacros<'_> {
             .map_or(Lookup::Undefined, Lookup::Defined)
     }
 
-    /// **Forwarded, because this wrapper is the only thing the condition evaluator ever sees.**
+    /// **Forwarded, with the offset this wrapper exists to add.**
     ///
     /// The cooks all evaluate through a [`PositionalMacros`], so an operator answered by the table underneath is
     /// answered here or nowhere: `__has_include` would be `Unknown` in every real cook while its implementation sat
-    /// one layer down, unreachable. The wrapper's whole job is to add the offset, and this question has no offset.
+    /// one layer down, unreachable. The wrapper's whole job is to add the offset.
+    ///
+    /// # The offset is not decoration
+    ///
+    /// An earlier version of this forwarded the operator with **no** position, and for `__has_cpp_attribute` that was
+    /// the whole bug: the answer depends on whether the bare name is a macro *at that point*, and the walking table
+    /// answers a question without a position from the **end of the file** — where `xtr1common:22`'s `#undef msvc`
+    /// has already happened, so every `msvc::` attribute read as unsupported and
+    /// `[[msvc::no_specializations(...)]]` was missing from the stream while `cl.exe` emitted it 17 times.
     fn builtin_operator(&self, name: &str, operand: &str) -> Option<crate::condition::Value> {
+        if name == "__has_cpp_attribute" {
+            let answer = crate::preprocess::cooked::attribute_support(operand);
+            if std::env::var_os("CPPLS_TRACE_ATTR").is_some() {
+                eprintln!("cppls-trace: __has_cpp_attribute({operand:?}) at {} -> {answer:?}", self.offset);
+            }
+            return answer.map(crate::condition::Value::Known);
+        }
+
         self.table.builtin_operator(name, operand)
     }
 }

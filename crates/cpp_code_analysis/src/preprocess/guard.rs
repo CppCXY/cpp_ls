@@ -77,6 +77,39 @@ impl Branch {
     /// on the macro table *at that point in the file*, and a guard cloned onto a declaration carries no
     /// position of its own. The caller has the position; this does not need it.
     pub fn holds(&self, macros: &impl MacroValues) -> Option<bool> {
+        // **A trace on one condition, for the walk's own evaluation path.** The cook and the walk decide the same
+        // guards through different code, and when they disagree the disagreement is invisible from outside: this
+        // prints what *this* path decided, for a condition whose text mentions the name the caller asked about.
+        if let Some(wanted) = std::env::var_os("CPPLS_TRACE_GUARD") {
+            let wanted = wanted.to_string_lossy();
+            let mentions = self
+                .tokens
+                .iter()
+                .any(|token| token.text().contains(wanted.as_ref()));
+            if mentions {
+                let answer = match self.kind {
+                    DirectiveKind::If | DirectiveKind::Elif => {
+                        evaluate(&self.tokens, macros).is_true()
+                    }
+                    DirectiveKind::Ifdef => is_defined(self.name.as_deref(), macros),
+                    DirectiveKind::Ifndef => {
+                        is_defined(self.name.as_deref(), macros).map(|defined| !defined)
+                    }
+                    DirectiveKind::Else => Some(true),
+                    _ => None,
+                };
+                println!(
+                    "cppls-guard: {:?} mentions {wanted} -> {answer:?}",
+                    self.tokens
+                        .iter()
+                        .map(|token| token.text())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+                return answer;
+            }
+        }
+
         match self.kind {
             DirectiveKind::If | DirectiveKind::Elif => evaluate(&self.tokens, macros).is_true(),
             DirectiveKind::Ifdef => is_defined(self.name.as_deref(), macros),
@@ -94,7 +127,34 @@ impl Branch {
 /// the answer only for [`Lookup::Undefined`], which is the one table state that claims completeness, and a
 /// directive with no name at all is `None` for the same reason: there is nothing to decide.
 fn is_defined(name: Option<&str>, macros: &impl MacroValues) -> Option<bool> {
-    name.and_then(|name| macros.lookup(name).is_defined())
+    name.and_then(|name| {
+        // **A builtin operator is defined, and the compiler is the authority for that.**
+        //
+        // `defined(__has_cpp_attribute)` and `#ifndef __has_cpp_attribute` are **true** on clang, gcc and MSVC alike:
+        // these operators are predefined macros of the implementation, not ordinary names, which is exactly how a
+        // header tells whether the implementation has the operator at all. clang has a formal list of them
+        // (`__has_feature`, `__has_builtin`, `__has_attribute`, `__has_cpp_attribute`, …).
+        //
+        // Answering from the macro table instead was the head of a long chain: `yvals_core.h:655` writes
+        //
+        // ```cpp
+        // #ifndef __has_cpp_attribute
+        // #define _HAS_MSVC_ATTRIBUTE(x) 0        // ← we took this
+        // #else
+        // #define _HAS_MSVC_ATTRIBUTE(x) __has_cpp_attribute(msvc::x)
+        // #endif
+        // ```
+        //
+        // so every `_HAS_MSVC_ATTRIBUTE` below it became the literal `0`, and the table of MSVC attributes in
+        // [`crate::preprocess::cooked::supported_attribute`] could never be reached — `_NO_SPECIALIZATIONS_OF_TYPE_TRAITS`
+        // expanded to nothing and `[[msvc::no_specializations(...)]]` was missing from the stream at
+        // `xtr1common:27`.
+        if crate::preprocess::condition::is_a_builtin_operator(name) {
+            return Some(true);
+        }
+
+        macros.lookup(name).is_defined()
+    })
 }
 
 /// One conditional region: the chain of branches written for a single `#if`.

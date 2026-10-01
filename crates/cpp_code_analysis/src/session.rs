@@ -678,6 +678,37 @@ impl<F: FileProvider + Clone> Session<F> {
         self.store.index()
     }
 
+    /// **What a name is at one position in one file** — see [`crate::MacroAt`] for why this exists and what the
+    /// offset is for.
+    ///
+    /// Reads the unit the way [`Session::read_the_unit`] does, minus the indexing: this is a question *about* a file,
+    /// and asking it must not change the answer to anything else.
+    ///
+    /// # Which unit a file belongs to
+    ///
+    /// A file in the project is its own unit. One that is not — a system header, a file the caller named by hand — is
+    /// a member of some *other* file's unit, and which one is answered by the project's source list: the first source
+    /// whose walk reaches it. `None` when nothing in the project reaches it, which is the honest "this session
+    /// cannot speak about that file" rather than a `false` that would read as "not defined".
+    pub fn macro_at(&mut self, file: &Path, name: &str, offset: usize) -> Option<crate::MacroAt> {
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if self.project.iter().any(|root| root == file) {
+            candidates.push(file.to_path_buf());
+        }
+        candidates.extend(self.project.iter().filter(|root| *root != file).cloned());
+
+        for root in candidates {
+            let Some(unit) = self.translation_unit_of(&root) else {
+                continue;
+            };
+            if let Some(answer) = unit.macro_at(file, name, offset) {
+                return Some(answer);
+            }
+        }
+
+        None
+    }
+
     pub fn stats(&self) -> StoreStats {
         self.store.stats()
     }

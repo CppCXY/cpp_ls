@@ -1105,6 +1105,53 @@ struct UnitMacros<'a> {
 
 impl crate::condition::MacroValues for UnitMacros<'_> {
     fn lookup(&self, name: &str) -> crate::condition::Lookup<'_> {
+        // **What the walk's own evaluator is told about a name**, behind an environment variable.
+        //
+        // The cook and the walk decide the same guards through different code, and when they disagree nothing
+        // outside shows it: a guard the walk reads as `None` silently drops every fact inside it, and the only
+        // symptom is content missing from a stream much later. `CPPLS_TRACE_LOOKUP=NAME` prints this path's answer.
+        if let Some(wanted) = std::env::var_os("CPPLS_TRACE_LOOKUP")
+            && wanted.to_string_lossy() == name
+        {
+            let from_state = self.state.definitions.get(name).map(|binding| {
+                // **The shape, not just the name.** A definition whose parameter list or body did not survive the
+                // walk is a definition the expander cannot use: `NAME (x)` stops being a call, and an `#if` that
+                // asks for a *value* gets an identifier with none. Printing only "defined" hid that for several
+                // rounds — the lookup answered `Defined` while the guard still came out `None`.
+                let params = match &binding.definition.params {
+                    None => "object-like".to_string(),
+                    Some(list) => format!(
+                        "fn-like({:?})",
+                        list.iter().map(|held| held.name.as_ref()).collect::<Vec<_>>()
+                    ),
+                };
+                let body: Vec<&str> = binding
+                    .definition
+                    .body
+                    .significant()
+                    .map(|token| token.text())
+                    .collect();
+                format!(
+                    "state(defined_in={} at={} {params} body={:?})",
+                    binding.defined_in.display(),
+                    binding.defined_at,
+                    body.join(" ")
+                )
+            });
+            let from_seed = match self.seed.lookup(name) {
+                crate::condition::Lookup::Defined(_) => "seed:Defined".to_string(),
+                crate::condition::Lookup::DefinedWithoutAValue => {
+                    "seed:DefinedWithoutAValue".to_string()
+                }
+                crate::condition::Lookup::Undefined => "seed:Undefined".to_string(),
+                crate::condition::Lookup::Unanswered => "seed:Unanswered".to_string(),
+            };
+            println!(
+                "cppls-lookup: {name} state={} {from_seed}",
+                from_state.as_deref().unwrap_or("none")
+            );
+        }
+
         if let Some(binding) = self.state.definitions.get(name) {
             // **A definition written below this condition has not happened yet.** An include guard is
             // `#ifndef X / #define X`, so a table read at the end of the file answers "`X` is defined" — and that
@@ -1121,6 +1168,32 @@ impl crate::condition::MacroValues for UnitMacros<'_> {
         }
 
         self.seed.lookup(name)
+    }
+
+    /// **Forwarded to the seed, because this is the table every condition in the walk is evaluated against.**
+    ///
+    /// A builtin operator is a question about the **compiler**, and the compiler's answers live on
+    /// [`crate::Marked`] — the seed. Without this, the answer is the trait's default `None`, which becomes
+    /// `Unknown`, and a condition that asks one is silently undecidable.
+    ///
+    /// # What it cost, measured
+    ///
+    /// `_HAS_MSVC_ATTRIBUTE(x)` is `__has_cpp_attribute(msvc::x)`, so every `#if _HAS_MSVC_ATTRIBUTE(…)` in the STL
+    /// is a question about an attribute — and every one of them came out `None` on this path:
+    ///
+    /// ```text
+    /// cook   __has_cpp_attribute(msvc::known_semantics)          -> Some(1)
+    /// walk   _HAS_MSVC_ATTRIBUTE ( known_semantics )             -> None
+    /// ```
+    ///
+    /// The walk then judged each guard false, so the `#define`s inside them — `_MSVC_KNOWN_SEMANTICS`,
+    /// `_MSVC_INTRINSIC`, `_NO_SPECIALIZATIONS_MSG` and the rest of that family — **were never recorded at all**.
+    /// That is why later queries answered `positional=no-binding`: the fact was not hidden, it had never been made.
+    ///
+    /// This is the same mistake as [`crate::preprocess::PositionalMacros`]'s note describes, on the other path: an
+    /// implementation sitting one layer below the only caller that asks.
+    fn builtin_operator(&self, name: &str, operand: &str) -> Option<crate::condition::Value> {
+        self.seed.builtin_operator(name, operand)
     }
 }
 
@@ -1320,6 +1393,10 @@ pub(crate) struct TuFrame {
     pub(crate) entry_seq: u32,
     /// The end of this frame's subtree, as a frame index (see the type's note on preorder).
     pub(crate) tout: u32,
+    /// **The file writes `#pragma once`** — see [`SummaryGuards::visit_once`]. Carried on the frame because the
+    /// renderer walks frames rather than summaries, and a file that is only directives has no tokens of its own to
+    /// carry the pragma into the stream.
+    pub(crate) visit_once: bool,
 }
 
 /// The timeline under construction — the sink [`Walked`] records into while the one walk runs.
@@ -1332,12 +1409,19 @@ struct TimelineBuilder {
 
 impl TimelineBuilder {
     /// Open a frame for a file the walk is about to read, and return its id.
-    fn enter(&mut self, file: &std::path::Path, parent: Option<u32>, from_in_parent: usize) -> u32 {
+    fn enter(
+        &mut self,
+        file: &std::path::Path,
+        parent: Option<u32>,
+        from_in_parent: usize,
+        visit_once: bool,
+    ) -> u32 {
         let id = self.frames.len() as u32;
         self.frames.push(TuFrame {
             file: file.to_path_buf(),
             parent,
             from_in_parent,
+            visit_once,
             entry_seq: self.events.len() as u32,
             // Closed by `leave`; a frame that is never left is the last one, and its subtree runs to the end.
             tout: u32::MAX,
@@ -1807,6 +1891,39 @@ impl UnitCook<'_> {
             out.unbalanced.push(self.unit.frames[frame as usize].file.clone());
         }
 
+        // **`#pragma once`, for a file that has nothing else to carry it.**
+        //
+        // A file with tokens of its own already has the pragma in them — the cook emits every live `#pragma`, and a
+        // file that writes `#pragma once` writes it at the top, inside the guard, where it is live. So emitting one
+        // here as well would print it twice, which is exactly what the first version of this did: `sal.h` came out
+        // with `#pragma once` at line 1 *and* a synthetic copy, and a file that had been an exact match stopped
+        // being one.
+        //
+        // What is missing is the other case: a header that is **nothing but directives** — `yvals_core.h` and its
+        // neighbours — contributes no token to the rendering, so it is never cooked and its `#pragma once` never
+        // reaches the stream. Every compiler keeps the line, and it is how a reader sees *which files a compilation
+        // read*: measured on `#include <vector>`, `cl.exe` emits 54 of them and the first difference between the two
+        // readings was a `#pragma`, because the next file in its stream was one we had emitted no line for.
+        //
+        // The range is the file's own first byte. A `#pragma once` written anywhere in a file means the same thing,
+        // and a compiler prints it where the file begins; a zero-length range at offset 0 is honest about being a
+        // *rendering* of the directive rather than a pointer into the text, and it sorts before every real token, so
+        // an include that follows is spliced after it exactly as a preprocessor would.
+        if self.unit.frames[frame as usize].visit_once && cook.tokens.is_empty() {
+            let here = cpp_parser::SourceRange::new(0, 0);
+            for spelling in ["#", "pragma", "once"] {
+                out.text.push_str(spelling);
+                out.text.push(' ');
+                let cooked =
+                    cpp_parser::SourceRange::new(out.text.len() - spelling.len() - 1, spelling.len());
+                out.spans.push(UnitSpan {
+                    cooked,
+                    written: here,
+                    file: frame as u32,
+                });
+            }
+        }
+
         for token in &cook.tokens {
             // **Where the token stands in this file**, which is also what decides whether an include that has not
             // been spliced yet comes first: the call site for an expansion (the text the reader sees) and the
@@ -1903,12 +2020,194 @@ pub struct MacroView<'unit> {
     frame: u32,
 }
 
+/// **What a name is at one position in one file** — the question a preprocessor asks and the one this crate could
+/// not previously answer about a file it had only *read*.
+///
+/// Everything needed to answer it was already here; what was missing was a public door. The only way to ask it was to
+/// **copy the file, inject an `#error` probe, and read the compiler's complaint** — and that probe changes the thing
+/// being measured. Measured, and the reason this type exists:
+///
+/// ```text
+/// the real `xtr1common`                      → cl emits [[msvc::no_specializations(...)]] 17 times
+/// a copy with `#error` probes inserted       → cl says the attribute is NOT supported (0)
+/// ```
+///
+/// A copy is not the file: an include guard, an include order, or a `#pragma push_macro` further up all move when
+/// the text moves. So the answer has to come from the analysis's own timeline, which is what this reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacroAt {
+    /// Whether the name is a macro there. `false` covers both "undefined" and "`#undef`ed above this line".
+    pub defined: bool,
+    /// **The shape** of the replacement list, when the walk recovered one.
+    ///
+    /// A [`cpp_parser::MacroBody`] rather than the body's text, because that is what a later parse needs to know:
+    /// whether the name expands to a type, a statement, an expression or nothing. The text is in
+    /// [`MacroAt::body_text`], which is what a *reader* wants. `None` with [`MacroAt::defined`] true is a name the
+    /// walk saw defined but whose shape it could not read — an honest gap rather than a claim that the body is empty.
+    pub body: Option<cpp_parser::MacroBody>,
+    /// **The replacement list as written** — what answers "so what does this name expand to?".
+    pub body_text: Option<String>,
+    /// Whether the definition takes arguments.
+    pub function_like: bool,
+    /// Where the binding in force was written: the file, and the offset in it. `None` when the binding came from
+    /// outside the unit — a compiler builtin or a command-line `-D`.
+    pub written_in: Option<std::path::PathBuf>,
+    /// The line in [`MacroAt::written_in`], one-based.
+    pub written_at_line: Option<usize>,
+}
+
+impl TranslationUnit {
+    /// **What `name` is, at byte `offset` of `file`, as this unit read it.**
+    ///
+    /// `None` when the file is not part of this unit's walk — which is a different answer from "not defined", and the
+    /// distinction a caller needs in order to know whether it asked a question the unit can answer at all.
+    ///
+    /// # Why the offset is required
+    ///
+    /// A file's macro state is a **timeline**: `#define` and `#undef` take effect where they are written, and an
+    /// include contributes its own definitions at the point it is included. Asking without a position means asking
+    /// about the end of the file, which is how a name that `xtr1common:22` had `#undef`ed still read as defined — see
+    /// [`crate::preprocess::cooked::attribute_support`], where that mistake cost the `[[msvc::…]]` attributes.
+    pub fn macro_at(
+        &self,
+        file: &std::path::Path,
+        name: &str,
+        offset: usize,
+    ) -> Option<MacroAt> {
+        // **The file is matched the way this crate matches every path**, not by `Path` equality: a caller reaching for
+        // a header from an `#include <...>` spelling hands over forward slashes and whatever case it typed, while the
+        // walk recorded the path the filesystem gave it. Comparing raw paths made every question about a system header
+        // answer "this session's walk never reaches that file" — the one answer that is not a reading of anything.
+        let wanted = crate::file::paths::normalize_path(file, true);
+        let frame = self
+            .entered
+            .iter()
+            .find(|(held, _)| crate::file::paths::normalize_path(held, true) == wanted)
+            .map(|(_, frame)| *frame)?;
+        let view = self.environment_at(frame);
+
+        // **A file this walk recorded facts for at all**, which is not the same as "a file it entered".
+        //
+        // A header that is *only* directives — every `#define` and `#if` and no declaration — contributes no token to
+        // the rendering, and the unit's timeline can end up with no event of its frame. Measured, on a three-line
+        // repro and again on MSVC's `yvals_core.h`:
+        //
+        // ```text
+        // the cooked stream        FEATURE_FLAG is 1, VISIBLE_MACRO is defined   ← correct, and what parsing uses
+        // this query               FEATURE_FLAG is "not a macro"                 ← wrong
+        // ```
+        //
+        // The stream is right because a cook reads such a file through its own table; this query reads the unit's
+        // timeline, which for that shape holds nothing. `None` says so, and the caller reports "no reading" instead of
+        // a confident `false` — a tool whose answers are used to decide what to fix must not invent one.
+        if !self.events.iter().any(|event| event.frame == frame) {
+            return None;
+        }
+
+        // **A file's own facts are visible to it, and `MacroView::the_binding` cannot say so.**
+        //
+        // That method exists for the parser, which reads a file's own definitions **from its own parse** and so wants
+        // the walk to report only inherited ones: `offset_of` answers `None` for an event of this very frame, and
+        // `last_visible` turns that into "not visible". Asking through it produced the absurdity this code was written
+        // to fix —
+        //
+        // ```text
+        // at vadefs.h:30      _CRT_PACKING  →  not a macro      ← defined at :18, in this file
+        // at vcruntime.h:100  _CRT_PACKING  →  #define 8        ← from another file, and visible
+        // ```
+        //
+        // So both halves are read and the later one wins, which is the rule the whole table follows:
+        //
+        // * **this file's own last fact at or before `offset`**, out of the unit's name history, which is in walk
+        //   order — a fact written by this file is in force from where it is written;
+        // * **the inherited one**, if any, from `the_binding`, which knows about the files this one includes.
+        let own = self
+            .by_name
+            .get(name)
+            .into_iter()
+            .flatten()
+            .rev()
+            .map(|index| &self.events[*index as usize])
+            .find(|event| event.unconditional && view.applies_here(frame, offset, event));
+
+        let inherited = view.the_binding(name);
+
+        // The event in force, taken as the **later** of the two candidates: the file's own last fact at or before the
+        // position, and whatever the inclusive walk says is in force there.
+        let event: &TuEvent = match (own, inherited) {
+            (Some(own), None) => own,
+            (None, Some((at, event))) if at <= offset => event,
+            (None, Some(_)) => {
+                return Some(MacroAt {
+                    defined: false,
+                    body: None,
+                    body_text: None,
+                    function_like: false,
+                    written_in: None,
+                    written_at_line: None,
+                });
+            }
+            (Some(own), Some(_)) => own,
+            (None, None) => {
+                return Some(MacroAt {
+                    defined: false,
+                    body: None,
+                    body_text: None,
+                    function_like: false,
+                    written_in: None,
+                    written_at_line: None,
+                });
+            }
+        };
+
+        let defined = event.body.is_some() || event.function_like.is_some();
+        Some(MacroAt {
+            defined,
+            body: event.body,
+            body_text: event.body_text.as_ref().map(|text| text.to_string()),
+            function_like: event.function_like.is_some_and(|held| held),
+            written_in: Some(self.frames[event.frame as usize].file.clone()),
+            written_at_line: None,
+        })
+    }
+}
+
 impl<'unit> MacroView<'unit> {
     /// The file this view is of.
     pub fn file(&self) -> &'unit std::path::Path {
         &self.unit.frames[self.frame as usize].file
     }
 
+    /// **Is this fact in force here, at `offset`?** — [`TranslationUnit::macro_at`]'s test, which needs the facts
+    /// [`MacroView::offset_of`] deliberately hides.
+    ///
+    /// [`MacroView::offset_of`] answers `None` for an event of the file being asked about, because the only caller it
+    /// was written for — the parser — reads a file's own definitions **from that file's own parse** and wants the
+    /// walk to report inherited facts alone. A caller asking "what is this name *here*" wants the opposite, and has to
+    /// make the same three-way decision with the own case included.
+    ///
+    /// The trap is the middle case: an event carries `at` in **its own file's** coordinates, so comparing it against
+    /// the offset being asked about compares two different rulers. Which is what the previous version did —
+    /// `event.frame == frame && event.at <= offset` — and a cross-file event that survived the frame test carried a
+    /// number from another file into the comparison. It was right by luck for a fact inherited from an include and
+    /// wrong for a fact the file wrote itself.
+    fn applies_here(&self, frame: u32, offset: usize, event: &TuEvent) -> bool {
+        let held = &self.unit.frames[frame as usize];
+
+        if event.frame == frame {
+            // The file's own text: its offsets are the ones being asked about.
+            return event.at <= offset;
+        }
+
+        if event.frame > frame && event.frame < held.tout {
+            // A file this one includes — the interval test is the frame subtree, since frames are in DFS preorder.
+            // The fact is in force from the `#include` that brought it in, **in this file's coordinates**.
+            return self.unit.offset_in(event.frame, frame) <= offset;
+        }
+
+        // Anything else was written after this file was left, which is not visible here at all.
+        false
+    }
     /// The offset in **this file** at which the event at `index` comes into force, or `None` when this file cannot
     /// see it at all.
     fn offset_of(&self, index: usize, event: &TuEvent) -> Option<usize> {
@@ -1986,8 +2285,35 @@ impl<'unit> MacroView<'unit> {
     /// The index rather than the event because the cooker needs to reach what the fact was *parsed into*
     /// ([`UnitDefinitions`]), and that parse is per event rather than per file: one definition reaches every file
     /// that sees it, and re-parsing it per file is what the census measured at seconds of a run.
+    ///
+    /// # Why a fact a condition settled counts as a binding here
+    ///
+    /// This asked for `event.unconditional` alone, and that is **not** the same question as "is this fact in force":
+    /// a `#define` inside `#if GUARD` is recorded as a *conditional* fact, and when the walk found `GUARD` true it is
+    /// as much in force as one written at file scope. Skipping those lost the definition entirely.
+    ///
+    /// Measured, and it is what the whole `[[msvc::…]]` family came down to. A three-line repro:
+    ///
+    /// ```cpp
+    /// // h2.h
+    /// #if _HAS_MSVC_ATTRIBUTE(known_semantics)      // evaluates true, so the walk records the fact
+    /// #define KM [[msvc::known_semantics]]
+    /// #endif
+    ///
+    /// // g3.cpp
+    /// #include "h2.h"
+    /// KM int a;                                     // cl: [[msvc::known_semantics]] int a;
+    /// ```
+    ///
+    /// We expanded nothing and left `KM` in the stream, for the reason `CPPLS_TRACE_MACRO=KM` printed:
+    /// `in_force=no positional=no-binding seed=no`. The definition was in the timeline — the walk recorded it — and
+    /// this filter is what hid it. The same masked every conditional definition in a compiler's own headers, which is
+    /// why `_STL_STRINGIZE` (48 recordings) and the `_MSVC_*` attribute macros all read as undefined.
+    ///
+    /// A conditional fact with **no** body is still not a binding: that is an `#undef` in a branch, or a definition
+    /// whose replacement list nobody carried, and [`UnitDefinitions::of`] answers `None` for it either way.
     pub(crate) fn visible_binding(&self, name: &str) -> Option<(usize, u32)> {
-        self.last_visible_of(name, |event| event.unconditional)
+        self.last_visible_of(name, |event| event.unconditional || event.body.is_some())
     }
 
     /// [`MacroView::the_body_in_force`] as the timeline index of that fact.
@@ -2632,10 +2958,9 @@ fn walk_one_file<'a>(
     // The frame this file occupies in the unit's timeline, when the walk is building one. Entered **after** the
     // two early returns above, so a file that is skipped leaves no frame behind — and closed at the end of this
     // function, which is after every file it includes has been walked, so the frame's subtree is an interval.
-    let frame = walked
-        .timeline
-        .as_mut()
-        .map(|timeline| timeline.enter(path, parent, from_in_parent));
+    let frame = walked.timeline.as_mut().map(|timeline| {
+        timeline.enter(path, parent, from_in_parent, file.guards.visit_once)
+    });
 
     let mut macros = file.macros.iter().peekable();
     let mut includes = file.includes.iter().peekable();
@@ -2854,6 +3179,18 @@ pub struct SummaryGuards {
     /// has *defined* its own name — a file whose contents are `#ifndef X / #define X / … #endif` would answer
     /// "inactive" to everything inside it, which is exactly backwards.
     pub own_guard: Option<u32>,
+    /// **The file writes `#pragma once`**, and so is entered at most once per translation unit.
+    ///
+    /// Stored rather than derived at the point it is needed, because the two places that need it are far from the
+    /// directives: the walk, which skips a second visit, and the **renderer**, which has to put the pragma into the
+    /// stream. `#pragma once` is the one directive that is *recognised* and, until this field existed, never
+    /// *produced* — the cook only ever sees the file it is cooking, and a header that is nothing but directives
+    /// contributes no token to be cooked at all, so its `#pragma once` never reached the output.
+    ///
+    /// Measured on `#include <vector>`: the compiler's stream carries **54** of them and ours carried none of the
+    /// ones from such files, which is what made the first difference a `#pragma`: every compiler emits the pragma of
+    /// each file it enters, and the presence of that line is how a reader sees which files a compilation read.
+    pub visit_once: bool,
 }
 
 /// One conditional region: the chain of branches a single `#if` opened.

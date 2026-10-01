@@ -360,6 +360,53 @@ fn a_pragma_stays_in_the_stream_the_way_the_compiler_keeps_it() {
 }
 
 #[test]
+fn push_macro_and_pop_macro_save_and_restore_a_definition() {
+    // **The only directives that save and restore macro state**, and MSVC's own headers rely on them:
+    // `vcruntime.h` pushes `msvc` and `constexpr`, undefines both so a header can be written without seeing them as
+    // macros, and restores them afterwards. A cook that ignored the push gets every `#ifdef` below the `#undef`
+    // wrong.
+    //
+    // Measured against cl.exe: it **drops both from `-E` output** — `#pragma push_macro("msvc")` at `vcruntime.h:323`
+    // appears zero times in the compiler's stream for `#include <vector>` — which is why neither may be printed.
+    let source = "\
+#define WIDTH 8
+#pragma push_macro(\"WIDTH\")
+#undef WIDTH
+int during = WIDTH;
+#pragma pop_macro(\"WIDTH\")
+int after = WIDTH;
+";
+    let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+    let cooked = cook(source, &tokens);
+
+    // `WIDTH` is gone between the two pragmas and back afterwards, and neither pragma is in the stream.
+    assert_eq!(
+        cooked.spellings(),
+        "int during = WIDTH ; int after = 8 ;",
+        "the pushed definition is restored by the pop, and the pragmas themselves are not text"
+    );
+
+    // A name that was **not defined** when pushed comes back undefined, which is a different thing from coming back
+    // empty: `#ifdef` can tell the two apart.
+    let source = "#pragma push_macro(\"GONE\")\n#define GONE 1\n#pragma pop_macro(\"GONE\")\n#ifdef GONE\nint defined;\n#else\nint not_defined;\n#endif\n";
+    let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+    assert_eq!(
+        cook(source, &tokens).spellings(),
+        "int not_defined ;",
+        "pushing an undefined name and popping it leaves it undefined, not defined-and-empty"
+    );
+
+    // The pragmas that are **not** these two are still printed, with their arguments expanded.
+    let source = "#define P 8\n#pragma pack(push, P)\nint x;\n";
+    let (tokens, _) = cpp_parser::lex(source, &cpp_parser::LexerConfig::default());
+    assert_eq!(
+        cook(source, &tokens).spellings(),
+        "# pragma pack ( push , 8 ) int x ;",
+        "`#pragma pack` is program text, and its argument is a macro that expands"
+    );
+}
+
+#[test]
 fn an_empty_body_leaves_nothing_behind_and_the_declaration_still_reads() {
     // `_NODISCARD` is the case that needed a shape rule on the raw side: an empty-bodied macro read as a type
     // name. Cooked, it is simply not there — and nothing downstream has to know it ever was.

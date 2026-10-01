@@ -104,7 +104,7 @@ pub use tu_cache::{TRANSLATION_UNITS_DIRECTORY, TranslationUnitCache};
 pub use summary::ConditionalBody;
 pub use summary::{
     ConditionAt, ConditionalRegion, CookedDiagnostic, DeclFact, DeclKind, FactGuard, FileSummary,
-    GuardBranch, IncludeFact, IndexedRendering, IndexedUnit, UnitReading, MacroFact, MacroKind, MacroView,
+    GuardBranch, IncludeFact, IndexedRendering, IndexedUnit, UnitReading, MacroAt, MacroFact, MacroKind, MacroView,
     MapReport,
     OutlineSymbol,
     SummaryGuards, TranslationUnit, UnitDefinitions, macros_from_direct_includes,

@@ -64,12 +64,29 @@ fn main() {
     let mut root: Option<PathBuf> = None;
     let mut ours_only = false;
     let mut record = false;
+    let mut windows = false;
+    // `--at <file>:<line>:<name>` — ask what a name is at one position. Repeatable.
+    let mut asks: Vec<(PathBuf, usize, String)> = Vec::new();
 
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--project" => root = arguments.next().map(PathBuf::from),
             "--ours-only" => ours_only = true,
             "--record" => record = true,
+            "--window" => windows = true,
+            "--at" => {
+                let Some(spec) = arguments.next() else {
+                    eprintln!("--at needs <file>:<line>:<name>");
+                    return;
+                };
+                match parse_an_ask(&spec) {
+                    Some(ask) => asks.push(ask),
+                    None => {
+                        eprintln!("--at wants <file>:<line>:<name>, got {spec:?}");
+                        return;
+                    }
+                }
+            }
             other => file = Some(PathBuf::from(other)),
         }
     }
@@ -85,7 +102,17 @@ fn main() {
              --ours-only  print our half and stop: needs no compiler, so a machine without one can still\n\
              \x20            record what the reading produced\n\
              --record     instead of the full report, print the two numbers a regression check compares:\n\
-             \x20            one `summary` line and one line per file, in a fixed order"
+             \x20            one `summary` line and one line per file, in a fixed order\n\
+             \n\
+             --window     print both streams around the first difference. A difference names one position;\n\
+             \x20            what a reader needs in order to judge it is the run around it on both sides,\n\
+             \x20            because the cause is usually a few tokens before the symptom\n\
+             --at <file>:<line>:<name>\n\
+             \x20            ask what a name is at one position — its definition, or that it is not one —\n\
+             \x20            as *this* analysis read it. Repeatable. This replaces the only other way to\n\
+             \x20            ask, which was to copy the file, inject an `#error` probe and read the\n\
+             \x20            compiler's complaint — and the copy is not the file: an include guard, an\n\
+             \x20            include order or a `#pragma push_macro` all move when the text moves"
         );
         std::process::exit(2);
     };
@@ -110,6 +137,39 @@ fn main() {
         WatchFilter::new(&root),
     );
     session.index_everything();
+
+    // **The positional questions, answered before anything is printed about the streams.** These are asked of the
+    // analysis's own timeline, so answering them needs the session and nothing else — and they are the reason this
+    // tool can answer "what is `msvc` at `xtr1common:28`" without a copy of the file and an injected probe.
+    for (path, line, name) in &asks {
+        let source = std::fs::read_to_string(path).unwrap_or_default();
+        let offset = offset_of_line(&source, *line);
+        println!("--- at {}:{line} what is {name:?}", path.display());
+        match session.macro_at(path, name, offset) {
+            None => println!("    this session's walk never reaches that file"),
+            Some(held) => {
+                if !held.defined {
+                    println!("    not a macro there");
+                } else {
+                    println!(
+                        "    #define {}{}{}",
+                        name,
+                        if held.function_like { "(…)" } else { "" },
+                        held.body_text
+                            .as_deref()
+                            .map(|body| format!(" {body}"))
+                            .unwrap_or_default()
+                    );
+                    if let Some(where_from) = &held.written_in {
+                        println!("    written in {}", where_from.display());
+                    }
+                    if let Some(shape) = held.body {
+                        println!("    shape {shape:?}");
+                    }
+                }
+            }
+        }
+    }
 
     println!("file     {}", file.display());
     println!("project  {}", root.display());
@@ -282,6 +342,29 @@ fn main() {
             }
             if missing.len() > 60 {
                 println!("  … {} more", missing.len() - 60);
+            }
+        }
+    }
+
+    // **The two streams side by side at the first difference**, when the caller asks for it. A `Difference` names one
+    // position and one token each; what a reader needs in order to judge it is the **run** around it, on both sides,
+    // because the cause is usually a few tokens before the symptom.
+    if windows {
+        match report.differences.first() {
+            None => println!("\n--- the two streams agree, so there is no window to show"),
+            Some(first) => {
+                let at = first.at;
+                let from = at.saturating_sub(48);
+                let to = at + 40;
+
+                println!("\n--- ours around the first difference (position {at}) ---");
+                for index in from..to.min(ours.len()) {
+                    println!("  {index:>6}  {:?}", ours[index].spelling);
+                }
+                println!("--- theirs at the same position ---");
+                for index in from..to.min(theirs.len()) {
+                    println!("  {index:>6}  {:?}", theirs[index].spelling);
+                }
             }
         }
     }
@@ -579,7 +662,7 @@ fn print_per_file(ours: &[StreamToken], files: &[PathBuf]) {
     // **The stream itself, when it is short enough to read.** A first difference says *where* two readings parted;
     // on a small probe the whole stream says *what* each one is, which is what turns "we differ at sal.h:2361" into
     // "we emit these eighteen tokens and cl emits those twenty-six".
-    if ours.len() <= 260 {
+    if ours.len() <= 4000 {
         println!("\n--- our stream ({} tokens) ---", ours.len());
         for (index, token) in ours.iter().enumerate() {
             let file = token
@@ -631,4 +714,29 @@ fn compiler_family(program: &Path) -> String {
 /// The first `limit` lines of a compiler's message, because a compiler can be verbose about one mistake.
 fn first_lines(text: &str, limit: usize) -> String {
     text.lines().take(limit).collect::<Vec<_>>().join("\n")
+}
+
+/// `"<file>:<line>:<name>"` — the spelling `--at` takes, and `None` when it is not that shape.
+///
+/// The file is allowed to contain a colon (a Windows drive letter is one), so the parse runs **from the right**: the
+/// last colon ends the name, the one before it separates the line.
+fn parse_an_ask(spec: &str) -> Option<(PathBuf, usize, String)> {
+    let (rest, name) = spec.rsplit_once(':')?;
+    let (path, line) = rest.rsplit_once(':')?;
+    Some((PathBuf::from(path), line.parse().ok()?, name.to_string()))
+}
+
+/// The byte offset a **one-based** line starts at, for a file held as text.
+///
+/// A line past the end gives the end of the text, which is what a caller asking about "the last line" means.
+fn offset_of_line(source: &str, line: usize) -> usize {
+    if line <= 1 {
+        return 0;
+    }
+
+    source
+        .match_indices('\n')
+        .nth(line - 2)
+        .map(|(at, _)| at + 1)
+        .unwrap_or(source.len())
 }

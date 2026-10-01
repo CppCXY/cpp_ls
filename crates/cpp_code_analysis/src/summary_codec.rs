@@ -178,7 +178,21 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 ///
 /// Only [`CODEC_VERSION`] moves: an entry written before it existed has no parameter list, and the detail line
 /// falls back to the `(…)` it used to print — a weaker answer, not a wrong one.
-pub const CODEC_VERSION: u32 = 23;
+/// # Version 23
+///
+/// A unit frame gained `visit_once` — the bump to version 24: whether the file writes `#pragma once`, so that a
+/// renderer can **emit** the line. Until now the pragma was recognised (the walk uses it to skip a second visit) and
+/// never produced: a cook sees only the file it is cooking, and a header that is nothing but directives contributes
+/// no token to be cooked, so its `#pragma once` never reached the stream.
+///
+/// Measured on `#include <vector>`: the compiler's stream has **54** of them, and the first difference between the
+/// two readings was a `#pragma` — every compiler emits the pragma of each file it enters, so the line is how a
+/// reader sees which files a compilation read.
+///
+/// Only [`CODEC_VERSION`] moves: the field is new, so an entry written before it decodes with the frame's flag
+/// unset, which is a weaker answer (a missing `#pragma` line) rather than a wrong one — and the reader rejects the
+/// older version anyway.
+pub const CODEC_VERSION: u32 = 24;
 
 /// Write a summary as bytes.
 ///
@@ -374,6 +388,7 @@ pub fn encode_translation_unit(unit: &TranslationUnit, closure: &[(std::path::Pa
         put_u64(&mut out, frame.from_in_parent as u64);
         put_u32(&mut out, frame.entry_seq);
         put_u32(&mut out, frame.tout);
+        put_u8(&mut out, u8::from(frame.visit_once));
     }
 
     put_u32(&mut out, unit.events.len() as u32);
@@ -455,6 +470,7 @@ pub fn decode_translation_unit(
             from_in_parent: reader.u64()? as usize,
             entry_seq: reader.u32()?,
             tout: reader.u32()?,
+            visit_once: reader.u8()? != 0,
         });
     }
 
@@ -1244,6 +1260,7 @@ mod tests {
                 },
             ],
             guards: SummaryGuards {
+                visit_once: false,
                 regions: vec![range(200, 12), range(240, 20), range(260, 9), range(300, 11)],
                 conditionals: vec![
                     ConditionalRegion {

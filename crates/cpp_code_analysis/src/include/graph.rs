@@ -979,6 +979,19 @@ impl crate::condition::MacroValues for Marked {
     fn lookup(&self, name: &str) -> crate::condition::Lookup<'_> {
         use crate::condition::Lookup;
 
+        // **A builtin operator is defined**, which is what the implementation says about its own predefined macros:
+        // `defined(__has_cpp_attribute)` is true on clang, gcc and MSVC alike. See
+        // [`crate::preprocess::guard`], where the same answer is given to the cook's `#ifdef` — the two paths have to
+        // agree, and this is the one the **include walk** uses.
+        //
+        // Missing it here was enough to defeat the whole `_HAS_MSVC_ATTRIBUTE` chain: `yvals_core.h:655` writes
+        // `#ifndef __has_cpp_attribute`, we answered "not defined", and the header then defined
+        // `_HAS_MSVC_ATTRIBUTE(x)` as the literal `0` — so `_NO_SPECIALIZATIONS_MSG` was never defined and
+        // `[[msvc::no_specializations(...)]]` vanished from `xtr1common:28`.
+        if crate::preprocess::condition::is_a_builtin_operator(name) {
+            return Lookup::DefinedWithoutAValue;
+        }
+
         if self.is_unknown(name) {
             return Lookup::Unanswered;
         }
@@ -989,6 +1002,21 @@ impl crate::condition::MacroValues for Marked {
 
         self.get(name)
             .map_or(Lookup::DefinedWithoutAValue, Lookup::Defined)
+    }
+
+    /// [`crate::condition::MacroValues::builtin_operator`] for the **walk's** state, so that
+    /// `#if __has_cpp_attribute(msvc::no_specializations)` is decided here the way the cook decides it.
+    ///
+    /// Without this the walk and the cook would answer the same question differently, which is the defect this file
+    /// has already been fixed for once (see `UnitMacros::lookup`): a condition has one answer, and both layers have
+    /// to reach it.
+    fn builtin_operator(&self, name: &str, operand: &str) -> Option<crate::condition::Value> {
+        if name == "__has_cpp_attribute" {
+            return crate::preprocess::cooked::attribute_support(operand)
+                .map(crate::condition::Value::Known);
+        }
+
+        None
     }
 }
 

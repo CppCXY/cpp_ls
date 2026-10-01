@@ -242,6 +242,11 @@ pub trait MacroBindings {
     ///
     /// `None` is "this table cannot speak about that", which the evaluator turns into `Unknown` rather than `0`. The
     /// default is `None` so that a table which knows nothing about builtins is not forced to say so.
+    ///
+    /// `__has_cpp_attribute` is **not** answered here: its answer depends on the macro state **at an offset**, and a
+    /// position is the one thing this trait's methods are not given. It is a free function taking an offset —
+    /// [`crate::preprocess::cooked::attribute_support`] — and [`crate::preprocess::PositionalMacros`], which has the
+    /// offset, is the layer that calls it.
     fn builtin_operator(&self, name: &str, operand: &str) -> Option<crate::condition::Value> {
         let _ = (name, operand);
         None

@@ -625,6 +625,16 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             // summary. See `SummaryGuards::own_guard` — a file's own guard is not a condition on anything.
             guards.own_guard = own_guard.map(|region| region as u32);
 
+            // **And whether the file asks to be entered once by pragma**, which is the same scan `detect_guard`
+            // already did — kept because the renderer needs to emit the line and has no directives to look at.
+            guards.visit_once = preprocessing.directives.iter().any(|spanned| {
+                matches!(
+                    &spanned.directive,
+                    crate::directive::Directive::Pragma { tokens }
+                        if tokens.first().is_some_and(|token| token.text() == "once")
+                )
+            });
+
             if let Some(region) = own_guard {
                 let mut all: Vec<&mut FactGuard> = declarations
                     .iter_mut()

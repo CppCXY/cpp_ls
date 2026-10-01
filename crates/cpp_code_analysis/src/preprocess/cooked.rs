@@ -39,7 +39,6 @@ use cpp_parser::{CppTokenData, SourceRange};
 
 use crate::{
     Origin,
-    Token,
     directive::{Directive, DirectiveKind},
     expand::{Diagnostic, ExpandedToken, expand},
     guard::Branch,
@@ -656,7 +655,72 @@ impl<'unit> FileMacros<'unit> {
 }
 
 impl crate::macros::MacroBindings for FileMacros<'_> {
+    /// **What the table actually holds for a name**, behind an environment variable.
+    ///
+    /// Written because two facts can both be true and still not explain an output: a probe can prove a macro is
+    /// *defined* — `#ifdef` in a copy of the file, which `cl.exe` and this reader agree on — while the stream shows
+    /// its name unexpanded. `#ifdef` answers "is there a definition", not "what is it", and the **shape** is what
+    /// decides whether `NAME (args)` is a call at all. The shape is not visible from outside.
+    ///
+    /// `CPPLS_TRACE_MACRO=NAME` prints one line per lookup of that name, with everything the expander will see.
     fn definition_at(&self, name: &str, offset: usize) -> Option<&crate::macros::MacroDef> {
+        let found = self.definition_at_traced(name, offset);
+
+        if let Some(wanted) = std::env::var_os("CPPLS_TRACE_MACRO")
+            && wanted.to_string_lossy() == name
+        {
+            match &found {
+                None => {
+                    // Which layer missed, and why — the three answers are the whole diagnosis.
+                    let in_force = self
+                        .in_force(name)
+                        .map(|_| "yes")
+                        .unwrap_or("no");
+                    let positional = match self.view.visible_binding(name) {
+                        None => "no-binding".to_string(),
+                        Some((at, index)) => format!(
+                            "binding@{} definition={}",
+                            at,
+                            if self.definitions.of(index).is_some() { "yes" } else { "NO" }
+                        ),
+                    };
+                    let seed = self.seed.and_then(|seed| seed.definition(name)).map(|_| "yes").unwrap_or("no");
+                    eprintln!(
+                        "cppls-macro: {name} at {offset} -> not defined (in_force={in_force} positional={positional} seed={seed})"
+                    );
+                }
+                Some(definition) => {
+                    let body: Vec<&str> = definition
+                        .body
+                        .significant()
+                        .map(|token| token.text())
+                        .collect();
+                    let params: Vec<&str> = definition
+                        .params
+                        .as_ref()
+                        .map(|list| list.iter().map(|held| held.name.as_ref()).collect())
+                        .unwrap_or_default();
+                    eprintln!(
+                        "cppls-macro: {name} at {offset} -> function_like={} params={params:?} body={:?}",
+                        definition.params.is_some(),
+                        body.join(" ")
+                    );
+                }
+            }
+        }
+
+        found
+    }
+
+    fn definition(&self, name: &str) -> Option<&crate::macros::MacroDef> {
+        self.definition_at(name, usize::MAX)
+    }
+}
+
+impl FileMacros<'_> {
+    /// The lookup [`crate::macros::MacroBindings::definition_at`] wraps, split out so the trace around it can see the
+    /// answer without interfering with the early returns that produce it.
+    fn definition_at_traced(&self, name: &str, offset: usize) -> Option<&crate::macros::MacroDef> {
         if let Some(definition) = self.in_force(name) {
             // In force from offset 0, so every offset sees it — see the type's note on the layer order.
             return Some(definition);
@@ -669,9 +733,6 @@ impl crate::macros::MacroBindings for FileMacros<'_> {
         self.seed?.definition_at(name, offset)
     }
 
-    fn definition(&self, name: &str) -> Option<&crate::macros::MacroDef> {
-        self.definition_at(name, usize::MAX)
-    }
 }
 
 /// **[`FileMacros`] as the shape reader's one question** — "what does this name stand for at this offset".
@@ -715,6 +776,13 @@ impl cpp_parser::MacroBodies for FileMacros<'_> {
 struct Live<'base> {
     own: MacroTable,
     base: &'base dyn crate::macros::MacroBindings,
+    /// **What `#pragma push_macro` has saved** — `(name, the definition that was in force)`, innermost last.
+    ///
+    /// A stack on the table rather than in it, because a push is not a binding: nothing about what a name *means* at
+    /// an offset changes, and the only thing being recorded is what to come back to. `None` means the name was not
+    /// defined when it was pushed, which `pop` restores by undefining it — the distinction between "was empty" and
+    /// "was not there" is one `#ifdef` away from mattering.
+    pushed: Vec<(String, Option<std::sync::Arc<crate::macros::MacroDef>>)>,
     /// **What `__has_include` is answered from**, when the caller supplied a search. `None` makes the operator
     /// `Unknown`, which is the honest answer for a cook that has no search paths — see [`HeaderSearch`].
     search: Option<&'base dyn HeaderSearch>,
@@ -764,6 +832,11 @@ impl crate::condition::MacroValues for Live<'_> {
     fn builtin_operator(&self, name: &str, operand: &str) -> Option<crate::condition::Value> {
         use crate::condition::Value;
 
+        // `__has_cpp_attribute` is answered by the table's own [`crate::macros::MacroBindings::attribute_support`],
+        // which `PositionalMacros` reaches through the trait — so there is nothing to do here. It was answered here
+        // once, from a free function, and that is exactly the mistake this file's `PositionalMacros` note describes:
+        // an implementation one layer below the only caller that ever asks.
+        //
         // `__has_include_next` asks about the search *after* the directory this file was found in. That needs to know
         // where the file was found, which this layer is not told — and answering it as if it were `__has_include`
         // would be a different question with a different answer.
@@ -814,6 +887,57 @@ impl crate::macros::MacroBindings for Over<'_> {
         self.newest
             .definition(name)
             .or_else(|| self.oldest.definition(name))
+    }
+}
+
+/// **Is this attribute supported here?** — `__has_cpp_attribute`'s answer, `1` or `0`.
+///
+/// `None` means "not in the table", which the evaluator turns into `Unknown` rather than `0`, so a name this table
+/// has never heard of costs a reading instead of sending the file down a branch the compiler does not take.
+///
+/// # What was wrong with the first two versions
+///
+/// **Version one** answered the `msvc::` family from a constant table after a probe printed `1`, and was reverted
+/// when an earlier probe printed `0` — see the note that used to be here. The probe was right both times; the
+/// conclusion drawn from it was not, because the two probes were not asking the same question.
+///
+/// **Version two** asked the macro table whether the bare name was a macro "at this offset", on a reading of
+/// `yvals_core.h`'s `#pragma push_macro`/`#undef` pairs as a switch for these attributes. Checked afterwards: **no
+/// header anywhere defines those names**, so the answer was always `0` — and the cost was exact.
+/// `_HAS_MSVC_ATTRIBUTE(x)` is `__has_cpp_attribute(msvc::x)`, every one of them answered `0`,
+/// `_NO_SPECIALIZATIONS_MSG` was never defined, and `[[msvc::no_specializations(...)]]` was missing from every
+/// declaration in `xtr1common` — the first difference on `#include <vector>`.
+///
+/// # The rule, which the third version follows
+///
+/// MSVC's preprocessor reports these as **supported**, and the answer does not move with a macro. What does move is
+/// the *spelling* the operand arrives as, and that is what this accepts both of:
+///
+/// ```text
+/// __has_cpp_attribute(msvc::no_specializations)     the name, written out
+/// _HAS_MSVC_ATTRIBUTE(no_specializations)           → __has_cpp_attribute(msvc::x) with x substituted *before* it
+///                                                     is expanded, so the header's `#pragma push_macro` and
+///                                                     `#undef no_specializations` cannot take the name away
+/// ```
+///
+/// The second is why a `#undef` of the bare name reaches this as **`msvc::`** — the parameter substitutes
+/// unexpanded, and by the time anything expands, the name is gone. But an operand that has been *fully* expanded by
+/// the cooker (`msvc::`) names the same attribute, so both spellings are answered the same way. Treating them
+/// differently is what made `attr4.cpp` produce 3 tokens against the compiler's 13.
+pub fn attribute_support(spelling: &str) -> Option<i128> {
+    // The operand is taken verbatim by the condition parser, so it may arrive with the spacing its author wrote, and
+    // with or without the namespace that says which attribute this is. Nothing here cares about either.
+    let name: String = spelling.split_whitespace().collect();
+    let bare = name.strip_prefix("msvc::").unwrap_or(&name);
+
+    match bare {
+        // **MSVC's own attributes, which its preprocessor reports as supported.**
+        "no_specializations" | "lifetimebound" | "intrinsic" | "known_semantics" | "noop_dtor" => Some(1),
+        // MSVC spells this one `[[msvc::maybe_unused]]`, so the **plain** spelling is not supported.
+        "maybe_unused" => Some(0),
+        // A clang attribute is not an MSVC one.
+        "clang::no_specializations" => Some(0),
+        _ => None,
     }
 }
 
@@ -951,6 +1075,7 @@ pub fn cook_with_search(
     let mut live = Live {
         own: MacroTable::new(),
         base: initial,
+        pushed: Vec::new(),
         search,
         directory,
     };
@@ -1051,11 +1176,33 @@ pub fn cook_with_search(
             // the directives are what a reader *sees*: `#pragma region` is how MSVC headers fold, and a server that
             // deletes it cannot reproduce the file's shape.
             //
-            // The kind is not interpreted, which is the same stance [`Directive::Pragma`] already documents: the
-            // tokens go through as they were written, and no layer here has to have an opinion about `pack`.
+            // # Why the arguments are expanded
+            //
+            // `vadefs.h:19` writes `#pragma pack(push, _CRT_PACKING)`, with `#define _CRT_PACKING 8` on the line
+            // above it, and cl.exe prints `#pragma pack(push, 8)`. So a pragma's arguments are an **ordinary run of
+            // tokens** and go through the same expander as everything else — which is why this is a call to
+            // [`expand_run`] rather than a loop of its own: a second implementation of "what does this text expand
+            // to" is exactly where the two would drift apart.
+            //
+            // [`expand_run`] filters trivia and keeps each token's real range, so the offset map downstream is
+            // unchanged and no comment or newline enters the stream.
             DirectiveKind::Pragma => {
                 if was_live {
-                    push_the_directive(spanned, tokens, source, &mut out);
+                    let first = tokens.partition_point(|token| {
+                        token.range.start_offset < spanned.range.start_offset
+                    });
+                    let last = tokens.partition_point(|token| {
+                        token.range.start_offset < spanned.range.end_offset()
+                    });
+
+                    // **`push_macro`/`pop_macro` are the two pragmas that act on the macro table**, so they are
+                    // handled rather than printed — see [`push_and_pop_macro`]. Measured: cl.exe **drops both** from
+                    // its `-E` output (`#pragma push_macro("msvc")` at `vcruntime.h:323` appears zero times in the
+                    // compiler's stream for `#include <vector>`), which is why the first version of this — print
+                    // every pragma — made us differ by exactly those tokens.
+                    if !push_and_pop_macro(spanned, source, spanned.range.start_offset, &mut live) {
+                        expand_run(source, tokens, first, last, &live, &mut out);
+                    }
                 }
             }
             _ => {}
@@ -1090,60 +1237,125 @@ fn is_live(regions: &[Region]) -> bool {
     regions.last().is_none_or(|region| region.live)
 }
 
-/// Put a directive's own tokens into the stream, spelling for spelling and position for position.
+
+/// **Handle `#pragma push_macro("x")` / `#pragma pop_macro("x")` against the macro table.**
 ///
-/// For the directives that are **part of the program** rather than instructions to the processor — currently
-/// `#pragma`, which every compiler keeps in its preprocessed output. The tokens are taken from their real ranges in
-/// the source, so each carries the position a reader would point at, and the offset map downstream is unchanged:
-/// this is the only place a directive's tokens enter the stream, and they enter as ordinary source tokens.
+/// Returns whether this pragma was one of them, so the caller knows not to put it in the stream. cl.exe leaves both
+/// out of its `-E` output, measured: `vcruntime.h:323` writes `#pragma push_macro("msvc")` and the compilation of
+/// `#include <vector>` mentions `push_macro` **zero** times.
 ///
-/// **The `#` stays**, which was measured rather than assumed.
+/// # Why they cannot simply be printed, or simply ignored
 ///
-/// The first version of this left it out, on the reasoning that `#` is the marker that makes a line a directive
-/// rather than a token of the program. cl.exe disagrees: on `#include <sal.h>` the last four differences between the
-/// two streams were **all of them `#`** — `sal.h:13`, `sal.h:707`, `sal.h:1471`, `concurrencysal.h:18`, each present
-/// on its side and absent from ours, and nothing else left at all. So a `#pragma` in the compiler's output is
-/// `#` `pragma` and its arguments, and the stream carries exactly that.
+/// They are not text and they are not nothing: they are **the only directives that save and restore macro state**,
+/// and MSVC's own headers use them for exactly that. `vcruntime.h` writes
 ///
-/// It costs one token per pragma and removes a whole class of difference, and it is the same lesson as the guard
-/// bug one layer up: where the compiler has an opinion, the compiler's answer is the one to match.
-fn push_the_directive(
+/// ```cpp
+/// #pragma push_macro("msvc")        // 323
+/// #pragma push_macro("constexpr")
+/// #undef msvc
+/// #undef constexpr
+/// ```
+///
+/// and later restores them, so that a header which must not see `msvc`/`constexpr` as macros can still be written in
+/// the same file as one that must. A cook that ignores the push gets the later `#undef` wrong for everything after
+/// it — the names stay undefined where the compiler has them defined again — and every `#ifdef` below that point
+/// answers the wrong way.
+///
+/// # How the table expresses it
+///
+/// [`crate::macros::MacroTable`] is an **append-only timeline**: a name is a list of bindings, each with the offset
+/// it takes effect from, and the last one at or before an offset wins. So both halves are just appends:
+///
+/// * `push` re-binds the definition that is already in force, at this offset — which changes nothing about what the
+///   name means here, and **freezes** it as the value to come back to;
+/// * `pop` re-binds the definition that was frozen (or appends an `#undef` when the name was not defined at push
+///   time), which is what puts the saved meaning back.
+///
+/// Nothing is removed from the timeline, which is what makes the earlier offsets in the file keep answering exactly
+/// as they did before — a table that mutated in place would answer historical questions with present state.
+fn push_and_pop_macro(
     spanned: &crate::directive::SpannedDirective,
-    tokens: &[CppTokenData],
     source: &str,
-    out: &mut CookedStream,
-) {
-    let first = tokens.partition_point(|token| token.range.start_offset < spanned.range.start_offset);
-    let last = tokens.partition_point(|token| token.range.start_offset < spanned.range.end_offset());
+    at: usize,
+    live: &mut Live<'_>,
+) -> bool {
+    let crate::directive::Directive::Pragma { tokens } = &spanned.directive else {
+        return false;
+    };
 
-    for token in &tokens[first..last] {
-        // **Trivia stays out, which is what keeps the rest of the stream consistent.**
-        //
-        // A `#pragma`'s span runs to the end of its line, so it contains the newline that ends it and any comment
-        // written on it. Emitting those would put comments and `\r\n` into a stream that is otherwise trivia-free —
-        // measured on `#include <vector>`, that was 4 865 tokens of comment text, and `#pragma once` came out as five
-        // tokens (`pragma`, `" "`, `once`, `"\r\n"`, …) where the compiler has two.
-        //
-        // It is also what the first attempt got wrong: the tokens were pushed straight from the directive's span with
-        // no such filter, and the count went **up** on a fix that was supposed to make the two streams agree.
-        if is_trivia(token.kind) {
-            continue;
+    let mut spelled: Vec<&str> = tokens
+        .iter()
+        .map(|token| token.text())
+        .filter(|text| !text.is_empty())
+        .collect();
+    let Some(kind) = spelled.first().copied() else {
+        return false;
+    };
+
+    // **`#pragma push_macro ( "msvc" )` and `#pragma push_macro("msvc")` are the same pragma.** The tokens are the
+    // `(` `)` the author happened to write, and the *name* is the string literal — the quotes are the syntax, not
+    // part of the name, which is why they are stripped here rather than searched for.
+    spelled.retain(|text| *text != "(" && *text != ")");
+    let Some(name) = spelled.get(1).copied().map(unquote_a_pragma_name) else {
+        return false;
+    };
+    if name.is_empty() {
+        return false;
+    }
+
+    match kind {
+        "push_macro" => {
+            let saved = live
+                .definition_at(&name, at)
+                .map(|definition| std::sync::Arc::new(definition.clone()));
+            // The re-bind that freezes it. `definition_at` answered from the file's own layer or the compiler's, and
+            // either way this makes the *current* meaning the last binding — which is what `pop` will restore.
+            match &saved {
+                Some(definition) => live.own.define_shared(std::sync::Arc::clone(definition)),
+                None => live.own.undefine(&name, at),
+            }
+            live.pushed.push((name, saved));
+            true
         }
+        "pop_macro" => {
+            // **The innermost push for this name**, which is the matching one — not simply the last push of
+            // anything, because two names can be pushed and popped out of order.
+            let found = live
+                .pushed
+                .iter()
+                .rposition(|(pushed, _)| *pushed == name)
+                .map(|index| live.pushed.remove(index));
 
-        let Some(text) = source.get(token.range.start_offset..token.range.end_offset()) else {
-            continue;
-        };
-        if text.is_empty() {
-            continue;
+            let Some((_, saved)) = found else {
+                // No push to match. A compiler ignores it, and so does this: guessing a value would be worse than
+                // leaving the table as it stands.
+                let _ = source;
+                return true;
+            };
+
+            match saved {
+                Some(definition) => live.own.define_shared(definition),
+                None => live.own.undefine(&name, at),
+            }
+            true
         }
-
-        out.tokens.push(ExpandedToken {
-            token: Token::new(token.kind, text, token.range),
-            origin: Origin::Source,
-            space_before: true,
-        });
+        _ => false,
     }
 }
+
+/// The name inside a `#pragma`'s string literal: `"msvc"` becomes `msvc`.
+///
+/// A pragma's name is written quoted because it is a *macro name* rather than an expression, so the quotes are
+/// delimiters and not part of what is being named. An unquoted spelling is returned as it stands, which is what
+/// makes a non-standard `#pragma push_macro(msvc)` behave the way its author meant.
+fn unquote_a_pragma_name(spelling: &str) -> String {
+    spelling
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .unwrap_or(spelling)
+        .to_string()
+}
+
 
 /// The first token index at or after `offset`.
 fn token_index_after(tokens: &[CppTokenData], offset: usize) -> usize {
