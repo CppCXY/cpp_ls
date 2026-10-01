@@ -34,10 +34,66 @@ impl<'a> CppLexer<'a> {
                 break;
             }
 
-            tokens.push(CppTokenData::new(kind, self.reader.saved_range()));
+            self.push(tokens.as_mut(), kind);
         }
 
         tokens
+    }
+
+    /// Push the token just lexed, **broken up when it is one of the three the grammar cannot use whole**.
+    ///
+    /// # Maximal munch runs first, and is not negotiable
+    ///
+    /// [`CppLexer::lex`] takes the longest run of characters that could be one token, because that is translation
+    /// phase 3 and it is what makes `a->b` one token while `a - >b` is three. Nothing here changes that.
+    ///
+    /// What maximal munch produces, though, is a **preprocessing token**, and the grammar works *above* the
+    /// preprocessor. `>>` is one preprocessing token and **two `>` tokens**, and only the grammar knows which
+    /// reading a given one has — `std::vector<std::vector<int>>` ends in two closers, `a >> b` is a shift, and the
+    /// tokens are the same. So the split belongs to the end of phase 3 rather than to the parser.
+    ///
+    /// # Which three, and why only those
+    ///
+    /// Exactly the spellings whose **first character is a `>` that can close a template-argument-list**: `>>`,
+    /// `>=` and `>>=`. `<<`, `<=`, `->`, `::` and `...` are pushed whole — none of them can close a list, so
+    /// breaking them would buy nothing and cost every consumer of those tokens a join.
+    ///
+    /// # What this replaces, and the layer it deletes
+    ///
+    /// The parser used to split them **on demand, in place**, with `Vec::insert` — which shifts every token after
+    /// the cursor, so one split cost `O(tokens remaining)` and a file needing `k` of them cost `O(k · n)`. Measured
+    /// on the 3.3 MB cooked `<vector>` stream: **2759 ms**, with the per-byte cost climbing 244 → 847 µs/KB down the
+    /// ladder; the same text with `>>` written `> >` parsed in 793 ms at a flat 243 µs/KB. Doing it here costs one
+    /// `Vec` push per part and nothing after that.
+    ///
+    /// The other half of the same fact is the **compensation** the old spelling forced on the grammar: the angle
+    /// scanners counted a `RightShift` as *two* brackets — `angles += 2`, `depth -= 2` — each one a place that had
+    /// to know how the lexer spells things, and `types.rs` even said so in a comment ("the lexer has already glued
+    /// `>>` into a single `RightShift`"). With every `>` one bracket, those collapse.
+    fn push(&self, tokens: &mut Vec<CppTokenData>, kind: CppTokenKind) {
+        let range = self.reader.saved_range();
+        let start = range.start_offset;
+
+        // One byte per part, and the parts are contiguous by construction: the lexer only produces these three
+        // after consuming exactly these characters.
+        let part = |at: usize, kind| CppTokenData::new(kind, crate::text::SourceRange::new(at, 1));
+
+        match kind {
+            CppTokenKind::RightShift => {
+                tokens.push(part(start, CppTokenKind::Greater));
+                tokens.push(part(start + 1, CppTokenKind::Greater));
+            }
+            CppTokenKind::GreaterEqual => {
+                tokens.push(part(start, CppTokenKind::Greater));
+                tokens.push(part(start + 1, CppTokenKind::Assign));
+            }
+            CppTokenKind::RightShiftAssign => {
+                tokens.push(part(start, CppTokenKind::Greater));
+                tokens.push(part(start + 1, CppTokenKind::Greater));
+                tokens.push(part(start + 2, CppTokenKind::Assign));
+            }
+            _ => tokens.push(CppTokenData::new(kind, range)),
+        }
     }
 
     /// Convert identifier to keyword token if it matches a C++ keyword

@@ -604,7 +604,7 @@ fn parse_binary_expr_with_precedence(p: &mut CppParser, min_prec: u8) -> ParseRe
     // unanswerable in every file that included `<string>`.
     if is_fold_operator(p, p.current_token())
         && p.peek_next_token() == CppTokenKind::Ellipsis
-        && let Some(prec) = get_operator_precedence(p, p.current_token())
+        && let Some(prec) = get_operator_precedence(p, p.joined_operator_at_the_cursor().0)
         && prec >= min_prec
     {
         let operator = p.current_token();
@@ -619,7 +619,7 @@ fn parse_binary_expr_with_precedence(p: &mut CppParser, min_prec: u8) -> ParseRe
         // term of the chain.
         if is_fold_operator(p, p.current_token())
             && p.current_token() == operator
-            && let Some(prec) = get_operator_precedence(p, p.current_token())
+            && let Some(prec) = get_operator_precedence(p, p.joined_operator_at_the_cursor().0)
             && prec >= min_prec
         {
             p.bump(); // the operator again
@@ -692,7 +692,7 @@ fn parse_binary_expr_with_precedence(p: &mut CppParser, min_prec: u8) -> ParseRe
                 super::stats::parse_preprocessor_directive(p)?;
             }
 
-            let an_operator_follows = get_operator_precedence(p, p.current_token())
+            let an_operator_follows = get_operator_precedence(p, p.joined_operator_at_the_cursor().0)
                 .is_some_and(|prec| prec >= min_prec);
             if !an_operator_follows {
                 if opens_another_branch {
@@ -702,16 +702,22 @@ fn parse_binary_expr_with_precedence(p: &mut CppParser, min_prec: u8) -> ParseRe
             }
         }
 
-        let Some(prec) = get_operator_precedence(p, p.current_token()) else {
+        let Some(prec) = get_operator_precedence(p, p.joined_operator_at_the_cursor().0) else {
             break;
         };
         if prec < min_prec {
             break;
         }
 
-        let operator = p.current_token();
+        // The operator, and **how many tokens the lexer left it in** — `>>`, `>>=` and `>=` arrive broken up, so
+        // the cursor has to advance over every part. See [`CppParser::joined_operator_at_the_cursor`]: one
+        // question ("is this an operator") with one answer, instead of a `RightShift` handed out whole and three
+        // angle scanners left to remember that it was two brackets.
+        let (operator, spans) = p.joined_operator_at_the_cursor();
         let m = left.precede(p, CppSyntaxKind::BinaryExpr);
-        p.bump(); // consume operator
+        for _ in 0..spans {
+            p.bump(); // consume operator
+        }
 
         // The right operand of an **assignment** is an *initializer-clause*, which is a wider rule than an
         // expression: `x = {1, 2};` assigns a braced-init-list, and a `{` cannot begin an expression at all.

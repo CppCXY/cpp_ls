@@ -1005,6 +1005,64 @@ impl<'a> CppParser<'a> {
         self.token_index = index;
     }
 
+    /// **The operator at the cursor**, with the `>`-family spellings the lexer broke up put back together.
+    ///
+    /// Returns the kind and **how many tokens it spans**: `1` for everything but `>>` (2), `>=` (2) and `>>=`
+    /// (3), which the lexer splits at the end of maximal munch — see [`crate::lexer::CppLexer::tokenize`] for why
+    /// the split is there. A caller that has taken the operator must advance the cursor by that many tokens.
+    ///
+    /// # Two questions, two answers, and neither knows the other's spelling
+    ///
+    /// A caller that wants an **operator** asks this. A caller that wants a `>` as a **bracket** — the
+    /// template-argument reader closing its list — asks [`CppParser::current_token`] and gets a lone `>`, because
+    /// the lexer left it that way. That separation is the whole gain: the version before this handed out
+    /// `RightShift` and left three angle scanners to remember that one token was two brackets, and left
+    /// `split_closing_angle` to take it apart again.
+    ///
+    /// It also settles a case the old spelling could not: **`C<D>= 3>`**. There the `>` closes the list — the
+    /// template reader asks the bracket question, takes one token, and never joins — while in `a >= b` the
+    /// expression loop asks the operator question and gets `GreaterEqual`. The context decides, which is what
+    /// g++'s message ("'`>=`' should be '`> =`' to terminate a template argument list") is describing.
+    ///
+    /// Adjacency is by **byte offset**, not by position: `a > > b` is two greater-thans and only the characters
+    /// being adjacent makes it a shift. Same test the lexer would have made, made here instead of baked in.
+    pub fn joined_operator_at_the_cursor(&self) -> (CppTokenKind, usize) {
+        let Some(first) = self.tokens.get(self.token_index) else {
+            return (self.current_token, 1);
+        };
+        if first.kind != CppTokenKind::Greater {
+            return (first.kind, 1);
+        }
+
+        let touches = |left: &CppTokenData, right: &CppTokenData| {
+            left.range.end_offset() == right.range.start_offset
+        };
+        let second = self.tokens.get(self.token_index + 1);
+        let third = self.tokens.get(self.token_index + 2);
+
+        // `>>=` — the longest first, so `>` `>` `=` is not taken for a shift and a stray `=`.
+        if let (Some(second), Some(third)) = (second, third)
+            && second.kind == CppTokenKind::Greater
+            && third.kind == CppTokenKind::Assign
+            && touches(first, second)
+            && touches(second, third)
+        {
+            return (CppTokenKind::RightShiftAssign, 3);
+        }
+
+        if let Some(second) = second
+            && touches(first, second)
+        {
+            match second.kind {
+                CppTokenKind::Greater => return (CppTokenKind::RightShift, 2),
+                CppTokenKind::Assign => return (CppTokenKind::GreaterEqual, 2),
+                _ => {}
+            }
+        }
+
+        (CppTokenKind::Greater, 1)
+    }
+
     /// Number of events recorded so far, for use as a `from_event` bound.
     pub fn current_event_count(&self) -> usize {
         self.events.len()

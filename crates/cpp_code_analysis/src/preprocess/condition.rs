@@ -629,6 +629,58 @@ impl<'a> Parser<'a> {
         self.peek().map(|token| token.kind)
     }
 
+    /// **The operator at the cursor**, with the `>`-family spellings the lexer broke up put back together.
+    ///
+    /// Returns the kind and how many tokens it spans. A `#if` is a parser like any other and it works **above**
+    /// the preprocessor, so the tokens it reads were split at the end of maximal munch: `>>`, `>=` and `>>=` arrive
+    /// in pieces. See [`cpp_parser::CppParser::joined_operator_at_the_cursor`], which asks the same question of
+    /// the same stream — one rule, two readers, and this is the second copy the compiler cannot check.
+    ///
+    /// **Reading them unjoined is not a missing optimisation, it is a wrong branch**, which is the one failure this
+    /// layer must not have:
+    ///
+    /// ```text
+    /// #if (16 >> 2) == 4     the `>>` was two greater-thans, the chain never reduced, the condition came out
+    ///                        **false**, and the #else branch was the one cooked
+    /// ```
+    ///
+    /// A `#if` that takes the wrong branch hands every layer above it a program nobody compiled — the plan's §1,
+    /// "输入错了就是错了". Adjacency is by byte offset, so `a > > b` stays two greater-thans.
+    fn operator(&self) -> (Option<CppTokenKind>, usize) {
+        let Some(first) = self.peek() else {
+            return (None, 0);
+        };
+        if first.kind != CppTokenKind::Greater {
+            return (Some(first.kind), 1);
+        }
+
+        let touches = |left: &Token, right: &Token| left.range.end_offset() == right.range.start_offset;
+        let second = self.tokens.get(self.index + 1);
+        let third = self.tokens.get(self.index + 2);
+
+        // The longest first, so `>` `>` `=` is not taken for a shift with a stray `=` after it.
+        if let (Some(second), Some(third)) = (second, third)
+            && second.kind == CppTokenKind::Greater
+            && third.kind == CppTokenKind::Assign
+            && touches(first, second)
+            && touches(second, third)
+        {
+            return (Some(CppTokenKind::RightShiftAssign), 3);
+        }
+
+        if let Some(second) = second
+            && touches(first, second)
+        {
+            match second.kind {
+                CppTokenKind::Greater => return (Some(CppTokenKind::RightShift), 2),
+                CppTokenKind::Assign => return (Some(CppTokenKind::GreaterEqual), 2),
+                _ => {}
+            }
+        }
+
+        (Some(CppTokenKind::Greater), 1)
+    }
+
     fn bump(&mut self) -> Option<&'a Token> {
         let token = self.tokens.get(self.index);
         if token.is_some() {
@@ -731,14 +783,15 @@ impl<'a> Parser<'a> {
     fn relational(&mut self) -> Result<ConditionExpr, EvalError> {
         let mut left = self.shift()?;
         loop {
-            let op = match self.kind() {
+            let (kind, spans) = self.operator();
+            let op = match kind {
                 Some(CppTokenKind::Less) => BinaryOp::Less,
                 Some(CppTokenKind::LessEqual) => BinaryOp::LessEqual,
                 Some(CppTokenKind::Greater) => BinaryOp::Greater,
                 Some(CppTokenKind::GreaterEqual) => BinaryOp::GreaterEqual,
                 _ => break,
             };
-            self.index += 1;
+            self.index += spans;
             let right = self.shift()?;
             left = binary(op, left, right);
         }
@@ -748,12 +801,13 @@ impl<'a> Parser<'a> {
     fn shift(&mut self) -> Result<ConditionExpr, EvalError> {
         let mut left = self.additive()?;
         loop {
-            let op = match self.kind() {
+            let (kind, spans) = self.operator();
+            let op = match kind {
                 Some(CppTokenKind::LeftShift) => BinaryOp::ShiftLeft,
                 Some(CppTokenKind::RightShift) => BinaryOp::ShiftRight,
                 _ => break,
             };
-            self.index += 1;
+            self.index += spans;
             let right = self.additive()?;
             left = binary(op, left, right);
         }

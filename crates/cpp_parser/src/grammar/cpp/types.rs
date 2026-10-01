@@ -3543,9 +3543,20 @@ fn parse_operator_name(p: &mut CppParser) -> ParseResult {
         }
         // The suffix was written without a space, so the lexer already made one token of it.
         CppTokenKind::UserDefinedLiteral => p.bump(),
-        // Any other overloadable operator is a single token the lexer already produced. `>=` and
-        // `>>=` etc. are fine as-is.
-        kind if is_overloadable_operator(kind) => p.bump(),
+        // Any other overloadable operator — **joined, because the `>`-family spellings arrive broken up**.
+        //
+        // This arm used to say "a single token the lexer already produced, so `>=` and `>>=` are fine as-is",
+        // and that stopped being true when the lexer began splitting them at the end of maximal munch: see
+        // [`CppParser::joined_operator_at_the_cursor`]. Bumping once left the second half of `operator>>`
+        // behind, and every file that *declares* one reported ``expected `;` `` at it —
+        // `<__msvc_bit_utils.hpp>` writes `operator>>(const byte, _IntType)`, and it was most of the new
+        // diagnostics on the cooked `<vector>` stream. The **name** of the operator is the joined spelling,
+        // which is the whole reason the join exists.
+        kind if is_overloadable_operator(kind) => {
+            for _ in 0..p.joined_operator_at_the_cursor().1 {
+                p.bump();
+            }
+        }
         _ => {
             let err = CppParseError::syntax_error_from(
                 "expected an operator name after `operator`",
