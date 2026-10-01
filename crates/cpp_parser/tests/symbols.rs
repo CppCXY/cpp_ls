@@ -16,7 +16,7 @@
 //!   through `ParserConfig`.
 
 use cpp_parser::{
-    CppParser, CppSyntaxKind, CppSyntaxTree, IncludedMacro, MacroBody, MacroEnvironment, NoSymbols,
+    CppParser, CppSyntaxKind, CppSyntaxTree, NoSymbols,
     ParserConfig, SymbolKind, SymbolMap, SymbolTable,
 };
 
@@ -105,13 +105,16 @@ fn an_empty_table_parses_exactly_like_no_table() {
 /// This is the "wrong index" case, and the contract is structural: the tree stays lossless, well formed and
 /// total. A wrong answer may choose a wrong *reading* — that is what an index the user has not saved yet can do,
 /// and the fallback is why the parser kept its own evidence — but it can never lose a token.
+///
+/// The `Macro` answer is the harshest nonsense available: the grammar has no use for it any more (see
+/// `ParserConfig`), so a table that says nothing else is a table the parser must simply not believe.
 struct EverythingIsAMacro;
 
 impl SymbolTable for EverythingIsAMacro {
     fn kind_of(&self, _name: &str) -> Option<SymbolKind> {
         Some(SymbolKind::Macro {
             function_like: true,
-            body: MacroBody::Statement,
+            body: cpp_parser::MacroBody::Statement,
         })
     }
 }
@@ -211,25 +214,7 @@ fn a_table_described_type_settles_the_declaration_question() {
     );
 }
 
-/// Parse `source` with `table` and return the diagnostics.
-fn errors_with(source: &str, table: &SymbolMap) -> Vec<String> {
-    CppParser::parse(source, ParserConfig::default().with_symbol_table(table))
-        .get_errors()
-        .iter()
-        .map(|error| error.message.to_string())
-        .collect()
-}
 
-/// Does `source` fail to parse with **no** table, and does the failure mention `name`?
-///
-/// The negative half of every table test: evidence is what changes the reading, and without it the shape rules
-/// report what they always did.
-fn text_has_errors(name: &str, source: &str) -> bool {
-    let source = source.replace(name, "NUMBER_OPTION");
-    !CppParser::parse(&source, ParserConfig::default())
-        .get_errors()
-        .is_empty()
-}
 
 #[test]
 fn a_table_can_be_built_and_shared_from_outside_the_crate() {

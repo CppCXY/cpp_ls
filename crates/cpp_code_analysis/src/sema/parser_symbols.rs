@@ -25,9 +25,10 @@
 //! * **Unqualified names only.** A name is asked for as it is written, and a written name can be qualified
 //!   (`std::vector`, `ns::C::f`). Resolving those is semantic work, not a table lookup, and answering a qualified
 //!   name wrongly would be worse than answering `None`: the bridge stays silent for anything containing a `::`.
-//! * **No macros.** Macros are not bindings here — they live in [`crate::MacroTable`], and they are *not* the same
-//!   question: what the parser needs about a macro is what its body expands to, which is an expansion, not a kind.
-//!   So `Some(SymbolKind::Macro { .. })` is never returned, and the parser's macro rules keep their own evidence.
+//! * **No macros.** Macros are not bindings here — they live in [`crate::MacroTable`] — and the parser does not ask
+//!   about them at all any more: the text it reads has been preprocessed, so a name in it is a name. See
+//!   [`cpp_parser::ParserConfig`]. The `Macro` variant of the vocabulary is still carried, because the *scope walk*
+//!   reads macro bodies through the same environment (`crate::sema::scopes::MacroBodies`) and shares the type.
 //!
 //! # Why `None` is the common answer, and why that is correct
 //!
@@ -36,7 +37,7 @@
 //! `None`, and the parser's own table and shape preferences take over from there. What it does answer, it answers
 //! from the file's own syntax, so it cannot be staler than the buffer it was built from.
 
-use cpp_parser::{MacroBody, SymbolKind, SymbolTable};
+use cpp_parser::{SymbolKind, SymbolTable};
 
 use crate::sema::symbol::{BindingKind, Name, ScopeTree};
 
@@ -118,17 +119,6 @@ fn symbol_kind_of(kind: BindingKind) -> Option<SymbolKind> {
 /// The vocabulary the bridge can answer with, re-exported so a caller does not have to depend on `cpp_parser`
 /// for it.
 pub use cpp_parser::SymbolKind as ParserSymbolKind;
-
-/// What a macro body is called in the parser's vocabulary — a convenience for a caller that has a [`MacroTable`]
-/// and wants to describe a macro through the same interface later.
-///
-/// [`MacroTable`]: crate::MacroTable
-pub fn macro_kind(function_like: bool, body: MacroBody) -> SymbolKind {
-    SymbolKind::Macro {
-        function_like,
-        body,
-    }
-}
 
 #[cfg(test)]
 mod tests {

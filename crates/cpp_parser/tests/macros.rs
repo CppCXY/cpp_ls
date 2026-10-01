@@ -1,22 +1,25 @@
-//! Macros: the names a file `#define`s, and the shapes their invocations take.
+//! **The macro table is gone.** What is left of "macros" in this parser, and what was given up.
 //!
-//! A macro is expanded in translation phase 4, so by the time the grammar runs an invocation has left behind
-//! whatever the macro expanded to — a specifier, a statement, a whole block, or nothing. The parser does not run
-//! the preprocessor (see `crate::grammar::cpp::stats`), and it does not need to: what it was missing is the
-//! **name**.
+//! A macro is expanded in translation phase 4, so the grammar's input is the text *after* preprocessing: an
+//! invocation has left behind whatever its body produced — a specifier, a statement, a whole block, or nothing at
+//! all. This file used to be about the workaround for not having that: a table of the names a file `#define`s,
+//! consulted so that `BOOL_OPTION(x)` with no `;` could be told from `g(x)` with its `;` missing.
 //!
 //! ```cpp
 //! #define NUMBER_OPTION(op) if (auto v = Get(op); !v.empty()) { … }
 //!
-//! NUMBER_OPTION(tab_width)      // no `;` — the macro's body is a whole statement
+//! NUMBER_OPTION(tab_width)      // no `;` — the body supplies a whole statement
 //! g(tab_width)                  // no `;` — a typo, and the only reading is an error
 //! ```
 //!
-//! The two lines are the same tokens up to the name, and no amount of token inspection separates them. A parser
-//! that guesses from the *spelling* (all caps) accepts both and hides the typo; a parser that knows which names
-//! this file defined accepts the first and reports the second. That difference is the whole subject of this file,
-//! and each test below has its negative half: the reading is taken for a defined macro and **not** for anything
-//! else.
+//! **The table was removed, not merely bypassed**, and the reason is on `ParserConfig`: the grammar reads a stream
+//! whose offsets are not any file's, while a macro environment answers positionally in a *file's* coordinates, so
+//! "is this name a macro here" was being asked against a ruler that does not measure the text in front of it. On
+//! the stream this grammar is meant to read the question does not arise either — the invocation is not there.
+//!
+//! What survives is everything that never needed the table: the **shapes** a macro-shaped name can take, and the
+//! spelling conventions that stand in for evidence where a shape has no other reading. Each test below says which
+//! of the two it is pinning.
 
 use cpp_parser::{CppParser, CppSyntaxKind, CppSyntaxTree, ParserConfig};
 
@@ -63,100 +66,123 @@ fn text_of(source: &str, kind: CppSyntaxKind) -> String {
         .to_string()
 }
 
+/// **A `#define` in the file does not change a single reading**, which is the contract this file exists for now.
+///
+/// The pairs below are the same tokens with and without the directive, and both halves must give the same answer —
+/// because the parser does not evaluate the directive, and the cooked stream would not contain the invocation in
+/// the first place. The first pair is the case the old table was built for; the reading it bought is **given up**,
+/// and pinning the loss is the point: on raw text `NUMBER_OPTION(tab_width)` with no `;` is an error, and the
+/// `#define` above it does not rescue it.
 #[test]
-fn a_defined_macro_may_be_a_statement_without_a_semicolon() {
-    // The shape the whole table exists for: the macro's body is a complete statement, so the invocation needs no
-    // `;` of its own. `LuaStyle.cpp` writes 38 of these (`BOOL_OPTION(x)` and `NUMBER_OPTION(y)`), and each one
-    // used to be reported as a call with its `;` missing — 64 diagnostics with the cascades.
-    parses(
-        "#define NUMBER_OPTION(op) if (auto v = Get(op); !v.empty()) { }\nvoid f() {\n    NUMBER_OPTION(tab_width)\n}\n",
-    );
-    parses(
-        "#define BOOL_OPTION(op) if (auto v = Get(op); !v.empty())\nvoid f() {\n    BOOL_OPTION(a)\n    BOOL_OPTION(b)\n}\n",
-    );
-
-    let source = "#define BOOL_OPTION(op) op\nvoid f() {\n    BOOL_OPTION(a)\n}\n";
-    assert_eq!(count(source, CppSyntaxKind::MacroCall), 1);
-    assert_eq!(
-        text_of(source, CppSyntaxKind::MacroCall),
-        "BOOL_OPTION(a)\n",
-        "the macro call is one node, and the statement ends where the macro's body does"
-    );
-
-    // …and the **negative half**, which is the reason the reading is not taken for every all-caps name: without a
-    // `#define` in the file there is no evidence, and a call whose `;` is missing is exactly what it looks like.
-    for source in [
+fn a_define_in_the_file_does_not_change_a_reading() {
+    for with_define in [
         "void f() {\n    NUMBER_OPTION(tab_width)\n}\n",
-        "void f() {\n    BOOL_OPTION(a)\n    BOOL_OPTION(b)\n}\n",
-        "void f() {\n    g(x)\n    h(y)\n}\n",
+        "#define NUMBER_OPTION(op) if (auto v = Get(op); !v.empty()) { }\nvoid f() {\n    NUMBER_OPTION(tab_width)\n}\n",
     ] {
         assert_ne!(
-            tree(source).get_errors(),
+            tree(with_define).get_errors(),
             [],
-            "{source:?} has no macro in sight and must stay an error"
+            "{with_define:?}: a body that is a whole statement is what would make this legal, and reading it is \
+             the preprocessor's job"
         );
     }
-}
 
-#[test]
-fn an_undef_takes_the_evidence_away() {
-    // `#define` takes effect for the rest of the file and `#undef` takes it away, so the table follows both. A
-    // file that undefines a name and then writes `NAME(x)` without a `;` has a typo, not a macro.
-    parses("#define FOO(a) a\nvoid f() {\n    FOO(x);\n}\n");
-    parses("#define FOO(a) a\n#undef FOO\nvoid f() {\n    FOO(x);\n}\n");
-
-    let source = "#define FOO(a) a\n#undef FOO\nvoid f() {\n    FOO(x)\n}\n";
-    assert_ne!(
-        tree(source).get_errors(),
-        [],
-        "after `#undef` the name is not a macro any more"
-    );
-}
-
-#[test]
-fn a_macro_that_expands_to_a_block_takes_the_block_with_it() {
-    // `#define IF_EXIST(op) if (…)` — the `{ … }` that follows the invocation is the *macro's* body, so it belongs
-    // inside the macro's node. Read that way a consumer can skip the whole construct, and the statements inside
-    // are still parsed as statements.
-    let source = "#define IF_EXIST(op) if (auto v = Get(op); !v.empty())\nvoid f() {\n    IF_EXIST(a) {\n        g();\n    }\n}\n";
-    parses(source);
-
-    assert_eq!(count(source, CppSyntaxKind::MacroCall), 1);
-    assert_eq!(
-        text_of(source, CppSyntaxKind::MacroCall),
-        "IF_EXIST(a) {\n        g();\n    }\n",
-        "the block is part of the macro's node"
-    );
-    assert_eq!(count(source, CppSyntaxKind::CompoundStat), 2);
-
-    // A macro that expands to a plain statement ends at its `;`, and the `;` belongs to the invocation.
-    let source = "#define ASSERT(cond) do { } while (false)\nvoid f() {\n    ASSERT(x);\n}\n";
-    parses(source);
-    assert_eq!(text_of(source, CppSyntaxKind::MacroCall), "ASSERT(x);\n");
-}
-
-#[test]
-fn a_macros_arguments_are_raw_tokens() {
-    // A macro's parameters are pasted into identifiers, types and expressions alike, so nothing inside the
-    // parentheses may be interpreted — `TEST(FormatPerformance, 1k_row)` is how gtest writes a test name, and
-    // `1k_row` is not a value in any grammar. The group is read as balanced tokens for exactly this reason.
-    for source in [
-        "#define T(a, b) a##b\nvoid f() {\n    T(1k_row, x.y)\n}\n",
-        "#define T(a) a\nvoid f() {\n    T(std::vector<int> *)\n}\n",
-        "#define T(...) 0\nvoid f() {\n    T(a, b, c)\n}\n",
+    // …and the other direction: a call with its `;` reads the same whether or not the name is `#define`d.
+    for with_define in [
+        "void f() {\n    FOO(x);\n}\n",
+        "#define FOO(a) a\nvoid f() {\n    FOO(x);\n}\n",
     ] {
-        parses(source);
-        assert_eq!(count(source, CppSyntaxKind::MacroCall), 1, "{source:?}");
+        parses(with_define);
     }
 }
 
+/// **The declaration-level shape reads cleanly, and it is worth being exact about what it reads as.**
+///
+/// gtest's `TEST(A, B) { … }` has no `#define` in the file that writes it — the macro is in an included header —
+/// which is exactly the boundary the removed table could never cross. The reading is a **spelling convention**
+/// (`looks_like_a_macro_name`), and the negative beside it is why one is needed: `g(x) { }` inside a body is a call
+/// whose `;` is missing, followed by a block, and it stays an error.
+///
+/// What the convention buys here is **not** a `MacroCall`: the shape comes out a `Declaration` whose specifier is
+/// the name and whose declarator holds the group, followed by the block — lossless, clean, every token present.
+/// The old version of this test asserted no more than that, and the assertion below is deliberately about the
+/// group's *contents* rather than about a node kind, because that is the part the grammar is responsible for.
 #[test]
-fn the_table_speaks_for_this_file_only() {
-    // The boundary the table documents, pinned: a macro from an *included header* is not in it, so the
-    // declaration-level shapes keep their spelling fallback — gtest's `TEST(A, B) { … }` has no `#define` here
-    // and is still read, because at declaration level the shape has no other reading at all.
+fn the_declaration_level_shape_reads_without_any_table() {
     parses("TEST(A, B) { }");
     parses("TEST(FormatPerformance, 1k_row) { int x = 1; }");
     parses("namespace n { TEST(A, B) { } }");
     assert_eq!(count("TEST(A, B) { }", CppSyntaxKind::CompoundStat), 1);
+
+    // The name is not spelled like a macro, so the same shape is the mistake it looks like.
+    assert_ne!(
+        tree("void f() {\n    g(x) { }\n}\n").get_errors(),
+        [],
+        "a lowercase name followed by a block is a call with its `;` missing"
+    );
+}
+
+/// **A macro's arguments are raw tokens**, and this half survives intact: the group is read as a balanced token
+/// group and nothing inside it is interpreted.
+///
+/// A macro's parameters are pasted into identifiers, types and expressions alike, so the grammar must not read
+/// them — `TEST(FormatPerformance, 1k_row)` is how gtest writes a test name, and `1k_row` is a `UserDefinedLiteral`
+/// that means nothing on its own. What this pins is that the group comes out as **tokens of the group** rather than
+/// as a parameter list the grammar tried to make sense of.
+#[test]
+fn a_macros_arguments_are_raw_tokens() {
+    for source in [
+        "TEST(1k_row, x.y) { }",
+        "TEST(std::vector<int> *) { }",
+        "TEST(a, b, c) { }",
+    ] {
+        parses(source);
+        assert_eq!(
+            count(source, CppSyntaxKind::ArgumentList),
+            1,
+            "{source:?}: the group is kept whole"
+        );
+        assert_eq!(
+            count(source, CppSyntaxKind::ParameterList),
+            0,
+            "{source:?}: and nothing tried to read it as parameters"
+        );
+    }
+
+    assert_eq!(
+        text_of("TEST(FormatPerformance, 1k_row) { }", CppSyntaxKind::ArgumentList).trim_end(),
+        "(FormatPerformance, 1k_row)",
+        "…and the trivia the group swallowed is the only thing trimmed"
+    );
+}
+
+/// **The `#undef` case and the `asm` case are the same fact**: a name the file defines is still just a name here.
+///
+/// `#define FOO(a) a` / `#undef FOO` / `FOO(x)` reads exactly as `FOO(x)` does with no directives at all, and
+/// `#define asm(x) g(x)` does not stop `asm(1)` being the compiler's own statement. Saying so keeps the next reader
+/// from "fixing" either one by looking the name up — which is the change this file records the removal of.
+#[test]
+fn a_defined_name_is_still_just_a_name() {
+    parses("#define FOO(a) a\nvoid f() {\n    FOO(x);\n}\n");
+    parses("#define FOO(a) a\n#undef FOO\nvoid f() {\n    FOO(x);\n}\n");
+
+    let with = tree("#define asm(x) g(x)\nvoid f() { asm(1); }\n");
+    let without = tree("void f() { asm(1); }\n");
+    assert_eq!(
+        with.get_red_root()
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::AsmStat)
+            .count(),
+        without
+            .get_red_root()
+            .descendants()
+            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::AsmStat)
+            .count(),
+        "the directive makes no difference to the reading"
+    );
+    assert_eq!(
+        text_of("#define asm(x) g(x)\nvoid f() { asm(1); }\n", CppSyntaxKind::AsmStat).trim_end(),
+        "asm(1);",
+        "the trivia after the `;` belongs to the enclosing node, so a node's text may end in it"
+    );
 }
