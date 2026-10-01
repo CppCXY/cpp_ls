@@ -324,6 +324,34 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// Cleared wherever [Session::units] is: a unit read is a reading of the same timeline, so anything that
     /// moves inside it makes this list a claim about a reading that no longer describes its closure.
     units_read: std::collections::HashSet<String>,
+    /// **The last program this session indexed, and what it was** — one entry, keyed by the stream's own bytes.
+    ///
+    /// A unit read is a walk, a render, a **parse of the whole program** and a sweep of every declaration in it, and
+    /// the reading is a pure function of the stream: the same bytes give the same facts. Sources that include the
+    /// same headers therefore produce the **same** stream — measured on twenty sources each including `<future>`, all
+    /// twenty render to 617 607 tokens, byte for byte — and re-parsing it nineteen more times is work nobody asked
+    /// for.
+    ///
+    /// # What the measurement was
+    ///
+    /// Twenty sources, one shared header set, on this machine:
+    ///
+    /// ```text
+    ///                  ms        share of the run
+    /// [indexing]     131 322       71.9%     ← the render's parse and sweep, per unit
+    ///   render-parse  59 190       32.4%
+    ///   render-sweep  72 133       39.5%
+    /// [units]         47 963       26.2%
+    ///   unit-render   45 489       24.9%     ← the render itself, also per unit
+    /// ```
+    ///
+    /// 179 seconds for twenty units is 300-odd for forty, which is the number this exists to remove. The cache is
+    /// one entry rather than a map because the sources of one project include the same headers **in runs**: a build
+    /// walks them in directory order, and the entry that helps is the one just computed.
+    ///
+    /// Keyed by [`crate::cache::content_hash`] of the stream so nothing large is kept twice, and dropped wherever the
+    /// index or the configuration moves, because a program's reading is only valid for the configuration that read it.
+    unit_index: Option<(u64, crate::IndexedUnit)>,
     /// **What each edited file's directives said the last time it changed**, by the path the queue keys on.
     ///
     /// The comparison an edit is judged by: an edit that leaves a file's directives where and what they were cannot
@@ -616,6 +644,7 @@ impl<F: FileProvider + Clone> Session<F> {
             definitions: crate::MacroDefinitions::default(),
             units: UnitTable::default(),
             units_read: std::collections::HashSet::new(),
+            unit_index: None,
             directive_signatures: std::collections::HashMap::new(),
             prefetched: HashMap::new(),
             headers,
@@ -1988,8 +2017,35 @@ impl<F: FileProvider + Clone> Session<F> {
         let stream = self.render_the_unit(&root)?;
 
         let key = SummaryKey::new(0, self.store.context_hash(&root));
-        let indexer = FileIndexer::new(&self.files, &self.config);
-        let indexed = indexer.index_unit_rendering(&root, &stream, key);
+        let program = crate::cache::content_hash(&stream.text);
+        if std::env::var_os("CPPLS_TRACE_UNIT").is_some() {
+            match self.unit_index.as_ref() {
+                Some((seen, cached)) => println!(
+                    "cppls-unit: {root:?} program={program} cached={seen} hit={} tokens={} text_len={}",
+                    *seen == program,
+                    cached.tokens,
+                    stream.text.len()
+                ),
+                None => println!(
+                    "cppls-unit: {root:?} program={program} no entry yet tokens={} text_len={}",
+                    stream.len(),
+                    stream.text.len()
+                ),
+            }
+        }
+        let indexed = match self.unit_index.as_ref() {
+            // **The same program, already read.** The reading is a function of the stream's bytes, and a project's
+            // sources share their headers, so this is the common case rather than a lucky one: measured, twenty
+            // sources including `<future>` all render to the same 617 607 tokens, and this turns the second and
+            // later of them from a parse-and-sweep of the whole program into a clone of the facts.
+            Some((seen, cached)) if *seen == program => cached.clone(),
+            _ => {
+                let indexer = FileIndexer::new(&self.files, &self.config);
+                let indexed = indexer.index_unit_rendering(&root, &stream, key);
+                self.unit_index = Some((program, indexed.clone()));
+                indexed
+            }
+        };
 
         // **The gate is gone, and what replaced it is a repair rather than a refusal.** A parse error is filed
         // against the file it is in; a brace the parser paired across two files is neutralised in the stream and

@@ -3700,7 +3700,7 @@ pub struct MapReport {
 ///
 /// One parse, many files: the facts are grouped by the file each declaration was written in, so a caller files
 /// them under their own paths rather than under the unit's root.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct IndexedUnit {
     /// Each file's share, in the order the unit's frames hold them — which is include order.
     pub files: Vec<(std::path::PathBuf, crate::CookedFile)>,

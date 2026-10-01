@@ -65,6 +65,9 @@ fn main() {
     let mut ours_only = false;
     let mut record = false;
     let mut windows = false;
+    // `--stages` — print where the time went. The crate keeps a global counter per stage (see `stages.rs`), and
+    // nothing was printing it: a reading that took half a minute gave no way to say which part of it did.
+    let mut stages = false;
     // `--at <file>:<line>:<name>` — ask what a name is at one position. Repeatable.
     let mut asks: Vec<(PathBuf, usize, String)> = Vec::new();
 
@@ -74,6 +77,7 @@ fn main() {
             "--ours-only" => ours_only = true,
             "--record" => record = true,
             "--window" => windows = true,
+            "--stages" => stages = true,
             "--at" => {
                 let Some(spec) = arguments.next() else {
                     eprintln!("--at needs <file>:<line>:<name>");
@@ -241,6 +245,10 @@ fn main() {
         stream.unbalanced.len(),
         stream.braces,
     );
+
+    if stages {
+        println!("\n--- where the time went ---\n{}", cpp_code_analysis::stages::StageTimes::read().report());
+    }
 
     // **What the compilation would have said** — every live `#error` and `#warning`, with the file that wrote it.
     //
