@@ -692,6 +692,17 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
         // declaration was refused, the tilde was wrapped in an error node on its own, and what followed was
         // read as a declaration of `S` with a parameter list and nothing named.
         CppTokenKind::Tilde => return parse_destructor_declaration(p),
+        // `__thiscall ~_Lockit() noexcept;` — a destructor with a calling convention written before the `~`, which is
+        // where MSVC's `<yvals.h>` puts it. The convention is part of the declaration, so it is read inside it.
+        CppTokenKind::Identifier
+            if p.peek_next_token() == CppTokenKind::Tilde
+                && matches!(
+                    p.current_token_text(),
+                    "__thiscall" | "__cdecl" | "__stdcall" | "__fastcall" | "__vectorcall" | "__clrcall"
+                ) =>
+        {
+            return parse_destructor_declaration(p);
+        }
 
         // A **conversion operator** — `operator int();`, `operator std::string() const;`.
         //
@@ -1800,12 +1811,14 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
         // than beginning a clause — `starts_a_requires_clause` tries the clause and reports that it consumed
         // nothing, which is the same test the class-head refusal above relies on.
         CppTokenKind::Identifier
-            if at_requires(p) && p.last_declarator_is_function() && starts_a_requires_clause(p) =>
+            if at_requires(p)
+                && (declarator_is_function || p.last_consumed_token_kind() == Some(CppTokenKind::RightParen))
+                && starts_a_requires_clause(p) =>
         {
             // Asked **before** the clause is parsed, because the constraint is an expression: an expression may
             // contain a declarator of its own (`decltype(…)`, a lambda's parameter list) and parsing one resets
             // the flag this needs to read afterwards.
-            let constrains_a_function = p.last_declarator_is_function();
+            let constrains_a_function = true;
             parse_requires_clause(p)?;
 
             // A directive between the clause and what follows it, for the reason the loop before the match gives.
@@ -1824,6 +1837,21 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
                 // …and the other branches' lists, for the same reason this arm exists at all: a conditional can
                 // put one per branch, with a directive in between.
                 parse_further_member_initializer_lists(p)?;
+            }
+
+            // …and a defaulted or deleted definition: `V(const V&) requires C<T> = default;`. The `=` is the
+            // declarator's initializer and not part of the constraint, which stops at `||`.
+            if p.current_token() == CppTokenKind::Assign
+                && matches!(
+                    p.peek_next_token(),
+                    CppTokenKind::DefaultKeyword | CppTokenKind::DeleteKeyword
+                )
+            {
+                p.bump(); // `=`
+                let init = p.mark(CppSyntaxKind::Initializer);
+                p.bump();
+                init.complete(p);
+                return Ok(m.complete(p));
             }
         }
         // A bit-field: `int bits : 3;`, `unsigned flags : 1, spare : 7;`.
@@ -4223,6 +4251,15 @@ fn parse_class_body_members(p: &mut CppParser) -> ParseResult {
             continue;
         }
 
+        // **An empty member declaration**: a `;` with nothing before it, which is legal (C++11 [class.mem]) and which
+        // macros leave behind constantly — `_Atomic_integral_facade { ; ; using _Base = …` is what MSVC's `<atomic>`
+        // expands `_STL_INTERNAL_STATIC_ASSERT(…);` to when the check is compiled out. It is not an error, and was
+        // read as one: an `ErrorNode` per stray semicolon.
+        if p.current_token() == CppTokenKind::Semicolon {
+            p.bump();
+            continue;
+        }
+
         // A **member that is nothing but a macro invocation**: `Q_OBJECT`, `Q_PROPERTY(int x READ x)`,
         // `Q_ENUM(E)`. An attribute-like macro is written where a member goes and carries no `;` — its expansion
         // supplies whatever declarations it wants — so the member loop has to recognise it before the declaration
@@ -4328,6 +4365,10 @@ fn access_specifier_kind(kind: CppTokenKind) -> CppSyntaxKind {
 fn parse_access_specifier(p: &mut CppParser) -> ParseResult {
     let access = p.mark(access_specifier_kind(p.current_token()));
     p.consume_current_token();
+    // The layout between the keyword and its colon (`public :`) belongs to the access specifier. Without reading
+    // it first the cursor sits on the whitespace, the colon is not found, and it is left as an `ErrorNode` — which
+    // is how every access specifier of a stream spelled with spaces between tokens read.
+    p.emit_trivia_after_current_token();
     p.consume_current_token_if(CppTokenKind::Colon);
     access.complete(p);
 
@@ -4564,7 +4605,13 @@ pub fn starts_declaration(p: &mut CppParser) -> bool {
 /// `virtual` or `inline`, because those are specifiers the sequence knows; the tilde after them is what stops
 /// it. That is why this rule starts at the declarator rather than at a type.
 fn parse_destructor_declaration(p: &mut CppParser) -> ParseResult {
-    parse_declaration_starting_at_a_name(p, super::types::parse_declarator)
+    parse_declaration_starting_at_a_name(p, |p| {
+        // A calling convention written before the `~` (see the dispatch in [`parse_declaration_here`]).
+        if p.current_token() == CppTokenKind::Identifier {
+            p.bump();
+        }
+        super::types::parse_declarator(p)
+    })
 }
 
 /// Parse a **conversion** operator declaration: `operator int();`, `operator bool() const;`,
@@ -4687,6 +4734,23 @@ pub fn parse_using_declaration(p: &mut CppParser) -> ParseResult {
     // **enumerators** into the scope, not a type name, and this parser records only what a name is — see the
     // comment on the alias form. Recording `E` as a type would be recording something that was already true.
     if p.current_token() == CppTokenKind::EnumKeyword {
+        p.bump();
+        if let Err(err) = parse_name(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+        if let Err(err) = expect_semicolon(p) {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+        return Ok(m.complete(p));
+    }
+
+    // `using typename Base::value_type;` — a using-declaration that names a **type** of a dependent base. The
+    // keyword is the whole evidence, as `enum` is above: an alias is `using NAME = …`. MSVC's `<atomic>` writes
+    // it in every specialization of `_Atomic_integral`. Left to the alias reading it failed with `expected a name`
+    // that nobody reported, and the class body it stood in lost every member after it.
+    if p.current_token() == CppTokenKind::TypenameKeyword {
         p.bump();
         if let Err(err) = parse_name(p) {
             p.close_marks_above(base);

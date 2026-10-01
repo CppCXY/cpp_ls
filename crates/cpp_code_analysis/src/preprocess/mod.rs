@@ -94,6 +94,15 @@ pub struct PositionalMacros<'a> {
     offset: usize,
 }
 
+impl PositionalMacros<'_> {
+    /// Whether the compiler being read is MSVC's own: it predefines `_MSC_VER`, and clang-cl (which answers
+    /// `__has_cpp_attribute` as clang does) also predefines `__clang__`.
+    fn is_msvc(&self) -> bool {
+        self.table.definition_at("_MSC_VER", self.offset).is_some()
+            && self.table.definition_at("__clang__", self.offset).is_none()
+    }
+}
+
 impl crate::condition::MacroValues for PositionalMacros<'_> {
     fn lookup(&self, name: &str) -> crate::condition::Lookup<'_> {
         use crate::condition::Lookup;
@@ -118,7 +127,8 @@ impl crate::condition::MacroValues for PositionalMacros<'_> {
     /// `[[msvc::no_specializations(...)]]` was missing from the stream while `cl.exe` emitted it 17 times.
     fn builtin_operator(&self, name: &str, operand: &str) -> Option<crate::condition::Value> {
         if name == "__has_cpp_attribute" {
-            let answer = crate::preprocess::cooked::attribute_support(operand);
+            let msvc = self.is_msvc();
+            let answer = crate::preprocess::cooked::attribute_support_in(operand, msvc);
             if std::env::var_os("CPPLS_TRACE_ATTR").is_some() {
                 eprintln!("cppls-trace: __has_cpp_attribute({operand:?}) at {} -> {answer:?}", self.offset);
             }

@@ -546,13 +546,18 @@ impl Scratch {
     /// refused, and each refusal is reported: an empty macro table is a wrong reading of every `#ifdef` in every
     /// header, so the reason has to be visible rather than inferred from a count of zero.
     fn new(fallbacks: &[std::path::PathBuf]) -> Option<Scratch> {
+        // A clock reading is not unique across threads (Windows' resolution is 100ns, and two sessions ask at
+        // once): two callers got the same name, one's `Drop` deleted the directory the other was creating, and the
+        // loser saw "access denied" and an empty macro table. A counter cannot collide inside a process.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let unique = format!(
-            "cppls-msvc-{}-{:?}",
+            "cppls-msvc-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|elapsed| elapsed.as_nanos())
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
 
         let mut bases = vec![std::env::temp_dir()];

@@ -80,7 +80,7 @@ pub use cache::{
 // before it reports a `truncated` one.
 pub use align::{
     Alignment, Difference, DiskTexts, MAX_EDIT_DISTANCE, Reason, Report, Side, StreamToken, UnitTexts, align,
-    files_of, normalized, shared, tokenize_preprocessed, unit_tokens,
+    files_of, normalized, shared, tokenize_preprocessed, unit_tokens, without_pragmas,
 };
 // The *completion* layer is the one place where the answer to a cursor is assembled rather than queried: the two
 // name queries below it answer "what is visible" and "what does this type have", and this decides which of those

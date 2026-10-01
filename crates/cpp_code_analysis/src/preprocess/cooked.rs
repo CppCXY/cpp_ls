@@ -81,6 +81,14 @@ pub struct CookedStream {
     pub assumed_undefined: usize,
     /// Did the expansion budget run out? When it did, `tokens` is a prefix rather than the whole file.
     pub exhausted: bool,
+    /// **Which tokens of `tokens` are one `#pragma` line each**, as ranges of indices.
+    ///
+    /// A directive ends at the end of its **line**, and a rendering that spells the stream with single spaces has no
+    /// lines: a `# pragma once` in it is a directive that runs to the end of the program, and the parser reads every
+    /// declaration after it as the pragma's arguments. (Measured on `#include <format>`: 2.9 MB of text, zero errors
+    /// and zero declarations — the whole program was one `PreprocessorDirective` node.) So the renderers break the
+    /// line before the first token of each range and after the last.
+    pub pragma_lines: Vec<std::ops::Range<usize>>,
 }
 
 impl CookedStream {
@@ -113,14 +121,22 @@ impl CookedStream {
         let mut text = String::new();
         let mut spans = Vec::with_capacity(self.tokens.len());
 
-        for cooked in &self.tokens {
+        let mut lines = self.pragma_lines.iter().peekable();
+        let mut break_next = false;
+
+        for (index, cooked) in self.tokens.iter().enumerate() {
+            while lines.next_if(|line| line.end <= index).is_some() {}
+            let starts_a_line = lines.peek().is_some_and(|line| line.start == index);
+
             // One space between tokens, always. The parser reads kinds and not layout, so this costs nothing
             // there — and it cannot merge two spellings into one token, which is the one way layout *can*
             // change a parse. (Where tokens really do touch, like `+` and `=` pasted into `+=`, they are
-            // already one token by the time they get here.)
+            // already one token by the time they get here.) A `#pragma` line is the exception: a directive
+            // ends at a newline, so one is written on a line of its own — see [`CookedStream::pragma_lines`].
             if !text.is_empty() {
-                text.push(' ');
+                text.push(if break_next || starts_a_line { '\n' } else { ' ' });
             }
+            break_next = lines.peek().is_some_and(|line| line.end == index + 1);
 
             let start = text.len();
             text.push_str(cooked.token.text());
@@ -940,9 +956,35 @@ impl crate::macros::MacroBindings for Over<'_> {
 /// the cooker (`msvc::`) names the same attribute, so both spellings are answered the same way. Treating them
 /// differently is what made `attr4.cpp` produce 3 tokens against the compiler's 13.
 pub fn attribute_support(spelling: &str) -> Option<i128> {
-    // The operand is taken verbatim by the condition parser, so it may arrive with the spacing its author wrote, and
-    // with or without the namespace that says which attribute this is. Nothing here cares about either.
+    attribute_support_in(spelling, false)
+}
+
+/// [`attribute_support`], told whether the compiler being read is MSVC's own.
+///
+/// # Why the compiler has to be known
+///
+/// `cl.exe` was **asked** (`#if __has_cpp_attribute(x) == N`, one probe per spelling, MSVC 14.51 under
+/// `/std:c++latest`), and its answers are neither "supported" for everything a standard names nor a bare `1`:
+///
+/// ```text
+/// nodiscard 201907   likely 201803   assume 202207   msvc::no_unique_address 201803   msvc::lifetimebound 202302
+/// no_unique_address  0   (the *plain* spelling; MSVC wants `[[msvc::no_unique_address]]`)
+/// indeterminate      0   gnu::always_inline 0   clang::lifetimebound 0   any name it has never heard of: 0
+/// ```
+///
+/// `yvals_core.h` turns the difference into `#error`: with `_HAS_CXX23` it requires one of the two
+/// `no_unique_address` spellings, and a table that answers neither (`None`, i.e. Unknown) lands in the `#error`
+/// branch and the stream stops being the program the compiler reads. So for MSVC an unlisted name is `0`, because
+/// that is what the compiler says — "unknown to us" is only the right answer for a compiler this table has not been
+/// measured against.
+pub fn attribute_support_in(spelling: &str, msvc: bool) -> Option<i128> {
+    // The operand is taken verbatim by the condition parser, so it may arrive with the spacing its author wrote.
     let name: String = spelling.split_whitespace().collect();
+
+    if msvc {
+        return Some(msvc_attribute_value(&name));
+    }
+
     let bare = name.strip_prefix("msvc::").unwrap_or(&name);
 
     match bare {
@@ -956,6 +998,25 @@ pub fn attribute_support(spelling: &str) -> Option<i128> {
     }
 }
 
+/// What `cl.exe` answers for `__has_cpp_attribute(name)`; every value below was printed by the compiler.
+fn msvc_attribute_value(name: &str) -> i128 {
+    match name {
+        "carries_dependency" | "noreturn" => 200809,
+        "deprecated" => 201309,
+        "fallthrough" | "maybe_unused" => 201603,
+        "likely" | "unlikely" => 201803,
+        "nodiscard" => 201907,
+        "assume" => 202207,
+        "msvc::no_unique_address" | "msvc::forceinline" | "msvc::forceinline_calls" | "msvc::noinline" => 201803,
+        "msvc::noop_dtor" | "msvc::maybe_unused" | "msvc::no_tls_guard" => 201603,
+        "msvc::lifetimebound" => 202302,
+        "msvc::intrinsic" => 202210,
+        "msvc::known_semantics" | "msvc::flatten" | "msvc::constexpr" => 202002,
+        "msvc::no_specializations" => 202412,
+        "gsl::suppress" => 1,
+        _ => 0,
+    }
+}
 /// **What `__has_include` asks** — is this header findable from here?
 ///
 /// A trait because the answer is a **filesystem search**, and the layer that evaluates a condition is not the layer
@@ -1227,7 +1288,11 @@ pub fn cook_with_search(
                     // compiler's stream for `#include <vector>`), which is why the first version of this — print
                     // every pragma — made us differ by exactly those tokens.
                     if !push_and_pop_macro(spanned, source, spanned.range.start_offset, &mut live) {
+                        let before = out.tokens.len();
                         expand_run(source, tokens, first, last, &live, &mut out);
+                        if out.tokens.len() > before {
+                            out.pragma_lines.push(before..out.tokens.len());
+                        }
                     }
                 }
             }

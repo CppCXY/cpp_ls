@@ -462,12 +462,13 @@ pub fn align(ours: &[StreamToken], theirs: &[StreamToken]) -> Alignment {
         suffix += 1;
     }
 
-    alignment.matched = prefix + suffix;
+    // Settled below, once the script says how many of our tokens it had to touch.
+    alignment.matched = 0;
 
     let our_middle = &ours[prefix..ours.len() - suffix];
     let their_middle = &theirs[prefix..theirs.len() - suffix];
 
-    let (edits, truncated) = shortest_edit_script(our_middle, their_middle);
+    let (edits, truncated) = anchored_edit_script(our_middle, their_middle, 0);
     alignment.truncated = truncated;
 
     for (at, ours_at, theirs_at) in edits {
@@ -491,7 +492,14 @@ pub fn align(ours: &[StreamToken], theirs: &[StreamToken]) -> Alignment {
         .differences
         .sort_by_key(|difference| difference.at);
 
-    // **Group the edits into runs**, which is what the three `run*` fields mean: every edit that sits one slot after
+    alignment.matched = ours.len()
+        - alignment
+            .differences
+            .iter()
+            .filter(|difference| difference.ours.is_some())
+            .count();
+
+        // **Group the edits into runs**, which is what the three `run*` fields mean: every edit that sits one slot after
     // the one before it belongs to the same movement of tokens. Now that the list is ordered, one forward pass is
     // enough.
     group_into_runs(&mut alignment.differences);
@@ -534,6 +542,146 @@ fn group_into_runs(differences: &mut [Difference]) {
     }
 }
 
+/// **The window widths anchors are looked for at**, widest first.
+///
+/// A window that occurs once in each stream is a place the two readings certainly agree about, and it is what lets
+/// a multi-hundred-thousand-token comparison be cut into pieces the table below can afford. Wide first because a
+/// wide window is unique by construction; narrower only for the gaps the wide one could not cut.
+const ANCHOR_WIDTHS: [usize; 4] = [24, 12, 6, 3];
+
+/// **A script over streams too long for one table**, made by cutting them at agreed places first.
+///
+/// [`shortest_edit_script`] is bounded at [`MAX_DP_CELLS`], and a standard library's closure is a half-million tokens
+/// a side: handed whole, it gave up at the first disagreement and called **every token** a difference, which is not a
+/// measurement. This finds windows that occur exactly once in each stream, keeps the longest chain of them that is in
+/// the same order on both sides (a patience diff), and runs the table only between consecutive anchors. Where a gap
+/// is still too large, it is cut again with a narrower window; where no window cuts it, the table's own honest
+/// "truncated" answer stands.
+fn anchored_edit_script(
+    ours: &[StreamToken],
+    theirs: &[StreamToken],
+    width_index: usize,
+) -> (Vec<(usize, Option<usize>, Option<usize>)>, bool) {
+    if ours.len().saturating_mul(theirs.len()) <= MAX_DP_CELLS || width_index >= ANCHOR_WIDTHS.len() {
+        return shortest_edit_script(ours, theirs);
+    }
+
+    let width = ANCHOR_WIDTHS[width_index];
+    let anchors = unique_anchors(ours, theirs, width);
+    if anchors.is_empty() {
+        return anchored_edit_script(ours, theirs, width_index + 1);
+    }
+
+    let mut edits = Vec::new();
+    let mut truncated = false;
+    let (mut our_cursor, mut their_cursor) = (0usize, 0usize);
+
+    let mut gap = |our_from: usize, our_to: usize, their_from: usize, their_to: usize| {
+        let (found, cut) = anchored_edit_script(
+            &ours[our_from..our_to],
+            &theirs[their_from..their_to],
+            width_index + 1,
+        );
+        truncated |= cut;
+        for (at, our_index, their_index) in found {
+            edits.push((
+                at + our_from,
+                our_index.map(|index| index + our_from),
+                their_index.map(|index| index + their_from),
+            ));
+        }
+    };
+
+    for (our_at, their_at) in anchors {
+        if our_at < our_cursor || their_at < their_cursor {
+            continue;
+        }
+        gap(our_cursor, our_at, their_cursor, their_at);
+        our_cursor = our_at + width;
+        their_cursor = their_at + width;
+        while our_cursor < ours.len()
+            && their_cursor < theirs.len()
+            && ours[our_cursor].spelling == theirs[their_cursor].spelling
+        {
+            our_cursor += 1;
+            their_cursor += 1;
+        }
+    }
+    gap(our_cursor, ours.len(), their_cursor, theirs.len());
+
+    (edits, truncated)
+}
+
+/// The windows of `width` tokens that occur **exactly once** in each stream, as `(ours, theirs)` start positions in
+/// our order, restricted to the longest chain that is also increasing in theirs.
+fn unique_anchors(ours: &[StreamToken], theirs: &[StreamToken], width: usize) -> Vec<(usize, usize)> {
+    use std::collections::HashMap;
+
+    if ours.len() < width || theirs.len() < width {
+        return Vec::new();
+    }
+
+    // `Some(position)` the first time a window is seen, `None` once it has been seen twice.
+    let windows = |tokens: &[StreamToken]| -> HashMap<u64, Option<usize>> {
+        let mut seen: HashMap<u64, Option<usize>> = HashMap::new();
+        for (start, window) in tokens.windows(width).enumerate() {
+            seen.entry(hash_window(window))
+                .and_modify(|entry| *entry = None)
+                .or_insert(Some(start));
+        }
+        seen
+    };
+
+    let theirs_windows = windows(theirs);
+    let ours_windows = windows(ours);
+
+    let mut pairs: Vec<(usize, usize)> = ours_windows
+        .iter()
+        .filter_map(|(hash, ours_at)| {
+            let (ours_at, theirs_at) = ((*ours_at)?, (*theirs_windows.get(hash)?)?);
+            // A hash agreeing is not the windows agreeing.
+            let same = ours[ours_at..ours_at + width]
+                .iter()
+                .zip(&theirs[theirs_at..theirs_at + width])
+                .all(|(one, other)| one.spelling == other.spelling);
+            same.then_some((ours_at, theirs_at))
+        })
+        .collect();
+    pairs.sort_unstable();
+
+    // Longest increasing subsequence by `theirs`, with the predecessor links to read the chain back.
+    let mut tails: Vec<usize> = Vec::new();
+    let mut previous: Vec<Option<usize>> = vec![None; pairs.len()];
+    for index in 0..pairs.len() {
+        let theirs_at = pairs[index].1;
+        let slot = tails.partition_point(|&tail| pairs[tail].1 < theirs_at);
+        previous[index] = slot.checked_sub(1).map(|before| tails[before]);
+        if slot == tails.len() {
+            tails.push(index);
+        } else {
+            tails[slot] = index;
+        }
+    }
+
+    let mut chain = Vec::with_capacity(tails.len());
+    let mut at = tails.last().copied();
+    while let Some(index) = at {
+        chain.push(pairs[index]);
+        at = previous[index];
+    }
+    chain.reverse();
+    chain
+}
+
+fn hash_window(window: &[StreamToken]) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for token in window {
+        token.spelling.hash(&mut hasher);
+    }
+    hasher.finish()
+}
 /// Myers' shortest edit script over two slices, as `(position, our index, their index)` triples in stream order.
 /// **How far the comparison may go before it stops looking for the smallest script.**
 ///
@@ -723,6 +871,66 @@ fn flush(
     queue.clear();
 }
 
+/// **The stream with every pragma taken out**, so two compilers' different ways of *carrying* one stop being
+/// differences.
+///
+/// Measured against `cl /E` on `<format>`: the compiler prints `#pragma` lines at its own place in the output (a
+/// header's `#pragma comment` arrives before the `#pragma detect_mismatch` that precedes it in the source), and it
+/// rewrites `_Pragma("warning(push)")` into `__pragma(warning(push))`. Neither is a *reading* of the program — a
+/// pragma is a message to the compiler, and no declaration depends on it — but together they were three thousand
+/// differences that buried the ones that were.
+///
+/// What goes: a `#` `pragma` line (every following token on the same file and line), and a `_Pragma(…)` or
+/// `__pragma(…)` operator with its balanced parenthesis. What stays: everything else, including the tokens either
+/// side of them. A comparison that wants to notice a wrong `#pragma once` keeps the stream as it is and does not
+/// call this.
+pub fn without_pragmas(tokens: &[StreamToken]) -> Vec<StreamToken> {
+    let mut kept = Vec::with_capacity(tokens.len());
+    let mut index = 0usize;
+
+    let same_line = |one: &StreamToken, other: &StreamToken| one.file == other.file && one.line == other.line;
+
+    while index < tokens.len() {
+        let token = &tokens[index];
+
+        if &*token.spelling == "#"
+            && tokens.get(index + 1).is_some_and(|next| &*next.spelling == "pragma" && same_line(token, next))
+        {
+            index += 2;
+            while index < tokens.len() && same_line(token, &tokens[index]) {
+                index += 1;
+            }
+            continue;
+        }
+
+        if matches!(&*token.spelling, "_Pragma" | "__pragma")
+            && tokens.get(index + 1).is_some_and(|next| &*next.spelling == "(")
+        {
+            let mut depth = 0usize;
+            let mut end = index + 1;
+            while end < tokens.len() {
+                match &*tokens[end].spelling {
+                    "(" => depth += 1,
+                    ")" => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                end += 1;
+            }
+            index = end + 1;
+            continue;
+        }
+
+        kept.push(token.clone());
+        index += 1;
+    }
+
+    kept
+}
 /// **Read the tokens out of a real preprocessor's output**, dropping its line markers and keeping the position they
 /// state.
 ///

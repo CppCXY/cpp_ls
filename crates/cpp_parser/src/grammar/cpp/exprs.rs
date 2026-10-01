@@ -312,7 +312,11 @@ pub fn parse_call_arguments(p: &mut CppParser) -> ParseResult {
 /// `{` after any part of it belongs to the same body, however deeply the expression nests.
 pub fn parse_constraint_expr(p: &mut CppParser) -> ParseResult {
     let previous = p.enter_constraint();
-    let result = parse_expr(p);
+    // A constraint is a *logical-or-expression* ([temp.pre]): `||` is the loosest operator it can hold. Anything
+    // looser belongs to what the clause is written on — the `=` of `V() requires C<T> = default;` and
+    // `void f() requires C<T> = delete;`, which read as an assignment to `C<T>` left the declaration without a
+    // clause and without a body.
+    let result = parse_binary_expr_with_precedence(p, 4);
     p.leave_constraint(previous);
     result
 }
@@ -1613,9 +1617,44 @@ fn parse_postfix_suffixes(
                 // template arguments. It is accepted in both positions or neither, because which of the two a
                 // reader meets depends only on whether the object has a name.
                 if p.current_token() == CppTokenKind::TemplateKeyword
-                    && p.peek_next_token() == CppTokenKind::Identifier
+                    && matches!(
+                        p.peek_next_token(),
+                        CppTokenKind::Identifier | CppTokenKind::OperatorKeyword
+                    )
                 {
                     p.bump(); // `template`
+                }
+
+                // **A qualified member name**: `this->Base::store(v)`, `p->Outer<T>::Inner::f()`,
+                // `x.Base::template f<T>()`. Each segment before a `::` is part of the name, and it is the last one
+                // that is the member. MSVC's `<atomic>` writes `const_cast<atomic*>(this)->_Base::store(_Value)`
+                // in thirty places, and every one of them was `expected ;`.
+                while p.current_token() == CppTokenKind::Identifier {
+                    if p.peek_next_token() == CppTokenKind::Less {
+                        // A template-id qualifier, `Outer<T>::f`: kept only when a `::` follows the arguments, which
+                        // is what separates it from a comparison written after a member access.
+                        let before_the_qualifier = p.checkpoint();
+                        p.bump();
+                        if super::types::parse_template_argument_list(p).is_err()
+                            || p.current_token() != CppTokenKind::Scope
+                        {
+                            p.rollback(before_the_qualifier);
+                            break;
+                        }
+                    } else if p.peek_next_token() == CppTokenKind::Scope {
+                        p.bump(); // the qualifier
+                    } else {
+                        break;
+                    }
+                    p.bump(); // `::`
+                    if p.current_token() == CppTokenKind::TemplateKeyword
+                        && matches!(
+                            p.peek_next_token(),
+                            CppTokenKind::Identifier | CppTokenKind::OperatorKeyword
+                        )
+                    {
+                        p.bump(); // `template`
+                    }
                 }
 
                 if p.current_token() == CppTokenKind::Identifier {
@@ -1643,6 +1682,14 @@ fn parse_postfix_suffixes(
                     // reads it — see [`super::types::parse_operator_name_here`], which is exposed for exactly
                     // this: one answer to "what is an operator name" rather than two.
                     super::types::parse_operator_name_here(p)?;
+                    // `x.template operator()<I>(args)`: the explicit template arguments of a call operator.
+                    if super::types::could_start_template_arguments(p) {
+                        let before_the_arguments = p.checkpoint();
+                        let read = super::types::parse_template_argument_list(p);
+                        if read.is_err() || starts_an_operand(p, 0) {
+                            p.rollback(before_the_arguments);
+                        }
+                    }
                 } else if p.current_token() == CppTokenKind::Tilde {
                     // A **pseudo-destructor call**: `p->~T()`, `x.~basic_string()`. `~name` is how a destructor is
                     // spelled, in an expression as much as in a declaration, and what follows the name may be

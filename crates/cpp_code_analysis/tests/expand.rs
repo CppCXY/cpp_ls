@@ -19,8 +19,7 @@ use cpp_parser::{CppParser, CppTokenKind, ParserConfig};
 ///
 /// **Lexed, not read out of the tree**, and that is the point rather than a shortcut. The tree does not
 /// store trivia at all — the parser emits `MarkEvent::Trivia` for it and the tree builder drops it, so
-/// whitespace never reaches the CST. Expansion needs it anyway: `F (1)` is not a call to `F`, and that
-/// is a fact about the gap between two tokens.
+/// whitespace never reaches the CST.
 ///
 /// A consumer does the same thing for the same reason: to expand a region it lexes the file and takes
 /// the tokens in that range.
@@ -45,8 +44,7 @@ fn lex(source: &str) -> Vec<Token> {
 /// The significant tokens of a fragment: everything but whitespace, newlines and comments.
 ///
 /// Trivia is dropped because *expansion does not depend on it* — the standard's phases remove comments
-/// and splices before any of this, and whitespace only matters for the adjacency of a call's
-/// parenthesis, which the lexer already recorded. Dropping it here also means the assertions can be
+/// and splices before any of this, and whitespace never decides what a call is. Dropping it here also means the assertions can be
 /// about the spelling that matters.
 fn tokens_of(source: &str) -> Vec<Token> {
     lex(source)
@@ -65,9 +63,7 @@ fn table(defines: &str) -> MacroTable {
 fn expand_use(defines: &str, use_site: &str) -> cpp_code_analysis::Expansion {
     let macros = table(defines);
 
-    // **Lexed, not filtered**, so that the whitespace is still there when the expander asks whether a
-    // `(` is adjacent to the name before it. Filtering it out first would make `F (1)` look like a call,
-    // and the adjacency rule is a fact about the gap.
+    // Lexed, not filtered: the expander has to read through the layout between a name and its `(`.
     expand(&lex(use_site), &macros)
 }
 
@@ -164,23 +160,64 @@ fn a_function_like_macro_takes_arguments() {
     assert_eq!(joined(&expansion), "((1) > (2) ? (1) : (2))");
 }
 
-/// **The adjacency rule.** `F (1)` is not a call: the tokens are `F`, `(`, `1`, `)`. A check on the
-/// next *significant* token would expand it anyway and produce `(1)` where a compiler leaves `F (1)`.
+/// **Layout between the name and the `(` does not stop a call.** `F (1)` is a call to `F` (C11 6.10.3p10, C++
+/// [cpp.replace]): only the `#define` needs the `(` adjacent to the name. `cl /E` expands it, and so does every
+/// other preprocessor.
 #[test]
-fn a_space_before_the_parenthesis_means_it_is_not_a_call() {
+fn a_space_before_the_parenthesis_is_still_a_call() {
     let expansion = expand_use("#define F(x) (x)\n", "F (1)");
 
-    assert_eq!(
-        joined(&expansion),
-        "F (1)",
-        "the name is left as it is, and the rest is copied"
-    );
-    assert!(matches!(
-        expansion.diagnostics.first().map(|it| &it.note),
-        Some(cpp_code_analysis::ExpansionNote::NoArgumentList { .. })
-    ));
+    assert_eq!(joined(&expansion), "(1)");
+    assert!(expansion.diagnostics.is_empty());
 }
 
+/// **A name at the end of a replacement list is called by what follows the invocation.** `A` expands to `F`, and
+/// the `(1)` after `A` in the source is `F`'s argument list. MSVC's `__MACHINEX86(…)` intrinsics table is written
+/// this way: one object-like macro that expands either to the function-like `__MACHINE` or to `__MACHINEZ`.
+#[test]
+fn a_function_like_name_ending_a_body_takes_the_arguments_after_the_call() {
+    let expansion = expand_use("#define F(x) (x)\n#define A F\n", "A(1) + 2");
+
+    assert_eq!(joined(&expansion), "(1) + 2");
+}
+
+/// The same through two levels, where the second level is an object-like macro too.
+#[test]
+fn a_chain_of_object_like_macros_ends_in_a_call() {
+    let expansion = expand_use("#define F(x) [x]\n#define A F\n#define B A\n", "B (7) ;");
+
+    assert_eq!(joined(&expansion), "[7] ;");
+}
+
+/// A call that never gets its `(` is left alone, with the rest of the run intact.
+#[test]
+fn a_function_like_name_ending_a_body_without_arguments_is_left_alone() {
+    let expansion = expand_use("#define F(x) (x)\n#define A F\n", "A + 2");
+
+    assert_eq!(joined(&expansion), "F + 2");
+}
+/// **An argument is expanded before it is substituted**, so a stringizing macro one level down sees the value.
+/// MSVC's `_STL_STRINGIZE(_ITERATOR_DEBUG_LEVEL)` is this shape, and the compiler prints `"0"`.
+#[test]
+fn an_argument_is_expanded_before_a_nested_stringize_sees_it() {
+    let expansion = expand_use(
+        "#define LEVEL 0\n#define S_(x) #x\n#define S(x) S_(x)\n",
+        "S(LEVEL) S_(LEVEL)",
+    );
+
+    assert_eq!(text(&expansion), ["\"0\"", "\"LEVEL\""], "`#x` directly on the argument stringizes the name");
+}
+
+/// An operand of `##` is used as written: pre-expanding it would paste the value instead of the name.
+#[test]
+fn a_pasted_argument_is_not_expanded_first() {
+    let expansion = expand_use(
+        "#define X 1\n#define CAT(a, b) a ## b\n",
+        "CAT(X, Y) CAT(1, X)",
+    );
+
+    assert_eq!(text(&expansion), ["XY", "1X"]);
+}
 /// A function-like name with no argument list at all is not a call either.
 #[test]
 fn a_function_like_macro_without_arguments_is_not_expanded() {

@@ -1923,20 +1923,15 @@ impl UnitCook<'_> {
         // an include that follows is spliced after it exactly as a preprocessor would.
         if self.unit.frames[frame as usize].visit_once && cook.tokens.is_empty() {
             let here = cpp_parser::SourceRange::new(0, 0);
+            out.break_line_before_next();
             for spelling in ["#", "pragma", "once"] {
-                out.text.push_str(spelling);
-                out.text.push(' ');
-                let cooked =
-                    cpp_parser::SourceRange::new(out.text.len() - spelling.len() - 1, spelling.len());
-                out.spans.push(UnitSpan {
-                    cooked,
-                    written: here,
-                    file: frame as u32,
-                });
+                out.push(spelling, frame, here);
             }
+            out.break_line_before_next();
         }
 
-        for token in &cook.tokens {
+        let mut lines = cook.pragma_lines.iter().peekable();
+        for (index, token) in cook.tokens.iter().enumerate() {
             // **Where the token stands in this file**, which is also what decides whether an include that has not
             // been spliced yet comes first: the call site for an expansion (the text the reader sees) and the
             // token's own range for text the file wrote. Both are monotone in stream order, and both are positions
@@ -1948,7 +1943,15 @@ impl UnitCook<'_> {
                 self.stitch(included[next], out);
                 next += 1;
             }
+            while lines.next_if(|line| line.end <= index).is_some() {}
+            // A `#pragma` is a line of its own — see [`crate::CookedStream::pragma_lines`].
+            if lines.peek().is_some_and(|line| line.start == index) {
+                out.break_line_before_next();
+            }
             out.push(token.text(), frame, at);
+            if lines.peek().is_some_and(|line| line.end == index + 1) {
+                out.break_line_before_next();
+            }
         }
 
         self.stitch_included(included, next, out);
@@ -2555,6 +2558,8 @@ pub struct RenderedUnit {
     /// answering `Unknown` there is what pulls the `/analyze` header into a program that never asks for it. That is
     /// §3.2 item 1 (the builtin macro table), and it is the fix that stops this file being in the program at all.
     pub unbalanced: Vec<std::path::PathBuf>,
+    /// The next token starts a new line: a `#pragma` directive ends at its newline, and `text` has no other.
+    pub(crate) pending_break: bool,
 }
 
 /// **One `#error` or `#warning` the compilation would have said**, with where it was written.
@@ -2761,8 +2766,9 @@ impl RenderedUnit {
     /// and a test that spelled the text itself would be testing its own spelling rather than this rule.
     pub(crate) fn push(&mut self, text: &str, file: u32, written: cpp_parser::SourceRange) {
         if !self.text.is_empty() {
-            self.text.push(' ');
+            self.text.push(if self.pending_break { '\n' } else { ' ' });
         }
+        self.pending_break = false;
         match text {
             "{" => self.braces += 1,
             "}" => self.braces -= 1,
@@ -2775,6 +2781,11 @@ impl RenderedUnit {
             file,
             written,
         });
+    }
+
+    /// Put the next token on a line of its own. See [`crate::CookedStream::pragma_lines`].
+    pub(crate) fn break_line_before_next(&mut self) {
+        self.pending_break = true;
     }
 
     /// **The same program without the tokens of `left_out` files** — the stream a fenced parse reads. Everything else
@@ -2855,6 +2866,9 @@ impl RenderedUnit {
         let mut out = self.empty_like();
         for span in &self.spans {
             if span.file == file {
+                if span.cooked.start_offset > 0 && self.text.as_bytes()[span.cooked.start_offset - 1] == b'\n' {
+                    out.break_line_before_next();
+                }
                 out.push(&self.text[span.cooked.start_offset..span.cooked.end_offset()], span.file, span.written);
             }
         }

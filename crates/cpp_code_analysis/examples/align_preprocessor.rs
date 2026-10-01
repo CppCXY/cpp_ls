@@ -332,7 +332,14 @@ fn main() {
         std::process::exit(1);
     }
 
-    let theirs = cpp_code_analysis::tokenize_preprocessed(&output.stdout);
+    let mut theirs = cpp_code_analysis::tokenize_preprocessed(&output.stdout);
+    // Pragmas are carried differently by the two sides and are not part of the program's reading; `--keep-pragmas`
+    // compares them too.
+    let mut ours = ours;
+    if !std::env::args().any(|argument| argument == "--keep-pragmas") {
+        ours = cpp_code_analysis::without_pragmas(&ours);
+        theirs = cpp_code_analysis::without_pragmas(&theirs);
+    }
     println!("{} tokens from the preprocessor", theirs.len());
     if theirs.is_empty() && !ours.is_empty() {
         eprintln!(
@@ -353,6 +360,13 @@ fn main() {
     }
 
     println!("\n--- alignment ---\n{}", report.render());
+
+    // `--regions`: the differences clustered into the places they happen (gaps of up to 64 tokens joined), largest
+    // first, with a per-file total. A list of forty differences says *that* a reading differs; the regions say
+    // *where*, which is the order a work list wants.
+    if std::env::args().any(|argument| argument == "--regions") {
+        print_regions(&ours, &theirs);
+    }
 
     // **Which files the compiler read and we did not**, by name. The one certain classification, and the one a reader
     // can act on: a count says how big the gap is, the names say which search differed.
@@ -766,4 +780,96 @@ fn offset_of_line(source: &str, line: usize) -> usize {
         .nth(line - 2)
         .map(|(at, _)| at + 1)
         .unwrap_or(source.len())
+}
+
+/// Differences clustered by position, as `file:line` regions.
+fn print_regions(ours: &[StreamToken], theirs: &[StreamToken]) {
+    let alignment = cpp_code_analysis::align(ours, theirs);
+
+    struct Region {
+        first: String,
+        file: String,
+        ours: usize,
+        theirs: usize,
+        last_at: usize,
+        sample_ours: Vec<String>,
+        sample_theirs: Vec<String>,
+    }
+
+    let mut regions: Vec<Region> = Vec::new();
+    for difference in &alignment.differences {
+        let token = difference.ours.as_ref().or(difference.theirs.as_ref());
+        let Some(token) = token else { continue };
+
+        let continues = regions
+            .last()
+            .is_some_and(|region| difference.at <= region.last_at + 64);
+        if !continues {
+            regions.push(Region {
+                first: token.origin(),
+                file: token
+                    .file
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default(),
+                ours: 0,
+                theirs: 0,
+                last_at: difference.at,
+                sample_ours: Vec::new(),
+                sample_theirs: Vec::new(),
+            });
+        }
+
+        let region = regions.last_mut().expect("just pushed");
+        region.last_at = difference.at;
+        if let Some(token) = &difference.ours {
+            region.ours += 1;
+            if region.sample_ours.len() < 12 {
+                region.sample_ours.push(token.spelling.to_string());
+            }
+        }
+        if let Some(token) = &difference.theirs {
+            region.theirs += 1;
+            if region.sample_theirs.len() < 12 {
+                region.sample_theirs.push(token.spelling.to_string());
+            }
+        }
+    }
+
+    let short = |text: &str| {
+        let text = text.replace("c:/program files/microsoft visual studio/18/community/vc/tools/msvc/", "<msvc>/");
+        text.replace("c:/program files (x86)/windows kits/10/include/", "<kits>/")
+    };
+
+    let mut by_file: HashMap<String, (usize, usize)> = HashMap::new();
+    for region in &regions {
+        let entry = by_file.entry(short(&region.file)).or_default();
+        entry.0 += 1;
+        entry.1 += region.ours + region.theirs;
+    }
+    let mut files: Vec<_> = by_file.into_iter().collect();
+    files.sort_by_key(|(_, (_, tokens))| std::cmp::Reverse(*tokens));
+
+    println!("\n--- {} regions; differing tokens per file ---", regions.len());
+    for (file, (count, tokens)) in files.iter().take(30) {
+        println!("{tokens:>7} tokens in {count:>4} regions  {file}");
+    }
+
+    let limit: usize = std::env::args()
+        .skip_while(|argument| argument != "--regions")
+        .nth(1)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(30);
+    regions.sort_by_key(|region| std::cmp::Reverse(region.ours + region.theirs));
+    println!("\n--- largest regions ---");
+    for region in regions.iter().take(limit) {
+        println!(
+            "{:>6} ours {:>6} theirs  {}\n        ours:   {}\n        theirs: {}",
+            region.ours,
+            region.theirs,
+            short(&region.first),
+            region.sample_ours.join(" "),
+            region.sample_theirs.join(" ")
+        );
+    }
 }

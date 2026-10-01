@@ -245,7 +245,7 @@ impl ExpandedToken {
 pub enum ExpansionNote {
     /// A function-like macro with no argument list after it.
     ///
-    /// `F` alone is not a call, and expanding it would invent an invocation. The name is left as it is.
+    /// `F` with no `(` after it (layout aside) is not a call, and expanding it would invent an invocation. The name is\n    /// left as it is.
     NoArgumentList { name: Box<str> },
     /// The argument list was not closed before the end of the input — the normal state of a call being
     /// typed.
@@ -312,7 +312,7 @@ pub fn expand(tokens: &[Token], macros: &(impl MacroValues + ?Sized)) -> Expansi
 
     let marked: Vec<Marked> = tokens.iter().cloned().map(Marked::from).collect();
     let region = span_of(tokens);
-    expander.expand_into(&marked, region);
+    expander.expand_into(&marked, region, None);
     expander.finish()
 }
 
@@ -335,7 +335,7 @@ pub fn expand_with_budget(
 
     let marked: Vec<Marked> = tokens.iter().cloned().map(Marked::from).collect();
     let region = span_of(tokens);
-    expander.expand_into(&marked, region);
+    expander.expand_into(&marked, region, None);
     expander.finish()
 }
 
@@ -401,6 +401,11 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
     /// call site it was joined at, and re-labelling it as `Expanded` would throw that away.
     fn origin_of(&self, token: &Token, region: Option<SourceRange>, fallback: &Origin) -> Origin {
         if matches!(fallback, Origin::Pasted { .. } | Origin::Stringized { .. }) {
+            return fallback.clone();
+        }
+
+        // A token the expansion of an argument already produced carries the chain it was produced under.
+        if matches!(fallback, Origin::Expanded { invocations } if !invocations.is_empty()) {
             return fallback.clone();
         }
 
@@ -477,12 +482,19 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
     /// `region` is the span in the file those tokens came from, and it is what [`origin_of`](Self::origin_of)
     /// uses to tell a token of the source from a token of a macro body. It is `None` only when the caller
     /// handed over something with no file behind it.
-    fn expand_into(&mut self, tokens: &[Marked], region: Option<SourceRange>) {
+    fn expand_into(
+        &mut self,
+        tokens: &[Marked],
+        region: Option<SourceRange>,
+        tail: Option<&Tail<'_>>,
+    ) -> usize {
         let mut index = 0;
+        // How many tokens of `tail` a call that began in `tokens` took as its arguments.
+        let mut consumed = 0usize;
 
         while index < tokens.len() {
             if self.exhausted {
-                return;
+                return consumed;
             }
 
             let token = &tokens[index].token;
@@ -491,7 +503,7 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
             // the lexer has no way to know it is looking at a directive's name — so both are looked up.
             if !could_be_a_macro_name(token.kind) {
                 if !self.push(token.clone(), tokens[index].origin.clone(), region) {
-                    return;
+                    return consumed;
                 }
                 index += 1;
                 continue;
@@ -504,7 +516,7 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
                 // Not a macro. Not a note either: most identifiers are not macros, and reporting that
                 // would bury the ones that are.
                 if !self.push(token.clone(), tokens[index].origin.clone(), region) {
-                    return;
+                    return consumed;
                 }
                 index += 1;
                 continue;
@@ -518,7 +530,7 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
             if self.active.contains(&name) {
                 self.note(ExpansionNote::Recursive { name: name.clone() }, token.range);
                 if !self.push(token.clone(), tokens[index].origin.clone(), region) {
-                    return;
+                    return consumed;
                 }
                 index += 1;
                 continue;
@@ -527,7 +539,7 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
             if self.depth >= MAX_DEPTH {
                 self.note(ExpansionNote::TooDeep { name: name.clone() }, token.range);
                 if !self.push(token.clone(), tokens[index].origin.clone(), region) {
-                    return;
+                    return consumed;
                 }
                 index += 1;
                 continue;
@@ -543,31 +555,73 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
                         call_site: token.range,
                         written_in: definition.written_in,
                     };
-                    self.expand_body(&definition, &[], tokens, invocation);
+                    // What follows the name is what the rescan of its body may still need: a body that ends in
+                    // a function-like macro's name (`#define __MACHINEX64 __MACHINEZ`) is called by the tokens
+                    // **after** it, and those are not in the body.
+                    let after = Tail {
+                        tokens: &tokens[index + 1..],
+                        outer: tail,
+                    };
+                    let used = self.expand_body(&definition, &[], tokens, invocation, Some(&after));
                     index += 1;
+                    self.advance_past(tokens.len(), &mut index, used, &mut consumed);
                 }
-                // A function-like macro: only a call. The `(` has to be *adjacent*, which is why the
-                // check is on the next token rather than on the next significant one.
+                // A function-like macro: only a call. The standard allows layout between the name and the
+                // `(` — `F (1)` is a call — and the `(` may be in whatever follows the replacement list this
+                // name ended.
                 Some(_) => {
-                    if !next_token_is_a_call(tokens, index) {
+                    let open = match tokens[index + 1..]
+                        .iter()
+                        .position(|marked| !is_trivia(marked.token.kind))
+                    {
+                        Some(offset) => (tokens[index + 1 + offset].token.kind == CppTokenKind::LeftParen)
+                            .then_some(index + 1 + offset),
+                        None => None,
+                    };
+                    let reaches_into_the_tail = tokens[index + 1..]
+                        .iter()
+                        .all(|marked| is_trivia(marked.token.kind))
+                        && tail.is_some_and(Tail::starts_a_call);
+
+                    if open.is_none() && !reaches_into_the_tail {
                         self.note(
                             ExpansionNote::NoArgumentList { name: name.clone() },
                             token.range,
                         );
                         if !self.push(token.clone(), tokens[index].origin.clone(), region) {
-                            return;
+                            return consumed;
                         }
                         index += 1;
                         continue;
                     }
 
-                    let Some(arguments) = split_arguments(tokens, index) else {
+                    // A call that starts here and ends in the tail is read from one flat run, so the argument
+                    // reader and the substitution see the same indices.
+                    let flat: Vec<Marked>;
+                    let (source, in_this_run, open) = match open {
+                        Some(open) => (tokens, true, open),
+                        None => {
+                            let mut run = tokens[index..].to_vec();
+                            if let Some(tail) = tail {
+                                tail.copy_into(&mut run);
+                            }
+                            let open = run
+                                .iter()
+                                .skip(1)
+                                .position(|marked| !is_trivia(marked.token.kind))
+                                .map_or(1, |offset| offset + 1);
+                            flat = run;
+                            (flat.as_slice(), false, open)
+                        }
+                    };
+
+                    let Some(arguments) = split_arguments(source, open) else {
                         self.note(
                             ExpansionNote::UnterminatedArgumentList { name: name.clone() },
                             token.range,
                         );
                         if !self.push(token.clone(), tokens[index].origin.clone(), region) {
-                            return;
+                            return consumed;
                         }
                         index += 1;
                         continue;
@@ -583,16 +637,21 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
                             token.range,
                         );
                         if !self.push(token.clone(), tokens[index].origin.clone(), region) {
-                            return;
+                            return consumed;
                         }
                         index += 1;
                         continue;
                     }
 
-                    let call_site = SourceRange::new(
-                        token.range.start_offset,
-                        arguments.end_offset - token.range.start_offset,
-                    );
+                    // A name that ended a replacement list was written in a `#define`, and its arguments were
+                    // written at the use: the two are offsets in different texts, so the call is placed where the
+                    // reader can see it — from the `(`.
+                    let call_from = if in_this_run {
+                        token.range.start_offset
+                    } else {
+                        source[open].token.range.start_offset
+                    };
+                    let call_site = SourceRange::new(call_from, arguments.end_offset - call_from);
                     let invocation = MacroInvocation {
                         name: name.clone(),
                         definition: definition.range,
@@ -601,29 +660,150 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
                         written_in: definition.written_in,
                     };
 
-                    self.expand_body(&definition, &arguments.groups, tokens, invocation);
-                    index = arguments.next_index;
+                    if in_this_run {
+                        let after = Tail {
+                            tokens: &source[arguments.next_index..],
+                            outer: tail,
+                        };
+                        let used =
+                            self.expand_body(&definition, &arguments.groups, source, invocation, Some(&after));
+                        index = arguments.next_index;
+                        self.advance_past(tokens.len(), &mut index, used, &mut consumed);
+                    } else {
+                        // `source` is the name, the rest of this run, and the tail up to the call's end: what it
+                        // took of the tail is everything past this run's own tokens.
+                        let own = tokens.len() - index;
+                        let after = Tail {
+                            tokens: &source[arguments.next_index..],
+                            outer: None,
+                        };
+                        let used =
+                            self.expand_body(&definition, &arguments.groups, source, invocation, Some(&after));
+                        consumed = arguments.next_index - own + used;
+                        index = tokens.len();
+                    }
                 }
             }
+        }
+
+        consumed
+    }
+
+    /// Each argument of a call, macro-expanded in isolation — `None` where there is nothing in it to expand.
+    ///
+    /// Indexed by parameter position. An argument with no macro name in it is left to be substituted as written,
+    /// which is both what the standard says for it and the common case.
+    fn expand_arguments(
+        &mut self,
+        definition: &MacroDef,
+        arguments: &[std::ops::Range<usize>],
+        plain: &[Token],
+        region: Option<SourceRange>,
+    ) -> Vec<Option<Vec<Marked>>> {
+        let Some(params) = &definition.params else {
+            return Vec::new();
+        };
+
+        let mut expanded = Vec::with_capacity(params.len());
+        for param in params {
+            let raw = trim_trivia(argument_range_for(params, arguments, plain, &param.name));
+            let has_a_macro = raw.iter().any(|token| {
+                could_be_a_macro_name(token.kind) && self.macros.lookup(token.text()).definition().is_some()
+            });
+            if !has_a_macro {
+                expanded.push(None);
+                continue;
+            }
+
+            let marked: Vec<Marked> = raw.into_iter().map(Marked::from).collect();
+            let saved = std::mem::take(&mut self.out);
+            self.expand_into(&marked, region, None);
+            let produced = std::mem::replace(&mut self.out, saved);
+
+            let mut tokens: Vec<Marked> = produced
+                .into_iter()
+                .map(|token| Marked {
+                    token: token.token,
+                    origin: token.origin,
+                })
+                .collect();
+            while tokens.last().is_some_and(|marked| is_trivia(marked.token.kind)) {
+                tokens.pop();
+            }
+            let leading = tokens
+                .iter()
+                .take_while(|marked| is_trivia(marked.token.kind))
+                .count();
+            tokens.drain(..leading);
+            expanded.push(Some(tokens));
+        }
+        expanded
+    }
+
+    /// Move past the tokens a nested expansion took from what followed it.
+    ///
+    /// `index` is the first token after the call; `used` of the tokens from there on were consumed by the
+    /// expansion's own rescan. When that is more than this run has left, the rest came from the run's own tail.
+    fn advance_past(&self, length: usize, index: &mut usize, used: usize, consumed: &mut usize) {
+        let available = length - *index;
+        if used <= available {
+            *index += used;
+        } else {
+            *index = length;
+            *consumed = used - available;
         }
     }
 
     /// Substitute a macro's arguments into its body and expand the result.
     ///
     /// `arguments` are slices of `tokens`, so an argument is a token sequence and not a string.
+    ///
+    /// Returns how many tokens of `after` the rescan consumed: the replacement list can end in the name of a
+    /// function-like macro, and the arguments of that call are then what follows the invocation.
     fn expand_body(
         &mut self,
         definition: &MacroDef,
         arguments: &[std::ops::Range<usize>],
         tokens: &[Marked],
         invocation: MacroInvocation,
-    ) {
+        after: Option<&Tail<'_>>,
+    ) -> usize {
+        // Only the tokens the arguments are made of are copied. The run this call sits in can be a whole file's
+        // worth, and copying all of it for every macro call made expansion quadratic in the length of a run.
+        let (offset, wanted) = match (arguments.first(), arguments.last()) {
+            (Some(first), Some(last)) => (first.start, &tokens[first.start..last.end]),
+            _ => (0, &tokens[..0]),
+        };
+        let plain: Vec<Token> = wanted.iter().map(|marked| marked.token.clone()).collect();
+        let arguments: Vec<std::ops::Range<usize>> = arguments
+            .iter()
+            .map(|range| range.start - offset..range.end - offset)
+            .collect();
+        let arguments = arguments.as_slice();
+        let region = match (tokens.first(), tokens.last()) {
+            (Some(first), Some(last)) => Some(SourceRange::new(
+                first.token.range.start_offset,
+                last.token.range.end_offset() - first.token.range.start_offset,
+            )),
+            _ => None,
+        };
+        // **Arguments are macro-expanded before they are substituted** (C11 6.10.3.1), except where they are the
+        // operand of `#` or `##`. The difference is observable: `#define S(x) S_(x)` / `#define S_(x) #x` makes
+        // `S(LEVEL)` the string of what `LEVEL` expands to — `"0"` — and a rescan-only expander stringizes the
+        // name. That is `_STL_STRINGIZE(_ITERATOR_DEBUG_LEVEL)` in every MSVC STL translation unit.
+        //
+        // This runs **before** the macro being invoked is hidden: the argument is read in the context of the call.
+        let expanded = self.expand_arguments(definition, arguments, &plain, region);
         self.active.push(definition.name.clone());
         self.invocations.push(invocation.clone());
         self.depth += 1;
-
-        let plain: Vec<Token> = tokens.iter().map(|marked| marked.token.clone()).collect();
-        let substituted = substitute(definition, arguments, &plain, &invocation);
+        // A token `#` or `##` makes is placed at the **outermost** call: a call written inside another macro's body
+        // has its call site in that `#define`, and a position in another file is no place to put a token of this one.
+        let mut operators_at = invocation.clone();
+        if let Some(outermost) = self.invocations.first() {
+            operators_at.call_site = outermost.call_site;
+        }
+        let substituted = substitute(definition, arguments, &plain, &operators_at, &expanded);
 
         // The rescan. Doing it through `expand_into` rather than by re-running `expand` on the whole
         // thing is what keeps the origin chain: a token that came from an argument and is *also* a
@@ -632,15 +812,44 @@ impl<M: MacroValues + ?Sized> Expander<'_, M> {
         // The region is the macro body, so a token of the body is outside it and a token that came from an
         // argument — written at the call site — is inside. That is how the two stay distinguishable all
         // the way down.
-        let region = span_of(&plain);
-        self.expand_into(&substituted, region);
+        let used = self.expand_into(&substituted, region, after);
 
         self.depth -= 1;
         self.active.pop();
         self.invocations.pop();
+        used
     }
 }
 
+/// The tokens that follow a run being expanded: what an expansion's rescan reads on once its own replacement list
+/// is spent. Innermost run first, each pointing at the run it was nested in.
+struct Tail<'a> {
+    tokens: &'a [Marked],
+    outer: Option<&'a Tail<'a>>,
+}
+
+impl Tail<'_> {
+    /// Is the next token that is not layout a `(`?
+    fn starts_a_call(&self) -> bool {
+        let mut at = Some(self);
+        while let Some(run) = at {
+            if let Some(next) = run.tokens.iter().find(|marked| !is_trivia(marked.token.kind)) {
+                return next.token.kind == CppTokenKind::LeftParen;
+            }
+            at = run.outer;
+        }
+        false
+    }
+
+    /// Every token of the tail, in order, appended to `out`.
+    fn copy_into(&self, out: &mut Vec<Marked>) {
+        let mut at = Some(self);
+        while let Some(run) = at {
+            out.extend(run.tokens.iter().cloned());
+            at = run.outer;
+        }
+    }
+}
 /// The result of reading one argument list.
 struct Arguments {
     /// Each argument as a range into the original token slice, so no tokens are copied.
@@ -649,23 +858,6 @@ struct Arguments {
     next_index: usize,
     /// The offset just past the closing `)`.
     end_offset: usize,
-}
-
-/// Is the token after `index` an opening parenthesis with nothing in between?
-///
-/// The adjacency is the standard's rule and it is observable: given `#define F(x) x`,
-///
-/// ```text
-/// F(1)     // a call
-/// F (1)    // `F` is not a call at all — the tokens are `F`, `(`, `1`, `)`
-/// ```
-///
-/// so a check on the next *significant* token would expand `F (1)` into `(1)` where a compiler leaves
-/// `F (1)` alone.
-fn next_token_is_a_call(tokens: &[Marked], index: usize) -> bool {
-    tokens
-        .get(index + 1)
-        .is_some_and(|marked| marked.token.kind == CppTokenKind::LeftParen)
 }
 
 /// The span a token run occupies in the file, if it occupies one at all.
@@ -690,6 +882,7 @@ fn span_of(tokens: &[Token]) -> Option<SourceRange> {
 /// make — and the origin of each has to survive into the rescan. A plain `Vec<Token>` cannot: by the time
 /// the rescan sees a pasted token it is indistinguishable from a body token, and the call site it was
 /// pasted at is lost, which is the one thing a consumer needs in order to report against the right line.
+#[derive(Clone)]
 struct Marked {
     token: Token,
     origin: Origin,
@@ -728,12 +921,11 @@ impl FromIterator<Marked> for Vec<Token> {
     }
 }
 
-/// Read an argument list starting at the `(` that follows the macro name at `index`.
+/// Read an argument list whose opening `(` is at `open`.
 ///
 /// Returns `None` when the list is not closed before the input ends, which is the state of a call being
 /// typed and not an error worth reporting.
-fn split_arguments(tokens: &[Marked], index: usize) -> Option<Arguments> {
-    let open = index + 1;
+fn split_arguments(tokens: &[Marked], open: usize) -> Option<Arguments> {
     let mut depth = 0usize;
     let mut groups: Vec<std::ops::Range<usize>> = Vec::new();
     let mut group_start = open + 1;
@@ -816,6 +1008,7 @@ fn substitute(
     arguments: &[std::ops::Range<usize>],
     tokens: &[Token],
     invocation: &MacroInvocation,
+    expanded: &[Option<Vec<Marked>>],
 ) -> Vec<Marked> {
     let Some(params) = &definition.params else {
         // An object-like macro is its body. The layout around the body goes: it is the space after the
@@ -905,8 +1098,20 @@ fn substitute(
 
         // An ordinary parameter: the argument's tokens.
         if is_parameter(params, token.text()) {
-            let argument = argument_for(params, arguments, tokens, token.text());
-            out.extend(argument.into_iter().map(Marked::from));
+            // The left operand of `##` is used as written, like the right one.
+            let pre_expanded = params
+                .iter()
+                .position(|param| &*param.name == token.text())
+                .filter(|_| !paste_at.contains(&(index + 1)))
+                .and_then(|position| expanded.get(position))
+                .and_then(|argument| argument.as_ref());
+            match pre_expanded {
+                Some(argument) => out.extend(argument.iter().cloned()),
+                None => {
+                    let argument = argument_for(params, arguments, tokens, token.text());
+                    out.extend(argument.into_iter().map(Marked::from));
+                }
+            }
 
             // A variadic parameter often has no argument at all — `LOG("x")` for
             // `#define LOG(f, ...)`. Nothing is substituted, which is why `__VA_ARGS__` disappearing
@@ -1054,11 +1259,23 @@ fn stringize(argument: &[Token], call_site: SourceRange) -> Token {
     let mut text = String::with_capacity(argument.len() * 4 + 2);
     text.push('"');
 
-    let mut needs_a_space = false;
-    for token in argument.iter().filter(|token| !is_trivia(token.kind)) {
-        if needs_a_space {
+    // A space is written where the argument had layout between two tokens — `sizeof(int)` stays `sizeof(int)`
+    // and `a + b` stays `a + b` — which is what `cl` and `clang` print. Layout is either a trivia token (a stream
+    // that kept them) or a gap between the two tokens' positions (one that did not).
+    let mut previous: Option<&Token> = None;
+    let mut saw_layout = false;
+    for token in argument.iter() {
+        if is_trivia(token.kind) {
+            saw_layout = true;
+            continue;
+        }
+        if let Some(previous) = previous
+            && (saw_layout || previous.range.end_offset() != token.range.start_offset)
+        {
             text.push(' ');
         }
+        saw_layout = false;
+        previous = Some(token);
         // Within the string, `"` and `\` have to be escaped or the literal does not re-lex.
         for character in token.text().chars() {
             match character {
@@ -1067,7 +1284,6 @@ fn stringize(argument: &[Token], call_site: SourceRange) -> Token {
                 other => text.push(other),
             }
         }
-        needs_a_space = true;
     }
 
     text.push('"');

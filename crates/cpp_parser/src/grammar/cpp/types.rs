@@ -166,7 +166,10 @@ fn a_macro_call_begins_the_declaration(p: &CppParser) -> bool {
                 depth -= 1;
                 if depth == 0 {
                     let after = super::decls::next_significant_index(p, index);
-                    return p.token_kind_at(after) == CppTokenKind::Identifier;
+                    // `V() requires C<T>`: the name after the group is the keyword that begins a constraint, so
+                    // what stands before it is a constructor's declarator and not a macro used as a type.
+                    return p.token_kind_at(after) == CppTokenKind::Identifier
+                        && p.token_text_at(after) != "requires";
                 }
             }
             CppTokenKind::Semicolon | CppTokenKind::Eof | CppTokenKind::None => return false,
@@ -176,6 +179,17 @@ fn a_macro_call_begins_the_declaration(p: &CppParser) -> bool {
     }
 
     false
+}
+
+/// Is the cursor on a `requires` that begins a constraint right after a parameter list — `V() requires C<T>`?
+///
+/// The shape has no competitor: a variable called `requires` is not written after a `)` and followed by something that
+/// reads as a constraint, so the clause is tried and what it consumed is the answer.
+fn has_a_clause_after_a_parameter_list(p: &mut CppParser) -> bool {
+    p.current_token() == CppTokenKind::Identifier
+        && p.current_token_text() == "requires"
+        && p.last_consumed_token_kind() == Some(CppTokenKind::RightParen)
+        && super::decls::starts_a_requires_clause(p)
 }
 
 /// Does this token *end* a decl-specifier-seq / type-id beyond doubt?
@@ -1489,6 +1503,21 @@ fn parse_one_decl_specifier_inner(
                 }
 
                 expect_token(p, CppTokenKind::RightParen)?;
+
+                // **A name looked up in the type `decltype` denotes**: `decltype(f())::type`, the form
+                // `<iterator>` and `<ranges>` write their return types in. The `::` and what follows it are part of
+                // the same type specifier — read as a separate one the declaration ended at the `)`, and in a class
+                // body that was silent: the rest of the member list became the tail of the declaration.
+                if p.current_token() == CppTokenKind::Scope
+                    && matches!(
+                        p.peek_next_token(),
+                        CppTokenKind::Identifier | CppTokenKind::TemplateKeyword
+                    )
+                    && let Err(err) = parse_name(p)
+                {
+                    p.close_marks_above(base);
+                    return Err(err);
+                }
             }
             return Ok(m.complete(p));
         }
@@ -1650,6 +1679,15 @@ fn parse_one_decl_specifier_inner(
         // A qualified or unqualified name, possibly a template-id. This is the case that needs a
         // symbol table to be certain about; the grammar accepts it and lets the caller decide.
         CppTokenKind::Identifier | CppTokenKind::Scope => {
+            // **`requires` after a parameter list is a constraint, not a word of the type**: `V(const V&) requires
+            // C<T> = default;` has no type at all — the specifier sequence ends where the clause begins.
+            if has_a_clause_after_a_parameter_list(p) {
+                return Err(CppParseError::syntax_error_from(
+                    "expected a declarator name",
+                    p.current_token_range(),
+                ));
+            }
+
             // A name specifier ends the type when it cannot be part of it. Two forms are ambiguous
             // from the tokens alone, and both are grammatical:
             //
@@ -1933,6 +1971,15 @@ fn name_joins_the_type(
     // No type yet, so this name can only be the type.
     if !has_type_specifier {
         return true;
+    }
+    // **A name that begins a pointer-to-member operator is not a word of the type**: `A B::*` is the type `A` and the
+    // operator `B::*`, never a type named `A B::`. Template arguments are where it shows — `_Ty1 _Ty2::*` in MSVC's
+    // `<type_traits>` (`struct _Is_member_object_pointer<_Ty1 _Ty2::*>`), and `int X::*>` for a name spelled like a
+    // macro — because a name after a complete type is otherwise taken for another word of it, and the `*` is then
+    // left as a declarator inside the type. The failure was silent: no diagnostic, and the declaration that
+    // contained it never ended, so everything after it in the file was part of it.
+    if has_type_specifier && pointer_to_member_operator_length(p, 0).is_some() {
+        return false;
     }
     // A **type-id**, where a macro-shaped name after a type is simply another word of the type and there is no
     // declarator to make room for:
@@ -2461,6 +2508,22 @@ fn parse_class_like_head(p: &mut CppParser) -> ParseResult {
         if parse_attribute_specifier(p).is_err() {
             break;
         }
+    }
+
+    // **`alignas(N)` between the class-key and the name**: `class alignas(2 * sizeof(void*)) _Atomic_ptr_base { … }`,
+    // which is where MSVC's `<memory>` puts it. Left alone the head had no name — the class was recorded as
+    // anonymous, so its constructors (`_Atomic_ptr_base() noexcept = default;`) were declarations with no return
+    // type and each one became an `ErrorNode`.
+    while p.current_token() == CppTokenKind::AlignasKeyword
+        && p.peek_next_token() == CppTokenKind::LeftParen
+    {
+        let alignas = p.mark(CppSyntaxKind::AlignasSpec);
+        p.bump(); // `alignas`
+        if super::decls::parse_balanced_token_group(p, CppSyntaxKind::ArgumentList).is_err() {
+            alignas.undo(p);
+            break;
+        }
+        alignas.complete(p);
     }
 
     // A **macro between the class-key and the name**, which is where a compiler's alignment attribute is written:
@@ -3075,6 +3138,23 @@ pub fn parse_name(p: &mut CppParser) -> ParseResult {
                 continue;
             }
             CppTokenKind::Identifier => p.bump(),
+            // **`decltype(expr)` as the first segment of a qualified name**: `typename decltype(__pc)::iterator`.
+            // The type it names is what the rest of the name is looked up in, so it stands where a namespace or a
+            // class would. MSVC's `<format>` writes `same_as<typename decltype(__pc)::iterator>` in two
+            // concepts, and the name rule refused the keyword.
+            CppTokenKind::DecltypeKeyword if p.peek_next_token() == CppTokenKind::LeftParen => {
+                p.bump(); // `decltype`
+                p.bump(); // `(`
+                let payload = if p.current_token() == CppTokenKind::AutoKeyword {
+                    parse_type_id(p).map(|_| ())
+                } else {
+                    super::exprs::parse_expr(p).map(|_| ())
+                };
+                if let Err(err) = payload.and_then(|()| expect_token(p, CppTokenKind::RightParen)) {
+                    p.close_marks_above(base);
+                    return Err(err);
+                }
+            }
             // `operator+`, `operator()`, `operator new`, `operator""_x`...
             CppTokenKind::OperatorKeyword => {
                 parse_operator_name(p)?;
@@ -3367,10 +3447,13 @@ fn a_bare_template_id_is_here(p: &CppParser) -> bool {
                 };
                 if depth <= 0 {
                     let after = index + 3;
-                    return !matches!(
-                        p.peek_token_kind_at(after..after + 1).first(),
-                        Some(&CppTokenKind::Scope)
-                    );
+                    let next = p.peek_token_kind_at(after..after + 1).first().copied();
+                    // **A friend declaration may name a template-id**: `friend int f<>(const C&);` and
+                    // `friend void g<int>(T);` befriend one specialization of a function template, and the
+                    // arguments belong to the name. (MSVC's `<xloctime>`/`<xlocnum>` write the first.)
+                    let a_friend_names_a_specialization = next == Some(CppTokenKind::LeftParen)
+                        && p.is_open(CppSyntaxKind::FriendDecl);
+                    return next != Some(CppTokenKind::Scope) && !a_friend_names_a_specialization;
                 }
             }
             CppTokenKind::Semicolon
@@ -4592,7 +4675,12 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
     // Refusing here is what turns that statement back into the expression it is: the declaration reading fails,
     // and the caller falls back — the same bounded backtracking the declaration/expression ambiguity already
     // relies on. See `a_bare_template_id_is_here`.
-    if a_bare_template_id_is_here(p) {
+    let clause_ahead = p.current_token() == CppTokenKind::Identifier
+        && !named_inside_parentheses
+        && super::at_requires(p)
+        && (p.last_declarator_is_function() || p.last_consumed_token_kind() == Some(CppTokenKind::RightParen))
+        && super::decls::starts_a_requires_clause(p);
+    if !clause_ahead && a_bare_template_id_is_here(p) {
         p.close_marks_above(base);
         return Err(CppParseError::syntax_error_from(
             "a declarator's name cannot have template arguments",
@@ -4600,14 +4688,25 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
         ));
     }
 
+    // **`requires` after a parameter list begins a constraint, it does not name anything**: in
+    // `V(const V&) requires C<T> = default;` the declarator is a constructor's — no type, no name — and the keyword
+    // is the next thing written. Taken for the declarator's name, the clause's `C<T>` was then "a name with template
+    // arguments" and the whole member failed, silently, in nine places of MSVC's `<variant>`/`<ranges>`. A real
+    // variable called `requires` is still one: its tokens do not read as a clause.
+    let begins_a_clause = p.current_token() == CppTokenKind::Identifier
+        && !named_inside_parentheses
+        && super::at_requires(p)
+        && (p.last_declarator_is_function() || p.last_consumed_token_kind() == Some(CppTokenKind::RightParen))
+        && super::decls::starts_a_requires_clause(p);
     let named = named_inside_parentheses
-        || matches!(
-            p.current_token(),
-            CppTokenKind::Identifier
-                | CppTokenKind::Scope
-                | CppTokenKind::OperatorKeyword
-                | CppTokenKind::Tilde
-        );
+        || (!begins_a_clause
+            && matches!(
+                p.current_token(),
+                CppTokenKind::Identifier
+                    | CppTokenKind::Scope
+                    | CppTokenKind::OperatorKeyword
+                    | CppTokenKind::Tilde
+            ));
     if named
         && !named_inside_parentheses
         && let Err(err) = parse_name(p)

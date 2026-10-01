@@ -1012,7 +1012,8 @@ impl crate::condition::MacroValues for Marked {
     /// to reach it.
     fn builtin_operator(&self, name: &str, operand: &str) -> Option<crate::condition::Value> {
         if name == "__has_cpp_attribute" {
-            return crate::preprocess::cooked::attribute_support(operand)
+            let msvc = self.is_defined("_MSC_VER") && !self.is_defined("__clang__");
+            return crate::preprocess::cooked::attribute_support_in(operand, msvc)
                 .map(crate::condition::Value::Known);
         }
 
