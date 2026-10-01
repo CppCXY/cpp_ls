@@ -2768,9 +2768,32 @@ fn the_arguments_look_like_values(p: &CppParser) -> bool {
                 at_element_start = false;
             }
             CppTokenKind::LeftParen | CppTokenKind::LeftBracket | CppTokenKind::LeftBrace => {
-                // A `(` in element position is a call, which is a value — not a type. Anywhere else it is
-                // nested inside an element that is already under way.
-                if at_element_start && kind == CppTokenKind::LeftParen {
+                // A `(` **or a `{`** in element position is a value, not a type. Anywhere else it is nested
+                // inside an element that is already under way.
+                //
+                // The `{` was missing from this test, and the shape it cost is a common one — a direct-initialiser
+                // with a braced element:
+                //
+                // ```cpp
+                // D d(1, {});                       // `d` is a variable initialised with two arguments
+                // _Delta1_t(_First, …, {}, {});     // `<algorithm>`: an empty braced-init-list per parameter
+                // ```
+                //
+                // Read without it, the `{` was taken for "an element already under way", the whole group came back
+                // **not** looking like values, and the declaration reading was refused — so `D d(1, {})` came out an
+                // `ExpressionStat` holding `D`, with `d(1, {` left as rubble. Six of the eight diagnostics on the
+                // 3.3 MB cooked `<vector>` stream were this one shape.
+                //
+                // The argument is the same one `(` has, and it is about what a *type* can be: a parameter's type is
+                // built from `*`, `&`, `&&`, `::`, `<>`, `[]` and `()`, and **nothing a type is made of begins with
+                // `{`**. So a `{` at the start of an element is a braced-init-list, which is a value.
+                //
+                // A `{` that does *not* begin an element is untouched, and that is what keeps default arguments
+                // reading: in `void f(A a = {})` the element is under way by the time the `{` arrives, so it is
+                // nested rather than decisive.
+                if at_element_start
+                    && matches!(kind, CppTokenKind::LeftParen | CppTokenKind::LeftBrace)
+                {
                     return true;
                 }
                 depth += 1;
@@ -2859,37 +2882,25 @@ fn the_arguments_look_like_values(p: &CppParser) -> bool {
             }
             // An element that begins with an operator no type contains — `!flag`, `-x`, `~bits`.
             kind if at_element_start && !can_begin_a_type(kind) => return true,
-            // A `*` or `&` in element position is ambiguous — `A(B* C)` is a parameter of type `B*` and
-            // `A(*p)` is a dereference — and what separates them is whether a name follows. A pointer or
-            // reference *declarator* has one, because `*` and `&` decorate the thing being declared:
-            // `*`, `* const`, `*p`, `&r`. One with nothing but the end of the list after it is arithmetic.
+            // A `*` or `&` **in element position is a unary operator**, and the version before this one got it
+            // backwards — it asked "does a name follow?", kept the element a declaration when one did, and so read
+            // `A(*p)` as a *declaration* where its own comment called it a dereference.
             //
-            // This is the same question [`can_begin_a_type`] answers for the start of an element, asked one
-            // token later, and it is asked here rather than left to that function because the answer changes
-            // with what follows: a bare `*` cannot begin a type.
+            // The question is misplaced at element position, and `A(B* C)` is why it looked reasonable: there the
+            // `*` really does make a pointer declarator. But it is **not at element position** there — the element
+            // began with `B`, an identifier, and the arm below has already spent the marker by the time the `*`
+            // arrives. Reaching this arm means `*` is the element's *first* token, and a parameter needs a
+            // decl-specifier-seq before its declarator while `*` is not one: **no parameter begins with `*` or
+            // `&`**, in any spelling. So the token can only be a dereference or an address-of, which is a value.
+            //
+            // What it cost: `T x(a, &b)` — an address-of in a direct-initialiser — came out an `ExpressionStat`
+            // holding `T` with `x ( a , & b` left as rubble, because "not values" refused the declaration reading.
+            // `T x(*b)` and `T x(a, b, c)` were the two neighbours that pinned the boundary: the first failed with
+            // it, the second worked without it. `<ppltasks.h>` writes `_Options(…, &_Default_Context, …)`.
             CppTokenKind::Star | CppTokenKind::Ampersand | CppTokenKind::LogicalAnd
                 if at_element_start =>
             {
-                let mut after = next_significant_index(p, index);
-                while matches!(
-                    p.token_kind_at(after),
-                    CppTokenKind::ConstKeyword | CppTokenKind::VolatileKeyword
-                ) {
-                    after = next_significant_index(p, after);
-                }
-
-                if !matches!(
-                    p.token_kind_at(after),
-                    CppTokenKind::Identifier
-                        | CppTokenKind::Scope
-                        | CppTokenKind::Star
-                        | CppTokenKind::Ampersand
-                        | CppTokenKind::LogicalAnd
-                        | CppTokenKind::LeftParen
-                ) {
-                    return true;
-                }
-                at_element_start = false;
+                return true;
             }
             // The list ended without a `)`, or the statement did: there is no list to judge.
             CppTokenKind::Semicolon if depth == 0 => return false,
@@ -3610,6 +3621,33 @@ fn parse_further_member_initializer_lists(p: &mut CppParser) -> ParseResult {
         parse_member_initializer_list(p)?;
     }
 }
+/// Parse a parenthesised list of **initializer clauses**: `(a, b)`, `(a, {})`.
+///
+/// # An element may be a braced-init-list, and that is the grammar rather than a relaxation
+///
+/// C++11 gave direct-initialisation two spellings — [dcl.init]:
+///
+/// ```text
+/// direct-initializer:   ( expression-list )        int a(1, 2);
+///                       ( initializer-list )       D d(1, {});      ← this one
+/// initializer-clause:   assignment-expression
+///                       braced-init-list
+/// ```
+///
+/// so `D d(1, {})` is **not** an expression-list with an odd element: `1, {}` is an *initializer-list*, whose
+/// second clause is a braced-init-list. `{}` is a perfectly good clause and never was an expression.
+///
+/// Reading only expressions is what this rule used to do, and the cost was the whole declaration: the group failed,
+/// `parse_the_initializer` failed with it, and `D d(1, {})` came out an `ExpressionStat` holding `D` with `d(1, {`
+/// left as rubble. Six of the eight diagnostics on the 3.3 MB cooked `<vector>` stream were this one shape, written
+/// by `<algorithm>`'s `_Delta1_t(_First, _UFirst, _Pat_size_raw, {}, {})`.
+///
+/// The call spelling of the same tokens (`g(1, {})`) already read, because a call's arguments go through the
+/// expression grammar's own payload reader; the two had different vocabularies for the same list, which is why one
+/// worked and the other did not.
+///
+/// The other two callers are `new`'s placement lists, where a braced clause means nothing — accepting one there is
+/// the harmless direction, and refusing it would be a second vocabulary for the same list.
 pub fn parse_expression_list(p: &mut CppParser, closing: CppTokenKind) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::ArgumentList);
@@ -3624,7 +3662,12 @@ pub fn parse_expression_list(p: &mut CppParser, closing: CppTokenKind) -> ParseR
     while p.current_token() != closing && !p.is_eof() {
         // One **element** of the list, read below the comma operator: the commas between elements belong to the
         // list, not to an expression. See [`super::exprs::parse_assignment_expr`].
-        if let Err(err) = super::exprs::parse_assignment_expr(p) {
+        let element = if p.current_token() == CppTokenKind::LeftBrace {
+            parse_braced_initializer(p)
+        } else {
+            super::exprs::parse_assignment_expr(p)
+        };
+        if let Err(err) = element {
             p.close_marks_above(base);
             return Err(err);
         }

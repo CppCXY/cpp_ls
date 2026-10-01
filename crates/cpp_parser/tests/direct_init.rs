@@ -295,15 +295,38 @@ fn a_qualified_name_is_judged_after_the_whole_chain() {
 
 #[test]
 fn an_unnamed_pointer_parameter_is_the_one_reading_left_to_the_type_table() {
-    // The documented cost of this rule. `Widget w(*p)` is a dereference — `*p` has no name for the pointer to
-    // decorate — but a parameter list is also a reading of those tokens, because `void f(*p)` declares an
-    // unnamed pointer, and that reading succeeds first and is never revisited.
+    // **The name is kept and the reading is inverted**, because the premise the old version was written on is
+    // false. It said `Widget w(*p)` is a dereference but "a parameter list is also a reading of those tokens,
+    // because `void f(*p)` declares an unnamed pointer" — and `cl.exe` refuses exactly that:
     //
-    // Kept as a call-shaped expression rather than making the parameter reading conditional, because the
-    // conditional would have to be a guess about a shape this rare. Nothing is lost silently: the variable `w`
-    // goes unbound, and the tokens are all still in the tree.
-    let parsed = parse("void f() { Widget w(*p); }\n");
-    assert_eq!(parsed.initializers, 0);
+    // ```text
+    // void f(*p);     C2182 "void: this use is invalid" + C2065 undeclared `p`
+    // W w(*p);        C2065 alone  — a declaration whose direct-initialiser is `*p`
+    // W w(a, &b);     C2065 + C2440 — likewise, and the C2440 is about initialising a `W`
+    // ```
+    //
+    // A parameter needs a decl-specifier-seq before its declarator, and `*` is not one — **no parameter begins
+    // with `*` or `&`**, so a `*` at the head of an element can only be a dereference. That is what
+    // `the_arguments_look_like_values` now answers, and the cost this test used to document is simply gone.
+    //
+    // Kept as a test rather than deleted because it is the boundary: the reading is a *declaration* here, and the
+    // neighbouring shapes that must stay parameter lists are pinned above.
+    for source in [
+        "void f() { Widget w(*p); }\n",
+        "void f() { Widget w(&r); }\n",
+        "void f() { Widget w(a, &b); }\n",
+    ] {
+        let parsed = parse(source);
+        assert!(
+            parsed.errors.is_empty(),
+            "{source:?} should parse cleanly, got {:?}",
+            parsed.errors
+        );
+        assert_eq!(
+            parsed.initializers, 1,
+            "{source:?} is a declaration with a direct initialiser — `cl.exe` refuses the parameter reading"
+        );
+    }
 }
 
 #[test]

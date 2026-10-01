@@ -1805,6 +1805,46 @@ fn parse_postfix_suffixes(
 ///
 /// `fold_operand` is threaded down from [`parse_parenthesized_expression`] and is what licenses a bare `...` to
 /// be an operand; anywhere else it is refused so that the constructs which spell `...` themselves keep it.
+/// Is the token at the cursor a `decltype` that begins a **qualified name** — `decltype(x)::type`?
+///
+/// `false` for every token that is not a `decltype`, so it can be read as "is *this* the qualified spelling" at
+/// both places that have to agree about it: the functional-conversion arm must **decline** when it is `true`, and
+/// the name arm must **take** the tokens when it is.
+///
+/// The `::` has to be found by **matching the `decltype`'s own parentheses**, because the payload may contain
+/// them: `decltype(f(a))::type`. No `peek` can do it — the parser has no "token after the matching bracket"
+/// lookahead, which is the same reason [`super::decls::index_after_the_group`] counts rather than peeks.
+fn a_decltype_that_begins_a_qualified_name(p: &CppParser) -> bool {
+    if p.current_token() != CppTokenKind::DecltypeKeyword {
+        return false;
+    }
+
+    if p.peek_next_token() != CppTokenKind::LeftParen {
+        return false;
+    }
+
+    let mut index = super::decls::next_significant_index(p, p.current_token_index());
+    let mut depth = 0isize;
+
+    while index < p.token_count() {
+        match p.token_kind_at(index) {
+            CppTokenKind::LeftParen => depth += 1,
+            CppTokenKind::RightParen => {
+                depth -= 1;
+                if depth == 0 {
+                    let after = super::decls::next_significant_index(p, index);
+                    return p.token_kind_at(after) == CppTokenKind::Scope;
+                }
+            }
+            CppTokenKind::Eof | CppTokenKind::None => return false,
+            _ => {}
+        }
+        index += 1;
+    }
+
+    false
+}
+
 fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
     match p.current_token() {
         // 字面量
@@ -1898,11 +1938,17 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
         // none — so the expression reading is the only one the standard offers, and the declaration rule (which
         // runs first, and refuses an initialiser with no name to initialise) has already declined. `int(x);` is a
         // different matter and stays the declaration it is: there the parenthesised name is a declarator.
+        // **…and `decltype(…)` is excepted, because a `::` after it makes it a *name* rather than a conversion.**
+        // `decltype` is lexed as a type keyword, so this arm claimed it first and `decltype(v)::max` never reached
+        // the name rule below — the `::` was left with nothing to continue. See
+        // [`a_decltype_here_continues_a_name`], which is `true` for every other keyword here and only asks the
+        // question `decltype` has an answer to.
         kind if super::types::is_type_specifier_keyword(kind)
             && matches!(
                 p.peek_next_token(),
                 CppTokenKind::LeftParen | CppTokenKind::LeftBrace
-            ) =>
+            )
+            && !a_decltype_that_begins_a_qualified_name(p) =>
         {
             let m = p.mark(CppSyntaxKind::CastExpr);
 
@@ -1982,8 +2028,13 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
         // library asks exactly that question (`compare`, `bits/ranges_cmp.h`). The segment loop below already read
         // an operator name in every position *except* this one — it is reached for `Foo::operator+()` but not for
         // a bare `operator+()`, because the arm's pattern did not include the keyword.
-        CppTokenKind::Identifier | CppTokenKind::Scope | CppTokenKind::OperatorKeyword
-            if !is_expression_keyword(p) =>
+        CppTokenKind::Identifier
+        | CppTokenKind::Scope
+        | CppTokenKind::OperatorKeyword
+        | CppTokenKind::DecltypeKeyword
+            if !is_expression_keyword(p)
+                && (p.current_token() != CppTokenKind::DecltypeKeyword
+                    || a_decltype_that_begins_a_qualified_name(p)) =>
         {
             let base = p.open_marks();
             let m = p.mark(CppSyntaxKind::IdentifierExpr);
@@ -2024,6 +2075,44 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
 
                 match p.current_token() {
                     CppTokenKind::Identifier => p.bump(),
+                    // **`decltype(expr)` as the *first segment* of a qualified name** — `decltype(v)::max`.
+                    //
+                    // A `decltype-specifier` names a type, so it stands where a namespace or a class does and the
+                    // `::` after it continues the same name. The arm above already reads the *type* spelling of
+                    // this (`types::parse_name` has had its own `decltype` segment since `<format>` needed
+                    // `typename decltype(__pc)::iterator`), and the expression grammar did not — so
+                    //
+                    // ```cpp
+                    // constexpr auto _Forever = (decltype(_Abs_time)::max)();      // <thread>: _Abs_time's type
+                    // ```
+                    //
+                    // reported `expected ), but get ::` against the `::`, and that was the last diagnostic on the
+                    // 3.3 MB cooked `<vector>` stream.
+                    //
+                    // **This arm is only reachable when a `::` follows** — see
+                    // [`a_decltype_here_continues_a_name`] — and that guard is the whole reason it is written here
+                    // rather than by adding `decltype` to the pattern outright. A bare `decltype(v)` currently
+                    // reads as the functional conversion `CastExpr`, which is a shape consumers already see and a
+                    // change nothing asked for; only the qualified spelling is new.
+                    //
+                    // The payload is read by the **expression** rule, not the type rule: `decltype(v)` and
+                    // `decltype(f())` are expressions, and only `decltype(auto)` is not. `types::parse_name` asks
+                    // the same question the same way.
+                    CppTokenKind::DecltypeKeyword if p.peek_next_token() == CppTokenKind::LeftParen => {
+                        p.bump(); // `decltype`
+                        p.bump(); // `(`
+                        let payload = if p.current_token() == CppTokenKind::AutoKeyword {
+                            super::types::parse_type_id(p).map(|_| ())
+                        } else {
+                            parse_expr(p).map(|_| ())
+                        };
+                        if let Err(err) =
+                            payload.and_then(|()| expect_token(p, CppTokenKind::RightParen))
+                        {
+                            p.close_marks_above(base);
+                            return Err(err);
+                        }
+                    }
                     CppTokenKind::Tilde => {
                         p.bump();
                         if p.current_token() == CppTokenKind::Identifier {
