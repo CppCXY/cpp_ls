@@ -2560,6 +2560,10 @@ pub struct RenderedUnit {
     pub unbalanced: Vec<std::path::PathBuf>,
     /// The next token starts a new line: a `#pragma` directive ends at its newline, and `text` has no other.
     pub(crate) pending_break: bool,
+    /// The **file and file-range of the token appended last**, for the separator rule in
+    /// [`RenderedUnit::push`]: two tokens that touch in the same file were one spelling there, and rendering them
+    /// apart is what would make `a >> b` unreadable as a shift.
+    pub(crate) previous: Option<(u32, cpp_parser::SourceRange)>,
 }
 
 /// **One `#error` or `#warning` the compilation would have said**, with where it was written.
@@ -2764,10 +2768,36 @@ impl RenderedUnit {
     ///
     /// `pub(crate)` rather than private because this crate's tests build a unit token by token to check the mapping,
     /// and a test that spelled the text itself would be testing its own spelling rather than this rule.
+    ///
+    /// # A space only where the source had one
+    ///
+    /// This used to put a space between every pair. That is safe in one direction — a space can only *split* a
+    /// spelling, never merge two — and it is **not** safe in the other, which is the one that bit: layout can also
+    /// change a parse by making a pair that *was* adjacent stop being so. The lexer leaves the `>`-family in pieces
+    /// (`cpp_parser::CppLexer::tokenize`) and the grammar puts `>` `>` back together by **byte adjacency**, so
+    /// spelling `a >> b` as `a > > b` hands the parser two greater-thans it will not join.
+    ///
+    /// Measured on the cooked `<vector>` stream: **0 diagnostics → 77**, the first at byte 4127, where the file
+    /// writes `is_same_v<_Ty1, _Ty2>>` and the rendering wrote `_Ty2 > >`.
+    ///
+    /// `written` is what makes the test cheap and correct: a token the file wrote literally carries its own range,
+    /// while one out of a macro body carries the **invocation** — which is not adjacent to anything around it, so
+    /// those keep their space. Same rule as `CookedStream::render`, asked of the field this map already keeps.
     pub(crate) fn push(&mut self, text: &str, file: u32, written: cpp_parser::SourceRange) {
         if !self.text.is_empty() {
-            self.text.push(if self.pending_break { '\n' } else { ' ' });
+            let touching = self
+                .previous
+                .is_some_and(|(previous_file, previous)| {
+                    previous_file == file && previous.end_offset() == written.start_offset
+                });
+
+            if self.pending_break {
+                self.text.push('\n');
+            } else if !touching {
+                self.text.push(' ');
+            }
         }
+        self.previous = Some((file, written));
         self.pending_break = false;
         match text {
             "{" => self.braces += 1,

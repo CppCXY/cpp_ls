@@ -1678,18 +1678,30 @@ fn conditional_branch(directive: &Directive, range: &SourceRange) -> GuardBranch
     GuardBranch {
         kind: directive.kind(),
         condition: match directive {
-            // The expression's tokens, joined back into the text they were read from: a space between tokens can
-            // only ever *split* a token, never merge two, so re-reading the result gives the same expression —
-            // and the four spellings a preprocessor cares about (`defined X`, `defined(X)`) read the same way
-            // with a space in them.
-            Directive::Conditional { condition, .. } => Some(
-                condition
-                    .iter()
-                    .map(|token| token.text())
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .into(),
-            ),
+            // The expression's tokens, spelled back into the text they were read from — **a space only where the
+            // source had one**, which is what makes it that text and not a normalisation of it.
+            //
+            // Joining every token with a space is what this did, on the argument that "a space between tokens can
+            // only ever *split* a token, never merge two, so re-reading the result gives the same expression".
+            // That was true while the lexer produced maximal-munch tokens only, and it stopped being true when the
+            // `>`-family began arriving in pieces (`CppLexer::tokenize`): `__cplusplus >= 201703L` joins to
+            // `__cplusplus > = 201703L`, which re-reads as **two** tokens and no longer matches the
+            // `__cplusplus >= 201703L` a configuration or a compile database carries.
+            //
+            // Adjacency is the whole test, and it needs no source text: two tokens that touch in the source were
+            // one spelling there, and two that do not were separated by something.
+            Directive::Conditional { condition, .. } => Some({
+                let mut spelling = String::new();
+                let mut previous_end = None;
+                for token in condition.iter() {
+                    if previous_end.is_some_and(|end| end != token.range.start_offset) {
+                        spelling.push(' ');
+                    }
+                    spelling.push_str(token.text());
+                    previous_end = Some(token.range.end_offset());
+                }
+                spelling.into()
+            }),
             Directive::Ifdef { name, .. } => Some(name.clone()),
             // `#else` asks nothing, and says so with `None` rather than with an empty expression: an empty
             // condition is a syntax error in a preprocessor, and folding the two together would make

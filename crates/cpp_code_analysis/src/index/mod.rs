@@ -1451,8 +1451,12 @@ mod tests {
         let branches = &shapes[0];
         assert_eq!(branches.len(), 3);
         assert!(
-            branches[0].starts_with("If defined ( _WIN32 )"),
-            "the expression's tokens, joined: {}",
+            // **The source's spelling, not a space between every token.** `defined(_WIN32)` is what the file
+            // writes and what a configuration carries; the space-joined form was an artefact of how the text used
+            // to be rebuilt, and rebuilding it faithfully is what keeps `__cplusplus >= 201703L` from becoming
+            // `__cplusplus > = 201703L` when the `>`-family arrives in pieces. See `conditional_branch`.
+            branches[0].starts_with("If defined(_WIN32)"),
+            "the expression's tokens, spelled as the source wrote them: {}",
             branches[0]
         );
         assert!(

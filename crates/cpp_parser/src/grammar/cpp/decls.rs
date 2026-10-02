@@ -319,12 +319,10 @@ pub fn parse_template_parameter_list(p: &mut CppParser) -> ParseResult {
                 p.bump();
                 break;
             }
-            // `>>` closing a nested list, e.g. `template <template <class> class T>`.
-            CppTokenKind::RightShift => {
-                p.split_current_token(1, CppTokenKind::Greater, CppTokenKind::Greater);
-                p.bump();
-                break;
-            }
+            // `>>` closing a nested list — `template <template <class> class T>` — was an arm here, splitting the
+            // token in place before bumping once. The lexer now leaves every `>` on its own (`CppLexer::tokenize`),
+            // so the arm above is the whole of it: the first `>` ends this list and the outer list's reader finds
+            // the second where it expects it.
             // **A macro that is the rest of the list.** `bits/refwrap.h:142` writes
             //
             // ```cpp

@@ -123,20 +123,44 @@ impl CookedStream {
 
         let mut lines = self.pragma_lines.iter().peekable();
         let mut break_next = false;
+        // Where the previous token ended **in the file it was written in**, when it was written literally there.
+        // See the note on the separator below: two tokens that touched are one spelling, and rendering them apart
+        // is how a `>>` becomes something the parser cannot put back together.
+        let mut previous_source_end: Option<usize> = None;
 
         for (index, cooked) in self.tokens.iter().enumerate() {
             while lines.next_if(|line| line.end <= index).is_some() {}
             let starts_a_line = lines.peek().is_some_and(|line| line.start == index);
 
-            // One space between tokens, always. The parser reads kinds and not layout, so this costs nothing
-            // there — and it cannot merge two spellings into one token, which is the one way layout *can*
-            // change a parse. (Where tokens really do touch, like `+` and `=` pasted into `+=`, they are
-            // already one token by the time they get here.) A `#pragma` line is the exception: a directive
-            // ends at a newline, so one is written on a line of its own — see [`CookedStream::pragma_lines`].
+            // **A space only where the source had one.**
+            //
+            // This was "one space between tokens, always", on the argument that a space "cannot merge two
+            // spellings into one token, which is the one way layout *can* change a parse". That argument has a
+            // second half which was not written down and which stopped being true: layout can also change a parse
+            // by making a pair that *was* adjacent stop being so. The lexer leaves the `>`-family in pieces
+            // (`CppLexer::tokenize`), and the grammar puts `>` `>` back together by **byte adjacency** — so
+            // spelling `a >> b` as `a > > b` gives the parser two greater-thans it will not join.
+            //
+            // Measured: the cooked `<vector>` stream went from 0 diagnostics to **77**, the first of them at byte
+            // 4127, where the file writes `is_same_v<_Ty1, _Ty2>>` and the rendering wrote `_Ty2 > >`.
+            //
+            // Tokens the cook **produced** — pasted, stringised, expanded — keep their space: they have no shared
+            // spelling to preserve, and separating them is the direction that cannot invent a token.
+            let touching = matches!(cooked.origin, Origin::Source)
+                && previous_source_end == Some(cooked.token.range.start_offset);
+
             if !text.is_empty() {
-                text.push(if break_next || starts_a_line { '\n' } else { ' ' });
+                if break_next || starts_a_line {
+                    text.push('\n');
+                } else if !touching {
+                    text.push(' ');
+                }
             }
             break_next = lines.peek().is_some_and(|line| line.end == index + 1);
+            previous_source_end = match cooked.origin {
+                Origin::Source => Some(cooked.token.range.end_offset()),
+                _ => None,
+            };
 
             let start = text.len();
             text.push_str(cooked.token.text());

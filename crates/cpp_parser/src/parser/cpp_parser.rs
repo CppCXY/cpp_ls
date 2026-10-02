@@ -70,162 +70,6 @@ pub struct Checkpoint {
     innermost_template_argument_list: Option<usize>,
 }
 
-/// **The token stream, kept as a zipper** — the tokens before the cursor in order, the rest reversed.
-///
-/// # Why not a `Vec`
-///
-/// The parser splits tokens **in place**: `>>` has to become `>` `>` when the first of them closes a
-/// template-argument list ([`CppParser::split_closing_angle`]), and `>=` becomes `>` `=` for the same reason. On a
-/// `Vec` that is `Vec::insert`, which **shifts every token after it** — one split costs `O(tokens remaining)`, and
-/// a file that needs `k` of them costs `O(k · n)`.
-///
-/// Measured on the 3.3 MB cooked `<vector>` stream, that was the whole of the parse's super-linearity:
-///
-/// ```text
-///                                  bytes     parse ms   us/byte   `>>`-family tokens
-///   the stream as it is          3337071       2759.2     846.7               1863
-///   the same text, `>>` → `> >`  3338810        793.3     243.3                144
-/// ```
-///
-/// Same bytes, same declarations, **3.5x the time** — and with the splits gone the per-byte cost is flat
-/// (232 → 243 µs/KB across a 4x range) where it had been climbing (244 → 847). `parse_curve` puts the crossover at
-/// about 770 KB, which is why every unit test and every small file looked linear: at 417 KB the quadratic term is
-/// only a quarter of the cost.
-///
-/// # The two halves, and why the order is the fix
-///
-/// `front` holds the tokens up to the cursor in source order, so the cursor sits **just past its end**. `back`
-/// holds the rest **reversed**, so the cursor's own token is its **last** element. Every move the parser makes is
-/// then `O(1)`:
-///
-/// ```text
-///   split at the cursor    back.push(second)       the operation this type exists for
-///   advance one token      front.push(back.pop())  bump
-///   step back to `i`       back.push(front.pop())  rollback
-///   drop k at the cursor   back.truncate(… - k)    folding a header name
-/// ```
-///
-/// A `VecDeque` would not do, and it is worth saying why since it is the obvious candidate:
-/// `VecDeque::insert(i, x)` is `O(min(i, n - i))`, which is still proportional to the file — 4x better on average
-/// and no better at all in the worst case. **The order is what has to change, not the container.**
-#[derive(Debug, Default)]
-struct Tokens {
-    /// The tokens up to the cursor, in source order. The cursor is just past the end.
-    front: Vec<CppTokenData>,
-    /// The tokens from the cursor on, **reversed** — the cursor's token is the last one.
-    back: Vec<CppTokenData>,
-}
-
-impl Tokens {
-    /// Take a lexed stream, with the cursor at its start.
-    fn from_lexed(tokens: Vec<CppTokenData>) -> Tokens {
-        let mut back = tokens;
-        back.reverse();
-        Tokens {
-            front: Vec::new(),
-            back,
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.front.len() + self.back.len()
-    }
-
-    fn is_empty(&self) -> bool {
-        // **Both halves**, not just `back`: the cursor sits at the boundary, so `back` is empty for the whole
-        // tail of every parse and a `back.is_empty()` here would answer "the file has no tokens" about a file
-        // whose tokens have all been read. The one caller is
-        // [`CppParser::current_token_range`], which uses it to decide whether the stream has a last token to
-        // hand out when the cursor is past the end — and answering "no" there puts a default range under an
-        // error instead of the last token's, which is a diagnostic in the wrong place rather than a crash.
-        self.front.is_empty() && self.back.is_empty()
-    }
-
-    fn get(&self, index: usize) -> Option<&CppTokenData> {
-        if index < self.front.len() {
-            return self.front.get(index);
-        }
-        let from_the_end = index - self.front.len();
-        self.back.get(self.back.len().checked_sub(1 + from_the_end)?)
-    }
-
-    /// The **last** token of the whole stream, which is the one that owns the tail when the cursor is past the
-    /// end. That is not "the token before the cursor": `front.last()` is.
-    fn last(&self) -> Option<&CppTokenData> {
-        match (self.front.last(), self.back.first()) {
-            (_, Some(back)) => Some(back),
-            (front, None) => front,
-        }
-    }
-
-    /// Replace the token the cursor is on. A split's first half.
-    fn set_at_cursor(&mut self, token: CppTokenData) {
-        if let Some(slot) = self.back.last_mut() {
-            *slot = token;
-        }
-    }
-
-    /// Put a token **at** the cursor, pushing what was there one place along. A split's second half — and the
-    /// operation the whole type is shaped around.
-    fn insert_at_cursor(&mut self, token: CppTokenData) {
-        self.back.push(token);
-    }
-
-    /// Take `count` tokens at the cursor and put `whole` in their place — folding `# include < a . h >` into one
-    /// header-name token.
-    fn replace_run_at_cursor(&mut self, count: usize, whole: CppTokenData) {
-        let remaining = self.back.len().saturating_sub(count);
-        self.back.truncate(remaining);
-        self.back.push(whole);
-    }
-
-    /// Move the cursor to the absolute index `index`, which is where every caller wants it: `bump` computes the
-    /// next index by skipping trivia and then seeks once, so the boundary moves in one step rather than per token.
-    fn seek(&mut self, index: usize) {
-        while self.front.len() > index {
-            match self.front.pop() {
-                Some(token) => self.back.push(token),
-                None => break,
-            }
-        }
-        while self.front.len() < index {
-            match self.back.pop() {
-                Some(token) => self.front.push(token),
-                None => break,
-            }
-        }
-    }
-
-    /// The tokens up to `end`, in source order — for the one caller that looks back over the stream it has
-    /// already passed ([`CppParser::comment_sources`]). Bounded by `end` rather than by the cursor, because that
-    /// caller asks about a position it is not standing on.
-    fn iter_up_to(&self, end: usize) -> impl Iterator<Item = &CppTokenData> {
-        let back_taken = end.saturating_sub(self.front.len()).min(self.back.len());
-        self.front
-            .iter()
-            .chain(self.back[self.back.len() - back_taken..].iter().rev())
-    }
-
-    /// The stream in source order — the one place the two halves are put back together, when the tree takes
-    /// ownership of the tokens.
-    fn into_sorted(self) -> Vec<CppTokenData> {
-        let mut tokens = self.front;
-        tokens.extend(self.back.into_iter().rev());
-        tokens
-    }
-}
-
-impl std::ops::Index<usize> for Tokens {
-    type Output = CppTokenData;
-
-    /// Indexing reads through the zipper, so every `self.tokens[i]` in this file keeps working **unchanged** —
-    /// which is the point of giving the type the same surface as the `Vec` it replaced. Panics past the end, as
-    /// indexing a `Vec` does.
-    fn index(&self, index: usize) -> &CppTokenData {
-        self.get(index)
-            .expect("a token index past the end of the stream")
-    }
-}
 
 /// A position in the parse, for a question asked later about the tokens around it.
 ///
@@ -285,11 +129,20 @@ enum BodyKind {
 pub struct CppParser<'a> {
     text: &'a str,
     events: Vec<MarkEvent>,
-    /// The token stream, as a zipper — see [`Tokens`] for why it is not a `Vec`, and for the measurement that
-    /// made the difference between a linear parse and a quadratic one on every file over about 770 KB.
-    tokens: Tokens,
-    /// The cursor, as an absolute token index. Always `tokens.front.len()`; [`Tokens::seek`] is the only thing
-    /// that moves it, and it is what keeps the field and the zipper's own boundary from drifting apart.
+    /// **The token stream, immutable once lexed.**
+    ///
+    /// This was a *zipper* for one revision — the tokens before the cursor in order and the rest reversed — so that
+    /// the parser could split a `>>` in place at `O(1)`: `Vec::insert` shifts every token after the cursor, which
+    /// made a parse cost `O(k · n)` (2759 ms on the 3.3 MB cooked `<vector>` stream, with the per-byte cost climbing
+    /// 244 → 847 µs/KB).
+    ///
+    /// Nothing splits any more. The `>`-family is broken up **once, at the end of maximal munch**
+    /// ([`crate::lexer::CppLexer::tokenize`]), and the grammar puts the pieces back together by byte adjacency
+    /// ([`CppParser::joined_operator_at_the_cursor`]). With no insertion left, the zipper was two `Vec`s doing a
+    /// plain `Vec`'s job and paying a move per cursor step for it, so it is a plain `Vec` again — which is also the
+    /// shape the tree and every consumer of `get`/`len`/`last` already expected.
+    tokens: Vec<CppTokenData>,
+    /// The cursor, as an absolute index into [`CppParser::tokens`].
     token_index: usize,
     current_token: CppTokenKind,
     /// Event position of every `NodeStart` that has not been closed yet.
@@ -600,7 +453,7 @@ impl<'a> CppParser<'a> {
         CppParser {
             text,
             events: Vec::new(),
-            tokens: Tokens::from_lexed(tokens),
+            tokens,
             token_index: 0,
             current_token: CppTokenKind::None,
             open_marks: Vec::new(),
@@ -647,7 +500,7 @@ impl<'a> CppParser<'a> {
             builder.finish()
         };
 
-        let tokens = std::mem::take(&mut parser.tokens).into_sorted();
+        let tokens = std::mem::take(&mut parser.tokens);
         let tree = CppSyntaxTree::new(root, errors, tokens);
         (tree, events)
     }
@@ -676,7 +529,7 @@ impl<'a> CppParser<'a> {
             builder.finish()
         };
 
-        let tokens = std::mem::take(&mut parser.tokens).into_sorted();
+        let tokens = std::mem::take(&mut parser.tokens);
         (CppSyntaxTree::new(root, errors, tokens), audit)
     }
 
@@ -831,58 +684,6 @@ impl<'a> CppParser<'a> {
         }
     }
 
-    /// Split the current token into two, consuming the first part and leaving the remainder at the
-    /// cursor.
-    ///
-    /// C++ needs this exactly once, but it needs it badly: `std::vector<std::vector<int>>` ends in a
-    /// single `>>` token that has to close two template argument lists. The alternative — lexing `>`
-    /// one character at a time and letting the parser join them — is worse, because then `a >> b`
-    /// costs a merge on every shift. Splitting on demand keeps the common case free and puts the
-    /// decision where the context actually is.
-    ///
-    /// `consumed` is the length of the first part in bytes and `first_kind` its kind — the first half
-    /// of `>>` is a `>`, not a `>>`, and keeping the original kind would leave a one-byte token still
-    /// claiming to be a shift operator. Every later token-level decision (counting angle-bracket
-    /// depth, deciding whether a `>` closes a list) would then be wrong. The second token is inserted
-    /// after the cursor, so the caller's current token is the first part and its index is unchanged.
-    pub fn split_current_token(
-        &mut self,
-        consumed: usize,
-        first_kind: CppTokenKind,
-        remainder_kind: CppTokenKind,
-    ) {
-        let Some(token) = self.tokens.get(self.token_index).copied() else {
-            return;
-        };
-
-        let first_end = token.range.start_offset + consumed;
-        if consumed == 0 || first_end >= token.range.end_offset() {
-            // Nothing to split: either the whole token is consumed or the request is degenerate.
-            return;
-        }
-
-        let first = CppTokenData::new(
-            first_kind,
-            crate::text::SourceRange::new(token.range.start_offset, consumed),
-        );
-        let second = CppTokenData::new(
-            remainder_kind,
-            crate::text::SourceRange::new(first_end, token.range.end_offset() - first_end),
-        );
-
-        self.follower_memo.get_mut().clear();
-        // **The one place the zipper earns its keep.** Written as two steps rather than one `Vec::insert`, which
-        // is what made a parse cost `O(k · n)` over the file — see [`Tokens`].
-        self.tokens.set_at_cursor(first);
-        self.tokens.insert_at_cursor(second);
-        self.current_token = first.kind;
-    }
-
-    /// Consume the current token, treating only its first `consumed` bytes as consumed.
-    pub fn bump_prefix_of_current_token(&mut self, consumed: usize, first_kind: CppTokenKind) {
-        self.split_current_token(consumed, first_kind, CppTokenKind::Greater);
-        self.bump();
-    }
 
     /// Try to consume a header name at the cursor, folding the `<`, name and `>` tokens the ordinary
     /// sweep produced into a single [`CppTokenKind::HeaderName`].
@@ -905,8 +706,8 @@ impl<'a> CppParser<'a> {
             if !text.contains('\\') {
                 let token = self.tokens[self.token_index];
                 self.follower_memo.get_mut().clear();
-                self.tokens
-                    .set_at_cursor(CppTokenData::new(CppTokenKind::HeaderName, token.range));
+                self.tokens[self.token_index] =
+                    CppTokenData::new(CppTokenKind::HeaderName, token.range);
                 self.current_token = CppTokenKind::HeaderName;
                 self.bump();
                 return true;
@@ -963,7 +764,7 @@ impl<'a> CppParser<'a> {
         // Replace the whole run with the single header-name token and advance past it.
         self.follower_memo.get_mut().clear();
         self.tokens
-            .replace_run_at_cursor(end_index - self.token_index + 1, whole);
+            .splice(self.token_index..self.token_index + (end_index - self.token_index + 1), [whole]);
         self.current_token = CppTokenKind::HeaderName;
         self.bump();
         true
@@ -1001,7 +802,6 @@ impl<'a> CppParser<'a> {
     /// the cursor's own advance already had. The difference from the `Vec::insert` it replaced is *what* the
     /// distance is proportional to: one token, not every token remaining in the file.
     fn move_the_cursor_to(&mut self, index: usize) {
-        self.tokens.seek(index);
         self.token_index = index;
     }
 
@@ -1831,7 +1631,7 @@ impl<'a> CppParser<'a> {
                 // comment positions plus the layout between them, so this is that layout — and only
                 // layout, since a non-layout token would have ended the group.
                 let previous_end = self.tokens[group[position - 1]].range.end_offset();
-                for token in self.tokens.iter_up_to(token_index).filter(|token| {
+                for token in self.tokens[..token_index].iter().filter(|token| {
                     is_line_layout_kind(token.kind) && token.range.start_offset >= previous_end
                 }) {
                     if source.separator_len < crate::grammar::doc::MAX_SEPARATOR_TOKENS {

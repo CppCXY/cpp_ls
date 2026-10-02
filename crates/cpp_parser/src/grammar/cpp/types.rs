@@ -4965,17 +4965,17 @@ fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
     let conditionals_when_the_list_began = p.open_conditionals();
 
     while !p.is_eof() {
-        // A **`>>` standing where an argument would begin** is two closers, and the first of them closes this
-        // list. That is the *empty* argument list: `std::less<>` inside `std::map<K, V, std::less<>>`.
+        // **A `>>` standing where an argument would begin was a special case here, and is not any more.**
         //
-        // The split has to happen before the argument is read. Everywhere else it happens on the way *out* — the
-        // argument is read, and then `split_closing_angle` in the `match` below turns the trailing `>>` into a
-        // lone `>` — which is why the non-empty spelling `std::map<K, std::less<int>>` has always worked while
-        // the empty one reported `expected a template argument` against the `>>`: there was nothing to read
-        // first, so the loop never reached the split.
-        if p.current_token() == CppTokenKind::RightShift {
-            split_closing_angle(p);
-        }
+        // `std::less<>` inside `std::map<K, V, std::less<>>` is two closers in a row, and the loop below reads a
+        // closer by looking at one token — which worked for `std::map<K, std::less<int>>` (the argument was read
+        // first, and the trailing `>>` was taken apart on the way out) but not for the empty list, where there was
+        // nothing to read first and the loop never reached the split. So an `if current_token == RightShift` sat
+        // here, splitting before the argument.
+        //
+        // The lexer now leaves every `>` on its own from the start (`CppLexer::tokenize`), so the two spellings
+        // need no telling apart: the first closer is the token the cursor is on, and the second is the token after
+        // it — which is exactly what the loop below already does.
 
         // A `>` **here** closes this list, and no lookahead is needed to know it.
         //
@@ -4991,8 +4991,8 @@ fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
         // short of the end — and that shape is not rare: it is what every conjunction of two concepts
         // is written as, and `T<A>::value < T<B>::value` is the same shape.
         //
-        // `split_closing_angle` has already turned any `>>` into a lone `>` by the time we look, so
-        // this is the only place the closer is consumed.
+        // The lexer has already left every `>` on its own by the time we look, so this is the only place the
+        // closer is consumed.
         if p.current_token() == CppTokenKind::Greater {
             p.bump();
 
@@ -5054,7 +5054,7 @@ fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
                     break;
                 }
 
-                split_closing_angle(p);
+                at_a_closing_angle(p);
                 expect_token(p, CppTokenKind::Greater)?;
             }
 
@@ -5144,7 +5144,7 @@ fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
             }
             _ => {
                 // A `>>`-family token still needs splitting before it can close this list.
-                split_closing_angle(p);
+                at_a_closing_angle(p);
             }
         }
     }
@@ -5156,31 +5156,22 @@ fn parse_template_argument_list_inner(p: &mut CppParser) -> ParseResult {
     ))
 }
 
-/// Split a `>>`-family token so its first `>` can close a template argument list.
+/// Is the cursor on a `>` that can close a template argument list?
 ///
-/// Returns whether the cursor is on a `>` that can close a list — either a lone `>`, or one that was
-/// just split out of `>>`, `>=` or `>>=`. The remainder is put back into the token stream as its own
-/// token, so the next consumer sees the operator it actually is.
+/// A lone `>` is **not** consumed here: the caller decides whether it closes a list or is a comparison, which is
+/// what lets every caller share this.
 ///
-/// A lone `>` is *not* consumed here: the caller decides whether it closes a list or is a
-/// comparison, and reporting `true` without consuming is what lets both callers share this.
-fn split_closing_angle(p: &mut CppParser) -> bool {
-    match p.current_token() {
-        CppTokenKind::Greater => true,
-        CppTokenKind::RightShift => {
-            p.split_current_token(1, CppTokenKind::Greater, CppTokenKind::Greater);
-            true
-        }
-        CppTokenKind::GreaterEqual => {
-            p.split_current_token(1, CppTokenKind::Greater, CppTokenKind::Assign);
-            true
-        }
-        CppTokenKind::RightShiftAssign => {
-            p.split_current_token(1, CppTokenKind::Greater, CppTokenKind::GreaterEqual);
-            true
-        }
-        _ => false,
-    }
+/// # This used to be `split_closing_angle`, and it used to do something
+///
+/// The lexer produced `>>`, `>=` and `>>=` as single tokens, so a `>` that closed a list had to be taken out of
+/// one — in place, with `Vec::insert`, which shifts every token after the cursor. That is what made a parse cost
+/// `O(k · n)`: 2759 ms on the 3.3 MB cooked `<vector>` stream, at a per-byte cost climbing 244 → 847 µs/KB.
+///
+/// The split now happens **once, at the end of maximal munch** (`CppLexer::tokenize`), so by the time any grammar
+/// rule runs there is nothing to take apart: a `>` is one token, always. What is left is the question the callers
+/// were really asking, and the name says it.
+fn at_a_closing_angle(p: &CppParser) -> bool {
+    p.current_token() == CppTokenKind::Greater
 }
 
 /// Parse one template argument: a type, a template-id, or a constant expression.
@@ -5326,7 +5317,7 @@ fn parse_template_argument(p: &mut CppParser) -> ParseResult {
 /// 865**, most of them ``expected a template argument``. `*`, `&` and `&&` are absent for the other reason: they
 /// decorate a type as readily as they multiply one (`S<int*>`, `S<int&>`, `S<int&&>`), so an argument that stops at
 /// one of them stays with the type reading. `>=`/`<=` are absent because a closing `>` followed by `=` is split by
-/// [`split_closing_angle`] before this question is asked.
+/// [`at_a_closing_angle`] before this question is asked.
 fn continues_an_expression(kind: CppTokenKind) -> bool {
     matches!(
         kind,

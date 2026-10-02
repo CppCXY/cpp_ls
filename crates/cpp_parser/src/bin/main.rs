@@ -17,14 +17,25 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let filename = args.iter().skip(1).find(|arg| !arg.starts_with("--"));
     let Some(filename) = filename else {
-        eprintln!("Usage: cpp_dump <filename> [--tree]");
+        eprintln!("Usage: cpp_dump <filename> [--tree] [--errors-only]");
         return;
     };
     let with_tree = args.iter().any(|arg| arg == "--tree");
+    // **`--errors-only` exists because the dump is the expensive part, not the parse.** On the 3.3 MB cooked
+    // `<vector>` stream the parse is about 0.8 s and `tree.get_unit().dump()` is about 14 s: it builds a
+    // 1.2-million-line string and writes it out. A check that wants *the number of diagnostics* — which is most
+    // of them — was paying for all of it and throwing the string away.
+    let errors_only = args.iter().any(|arg| arg == "--errors-only");
 
     let content = std::fs::read_to_string(filename).expect("Failed to read the file");
     let tree = CppParser::parse(&content, ParserConfig::default());
     let errors = tree.get_errors();
+
+    if errors_only {
+        println!("{filename} errors={}", errors.len());
+        return;
+    }
+
     if !errors.is_empty() {
         let line_index = LineIndex::parse(&content);
         eprintln!("Errors found while parsing the file:");

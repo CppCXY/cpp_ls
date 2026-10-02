@@ -1770,7 +1770,21 @@ fn parse_postfix_suffixes(
             // on. See [`CppParser::is_in_a_constraint`]: `requires C<T> { }` would otherwise come out as a
             // constraint of `C<T>{}` with the body missing.
             //
-            // **…and except inside a compound requirement's braces**, where the `{` cannot be that body: it is
+            // **…and except where a `{` cannot be that body**, which is two places and the same argument both
+            // times: the exception is about what *can* stand here, not about being lenient.
+            //
+            // * **inside a compound requirement's braces** — the `{` is nested in the requirement's own `{ }`, so
+            //   it cannot be the definition's body;
+            // * **inside parentheses** — `requires (D{1} < D{2})` still has its `)` to come, and a definition's
+            //   body never arrives before the clause's own parenthesis closes. [`an_operand_is_decisive`] asks the
+            //   identical question about the identical token and answers it with the same `is_open(ParenExpr)`.
+            //
+            // The parenthesised spelling was measured, not reasoned about: `<chrono>` and `<filesystem>` both write
+            // `requires (!treat_as_floating_point_v<…> && _Duration{1} < days{1})`, and without this arm the `{`
+            // was refused, the clause reported ``expected `)`, but get `{` `` and everything after it in the
+            // declaration went with it — three each, from one construct in a shared header.
+            //
+            // **…and inside a compound requirement's braces**, where the `{` cannot be that body: it is
             // nested inside the requirement's own `{ }`, and the reading it gets is the ordinary one for a `{`
             // after an expression:
             //
@@ -1784,7 +1798,9 @@ fn parse_postfix_suffixes(
             // `Requirement` node is open exactly while the cursor is inside those braces, which is what makes the
             // question answerable without a second flag.
             CppTokenKind::LeftBrace
-                if !p.is_in_a_constraint() || p.is_open(CppSyntaxKind::Requirement) =>
+                if !p.is_in_a_constraint()
+                    || p.is_open(CppSyntaxKind::Requirement)
+                    || p.is_open(CppSyntaxKind::ParenExpr) =>
             {
                 let marks_before = p.open_marks();
                 let m = expr.precede(p, CppSyntaxKind::InitListExpr);
