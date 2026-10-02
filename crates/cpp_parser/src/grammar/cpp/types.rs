@@ -1798,11 +1798,23 @@ fn continues_a_qualified_name(p: &CppParser) -> bool {
                     != Some(CppTokenKind::Star);
             }
             // Anything that ends a name without a following `::`.
+            //
+            // **`[` is one of them**, and leaving it out is what made `static bool t[::g + 1];` unreadable.
+            // Without it the scan *stepped over* the bracket, found the `::` of the bound, and answered "this
+            // name continues as a qualified name" — so `t` joined the type instead of naming the declarator, the
+            // `[::g + 1]` that followed had no declarator to belong to, and the declaration was refused at its
+            // own name (``expected `;` ``, measured). The bound's `::` belongs to the *bound*: an array suffix
+            // ends the name, and no type is spelled `T[::N::M]`.
+            //
+            // The same bracket is why `<chrono>`'s and `<filesystem>`'s `T x[::std::f<int>() + 1]` needed the
+            // whole scan to stop here — the argument list inside the bound is reached only through the `[`.
             CppTokenKind::Comma
             | CppTokenKind::Semicolon
             | CppTokenKind::LeftBrace
             | CppTokenKind::RightBrace
             | CppTokenKind::LeftParen
+            | CppTokenKind::LeftBracket
+            | CppTokenKind::RightBracket
             | CppTokenKind::Assign
             | CppTokenKind::Eof
             | CppTokenKind::None => return false,
