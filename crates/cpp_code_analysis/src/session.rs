@@ -111,6 +111,15 @@ use crate::PathInterner;
 /// what tells a caller there is work left.
 const COOK_SLICE: usize = 4;
 
+/// How many files [`Session::want_the_closure_cooked`] reaches for **one level below the direct includes**.
+///
+/// A payload bound, like [`COOK_SLICE`]: the rule above it is "a header's own headers are where the standard
+/// library keeps what a reader asks for", and the cost of applying it without a bound is the 11.7 s the whole
+/// closure took. Sixty-four covers the layer under every MSVC header that is a thin wrapper over another
+/// (`<string>` → `<xstring>`, `<vector>` → `<xmemory>`, `<map>` → `<xtree>`); a translation unit that includes
+/// the whole library wants [`Session::want_everything_cooked`], which is the caller's decision and not a default.
+const COOK_ONE_LEVEL_FURTHER: usize = 64;
+
 /// How many files a project scan will list before it stops.
 ///
 /// A bound on a directory walk whose size is a fact about a machine rather than about the project: a checkout with
@@ -1123,9 +1132,43 @@ impl<F: FileProvider + Clone> Session<F> {
             session.store.index().cooked_declarations(path).is_some()
         };
 
-        for included in self.direct_includes_of(root) {
-            if !already_read(self, &included) {
-                self.cooking.want(&included);
+        let direct = self.direct_includes_of(root);
+        for included in &direct {
+            if !already_read(self, included) {
+                self.cooking.want(included);
+            }
+        }
+
+        // **One level further, because a macro that opens a namespace lives one file down.**
+        //
+        // MSVC's `<string>` is a thin layer: it declares `getline` and the numeric conversions, and everything a
+        // reader actually asks for — `basic_string`, and the `string` alias itself — is written in `<xstring>`,
+        // which `<string>` includes. A **raw** reading of `<xstring>` cannot place any of it: its text says
+        // `_STD_BEGIN`, not `namespace std {`, so every declaration in it is filed at **file scope** —
+        // `::basic_string`, not `std::basic_string` — and the macro's own body is only substituted by a cook.
+        //
+        // Measured on a file whose whole text is `#include <string>`:
+        //
+        // ```text
+        // std::  → 23 items  ["getline", "stod", "stof", "stoi", "stol", "stold"]
+        //           every one of them `<string>`'s own, and `std::string` is not there
+        // #include <xstring> instead → 25 items, `basic_string` among them
+        // ```
+        //
+        // So the level that was missing was exactly the one between the two, and this is it. It is bounded
+        // because the unbounded version is the 11.7 s above: a translation unit that includes all of the standard
+        // library has hundreds of files at this depth, and cooking is a render and an index per file.
+        let mut budget = COOK_ONE_LEVEL_FURTHER;
+        for included in &direct {
+            for nested in self.direct_includes_of(included) {
+                if budget == 0 {
+                    break;
+                }
+                if already_read(self, &nested) {
+                    continue;
+                }
+                self.cooking.want(&nested);
+                budget -= 1;
             }
         }
 

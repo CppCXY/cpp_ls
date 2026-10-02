@@ -981,6 +981,49 @@ pub fn shape_of_a_body(text: &str) -> BodyShape {
     shape_of_a_body_at(text, &NothingAtAll, 0)
 }
 
+/// Whether a namespace head is spelled **`inline`** — the `inline` in `inline namespace X {`.
+///
+/// A question of its own rather than a field on [`BodyShape`], because it is asked by a different caller for a
+/// different reason: the shape says *that* a scope opens, and this says **how a declaration written inside it is
+/// qualified**. [namespace.def]: "members of an inline namespace can be used in most respects as though they
+/// were members of the enclosing namespace" — so `std::format`, which MSVC's `<format>` writes between
+/// `_FMT_P2286_BEGIN` and `_FMT_P2286_END` (whose body is `inline namespace __p2286 {`), has to be findable
+/// under `std`. `std::literals` and libstdc++'s `inline namespace __cxx11` — which holds `std::string` — are the
+/// same shape.
+///
+/// Only the first two significant tokens are read, so it is cheap enough to ask once per invocation, and it
+/// **does not repeat** [`shape_of_a_body`]'s validation: the caller asks it only for a body the shape reader has
+/// already accepted as a namespace head. Anything else answers `false`, which is the safe answer — the question
+/// is about a scope the caller is not opening when the body is not one.
+///
+/// It reads the text, so it is deliberately **not** told what the body's words expand to: `inline` is a keyword
+/// and no macro can stand for it here — a body that begins with an expandable name is a body whose *shape* the
+/// reader settles first, and this is only ever asked about one whose shape it settled as a namespace head.
+pub fn a_body_opens_an_inline_namespace(text: &str) -> bool {
+    use crate::{CppLexer, CppTokenKind, LexerConfig};
+
+    let mut errors = Vec::new();
+    let mut lexer = CppLexer::new(text, LexerConfig::default(), &mut errors);
+
+    let mut significant = lexer
+        .tokenize()
+        .into_iter()
+        .map(|token| token.kind)
+        .filter(|kind| {
+            !matches!(
+                kind,
+                CppTokenKind::Whitespace
+                    | CppTokenKind::Newline
+                    | CppTokenKind::LineContinuation
+                    | CppTokenKind::LineComment
+                    | CppTokenKind::BlockComment
+            )
+        });
+
+    significant.next() == Some(CppTokenKind::InlineKeyword)
+        && significant.next() == Some(CppTokenKind::NamespaceKeyword)
+}
+
 /// [`shape_of_a_body`] for a caller that can say **what a word in the body expands to**, and where.
 ///
 /// The parameter is the same seam [`MacroFacts`] already is, for the same reason: a body is written in a file and
@@ -1042,7 +1085,24 @@ pub fn shape_of_a_body_at(text: &str, bodies: &(impl MacroBodies + ?Sized), at: 
 
     // `namespace` first and `{` last, with nothing between them but the name's own tokens. The middle test is what
     // keeps `namespace std = other;` (an alias) and `namespace std;` out: both end somewhere else.
-    if kinds.first() != Some(&CppTokenKind::NamespaceKeyword) {
+    //
+    // **`inline` is looked past**, and it is not decoration: an **inline namespace** is one whose members are also
+    // members of the enclosing namespace, and its spelling puts a keyword in front of `namespace`. MSVC's
+    // `_FMT_P2286_BEGIN` is exactly this — `#define _FMT_P2286_BEGIN inline namespace __p2286 {` — so reading it
+    // as `Other` opened nothing, and every declaration between that macro and its closer was filed in the
+    // enclosing scope instead of the namespace's. Measured on `<format>`: all five `std::format` overloads and
+    // `std::vformat` were `std::__p2286::format`, which is why a completion probe reports `std::format` as
+    // missing while fifty other `format`-ish names from the same file are present.
+    //
+    // `export` is *not* looked past: `export namespace X {` is not a thing the standard spells, and a macro body
+    // is read for what it says.
+    let head = if kinds.first() == Some(&CppTokenKind::InlineKeyword) {
+        1
+    } else {
+        0
+    };
+
+    if kinds.get(head) != Some(&CppTokenKind::NamespaceKeyword) {
         // …and a body that ends at a `{` without naming a namespace **opens a block**: `try {`, `do {`,
         // `switch (x) {`, `extern "C" {`. Nothing is named, and a statement-level reader needs exactly that much —
         // the brace's balance.
@@ -1054,7 +1114,7 @@ pub fn shape_of_a_body_at(text: &str, bodies: &(impl MacroBodies + ?Sized), at: 
     }
 
     let mut segments = Vec::new();
-    for token in &tokens[1..tokens.len() - 1] {
+    for token in &tokens[head + 1..tokens.len() - 1] {
         match token.kind {
             CppTokenKind::Identifier => {
                 segments.push(text[token.range.start_offset..token.range.end_offset()].to_string())
@@ -1228,10 +1288,10 @@ mod tests {
     ///
     /// The two hits are what the corpora write: `_STD_BEGIN`/`_STDEXT_BEGIN` (MSVC) and libstdc++'s
     /// `_GLIBCXX_BEGIN_NAMESPACE_VERSION`, whose bodies are `namespace std {`, `namespace stdext {` and
-    /// `namespace __8 {`. The misses are each one token away from a hit, and each would be a wrong scope if it
+    /// `namespace __8 {` — and `_FMT_P2286_BEGIN`, whose body is `inline namespace __p2286 {` and which is
+    /// asserted below. The misses are each one token away from a hit, and each would be a wrong scope if it
     /// were accepted: `namespace std` is the *name* half of a head (used where a specifier goes), `__8` is a
-    /// namespace name, `inline namespace _V2 {` is a head the parser's own rule does not claim either, and an
-    /// alias is a declaration rather than an opening brace.
+    /// namespace name, and an alias is a declaration rather than an opening brace.
     #[test]
     fn only_two_body_shapes_are_structural() {
         let segments = |text: &str| shape_of_a_body(text).namespace_segments().map(<[String]>::to_vec);
@@ -1257,6 +1317,30 @@ mod tests {
         assert!(shape_of_a_body("}").closes_a_block());
         assert!(shape_of_a_body(" } ").closes_a_block(), "trivia is dropped first");
 
+        // **An inline namespace is a hit**, and it was on the miss list until the reason it was there stopped
+        // being true. The note above said "`inline namespace _V2 {` is a head the parser's own rule does not claim
+        // either", and that claim is now measurable and false: the parser reads a literal
+        // `inline namespace __p2286 {` and opens the scope — MSVC's `<format>` renders exactly that text, and the
+        // declarations under it are filed as `std::__p2286::…` rather than at file scope.
+        //
+        // The half of the old reason that was a *judgement* rather than a claim about another layer is also worth
+        // answering, because it is why this looked like a wrong scope: an **inline namespace's members are also
+        // members of the enclosing namespace**, so opening a scope for it cannot take a name away from the scope
+        // around it — a qualified lookup that would have found `std::format` still does, and it additionally
+        // finds the namespace the header actually wrote.
+        //
+        // What it cost to leave out, measured: MSVC's `_FMT_P2286_BEGIN` is
+        // `#define _FMT_P2286_BEGIN inline namespace __p2286 {`, so a scope-opening macro that the parser reads and
+        // the scope walk did not left **every declaration between its two invocations** in the wrong scope — all
+        // five `std::format` overloads and `std::vformat` were `std::__p2286::format`, which is why a completion
+        // probe reports `std::format` as missing while fifty other `format`-ish names from the same file are
+        // present.
+        assert_eq!(
+            segments("inline namespace _V2 {"),
+            Some(vec!["_V2".to_string()]),
+            "the keyword in front of `namespace` does not change what the body opens"
+        );
+
         // The misses.
         for other in [
             "",
@@ -1264,7 +1348,6 @@ mod tests {
             "__8",
             "namespace std",
             "namespace std = other;",
-            "inline namespace _V2 {",
             "};",
             "{",
             "((a) > (b) ? (a) : (b))",

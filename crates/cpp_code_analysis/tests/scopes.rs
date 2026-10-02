@@ -1391,6 +1391,274 @@ fn a_scope_a_macro_body_opens_holds_the_declarations_behind_it() {
     );
 }
 
+/// **The same scope, when the macro is invoked in a header the entry point only reaches through another one.**
+///
+/// [`a_scope_a_macro_body_opens_holds_the_declarations_behind_it`] puts the invocation in the **entry point**,
+/// and that is the case the reading is built for: an entry point is the file whose closure the index walks, so
+/// its own summary is the one the pass is about. This test moves the invocation one header down — `main.cpp`
+/// includes `mid.h`, `mid.h` includes `deep.h`, and `deep.h` is where the namespace is opened and the
+/// declaration is written.
+///
+/// Nothing about the question changes: `deep.h` defines `NSB` and invokes it in the same file, so the body is
+/// its own and no header can take it away. What changes is *which* reader has to see it:
+///
+/// ```text
+/// the first pass      no includes are indexed yet, so the scope walk has no bodies and files `Deep` at file scope
+/// the second pass     re-reads the files whose reading a body could change, and this is where it was wrong
+/// ```
+///
+/// **What it caught.** `build_scopes` was handed the environment of the file's *includes*, and a macro a file
+/// writes and invokes **itself** is in no include — so it was invisible to the scope walk, the namespace it
+/// opened was lost, and every declaration behind it landed at file scope. Moving the same `#define` into a
+/// header the file includes made the test pass, which is what makes this a defect rather than a limitation: the
+/// two spellings mean the same thing and only one of them was read.
+#[test]
+fn a_scope_a_macro_body_opens_is_held_where_the_invocation_is_two_headers_down() {
+    use cpp_code_analysis::{CompilerConfig, MemoryFiles, SummaryStore};
+
+    let files = MemoryFiles::new()
+        .with_file(
+            "/q/deep.h",
+            "#pragma once\n#define NSB namespace deepns {\n#define NSE }\nNSB\nstruct Deep { int d; };\nNSE\n",
+        )
+        .with_file("/q/mid.h", "#pragma once\n#include \"deep.h\"\n")
+        .with_file(
+            "/q/main.cpp",
+            "#include \"mid.h\"\nvoid f() { deepns::Deep d; }\n",
+        );
+
+    let root = std::env::temp_dir().join("cppls-macro-scope-deep-tests");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("the test directory");
+
+    let mut store = SummaryStore::with_provider(&root, CompilerConfig::default(), files);
+    store.index_includes_from(std::path::Path::new("/q/main.cpp"), Default::default());
+
+    let summary = store
+        .index()
+        .summary(std::path::Path::new("/q/deep.h"))
+        .expect("deep.h is indexed");
+    let deep = summary
+        .declarations
+        .iter()
+        .find(|fact| fact.name == "Deep")
+        .unwrap_or_else(|| {
+            panic!(
+                "the declaration was read: {:?}",
+                summary
+                    .declarations
+                    .iter()
+                    .map(|fact| fact.qualified_name())
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        deep.scope.as_deref(),
+        Some("deepns"),
+        "the file that writes the `#define` and invokes it keeps the scope it opens, however deep it is: {:?}",
+        summary
+            .declarations
+            .iter()
+            .map(|fact| fact.qualified_name())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// **A function behind an export macro, in a namespace a macro opened** — the shape `std::format` has.
+///
+/// [`a_scope_a_macro_body_opens_holds_the_declarations_behind_it`] pins the *class* spelling
+/// (`_EXPORT_STD template <…> class vector`), which is what `<vector>` writes and what resolves. This is the
+/// same question about a **function**, which is what `<format>` writes:
+///
+/// ```cpp
+/// _STD_BEGIN
+/// _EXPORT_STD template <class... _Types>
+/// string format(format_string<_Types...> _Fmt, _Types&&... _Args);
+/// _STD_END
+/// ```
+///
+/// asked because `std::format` is the one standard-library name a completion probe reports as absent while
+/// `std::string` resolves, so the difference between the two spellings is worth pinning rather than assuming.
+/// It passes — which is what says the loss is not here: `std::format` is missing from the reading
+/// `FileIndexer::index_rendering` builds, and this harness reaches the same text through `FileIndexer::index`.
+#[test]
+fn a_function_behind_an_export_macro_is_in_the_namespace_the_macro_opened() {
+    use cpp_code_analysis::{CompilerConfig, Known, MemoryFiles, SummaryStore};
+
+    let files = MemoryFiles::new()
+        .with_file(
+            "/q/ns.h",
+            "#pragma once\n#define _STD_BEGIN namespace std {\n#define _STD_END }\n\
+             #if defined(_BUILD_STD_MODULE)\n#define _EXPORT_STD export\n#else\n#define _EXPORT_STD\n#endif\n",
+        )
+        .with_file(
+            "/q/main.cpp",
+            "#include \"ns.h\"\n_STD_BEGIN\n_EXPORT_STD template <class _Ty>\n_Ty format(int _Fmt);\n_STD_END\n",
+        );
+
+    let root = std::env::temp_dir().join("cppls-macro-scope-function-tests");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("the test directory");
+
+    let mut store = SummaryStore::with_provider(&root, CompilerConfig::default(), files);
+    store.index_includes_from(std::path::Path::new("/q/main.cpp"), Default::default());
+
+    let summary = store
+        .index()
+        .summary(std::path::Path::new("/q/main.cpp"))
+        .expect("main.cpp is indexed");
+    let format = summary
+        .declarations
+        .iter()
+        .find(|fact| fact.name == "format")
+        .unwrap_or_else(|| {
+            panic!(
+                "the function was read: {:?}",
+                summary
+                    .declarations
+                    .iter()
+                    .map(|fact| (fact.qualified_name(), fact.kind))
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        format.scope.as_deref(),
+        Some("std"),
+        "a function is scoped by the namespace the macro opened, exactly as the class beside it is: {:?}",
+        summary
+            .declarations
+            .iter()
+            .map(|fact| fact.qualified_name())
+            .collect::<Vec<_>>()
+    );
+
+    match store
+        .index()
+        .definition("std::format", std::path::Path::new("/q/main.cpp"))
+    {
+        Known::Yes(found) => assert_eq!(found.fact.qualified_name(), "std::format"),
+        other => panic!("`std::format` must resolve for the same reason `std::vector` does: {other:?}"),
+    }
+}
+
+/// **An inline namespace is transparent to a qualified name; an ordinary one is not.**
+///
+/// [namespace.def]: "members of an inline namespace can be used in most respects as though they were members of
+/// the enclosing namespace". MSVC's `<format>` writes `std::format` between `_FMT_P2286_BEGIN` and
+/// `_FMT_P2286_END`, whose body is `inline namespace __p2286 {` — so the declaration is *inside* `__p2286` and
+/// its qualified name is nonetheless `std::format`. `std::literals` and libstdc++'s `inline namespace __cxx11`
+/// — which holds `std::string` — are the same shape.
+///
+/// # The four ways the pair can be written
+///
+/// The macro pair is the shape the standard library uses, and both halves of it matter: whether the pair is
+/// **behind a conditional** (MSVC's is, under `#if _HAS_CXX23`) and whether the namespace it opens is
+/// **`inline`**. The first run of this test had only the first two fixtures, and the answer it gave — the
+/// conditional one passing while the plain one failed — is what said the condition was not the question and the
+/// keyword was.
+///
+/// # What it caught
+///
+/// `scope_of_a_body` decided "is this a namespace head" by its **first token**, so `inline namespace __p2286 {`
+/// was read as `Other` and opened nothing — every declaration between the two invocations landed in the
+/// enclosing scope. And the walker's own check for the literal spelling asked the `NamespaceDecl` node's
+/// children for an `InlineKeyword`, which can never be there: the parser puts the keyword **beside** the node
+/// (`TranslationUnit > [InlineKeyword, NamespaceDecl]`), so a check written that way silently answered `false`
+/// for every inline namespace — including the literal one MSVC's rendering contains, which is the path the
+/// product actually takes.
+///
+/// The last fixture is that path, and it is here because the first three did **not** catch it: they reach the
+/// scope walk through a macro body, and the rendering reaches it through a parsed `NamespaceDecl`.
+#[test]
+fn an_inline_namespace_is_transparent_to_a_qualified_name() {
+    use cpp_code_analysis::{CompilerConfig, DeclFact, MemoryFiles, SummaryStore};
+
+    // Every fixture declares `Deep` inside the namespace, and every one must reach it as `std::Deep` **when the
+    // namespace is inline** — that is the whole question. The two ordinary ones must not.
+    let headers = [
+        (
+            "macro, conditional, inline",
+            "#pragma once\n#if 1\n#define NSB inline namespace deepns {\n#define NSE }\n#else\n#define NSB\n#define NSE\n#endif\n",
+            "std::Deep",
+        ),
+        (
+            "macro, conditional, plain",
+            "#pragma once\n#if 1\n#define NSB namespace deepns {\n#define NSE }\n#else\n#define NSB\n#define NSE\n#endif\n",
+            "std::deepns::Deep",
+        ),
+        (
+            "macro, plain, inline",
+            "#pragma once\n#define NSB inline namespace deepns {\n#define NSE }\n",
+            "std::Deep",
+        ),
+        (
+            "macro, plain, plain",
+            "#pragma once\n#define NSB namespace deepns {\n#define NSE }\n",
+            "std::deepns::Deep",
+        ),
+        (
+            "written out, inline",
+            "#pragma once\n",
+            "std::Deep",
+        ),
+    ];
+
+    // The last fixture spells the namespace instead of using the macro, which is the path a **rendering** takes:
+    // MSVC's `<format>` is cooked, so the scope walk sees the text `inline namespace __p2286 {` in a parsed tree
+    // rather than a `MacroCall`.
+    let sources = [
+        "#include \"pair.h\"\nnamespace std {\nNSB\nstruct Deep { int d; };\nNSE\nint after(int);\n}\n",
+        "#include \"pair.h\"\nnamespace std {\nNSB\nstruct Deep { int d; };\nNSE\nint after(int);\n}\n",
+        "#include \"pair.h\"\nnamespace std {\nNSB\nstruct Deep { int d; };\nNSE\nint after(int);\n}\n",
+        "#include \"pair.h\"\nnamespace std {\nNSB\nstruct Deep { int d; };\nNSE\nint after(int);\n}\n",
+        "#include \"pair.h\"\nnamespace std {\ninline namespace deepns {\nstruct Deep { int d; };\n}\nint after(int);\n}\n",
+    ];
+
+    let mut readings: Vec<(&str, Vec<String>, Vec<String>)> = Vec::new();
+    for ((label, header, _), source) in headers.into_iter().zip(sources) {
+        let files = MemoryFiles::new()
+            .with_file("/q/pair.h", header)
+            .with_file("/q/main.cpp", source);
+
+        let root = std::env::temp_dir().join(format!("cppls-inline-namespace-{}", label.replace(' ', "-")));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("the test directory");
+
+        let mut store = SummaryStore::with_provider(&root, CompilerConfig::default(), files);
+        store.index_includes_from(std::path::Path::new("/q/main.cpp"), Default::default());
+
+        let summary = store
+            .index()
+            .summary(std::path::Path::new("/q/main.cpp"))
+            .expect("main.cpp is indexed");
+        let names = |want: &str| -> Vec<String> {
+            summary
+                .declarations
+                .iter()
+                .filter(|fact| fact.name == want)
+                .map(DeclFact::qualified_name)
+                .collect()
+        };
+        readings.push((label, names("Deep"), names("after")));
+    }
+
+    // **Every fixture is read before anything is asserted**, because the reading that matters is the *pattern*
+    // across them: which single word changes the answer.
+    for ((label, _, expected), (_, deep, after)) in headers.iter().zip(&readings) {
+        assert_eq!(
+            after,
+            &vec!["std::after".to_string()],
+            "({label}) the declaration after the closer is in `std`"
+        );
+        assert_eq!(
+            deep,
+            &vec![expected.to_string()],
+            "({label}) an inline namespace's members are the enclosing namespace's members, and an ordinary \
+             namespace's are its own. All five readings: {readings:?}"
+        );
+    }
+}
+
 /// **A word in a macro's body that expands to nothing is not a word** — the shape MSVC's `_STD_BEGIN` really has.
 ///
 /// The failure this pins was the whole of `std::format`. Measured on MSVC 14.51's `yvals_core.h`, the body of

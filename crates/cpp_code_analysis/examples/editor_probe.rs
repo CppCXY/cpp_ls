@@ -122,8 +122,25 @@ fn main() {
             raw,
             cooked.as_ref().map(|facts| facts.len())
         );
-        if let Some(facts) = cooked {
-            println!("      cooked names: {facts:?}");
+        // **How many there are, not just the first six.** `take(6)` above is for the listing; a *count* is what
+        // says whether a name is missing or merely late in the list, and reading the truncated list as the answer
+        // is a mistake this probe made for several rounds (`std::format` was reported absent when the question
+        // being answered was "is it in the first six").
+        for (label, facts) in [
+            ("raw", session.index().summary(path).map(|summary| summary.declarations.as_slice())),
+            ("cooked", session.index().cooked_declarations(path)),
+        ] {
+            let Some(facts) = facts else { continue };
+            let all: Vec<String> = facts
+                .iter()
+                .filter(|fact| fact.name.contains("format"))
+                .map(cpp_code_analysis::DeclFact::qualified_name)
+                .collect();
+            println!(
+                "      {label}: {} `format`-ish in all — `std::format` present: {} — {all:?}",
+                all.len(),
+                facts.iter().any(|fact| fact.qualified_name() == "std::format"),
+            );
         }
     }
     for name in ["std::format", "std::vformat", "std::string", "std::cout"] {

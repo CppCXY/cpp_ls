@@ -2860,6 +2860,29 @@ fn the_arguments_look_like_values(p: &CppParser) -> bool {
                 depth += 1;
                 at_element_start = false;
             }
+            // **A leading `::` does not spend the element-start marker.** It cannot begin anything *but* a name —
+            // `::ns::T`, `::f(x)` — so the element is still at its start when the first identifier arrives, and
+            // the arm below is the one that has to judge it.
+            //
+            // Leaving it to the catch-all spent the marker instead, and the cost was the very shape the note
+            // below records fixing one level down: a **qualified call** produced no evidence of a value at all.
+            // Measured, and it is the whole of one defect in a real header:
+            //
+            // ```text
+            // const basic_string_view<_CharT> _Str(::std::to_address(_First), ::std::to_address(_First + _Dist));
+            //                                                                          ^^^^^^^^^^^^^^^^^^^^^^^
+            // ```
+            //
+            // MSVC's `<format>` writes that line, the element began with `::`, `f`'s follower was never read, the
+            // group came back "not values", the declaration reading was refused — ``expected a parameter list or
+            // an initializer`` at the `(` — and the file's cooked reading came out with **6 declarations where
+            // its own text has 173**. The standard library is full of `::std::`-qualified calls in initialisers,
+            // so this is not one line's problem.
+            //
+            // The `+` is what made it visible and is worth recording as the discriminator: `::f(a * b)` was
+            // *clean* and `::f(a + b)` failed, which is why the shape survived so long — `*` and `&` have their
+            // own arm further down and the `+` has none.
+            CppTokenKind::Scope if at_element_start => {}
             CppTokenKind::Comma if depth == 0 => at_element_start = true,
             CppTokenKind::IntegerLiteral
             | CppTokenKind::FloatingLiteral

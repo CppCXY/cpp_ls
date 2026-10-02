@@ -76,6 +76,7 @@ pub fn build_scopes(root: &CppSyntaxNode, bodies: &dyn MacroBodies) -> ScopeTree
     let mut walker = ScopeWalker {
         table: ScopeTree::new(),
         bodies,
+        own: std::collections::HashMap::new(),
     };
 
     let file = walker.table.create_scope(
@@ -95,6 +96,132 @@ struct ScopeWalker<'a> {
     /// What the includes say about a macro the file invokes — see [`MacroBodies`], which is
     /// [`cpp_parser::MacroBodies`]: the seam is one trait, in the crate that owns the reader that needs it.
     bodies: &'a dyn MacroBodies,
+    /// **The file's own `#define`s**, as the walk passes them.
+    ///
+    /// `bodies` is what the file's **includes** contribute, and a macro a file writes and invokes *itself* is in
+    /// neither: it is written here, so no include can carry it, and an environment built from the closure has
+    /// never seen it. Leaving it out cost the scope the macro opens, and the declarations behind it were filed
+    /// at file scope.
+    ///
+    /// Measured as a pair, which is what makes it a defect rather than a limitation:
+    ///
+    /// ```text
+    /// #define NSB namespace deepns {     written in a header main.cpp includes   → `Deep` is `deepns::Deep`  ✓
+    ///                                  written in the file that invokes it      → `Deep` is `Deep`          ✗
+    /// ```
+    ///
+    /// `tests/scopes.rs`'s `a_scope_a_macro_body_opens_is_held_where_the_invocation_is_two_headers_down` is that
+    /// pair, and it holds however deep the file is — the entry point's own summary is not the only one the index
+    /// builds.
+    ///
+    /// Filled **as the walk passes each directive**, which is what makes it positional for free: a `#define`
+    /// below its own use is not in the table yet when that use is read, and that is the language's rule rather
+    /// than a coincidence of this implementation.
+    own: std::collections::HashMap<Box<str>, Box<str>>,
+}
+
+/// A body reader that answers from the file's **own** `#define`s first, then from what its includes say.
+///
+/// The two are one question — "what does this name stand for here" — asked of two sources, and neither can
+/// answer for the other: a name written in this file is in no include, and a name from a header is in no
+/// `#define` of this file. [`ScopeWalker::opened_by_a_body`] used to ask only the second.
+struct OwnAndIncluded<'a> {
+    own: &'a std::collections::HashMap<Box<str>, Box<str>>,
+    included: &'a dyn MacroBodies,
+}
+
+impl MacroBodies for OwnAndIncluded<'_> {
+    fn body_at(&self, name: &str, at: usize) -> Option<std::borrow::Cow<'_, str>> {
+        if let Some(body) = self.own.get(name) {
+            return Some(std::borrow::Cow::Borrowed(body));
+        }
+        self.included.body_at(name, at)
+    }
+}
+
+/// Whether the token **before** this node is `inline` — the `inline` in `inline namespace X {`.
+///
+/// The keyword is a **sibling** of the `NamespaceDecl` rather than a child of it, which is what the first
+/// attempt at this got wrong: the tree is
+///
+/// ```text
+/// Syntax(TranslationUnit)@0..45
+///   Token(InlineKeyword)@0..6 "inline"
+///   Syntax(NamespaceDecl)@7..45
+///     Token(NamespaceKeyword)@7..16 "namespace"
+/// ```
+///
+/// so asking the node's own tokens for an `InlineKeyword` can never find one, and a check written that way
+/// silently answers `false` for every inline namespace — which is exactly what it did.
+///
+/// [`begins_an_exported_region`](crate::sema::declarations::begins_an_exported_region) walks back the same way
+/// for `export`, which is spelled in front of a declaration for the same reason and lands in the same place.
+/// Trivia is skipped, because `inline` and the declaration it modifies may be separated by a newline or a
+/// comment — a macro body is written across lines more often than not.
+fn begins_an_inline_namespace(node: &CppSyntaxNode) -> bool {
+    let mut previous = node.prev_sibling_or_token();
+
+    while let Some(element) = previous {
+        if let Some(token) = element.as_token() {
+            if cpp_parser::is_trivia(CppTokenKind::from(token.kind())) {
+                previous = token.prev_sibling_or_token();
+                continue;
+            }
+
+            return CppTokenKind::from(token.kind()) == CppTokenKind::InlineKeyword;
+        }
+
+        // A *node* before this one: the keyword is not there, whatever it is.
+        return false;
+    }
+
+    false
+}
+
+/// `#define NAME …` from a directive node, when that is what it is and `NAME` is **object-like**.
+///
+/// A function-like macro is not a scope opener — `#define F(x) namespace n {` opens nothing, because `F` is not
+/// the name a declaration can follow — so the `(` is what refuses it.
+///
+/// The body is the rest of the **logical line**: tokens up to the one that carries the newline, which is inside
+/// the directive node. Continuations are already part of that node, so a body written across lines
+/// (`_STD_BEGIN`'s real spelling) arrives whole.
+fn a_define_at(node: &CppSyntaxNode) -> Option<(String, String)> {
+    if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::PreprocessorDirective {
+        return None;
+    }
+
+    let tokens: Vec<_> = node
+        .children_with_tokens()
+        .filter_map(|child| child.into_token())
+        .filter(|token| !token.text().trim().is_empty())
+        .collect();
+
+    if CppTokenKind::from(tokens.first()?.kind()) != CppTokenKind::Hash {
+        return None;
+    }
+    if tokens.get(1)?.text() != "define" {
+        return None;
+    }
+    let name = tokens.get(2)?;
+    if CppTokenKind::from(name.kind()) != CppTokenKind::Identifier {
+        return None;
+    }
+    if tokens
+        .get(3)
+        .is_some_and(|token| CppTokenKind::from(token.kind()) == CppTokenKind::LeftParen)
+    {
+        return None;
+    }
+
+    let body = tokens[3..]
+        .iter()
+        .take_while(|token| !token.text().contains('\n'))
+        .map(|token| token.text())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    Some((name.text().to_string(), body))
 }
 
 /// What an invocation does to the scope the walk is in, when its replacement list says.
@@ -168,6 +295,11 @@ impl ScopeWalker<'_> {
         let mut opened: Vec<(ScopeId, ScopeId)> = Vec::new();
 
         for child in node.children() {
+            // **A directive is read before it is asked about**, so a `#define` this file writes is in force for
+            // everything below it and not for what stands above. See [`ScopeWalker::own`].
+            if let Some((name, body)) = a_define_at(&child) {
+                self.own.insert(name.into_boxed_str(), body.into_boxed_str());
+            }
             match self.opened_by_a_body(&child) {
                 Some(OpenedByBody::Opens {
                     name,
@@ -236,13 +368,20 @@ impl ScopeWalker<'_> {
 
         let name = invocation_name(node)?;
         let range = cpp_parser::source_range(node.text_range());
-        let body = self.bodies.body_at(&name, range.start_offset)?;
+        // **This file's own `#define`s first, then the includes'** — see [`ScopeWalker::own`]. Both the body and
+        // the words *inside* it are read through the pair, because a body this file wrote may name a word a
+        // header defines (`_STD_BEGIN` → `_EXTERN_CXX_WORKAROUND`) and the other way round.
+        let bodies = OwnAndIncluded {
+            own: &self.own,
+            included: self.bodies,
+        };
+        let body = bodies.body_at(&name, range.start_offset)?;
 
         // **Asked at the invocation's own offset**, because a body is positional in two ways: the body itself
         // (`_GLIBCXX_BEGIN_NAMESPACE_VERSION` is `namespace __8 {` in one configuration and nothing in another),
         // and the words *inside* it (`_STD_BEGIN` is `_EXTERN_CXX_WORKAROUND namespace std {`, and
         // `_EXTERN_CXX_WORKAROUND` is empty in the arm that is in force — see [`cpp_parser::shape_of_a_body_at`]).
-        match cpp_parser::shape_of_a_body_at(&body, self.bodies, range.start_offset) {
+        match cpp_parser::shape_of_a_body_at(&body, &bodies, range.start_offset) {
             cpp_parser::BodyShape::OpensANamespace(segments) => Some(OpenedByBody::Opens {
                 name,
                 segments,
@@ -287,7 +426,11 @@ impl ScopeWalker<'_> {
             self.table
                 .create_scope(ScopeKind::Namespace, Some(parent), Some(range))
         } else {
-            self.open_namespace_chain(segments, parent, range)
+            // **`inline namespace X {` is opened, and contributes no segment.** See
+            // [`cpp_parser::a_body_opens_an_inline_namespace`] for why the question is asked separately from the
+            // shape, and [`ScopeWalker::open_namespace_chain`] for what leaving the name off does.
+            let inline = cpp_parser::a_body_opens_an_inline_namespace(body);
+            self.open_namespace_chain(segments, parent, range, inline)
         };
 
         self.table.macro_readings.push(MacroScopeReading {
@@ -385,8 +528,7 @@ impl ScopeWalker<'_> {
     }
 
     /// `namespace ns { ... }`, the nested spelling `namespace a::b { ... }`, and the anonymous form.
-    fn namespace(&mut self, node: &CppSyntaxNode, parent: ScopeId) {
-        let range = cpp_parser::source_range(node.text_range());
+    fn namespace(&mut self, node: &CppSyntaxNode, parent: ScopeId) {        let range = cpp_parser::source_range(node.text_range());
 
         // The body, found before anything is created, because the scope chain below has to know whether the
         // declaration has one at all.
@@ -402,10 +544,18 @@ impl ScopeWalker<'_> {
         let segments = namespace_segments(node);
         let segment_ranges = namespace_segment_ranges(node);
 
+        // **Is this an inline namespace?** [namespace.def]: "members of an inline namespace can be used in most
+        // respects as though they were members of the enclosing namespace". MSVC's `<format>` writes
+        // `std::format` between `_FMT_P2286_BEGIN` and `_FMT_P2286_END`, and that macro's body is
+        // `inline namespace __p2286 {` — so the declaration is inside `__p2286` and its *qualified* name is
+        // nonetheless `std::format`. `std::literals` and libstdc++'s `inline namespace __cxx11` — which holds
+        // `std::string` — are the same shape.
+        let inline = begins_an_inline_namespace(node);
+
         let scope = match (segments.as_slice(), body) {
             // Anonymous. Nothing to name and nothing to make reachable.
             ([], _) => self.table.create_scope(ScopeKind::Namespace, Some(parent), Some(range)),
-            (segments, Some(_)) => self.open_namespace_chain(segments, parent, range),
+            (segments, Some(_)) => self.open_namespace_chain(segments, parent, range, inline),
             // A namespace declaration with no body — `namespace ns;` is not legal C++, but the grammar can
             // produce one from malformed input, and naming a scope that has nothing in it is better than
             // opening a chain the walk then has to explain.
@@ -476,11 +626,20 @@ impl ScopeWalker<'_> {
     /// whole declaration is what introduced all of them.
     ///
     /// A single-segment name goes through here too, which keeps one rule for where the body lands.
+    /// `inline` decides whether the scopes this opens **contribute a segment to a qualified name**.
+    ///
+    /// A scope's name is what [`ScopeTree::qualified_name_of`] joins to spell a declaration's qualified name,
+    /// so leaving it off is exactly the statement "declarations written in here are qualified by what encloses
+    /// it" — which is what an inline namespace means. The scope is still created and still holds its bindings:
+    /// lookup walks through it, braces balance in it, and `bind_namespace_segments` still declares the name, so
+    /// `std::__p2286` remains resolvable as a scope. What it does not do is *appear* in a qualified name, and
+    /// that is the half `std::format` needs.
     fn open_namespace_chain(
         &mut self,
         segments: &[String],
         parent: ScopeId,
         range: cpp_parser::SourceRange,
+        inline: bool,
     ) -> ScopeId {
         let mut enclosing = parent;
 
@@ -489,7 +648,7 @@ impl ScopeWalker<'_> {
                 ScopeKind::Namespace,
                 Some(enclosing),
                 Some(range),
-                Some(segment),
+                if inline { None } else { Some(segment) },
             );
         }
 
