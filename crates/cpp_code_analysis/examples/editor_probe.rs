@@ -36,6 +36,63 @@ void probe_member() {
 }
 "#;
 
+/// **Is this name declared somewhere the file is not allowed to see?**
+///
+/// The question the count above cannot answer on its own, and the difference between a gap and a refusal. A name
+/// that a header the file never includes declares is one a lookup must not resolve, so counting it as work left
+/// to do would aim the effort at a number that partly **should not** fall.
+///
+/// Asked through the graph rather than by matching spellings against the whole session, which is what two earlier
+/// attempts did and why they disagreed: matching a bare name against every qualified name in the index answered
+/// "held" for `value_type` because hundreds of unrelated classes have one, and the same check with the bare form
+/// removed answered "not held" for names that are merely in another header. `visible_files` is the graph's own
+/// answer and does not have either failure.
+fn declared_out_of_sight<F: cpp_code_analysis::FileProvider + Clone>(
+    session: &cpp_code_analysis::Session<F>,
+    view: &cpp_code_analysis::FileView,
+    name: &str,
+    in_scope: Option<&str>,
+) -> bool {
+    let visible: std::collections::HashSet<String> = session
+        .index()
+        .visible_files(&view.path)
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect();
+
+    // The spellings a lookup would have tried, in the order it tries them: the name under each enclosing scope,
+    // outermost first, and then as written — the same walk `definition_where_written` makes.
+    let mut spellings: Vec<String> = Vec::new();
+    if let Some(scope) = in_scope {
+        let segments: Vec<&str> = scope.split("::").collect();
+        spellings.extend(
+            (1..=segments.len())
+                .rev()
+                .map(|take| format!("{}::{name}", segments[..take].join("::"))),
+        );
+    }
+    spellings.push(name.to_string());
+
+    session.index().summaries().any(|summary| {
+        let held = summary
+            .declarations
+            .iter()
+            .any(|fact| spellings.iter().any(|wanted| *wanted == fact.qualified_name()));
+        if !held {
+            return false;
+        }
+
+        // Held **there**, and this file cannot reach the file it is held in: the name is real and out of sight.
+        // The file that holds its own declarations is not "out of sight" of itself, so it is let through to the
+        // check below rather than counted here.
+        summary.path != view.path
+            && !visible.contains(&cpp_code_analysis::normalize_path(
+                std::path::Path::new(&summary.path),
+                cfg!(windows),
+            ))
+    })
+}
+
 fn main() {
     let root = PathBuf::from(std::env::args().nth(1).expect("a directory"));
     let file = std::env::args()
@@ -252,6 +309,7 @@ fn main() {
     let mut placeholders = 0usize;
     let mut real: Vec<String> = Vec::new();
     let mut detail: Vec<String> = Vec::new();
+    let mut out_of_sight: Vec<String> = Vec::new();
     for path in session.index().summaries().map(|summary| summary.path.clone()).collect::<Vec<_>>() {
         let Some(facts) = session.index().cooked_declarations(&path) else {
             continue;
@@ -311,6 +369,12 @@ fn main() {
                 fallback += 1;
             } else if name == "auto" {
                 placeholders += 1;
+            } else if declared_out_of_sight(&session, &view, name, where_it_is.as_deref()) {
+                // **Declared, and the file is not allowed to see it.** This is the category that decides whether
+                // the number below means anything: a name in a header the file does not include is a name a
+                // lookup *must* refuse, so counting it as work left to do aims the effort at a number that
+                // partly should not fall. Measured and it is not a small part of it.
+                out_of_sight.push(name.to_string());
             } else {
                 // **The name alone decides the count; the detail is for reading.** They are two lists rather
                 // than one because `dedup` is what makes the number mean "names" instead of "occurrences" —
@@ -318,9 +382,87 @@ fn main() {
                 // two occurrences of one name under two scopes stopped being equal. The metric stays the same
                 // as every reading above it; only what is *printed* gained the detail.
                 real.push(name.to_string());
+                // **Is its first segment a template parameter?** `_Alloc::value_type` is not a name anybody
+                // declares — `value_type` is a member of whatever `_Alloc` is instantiated with, and the answer
+                // belongs to the instantiation rather than to this reading. A template parameter is *declared*,
+                // in the `parameters` of the template that introduced it, so the question is whether any fact in
+                // the session lists that name as one. Asked here rather than left to the reader of a list, and
+                // printed beside the name so that the classification can be checked against the spelling.
+                let first = name.split("::").next().unwrap_or(name);
+                let dependent = name.contains("::")
+                    && session.index().summaries().any(|summary| {
+                        // **Both readings**, and the second one is the one that matters: a template's parameters
+                        // are on the fact of the template, and a standard-library template is written with
+                        // macros its own file's raw reading does not expand — so `_Alloc` is a parameter in the
+                        // cooked facts and may be nothing at all in the raw ones. Scanning only the raw list
+                        // answered "not a parameter" for eight names that are.
+                        let cooked = session
+                            .index()
+                            .cooked_declarations(&summary.path)
+                            .unwrap_or_default();
+                        summary
+                            .declarations
+                            .iter()
+                            .chain(cooked.iter())
+                            .any(|fact| fact.parameters.iter().any(|held| held == first))
+                    });
+
+                // **Why `out_of_sight` said no**, asked separately for the three ways it can: nothing holds the
+                // name under any spelling a lookup would try; something does and the file **can** see it, which
+                // means the lookup itself is what failed; or the check above has a hole. The distinction decides
+                // whether what is left is a gap in the reading or a gap in the question being asked.
+                let mut spellings: Vec<String> = Vec::new();
+                if let Some(scope) = where_it_is.as_deref() {
+                    let segments: Vec<&str> = scope.split("::").collect();
+                    spellings.extend(
+                        (1..=segments.len())
+                            .rev()
+                            .map(|take| format!("{}::{name}", segments[..take].join("::"))),
+                    );
+                }
+                spellings.push(name.to_string());
+
+                let mut holders: Vec<std::path::PathBuf> = Vec::new();
+                for summary in session.index().summaries() {
+                    let cooked = session
+                        .index()
+                        .cooked_declarations(&summary.path)
+                        .unwrap_or_default();
+                    let held = summary
+                        .declarations
+                        .iter()
+                        .chain(cooked.iter())
+                        .any(|fact| spellings.iter().any(|wanted| *wanted == fact.qualified_name()));
+                    if held {
+                        holders.push(summary.path.clone());
+                    }
+                }
+
+                // **What the index's own visibility says**, asked through its own public entry point rather
+                // than through a second implementation of the same idea. `holders>0` says the name is held
+                // somewhere; this says whether the index agrees the file can see it. The two disagreeing is a
+                // bug **inside** the index, and that disagreement is what `_Choice_t` showed: held by
+                // `concepts`, and the lookup still refuses it.
+                let visible_here = session
+                    .index()
+                    .visible_declarations_where(
+                        &view.path,
+                        |fact: &cpp_code_analysis::DeclFact| {
+                            spellings
+                                .iter()
+                                .any(|wanted| *wanted == fact.qualified_name())
+                        },
+                    )
+                    .len();
+
                 detail.push(format!(
-                    "{name}  [scope={:?} in_namespace={:?} local={}]",
-                    fact.scope, fact.in_namespace, fact.local
+                    "{name}{}  [scope={:?} in_namespace={:?} local={} holders={} visible={}]",
+                    if dependent { "  ← 模板形参的成员" } else { "" },
+                    fact.scope,
+                    fact.in_namespace,
+                    fact.local,
+                    holders.len(),
+                    visible_here
                 ));
             }
         }
@@ -330,7 +472,16 @@ fn main() {
     println!(
         "\n--- type names the reading cannot place ---\n{considered} considered | {parameters} an enclosing \
          parameter | {resolved} resolved where written | {fallback} not name-shaped | {placeholders} `auto` | \
-         {} unplaced",
+         {} declared out of sight | {} unplaced",
+        // **Both counts are of names, not of occurrences**, and getting that wrong is how this category first
+        // read `260` against an `unplaced` of `64`: one name written in twenty headers counted twenty times
+        // while the other count deduped. A reading is only comparable to the ones above it if it is the same
+        // measurement, so the category is deduped here rather than counted where it is found.
+        {
+            out_of_sight.sort();
+            out_of_sight.dedup();
+            out_of_sight.len()
+        },
         real.len()
     );
     detail.sort();
@@ -359,6 +510,14 @@ fn main() {
         // after it does not, or whether the alias itself is where it stops.
         "std::vector::_Alvbase_traits",
         "std::vector::_Alvbase_traits::size_type",
+        // …and the one the count still names, where the two halves disagree: `std::_Vb_iterator::_Mybase`
+        // resolves on its own (as `Ambiguous`) while `_Mybase::_Mycont` written in that same class does not, so
+        // the step between them is what has to be looked at rather than the alias.
+        "std::_Vb_iterator::_Mybase",
+        // …and the classes either side of it, to say which one the alias should have landed on: `_Mybase` in
+        // `_Vb_iterator` is that class's own base, and `_Mycont` is declared in it.
+        "std::_Vb_iterator",
+        "std::_Vb_const_iterator",
     ] {
         match session.members_of(&view, written) {
             cpp_code_analysis::Known::Yes(list) => {

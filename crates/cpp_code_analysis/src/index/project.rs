@@ -3621,13 +3621,23 @@ fn alias_target_of(
         ));
     }
 
-    match index.definition(class, path) {
-        Known::Yes(found) if found.fact.kind == crate::DeclKind::Type => found
-            .fact
-            .type_of
-            .clone()
-            .map(|target| (target, found.fact.scope.clone())),
-        Known::Yes(_) | Known::Unknown(_) | Known::No => None,
+    // **Every declaration of the name, and the target comes from whichever one is the alias.**
+    //
+    // Asking the singular `definition` here refused the alias outright whenever the name had two declarations —
+    // `Unknown(Ambiguous)` is one of the arms below — and `_Mybase` in `std::_Vb_iterator` is exactly that: one
+    // alias, matched by its **bare** name in more than one class, because that is how the index narrows a
+    // lookup. The walk then returned the spelling unchanged, `direct_members` found no members under a name
+    // nothing declares, and `members_of("std::_Vb_iterator::_Mybase")` answered **zero members** for a class
+    // whose base has twenty-two. The same shape as `bases_of`: a name declared more than once is not a name
+    // that cannot be read, it is a name that has to be asked for in the plural.
+    match index.definitions(class, path) {
+        Known::Yes(found) => found.found.iter().find_map(|declaration| {
+            (declaration.fact.kind == crate::DeclKind::Type)
+                .then(|| declaration.fact.type_of.clone())
+                .flatten()
+                .map(|target| (target, declaration.fact.scope.clone()))
+        }),
+        Known::Unknown(_) | Known::No => None,
     }
 }
 

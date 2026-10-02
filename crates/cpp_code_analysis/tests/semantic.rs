@@ -526,3 +526,99 @@ fn a_local_fact_carries_a_namespace_the_file_only_opens_with_a_macro() {
         other => panic!("`Widget` written in `app` names `app::Widget`: {other:?}"),
     }
 }
+/// **A declaration that the tree holds and the reading drops — silently.**
+///
+/// ```cpp
+/// template <class T> struct Spec {};
+/// template <class T> struct Spec<T> { using d = W<decltype(_STD f<T>())>; };
+/// template <class T> struct After { int c; };     // ← in the tree, not in the summary
+/// ```
+///
+/// **The parser is not at fault, and that was measured rather than assumed**: the tree holds all three class
+/// definitions, `get_errors()` is empty and the source text is unchanged. What is lost is the **fact**, so this
+/// belongs in this layer and not in `cpp_parser`'s suite — the first version of this test was written there and
+/// passed, which is what moved it here.
+///
+/// # What `_STD` is
+///
+/// A macro. MSVC's `<yvals.h>` defines it as `::std::`, and a file summarised on its own has not read that
+/// header, so it arrives as a plain identifier — `_STD f<T>()` is then two identifiers in a row, which is not
+/// an expression. Both halves are needed, and each was measured alone:
+///
+/// ```text
+/// using d = W<decltype(_STD f<T>())>;              the declarations after it are dropped
+/// using d = decltype(_STD f<T>() - _STD f<T>());   fine — no enclosing argument list
+/// using d = W<decltype(f<T>() - f<T>())>;          fine — no stray identifier
+/// ```
+///
+/// # Why it matters beyond three lines
+///
+/// Measured on MSVC's `__msvc_iter_core.hpp`, whose line 116 is this shape: the first 130 lines of the file
+/// summarise to **43** declarations, and so do the first 200 and the first 400 — nothing after that line is
+/// read. Deleting the one partial specialization takes it to **45** and brings `iterator_traits` and
+/// `iter_difference_t` back, because they are written just below it. A header that stops being read at an
+/// arbitrary line is invisible in every count that only looks at what *is* there.
+#[test]
+fn a_stray_identifier_in_a_template_argument_drops_the_declarations_after_it() {
+    let source = "using d = decltype(_STD x);\nstruct After { int c; };\n";
+
+    // **Where the loss happens**, asked one layer at a time, because the first version of this test guessed and
+    // guessed wrong: the parser keeps the tree, so the question is whether the *scope tree* has a binding for
+    // `After` or whether it is the fact builder that drops it. Bindings are what facts are made from —
+    // `DeclarationFacts::build` walks the scopes and their bindings, not the tree — so a binding that is missing
+    // moves the answer one layer down again.
+    let parsed = cpp_parser::CppParser::parse(source, cpp_parser::ParserConfig::default());
+    let root = parsed.get_red_root();
+    let scopes = cpp_code_analysis::sema::scopes::build_scopes(
+        &root,
+        &cpp_code_analysis::sema::scopes::NoMacroBodies,
+    );
+    let bound: Vec<&str> = scopes
+        .scopes()
+        .iter()
+        .flat_map(|scope| scope.bindings.iter())
+        .filter_map(|binding| binding.name.identifier_text())
+        .collect();
+    // **What the file was divided into**, which is where the loss is visible. Two declarations are written
+    // and one node comes back, spanning both — so the tree says the rule that read the first never stopped
+    // where it should have, and the second was never a declaration of the file at all.
+    //
+    // Printed rather than asserted because the count is already asserted below and this is what a reader
+    // needs when it fails. `len` and the text together, because a node that looks right and covers the file
+    // is the failure mode: the previous version of this dump printed a node's kind and a **truncated** text
+    // and reported `UsingDecl`, which reads like the alias and is actually the whole translation unit.
+    let top: Vec<String> = root
+        .children()
+        .map(|child| {
+            let text: String = child.text().to_string();
+            format!(
+                "{:?} len={} {:?}",
+                cpp_parser::CppSyntaxKind::from(child.kind()),
+                text.len(),
+                text
+            )
+        })
+        .collect();
+    eprintln!("TOP {top:#?}");
+
+    assert!(
+        bound.contains(&"After"),
+        "…and if the binding is missing too, the loss is in `build_scopes`: got {bound:?}"
+    );
+
+    let summary = cpp_code_analysis::summarize(
+        std::path::Path::new("/p/a.cpp"),
+        source,
+        cpp_code_analysis::SummaryKey::new(0, 0),
+    );
+    let names: Vec<&str> = summary
+        .declarations
+        .iter()
+        .map(|fact| fact.name.as_str())
+        .collect();
+
+    assert!(
+        names.contains(&"After"),
+        "`After` is a class definition in the tree, so it has to be a fact: got {names:?}"
+    );
+}
