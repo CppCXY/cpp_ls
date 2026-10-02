@@ -1265,6 +1265,55 @@ pub fn parse_structured_binding(p: &mut CppParser) -> ParseResult {
     Ok(m.complete(p))
 }
 
+/// Is the declaration being read one whose type is a **placeholder** — `auto`, `auto&`, `decltype(auto)`?
+///
+/// [dcl.struct.bind] allows a structured binding only where the decl-specifier-seq contains a placeholder
+/// type, and that is the whole of what separates a binding from an **array declarator**: `[` opens both, and
+/// the tokens inside do not tell them apart — `[x]` and `[x::f]` are a binding pattern and an array bound.
+///
+/// **What happened without this question.** The reading was taken whenever the cursor stood on a `[` where a
+/// declarator's name would go, so a declaration the specifier sequence had already taken a name from — `int a`
+/// above the bracket — became a binding of `a`'s *array*:
+///
+/// ```text
+/// int a[x::f];    read as: type `int a`, declarator `StructuredBinding [x::f]`
+/// int a[::g];     `::` is not a binding name, so the reading failed and the whole declaration was refused
+/// ```
+///
+/// The first is the worse of the two: no error, no diagnostic, and a shape no compiler accepts.
+///
+/// The walk goes back over the qualifiers a placeholder may carry and stops at the first token that is a
+/// name, a keyword type or the start of the declaration — the same backwards walk
+/// [`the_declaration_has_a_type`] uses, for the same reason: by the time the `[` is reached, what named the
+/// type is behind the cursor.
+pub fn the_declaration_is_a_placeholder(p: &CppParser) -> bool {
+    let mut index = p.current_token_index();
+    let mut inside = 0i64;
+
+    while index > 0 {
+        index -= 1;
+        let kind = p.token_kind_at(index);
+
+        if is_declaration_trivia(kind) {
+            continue;
+        }
+        match kind {
+            // `auto& [k, v]`, `const auto& [k, v]`, `volatile auto …`.
+            CppTokenKind::Ampersand
+            | CppTokenKind::LogicalAnd
+            | CppTokenKind::ConstKeyword
+            | CppTokenKind::VolatileKeyword => {}
+            // `decltype(auto) [a] = x;` — the placeholder is inside the parentheses.
+            CppTokenKind::RightParen => inside += 1,
+            CppTokenKind::LeftParen if inside > 0 => inside -= 1,
+            CppTokenKind::AutoKeyword => return true,
+            _ => return false,
+        }
+    }
+
+    false
+}
+
 /// Parse one `init-declarator`: a declarator plus an optional initializer or function body.
 pub fn parse_init_declarator(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
@@ -1281,7 +1330,7 @@ pub fn parse_init_declarator(p: &mut CppParser) -> ParseResult {
     // node rather than a `Declarator` holding brackets. The distinction matters to a consumer: the
     // names inside are separate variables that share one initializer, and a walk that reports "this
     // declaration declares `[a, b]`" is worse than one that reports nothing.
-    if p.current_token() == CppTokenKind::LeftBracket {
+    if p.current_token() == CppTokenKind::LeftBracket && the_declaration_is_a_placeholder(p) {
         if let Err(err) = parse_structured_binding(p) {
             p.close_marks_above(base);
             return Err(err);
@@ -2691,23 +2740,37 @@ fn the_declaration_has_a_type(p: &CppParser, declarator_from: usize) -> bool {
     // rule's own — back over the consumed tokens, stopping at a `;`, a `{` or a `}`, which no declaration
     // contains — and trivia is skipped so the answer is about the first *significant* token rather than the
     // whitespace before the `=`.
+    //
+    // **The declarator's own brackets are skipped**, and that is the whole point of the depth counter: they are
+    // what stands between the `=` and the type, so asking about the token *immediately* before the initializer
+    // answers a question about the declarator instead. `auto [a] = g();` is the case that was measured — the
+    // token before the `=` is the `]` of the binding, `]` is not a type keyword, the answer came back "no type",
+    // and with `auto` also absent from `declarator_starts_with_a_type_keyword` above, the guard fired on a
+    // declaration that has a type written in plain sight. `unsigned [a] = g();` was clean throughout and is the
+    // control that isolates this: same shape, and it survives only because `unsigned` *is* in the rule above, so
+    // the walk is never reached. A placeholder is not, and that is deliberate — `auto` can begin an expression,
+    // so the two readings are decided elsewhere — which leaves this walk as the only thing that can answer.
     let mut index = p.current_token_index();
+    let mut inside = 0i64;
 
     while index > 0 {
         index -= 1;
         let kind = p.token_kind_at(index);
 
-        if matches!(
-            kind,
-            CppTokenKind::Semicolon | CppTokenKind::LeftBrace | CppTokenKind::RightBrace
-        ) {
-            return false;
-        }
         if is_declaration_trivia(kind) {
             continue;
         }
-
-        return super::types::is_type_specifier_keyword(kind);
+        match kind {
+            CppTokenKind::RightBracket | CppTokenKind::RightParen => inside += 1,
+            // A `[` or `(` with nothing open closes the group the walk started inside, and the type is what
+            // comes before it — so the *next* token back is the one to ask about.
+            CppTokenKind::LeftBracket | CppTokenKind::LeftParen if inside > 0 => inside -= 1,
+            CppTokenKind::Semicolon | CppTokenKind::LeftBrace | CppTokenKind::RightBrace if inside == 0 => {
+                return false;
+            }
+            _ if inside > 0 => {}
+            _ => return super::types::is_type_specifier_keyword(kind),
+        }
     }
 
     false

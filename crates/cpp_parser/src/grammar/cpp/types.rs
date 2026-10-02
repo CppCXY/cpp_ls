@@ -333,9 +333,19 @@ fn parse_type_id_inner(
     // Did those specifiers name a **type**, or only a name this file has never heard of? Two sources, and the
     // first is decisive on its own: a `BuiltinType` node is produced by exactly the branches that name a keyword
     // type. A name needs the file's table, because a bare unknown name is what a *variable* looks like.
+    //
+    // **Except the four that are keywords the lexer has no kind for.** `wchar_t`, `char8_t`, `char16_t` and
+    // `char32_t` are builtin types — [lex.key] lists every one — but this lexer hands them over as
+    // `Identifier`s, so they reach the specifier sequence as *names* and the file's table has never heard of
+    // them. Everywhere else that costs nothing, because an unknown name is a perfectly good type: `wchar_t x;`
+    // and `wchar_t a[4];` both parse. It costs something **here**, where the answer decides whether an array
+    // suffix is read at all: measured on MSVC's `<filesystem>`, whose `unique_ptr<wchar_t[]>` came out with the
+    // argument ending at `wchar_t` and the `[]` left for the list to trip over —
+    // ``expected `;` `` at the `>` of `unique_ptr<wchar_t[]>` and ``expected primary expression`` at the same
+    // `[]` in the definition below it. The same spelling with `int` is read, because `int` has a token kind.
     let the_type_is_known = p.events_contain_any(specifiers_from, &[CppSyntaxKind::BuiltinType])
         || p.declaration_type_name()
-            .is_some_and(|name| p.is_a_known_type_name(name));
+            .is_some_and(|name| p.is_a_known_type_name(name) || a_builtin_type_spelled_as_a_name(name));
 
     // An abstract declarator: pointers, references and cv-qualifiers, but no name.
     //
@@ -348,7 +358,7 @@ fn parse_type_id_inner(
     // It is read here rather than in the abstract declarator because that rule is shared with the *declarator*
     // path, where a `[` after the specifiers is a **structured binding** (`auto [a, b] = pair`) rather than a
     // bound. A type-id has no such reading: `int[4]` is a type and nothing else can be meant by it.
-    if read_array_suffixes {
+    if read_array_suffixes && !super::decls::the_declaration_is_a_placeholder(p) {
         read_array_suffixes_of_a_type_id(p, the_type_is_known)?;
     }
 
@@ -372,6 +382,20 @@ fn parse_type_id_inner(
 /// an abstract declarator may have consumed a `*`, and *that* is the last token — which is how `sizeof(int*[4])`
 /// came to be left alone, the guard having judged the `*` rather than the `int`.
 ///
+/// Is this spelling one of the **builtin types the lexer has no token kind for**?
+///
+/// `wchar_t`, `char8_t`, `char16_t` and `char32_t` are keywords of the language ([lex.key]) and this lexer
+/// hands every one of them over as an `Identifier`, so the only place that can tell them from a variable's name
+/// is a reader that looks at the spelling. [`the_type_is_known`] is that reader; see its note for what the
+/// difference cost.
+///
+/// Deliberately a short, closed list rather than a general "looks like a type" test: a name this file has not
+/// declared really can be a variable, and widening that answer is how a declaration reading starts claiming
+/// expressions.
+fn a_builtin_type_spelled_as_a_name(name: &str) -> bool {
+    matches!(name, "wchar_t" | "char8_t" | "char16_t" | "char32_t")
+}
+
 /// An empty bound is legal (`int[]`) and so is a run of them (`int[2][3]`).
 fn read_array_suffixes_of_a_type_id(p: &mut CppParser, the_type_is_known: bool) -> ParseResult {
     if !the_type_is_known {
@@ -4570,7 +4594,10 @@ pub fn parse_declarator_with(p: &mut CppParser, allow_structured_binding: bool) 
     }
 
     // A structured binding, in the position the name would occupy.
-    if allow_structured_binding && p.current_token() == CppTokenKind::LeftBracket {
+    if allow_structured_binding
+        && p.current_token() == CppTokenKind::LeftBracket
+        && super::decls::the_declaration_is_a_placeholder(p)
+    {
         if let Err(err) = super::decls::parse_structured_binding(p) {
             p.close_marks_above(base);
             return Err(err);
@@ -5182,7 +5209,25 @@ fn parse_template_argument(p: &mut CppParser) -> ParseResult {
     let checkpoint = p.checkpoint();
     let start = p.current_token_index();
 
+    // **An argument must not answer for the declaration that contains it.**
+    //
+    // `parse_type_id` opens a specifier sequence, and a specifier sequence announces itself with
+    // [`CppParser::begin_declaration_type`] — which parks the enclosing declaration's name and clears the
+    // field. Nothing put it back, so a declaration written `G<double> d(…)` lost its `"G"` the moment the
+    // argument was read, and the declarator afterwards found whatever the *argument* had left behind: `"S"` for
+    // `G<S>`, and **nothing** for `G<double>`, whose argument is a builtin keyword and so runs no
+    // name-recording branch at all.
+    //
+    // Saved and restored here, around one call, rather than by giving the specifier sequence a matching "end":
+    // that was tried twice and both versions poison the parse (5 diagnostics became 399, then 71), because a
+    // shared park slot written on entry has to be released on *every* exit to be safe. A local has no state to
+    // leak. The error paths need nothing: a failed argument fails the whole template-id, and the rollback at
+    // `checkpoint` puts the field back itself.
+    let outer_type = p.declaration_type_record();
+
     let type_read = parse_type_id(p);
+
+    p.set_declaration_type_record(outer_type);
 
     // `std::tuple<Ts...>` — a **pack expansion as a template argument**. The type reading stops at the
     // ellipsis, because a `...` is not something a type-id can continue with; what it means is that the type

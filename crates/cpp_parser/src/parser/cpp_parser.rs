@@ -1225,6 +1225,46 @@ impl<'a> CppParser<'a> {
         self.declaration_type_is_qualified
     }
 
+    /// The recorded declaration type name, **owned**, for a caller that has to hold it across a nested parse.
+    ///
+    /// The pair to [`CppParser::set_declaration_type_record`]; see that function for what is being saved and
+    /// why the saving happens at the call site rather than inside the specifier sequence.
+    pub fn declaration_type_record(&self) -> (Option<String>, bool) {
+        (
+            self.declaration_type_name
+                .as_ref()
+                .map(|name| name.to_string()),
+            self.declaration_type_is_qualified,
+        )
+    }
+
+    /// Put back a record saved by [`CppParser::declaration_type_record`].
+    ///
+    /// **A nested parse must not be allowed to answer for the declaration that contains it.** A template
+    /// argument is read with [`crate::grammar::cpp::types::parse_type_id`], a type-id opens a specifier
+    /// sequence, and that sequence begins by calling [`CppParser::begin_declaration_type`] — which parks the
+    /// enclosing name and clears the field. Nothing restored it, so `G<double> d(…)` lost the `"G"` as soon as
+    /// its argument was read, and the declarator afterwards found whatever the *argument* had left: `"S"` for
+    /// `G<S>`, and nothing at all for `G<double>`, whose argument is a builtin keyword that no name-recording
+    /// branch covers.
+    ///
+    /// The field answers "did this declaration write a name in type position" — the question that decides
+    /// whether the `(` after the declarator is an initializer or a parameter list
+    /// ([`crate::grammar::cpp::decls::a_declaration_is_the_better_reading`]) — so *both* answers were wrong for
+    /// a declaration that had written `G` in plain sight. Measured: `G<double> d(static_cast<double>(x));` was
+    /// refused while `S s(static_cast<double>(x));` parsed.
+    ///
+    /// **A local, not a parser field.** Giving the specifier sequence a matching "end" that restored a shared
+    /// park slot was tried and is not safe: the slot is written on entry and was only read on the success path,
+    /// so every sequence that returned an error left it occupied, and the next successful sequence restored a
+    /// stale name. Fifty headers went from 5 diagnostics to **399**, and the parser's own tests from 21 green
+    /// binaries to 11. A local around one call has no state to leak, and the error paths need it least — a
+    /// failed argument fails the whole template-id, and the rollback that follows restores the field anyway.
+    pub fn set_declaration_type_record(&mut self, record: (Option<String>, bool)) {
+        self.declaration_type_name = record.0.map(String::into_boxed_str);
+        self.declaration_type_is_qualified = record.1;
+    }
+
     /// Enter a class body, for the declaration rule that distinguishes a bit-field from a member initializer.
     ///
     /// Pushed on a **stack** rather than counted, because what the rule needs is the innermost brace: see
