@@ -1,0 +1,128 @@
+//! **Semantic checks**: what the analysis can say about a file that is *wrong*, as opposed to what it read.
+//!
+//! [`crate::FileDiagnostics::errors`] is the parser's answer — the text does not parse — and
+//! [`crate::FileDiagnostics::notes`] is what the analysis knows but is not a complaint. This is the third
+//! thing a diagnostics channel needs and the only one that was missing: a construct the grammar accepts and
+//! the language does not.
+//!
+//! # One check, one file
+//!
+//! A check is a module of its own in this directory, and [`Checks::run`] is the list. The reason is not
+//! tidiness: a check is a **claim**, and a claim is only worth showing if the reasoning behind it can be read.
+//! A single `diagnostics` function with twelve `if`s in it is a place where the twelfth is written by whoever
+//! is in a hurry, and the reader cannot tell which of the twelve were measured.
+//!
+//! # The contract: `Known::Yes` or `Known::No`, and nothing else
+//!
+//! **A check reports only what it knows.** [`Known`] has three values and this layer has two:
+//!
+//! ```text
+//! Known::Yes(_)   the question was answered, and the answer is a problem      -> report
+//! Known::No       the question was asked and the answer is a definite no      -> report, for a "not found"
+//! Known::Unknown  the question was not answered, for a stated reason          -> report NOTHING
+//! ```
+//!
+//! The third is not a gap in this layer, it is the whole design of the layer underneath it.
+//! [`sema::resolve`](crate::sema::resolve) keeps the two "no"s apart on purpose, and its module documentation
+//! says why: `Known::No` means a name is **nowhere**, and [`UnknownReason::NotDeclaredHere`] means it is
+//! *somewhere else* — usually a header the analysis has not read. The first is a fact about the file; the
+//! second is a fact about us.
+//!
+//! # Why a check that reports nothing is the ordinary case, and why that is the point
+//!
+//! The failure mode this layer has to avoid is not missing a problem, it is **inventing one**, because an
+//! editor that underlines correct code is one the user turns off — and then it reports nothing at all, forever.
+//! The measurement that keeps it honest is a corpus that is *known good*: the standard library. A check that
+//! reports anything at all on a header it read correctly is wrong, and that is a test that can fail.
+//!
+//! The defect this rule was written from, measured: MSVC's `inline namespace __p2286` was not modelled, so 117
+//! declarations of `<format>` were filed under `std::__p2286` instead of `std` and `std::format` could not be
+//! found by its own name. A check that reported "unknown type name" would have fired on **all 117**, and been
+//! wrong about all 117. The name was not missing; the scope was.
+//!
+//! # What a check is handed
+//!
+//! [`Checks`] — and it is deliberately *not* a [`Session`](crate::Session). A check that could ask the session
+//! anything would eventually ask it to parse something, and a diagnostics channel whose cost is "one parse per
+//! check per keystroke" is a channel that gets removed. What is here is a view of **one file** and the index as
+//! it stands, which is what the answers above are made of.
+
+use std::path::Path;
+
+use cpp_parser::SourceRange;
+
+use crate::{FileSummary, ProjectIndex};
+
+pub mod a_macro_is_not_redefined;
+pub mod an_error_the_file_asks_for;
+pub mod an_include_is_found;
+
+/// **What a check found**, in the form a diagnostics channel shows it.
+///
+/// A `Finding` is a *claim about a place in a file*, so it carries the span and the sentence together: a
+/// consumer that had to assemble the message from the parts would be a second author of it, and the two would
+/// drift. The check that knows why it fired is the one that says so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finding {
+    /// The span to underline — the whole construct, not just its first token.
+    pub range: SourceRange,
+    /// The name the finding is about, as the file spells it. Empty when the finding is not about one name.
+    pub name: String,
+    /// Which check reported it, as the module is named. For a consumer that filters, and for a test that has to
+    /// say *which* claim it just refuted.
+    pub check: &'static str,
+    /// The sentence shown to the user. Written by the check, because the check is what knows.
+    pub message: String,
+}
+
+/// Everything a check is given, and nothing else.
+pub struct Checks<'a> {
+    /// The file being checked, as the index spells it — the key to every answer below.
+    pub path: &'a Path,
+    /// The file's summary: the facts its own text produced. A check that needs only this is a check that
+    /// cannot be wrong about another file.
+    pub summary: &'a FileSummary,
+    /// The index as it stands. Answers about *other* files are answers about whatever was indexed — which is
+    /// why a check may only report a definite `Known::No`, and never an absence of an answer.
+    pub index: &'a ProjectIndex,
+    /// **The file's own text**, as the ranges in its summary are offsets into.
+    ///
+    /// Here because a fact stores a *range* rather than the text it covers — deliberately, since a summary is
+    /// written to disk and a range is smaller and cannot drift from the file it describes. A check that has to
+    /// compare two pieces of the file's text, rather than merely point at them, is the caller that closes the
+    /// loop: [`a_macro_is_not_redefined`] asks whether two `#define`s wrote the same replacement list, and the
+    /// answer is in these bytes.
+    pub source: &'a str,
+    /// **The file's own tree**, for the checks that have to find a construct rather than a fact.
+    ///
+    /// A summary stores what the analysis concluded — declarations, macros, includes, guards — and deliberately
+    /// not the things it had no conclusion about. `#error` is one of those: it declares nothing and expands to
+    /// nothing, so no fact mentions it, and the only place it exists is the tree that was parsed from the text.
+    ///
+    /// Handed over rather than re-derived, because finding a directive in the source text is a second
+    /// implementation of the lexer — the trap [`MacroFact::body_range`](crate::MacroFact) names in its own
+    /// documentation ("a search is a second implementation of the same rule, free to disagree with the one that
+    /// assigned the name"). The tree is the same one the rest of the analysis read.
+    pub tree: &'a cpp_parser::CppSyntaxNode,
+}
+
+impl Checks<'_> {
+    /// Run every check, in the order a consumer should show them.
+    ///
+    /// **Sorted by position**, because the order checks happen to be listed in is an implementation detail and
+    /// a diagnostics list sorted by it is a list that reshuffles when a check is added. Two findings at the
+    /// same offset keep the order they were produced in, which is the order of this list — deliberate, so that
+    /// the more specific check is written first and reads first.
+    pub fn run(&self) -> Vec<Finding> {
+        let mut findings = Vec::new();
+
+        findings.extend(an_include_is_found::the_file_it_names_is_not_there(self));
+        findings.extend(
+            a_macro_is_not_redefined::no_name_is_defined_twice_with_a_different_body(self),
+        );
+        findings.extend(an_error_the_file_asks_for::an_error_the_file_asks_for_is_reported(self));
+
+        findings.sort_by_key(|finding| finding.range.start_offset);
+        findings
+    }
+}

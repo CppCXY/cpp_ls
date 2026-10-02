@@ -1043,6 +1043,63 @@ fn a_qualified_declaration_binds_nothing_here() {
     );
 }
 
+/// **A `::` in the base clause is not this declaration's name.**
+///
+/// A declaration is read as *qualified* — and so binds nothing here — when its **specifier sequence** mentions
+/// a `::`-qualified name that does not belong to a declarator. That rule exists for `void Box<int>::grow()`,
+/// and it has now twice caught text that is not the declaration's name at all:
+///
+/// ```text
+/// class basic_string { … };        the ClassBody, 94 KB of members writing `X::y` all over it
+/// struct W : Base<A::B> {};        the BaseSpecifier, which is where a class names its template
+/// ```
+///
+/// Both were called qualified, both asked whether the qualifier named a scope *this file* had built, both got
+/// `false`, and both returned before binding anything — so the class had no binding and therefore **no fact**,
+/// with **no parse error to show for it**.
+///
+/// Measured before the fix, on `<vector>`'s closure: `xmemory:755` writes
+/// `struct [[msvc::no_specializations(…)]] allocator_traits : conditional_t<…, _Default_allocator_traits<_Alloc>,
+/// _Normal_allocator_traits<_Alloc>> {};` and produced **no fact for `allocator_traits` at all** — only one for
+/// its template parameter — while every unqualified base beside it was declared normally. A 311-byte file
+/// holding that declaration verbatim is the whole reproduction.
+///
+/// The two directions are asserted together because the fix is a `continue` in a shared walk: dropping too
+/// much would make `int ns::Widget::count = 0;` bind `count` at file scope, which is the mistake the rule was
+/// written to prevent.
+#[test]
+fn a_qualified_name_in_a_base_clause_does_not_make_the_declaration_qualified() {
+    // The plain qualified base, a qualified name inside the base's template arguments, and several bases.
+    for source in [
+        "struct W : Base<A::B> {};\n",
+        "struct W : A::B {};\n",
+        "struct W : public Base<std::vector<int>> {};\n",
+        "struct W : Base<A::B>, Other<C::D> {};\n",
+        "template <class T> struct W : conditional_t<A::value, Base> {};\n",
+    ] {
+        let table = scopes(source);
+        let file = table.scope(table.root().unwrap()).unwrap();
+        let names: Vec<String> = file
+            .bindings
+            .iter()
+            .map(|binding| binding.name.text())
+            .collect();
+
+        assert!(
+            names.iter().any(|name| name == "W"),
+            "the class is declared here — nothing in its base clause is its own name: {source:?} gave {names:?}"
+        );
+    }
+
+    // …and the rule this protects is still in force.
+    let table = scopes("int ns::Widget::count = 0;\n");
+    assert_eq!(
+        shape(&table),
+        "File",
+        "a genuinely qualified declaration still binds nothing here"
+    );
+}
+
 /// A `friend` declaration binds nothing: a friend is not a member.
 ///
 /// `friend class X;` says X's members may reach into this class. Binding `X` as a member would make it appear
@@ -1657,6 +1714,75 @@ fn an_inline_namespace_is_transparent_to_a_qualified_name() {
              namespace's are its own. All five readings: {readings:?}"
         );
     }
+}
+
+/// **A member spelled through an alias resolves through it, and nothing else starts resolving.**
+///
+/// `size_type` is a member of `basic_string`, so the qualified name the index holds is
+/// `std::basic_string::size_type`. `std::string` is a `using` declaration for `basic_string<char>`, so
+/// `std::string::size_type` is a **second question** — resolve the alias, then the member — and before this it
+/// answered `NotDeclaredHere` while the declaration was right there.
+///
+/// Measured as a pair on MSVC's library, which is what said the missing half was the alias rather than member
+/// resolution:
+///
+/// ```text
+/// std::basic_string::size_type   -> Yes              member resolution works
+/// std::string::size_type         -> NotDeclaredHere  the alias is what did not
+/// ```
+///
+/// The second half of the test is the one that matters as much: a fallback that rewrote a name it could not
+/// resolve into *some* member would be inventing a declaration, and `not_a_member` is here to say it does not.
+#[test]
+fn a_member_of_an_aliased_class_resolves_through_the_alias() {
+    use cpp_code_analysis::{CompilerConfig, Known, MemoryFiles, SummaryStore};
+
+    let files = MemoryFiles::new().with_file(
+        "/q/main.cpp",
+        "namespace std {\n\
+         template <class _Ty> struct basic_string { using size_type = unsigned long long; };\n\
+         using string = basic_string<char>;\n\
+         }\n\
+         std::basic_string<char>::size_type a;\n\
+         std::string::size_type b;\n",
+    );
+
+    let root = std::env::temp_dir().join("cppls-alias-member-tests");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("the test directory");
+
+    let mut store = SummaryStore::with_provider(&root, CompilerConfig::default(), files);
+    store.index_includes_from(std::path::Path::new("/q/main.cpp"), Default::default());
+
+    let index = store.index();
+    let main = std::path::Path::new("/q/main.cpp");
+
+    // The member as its own class spells it — the case that already worked, kept here so that a change to the
+    // fallback cannot break it quietly.
+    assert!(
+        matches!(
+            index.definition("std::basic_string::size_type", main),
+            Known::Yes(_)
+        ),
+        "the member under the class that declares it resolves: {:?}",
+        index.definition("std::basic_string::size_type", main)
+    );
+
+    match index.definition("std::string::size_type", main) {
+        Known::Yes(found) => assert_eq!(found.fact.name, "size_type"),
+        other => panic!("a member spelled through an alias must resolve through it: {other:?}"),
+    }
+
+    // …and the alias does not turn a name nobody declares into one. `std::string` is an alias for
+    // `basic_string<char>`, which has no member by this name, so the answer is still that it is nowhere.
+    assert!(
+        matches!(
+            index.definition("std::string::not_a_member", main),
+            Known::Unknown(_)
+        ),
+        "the fallback rewrites a name, it does not invent a declaration: {:?}",
+        index.definition("std::string::not_a_member", main)
+    );
 }
 
 /// **A word in a macro's body that expands to nothing is not a word** — the shape MSVC's `_STD_BEGIN` really has.

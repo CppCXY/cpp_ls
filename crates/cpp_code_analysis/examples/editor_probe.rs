@@ -87,6 +87,34 @@ fn main() {
         session.index().declarations_in("std", &file).len(),
         formats.len()
     );
+
+    // **The checks' answer, which on this fixture must be empty.** The file includes `<format>` and `<string>`
+    // from a toolchain the session found, so every include resolves and no check has a claim to make. This is
+    // the calibration `sema::check`'s module documentation describes: a check that fires on a header the
+    // analysis read correctly is a check that will be wrong about the user's code too.
+    match session.diagnostics(&file) {
+        Some(diagnostics) => {
+            println!(
+                "diagnostics: reading {:?} | {} error(s), {} note(s), {} check(s), {} unplaced",
+                diagnostics.reading,
+                diagnostics.errors.len(),
+                diagnostics.notes.len(),
+                diagnostics.checks.len(),
+                diagnostics.unplaced,
+            );
+            for finding in &diagnostics.checks {
+                println!(
+                    "   [{}] {}..{} {} — {}",
+                    finding.check,
+                    finding.range.start_offset,
+                    finding.range.end_offset(),
+                    finding.name,
+                    finding.message
+                );
+            }
+        }
+        None => println!("diagnostics: none (the file is not indexed)"),
+    }
     // **Why a name that is in a file in the closure is not in the index**: a header reached through `#include` has a
     // *raw* summary the moment it is parsed, and a *cooked* one only when something read it the way a compiler does —
     // and `std::format` is only `std::` after `_STD_BEGIN` (a macro in `yvals_core.h`) has been expanded.
@@ -143,8 +171,207 @@ fn main() {
             );
         }
     }
-    for name in ["std::format", "std::vformat", "std::string", "std::cout"] {
-        println!("   definition({name:?}) = {:?}", session.index().definition(name, &file));
+    // **The nested-name pair, and the difference between them is the whole question.** `size_type` is a member
+    // of `basic_string`, so its qualified name is `std::basic_string::size_type`; `std::string` is an *alias*
+    // for `basic_string<char, …>`, so `std::string::size_type` is a second question — resolve the alias, then
+    // the member. Asking both says which of the two is missing, and one answer without the other is not enough
+    // to tell them apart.
+    for name in [
+        "std::format",
+        "std::vformat",
+        "std::string",
+        "std::cout",
+        "std::vector",
+        "std::basic_string::size_type",
+        "std::string::size_type",
+        "std::_Alloc_ptr_t",
+        "std::_Allocation_guard::_Alloc_ptr_t",
+        // **The three shapes a member can have, side by side.** `size_type` is declared in the class it is
+        // asked of; `_Alty_traits` is a member alias of that class; `pointer` is **inherited** —
+        // `struct allocator_traits : _Normal_allocator_traits<_Alloc>` — and asking for it is what the base
+        // walk exists to answer. One of the three without the others cannot say which step is missing.
+        "std::allocator_traits::pointer",
+        "std::allocator_traits::difference_type",
+        "std::basic_string::_Alty_traits",
+        // …and the base the candidate walk should reach, named the way its own declaration is.
+        "std::_Normal_allocator_traits",
+        "std::_Normal_allocator_traits::pointer",
+        "std::_Default_allocator_traits::pointer",
+        // …and two of the names the count above says it cannot place, asked the way their own declaration
+        // spells them: `_Choice_t` is a class at `std` scope (`concepts:264`), and `_Alvbase_traits` is a member
+        // alias of `vector` declared twice (`vector:2828`, `2920`). If the plain spelling resolves and the one
+        // a declaration wrote does not, what is missing is the step from one to the other.
+        "std::_Choice_t",
+        "std::ranges::_Begin::_Cpo::_Choice_t",
+        "std::vector::_Alvbase_traits",
+        "std::vector::_Alvbase_traits::size_type",
+        // …and two the count still names, to say whether the alias fixes reached them: `_Mybase` is an alias of
+        // a class the count lists as unresolved, and `_Mycont` is a member of what it points at.
+        "std::_Vb_const_iterator::_Mybase",
+        "std::_Vb_const_iterator::_Mybase::_Mycont",
+        // …asked the way the count above asks: the spelling the type wrote, and the scope the declaration was
+        // in. The two spellings asked in full above answer `Yes`; if these do not, the count is right and the
+        // difference is the scope, not the alias.
+        "std::_Vb_iterator::_Mybase",
+        "std::_Vb_reference::_Mybase",
+        "std::_Vb_val::_Alvbase_traits",
+    ] {
+        println!(
+            "   definition({name:?}) = {:?}",
+            session.definition_of_a_written_type(&view, name, None, 0)
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // **How many type names the reading cannot place** — the judgement on the whole type-resolution
+    // effort, kept here rather than re-derived each time it is wanted.
+    //
+    // Every declaration of every cooked reading that spells a type, resolved by the name it wrote **in the
+    // scope it wrote it in** (`definition_where_written`). The categories are separated because they call for
+    // four different pieces of work, and a single total says none of them:
+    //
+    // * **an enclosing parameter** — `_Ty::value_type` inside `template <class _Ty>`, which no lookup can
+    //   answer and none should: the answer is a property of the instantiation;
+    // * **resolved** — the name is there, and this is the number that has to keep growing;
+    // * **not name-shaped** — the type reader's fallback carried a spelling no identifier could be, such as
+    //   `_CharT (*)(_CharT*, int&)`; `parse_type_spelling` says so in its own note, and a caller is expected
+    //   to know what it is doing with the text it gets;
+    // * **`auto`** — a placeholder, not a name, and the one category that stands for a missing **ability**
+    //   (deduction) rather than a missing fact.
+    //
+    // Measured, in the order the work landed:
+    //
+    // ```text
+    // 1868 unresolved   the first reading, which was the measurement being wrong: `Ambiguous` counted as a miss
+    // 1386              with `Ambiguous` counted as the answer it is
+    // 1235              with types that depend on a template parameter excluded
+    //  171              with the name resolved where it was written, not where the reader stands
+    //   75              with namespace-scope alias templates declaring facts
+    // ```
+    let (mut considered, mut parameters, mut resolved, mut fallback) = (0usize, 0usize, 0usize, 0usize);
+    let mut placeholders = 0usize;
+    let mut real: Vec<String> = Vec::new();
+    let mut detail: Vec<String> = Vec::new();
+    for path in session.index().summaries().map(|summary| summary.path.clone()).collect::<Vec<_>>() {
+        let Some(facts) = session.index().cooked_declarations(&path) else {
+            continue;
+        };
+        let Some(view) = session.view(&path) else { continue };
+        for fact in facts {
+            let Some(spelled) = &fact.type_of else { continue };
+            let ty = cpp_code_analysis::sema::types::parse_type_spelling(spelled);
+            if ty.depends_on_a_parameter() {
+                continue;
+            }
+            let Some(name) = ty.class_name() else { continue };
+            considered += 1;
+
+            let in_scope: Vec<String> = fact
+                .scope
+                .as_deref()
+                .map(|scope| session.index().template_parameters_of(scope, &path))
+                .unwrap_or_default();
+            if name
+                .split("::")
+                .next()
+                .is_some_and(|first| in_scope.iter().any(|parameter| parameter == first))
+            {
+                parameters += 1;
+                continue;
+            }
+
+            // **Where the declaration is, as the fact itself says.** `scope` is the precise answer and is `None`
+            // for a local, because a body contributes no segment to a qualified name; `in_namespace` is what a
+            // local has instead — read with the closure's macro bodies in hand, so `_STD_BEGIN` opens `std` even
+            // though the file spells no namespace at all. Asking the view's own scope tree instead answers for a
+            // file that spells its namespaces out and not for one that opens them with a macro, which is what
+            // every standard-library local is.
+            let where_it_is = fact.scope.clone().or_else(|| fact.in_namespace.clone());
+
+            if matches!(
+                session.definition_of_a_written_type(
+                    &view,
+                    name,
+                    where_it_is.as_deref(),
+                    fact.range.start_offset
+                ),
+                cpp_code_analysis::Known::Yes(_)
+                    | cpp_code_analysis::Known::Unknown(cpp_code_analysis::UnknownReason::Ambiguous(_))
+            ) {
+                resolved += 1;
+                continue;
+            }
+
+            let name_shaped = name.split("::").all(|segment| {
+                !segment.is_empty()
+                    && !segment.starts_with(|c: char| c.is_ascii_digit())
+                    && segment.chars().all(|c| c.is_alphanumeric() || c == '_')
+            });
+            if !name_shaped {
+                fallback += 1;
+            } else if name == "auto" {
+                placeholders += 1;
+            } else {
+                // **The name alone decides the count; the detail is for reading.** They are two lists rather
+                // than one because `dedup` is what makes the number mean "names" instead of "occurrences" —
+                // and appending `[scope=…]` to the string silently changed the metric from 71 to **125**, since
+                // two occurrences of one name under two scopes stopped being equal. The metric stays the same
+                // as every reading above it; only what is *printed* gained the detail.
+                real.push(name.to_string());
+                detail.push(format!(
+                    "{name}  [scope={:?} in_namespace={:?} local={}]",
+                    fact.scope, fact.in_namespace, fact.local
+                ));
+            }
+        }
+    }
+    real.sort();
+    real.dedup();
+    println!(
+        "\n--- type names the reading cannot place ---\n{considered} considered | {parameters} an enclosing \
+         parameter | {resolved} resolved where written | {fallback} not name-shaped | {placeholders} `auto` | \
+         {} unplaced",
+        real.len()
+    );
+    detail.sort();
+    detail.dedup();
+    for line in detail.iter() {
+        println!("   {line}");
+    }
+
+    // TEMPORARY — whether the two halves compose: `members_of` resolves a **written type name** and walks the
+    // base chain, so asking it for the alias that `_Alty_traits::pointer` starts from answers whether the
+    // remaining gap is a missing ability or a missing wire between two abilities that both exist.
+    //
+    // Measured, and the answer is the wire: this was `NotDeclaredHere("std::basic_string::allocator_traits")`
+    // before the four fixes it found — `is_declared` reading `Ambiguous` as "not declared", `direct_members`
+    // reading an ambiguous *class* as a failure, `bases_of` asking the singular `definition` for a class
+    // declared twice, and `lookup_names` taking a computed base (`conditional_t<…>`) at its word — and now
+    // finds all 44 members through an alias, an enclosing scope and a base the class only names inside a
+    // template argument. `definition` does not use this chain yet, which is why the count below has not moved.
+    for written in [
+        "std::allocator_traits",
+        "std::basic_string::_Alty_traits",
+        "std::string::_Alty_traits",
+        // …and the alias the count names: `_Alvbase_traits` is declared **twice** in `vector` (`2828` as
+        // `allocator_traits<_Alvbase>`, `2920` as `_Mybase::_Alvbase_traits`), and `size_type` is inherited from
+        // whichever it resolves to. Asking both spellings says whether the alias step works and the member step
+        // after it does not, or whether the alias itself is where it stops.
+        "std::vector::_Alvbase_traits",
+        "std::vector::_Alvbase_traits::size_type",
+    ] {
+        match session.members_of(&view, written) {
+            cpp_code_analysis::Known::Yes(list) => {
+                let names: Vec<&str> = list.members.iter().map(|member| member.fact.name.as_str()).collect();
+                println!(
+                    "   members_of({written:?}) = {} member(s) | pointer? {} difference_type? {}",
+                    names.len(),
+                    names.contains(&"pointer"),
+                    names.contains(&"difference_type")
+                );
+            }
+            other => println!("   members_of({written:?}) = {other:?}"),
+        }
     }
 
     // ---------------------------------------------------------------------------------------------

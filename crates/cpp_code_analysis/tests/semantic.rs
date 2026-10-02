@@ -6,6 +6,7 @@
 //! gets **no** classification rather than a plausible one.
 
 use cpp_code_analysis::semantic::{Name, NameKind, Provenance};
+use cpp_code_analysis::Known;
 use cpp_code_analysis::{
     CompilerConfig, MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter,
 };
@@ -366,5 +367,162 @@ fn keywords_and_literals_are_not_classified() {
             !matches!(text.as_str(), "int" | "return" | "struct"),
             "`{text}` is not a name this layer classifies: {kinds:?}"
         );
+    }
+}
+
+/// **A member the class inherits is found, because the query walks the chain that the member list walks.**
+///
+/// `pointer` is declared in `_Normal`, and `allocator_traits` names it only in its **base clause** — so the name
+/// is not declared in the class at all, and a lookup that asked the index for `std::allocator_traits::pointer`
+/// answered `NotDeclaredHere` while the member list of the very same class held it. Measured on MSVC's library,
+/// where the clause is a `conditional_t<…>` rather than a plain base and the walk has to look at the classes the
+/// clause names as well as the one it spells.
+///
+/// The second half is the one that keeps the first honest: a name the chain does not hold is still nowhere, and
+/// answering with a base's member would be inventing a declaration.
+#[test]
+fn a_written_type_resolves_a_member_the_class_inherits() {
+    let session = session_with(&[
+        (
+            "/p/base.h",
+            "template <class _Alloc>\nstruct _Normal {\n  using pointer = int*;\n  int size;\n};\n",
+        ),
+        (
+            "/p/a.cpp",
+            "#include \"base.h\"\nnamespace std {\ntemplate <class _Alloc>\nstruct allocator_traits : _Normal<_Alloc> {};\n}\n",
+        ),
+    ]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+
+    match session.definition_of_a_written_type(&view, "std::allocator_traits::pointer", None, 0) {
+        Known::Yes(found) => assert_eq!(found.fact.name, "pointer"),
+        other => panic!("`pointer` is inherited from `_Normal` and has to be found through it: {other:?}"),
+    }
+
+    assert!(
+        matches!(
+            session.definition_of_a_written_type(&view, "std::allocator_traits::nothing_here", None, 0),
+            Known::Unknown(_)
+        ),
+        "the walk reads the chain; it does not invent a member: {:?}",
+        session.definition_of_a_written_type(&view, "std::allocator_traits::nothing_here", None, 0)
+    );
+}
+/// **A local's type is looked up from the namespace the file spells around it.**
+///
+/// [`DeclFact::scope`] is `None` for a declaration inside a function body — a body contributes no segment to a
+/// qualified name — so a local `Widget` in `namespace app` is a name with **nothing to be looked up from**, and
+/// every type written in a body was unresolvable. The view's scope chain at the declaration's own offset says
+/// which namespaces enclose it, and that is what the offset parameter is for.
+///
+/// This is user code's shape rather than the standard library's, and the difference is real: a view is built
+/// with **no macro evidence** (`FileView::parse`), so `namespace app {` is a scope in it while `_STD_BEGIN` —
+/// whose replacement list lives in a header nothing here has read — is not. The second half of the test is that
+/// limit written down, so that it is a known boundary rather than a surprise: the same declaration inside a
+/// macro-opened namespace needs the namespace to travel **on the fact**, which is a change to what a summary
+/// stores rather than to what this query asks.
+#[test]
+fn a_local_type_is_looked_up_from_the_namespace_around_it() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "namespace app {\nstruct Widget { int size; };\nvoid f() { Widget w; }\n}\n",
+    )]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+
+    // The local's own position, which is where its type is written.
+    let at = "namespace app {\nstruct Widget { int size; };\nvoid f() { ".len();
+
+    match session.definition_of_a_written_type(&view, "Widget", None, at) {
+        Known::Yes(found) => assert_eq!(found.fact.qualified_name(), "app::Widget"),
+        other => panic!("a local `Widget` in `namespace app` names `app::Widget`: {other:?}"),
+    }
+
+    // …and the fallback **qualifies** the name, it does not invent one.
+    //
+    // The first version of this asserted that `Widget` is unreachable from file scope, and it is reachable:
+    // `ProjectIndex::definition` matches a fact on its **bare** name as well as its qualified one, which is what
+    // lets a cursor in one file answer for a name declared in a namespace of another. That behaviour is older
+    // than this query and is not what the fallback changes; what it must not do is turn a name nothing declares
+    // into one that resolves.
+    assert!(
+        matches!(
+            session.definition_of_a_written_type(&view, "Nothing_here_at_all", None, at),
+            Known::Unknown(_)
+        ),
+        "a name no declaration holds is still nowhere: {:?}",
+        session.definition_of_a_written_type(&view, "Nothing_here_at_all", None, at)
+    );
+}
+/// **The fact carries the namespace even when the file never spells one.**
+///
+/// This is what [`DeclFact::in_namespace`] exists for, and it is the case a view **cannot** answer. A view is
+/// built with no macro evidence, so `namespace app {` written literally is a scope in it and one a macro opened
+/// is not — and every standard-library local is the second kind, because `_STD_BEGIN` is where `std` comes from.
+/// The summary is read with the closure's macro bodies in hand, so the fact knows the namespace even though no
+/// token in the file spells it.
+///
+/// Both halves are asserted, because either one alone would pass for the wrong reason: the fact must carry
+/// `app`, **and** the view must not be able to supply it — otherwise this would be testing the fallback that was
+/// already there rather than the field that was added.
+#[test]
+fn a_local_fact_carries_a_namespace_the_file_only_opens_with_a_macro() {
+    let session = session_with(&[
+        // **The macro is in another file, and that is the whole of the distinction.** A definition written in
+        // the file itself *is* evidence the scope walk can use — it reads the file's own `#define` bodies as it
+        // walks — so `BEGIN_APP` here would be understood from the buffer alone and the test would prove
+        // nothing. `_STD_BEGIN` lives in `yvals.h` for the same reason: the namespace every standard-library
+        // local sits in is spelled by a header the file only includes.
+        (
+            "/p/ns.h",
+            "#define BEGIN_APP namespace app {\n#define END_APP }\n",
+        ),
+        (
+            "/p/a.cpp",
+            "#include \"ns.h\"\nBEGIN_APP\nstruct Widget { int size; };\nvoid f() { Widget w; }\nEND_APP\n",
+        ),
+    ]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+
+    // The body's `Widget w;` — the local, and not the class of the same name above it.
+    let local = session
+        .index()
+        .summaries()
+        .flat_map(|summary| summary.declarations.iter())
+        .find(|fact| fact.local && fact.name == "w")
+        .expect("the local is declared");
+
+    assert_eq!(
+        local.in_namespace.as_deref(),
+        Some("app"),
+        "the summary is read with the closure's macros in hand, so the namespace is known"
+    );
+    assert!(
+        local.scope.is_none(),
+        "…and a body contributes no segment to a qualified name, which is why the field is needed: {:?}",
+        local.scope
+    );
+
+    // The view cannot say it: `BEGIN_APP` is an identifier to a parse of **this file**, whose replacement list
+    // is in `ns.h` and which nothing in a view has read. So no `app` scope is ever opened there.
+    //
+    // Asked of the **scope tree** rather than of a lookup, and this is the second test in this file corrected
+    // for the same reason: `ProjectIndex::definition` matches a fact on its **bare** name as well as its
+    // qualified one, so it finds `app::Widget` from a context that never mentions `app` — correctly, and
+    // whatever namespace is passed. What the field changes is what the scope tree can supply, so that is what
+    // is asked.
+    assert!(
+        view.scopes.scope_with_qualified_name("app").is_none(),
+        "the macro that opens `app` is in another file, so the view has no such scope to walk from"
+    );
+
+    // …and with the fact's answer in hand the same name resolves.
+    match session.definition_of_a_written_type(
+        &view,
+        "Widget",
+        local.in_namespace.as_deref(),
+        local.range.start_offset,
+    ) {
+        Known::Yes(found) => assert_eq!(found.fact.qualified_name(), "app::Widget"),
+        other => panic!("`Widget` written in `app` names `app::Widget`: {other:?}"),
     }
 }

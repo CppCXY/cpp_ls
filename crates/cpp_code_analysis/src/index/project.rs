@@ -1005,8 +1005,17 @@ fn direct_members(
     // Nothing is written *in* it, so the name is either an empty class or no class at all. Which one is decided by
     // the declaration itself rather than by the absence of members: a fact whose own qualified name is the
     // spelling asked about is the class, and everything else that matched did so on its bare name.
+    //
+    // **`Ambiguous` is that same answer**, and it is the ordinary case for the standard library: a class
+    // template is forward-declared and then defined, and the two declarations are one entity written twice.
+    // `std::allocator_traits` is exactly this — `xmemory:554` forward-declares it and `755` defines it — and
+    // the class declares **no members of its own at all**, because every one of them is inherited from
+    // `_Normal_allocator_traits`. Answering `Ambiguous` here says "I cannot tell which class you mean", when
+    // the truthful answer is "that class, and it has nothing written directly in it": the members are one
+    // level out, which is what the base walk above is for.
     match index.definition(class, path) {
         Known::Yes(found) if found.fact.qualified_name() == *class => Known::Yes(Vec::new()),
+        Known::Unknown(UnknownReason::Ambiguous(_)) => Known::Yes(Vec::new()),
         Known::Unknown(reason) => Known::Unknown(reason),
         Known::Yes(_) | Known::No => {
             Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(class.as_str())))
@@ -3471,7 +3480,35 @@ fn resolve_aliases_with_arguments(
         }
         seen.push(current.clone());
 
-        let Some((target, scope)) = alias_target_of(index, scopes, root, path, &current) else {
+        // **The whole spelling is not an alias, but its prefix may be one.**
+        //
+        // `vector:2920` writes `using _Alvbase_traits = typename _Mybase::_Alvbase_traits;`, and `_Mybase` is
+        // **another alias of `vector`** — so the target is a qualified name whose *first* segment is itself a
+        // name to follow, not a class to stop at. Asking `alias_target_of` for the whole spelling answers `None`
+        // and the walk used to end there, one alias short of `allocator_traits`: measured,
+        // `members_of("std::vector::_Alvbase_traits")` reported
+        // `NotDeclaredHere("std::vector::_Mybase::_Alvbase_traits")`.
+        //
+        // The prefix is what gets resolved, and the rest is carried along — one segment at a time, longest
+        // prefix first, so a name nested two aliases deep is followed the same way. `seen` bounds it, so an
+        // alias that leads back to itself stops here rather than looping.
+        let followed = alias_target_of(index, scopes, root, path, &current).or_else(|| {
+            let segments: Vec<&str> = current.split("::").collect();
+            (1..segments.len()).rev().find_map(|take| {
+                let prefix = segments[..take].join("::");
+                let (target, scope) = alias_target_of(index, scopes, root, path, &prefix)?;
+
+                // **The arguments come off and the scope does not go on.** Both are the rules the candidate
+                // list below already applies, and applying them here as well compounded them: the first
+                // attempt produced `std::vector::std::vector::_Vb_val<_Alloc>::_Alvbase_traits`, with the
+                // enclosing scope twice over and a `_Vb_val<_Alloc>` no fact is named by.
+                let target = parse_type_spelling(&target).class_name()?.to_string();
+
+                Some((format!("{target}::{}", segments[take..].join("::")), scope))
+            })
+        });
+
+        let Some((target, scope)) = followed else {
             break;
         };
 
@@ -3488,12 +3525,46 @@ fn resolve_aliases_with_arguments(
             carried = target_type.arguments().to_vec();
         }
 
-        // An unqualified target is written relative to the scope the alias was declared in, so that spelling is
-        // tried first — and the bare one is kept for a target that names a global. A qualified target is already a
-        // complete spelling and is taken as it stands.
+        // An unqualified target is looked for **from the scope the alias was declared in, outward** — which is
+        // C++'s own rule for an unqualified name, and it is not one step of it.
+        //
+        // Measured on MSVC's `<string>`: `basic_string` declares `using _Alty_traits = allocator_traits<_Alty>;`,
+        // and `allocator_traits` is a **free template at namespace scope in `std`** (`xmemory:754`). With only
+        // the alias's own scope tried, the candidate is `std::basic_string::allocator_traits` — a spelling
+        // nothing declares — and the walk gives up one scope short of the answer. `members_of` reported exactly
+        // that: `NotDeclaredHere("std::basic_string::allocator_traits")`.
+        //
+        // **A qualified target's first segment takes the same walk**, and that is not the same as taking the
+        // target as it stands. `vector` declares two of them:
+        //
+        // ```cpp
+        // using _Alvbase_traits = allocator_traits<_Alvbase>;            // vector:2828, unqualified target
+        // using _Alvbase_traits = typename _Mybase::_Alvbase_traits;     // vector:2920, qualified target
+        // ```
+        //
+        // and `_Mybase` is **another alias of `vector`**, so `_Mybase::_Alvbase_traits` is not a spelling
+        // anything declares — it is a name whose *first* segment has to be found the same way. Taken as it
+        // stands it stopped the walk dead: `members_of("std::vector::_Alvbase_traits")` answered
+        // `NotDeclaredHere("_Mybase::_Alvbase_traits")`, one alias short of `allocator_traits`.
+        //
+        // The bare name is kept last, for a target that names something at global scope. A target that begins
+        // with `::` is absolute and is taken as it stands — that is what the leading `::` is for.
         let candidates: Vec<String> = match &scope {
-            Some(prefix) if !target.contains("::") => {
-                vec![format!("{prefix}::{target}"), target.clone()]
+            Some(prefix) if !target.starts_with("::") => {
+                let (first, rest) = match target.split_once("::") {
+                    Some((first, rest)) => (first, Some(rest)),
+                    None => (target.as_str(), None),
+                };
+                let segments: Vec<&str> = prefix.split("::").collect();
+                let mut candidates: Vec<String> = (1..=segments.len())
+                    .rev()
+                    .map(|take| match rest {
+                        Some(rest) => format!("{}::{first}::{rest}", segments[..take].join("::")),
+                        None => format!("{}::{first}", segments[..take].join("::")),
+                    })
+                    .collect();
+                candidates.push(target.clone());
+                candidates
             }
             _ => vec![target.clone()],
         };
@@ -3575,7 +3646,21 @@ fn is_declared(
         return true;
     }
 
-    matches!(index.definition(spelling, path), Known::Yes(_))
+    // **`Ambiguous` is declared.** A class template with a forward declaration and a definition answers with
+    // more than one declaration, and [`ProjectIndex::definition`] turns that into
+    // `Unknown(Ambiguous(…))` — which `matches!(…, Known::Yes(_))` reads as "not here". The question this
+    // function asks is *is the name declared*, not *is there exactly one declaration of it*, and the two
+    // differ for most of the standard library.
+    //
+    // Measured: `alias_target_of` resolves `_Alty_traits` to `allocator_traits<_Alty>` declared in
+    // `std::basic_string`, and the candidate that should answer is `std::allocator_traits` — a name the index
+    // holds **twice** (`xmemory:554` forward-declares it, `755` defines it). Rejected here, the walk fell back
+    // to `std::basic_string::allocator_traits`, a spelling nothing declares, and `members_of` reported
+    // `NotDeclaredHere("std::basic_string::allocator_traits")` one scope short of the answer.
+    matches!(
+        index.definition(spelling, path),
+        Known::Yes(_) | Known::Unknown(UnknownReason::Ambiguous(_))
+    )
 }
 
 /// The declaration of `member` written **directly** in `class`, or `None`.
@@ -3675,6 +3760,12 @@ fn fact_from_binding(root: &cpp_parser::CppSyntaxNode, class: &str, binding: &cr
         // inside a function. A local class's members are members of that class, and the caller that asked for them
         // asked by name. See [`DeclFact::local`].
         local: false,
+        // `None`, and it is a **gap rather than an answer** — the same kind [`fact_from_binding`]'s note above
+        // states for `clean` and `access`: this path is handed a node and no scope tree, so it cannot say which
+        // namespaces enclose a body. It is unreachable in practice here, because this path exists for members
+        // and a member is never a local; the caller that does need it asks the file's summary, where the reading
+        // was made with the scopes in hand. See [`DeclFact::in_namespace`].
+        in_namespace: None,
         kind: crate::DeclKind::from_binding_kind(binding.kind),
         type_of: crate::sema::declarations::declared_type_of(root, binding),
         // Answered here as well, because **members** are exactly where a call happens: `fac.build().size` needs the
@@ -3756,20 +3847,80 @@ fn bases_of(
         )));
     }
 
-    match index.definition(class, path) {
-        Known::Yes(found) => Known::Yes(lookup_names(&found.fact.bases)),
+    // **Every declaration of the class, not the first one, and `Ambiguous` is not a failure.**
+    //
+    // A class template is forward-declared and then defined, and only one of the two carries the base clause:
+    // `xmemory:554` writes `struct _NO_SPECIALIZATIONS_CITING(…) allocator_traits;` and `755` writes the same
+    // class with `: conditional_t<…>` after it. `definition` answers with the singular, so a class declared
+    // twice comes back `Unknown(Ambiguous)` and the walk gave up — and even where it answers `Yes`, the one
+    // declaration it picked is as likely to be the forward declaration, whose `bases` is empty, as the
+    // definition. The plural [`ProjectIndex::definitions`] is the query that returns both, so the bases are
+    // the union of what every declaration was written with, in the order the declarations came in.
+    match index.definitions(class, path) {
+        Known::Yes(found) => {
+            let mut bases: Vec<String> = Vec::new();
+            for declaration in &found.found {
+                for base in lookup_names(&declaration.fact.bases) {
+                    if !bases.contains(&base) {
+                        bases.push(base);
+                    }
+                }
+            }
+            Known::Yes(bases)
+        }
         Known::Unknown(reason) => Known::Unknown(reason),
         Known::No => Known::No,
     }
 }
 
 /// Base spellings as names a class can be looked up by, in the order they were written.
+///
+/// **A base clause is not always a class name**, and the names it *does* mention are what a member lookup has
+/// to walk into. MSVC's `<xmemory>` writes
+///
+/// ```cpp
+/// struct _NO_SPECIALIZATIONS_CITING("N5014 …") allocator_traits
+///     : conditional_t<_Is_default_allocator<_Alloc>::value, _Default_allocator_traits<_Alloc>,
+///           _Normal_allocator_traits<_Alloc>> {};
+/// ```
+///
+/// (line 755), and the class it actually derives from is **one of the two named inside** — which one is a
+/// question about `conditional_t`, and answering it is metaprogramming this layer does not do. Taking the
+/// clause at its word would walk into `conditional_t`, which is an alias with no bases, and stop one step
+/// short of every member the class actually has: measured, `members_of("std::allocator_traits")` returned
+/// **zero** members while `pointer` and `difference_type` are in `_Normal_allocator_traits`.
+///
+/// So every class name the clause mentions is offered, which is an **over-approximation on purpose**: it can
+/// only find a member one of the candidates really has, and the direction to err in is "found" rather than
+/// "missing". A language server that reports a name as undeclared because it could not evaluate a
+/// `conditional_t` is one that reports the standard library as broken.
 fn lookup_names(bases: &[String]) -> Vec<String> {
-    bases
-        .iter()
-        .map(|base| base_type_name(base).to_string())
-        .filter(|base| !base.is_empty())
-        .collect()
+    let mut names: Vec<String> = Vec::new();
+
+    for base in bases {
+        let parsed = crate::sema::types::parse_type_spelling(base);
+        collect_class_names(&parsed, &mut names);
+    }
+
+    names
+}
+
+/// Every class name a parsed type mentions, outermost first, each kept once.
+///
+/// The walk is over the **parsed type** rather than its text, so `_Normal_allocator_traits<_Alloc>`
+/// contributes `_Normal_allocator_traits` and not `_Alloc`, and a class named inside a nested template
+/// argument is found at whatever depth it was written.
+fn collect_class_names(ty: &crate::sema::types::Type, into: &mut Vec<String>) {
+    if let Some(name) = ty.class_name()
+        && !name.is_empty()
+        && !into.iter().any(|kept| kept == name)
+    {
+        into.push(name.to_string());
+    }
+
+    for argument in ty.arguments() {
+        collect_class_names(argument, into);
+    }
 }
 
 /// The spelling a base-clause name resolves to, given the class it was written in.
@@ -5026,6 +5177,85 @@ impl ProjectIndex {
         }
     }
 
+    /// **A type name resolved where it was written** — the lookup C++ does and a plain name lookup does not.
+    ///
+    /// A declaration's type is written in the scope the declaration is in, and C++ looks for an **unqualified**
+    /// name there first — in the class, then in what encloses it — before it looks anywhere else. Every other
+    /// query in this type is handed a name and a file, and `std::_Allocation_guard::_Alloc_ptr_t` is not what
+    /// the header wrote: it wrote `_Alloc_ptr_t`, a **member alias** of the class the declaration sits in.
+    ///
+    /// Measured on the closure of one file that includes `<format>`, `<vector>` and `<string>`: of 2129 type
+    /// spellings the reader could name, 185 named something no lookup answered, and the largest group by far was
+    /// this shape — `_Alloc_ptr_t`, `_Alty_traits::pointer`, `_Alloc_size_t`. Not one was a name that is not
+    /// there; every one is a member of the class whose member wrote it.
+    ///
+    /// # Why this is a separate query rather than a change to [`ProjectIndex::definition`]
+    ///
+    /// Because it *qualifies* the name, and `definition`'s callers ask about names a user wrote at a cursor —
+    /// where the enclosing class is already part of the spelling, or is a member access the caller resolved. A
+    /// caller that has a written type and the scope it was written in is the caller that wants this, and there
+    /// is one way to get it wrong: qualifying a name that is already absolute.
+    ///
+    /// # Why this walks outward rather than trying one scope
+    ///
+    /// An unqualified name is looked for **in the innermost scope first and then in each scope around it**, and
+    /// the standard library is why one step is not enough: `_Alloc_ptr_t` is used inside `std::_Allocation_guard`
+    /// and declared as a free alias template at **namespace scope in `std`** (`xmemory`, "`template <class
+    /// _Alloc> using _Alloc_ptr_t = …`"). Asking only the use's own scope answers
+    /// `std::_Allocation_guard::_Alloc_ptr_t` — a spelling nothing declares — for a name that is written two
+    /// lines up in the same namespace.
+    ///
+    /// # What it does not do
+    ///
+    /// It does not substitute template arguments and it does not instantiate: `_Alloc_ptr_t` is
+    /// `typename allocator_traits<_Alloc>::pointer`, and **finding the alias is not the same as finishing its
+    /// type** — the answer here is the alias's own declaration, which is what a caller needs to say where the
+    /// name comes from. Substitution is [`crate::Type::substituted`], driven by a caller that has the arguments,
+    /// and nothing drives it yet. Nor does it follow a **base class**: a name inherited from a base is written
+    /// unqualified too, and finding it means walking the bases of every class on the chain.
+    pub fn definition_where_written(
+        &self,
+        written: &str,
+        in_scope: Option<&str>,
+        visible_from: &Path,
+    ) -> Known<ProjectDefinition> {
+        // The name as written, first. A qualified name, and a name declared at file scope, both answer here —
+        // and a name that answers must not be re-asked under a different spelling, because the two answers are
+        // different declarations whenever a class has a member of the same name.
+        let direct = self.definition(written, visible_from);
+        if !matches!(direct, Known::Unknown(UnknownReason::NotDeclaredHere(_))) {
+            return direct;
+        }
+
+        // `::name` is absolute and takes no scope — that is what the leading `::` is for.
+        let Some(scope) = in_scope.filter(|_| !written.starts_with("::")) else {
+            return direct;
+        };
+
+        // **Outward, one segment at a time.** `std::a::b::name`, then `std::a::name`, then `std::name`, and the
+        // bare name has already been tried — which is the order C++ looks in, and the reason a name declared in
+        // an enclosing namespace is found from a class nested two deep inside it.
+        let segments: Vec<&str> = scope.split("::").collect();
+        for take in (1..=segments.len()).rev() {
+            let enclosing = segments[..take].join("::");
+            if enclosing.is_empty() {
+                continue;
+            }
+
+            let through_the_scope = self.definition(&format!("{enclosing}::{written}"), visible_from);
+            if !matches!(
+                through_the_scope,
+                Known::Unknown(UnknownReason::NotDeclaredHere(_))
+            ) {
+                return through_the_scope;
+            }
+        }
+
+        // **The original reason, not the last attempt's.** Returning `NotDeclaredHere` for a spelling the caller
+        // never wrote would have a consumer explaining a name the user cannot find in their file.
+        direct
+    }
+
     /// **Every declaration a name refers to** — the plural answer, for a consumer that can show a list.
     ///
     /// # Why a list, and why it is not a preference
@@ -5145,6 +5375,25 @@ impl ProjectIndex {
     ) -> Result<(Vec<ProjectDeclaration>, usize), UnknownReason> {
         let mut candidates = self.files_declaring(name, visible_from);
 
+        // **A member spelled through an alias.** `std::string::size_type` is not the qualified name of anything
+        // the index holds — `size_type` is a member of `basic_string`, and `std::string` is a `using`
+        // declaration for it — so the literal lookup finds nothing while the declaration is right there.
+        // Measured as a pair, which is what says this is the missing half rather than member resolution being
+        // absent altogether:
+        //
+        // ```text
+        // std::basic_string::size_type   -> Yes            member resolution works
+        // std::string::size_type         -> NotDeclaredHere   the alias is what does not
+        // ```
+        //
+        // Tried **only after the literal name found nothing**, so a name that resolves today cannot change its
+        // answer — the whole change is additive, which matters for a query this many callers share.
+        if candidates.is_empty()
+            && let Some(rewritten) = self.through_an_alias(name, visible_from)
+        {
+            candidates = self.files_declaring(&rewritten, visible_from);
+        }
+
         if candidates.is_empty() {
             return Err(UnknownReason::NotDeclaredHere(Box::from(name)));
         }
@@ -5186,6 +5435,72 @@ impl ProjectIndex {
         });
 
         Ok((certain, conditional))
+    }
+
+    /// **The qualified name a member has when it was spelled through an alias** — see
+    /// [`ProjectIndex::certain_declarations`], which asks this only when the literal name found nothing.
+    ///
+    /// `std::string::size_type` becomes `std::basic_string::size_type`, and the lookup is tried again. The walk
+    /// is over the name's **prefixes, longest first**: the alias may be at any position (`a::b::c::d` where `b`
+    /// is the alias), the last segment is the name being looked for and replacing *it* is what the caller has
+    /// already tried, and an inner alias is the one that decides what the outer name means.
+    ///
+    /// The target is spelled **relative to the scope the alias was written in**, which is where C++ looks for
+    /// it: `using string = basic_string<char, …>` inside `namespace std` names `std::basic_string`. A target the
+    /// alias spelled with a qualification of its own (`::other::Thing`) is already absolute and is used as it
+    /// stands.
+    ///
+    /// `None` when no prefix is an alias, or when the chain does not settle — an alias that leads back to
+    /// itself is not legal C++, but a bound is cheaper than proving there is none, and a query that loops is an
+    /// editor that stops answering.
+    fn through_an_alias(&self, name: &str, visible_from: &Path) -> Option<String> {
+        /// How many substitutions one name may go through before the answer is "not this way".
+        const ALIAS_DEPTH: usize = 4;
+
+        let mut rewritten = name.to_string();
+
+        for _ in 0..ALIAS_DEPTH {
+            let segments: Vec<&str> = rewritten.split("::").collect();
+
+            // The last segment is excluded: it is the name being looked for, and substituting it would be
+            // answering a different question from the one the caller asked.
+            let substituted = (1..segments.len()).rev().find_map(|take| {
+                let prefix = segments[..take].join("::");
+                let alias = self
+                    .files_declaring(&prefix, visible_from)
+                    .into_iter()
+                    .next()?;
+
+                if alias.fact.kind != DeclKind::Type {
+                    return None;
+                }
+                let target = crate::sema::types::parse_type_spelling(alias.fact.type_of.as_deref()?);
+                let class = target.class_name()?;
+
+                let qualified = if class.contains("::") {
+                    class.to_string()
+                } else {
+                    match &alias.fact.scope {
+                        Some(scope) => format!("{scope}::{class}"),
+                        None => class.to_string(),
+                    }
+                };
+
+                Some(format!("{qualified}::{}", segments[take..].join("::")))
+            });
+
+            let next = substituted?;
+            if next == rewritten {
+                return None;
+            }
+            rewritten = next;
+
+            if !self.files_declaring(&rewritten, visible_from).is_empty() {
+                return Some(rewritten);
+            }
+        }
+
+        None
     }
 
     /// What the macro name `name` is at `offset` in the file at `visible_from`.
@@ -6084,6 +6399,10 @@ impl ProjectDefinition {
                     .to_string(),
                 scope,
                 local,
+                // `None` for the same reason `type_of` below is: this answer is a **place to jump to**, built
+                // from a binding, and the namespaces around a body are a fact about the file's text that lives in
+                // its summary. See [`DeclFact::in_namespace`].
+                in_namespace: None,
                 kind: crate::DeclKind::from_binding_kind(binding.kind),
                 // No type, no return type and no bases, because this answer is a *place to jump to* and the binding
                 // it comes from carries none of them: they are facts about the file's text, and the file they
@@ -8056,14 +8375,23 @@ mod tests {
     }
 
     #[test]
-    fn a_class_declared_more_than_once_reports_the_bases_it_could_not_read() {
-        // MSVC's `<istream>`, in miniature: the class, and an explicit instantiation of it. The base walk asks for
-        // **one** declaration — an ambiguous name answers no base list — so the members inherited from `Base` are
-        // missing, and the list has to say so instead of looking complete.
+    fn a_class_declared_more_than_once_still_reports_the_bases_it_could_not_read() {
+        // MSVC's `<istream>`, in miniature: the class, and an explicit instantiation of it. Measured on the real
+        // header, `std::basic_istream` is declared three times — the class and two
+        // `template class _CRTIMP2_PURE_IMPORT basic_istream<char, …>;` lines — and the inherited members used
+        // to be missing with `unlisted` **empty**, which is a list claiming a completeness it does not have.
         //
-        // Measured on the real header: `std::basic_istream` is declared three times (the class and two
-        // `template class _CRTIMP2_PURE_IMPORT basic_istream<char, …>;` lines), `members_of` answered its 42 own
-        // members, and `eof` — inherited from `basic_ios` — was absent while `unlisted` stayed **empty**.
+        // **What changed, and why the expectation is `Base` rather than `Stream`.** The base walk used to ask
+        // `definition` for the class, which answers `Unknown(Ambiguous)` for a name declared twice, and an
+        // ambiguous class answered *no base list at all* — so the base clause was never even read, and the
+        // class itself was named as the thing that could not be read. It now merges the bases of **every**
+        // declaration, which is what makes `xmemory`'s `allocator_traits` — forward-declared at 554 with no
+        // base and defined at 755 with one — inherit anything at all. What is left unread is the base the
+        // clause actually names.
+        //
+        // `Base` is named here because `a.cpp` does not include the header that declares it, which is the
+        // honest gap and the one this field exists for: the list says which name it could not follow rather
+        // than quietly ending.
         let source = "template <class E>\nstruct Stream : Base {\n  int read;\n};\ntemplate struct Stream<char>;\n";
         let found = members_of_class(
             &[("/p/base.h", "struct Base { int eof; };\n")],
@@ -8081,8 +8409,8 @@ mod tests {
                 .iter()
                 .map(|base| base.spelling.as_str())
                 .collect::<Vec<_>>(),
-            ["Stream"],
-            "and the class whose bases could not be read is named, so the list does not claim completeness"
+            ["Base"],
+            "and the base the walk could not follow is named, so the list does not claim completeness"
         );
     }
 

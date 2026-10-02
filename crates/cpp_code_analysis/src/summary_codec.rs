@@ -192,7 +192,13 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// Only [`CODEC_VERSION`] moves: the field is new, so an entry written before it decodes with the frame's flag
 /// unset, which is a weaker answer (a missing `#pragma` line) rather than a wrong one — and the reader rejects the
 /// older version anyway.
-pub const CODEC_VERSION: u32 = 24;
+/// A declaration fact gained `in_namespace` — the bump to version 25: the namespaces a **local** sits inside,
+/// so that a type a body writes can be looked up from somewhere. Measured on one file's closure, **25** type
+/// names were unplaceable for want of it, every one of them declared inside a namespace the fact did not
+/// record. The reader rejects an older version, so the field needs no compatibility arm: an entry written
+/// before it has no answer to give, and `None` would be the wrong one — it says "only the file encloses this",
+/// which is exactly what a standard-library local is not.
+pub const CODEC_VERSION: u32 = 25;
 
 /// Write a summary as bytes.
 ///
@@ -229,6 +235,7 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
         put_range(&mut out, fact.range);
         put_range(&mut out, fact.name_range);
         put_u8(&mut out, u8::from(fact.local));
+        put_opt_str(&mut out, fact.in_namespace.as_deref());
         put_u8(&mut out, u8::from(fact.clean));
         put_u32(&mut out, guard_code(fact.guard));
         put_u8(&mut out, access_code(fact.access));
@@ -612,6 +619,7 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
             range: reader.range()?,
             name_range: reader.range()?,
             local: reader.u8()? != 0,
+            in_namespace: reader.optional_string()?,
             clean: reader.u8()? != 0,
             guard: guard_from(reader.u32()?)?,
             access: access_from(reader.u8()?),
@@ -1179,6 +1187,9 @@ mod tests {
                     // Both flags' `true` branch here, and the other facts below cover `false` — a round trip that
                     // only ever wrote one value of a `u8` flag would not notice a decoder that dropped it.
                     local: true,
+                    // The `Some` branch, which is the one only a **local** ever has — see
+                    // [`DeclFact::in_namespace`]. The two facts below cover `None`.
+                    in_namespace: Some("std::ranges".to_string()),
                     clean: false,
                     guard: FactGuard::Unconditional,
                 },
@@ -1202,6 +1213,7 @@ mod tests {
                     range: range(40, 15),
                     name_range: range(48, 6),
                     local: false,
+                    in_namespace: None,
                     clean: true,
                     guard: FactGuard::Region(3),
                 },
@@ -1219,6 +1231,7 @@ mod tests {
                     range: range(60, 8),
                     name_range: range(60, 0),
                     local: false,
+                    in_namespace: None,
                     clean: true,
                     guard: FactGuard::Unconditional,
                 },

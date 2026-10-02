@@ -938,6 +938,30 @@ impl ScopeWalker<'_> {
             self.template_parameters(&list, parameters);
         }
 
+        // **A templated `using` is a declaration beside the parameter list, not a declarator.**
+        //
+        // Measured, the tree is
+        //
+        // ```text
+        // Syntax(Declaration)@20..117
+        //   Syntax(TemplateDecl)@20..48        `template <class _Alloc>`
+        //   Syntax(UsingDecl)@48..117          `using _Alloc_ptr_t = typename …;`
+        // ```
+        //
+        // so the walk below — which reads *declarators* — finds none, declares nothing, and the alias never
+        // becomes a fact. `template <class _Alloc> using _Alloc_ptr_t = …;` is how the standard library writes
+        // every allocator and traits alias, so this was leaving whole families of names out of the index:
+        // measured on one file's closure, `_Alloc_ptr_t`, `_Alloc_size_t`, `_Alty_traits` and their neighbours
+        // were held **zero** times while `basic_string::size_type` — an alias too, but a member of a class and
+        // so reached by the class body's walk rather than by this one — resolved normally.
+        //
+        // The name is bound in `scope` and not in `parameters`, which is the rule the note above states: an
+        // alias template declares its name where the template was written, exactly as a class template does.
+        if let Some(using) = first_child(node, CppSyntaxKind::UsingDecl) {
+            self.using_decl(&using, scope);
+            return;
+        }
+
         self.declaration_parts(node, scope, parameters);
     }
 
@@ -1716,11 +1740,26 @@ fn mentions_a_qualified_name(node: &CppSyntaxNode, outside_a_declarator: bool) -
     for child in node.children() {
         let kind = CppSyntaxKind::from(child.kind());
 
-        // Another declaration's text. This declaration's name cannot be in there, and a `::` in it is that other
-        // declaration's business — a class body's members, a nested declaration, a function's body.
+        // Another declaration's text, or a part of this one that is not its name. This declaration's name cannot
+        // be in there, and a `::` in it is something else's business.
+        //
+        // **`BaseSpecifier` is the second half of the lesson `ClassBody` taught**, and it is the same mistake one
+        // node over: `struct W : Base<A::B> {};` writes `A::B` in its specifier sequence, the walk found a `::`,
+        // called the declaration qualified, asked whether `A::B` named a scope *this file* had built, got `false`,
+        // and returned before binding anything — so `W` had no binding and therefore **no fact at all**.
+        //
+        // Measured, and it is why the standard library loses whole classes: a base clause is where a class
+        // template names the template it derives from, and qualified names are the ordinary way to write that —
+        // `struct allocator_traits : conditional_t<…, _Default_allocator_traits<_Alloc>, …>` in MSVC's
+        // `xmemory:755` is the one that led here, and it produced no fact for `allocator_traits` while every
+        // unqualified base beside it did. The parser is not at fault: the tree is
+        // `StructDef > [NameExpr(W), Colon, BaseSpecifier(Base<A::B>)]` and it parses with no errors.
         if matches!(
             kind,
-            CppSyntaxKind::ClassBody | CppSyntaxKind::Declaration | CppSyntaxKind::CompoundStat
+            CppSyntaxKind::ClassBody
+                | CppSyntaxKind::Declaration
+                | CppSyntaxKind::CompoundStat
+                | CppSyntaxKind::BaseSpecifier
         ) {
             continue;
         }

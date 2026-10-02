@@ -1820,9 +1820,18 @@ impl<F: FileProvider + Clone> Session<F> {
             // point at. Reading it here rather than making the caller ask again is what keeps one request to one
             // parse — and the view is a parse of a file the VFS is already holding, because the cooked reading could
             // not exist for a file nothing read.
-            if let Some(view) = self.view(path) {
-                notes = self.notes_about_the_modules(&view);
+            //
+            // The **checks** read it too, and for the same reason: they are asked of the file's facts and its tree,
+            // and both come from this one view. A file that cannot be read back is a file with no checks, which is
+            // the same answer as a file no check had anything to say about.
+            let view = self.view(path);
+            if let Some(view) = &view {
+                notes = self.notes_about_the_modules(view);
             }
+            let checks = match &view {
+                Some(view) => self.checks_about(&key, view),
+                None => Vec::new(),
+            };
 
             return Some(FileDiagnostics {
                 reading: DiagnosticReading::Cooked,
@@ -1837,6 +1846,7 @@ impl<F: FileProvider + Clone> Session<F> {
                     })
                     .collect(),
                 notes,
+                checks,
             });
         }
 
@@ -1860,7 +1870,32 @@ impl<F: FileProvider + Clone> Session<F> {
                 })
                 .collect(),
             notes,
+            checks: self.checks_about(&key, &view),
         })
+    }
+
+    /// The checks' answer for one file — see [`crate::sema::check`].
+    ///
+    /// An empty list when the index holds no summary for the path, which is the same answer as "no check had
+    /// anything to say": a check is a claim about facts the analysis has, and a file it has no facts about is a
+    /// file it has nothing to claim.
+    ///
+    /// Nothing is parsed here. Every check is answered from the summary the reading already produced, so asking
+    /// for diagnostics is not a reason for a parse to happen — it is a reason to read what one produced.
+    fn checks_about(&self, key: &Path, view: &crate::FileView) -> Vec<crate::sema::check::Finding> {
+        let index = self.store.index();
+        let Some(summary) = index.summary(key) else {
+            return Vec::new();
+        };
+
+        crate::sema::check::Checks {
+            path: key,
+            summary,
+            index,
+            source: &view.source,
+            tree: &view.root,
+        }
+        .run()
     }
 
     /// The text the analysis reads for a path — the buffer when it is open, the file otherwise.
@@ -2857,6 +2892,119 @@ impl<F: FileProvider + Clone> Session<F> {
         )
     }
 
+    /// **A type name as a declaration wrote it, resolved where it was written — through a base if it has to.**
+    ///
+    /// [`ProjectIndex::definition_where_written`] answers for a name written in a scope: it follows an alias,
+    /// and it looks outward through the enclosing scopes the way C++ does. What it cannot answer is a member the
+    /// class **inherits**, because that is not a lookup in the index at all — it is a walk of the base chain,
+    /// and the walk lives here, where the file's scope tree and tree are, rather than in the index.
+    ///
+    /// Measured, and it is what this wire exists for:
+    ///
+    /// ```text
+    /// std::allocator_traits::pointer        NotDeclaredHere   the name is inherited, not declared
+    /// members_of("std::allocator_traits")   44 members        …and `pointer` is one of them
+    /// ```
+    ///
+    /// `pointer` is declared in `_Normal_allocator_traits`, which `allocator_traits` names only inside a
+    /// `conditional_t<…>` — so finding it needs the alias step, the outward scope step **and** the base walk,
+    /// and this is the one entry point that has all three.
+    ///
+    /// # A diamond is `Ambiguous`, and that answer comes from the walk rather than from here
+    ///
+    /// A member two bases declare at once is not uniquely resolved by the language, and the walk records it as
+    /// [`ProjectMember::ambiguous`]. Picking one would be a jump to an entity the user cannot tell from the
+    /// other, which is the answer this project refuses to give.
+    pub fn definition_of_a_written_type(
+        &self,
+        view: &FileView,
+        written: &str,
+        in_scope: Option<&str>,
+        at: usize,
+    ) -> Known<ProjectDefinition> {
+        let index = self.store.index();
+
+        // **A declaration inside a body has no scope to be named by, and the file's own scopes can supply
+        // one.** [`DeclFact::scope`] is `None` for a local — a function body contributes no segment to a
+        // qualified name — so a name it wrote has nothing to be looked up from, and a local `Widget` in
+        // `namespace app` is a name that cannot be found. The view's scope chain at the declaration's own
+        // offset says which namespaces enclose it.
+        //
+        // **Literal namespaces only, and that is the honest limit here.** A view is built with no macro
+        // evidence (see [`FileView::parse`]), so `namespace app {` is a scope in it and `_STD_BEGIN` — whose
+        // replacement list is in a header nothing here has read — is not. A name written inside a namespace the
+        // file spells out is therefore resolvable, and one inside a namespace a macro opened is not; the second
+        // needs the fact to carry the namespace, which is a change to what a summary stores rather than to what
+        // this query asks.
+        let enclosing = match in_scope {
+            Some(scope) => Some(scope.to_string()),
+            None => enclosing_namespace_at(view, at),
+        };
+
+        let direct = index.definition_where_written(written, enclosing.as_deref(), &view.path);
+        if !matches!(direct, Known::Unknown(UnknownReason::NotDeclaredHere(_))) {
+            return direct;
+        }
+        let in_scope = enclosing.as_deref();
+
+        // **The class half, then the member.** The class is handed to [`Session::members_of`] **as written**,
+        // because that query is the one that already knows how to turn a spelling into a class: it follows an
+        // alias, it looks outward through the enclosing scopes, and it walks the bases. Resolving it here first
+        // would be a second implementation of that, and it was one — asking
+        // `ProjectIndex::definition_where_written` for `std::allocator_traits` answers `Unknown(Ambiguous(…))`,
+        // because the class is forward-declared **and** defined, and an `Ambiguous` read as "no class" is the
+        // same mistake this file's own `is_declared` and `direct_members` each had to have fixed.
+        let Some((class, member)) = written.rsplit_once("::") else {
+            return direct;
+        };
+
+        // **Qualified by the scope first, then as written** — and the order is the whole of the care here. A
+        // class named unqualified inside another one is written relative to it, so `_Mybase` in
+        // `std::_Vb_const_iterator` means `std::_Vb_const_iterator::_Mybase` and not the bare name. Trying the
+        // bare spelling first was the first attempt, and it stopped the walk on the wrong class: `members_of`
+        // answered `Yes` for `_Mybase` — there is a class by that name somewhere — and the loop took that as the
+        // class to look the member up in, so the scope-qualified spelling was never reached. Measured, that is
+        // `_Mybase::_Mycont` at `std::_Vb_const_iterator`: unresolved with the bare spelling tried first, and
+        // `Yes` when the same name is asked in full.
+        let mut tried: Vec<String> = Vec::new();
+        if let Some(scope) = in_scope.filter(|_| !class.starts_with("::") && !class.contains("::")) {
+            tried.push(format!("{scope}::{class}"));
+        }
+        tried.push(class.to_string());
+
+        let mut list = None;
+        for spelling in &tried {
+            if let Known::Yes(found) = self.members_of(view, spelling) {
+                list = Some(found);
+                break;
+            }
+        }
+
+        let Some(list) = list else {
+            return direct;
+        };
+
+        let mut found = list.members.iter().filter(|found| found.fact.name == member);
+
+        let Some(only) = found.next() else {
+            // Nothing in the chain declares it, and the honest answer is the one the direct lookup gave: the
+            // name is not here, rather than a name nobody wrote.
+            return direct;
+        };
+
+        // **Two answers, or one answer the walk already called ambiguous.** A member that two bases declare at
+        // once is not uniquely resolved by the language, and a jump to either is a jump to an entity the user
+        // cannot tell from the other.
+        if found.next().is_some() || only.ambiguous {
+            return Known::Unknown(UnknownReason::Ambiguous(Box::from(written)));
+        }
+
+        Known::Yes(ProjectDefinition {
+            file: only.file.clone(),
+            fact: only.fact.clone(),
+        })
+    }
+
     /// **The file's declarations as a tree** — what an outline, a breadcrumb bar or a folding range is drawn from.
     ///
     /// # Two sources, and why the second one exists
@@ -2964,6 +3112,13 @@ pub struct FileDiagnostics {
     /// Here rather than in a call of its own because both answers come out of the same tree, and a consumer that
     /// asked twice would pay for the file's parse twice. Empty is the ordinary case.
     pub notes: Vec<ModuleNote>,
+    /// **What the analysis says is wrong with the file** — see [`crate::sema::check`].
+    ///
+    /// The third channel, and the one that is neither the parser's nor a note: a construct the grammar accepts
+    /// and the language does not. Every entry is a claim the analysis can stand behind — a check reports only
+    /// `Known::Yes` or `Known::No`, and never an absence of an answer — so a consumer may show all of them
+    /// without hedging, which is the property the layer exists to have.
+    pub checks: Vec<crate::sema::check::Finding>,
 }
 
 /// **What reading a file the way a compiler reads it produced** — see [`Session::cook`].
@@ -3292,6 +3447,37 @@ impl Work {
 
         ahead
     }
+}
+
+/// **The namespaces enclosing `at`, as the file itself spells them** — see
+/// [`Session::definition_of_a_written_type`], which asks this for a declaration that has no scope of its own.
+///
+/// The chain is walked outward from the innermost scope and then reversed, so the answer reads outermost first:
+/// a declaration in `namespace a { namespace b { void f() { … } } }` is looked up from `a::b`, then `a`, which
+/// is the order C++ looks in and the order [`crate::ProjectIndex::definition_where_written`] already walks once
+/// it has a starting point. `None` when nothing encloses the offset but the file: a declaration at file scope
+/// is qualified by nothing, and an empty string would be a scope no name is in.
+fn enclosing_namespace_at(view: &FileView, at: usize) -> Option<String> {
+    let scope = view.scopes.scope_at(at)?;
+
+    let mut segments: Vec<&str> = Vec::new();
+    for id in view.scopes.scope_chain(scope) {
+        let Some(data) = view.scopes.scope(id) else {
+            continue;
+        };
+        if data.kind == crate::ScopeKind::Namespace
+            && let Some(name) = data.name.as_deref()
+        {
+            segments.push(name);
+        }
+    }
+
+    if segments.is_empty() {
+        return None;
+    }
+
+    segments.reverse();
+    Some(segments.join("::"))
 }
 
 /// A path as the queue compares them — the same normalization the store and the index use.

@@ -32,7 +32,7 @@ use std::collections::HashMap;
 
 use crate::preprocess::directive::{Directive, DirectiveKind, SpannedDirective};
 use crate::preprocess::FilePreprocessing;
-use crate::sema::symbol::{Binding, BindingKind, ScopeId, ScopeTree};
+use crate::sema::symbol::{Binding, BindingKind, ScopeId, ScopeKind, ScopeTree};
 use crate::summary::{
     Access, ConditionalRegion, DeclFact, DeclKind, FactGuard, GuardBranch, MacroFact, MacroKind,
     SummaryGuards,
@@ -1151,6 +1151,7 @@ fn fact_for(
     binding: &Binding,
     scope: Option<String>,
     local: bool,
+    scopes: &ScopeTree,
     declarations: &Declarations<'_>,
 ) -> Option<DeclFact> {
     // A binding whose name has no identifier is a destructor, an operator, or a conversion function. Its
@@ -1210,6 +1211,18 @@ fn fact_for(
         _ => None,
     };
 
+    // **Where a local sits, for the names it writes.** A declaration inside a body has no qualified name of
+    // its own — see [`DeclFact::local`] — so the namespaces around it are the only place a type it writes can
+    // be looked up from. Asked here rather than reconstructed by a consumer because **this** is where the
+    // scopes were built with the closure's macro bodies in hand: a view's own scope tree has no macro evidence
+    // and cannot see a namespace a macro opened ([`crate::FileView::parse`]), which is exactly the case every
+    // standard-library local is.
+    let in_namespace = if local {
+        enclosing_namespaces_of(scopes, binding.name_range.start_offset)
+    } else {
+        None
+    };
+
     Some(DeclFact {
         kind: DeclKind::from_binding_kind(binding.kind),
         name,
@@ -1218,6 +1231,7 @@ fn fact_for(
         // answer a *shape* cannot give, because `void f() { int x; }` and `void f() { }` differ by a declaration
         // that is not in a scope at all. See [`ScopeTree::declares_a_local`].
         local,
+        in_namespace,
         type_of,
         returns,
         bases,
@@ -1233,6 +1247,39 @@ fn fact_for(
         // Filled in by `assign_guards`, which is the only place that knows where the directives are.
         guard: FactGuard::Unconditional,
     })
+}
+
+/// **The namespaces enclosing `at`, outermost first** — or `None` when only the file does.
+///
+/// The answer a local declaration needs and [`ScopeTree::qualification_prefix_of`] cannot give: that function
+/// answers `None` for a function body, a block and a lambda on purpose — a local is not named *through* them —
+/// and `None` is the right answer to "what is this declaration qualified by" while being no answer at all to
+/// "what can a type written here be looked up from". The second question skips the bodies and keeps the
+/// **namespaces**, which is what C++ does when it looks a name up from inside a function.
+///
+/// Measured: `void f() { _Basic_format_specs s; }` inside `std` is a type no lookup could place, and the
+/// namespace that would have placed it is two scopes out and spelled by no token in the file.
+fn enclosing_namespaces_of(scopes: &ScopeTree, at: usize) -> Option<String> {
+    let scope = scopes.scope_at(at)?;
+
+    let mut segments: Vec<&str> = Vec::new();
+    for id in scopes.scope_chain(scope) {
+        let Some(data) = scopes.scope(id) else {
+            continue;
+        };
+        if data.kind == ScopeKind::Namespace
+            && let Some(name) = data.name.as_deref()
+        {
+            segments.push(name);
+        }
+    }
+
+    if segments.is_empty() {
+        return None;
+    }
+
+    segments.reverse();
+    Some(segments.join("::"))
 }
 
 /// One declaration node of the file, and whether a diagnostic fell inside it.
@@ -1401,7 +1448,7 @@ impl<'a> DeclarationFacts<'a> {
             let local = scopes.declares_a_local(ScopeId(index));
 
             for binding in &scope.bindings {
-                if let Some(fact) = fact_for(root, &shapes, binding, prefix.clone(), local, &declarations) {
+                if let Some(fact) = fact_for(root, &shapes, binding, prefix.clone(), local, scopes, &declarations) {
                     facts.push(fact);
                 }
             }
@@ -2008,9 +2055,60 @@ pub fn scope_of<'a>(scopes: &'a ScopeTree, fact: &DeclFact) -> Option<(ScopeId, 
     })
 }
 
+/// **The template parameters a declaration can name** — what keeps "not known yet" apart from "not here".
+///
+/// A parameter and a class of the same spelling are indistinguishable **in the type's text**, and
+/// [`crate::sema::types::Type::depends_on_a_parameter`] answers only for a type that was *told* which names are
+/// parameters. Nothing tells it for a member of a class template: [`DeclFact::type_of`] is the `Display`
+/// rendering of a `Type` — `_Alloc` and `_Alloc::value_type` render exactly as a class of that name would — so
+/// the question "is this type one only instantiation can finish" **cannot be asked of the summary at all**.
+///
+/// It can be asked of the scope tree, which is where the answer lives: `template <class _Alloc>` opens a
+/// [`ScopeKind::TemplateParameters`] scope containing a [`BindingKind::TemplateParameter`] binding called
+/// `_Alloc`, and everything the template declares is walked *inside* that scope — see
+/// [`ScopeWalker::templated_declaration`](crate::sema::scopes), whose note says the declared name belongs
+/// outside the parameter list while the contents belong within sight of it.
+///
+/// Measured on the closure of one file that includes `<format>`, `<vector>` and `<string>`: of 2129 type
+/// spellings the reader could name, **1235 named something no lookup would answer** — `_Alloc::value_type`,
+/// `_Alty_traits::difference_type`, `_AdaptorType::container_type` — and not one was a name the analysis had
+/// failed to find. Recognising them brought that number down by an order of magnitude, and the ones left are
+/// the subject of the next measurement rather than of this note.
+///
+/// The scope is found by **position**, not by name: a function body contributes no segment to a qualified name
+/// (`template <class _Ty> void f(_Ty v)` puts `v` at `scope: None`) and a file scope is not a name at all, so a
+/// lookup by spelling would miss the two cases that matter most. Ordered innermost-first, which is the order
+/// [`ScopeTree::scope_chain`] walks in.
+pub fn template_parameters_for<'a>(scopes: &'a ScopeTree, fact: &DeclFact) -> Vec<&'a str> {
+    let Some(scope) = scopes.scope_at(fact.range.start_offset) else {
+        return Vec::new();
+    };
+
+    let mut found: Vec<&str> = Vec::new();
+    for id in scopes.scope_chain(scope) {
+        let Some(data) = scopes.scope(id) else {
+            continue;
+        };
+        if data.kind != ScopeKind::TemplateParameters {
+            continue;
+        }
+
+        for binding in &data.bindings {
+            if binding.kind == BindingKind::TemplateParameter
+                && let Some(name) = binding.name.identifier_text()
+            {
+                found.push(name);
+            }
+        }
+    }
+
+    found
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{build_facts, by_name};
+    use super::{build_facts, by_name, template_parameters_for};
+    use crate::summary::DeclFact;
     use crate::preprocess::preprocess;
     use crate::sema::scopes::build_scopes;
     use crate::summary::{DeclKind, FactGuard};
@@ -2049,6 +2147,260 @@ mod tests {
         );
         assert!(exported("alone"), "`export int alone();`");
         assert!(!exported("plain"), "and a declaration with no `export` above it");
+    }
+
+    /// **A parameter of an enclosing template is visible to everything inside it, and to nothing outside.**
+    ///
+    /// This is the predicate that keeps "not known yet" apart from "not here", and it has to be asked of the
+    /// **scope tree** rather than of the type: [`DeclFact::type_of`] is the `Display` rendering of a `Type`, so
+    /// `_Alloc` and a class named `_Alloc` are the same text, and `_Alloc::value_type` is a name no lookup can
+    /// ever answer.
+    ///
+    /// The three cases are the three the walk can get wrong: a member of a **class** template, a parameter of a
+    /// **function** template — which lives at `scope: None`, because a function body contributes no segment to a
+    /// qualified name — and the class's own name, which is declared **outside** the parameter list on purpose
+    /// (`template <typename T> class Array` declares `Array` in the enclosing scope and `T` within sight of it).
+    #[test]
+    fn a_declaration_inside_a_template_can_name_its_parameters() {
+        let source = "template <class _Alloc>\n\
+                      struct _Container {\n\
+                          using value_type = typename _Alloc::value_type;\n\
+                      };\n\
+                      template <class _Ty> void take(_Ty value) { }\n";
+
+        let tree = CppParser::parse(source, ParserConfig::default());
+        assert_eq!(tree.get_errors(), [], "the input must parse cleanly");
+
+        let root = tree.get_red_root();
+        let scopes = build_scopes(&root, &crate::NoMacroBodies);
+        let (facts, _) = build_facts(&scopes, &preprocess(source, tree.get_tokens()), &root, &[]);
+
+        let parameters_of = |name: &str| -> Vec<String> {
+            let fact = facts
+                .iter()
+                .find(|fact| fact.name == name)
+                .unwrap_or_else(|| panic!("{name} must be a fact"));
+
+            template_parameters_for(&scopes, fact)
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        };
+
+        assert_eq!(
+            parameters_of("value_type"),
+            vec!["_Alloc".to_string()],
+            "a member of a class template names the class's own parameter"
+        );
+        assert_eq!(
+            parameters_of("take"),
+            vec!["_Ty".to_string()],
+            "and a function template's parameter is in scope in its body, where the fact's `scope` is `None`"
+        );
+        assert!(
+            !parameters_of("_Container").contains(&"_Container".to_string()),
+            "the class's own name is not one of its parameters, so a type spelled `_Container` is not \
+             dependent. The list is not empty, and that is right rather than a leak: a template's parameters \
+             are in scope for the declaration that follows, **its own name included** — the note on \
+             `templated_declaration` says the name belongs to the enclosing scope, which is a statement about \
+             where the *binding* goes and not about what can be named. What the filter compares is the name, \
+             and `_Container` is not `_Alloc`: got {:?}",
+            parameters_of("_Container")
+        );
+    }
+
+    /// **An alias declares a fact, in every shape a header writes one.**
+    ///
+    /// Measured on the closure of one file that includes `<format>`, `<vector>` and `<string>`: `_Alloc_ptr_t`,
+    /// `_Alloc_size_t` and `_Alty_traits` are held by the index **zero** times — not a lookup that fails, but a
+    /// declaration that never became a fact — while `std::basic_string::size_type`, also an alias, resolves.
+    /// So the question is which *shape* of alias is read, and the four shapes are here:
+    ///
+    /// ```text
+    /// using plain = int;                                 file scope
+    /// template <class T> using ptr = …;                  namespace scope, and a **template**
+    /// using size_type = unsigned long long;              a class member, and a concrete type
+    /// using traits = allocator_traits<int>;              a class member, and a **template-id**
+    /// ```
+    ///
+    /// The last two are the pair that matters: `basic_string::size_type` is the third shape and it is in the
+    /// index, so if the fourth is not, the difference is the template-id and not the member.
+    #[test]
+    fn an_alias_declares_a_fact_in_every_shape() {
+        let source = "using plain = int;\n\
+                      namespace std {\n\
+                          template <class _Alloc>\n\
+                          using _Alloc_ptr_t = typename allocator_traits<_Alloc>::pointer;\n\
+                          struct _Guard {\n\
+                              using size_type = unsigned long long;\n\
+                              using _Alty_traits = allocator_traits<int>;\n\
+                          };\n\
+                      }\n";
+
+        let (facts, _) = facts(source);
+
+        // The reading, so that a failure says what was found rather than only what was not.
+        let everything: Vec<(String, DeclKind)> = facts
+            .iter()
+            .map(|fact| (fact.qualified_name(), fact.kind))
+            .collect();
+        let named = |name: &str| -> Option<String> {
+            facts
+                .iter()
+                .find(|fact| fact.name == name)
+                .map(DeclFact::qualified_name)
+        };
+
+        assert_eq!(
+            named("plain").as_deref(),
+            Some("plain"),
+            "a file-scope alias is a declaration: {everything:?}"
+        );
+        assert_eq!(
+            named("_Alloc_ptr_t").as_deref(),
+            Some("std::_Alloc_ptr_t"),
+            "a namespace-scope alias **template** is a declaration: {everything:?}"
+        );
+        assert_eq!(
+            named("size_type").as_deref(),
+            Some("std::_Guard::size_type"),
+            "a member alias to a concrete type is a declaration: {everything:?}"
+        );
+        assert_eq!(
+            named("_Alty_traits").as_deref(),
+            Some("std::_Guard::_Alty_traits"),
+            "a member alias to a **template-id** is a declaration — this is the shape that was missing, and \
+             `size_type` above is the control that says the member half works: {everything:?}"
+        );
+    }
+
+    /// **A base clause is read, including when a macro stands between the keyword and the name.**
+    ///
+    /// `struct Widget : Base { … };` is the plain shape. The one that matters is MSVC's, measured:
+    ///
+    /// ```cpp
+    /// _EXPORT_STD template <class _Alloc>
+    /// struct _NO_SPECIALIZATIONS_CITING("N5014 …") allocator_traits
+    ///     : conditional_t<…, _Default_allocator_traits<_Alloc>, _Normal_allocator_traits<_Alloc>> {};
+    /// ```
+    ///
+    /// (`xmemory:755`) — an attribute-like macro the index cannot expand sits **between `struct` and the
+    /// class's name**, and the base clause follows. [`DeclFact::bases`] is what a member lookup walks into, so a
+    /// base that is not recorded is a member that cannot be found: measured, `std::allocator_traits` resolves
+    /// and `std::allocator_traits::pointer` — declared in one of those two bases — answers `NotDeclaredHere`,
+    /// while `std::_Normal_allocator_traits::pointer` resolves.
+    ///
+    /// The base is recorded **as written**, arguments and all, because that is what the clause says: turning
+    /// `_Normal_allocator_traits<_Alloc>` into a class is the reader's job, and `conditional_t<…>` is not a
+    /// class name at all — see `ProjectIndex::bases_of_a_class`.
+    #[test]
+    fn a_base_clause_survives_a_macro_before_the_name() {
+        let source = "struct Base { int b; };\n\
+                      struct _Attr(\"x\") Widget : Base { int w; };\n\
+                      struct Plain : Base { int p; };\n\
+                      template <class _Alloc>\n\
+                      struct _Attr(\"y\") Traits\n\
+                          : conditional_t<true, Other<_Alloc>, Base> {};\n\
+                      _EXPORT_STD template <class _Alloc>\n\
+                      struct _Attr(\"z\") Exported\n\
+                          : conditional_t<true, Other<_Alloc>, Base> {};\n\
+                      template <class _Alloc>\n\
+                      struct [[msvc::no_specializations(\"a\" \"b\")]] Attributed\n\
+                          : conditional_t<true, Other<_Alloc>, Base> {};\n\
+                      template <class _Alloc>\n\
+                      struct [[msvc::no_specializations(\"Specializing this standard library template is forbidden by \" \"N5014 [allocator.traits.general]/1\")]] Bracketed\n\
+                          : conditional_t<true, Other<_Alloc>, Base> {};\n\
+                      namespace ns {\n\
+                      template <class _Alloc>\n\
+                      struct [[msvc::no_specializations(\"a\" \"b\")]] Nested\n\
+                          : conditional_t<true, Other<_Alloc>, Base> {};\n\
+                      }\n\
+                      template <class _Alloc>\n\
+                      struct [ [ msvc :: no_specializations ( \"a\" ) ] ] Spaced\n\
+                          : conditional_t<true, Other<_Alloc>, Base> {};\n";
+
+        let (facts, _) = facts(source);
+        let bases_of = |name: &str| -> Vec<String> {
+            facts
+                .iter()
+                .find(|fact| fact.name == name)
+                .unwrap_or_else(|| panic!("{name} must be a fact"))
+                .bases
+                .clone()
+        };
+
+        assert_eq!(
+            bases_of("Widget"),
+            vec!["Base".to_string()],
+            "a macro between the keyword and the name does not change what the class derives from"
+        );
+        assert_eq!(
+            bases_of("Widget"),
+            bases_of("Plain"),
+            "…which is the same answer the plain spelling gives"
+        );
+        assert_eq!(
+            bases_of("Traits"),
+            vec!["conditional_t<true, Other<_Alloc>, Base>".to_string()],
+            "and the clause is kept **as written** — `conditional_t<…>` is not a class name, and turning it \
+             into one is not this layer's question"
+        );
+        // **And a macro in front of the whole declaration**, which is how `_EXPORT_STD` is written. It expands
+        // to `export` in one configuration and to nothing in another, and neither reading is available to a
+        // file being parsed on its own — so the declaration has to be read with the macro standing there.
+        assert_eq!(
+            bases_of("Exported"),
+            vec!["conditional_t<true, Other<_Alloc>, Base>".to_string()],
+            "a macro before `template` does not stop the class from being declared: {:?}",
+            facts.iter().map(|fact| fact.qualified_name()).collect::<Vec<_>>()
+        );
+        // **The attribute as the rendering actually spells it.** `_NO_SPECIALIZATIONS_CITING(...)` is
+        // `_NO_SPECIALIZATIONS_MSG(...)`, which is `[[msvc::no_specializations(_Msg)]]` in one arm of its `#if`
+        // and **nothing** in another — so the file the analysis reads may hold either, and the two are not the
+        // same shape: the macro unexpanded is an identifier with arguments, the attribute is real syntax
+        // standing between `struct` and the name. Measured on `<vector>`'s closure, the rendering of
+        // `xmemory:755` is this spelling, and `allocator_traits` has **no definition fact at all** — only the
+        // forward declaration without a base clause, which is why `std::allocator_traits::pointer` cannot be
+        // found.
+        assert_eq!(
+            bases_of("Attributed"),
+            vec!["conditional_t<true, Other<_Alloc>, Base>".to_string()],
+            "an attribute between `struct` and the name does not stop the class from being declared: {:?}",
+            facts.iter().map(|fact| fact.qualified_name()).collect::<Vec<_>>()
+        );
+        // …and the attribute's **argument as the header writes it**: a string containing `[`, `]` and `/`.
+        assert_eq!(
+            bases_of("Bracketed"),
+            vec!["conditional_t<true, Other<_Alloc>, Base>".to_string()],
+            "the text inside the attribute's string does not change how the declaration is read: {:?}",
+            facts.iter().map(|fact| fact.qualified_name()).collect::<Vec<_>>()
+        );
+        // …and the same declaration **inside a namespace**, which is where every one of the standard library's
+        // is written. Measured on `<vector>`'s closure, `xmemory:755` declares `allocator_traits` inside
+        // `namespace std` and produces **no fact for the name at all** — only one for its template parameter
+        // `_Alloc` — while `allocator_traits` at file scope above is declared normally.
+        assert_eq!(
+            bases_of("Nested"),
+            vec!["conditional_t<true, Other<_Alloc>, Base>".to_string()],
+            "a namespace around the declaration changes nothing about it: {:?}",
+            facts.iter().map(|fact| fact.qualified_name()).collect::<Vec<_>>()
+        );
+        // **And the attribute as the rendering spells it — with a space between the brackets.**
+        //
+        // This is the shape the product actually parses: `_NO_SPECIALIZATIONS_MSG(_Msg)` expands to
+        // `[[msvc::no_specializations(_Msg)]]`, and the renderer writes one space between every pair of tokens,
+        // so what reaches the parser is `[ [ msvc :: no_specializations ( "…" ) ] ]`. Measured on `<vector>`'s
+        // closure, the rendering of `xmemory:755` is exactly this, and that declaration produces **no fact at
+        // all** while every tightly-spelled variant above produces one.
+        //
+        // The same family as `>>` becoming `> >`, which the renderer also causes: an adjacency the parser reads
+        // as syntax is not adjacency once there is a space in it.
+        assert_eq!(
+            bases_of("Spaced"),
+            vec!["conditional_t<true, Other<_Alloc>, Base>".to_string()],
+            "a space between the attribute's brackets does not change what the declaration is: {:?}",
+            facts.iter().map(|fact| fact.qualified_name()).collect::<Vec<_>>()
+        );
     }
 
     #[test]

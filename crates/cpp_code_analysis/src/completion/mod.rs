@@ -963,6 +963,7 @@ mod tests {
             name: "format".to_string(),
             scope: Some("std".to_string()),
             local: false,
+            in_namespace: None,
             kind: DeclKind::Function,
             type_of: None,
             returns: returns.map(str::to_string),

@@ -78,6 +78,24 @@ pub struct DeclFact {
     /// file's own scopes in hand (a completion in the open buffer) lists locals from there and never needs this
     /// field; a consumer listing *another* file's declarations uses it to leave them out.
     pub local: bool,
+    /// **The namespaces a local declaration sits inside** — what a type it writes has to be looked up from.
+    ///
+    /// The third of the three answers "where am I": [`DeclFact::scope`] is the qualified name of the scope a
+    /// declaration is in, and it is `None` for a local because **a function body contributes no segment to a
+    /// qualified name** — `void f() { Widget w; }` in `namespace app` declares `w` in no scope anything can
+    /// spell. So a type written there had nothing to be resolved from, and every local's type in the standard
+    /// library was unnameable: measured on one file's closure, `_Basic_format_specs`, `_Fmt_iterator_buffer` and
+    /// `_Ptr_t` were among **25 names no lookup could place**, each declared inside a namespace the fact did not
+    /// record.
+    ///
+    /// Written **only where `scope` cannot say it** — a local — and `None` everywhere else, because a
+    /// declaration whose own scope is `std::vector` is already qualified by it. Storing it for every fact would
+    /// be a second copy of what the scope chain already says, in a summary that is written to disk.
+    ///
+    /// The namespaces are the **file's own reading**, with the closure's macro bodies in hand — so `_STD_BEGIN`
+    /// opens `std` here even though the file spells no namespace at all. That is the difference from a view's
+    /// scope tree, which is built with no macro evidence and cannot answer this: see [`crate::FileView::parse`].
+    pub in_namespace: Option<String>,
     pub kind: DeclKind,
     /// The type a variable-like declaration was written with, as the file spells it.
     ///
