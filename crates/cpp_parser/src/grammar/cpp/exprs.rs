@@ -913,16 +913,27 @@ fn parse_unary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
         // in `bits/stl_construct.h`, the allocators, `std::exception_ptr`, `std::pmr`), and it is the first error
         // of several of those files.
         CppTokenKind::Scope if p.peek_next_token() == CppTokenKind::NewKeyword => parse_new_expr(p),
-        CppTokenKind::DeleteKeyword => {
-            let m = p.mark(CppSyntaxKind::UnaryExpr);
-            p.bump(); // consume 'delete'
-            if p.current_token() == CppTokenKind::LeftBracket {
-                p.bump(); // consume '['
-                expect_token(p, CppTokenKind::RightBracket)?;
-            }
-            parse_unary_expr(p, fold_operand)?;
-            Ok(m.complete(p))
+        // **`::delete` — the sibling of `::new`, one line further down the standard's own grammar.**
+        //
+        // [expr.delete] spells the production `::opt delete cast-expression`, so a leading `::` is part of the
+        // construct rather than a qualifier on anything — it names the **global** `operator delete`, which a
+        // class's own `operator delete` would otherwise hide. The two arms are the same fact: `::` is otherwise
+        // the start of a *qualified name*, the name branch claims it, and the error is the identical
+        // ``expected a name after `::` ``. That arm's note already records the shape for `new`; this one is the
+        // half that was missing.
+        //
+        // Measured: MSVC's `<any>:62` writes
+        //
+        // ```cpp
+        // ::delete static_cast<_Ty*>(_Target);
+        // ```
+        //
+        // so `void f(S* p) { ::delete p; }` was unparseable — and `cl.exe` accepts all of `::delete p`,
+        // `::delete[] p` and `::delete` on a value. It is the whole of the one remaining diagnostic in `<any>`.
+        CppTokenKind::Scope if p.peek_next_token() == CppTokenKind::DeleteKeyword => {
+            parse_delete_expr(p, fold_operand)
         }
+        CppTokenKind::DeleteKeyword => parse_delete_expr(p, fold_operand),
 
         // **A compiler keyword standing where an operand goes** — `__extension__`, the spelling GCC uses to say
         // "this is an extension, do not warn about it in a `-pedantic` build", and it is written *inside*
@@ -1865,6 +1876,33 @@ fn a_decltype_that_begins_a_qualified_name(p: &CppParser) -> bool {
     }
 
     false
+}
+
+/// `delete p`, `delete[] p`, and either of them written `::`-qualified.
+///
+/// The leading `::` is optional in the production ([expr.delete]: `::opt delete cast-expression`) and it is
+/// **kept inside the node**, the same way [`parse_new_expr`] keeps `::new`'s: what it selects is the global
+/// `operator delete`, which is a different function from a class's own, so dropping it would be dropping the
+/// only thing it says.
+///
+/// Shared by the two arms in [`parse_primary_expr`] — `delete` and `::delete` — because the reading after the
+/// keyword is the same and a second copy is where the next spelling gets forgotten.
+fn parse_delete_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
+    let m = p.mark(CppSyntaxKind::UnaryExpr);
+
+    if p.current_token() == CppTokenKind::Scope {
+        p.bump(); // the global one
+    }
+    expect_token(p, CppTokenKind::DeleteKeyword)?;
+
+    // `delete[] p` — the array form, which is a different `operator delete[]`.
+    if p.current_token() == CppTokenKind::LeftBracket {
+        p.bump();
+        expect_token(p, CppTokenKind::RightBracket)?;
+    }
+
+    parse_unary_expr(p, fold_operand)?;
+    Ok(m.complete(p))
 }
 
 fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {

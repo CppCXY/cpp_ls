@@ -5309,7 +5309,7 @@ fn parse_template_argument(p: &mut CppParser) -> ParseResult {
 /// Can this token continue an **expression** where a type has just ended?
 ///
 /// The operators that cannot appear inside a type in any position: equality, arithmetic, bitwise, the conditional
-/// `?` and `||`.
+/// `?`, `||` — and the two **member accessors**.
 ///
 /// **The delimiters are deliberately absent**, and the first version of this list is why the note exists: a bare
 /// `>` ends the argument (the list owns it) and a `<` opens a nested list, so listing them made the rule refuse
@@ -5318,6 +5318,24 @@ fn parse_template_argument(p: &mut CppParser) -> ParseResult {
 /// decorate a type as readily as they multiply one (`S<int*>`, `S<int&>`, `S<int&&>`), so an argument that stops at
 /// one of them stays with the type reading. `>=`/`<=` are absent because a closing `>` followed by `=` is split by
 /// [`at_a_closing_angle`] before this question is asked.
+///
+/// # `.` and `->`, and why they are not ambiguous the way `*` is
+///
+/// A member access is the one continuation that **settles** the element rather than decorating it: no type-id is
+/// spelled with a `.` or a `->` anywhere in it — a qualified name uses `::`, which is a different token and stays
+/// off this list. So `D<a.b, int>` is an argument that is an *expression*, and the type reading stopping after `a`
+/// is one token short of the right answer rather than finished.
+///
+/// It was not on the list, and the cost was measured: `<random>` writes
+///
+/// ```cpp
+/// using _Sx_type = conditional_t<_Params._Smax_bits <= 32, uint32_t,
+///                                conditional_t<_Params._Smax_bits <= 64, uint64_t, _Unsigned128>>;
+/// ```
+///
+/// — an argument that *begins* with a member access. The type reading took `_Params`, the argument was declared
+/// complete at the `.`, and the list then wanted a `,` or a `>`: ``expected a template argument``, followed by the
+/// three diagnostics that fall out of the declaration it was in.
 fn continues_an_expression(kind: CppTokenKind) -> bool {
     matches!(
         kind,
@@ -5332,6 +5350,8 @@ fn continues_an_expression(kind: CppTokenKind) -> bool {
             | CppTokenKind::Caret
             | CppTokenKind::LogicalOr
             | CppTokenKind::Question
+            | CppTokenKind::Dot
+            | CppTokenKind::Arrow
     )
 }
 
@@ -5349,6 +5369,14 @@ pub fn eat_function_qualifiers(p: &mut CppParser) {
             | CppTokenKind::MutableKeyword
             | CppTokenKind::ConstexprKeyword
             | CppTokenKind::ConstevalKeyword
+            // **`static`, the C++23 lambda-specifier** (P1169R4, "`static operator()`"), which is the same family
+            // as the three above and the same position: `[](int x) static { return x; }`.
+            //
+            // Not here for any *declaration*: `void f() static;` is not C++, and nothing in the standard library
+            // writes it. What does write it is MSVC's own `<iostream>` and `<ranges>`, in the lambda each uses to
+            // wrap a console call — and without this arm the lambda's body was never reached, so the whole
+            // statement was reported and the declaration after it went with it.
+            | CppTokenKind::StaticKeyword
             | CppTokenKind::Ampersand
             | CppTokenKind::LogicalAnd => p.bump(),
             // A **dynamic exception specification** — `throw()`, `throw(int)`, `throw(T, U&)` — which sits exactly
