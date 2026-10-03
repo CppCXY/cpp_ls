@@ -683,22 +683,28 @@ fn main() {
                     // "the name is not declared here" and "the type depends on a template argument" are
                     // different pieces of work, and one of them is not work at all.
                     let full = format!("{other:?}");
-                    let reason = full
-                        .split('(')
-                        .nth(1)
-                        .and_then(|inner| inner.split(['(', ')']).next())
-                        .unwrap_or(&full)
-                        .trim()
-                        .to_string();
                     // **An `UnknownType` carries the spelling it could not read**, and that is the whole of the
                     // work list: the variant says "the engine gave up" and the spelling says on what. Kept
                     // together so the printout names the shapes rather than the category.
-                    let reason = if reason == "UnknownType" || reason == "NotDeclaredHere" {
-                        full.chars().skip(reason.len() + 1).take(52).collect()
+                    // **By shape, not by spelling.** The work list is "which spelling does the engine not read",
+                    // and a list of four hundred distinct expressions says nothing. These are the families the
+                    // standard library writes, and each one is a rule that is missing rather than a name.
+                    let shape = full.clone();
+                    let shape = if shape.contains("(_STD ") || shape.contains("(_CSTD ") {
+                        "a parenthesised macro name, called"
+                    } else if shape.contains("_STD ") || shape.contains("_CSTD ") {
+                        "a macro name followed by a name"
+                    } else if shape.contains("*this") {
+                        "`*this`"
+                    } else if shape.contains("static_cast") || shape.contains("reinterpret_cast") {
+                        "a cast"
+                    } else if shape.contains('"') && shape.contains("_") {
+                        "a macro"
                     } else {
-                        reason
+                        "everything else"
                     };
-                    *why.entry(reason).or_default() += 1;
+                    *why.entry(shape.to_string()).or_default() += 1;
+                    continue;
                 }
             }
         }

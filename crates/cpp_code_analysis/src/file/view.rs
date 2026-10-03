@@ -47,6 +47,12 @@ pub struct FileView {
     pub file: FileId,
     pub path: PathBuf,
     /// The text analysed: the buffer when open, the file otherwise. Shared with the VFS, so a view costs a pointer.
+    ///
+    /// **This is the *reading*, and the two are not always the same text.** For a view of a file's own tokens they
+    /// are the file, and every offset in this struct is a file offset. For a view of a **rendering** — what a
+    /// preprocessor produced, which is what a compiler's parser is handed — they are the rendering, and the offsets
+    /// are the rendering's; [`FileView::file_offset_of`] and [`FileView::reading_offset_of`] are the way between the
+    /// two, and [`FileView::written`] is the text on the other side.
     pub source: Arc<str>,
     /// The line index **of [`FileView::source`]** — the same one the VFS built when it took this text in.
     pub line_index: Arc<LineIndex>,
@@ -59,6 +65,77 @@ pub struct FileView {
     pub scopes: ScopeTree,
     /// Did the text come from an open buffer rather than from the file?
     pub open: bool,
+    /// **The file's own text, when [`FileView::source`] is a rendering of it.**
+    ///
+    /// `None` — the ordinary case, and every view until a rendering one existed — means the two are the same text
+    /// and the mapping below is the identity.
+    written: Option<Arc<str>>,
+    /// **One entry per token of the stream the rendering was made from**, in the same order, each saying where the
+    /// spelling is in the rendering and where to act on it in the file.
+    ///
+    /// Empty exactly when [`FileView::written`] is `None`. It is an `Arc<[_]>` rather than a `Vec` because a view is
+    /// cloned per request — every handler takes one — and a header's rendering is hundreds of thousands of tokens.
+    reading: Arc<[crate::preprocess::cooked::RenderedSpan]>,
+}
+
+impl FileView {
+    /// **Where in the file's own text the token at `in_the_reading` was written.**
+    ///
+    /// The question a client's position has to be answered in: a rendering's offsets are its own, and an editor
+    /// speaks the file's. `None` — no rendering, or an offset past the end — means the identity, because a view of
+    /// a file's own tokens has one coordinate system and it is the file's.
+    ///
+    /// The span's [`reported`](crate::preprocess::cooked::RenderedSpan::reported) rather than its
+    /// [`written`](crate::preprocess::cooked::RenderedSpan::written), and the choice is the whole of what a reader
+    /// means by "here": a token a macro produced was *written* in the header that defines the macro and *acts*
+    /// where the macro was invoked, and a client shown the header would be shown a place its own buffer does not
+    /// contain.
+    pub fn file_offset_of(&self, in_the_reading: usize) -> Option<usize> {
+        if self.written.is_none() {
+            return Some(in_the_reading);
+        }
+        Some(self.span_at(in_the_reading)?.reported.start_offset)
+    }
+
+    /// **Where in the rendering the file's own offset `in_the_file` is acted on.**
+    ///
+    /// The other direction, and the one a client's position needs: an editor sends a line and a column in the file,
+    /// and every layer below this struct speaks the reading. `None` when the offset is in a region the rendering
+    /// does not contain — a `#if` branch nobody takes, a comment — which a caller must read as "no answer here"
+    /// rather than as an offset of zero.
+    pub fn reading_offset_of(&self, in_the_file: usize) -> Option<usize> {
+        if self.written.is_none() {
+            return Some(in_the_file);
+        }
+        // The first span that **acts** at or after the offset asked about. A file offset a macro's expansion
+        // stands for has several spans reporting it — every token of the replacement list — and the first is the
+        // one the cursor is nearest, which is what an editor means by pointing there.
+        self.reading
+            .iter()
+            .find(|span| span.reported.end_offset() > in_the_file)
+            .map(|span| span.cooked.start_offset)
+    }
+
+    /// The span whose spelling covers `in_the_reading`, by binary search.
+    ///
+    /// The spans are in stream order, so their `cooked` ranges are sorted and do not overlap — which is what makes
+    /// this a search rather than a scan. A rendering of a standard-library header is a few hundred thousand tokens
+    /// and a query about a position is answered per keystroke, so a scan would be the wrong shape.
+    fn span_at(&self, in_the_reading: usize) -> Option<&crate::preprocess::cooked::RenderedSpan> {
+        let at = self
+            .reading
+            .partition_point(|span| span.cooked.end_offset() <= in_the_reading);
+        self.reading.get(at)
+    }
+
+    /// **The file's own text**, when this view is of a rendering of it.
+    ///
+    /// `None` for a view of the file's own tokens, where [`FileView::source`] is already that text. A consumer needs
+    /// it for the one thing the rendering cannot answer: showing the reader the lines **they wrote**, with the macro
+    /// still in them, rather than the expansion the compiler read.
+    pub fn written_text(&self) -> Option<&str> {
+        self.written.as_deref()
+    }
 }
 
 /// **The documentation of what is declared at `offset`** — the comment a hover shows above a declaration.
@@ -156,6 +233,8 @@ impl FileView {
             root,
             scopes,
             open: file.open,
+            written: None,
+            reading: Arc::from(Vec::new()),
         }
     }
 
@@ -214,6 +293,51 @@ impl FileView {
             root,
             scopes,
             open: file.open,
+            written: None,
+            reading: Arc::from(Vec::new()),
+        }
+    }
+
+    /// **A view of what the preprocessor produced**, rather than of the file's own tokens.
+    ///
+    /// This is the reading a compiler's parser is handed, and the reason it is worth having one of: a parser given
+    /// a rendering never sees a macro invocation at all — `_STD` is `::std::`, `_STD_BEGIN` is `namespace std {` —
+    /// so every rule in the grammar that exists to guess which identifier is a macro has nothing to do here. The
+    /// scopes are built with [`crate::NoMacroBodies`] for exactly that reason: there is no body to consult, because
+    /// the body has already been read.
+    ///
+    /// # The two coordinate systems
+    ///
+    /// The offsets in this view — in the tree, in the scopes, in the line index — are the **rendering's**, and the
+    /// rendering is not the file: a macro that expands to twenty tokens makes everything after it sit twenty
+    /// positions further along. [`FileView::file_offset_of`] and [`FileView::reading_offset_of`] are the way
+    /// between the two, and [`FileView::written`] is the file's own text.
+    ///
+    /// A caller that ignores the difference gets an answer about the wrong place rather than no answer, which is
+    /// the worse of the two failures — so the mapping is on the struct rather than a convention.
+    pub fn parse_rendering(
+        file: &VfsFile,
+        rendered: &crate::preprocess::cooked::RenderedCooked,
+    ) -> FileView {
+        let source: Arc<str> = Arc::from(rendered.text.as_str());
+        let line_index = Arc::new(LineIndex::parse(&source));
+        let tree = cpp_parser::CppParser::parse(&source, cpp_parser::ParserConfig::default());
+        let root = tree.get_red_root();
+        // **No macro bodies**, and the answer is the point rather than a simplification: the text being parsed has
+        // no invocations in it, so a body reader would be consulted for names that were already replaced.
+        let scopes = crate::sema::scopes::build_scopes(&root, &crate::sema::scopes::NoMacroBodies);
+
+        FileView {
+            file: file.id,
+            path: file.path.clone(),
+            source,
+            line_index,
+            tree,
+            root,
+            scopes,
+            open: file.open,
+            written: Some(file.text.clone()),
+            reading: Arc::from(rendered.spans.as_slice()),
         }
     }
 

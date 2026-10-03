@@ -3008,15 +3008,52 @@ fn what_a_call_has_in(fact: &DeclFact) -> Option<Type> {
 }
 
 /// The declaration an expression names, or why it names none. See [`NamedDeclaration`].
-/// Is this spelling **a name** — a bare identifier, or a `::`-qualified chain of them (`::Widget` included)?
+/// Is this word written the way MSVC writes the macro that stands for a namespace?
+///
+/// `_STD`, `_CSTD`, `_RANGES`, `_STDEXT`, `_CHRONO` — every one of them a leading underscore, which is the half of
+/// the convention the standard gives to the implementation. The other half is the all-capitals spelling
+/// (`MY_API`, `HUGEP`), and both are what a reader looks at when deciding whether the word in front of a `::` is a
+/// namespace or a macro that stands for one.
+///
+/// A **spelling**, and it is used where nothing better is available: the environment that could settle it is not
+/// part of a name, and the alternative — splitting every `::` — would read `std::f` as `f` and answer with whichever
+/// `f` it found. See the caller, which is the only place this decides anything.
+fn written_like_a_macro(word: &str) -> bool {
+    word.starts_with('_')
+        || (word.len() > 1
+            && word
+                .chars()
+                .all(|character| !character.is_alphabetic() || character.is_uppercase()))
+}
+
+
 ///
 /// The test the type layer asks before it treats an expression as a name, and it is deliberately about the
 /// *spelling* rather than about the node's kind: a qualified name and a member access are different nodes and
 /// different questions — the second is an object and a member of it, the first is one entity with a scope.
+///
+/// **A macro prefix is part of the spelling**, and that is the whole of the second clause: `_STD f` is one name
+/// written as two words, because `_STD` is `::std::` to a compiler and an ordinary identifier to a file that has not
+/// read `<yvals.h>`. Without it every expression the standard library writes through a macro was not a name at all
+/// — the reading fell through to "not a name" and answered `UnknownType("_STD f")`, which is **the error's own
+/// spelling and the tell**: measured, `auto a = _STD f();` was refused while `auto a = f();` gave `int`, and 413 of
+/// the 609 `auto` declarations this analysis cannot deduce are these two shapes.
+///
+/// Two identifiers in a row cannot be two segments of one name in C++ and cannot be two expressions either, so
+/// accepting the pair costs nothing: the reading it admits is the one the parser has already made.
 fn writes_a_name(written: &str) -> bool {
     let spelling = written.strip_prefix("::").unwrap_or(written);
 
-    !spelling.is_empty() && spelling.split("::").all(is_an_identifier)
+    !spelling.is_empty()
+        && spelling
+            .split("::")
+            // Every segment is one identifier, or a **run of them** separated by single spaces — the macro prefix
+            // and the name it stands in front of. A segment with a space in the middle of a word (`_STD  f` with
+            // two) is still a run, because `split_whitespace` is what reads it.
+            .all(|segment| {
+                let mut words = segment.split_whitespace();
+                words.clone().count() > 0 && words.all(is_an_identifier)
+            })
 }
 
 /// Is this segment a name a declaration could carry?
@@ -3065,7 +3102,9 @@ fn declaration_of_expression(
     let written = expression.text().to_string();
     let written = written.trim();
 
-    match crate::sema::resolve::definition_at(scopes, root, offset) {
+    let asked = crate::sema::resolve::definition_at(scopes, root, offset);
+    eprintln!("[dbg] expression `{written}` at {offset} -> {asked:?}");
+    match asked {
         Known::Yes(binding) => Known::Yes(NamedDeclaration::Here(binding)),
         Known::Unknown(UnknownReason::NotDeclaredHere(name)) => {
             // **A name whose spelling carries a macro prefix is two spellings, and one of them is real.** `_STD`
@@ -3078,9 +3117,26 @@ fn declaration_of_expression(
             // macro the analysis *can* see has its full spelling bound in the scope tree, and that case never
             // reaches here at all. What is left is the prefix, and dropping it is what a reader does with the
             // line in front of them.
+            //
+            // **Two separators, because the name arrives in two spellings.** A macro prefix and what follows it are
+            // written `_STD f` — two words — and the reader above builds its qualified spelling with `::`, so the
+            // name this arm is handed is **`_STD::f`**. Measured, that is exactly what it was: the space-split never
+            // matched, and `auto a = _STD f();` stayed refused while `auto a = f();` gave `int`.
+            //
+            // Splitting a `::` is only safe when the **first segment is written like a macro** (`_STD`, `_CSTD`,
+            // `_RANGES` — the leading underscore MSVC uses for every one of them), because `std::f` is a real
+            // qualified name and dropping `std` to find some other `f` would be a wrong answer rather than a
+            // missing one. That is the same discriminator the expression grammar uses for the same question, and it
+            // is a spelling here for the same reason: the environment that could settle it is not part of a name's
+            // spelling, and the segment in front of a `::` is what a reader would look at.
             let mut candidates: Vec<&str> = vec![name.as_ref()];
             if let Some((_, without_the_prefix)) = name.split_once(' ') {
                 candidates.push(without_the_prefix.trim());
+            }
+            if let Some((first, rest)) = name.split_once("::")
+                && written_like_a_macro(first)
+            {
+                candidates.push(rest);
             }
 
             for candidate in candidates {

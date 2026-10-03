@@ -2664,6 +2664,52 @@ impl<F: FileProvider + Clone> Session<F> {
         Some(reading)
     }
 
+    /// **The rendering of one file** — what the preprocessor produces from it, as text.
+    ///
+    /// The other half of [`Session::cook`], and the artifact a parser should be reading if the crate is to follow a
+    /// compiler's reading rather than its own: `cook` renders a file and **parses the rendering**, then keeps the
+    /// declarations it found and throws the text away. This is that text, for a caller that wants the reading
+    /// itself — a probe comparing the two readings of a file, and any future consumer that answers from the
+    /// rendering instead of from the file's own tokens.
+    ///
+    /// `None` under exactly the conditions [`Session::cook`] returns `None`: the file is not in the index, or its
+    /// closure has not been read, so there is no environment to expand it against.
+    ///
+    /// # Why it is built the same way `cook` builds it
+    ///
+    /// The two must agree token for token, or a caller comparing them would be comparing a rendering against a
+    /// *different* rendering. They share the steps — the unit, the file's macros, `cook_with` — and this method
+    /// exists rather than `cook` returning its text because the text is large (a header's rendering is megabytes)
+    /// and every caller of `cook` but this one discards it.
+    pub fn rendered_text_of(&mut self, path: impl AsRef<Path>) -> Option<String> {
+        Some(self.rendering_of(path)?.text)
+    }
+
+    /// **The rendering of one file, with its spans** — the text and the map that says where each token of it was
+    /// written.
+    ///
+    /// The same artifact as [`Session::rendered_text_of`] with the half that makes it usable for a **view**:
+    /// [`crate::FileView::parse_rendering`] needs the spans, because a rendering's offsets are its own and a client
+    /// speaks the file's.
+    pub fn rendering_of(
+        &mut self,
+        path: impl AsRef<Path>,
+    ) -> Option<crate::preprocess::cooked::RenderedCooked> {
+        let path = self.store.index().summary(path.as_ref())?.path.clone();
+        let unit = self.translation_unit_of(&path)?;
+        let text = self.files.read(&path)?;
+        let seed = MacroTable::from_marked(self.store.index().macros());
+        let (tokens, _) = cpp_parser::lex(&text, &cpp_parser::LexerConfig::default());
+        let unit_definitions = unit.definitions();
+        let macros = crate::preprocess::cooked::FileMacros::new(
+            unit.environment_of(&path)?,
+            &unit_definitions,
+            Some(&seed),
+            true,
+        );
+        Some(crate::preprocess::cooked::cook_with(&text, &tokens, &macros).render())
+    }
+
     /// Cook every **open** file — what the indexing loop does when its queue drains.
     ///
     /// The moment is the point: a file's environment is only complete once everything it includes has been read, and

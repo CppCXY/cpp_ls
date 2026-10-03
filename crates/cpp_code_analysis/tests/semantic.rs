@@ -1109,3 +1109,169 @@ fn a_view_gets_its_macros_one_query_later() {
         "the next query gets the reading the work loop built: {second:?}"
     );
 }
+/// **An `auto` whose initializer is written through a macro the file does not define.**
+///
+/// The shapes the standard library writes and a reader of one file sees as two identifiers:
+///
+/// ```cpp
+/// auto a = _STD f();              // a macro, a name, a call
+/// auto b = (_STD g) (1);          // the same call with the parentheses moved
+/// auto c = _STD _Convert_size<int>(2);   // …and with template arguments
+/// ```
+///
+/// The parse now reads each of them as **one name** — that is the fix that took `<xmemory>` from 153
+/// declarations to 1175 — so the question this holds is the next one along: does the *type* of that name get
+/// looked up, when the name the index knows is `f` and the spelling in the tree is `_STD f`.
+#[test]
+fn an_auto_written_through_a_macro_is_still_deduced() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "int f();\n\
+         long g(int);\n\
+         template <class T> T h();\n\
+         void t() {\n\
+             auto plain_a = f();\n\
+             auto plain_b = g(1);\n\
+             auto plain_c = h<int>();\n\
+             auto a = _STD f();\n\
+             auto b = (_STD g) (1);\n\
+             auto c = _STD h<int>();\n\
+         }\n",
+    )]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+
+    let facts: Vec<cpp_code_analysis::DeclFact> = session
+        .index()
+        .summaries()
+        .flat_map(|summary| summary.declarations.iter().cloned())
+        .collect();
+
+    let mut seen: Vec<String> = Vec::new();
+    for (name, expected) in [("plain_a", "int"), ("plain_b", "long"), ("plain_c", "int"), ("a", "int"), ("b", "long"), ("c", "int")] {
+        let fact = facts
+            .iter()
+            .find(|fact| fact.name == name && fact.type_of.as_deref() == Some("auto"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "`{name}` is declared `auto`: {:?}",
+                    facts
+                        .iter()
+                        .map(|fact| (&fact.name, &fact.type_of))
+                        .collect::<Vec<_>>()
+                )
+            });
+
+        match cpp_code_analysis::sema::deduce::deduced_type_of(
+            session.index(),
+            &view.scopes,
+            &view.root,
+            &view.path,
+            fact,
+        ) {
+            Known::Yes(type_of) => seen.push(format!("{name}={type_of}")),
+            other => seen.push(format!("{name}={other:?}")),
+        }
+    }
+
+    assert!(
+        seen.iter().any(|got| got == "a=int"),
+        "a macro-prefixed call is a call: {seen:?}"
+    );
+}
+/// **A view of the rendering sees no macro at all** — which is what a compiler's parser is handed.
+///
+/// `_MY_STD` is `::std::` to a compiler and an ordinary identifier to a reader of one file, so a parse of the file's
+/// own tokens has to guess which of the two identifiers in `_MY_STD widget` is the name — and the grammar carries a
+/// family of rules for that guess (`MacroCall`, `written_like_a_macro`, `is_a_macro`). A view of the **rendering**
+/// needs none of them, because the file it parses has the macro already replaced:
+///
+/// ```text
+/// the file writes     _MY_STD widget w;      the parser sees a name, then a name, then a name
+/// the rendering has   ::std:: widget w;      the parser sees a qualified name and nothing to guess about
+/// ```
+///
+/// Three things are asserted, and the third is the one that makes the view usable at all:
+///
+/// * the rendering's tree holds **no `MacroCall`** — the node every macro reading produces;
+/// * the declaration it reads is in scope `mine`, because the body really is a namespace there;
+/// * a position in the **file** and a position in the **rendering** map to each other, because a client speaks the
+///   first and every offset in the view is the second.
+#[test]
+fn a_view_of_the_rendering_has_no_macros_left_to_guess_about() {
+    let session = session_with(&[
+        (
+            "/p/ns.h",
+            "#define _MY_BEGIN namespace mine {\n#define _MY_END }\n",
+        ),
+        (
+            "/p/a.cpp",
+            "#include \"ns.h\"\n_MY_BEGIN struct thing { int b; }; _MY_END\n",
+        ),
+    ]);
+    let mut session = session;
+    session.add_project_files(["/p/a.cpp".into(), "/p/ns.h".into()]);
+    session.index_everything();
+
+    let file = session
+        .files()
+        .held("/p/a.cpp")
+        .expect("the file is held")
+        .clone();
+    let rendered = session
+        .rendering_of("/p/a.cpp")
+        .expect("the file's closure was read, so it renders");
+
+    // **The text itself is the first evidence**: the macro is gone and the namespace it stood for is there.
+    assert!(
+        !rendered.text.contains("_MY_BEGIN"),
+        "the rendering has no invocation left: {}",
+        rendered.text
+    );
+    assert!(
+        rendered.text.contains("namespace mine"),
+        "…and what the macro stood for is written out: {}",
+        rendered.text
+    );
+
+    let view = cpp_code_analysis::FileView::parse_rendering(&file, &rendered);
+
+    let mut macro_calls = 0;
+    let mut stack = vec![view.root.clone()];
+    while let Some(node) = stack.pop() {
+        if cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::MacroCall {
+            macro_calls += 1;
+        }
+        stack.extend(node.children());
+    }
+    assert_eq!(
+        macro_calls, 0,
+        "a rendering has nothing for a macro rule to read: {macro_calls} MacroCall(s)"
+    );
+
+    // **The two coordinate systems, asserted by the text rather than by a direction.** The rendering is not simply
+    // longer or shorter than the file — an `#include` line is gone from it and a macro's body is written out in
+    // it, and the two move offsets opposite ways — so "smaller" and "larger" are both wrong as assertions, and the
+    // first version of this test failed on its own arithmetic rather than on the mapping. What is true is that the
+    // file offset the mapping gives points at the same **spelling**: the characters there are the first of
+    // `struct thing`, which is what a client means by asking about that position.
+    let at_struct = rendered
+        .text
+        .find("struct thing")
+        .expect("the rendering has the declaration");
+    let in_the_file = view
+        .file_offset_of(at_struct)
+        .expect("a position in the rendering is a position in the file");
+
+    let written = view
+        .written_text()
+        .expect("a view of a rendering holds the file's own text");
+    assert!(
+        written[in_the_file..].starts_with("struct thing"),
+        "the mapping points at the same spelling: file offset {in_the_file} is `{}`",
+        &written[in_the_file..(in_the_file + 12).min(written.len())]
+    );
+    assert!(
+        written.contains("_MY_BEGIN"),
+        "…and the text it points into is the one the reader wrote, macro and all"
+    );
+}
