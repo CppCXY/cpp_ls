@@ -30,11 +30,42 @@ use lsp_types::Position;
 /// `None` when the line does not exist or the offset cannot be mapped (`FileView::offset_at`'s own answer for a
 /// position that is not in the file); the caller answers `null`/`Missing` in that case, because a request about a
 /// position the file does not have has no answer rather than a wrong one.
+///
+/// # Two coordinate systems, and this is the seam
+///
+/// A client's line and column are in the **file** it is showing. A view may be of a **rendering** — the file with
+/// its macros replaced, which is what a compiler's parser is handed — and then every offset inside it is the
+/// rendering's, because a macro that expands to twenty tokens moves everything after it. The line and the column
+/// are therefore resolved against the file's own text and index first, and only then translated into the reading,
+/// which is the whole of what makes a view of a rendering usable by an editor.
 pub fn offset_at_position(view: &FileView, position: Position) -> Option<usize> {
     let line = position.line as usize;
-    let body = line_body(&view.source, line)?;
+    // **The text the client is looking at**, which is the file's — not `view.source`, which is the rendering when
+    // there is one. Reaching for `source` here is the mistake this module exists to prevent: the two have different
+    // line breaks wherever a macro expanded, so a line number from one is a different document's line number.
+    let written = view.written_text().unwrap_or(&view.source);
+    let body = line_body(written, line)?;
     let column = character_column(body, position.character as usize);
-    view.offset_at(line, column)
+    let in_the_file = view.file_offset_at(line, column)?;
+    // …and where the reading is. `None` for a region the rendering does not contain — a branch nobody takes, a
+    // comment — which is "no answer here" rather than offset zero.
+    view.reading_offset_of(in_the_file)
+}
+
+/// **A client's position for a byte offset in a view's reading** — the other half of the seam
+/// [`offset_at_position`] documents.
+///
+/// The offset a query hands back is in the view's own coordinates, and when the view is of a rendering those are the
+/// rendering's. A client is showing the file, so the offset goes back through [`FileView::file_offset_of`] first —
+/// and a token a macro produced reports **where the macro was invoked** rather than where its body is written, which
+/// is the place the reader can actually see and the only one their buffer contains.
+pub fn position_at_offset(view: &FileView, offset: usize) -> Option<Position> {
+    let in_the_file = view.file_offset_of(offset)?;
+    position_in(
+        view.written_text().unwrap_or(&view.source),
+        view.written_lines(),
+        in_the_file,
+    )
 }
 
 /// [`position_at_offset`] for a file that has no [`FileView`] behind it — one nobody is editing, which the caller

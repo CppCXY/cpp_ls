@@ -55,7 +55,7 @@ pub async fn on_inlay_hint(
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
-        let view = session.view(&path)?;
+        let view = session.view_of_the_file(&path)?;
         let held = session.files().held(&view.path)?;
 
         // **No answer while the index is still reading.** A hint's parameter names come from the declaration the

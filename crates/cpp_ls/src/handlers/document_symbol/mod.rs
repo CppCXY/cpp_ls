@@ -37,7 +37,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::RegisterCapabilities;
 use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
-use crate::util::{position_in, symbol_kind, uri_to_file_path};
+use crate::util::{position_at_offset, symbol_kind, uri_to_file_path};
 
 pub async fn on_document_symbol(
     context: ServerContextSnapshot,
@@ -117,8 +117,8 @@ fn document_symbol(view: &FileView, symbol: &OutlineSymbol) -> DocumentSymbol {
 /// A source range as a place in the file, through the line index the view already holds.
 fn range_in_file(view: &FileView, range: cpp_parser::SourceRange) -> Option<Range> {
     Some(Range::new(
-        position_in(&view.source, &view.line_index, range.start_offset)?,
-        position_in(&view.source, &view.line_index, range.end_offset())?,
+        position_at_offset(view, range.start_offset)?,
+        position_at_offset(view, range.end_offset())?,
     ))
 }
 

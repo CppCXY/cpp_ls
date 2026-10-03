@@ -63,7 +63,7 @@ pub async fn on_prepare_rename(
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
-        let view = session.view(&path)?;
+        let view = session.view_of_the_file(&path)?;
         let offset = crate::util::offset_at_position(&view, position)?;
         let (_, name_range) = macro_at(session, &view, offset)?;
 
@@ -90,7 +90,7 @@ pub async fn on_rename(
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
-        let view = session.view(&path)?;
+        let view = session.view_of_the_file(&path)?;
         let offset = crate::util::offset_at_position(&view, position)?;
 
         workspace_edit_of_renaming_a_macro(session, &view, offset, &new_name)

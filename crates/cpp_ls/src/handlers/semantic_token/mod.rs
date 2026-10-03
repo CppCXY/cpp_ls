@@ -156,7 +156,7 @@ pub async fn on_semantic_tokens(
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
-        let view = session.view(&path)?;
+        let view = session.view_of_the_file(&path)?;
         let held = session.files().held(&view.path)?;
 
         // **No answer while the index is still reading.** A name a header declares is classified through the

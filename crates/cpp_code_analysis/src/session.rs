@@ -450,6 +450,18 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// [`Session::want_cooked_reading`] and `Cooking` have, for the same reason. Behind a lock because the asking
     /// happens in a query (`&self`) and the building happens in the loop (`&mut self`).
     macro_work: std::sync::Mutex<Cooking>,
+    /// **The renderings built for `view`**, remembered against the content they were read from.
+    ///
+    /// The same arrangement as [`Session::macro_environments`] and for the same reason: a rendering is a unit walk
+    /// and a preprocess, a query cannot pay it, and the file it is asked about does not change between two
+    /// keystrokes. Keyed by the **content hash** rather than the path, because a buffer being typed in has a new
+    /// text on every keystroke and a rendering of the old text would be a wrong answer rather than a stale one.
+    renderings: std::sync::Mutex<
+        std::collections::HashMap<
+            (PathBuf, u64),
+            std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
+        >,
+    >,
 }
 
 impl Session<DiskFiles> {
@@ -712,6 +724,7 @@ impl<F: FileProvider + Clone> Session<F> {
             headers,
             macro_environments: std::sync::Mutex::new(std::collections::HashMap::new()),
             macro_work: std::sync::Mutex::new(Cooking::default()),
+            renderings: std::sync::Mutex::new(std::collections::HashMap::new()),
         };
 
         // The scan is the queue's **seed**, not a list to consult later: opening a project is the caller saying
@@ -1445,8 +1458,18 @@ impl<F: FileProvider + Clone> Session<F> {
                 else {
                     break;
                 };
-                if let Some(text) = self.text(&path) {
-                    self.the_macros_of(&path, &text);
+                if let Some(rendered) = self.rendering_of(&path) {
+                    // **Remembered under the text it was read from**, which is what the next `view` looks up. The
+                    // text is taken from the VFS rather than from the rendering: the key is the *file's* content,
+                    // because that is what a client's buffer changes.
+                    if let Some(text) = self.text(&path) {
+                        if let Ok(mut known) = self.renderings.lock() {
+                            known.insert(
+                                (path.clone(), crate::cache::content_hash(&text)),
+                                std::sync::Arc::new(rendered),
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1697,13 +1720,20 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn view(&self, path: impl AsRef<Path>) -> Option<FileView> {
         let file = self.vfs.held(path)?;
 
-        // **The macros if they are already read, and a request for them if they are not.** Nothing here builds
-        // one: it is 103.7 ms (measured, a closure of 151 files), and a query must not pay it. So the answer is
-        // the plain view this call has always given, the file is put in the work loop's hands, and the **next**
-        // query about it finds the environment built — the same "not now, next time" the diagnostics channel
-        // states through `isIncomplete`, and the same shape `want_cooked_reading` has.
-        match self.known_macros_of(&file.path, &file.text) {
-            Some(macros) => Some(FileView::parse_with(file, &macros)),
+        // **The rendering if it is already read, and a request for it if it is not.**
+        //
+        // A rendering is what a compiler's parser is handed: the file with its macros replaced, so `_STD` is
+        // `::std::` and `_STD_BEGIN` is `namespace std {`, and nothing in the text is an invocation any more. That
+        // is the reading this view is **of**, and it is why `Session::view` no longer hands the grammar a file full
+        // of macros and a family of rules for guessing which identifier is one.
+        //
+        // Nothing here builds it. A rendering is a unit walk, a preprocess and a render — measured at 65–190 ms for
+        // a standard-library header on an indexed project, and far more on a cold one — and a query must not pay
+        // that. So a file with no rendering yet is answered from **its own tokens**, put in the work loop's hands,
+        // and the next query about it finds the rendering built. The same "not now, next time" the diagnostics
+        // channel states through `isIncomplete`.
+        match self.known_rendering_of(&file.path, &file.text) {
+            Some(rendered) => Some(FileView::parse_rendering(file, &rendered)),
             None => {
                 if let Ok(mut work) = self.macro_work.lock() {
                     work.want(&file.path);
@@ -1711,6 +1741,90 @@ impl<F: FileProvider + Clone> Session<F> {
                 Some(FileView::parse(file))
             }
         }
+    }
+
+    /// **The view of what the file itself writes** — its own tokens, macros and all.
+    ///
+    /// The counterpart of [`Session::view`], and both are needed because they answer different questions:
+    ///
+    /// ```text
+    /// view                the reading a compiler's parser is handed — offsets in the rendering
+    /// view_of_the_file    the text the reader is editing — offsets in the file
+    /// ```
+    ///
+    /// A question about **a position** belongs to the first, because that is where declarations, types and members
+    /// are resolved. A question about **a macro** belongs to the second, and it is not a fallback: a rendering has
+    /// the macro already replaced, so `#define API …`, every `API` written below it, and the node a rename would
+    /// edit are all *gone* from it. Renaming, colouring or hovering a macro is a question about the spelling in the
+    /// buffer, and the buffer is this view.
+    ///
+    /// The two agree on the file's lines wherever no macro expanded, which is most of most files — and where they
+    /// disagree, that is exactly the region a macro wrote, so a caller that needs the file's own positions wants
+    /// this one regardless.
+    pub fn view_of_the_file(&self, path: impl AsRef<Path>) -> Option<FileView> {
+        Some(FileView::parse(self.vfs.held(path)?))
+    }
+
+    /// **The view of what the file itself writes, with the macros its includes define.**
+    ///
+    /// [`Session::view_of_the_file`] plus the closure's macro bodies, which is what makes a *namespace-opening*
+    /// macro readable without a full render: `_STD_BEGIN` becomes `namespace std {` in the scope tree, so a
+    /// declaration is filed where a compiler files it. Cheaper than a rendering and less complete — the tokens are
+    /// still the file's own — and it is the fallback for a caller that asked for a rendering before one was built.
+    pub fn view_of_the_file_with_macros(&self, path: impl AsRef<Path>) -> Option<FileView> {
+        let file = self.vfs.held(path)?;
+        match self.known_rendering_of(&file.path, &file.text) {
+            Some(rendered) => Some(FileView::parse_rendering(file, &rendered)),
+            None => match self.known_macros_of(&file.path, &file.text) {
+                Some(macros) => Some(FileView::parse_with(file, &macros)),
+                None => Some(FileView::parse(file)),
+            },
+        }
+    }
+
+    /// **The view of a file that a compiler's parser would see**, built if it has to be.
+    ///
+    /// [`Session::view`] gets the same reading **one query later** without ever blocking on it. This is for a caller
+    /// that would rather wait: a batch, a test, or the first query after a file is opened.
+    ///
+    /// # What the reading is, and why it is the one to want
+    ///
+    /// A file's own tokens carry macros, and a macro is a spelling rather than a grammar: `_STD widget` is a name
+    /// and a name to a reader of one file, and one qualified name to a compiler. The grammar grew a family of rules
+    /// for that guess — `MacroCall`, `written_like_a_macro`, `is_a_macro`, a body-shape reader — and every one of
+    /// them exists because the parser was being handed text the preprocessor had not finished with. A **rendering**
+    /// has none of it left:
+    ///
+    /// ```text
+    /// the file writes     _STD_BEGIN struct widget { … }; _STD_END
+    /// the rendering has   namespace std { struct widget { … }; }
+    /// ```
+    ///
+    /// Measured over eight standard-library headers, the rendering reads **24% more declarations with no parse
+    /// errors at all**, where the file's own text reported 1 to 84 errors each and recovered from them by inventing
+    /// declarations — a call inside a function body read as a declaration, a local read as a file-scope name.
+    ///
+    /// # The two coordinate systems
+    ///
+    /// The view's offsets are the **rendering's**. See [`FileView::parse_rendering`], whose note is the contract:
+    /// [`FileView::file_offset_of`] and [`FileView::reading_offset_of`] are the way between the two, and a caller
+    /// that reports a position to a user must go through them.
+    pub fn view_of_the_rendering(&mut self, path: impl AsRef<Path>) -> Option<FileView> {
+        let file = self.vfs.held(path)?.clone();
+        let rendered = self.rendering_of(&file.path)?;
+        // Remembered, so the next `view` — which cannot build one — finds it.
+        self.known_rendering_of(&file.path, &file.text);
+        Some(FileView::parse_rendering(&file, &rendered))
+    }
+
+    /// The rendering for `text`, **if it is already read** — a hash and a lookup, and nothing else.
+    fn known_rendering_of(
+        &self,
+        path: &Path,
+        text: &str,
+    ) -> Option<std::sync::Arc<crate::preprocess::cooked::RenderedCooked>> {
+        let key = (path.to_path_buf(), crate::cache::content_hash(text));
+        self.renderings.lock().ok()?.get(&key).cloned()
     }
 
     /// **The same view, with the macros this file's own includes define, built if it has to be.**

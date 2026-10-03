@@ -58,7 +58,7 @@ use tokio_util::sync::CancellationToken;
 use super::RegisterCapabilities;
 use crate::handlers::hover::documentation_text;
 use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
-use crate::util::{offset_at_position, position_in, uri_to_file_path};
+use crate::util::{offset_at_position, position_at_offset, uri_to_file_path};
 
 pub async fn on_completion(
     context: ServerContextSnapshot,
@@ -280,8 +280,8 @@ fn text_edit(
 
     Some(CompletionTextEdit::Edit(TextEdit {
         range: lsp_types::Range::new(
-            position_in(&view.source, &view.line_index, replace.start_offset)?,
-            position_in(&view.source, &view.line_index, replace.end_offset())?,
+            position_at_offset(view, replace.start_offset)?,
+            position_at_offset(view, replace.end_offset())?,
         ),
         new_text: new_text.to_string(),
     }))

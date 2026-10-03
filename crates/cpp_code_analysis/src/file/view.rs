@@ -70,6 +70,12 @@ pub struct FileView {
     /// `None` — the ordinary case, and every view until a rendering one existed — means the two are the same text
     /// and the mapping below is the identity.
     written: Option<Arc<str>>,
+    /// **The line index of [`FileView::written`]** — the file's own, which is the one a client's positions are in.
+    ///
+    /// Kept beside the written text rather than derived per request: a line index is a scan of the whole file, a
+    /// file with a rendering is a standard-library header of a hundred thousand lines, and a client asks about a
+    /// position on every keystroke.
+    written_lines: Option<Arc<LineIndex>>,
     /// **One entry per token of the stream the rendering was made from**, in the same order, each saying where the
     /// spelling is in the rendering and where to act on it in the file.
     ///
@@ -135,6 +141,34 @@ impl FileView {
     /// still in them, rather than the expansion the compiler read.
     pub fn written_text(&self) -> Option<&str> {
         self.written.as_deref()
+    }
+
+    /// **The line index of the text a document is edited in** — the file's own when this view is of a rendering,
+    /// and the rendering's own otherwise.
+    ///
+    /// The one a caller that turns an offset into a line and a column must use, because that pair is what a client
+    /// sees. Paired with [`FileView::written_text`], which is the text the index belongs to: passing one without the
+    /// other gives a line number from a different document.
+    pub fn written_lines(&self) -> &LineIndex {
+        self.written_lines
+            .as_deref()
+            .unwrap_or(self.line_index.as_ref())
+    }
+
+    /// **The byte offset in the file's own text for a line and column** — the first half of what a client's position
+    /// needs.
+    ///
+    /// The line index is the file's own, which is why this is a method on the view rather than arithmetic at the call
+    /// site: a view of a rendering holds **two** line indexes, and a caller that reaches for the wrong one gets a
+    /// line number from a different document — a wrong answer rather than a missing one. The column is in
+    /// **characters**, not bytes and not UTF-16; the conversion from the protocol's unit is the caller's, and
+    /// `crate::util::position` is where it happens.
+    pub fn file_offset_at(&self, line: usize, column: usize) -> Option<usize> {
+        match (&self.written, &self.written_lines) {
+            (Some(text), Some(index)) => index.get_offset(line, column, text).map(usize::from),
+            // The ordinary case: one text and one index, and it is already the file's.
+            _ => self.offset_at(line, column),
+        }
     }
 }
 
@@ -234,6 +268,7 @@ impl FileView {
             scopes,
             open: file.open,
             written: None,
+            written_lines: None,
             reading: Arc::from(Vec::new()),
         }
     }
@@ -294,6 +329,7 @@ impl FileView {
             scopes,
             open: file.open,
             written: None,
+            written_lines: None,
             reading: Arc::from(Vec::new()),
         }
     }
@@ -337,6 +373,7 @@ impl FileView {
             scopes,
             open: file.open,
             written: Some(file.text.clone()),
+            written_lines: Some(file.line_index.clone()),
             reading: Arc::from(rendered.spans.as_slice()),
         }
     }
