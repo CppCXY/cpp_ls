@@ -84,10 +84,20 @@ pub async fn on_goto_definition_handler(
         // found" for a name that has a perfectly good file behind it. Asked first rather than as a fallback for
         // the same reason a member query is asked before a name query — the *shape* at the cursor decides which
         // question applies, and the shape here is a directive.
-        if let Known::Yes(header) = session.header_at(&view, offset) {
-            // A header this session cannot hold — the file is on disk but the VFS refused it — answers `None`
-            // rather than a location with no range, which is the same "nothing to go to" the reader had before.
-            return location_of_a_file(session, &header).map(GotoDefinitionResponse::Scalar);
+        //
+        // **Asked of the file's own text, not of the rendering.** A rendering has the directives *resolved*: the
+        // `#include` line is gone from it, because what it stood for is written out in its place. So the one
+        // position a reader most obviously wants to jump from — the header they wrote — is not in the reading the
+        // rest of this handler works in, and asking there finds nothing.
+        if let Some(written) = session.view_of_the_file(&path) {
+            if let Some(in_the_file) = offset_at_position(&written, position) {
+                if let Known::Yes(header) = session.header_at(&written, in_the_file) {
+                    // A header this session cannot hold — the file is on disk but the VFS refused it — answers
+                    // `None` rather than a location with no range, which is the same "nothing to go to" the reader
+                    // had before.
+                    return location_of_a_file(session, &header).map(GotoDefinitionResponse::Scalar);
+                }
+            }
         }
 
         let Known::Yes(found) = session.definitions(&view, offset) else {

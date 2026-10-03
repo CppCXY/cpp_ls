@@ -2144,7 +2144,22 @@ pub(crate) fn type_of_expression(
         };
 
         return match type_of_expression(index, scopes, root, path, &right, depth + 1) {
-            Known::Yes((right_type, _)) if right_type == left_type => Known::Yes((left_type, file)),
+            Known::Yes((right_type, _)) if right_type == left_type => {
+                // **Two pointers subtracted are not a pointer.** `p - q` is a *count of elements*, and C++ spells
+                // it `ptrdiff_t` — so the rule below, "the operands agree, therefore the answer is their type",
+                // holds for arithmetic and is wrong for exactly this pair. Measured on a fixture: `auto d = q -
+                // raw();` with both operands `int*` answered **`int*`**, which is not a missing answer but a wrong
+                // one, and a wrong type shown for an `auto` is worse than a refusal — the refusal says the file did
+                // not spell it, and the wrong answer says it did.
+                //
+                // Refused rather than answered `ptrdiff_t`: a file that spells its own difference type — MSVC's
+                // `difference_type`, a `_Distance` — would be shown a name from another library, and the analysis
+                // has no way to know which of them this code is written against.
+                if operator == "-" && left_type.pointee().is_some() {
+                    return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
+                }
+                Known::Yes((left_type, file))
+            }
             // **The two operands disagree, so the conversion decides and this does not rank conversions.** The
             // answer is the spelling, which is what every other refusal in this layer carries.
             Known::Yes(_) => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
@@ -2778,6 +2793,15 @@ fn declared_type(
 
     // **The declaration reads its own type**, and the only case left over is the placeholder: for anything else
     // the shape the reader built *is* the answer, qualifiers and operators and all.
+    //
+    // **An alias's name is not an intermediate to be substituted away here.** The obvious next step — seeing
+    // `reference`, asking what it aliases, and answering `_Elem&` — was tried and is **wrong at this layer**: it
+    // broke three tests that had been passing, because `basic_string<char>::reference` is a *member looked up by
+    // that name*, and the class's own arguments are substituted into the target only once the lookup has found it.
+    // Measured: `a_member_of_a_class_reached_through_an_alias_gets_the_aliass_arguments` expects `char&` and got
+    // `_Elem&`, because the substitution had already consumed the name the lookup needed. See [`alias_target`] for
+    // the step that is right here — an alias *declared in this file* has a target this can read directly — and the
+    // note on [`the_alias_behind`] for where the other step belongs.
     let placeholder = declaration.to_string();
     if !writes_auto(&placeholder) {
         return Known::Yes(declaration);
@@ -2802,6 +2826,25 @@ fn declared_type(
     }
 }
 
+/// **Where the other half of the alias step belongs, and why it is not here.**
+///
+/// An `auto` whose initializer is a name of an alias type deduces that alias's **spelling** — `auto a = q;` where
+/// `q` is a `pointer` answers `pointer`. Following it to the target (`int*`, or in the standard library
+/// `typename _Alty_traits::pointer`) looks like the obvious completion of [`alias_target`], and it was written,
+/// measured and **removed**:
+///
+/// * it moved the standard library's own count by **one** declaration in 631 — 130 deduced to 131 — because the
+///   targets there are template-dependent names this cannot resolve anyway; and
+/// * it **broke three tests** that had been passing, all of them about aliases, because substituting at this layer
+///   destroys the alias *name* that a member lookup needs: `basic_string<char>::reference` is a member found by
+///   that name, and the class's arguments are substituted into the target only after the lookup has found it.
+///   Measured: `a_member_of_a_class_reached_through_an_alias_gets_the_aliass_arguments` wants `char&` and got
+///   `_Elem&`.
+///
+/// The step belongs where a type's **shape** is wanted and its name is not — the operator and member queries — and
+/// it belongs there with the class's arguments in hand, which is the generic instantiation this analysis does not
+/// yet do. Recorded here rather than in a plan: the next reader of `alias_target` is the reader who will try it.
+///
 /// Does this spelling use the `auto` placeholder? A word, not a substring: `automatic` is a name.
 fn writes_auto(written: &str) -> bool {
     written
@@ -3103,7 +3146,6 @@ fn declaration_of_expression(
     let written = written.trim();
 
     let asked = crate::sema::resolve::definition_at(scopes, root, offset);
-    eprintln!("[dbg] expression `{written}` at {offset} -> {asked:?}");
     match asked {
         Known::Yes(binding) => Known::Yes(NamedDeclaration::Here(binding)),
         Known::Unknown(UnknownReason::NotDeclaredHere(name)) => {

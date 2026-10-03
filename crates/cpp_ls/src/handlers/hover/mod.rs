@@ -78,9 +78,29 @@ pub async fn on_hover(
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
+
+        // **The two questions about the text are asked of the file's own text.**
+        //
+        // A view is of the **rendering** — the file with its macros replaced and its directives resolved, which is
+        // where declarations, types and members are resolved, and the right reading for those. Two of the questions
+        // below are not about the program at all but about the line the reader wrote: `#include <vector>` declares
+        // nothing, and a macro's name is *gone* from the rendering because it was replaced by what it stands for.
+        // Asked of the rendering, both answer "nothing to say" — the reader sees an empty popup on the two things
+        // they most obviously want a popup for.
+        //
+        // So the file's own view answers them, and the rendering answers the rest. Neither is a fallback: each is
+        // the only reading that has the thing being asked about.
+        let written = session.view_of_the_file(&path)?;
+        let in_the_file = offset_at_position(&written, position)?;
+        if let Known::Yes(header) = session.header_at(&written, in_the_file) {
+            return Some(markdown(header_markdown(&header)));
+        }
+        if let Known::Yes(found) = session.macro_definition(&written, in_the_file) {
+            return Some(markdown(macro_markdown(session, &written, &found)));
+        }
+
         let view = session.view(&path)?;
         let offset = offset_at_position(&view, position)?;
-
         hover(session, &view, offset)
     })
     .await

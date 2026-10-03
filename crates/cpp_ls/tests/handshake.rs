@@ -2882,3 +2882,174 @@ fn an_overload_set_answers_with_every_location() {
     server.request(999, "shutdown", Value::Null);
     server.notify("exit", Value::Null);
 }
+
+/// The fixture for [`a_completion_inside_a_macros_argument_is_about_that_argument`]: a macro whose second argument is
+/// where the cursor goes, and two types with one member each so that a wrong subject is visible in the list.
+const MACRO_ARGUMENT_CPP: &str = "\
+struct alpha { int one; };
+struct beta { int gamma; };
+
+#define PICK(first, second) pick_impl((first), (second))
+
+beta bet;
+
+int f() {
+    return PICK(1, bet.);
+}
+";
+
+/// **A cursor inside a macro's argument list is still a cursor in the code.**
+///
+/// A view is of the **rendering** — the file with its macros replaced — so a position a client sends has to be
+/// translated into the reading before anything is resolved. A macro invocation is where that translation is hardest
+/// and where getting it wrong is invisible: `PICK(1, bet.)` becomes something else entirely in the rendering, and a
+/// mapping that dropped the cursor at the invocation's start rather than inside the argument would still produce a
+/// completion list — of the wrong scope, at the wrong place, with no error anywhere to say so.
+///
+/// The criterion is that the **argument's own type** is what is offered. `bet` is a `beta` and the file also holds
+/// an `alpha`, so a list holding `one` is a list answering about some other expression.
+#[test]
+fn a_completion_inside_a_macros_argument_is_about_that_argument() {
+    let project = Project::new("completion-in-a-macro-argument");
+    project.write("main.cpp", MACRO_ARGUMENT_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": { "textDocument": { "completion": {} } },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": MACRO_ARGUMENT_CPP }
+        }),
+    );
+
+    // The cursor is right after `bet.` inside `PICK(1, bet.)` — a member access whose subject is a macro argument.
+    // Line 8 is `    return PICK(1, bet.);` and column 23 is the byte after the dot: the first version of this test
+    // asked at line 9, which is the closing brace, and the server answered a name completion for `}` — a correct
+    // answer to a question about the wrong place, which is the failure mode this test exists to catch and which it
+    // caught in itself first.
+    let answer = server.ask_until(100, |id| {
+        json!({
+            "id": id,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": main_uri },
+                "position": { "line": 8, "character": 23 },
+            },
+        })
+    });
+
+    let items = answer["result"]["items"]
+        .as_array()
+        .or_else(|| answer["result"].as_array())
+        .unwrap_or_else(|| panic!("a completion list was expected, got {answer}"));
+    let labels: Vec<&str> = items
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect();
+
+    assert!(
+        labels.contains(&"gamma"),
+        "the members of the argument's own type are offered: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"one"),
+        "and not the members of the other type in the same file: {labels:?}"
+    );
+}
+
+/// The fixture for [`a_signature_survives_being_inside_a_macro_argument`]: a real declaration, a call to it, and the
+/// whole call written as a macro's argument so that the reading the server parses has been rewritten around it.
+const SIGNATURE_IN_A_MACRO_CPP: &str = "\
+#define PICK(first, second) pick_impl((first), (second))
+
+/// Scales a count.
+int scale(int count, double factor);
+
+int f() {
+    return PICK(1, scale(2, ));
+}
+";
+
+/// **The signature popup survives being inside a macro's argument.**
+///
+/// The same seam [`a_completion_inside_a_macros_argument_is_about_that_argument`] tests, asked by the other handler
+/// that takes a cursor: signature help resolves the call around the offset out of the **rendering**, and the
+/// rendering is where `PICK(1, scale(2, ))` has been rewritten into something with the call still in it but at a
+/// different offset. A mapping that landed the cursor on the macro's own name, or on the first argument, would ask
+/// about a different call — `pick_impl` here — and either answer nothing or answer with the wrong signature.
+///
+/// What has to come back is `scale`'s own label and its second parameter active, which is the state a reader sees
+/// while typing the argument.
+#[test]
+fn a_signature_survives_being_inside_a_macro_argument() {
+    let project = Project::new("signature-in-a-macro");
+    project.write("main.cpp", SIGNATURE_IN_A_MACRO_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": { "textDocument": { "signatureHelp": {} } },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": SIGNATURE_IN_A_MACRO_CPP }
+        }),
+    );
+
+    // `    return PICK(1, scale(2, ));` is line 6, and column 28 is right after the comma of `scale`'s arguments.
+    let answer = server.ask_until_it(
+        100,
+        |id| {
+            json!({
+                "id": id,
+                "method": "textDocument/signatureHelp",
+                "params": {
+                    "textDocument": { "uri": main_uri },
+                    "position": { "line": 6, "character": 28 },
+                },
+            })
+        },
+        |answer| !answer["result"].is_null(),
+    );
+
+    let signatures = answer["result"]["signatures"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a signature list was expected, got {answer}"));
+    let labels: Vec<&str> = signatures
+        .iter()
+        .filter_map(|signature| signature["label"].as_str())
+        .collect();
+    assert!(
+        labels.iter().any(|label| label.contains("scale")),
+        "the signature of the call the cursor is in, not of the macro around it: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|label| label.contains("PICK")),
+        "and not the macro's own name: {labels:?}"
+    );
+    assert_eq!(
+        answer["result"]["activeParameter"],
+        json!(1),
+        "the second argument is the one being typed: {answer}"
+    );
+}

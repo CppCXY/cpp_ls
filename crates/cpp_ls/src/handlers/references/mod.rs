@@ -48,9 +48,29 @@ pub async fn on_references(
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
+
+        // **Which reading this question belongs to depends on what is under the cursor, so look.**
+        //
+        // A view is of the **rendering** — the file with its macros replaced, which is where declarations, types and
+        // members are resolved. That is the right reading for a symbol and the wrong one for a macro: `MAX_ITEMS`
+        // is not in the rendering at all, because it was replaced by what it stands for, so a question about the
+        // use the cursor is on finds nothing there and answers "no references" — a false claim rather than a
+        // smaller truth, and one a user would rename on.
+        //
+        // The file's own text is where a macro's spelling lives, so the name at the cursor is read there first and
+        // the choice follows from it. Both reads are needed and neither is a fallback: each is the only reading that
+        // can answer its own half.
+        let written = session.view_of_the_file(&path)?;
+        let in_the_file = crate::util::offset_at_position(&written, position)?;
+        if matches!(
+            session.macro_references(&written, in_the_file),
+            Known::Yes(_)
+        ) {
+            return locations(session, &written, in_the_file, include_declaration);
+        }
+
         let view = session.view(&path)?;
         let offset = crate::util::offset_at_position(&view, position)?;
-
         locations(session, &view, offset, include_declaration)
     })
     .await

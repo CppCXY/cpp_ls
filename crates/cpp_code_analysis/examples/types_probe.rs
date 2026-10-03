@@ -28,16 +28,27 @@ fn main() {
         .map(PathBuf::from)
         .collect();
 
-    let mut session = cpp_code_analysis::Session::with_config(
-        std::env::temp_dir().join("types-probe-root"),
+    // **A session that discovered the toolchain**, rather than one configured by hand.
+    //
+    // This probe reads **renderings**, and a rendering needs a file's macro environment, which needs the unit walk,
+    // which needs the include graph to resolve. `CompilerConfig::default()` has no include paths, so every
+    // `#include <…>` in a standard-library header resolves to nothing, the walk enters one file, and the
+    // environment for the file asked about is not in it — measured, that is what turned this probe's answer into
+    // "0 declarations" after it was pointed at the rendering. `Session::open` asks the machine what it compiles
+    // with, which is the only thing that knows where `<vector>` is.
+    let root = paths
+        .first()
+        .and_then(|path| path.parent())
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
+    let mut session = cpp_code_analysis::Session::open(
+        root.clone(),
         cpp_code_analysis::SessionFiles::new(
             cpp_code_analysis::OpenDocuments::new(),
             cpp_code_analysis::DiskFiles,
         ),
-        cpp_code_analysis::WatchFilter::new(std::env::temp_dir().join("types-probe-root")),
-        cpp_code_analysis::CompilerConfig::default(),
+        cpp_code_analysis::WatchFilter::new(&root),
     );
-    std::fs::create_dir_all(std::env::temp_dir().join("types-probe-root")).ok();
 
     let indexed = Instant::now();
     session.add_project_files(paths.iter().cloned());
@@ -53,10 +64,17 @@ fn main() {
     let mut refused = 0usize;
     let mut still_auto = 0usize;
     let mut examples: Vec<(String, String, String)> = Vec::new();
+    let mut refused_examples: Vec<(String, String, String)> = Vec::new();
     let mut refusals: HashMap<String, usize> = HashMap::new();
 
     for path in paths.iter().take(limit) {
-        let Some(view) = session.view(path) else {
+        // **The rendering, built here rather than waited for.** `Session::view` answers from the file's own tokens
+        // when no rendering is cached yet and asks the work loop for one — which is right for an editor, where a
+        // query must not block, and wrong for a probe: it takes one look per file, so it would measure the reading
+        // the product only uses as a fallback. The first run of this probe did exactly that and reported `_STD
+        // _Get_unwrapped` and `_RANGES next` as unresolved names — macro spellings that a **rendering** does not
+        // contain at all, which is how the mistake was visible.
+        let Some(view) = session.view_of_the_rendering(path) else {
             continue;
         };
 
@@ -97,6 +115,17 @@ fn main() {
                         let why = format!("{reason:?}");
                         let why = why.split('(').next().unwrap_or(&why).to_string();
                         *refusals.entry(why).or_default() += 1;
+                        // **What the refusal was about, not only how many there were.** A count says the analysis
+                        // does not know a type; the declaration says whether that is a shape the rule is missing or
+                        // one no rule can answer — and without it the 501 refusals below are a number rather than a
+                        // work list, which is what the first version of this probe printed.
+                        if refused_examples.len() < 24 {
+                            refused_examples.push((
+                                binding.name.text(),
+                                written.to_string(),
+                                path.file_name().unwrap_or_default().to_string_lossy().to_string(),
+                            ));
+                        }
                         String::new()
                     }
                     cpp_code_analysis::Known::No => {
@@ -121,5 +150,10 @@ fn main() {
     }
     for (name, type_of, file) in examples {
         println!("   {name} = {type_of}   ({file})");
+    }
+    println!("
+--- what was refused, as written ---");
+    for (name, written, file) in refused_examples {
+        println!("   {name}: {written}   ({file})");
     }
 }
