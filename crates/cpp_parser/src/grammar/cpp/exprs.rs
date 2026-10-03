@@ -2233,6 +2233,49 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
                     p.bump();
                     continue;
                 }
+
+                // **`MACRO name` — a name written after a macro this file has not seen.**
+                //
+                // `_STD f()`, `_NODISCARD const T& f()`, `_EXPORT_STD _NODISCARD inline wstring f()` — every
+                // standard-library header writes its names this way, and the macros are defined in `<yvals.h>`,
+                // which a file parsed on its own has not read. The prefix therefore arrives as a plain
+                // **identifier** and the name follows it: two identifiers in a row with no `::` between them.
+                //
+                // That is not a guess between two readings. Two adjacent identifiers cannot both be segments of
+                // one name in C++, and they cannot be two expressions either — there is no operator between them
+                // — so the second continues a name the file could not spell. Refusing it stopped the expression
+                // at the first identifier, and whatever enclosed the expression then reported against the second:
+                //
+                // ```text
+                // if (!_STD g()) { }        expected `)` against `g`
+                // while (_STD g()) { }      the same
+                // return _STD f(x);         expected `;` against `f`
+                // _STD g(p, [] { })         the declaration reading derailed inside the parameter list
+                // ```
+                //
+                // Each one failed the statement it stood in, and the failure took the declaration written after
+                // that statement's function with it. Measured across MSVC's headers, this is the single largest
+                // cause of a file stopping early: `<vector>` read 10% of itself before it and all of it after,
+                // and `<xmemory>`, `<iterator>`, `<type_traits>`, `<ranges>` and `<utility>` the same.
+                //
+                // **Narrowed to the call shape**, and the narrowing is measured rather than cautious. Taking any
+                // identifier after an expression turned `X Y` into one name wherever the declaration reading had
+                // already given up, and the cost was not local: MSVC's `<xmemory>` summarised 536 declarations
+                // covering the whole file before it and 266 covering a fifth after. What the standard library
+                // actually writes is a **call**, so the run is taken only when a `(` follows it:
+                //
+                // ```text
+                // _STD f()          taken — the shape every header writes
+                // _STD f(p, [] { }) taken, and it is where <format> stopped
+                // return _STD f(x); taken
+                // C<T> T value      **not** taken — no `(`, and `T` is the declaration's own type
+                // ```
+                while an_operand_is_decisive(p)
+                    && p.current_token() == CppTokenKind::Identifier
+                    && p.peek_token_kind_at(1..2).first() == Some(&CppTokenKind::LeftParen)
+                {
+                    p.bump();
+                }
                 break;
             }
 

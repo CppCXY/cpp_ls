@@ -256,6 +256,34 @@ pub fn parse_type_id_for_an_allocation(p: &mut CppParser) -> ParseResult {
 
 /// Open the `TypeId` node and read the type in it, with the caller's answers to the two questions that decide how
 /// far it reaches.
+/// **Consume tokens up to the `)` that closes the parenthesis the cursor is inside.**
+///
+/// Used by the `decltype`/`noexcept` payload, whose end is a `)` however much of the body the expression rule
+/// understood. Nested parentheses are counted so that `decltype(f(a, b))` stops at the outer one, and an
+/// unbalanced input stops at end of file, which is the honest reading of text that has no closer.
+///
+/// The skipped tokens are wrapped in an [`CppSyntaxKind::ErrorNode`] so that they belong to something: a token no
+/// rule claimed is what an error node is for, and leaving them bare would attach them to whatever encloses this
+/// specifier.
+pub(super) fn skip_to_the_closing_paren(p: &mut CppParser) {
+    let error = p.mark(CppSyntaxKind::ErrorNode);
+    let mut depth = 0isize;
+    while !p.is_eof() {
+        match p.current_token() {
+            CppTokenKind::LeftParen => depth += 1,
+            CppTokenKind::RightParen => {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+        p.bump();
+    }
+    error.complete(p);
+}
+
 fn parse_type_id_here(
     p: &mut CppParser,
     a_name_may_be_a_type: bool,
@@ -271,7 +299,37 @@ fn parse_type_id_here(
         read_array_suffixes,
         read_a_parameter_list_as_the_type,
     ) {
-        p.close_marks_above(base);
+        // **`end_marks_to`, not `close_marks_above`** — and the difference is a whole declaration, not a
+        // tidy-up.
+        //
+        // `close_marks_above` **detaches** the nodes above `base` without emitting their `NodeEnd`s, on the
+        // understanding that whoever owns them will emit one at its own `complete()`. That holds when the
+        // failure abandoned the tokens. It does **not** hold here: this rule fails *after consuming them*, so
+        // the `TypeId`, the `DeclSpecifierSeq` and the `BuiltinType` under it are left with a `NodeStart` and
+        // no end, and the tree builder balances each one at the **end of the stream**. Every token after the
+        // failure is then nested inside them — and inside whatever enclosed them, which is the declaration
+        // being read.
+        //
+        // Measured on two lines, whose event stream says exactly this:
+        //
+        // ```cpp
+        // using d = decltype(_STD x);
+        // struct After { int c; };   // a `Declaration` in the stream, absent from the tree
+        // ```
+        //
+        // ```text
+        //  1: NodeStart UsingDecl
+        // 10: NodeStart TypeId            ← no NodeEnd ever
+        // 11: NodeStart DeclSpecifierSeq  ← none
+        // 12: NodeStart BuiltinType       ← none
+        // 23: NodeStart Declaration       ← `struct After`, correct and unreachable
+        // ```
+        //
+        // `_STD` is a macro in the real world — `yvals.h` defines it as `::std::` — and an ordinary identifier
+        // to a file read on its own, so `decltype(_STD x)` holds two identifiers in a row. MSVC's
+        // `__msvc_iter_core.hpp` line 116 has that shape: the file's first 130 lines summarise to **43**
+        // declarations, and so do its first 200 and its first 400.
+        p.end_marks_to(base);
         return Err(err);
     }
 
@@ -1184,7 +1242,13 @@ fn parse_decl_specifier_seq_with(
             specifier_seen,
         ) {
             if specifiers == 0 {
-                p.close_marks_above(base);
+                // **`end_marks_to`** — the specifier that failed here had already consumed tokens (its
+                // keyword, its parentheses, part of its payload), so the nodes it opened must keep what they
+                // read instead of being detached. Detached, their `NodeStart`s are balanced by the tree builder
+                // at the end of the stream, and every token after the failure is nested inside them — including
+                // the declaration that follows. See the note on [`parse_type_id_here`], which is the same fix one
+                // level out, and the measurement there.
+                p.end_marks_to(base);
                 return Err(err);
             }
             break;
@@ -1472,6 +1536,28 @@ fn parse_one_decl_specifier_inner(
                     super::exprs::parse_expr(p)?;
                 }
 
+                // **The payload's end is the matching `)`, and that is true however the expression read went.**
+                //
+                // A body that is not an expression stops the expression rule early — it reads what it can and
+                // returns — and the `)` is then not where the rule left the cursor. That is not an error worth
+                // failing the declaration for: the parentheses are balanced, so this type specifier has a
+                // well-defined end, and what stands between is what the file wrote.
+                //
+                // Measured on two lines. `_STD` is a macro — `yvals.h` defines it as `::std::` — and a file read on
+                // its own has not seen that header, so it arrives as a plain identifier and `_STD x` is two
+                // identifiers in a row:
+                //
+                // ```cpp
+                // using d = decltype(_STD x);
+                // struct After { int c; };   // read, and unreachable
+                // ```
+                //
+                // The alias failed, its markers were resolved by the error path, and `After` ended up **inside**
+                // the `UsingDecl` rather than beside it — a `Declaration` in the event stream and nothing in the
+                // tree. MSVC's `__msvc_iter_core.hpp` writes the same shape at line 116, and `bits/*` throughout.
+                if !matches!(p.current_token(), CppTokenKind::RightParen) {
+                    skip_to_the_closing_paren(p);
+                }
                 expect_token(p, CppTokenKind::RightParen)?;
 
                 // **A name looked up in the type `decltype` denotes**: `decltype(f())::type`, the form
@@ -3152,6 +3238,22 @@ pub fn parse_name(p: &mut CppParser) -> ParseResult {
             continue;
         }
 
+        // **`MACRO name` in a type — the type-side half of the rule the expression grammar already applies.**
+        //
+        // The paragraph above this loop describes the shape and reads it through a `MacroCall` node, which works
+        // when the file wrote the `#define`. Standard-library headers do not: `_STD` is defined in `<yvals.h>`,
+        // so to a file parsed on its own it is an ordinary **identifier** and the name it qualifies follows it —
+        // two identifiers in a row with no `::` between them.
+        //
+        // ```cpp
+        // using reverse_iterator = _STD reverse_iterator<iterator>;      // <array>, and every container
+        // ```
+        //
+        // Refusing the pair ended the name at `_STD`, the specifier sequence took **that** for the type, and the
+        // real name became a nested `Declaration` produced by recovery — which is what the paragraph above
+        // describes as making `std::vector` ambiguous. Measured on MSVC's `<array>`: `class array` summarised to
+        // one fact, none of its members were facts at all, and the 2000 lines written after it produced nothing.
+        //
         break;
     }
 

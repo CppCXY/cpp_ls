@@ -560,7 +560,9 @@ fn a_local_fact_carries_a_namespace_the_file_only_opens_with_a_macro() {
 /// arbitrary line is invisible in every count that only looks at what *is* there.
 #[test]
 fn a_stray_identifier_in_a_template_argument_drops_the_declarations_after_it() {
-    let source = "using d = decltype(_STD x);\nstruct After { int c; };\n";
+    let source = "template <class T> struct Spec {};\n\
+                  template <class T> struct Spec<T> { using d = W<decltype(_STD f<T>())>; };\n\
+                  template <class T> struct After { int c; };\n";
 
     // **Where the loss happens**, asked one layer at a time, because the first version of this test guessed and
     // guessed wrong: the parser keeps the tree, so the question is whether the *scope tree* has a binding for
@@ -601,6 +603,23 @@ fn a_stray_identifier_in_a_template_argument_drops_the_declarations_after_it() {
         .collect();
     eprintln!("TOP {top:#?}");
 
+    // **The event stream itself**, which is where the two halves disagree. The parser emits a `NodeStart` when a
+    // rule opens a node and a `NodeEnd` when it closes one, and the tree builder pairs them **in order** — there
+    // is no identity in the event, so a node that spans the wrong text means the events are in the wrong order
+    // rather than that one is missing. Traced, for the two lines above: `UsingDecl`'s `NodeEnd` is emitted at
+    // event 20, right after `decltype` fails at token 10, and yet the node the tree builds from that stream
+    // covers all 53 bytes of the file.
+    let events: Vec<String> = cpp_parser::CppParser::parse_with_events(
+        source,
+        cpp_parser::ParserConfig::default(),
+    )
+    .1
+    .iter()
+    .enumerate()
+    .map(|(at, event)| format!("{at}: {event:?}"))
+    .collect();
+    eprintln!("EVENTS {events:#?}");
+
     assert!(
         bound.contains(&"After"),
         "…and if the binding is missing too, the loss is in `build_scopes`: got {bound:?}"
@@ -621,4 +640,182 @@ fn a_stray_identifier_in_a_template_argument_drops_the_declarations_after_it() {
         names.contains(&"After"),
         "`After` is a class definition in the tree, so it has to be a fact: got {names:?}"
     );
+}
+/// **A `decltype` whose body is not an expression still ends at its own `)`.**
+///
+/// The payload rule reads an expression and then asked for a `)` where the rule happened to stop. A body that is
+/// not an expression stops it early, so that `)` was not there, the alias failed, and the declaration written
+/// after it was resolved by an error path that left the `UsingDecl`'s `NodeStart` unpaired — the tree builder
+/// then balanced it at the end of the stream, so the node covered the **whole rest of the file**.
+///
+/// ```cpp
+/// using d = decltype(_STD x);
+/// struct After { int c; };   // a `Declaration` in the event stream, nothing in the tree
+/// ```
+///
+/// `_STD` is a macro — `yvals.h` defines it as `::std::` — and a file summarised on its own has not read that
+/// header, so it arrives as a plain identifier and `_STD x` is two identifiers in a row. That is the shape
+/// MSVC's headers write everywhere, and measured on `__msvc_iter_core.hpp` the file's first 130 lines
+/// summarised to **43** declarations before this and to **254** after.
+///
+/// Both halves are asserted: the declaration after the malformed one is a fact **of the file** rather than a
+/// member of the class above it, which is the difference between a name that can be found and one that cannot.
+#[test]
+fn a_decltype_whose_body_is_not_an_expression_still_ends_at_its_own_paren() {
+    for source in [
+        // At file scope, where the following declaration has no class to be nested in.
+        "using d = decltype(_STD x);\nstruct After { int c; };\n",
+        // …and inside a class, where a wrong nesting shows up as a wrong **qualified name**.
+        "struct S { using d = decltype(_STD x); };\nstruct After { int c; };\n",
+    ] {
+        let summary = cpp_code_analysis::summarize(
+            std::path::Path::new("/p/a.cpp"),
+            source,
+            cpp_code_analysis::SummaryKey::new(0, 0),
+        );
+        let found = summary
+            .declarations
+            .iter()
+            .find(|fact| fact.name == "After")
+            .unwrap_or_else(|| {
+                panic!(
+                    "`After` is written after the alias and has to be read: {:?}",
+                    summary
+                        .declarations
+                        .iter()
+                        .map(|fact| fact.qualified_name())
+                        .collect::<Vec<_>>()
+                )
+            });
+
+        assert_eq!(
+            found.qualified_name(),
+            "After",
+            "it is a declaration of the **file**, not a member of what stands before it: {source:?}"
+        );
+    }
+}
+/// **A `_STD`-shaped call in an expression position keeps the declaration after it.**
+///
+/// Every standard-library header writes `_STD f()`: `_STD` is a macro — `yvals.h` defines it as `::std::` — and a
+/// file parsed on its own has not read that header, so it arrives as a plain identifier and the call is two
+/// identifiers in a row. The expression rule reads the first and stops, and the **enclosing** rule then reported
+/// `expected )` against the second; the `if` failed, and the failure took what was written after the function
+/// with it.
+///
+/// Measured, and this is the difference that says where the fault is:
+///
+/// ```text
+/// _STD g();              a **statement** — fine, nothing encloses it
+/// if (!_STD g()) { }     a condition — the declaration after it is lost
+/// while (_STD g()) { }   the same
+/// ```
+///
+/// A statement has nothing expecting a token after the expression; a condition and an initializer do. The fix is
+/// to read the end of the condition from **its own parenthesis**, which is well defined however much of the
+/// expression was understood — see `skip_to_the_closing_paren`.
+///
+/// On MSVC's headers the effect is not marginal: `<vector>` stopped at the first of these (line 409) and
+/// summarised 86 declarations covering 10% of the file, and now summarises **157** covering all of it.
+#[test]
+fn a_std_shaped_call_in_a_condition_keeps_what_follows_it() {
+    for source in [
+        "struct S { void f() { if (!_STD g()) { } } };\nstruct After { int c; };\n",
+        "struct S { void f() { while (_STD g()) { } } };\nstruct After { int c; };\n",
+        "struct S { void f() { if (_STD g()) { } else { } } };\nstruct After { int c; };\n",
+    ] {
+        let summary = cpp_code_analysis::summarize(
+            std::path::Path::new("/p/a.cpp"),
+            source,
+            cpp_code_analysis::SummaryKey::new(0, 0),
+        );
+        let found = summary
+            .declarations
+            .iter()
+            .find(|fact| fact.name == "After")
+            .unwrap_or_else(|| {
+                panic!(
+                    "the declaration after the function has to be read: {:?}",
+                    summary
+                        .declarations
+                        .iter()
+                        .map(|fact| fact.qualified_name())
+                        .collect::<Vec<_>>()
+                )
+            });
+
+        assert_eq!(
+            found.qualified_name(),
+            "After",
+            "it is a declaration of the **file**, not of the class above it: {source:?}"
+        );
+    }
+}
+/// **A name written after a macro this file has not seen is still a name.**
+///
+/// Every standard-library header writes its names this way — `_STD f()`, `_NODISCARD const T& f()`,
+/// `_EXPORT_STD _NODISCARD inline wstring f()` — and the macros live in `<yvals.h>`, which a file summarised on
+/// its own has not read. The prefix therefore arrives as a plain **identifier** and the name follows it: two
+/// identifiers in a row with no `::` between them.
+///
+/// That is not a guess between two readings. Two adjacent identifiers cannot both be segments of one name in
+/// C++, and they cannot be two expressions either — there is no operator between them. Refusing the pair stopped
+/// the expression at the first identifier, and whatever enclosed the expression then reported against the
+/// second, failing the statement it stood in **and taking the declaration written after that statement's
+/// function with it**.
+///
+/// Measured on MSVC's headers, this is the single largest cause of a file stopping early:
+///
+/// ```text
+///                         before   after
+/// <format>                   173    1147     25% → 99% of the file
+/// <vector>                   157     538
+/// <xmemory>                  536     578
+/// <ranges>                    56     356
+/// <memory>                    17    1217
+/// <algorithm>                406     785
+/// ```
+///
+/// The run is taken only when a `(` follows it, and only outside a constraint's own top level. Both narrowings
+/// are measured rather than cautious: taking *any* identifier turned `X Y` into one name wherever the
+/// declaration reading had already given up (`<xmemory>` summarised a fifth of itself), and inside a constraint
+/// `requires C<T> T value = T{};` had the same fault — `T` is the declaration's own type, not a continuation.
+#[test]
+fn a_name_after_an_unseen_macro_is_still_a_name() {
+    for source in [
+        // The call shape, which is what every header writes.
+        "struct S { void f() { _STD g(); } };\nstruct After { int c; };\n",
+        // …with arguments, and with a lambda among them — where `<format>` stopped.
+        "struct S { void f() { _STD g(p, [] { }); } };\nstruct After { int c; };\n",
+        // …and in a `return`, where the enclosing rule wanted a `;`.
+        "struct S { int f() { return _STD g(x); } };\nstruct After { int c; };\n",
+        // …and under a conditional, which is where `<vector>` stopped.
+        "struct S { void f() { if (!_STD g()) { } } };\nstruct After { int c; };\n",
+    ] {
+        let summary = cpp_code_analysis::summarize(
+            std::path::Path::new("/p/a.cpp"),
+            source,
+            cpp_code_analysis::SummaryKey::new(0, 0),
+        );
+        let found = summary
+            .declarations
+            .iter()
+            .find(|fact| fact.name == "After")
+            .unwrap_or_else(|| {
+                panic!(
+                    "the declaration after the function has to be read: {:?}",
+                    summary
+                        .declarations
+                        .iter()
+                        .map(|fact| fact.qualified_name())
+                        .collect::<Vec<_>>()
+                )
+            });
+
+        assert_eq!(
+            found.qualified_name(),
+            "After",
+            "it is a declaration of the **file**, not of the class above it: {source:?}"
+        );
+    }
 }

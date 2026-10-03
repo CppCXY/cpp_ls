@@ -1121,6 +1121,26 @@ fn parse_condition(p: &mut CppParser) -> ParseResult {
         parse_expr(p)?;
     }
 
+    // **A condition's end is its own `)`, however much of the expression was understood** — the same reading
+    // the `decltype` payload takes, and for the same reason. `if (_STD f())` is written by every standard-library
+    // header: `_STD` is a macro (`yvals.h` defines it as `::std::`) and a file parsed on its own has not read that
+    // header, so it arrives as a plain identifier and `_STD f()` is two identifiers in a row. The expression rule
+    // reads the first and stops; reporting `expected )` against the second failed the whole `if`, and the failure
+    // took the declaration written after the function with it.
+    //
+    // Measured, on three lines:
+    //
+    // ```cpp
+    // struct S { void f() { if (!_STD g()) { } } };
+    // struct After { int c; };   // no fact at all
+    // ```
+    //
+    // …and the shape is not rare: `while (_STD g())` and `int x = _STD g();` break the same way, while a bare
+    // `_STD g();` **statement** does not — which is what says the fault is the enclosing rule's expectation
+    // rather than the expression reading. `vector` alone stops at the first of them, line 409.
+    if !matches!(p.current_token(), CppTokenKind::RightParen) {
+        super::types::skip_to_the_closing_paren(p);
+    }
     expect_token(p, CppTokenKind::RightParen)?;
     Ok(m.complete(p))
 }
