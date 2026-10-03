@@ -2793,9 +2793,68 @@ fn parse_class_like_head(p: &mut CppParser) -> ParseResult {
         }
         // A class definition ends with `;`. It is consumed by the declaration, because
         // `class Foo {} x;` has a declarator after the body.
+        //
+        // **…and the declaration does not always get the chance to say it is missing.** When what follows the body
+        // can begin a declaration of its own — `struct S { int a; } int g;` — the outer reading takes it for a
+        // continuation of *this* declaration and no `;` is ever asked for, so the whole file was read as one
+        // declaration and everything after it was lost **with no diagnostic at all**. Measured on a reader's own
+        // file, one missing semicolon took it from **8 declarations to 2**, and the two symptoms reported from it —
+        // no completion for a class in the current file, and none for a variable declared below it — are that one
+        // defect seen twice. What settles it is the **spelling**: a class definition's `;` may be followed by a
+        // declarator (`x`, `*p`), and a declaration-specifier there cannot continue this declaration.
+        if a_declaration_cannot_follow_here(p) {
+            p.close_marks_above(base_marks);
+            return Err(CppParseError::syntax_error_from(
+                "expected `;` after a class definition",
+                p.current_token_range(),
+            ));
+        }
     }
 
     Ok(m.complete(p))
+}
+
+/// **Is the token at the cursor one that cannot follow a class definition's body?**
+///
+/// A class definition may be followed by a `;` or by a declarator (`struct S { … } x;`, `enum E { … } *p;`), and
+/// those readings are left alone. What this answers is the residue: a token that **begins a declaration** of its
+/// own, closes the enclosing scope, or ends the file. In each of those the `;` can only have been forgotten, and
+/// saying so is what gets the reader the declarations that follow instead of losing them silently.
+///
+/// An identifier is deliberately **not** here — that is the declarator reading — and neither is `(` or `[`, which
+/// begin one.
+fn a_declaration_cannot_follow_here(p: &CppParser) -> bool {
+    use CppTokenKind::*;
+
+    matches!(
+        p.current_token(),
+        RightBrace | None
+            | StructKeyword
+            | ClassKeyword
+            | UnionKeyword
+            | EnumKeyword
+            | TemplateKeyword
+            | NamespaceKeyword
+            | UsingKeyword
+            | TypedefKeyword
+            | StaticKeyword
+            | InlineKeyword
+            | ExternKeyword
+            | ConstexprKeyword
+            | ConstevalKeyword
+            | ConstinitKeyword
+            | FriendKeyword
+            | VirtualKeyword
+            | PublicKeyword
+            | PrivateKeyword
+            | ProtectedKeyword
+            | VoidKeyword
+            | AutoKeyword
+            | CharKeyword
+            | IntKeyword
+            | FloatKeyword
+            | DoubleKeyword
+    )
 }
 
 /// Does a `{` appear before the next `;` or `}`?

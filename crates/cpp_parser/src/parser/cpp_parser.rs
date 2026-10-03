@@ -1190,6 +1190,17 @@ impl<'a> CppParser<'a> {
         self.parse_config.symbol_table()?.kind_of(name)
     }
 
+    /// **Is `name` a macro where the cursor stands?** — the caller's environment, when there is one.
+    ///
+    /// `None` is "nobody says", and every rule that asks must fall back to the reading it had before the question
+    /// could be asked at all. See [`ParserConfig::is_a_macro_at`] for what the three answers mean, and
+    /// [`CppParser::token_range_at`] for why the position is part of the question: a macro's body is in force from
+    /// an offset, so `_STD` is a macro below the `#include` that defines it and an identifier above.
+    pub fn is_a_macro(&self, name: &str) -> Option<bool> {
+        self.parse_config
+            .is_a_macro_at(name, self.current_token_range().start_offset)
+    }
+
     /// Start recording the declaration's leading type name; see the field's documentation.
     ///
     /// The name currently in force is parked rather than dropped, because a speculative region may

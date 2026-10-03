@@ -184,16 +184,24 @@ impl FileView {
     /// # The scope walk is what is wired, and the parse is not
     ///
     /// The two readers a body reader can serve are the **parse** and the **scope walk**, and
-    /// [`crate::index::FileIndexer`]'s note describes giving one value to both. Only the second is reachable from
-    /// here, and the reason is not a decision: `ParserConfig` has no way to take a `MacroFacts` — it offers
-    /// `with_dialect`, `with_lexer_config` and `with_symbol_table`, and the `macro_facts` field the indexer's note
-    /// says the parse reads through `with_macros_from_includes` is stored and never handed to a parse at all. So
-    /// `_STD_BEGIN` opening `std` works (this constructor's reason for existing) and `_STD addressof(*p)` being one
-    /// qualified name in the **tree** does not, and a reader that needs the second is reading the note for an API
-    /// that is not there.
+    /// [`crate::index::FileIndexer`]'s note describes giving one value to both. This constructor gives it to both.
+    ///
+    /// # Why the offsets are right here and were not before
+    ///
+    /// [`crate::index::FileIndexer`] carries a warning against passing an environment to a parse — "the version
+    /// that passed a positional environment here was answering a *stream* offset against a *file* timeline" — and
+    /// the warning is about a **`MacroView`**, the timeline of a unit, whose events carry `at` in each event's own
+    /// file's coordinates (see `crate::summary::MacroView::applies_here`). Those are two different rulers and
+    /// comparing them is the trap.
+    ///
+    /// The environment this constructor takes is the other kind: `macros_from_the_closure_with_bodies` builds
+    /// [`cpp_parser::IncludedMacro::from_offset`] as **the end of the `#include` that brought the definition in**,
+    /// which is an offset in *this* file — the same ruler the parse is reading with. So "is `_STD` a macro here" is
+    /// answerable, and answerable correctly.
     pub fn parse_with(file: &VfsFile, macros: &cpp_parser::MacroEnvironment) -> FileView {
         let source = file.text.clone();
-        let tree = cpp_parser::CppParser::parse(&source, cpp_parser::ParserConfig::default());
+        let config = cpp_parser::ParserConfig::default().with_macros_from_includes(macros);
+        let tree = cpp_parser::CppParser::parse(&source, config);
         let root = tree.get_red_root();
         let scopes = crate::sema::scopes::build_scopes(&root, macros);
 

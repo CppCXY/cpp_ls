@@ -1140,9 +1140,111 @@ fn is_a_type_in_parentheses(p: &CppParser) -> bool {
 /// the *constraint itself* is still going, so an operand there cannot be a declaration —
 /// `requires (N < 0 || N > 3)` is the shape — while at the clause's top level the operand can only be what
 /// follows the clause.
+/// **Reads the template-id at the cursor, or puts the tokens back.**
+///
+/// `true` when the `<` really began arguments and they are now part of the name; `false` when it was a comparison,
+/// in which case every token the attempt consumed has been rolled back and the caller must end the name.
+///
+/// Extracted from the name loop because two places in it need the same reading — the ordinary turn of the loop, and
+/// the run of names a macro prefix leaves behind (`MACRO name<targs>(…)`, where the `<` arrives **after** the run
+/// has taken the name and the loop is about to end). Writing it twice would be two readers for one shape, free to
+/// disagree about which `<` is a template-id.
+///
+/// The `false` answer is not "it did not parse": `n < 0 || n > 100000` parses perfectly well as `n<0 || n>`, so
+/// what settles it is the token **after** the list — an operand there cannot follow a template-id. See
+/// [`starts_an_operand`], which is where that rule is written.
+fn read_a_template_id_here(p: &mut CppParser) -> bool {
+    let before_the_arguments = p.checkpoint();
+    let read = super::types::parse_template_argument_list(p);
+
+    // The operand rule is suspended **inside a clause**, except when the operand is inside parentheses that are
+    // still open — see [`an_operand_is_decisive`], which is the same question the cast rule asks about its own `)`.
+    let an_operand_ends_the_constraint = an_operand_is_decisive(p) && starts_an_operand(p, 0);
+
+    if read.is_err() || an_operand_ends_the_constraint {
+        p.rollback(before_the_arguments);
+        return false;
+    }
+    true
+}
+
 fn an_operand_is_decisive(p: &CppParser) -> bool {
     !p.is_in_a_constraint() || p.is_open(CppSyntaxKind::ParenExpr)
 }
+
+/// **The identifier written before the cursor**, skipping the trivia between them.
+///
+/// The name a macro's second half follows. Trivia is a token in this lexer, so `_STD name<` has a whitespace
+/// token between the two words and a lookbehind of one is not enough. `None` at the start of the file.
+fn macro_name_before(p: &CppParser) -> Option<String> {
+    let mut index = p.current_token_index();
+    while index > 0 {
+        index -= 1;
+        let text = p.token_text_at(index);
+        if !text.trim().is_empty() {
+            return Some(text.to_string());
+        }
+    }
+    None
+}
+
+/// Does the `<` at the cursor open a **template argument list that a `(` immediately follows**?
+///
+/// The question a run of names has to answer before it may take one more: `_STD _Convert_size<size_type>(_Length)`
+/// is one qualified name and a call, while `vector<int> v` is a type and a declarator, and the two are the same
+/// tokens up to the `>`. What separates them is **what comes after the list closes** — a `(` — and that is a fact
+/// about the tokens rather than about the names, which is why this needs no table.
+///
+/// Bounded, and each bound has a reason:
+///
+/// * the window is [`TEMPLATE_ARGUMENT_WINDOW`] tokens. A template argument list longer than a screenful is not
+///   what this rule is for, and the rule may say "not this shape" without cost: the reading it declines is the one
+///   the parser had before it existed;
+/// * the scan **stops at a `;`, `{` or `}`**, which cannot occur inside a template argument list. Without that, a
+///   file whose `<` was a comparison would have the scan run to the end of the window looking for a `>` that
+///   belongs to something else entirely — `a < b;` would consume the next statement in the search;
+/// * a **`(`** at depth zero ends it too, and for the same reason: `f(a < b, c > d)` is a comparison in a call,
+///   and reading it as a template-id would swallow the call's parentheses.
+///
+/// `>>` needs no case of its own: the lexer leaves each `>` on its own token (`CppLexer::tokenize`), which is the
+/// same property the template parameter list reader relies on.
+fn a_template_id_here_is_called(p: &CppParser) -> bool {
+    let window = p.peek_token_kind_at(1..TEMPLATE_ARGUMENT_WINDOW);
+    let mut depth = 0usize;
+
+    for (index, kind) in window.iter().enumerate() {
+        match kind {
+            CppTokenKind::Less => depth += 1,
+            CppTokenKind::Greater => {
+                if depth == 0 {
+                    return false;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    // **The list closed here** — and the answer is the token after it, which is why the window is
+                    // read one past the `>` rather than stopping at it.
+                    return window.get(index + 1) == Some(&CppTokenKind::LeftParen);
+                }
+            }
+            // Not a template argument list at all: a statement or a block boundary cannot appear inside one.
+            CppTokenKind::Semicolon
+            | CppTokenKind::LeftBrace
+            | CppTokenKind::RightBrace => return false,
+            // A `(` before the list closed: this `<` was a comparison inside a call.
+            CppTokenKind::LeftParen if depth == 0 => return false,
+            _ => {}
+        }
+    }
+
+    false
+}
+
+/// **How far a `<` is followed looking for the `>` that closes it and the `(` that must follow.**
+///
+/// Generous enough for the arguments MSVC's headers write — `_Convert_size<size_type>`, `_Refancy_maybe_null<_Tptr>`,
+/// `_Max_limit<difference_type>` are all one or two tokens — and short enough that the scan is a fixed cost on a
+/// question asked once per name in a run.
+const TEMPLATE_ARGUMENT_WINDOW: usize = 8;
 
 /// Does a token that can only **begin an operand** follow the `)` matching the `(` at the cursor?
 ///
@@ -2212,19 +2314,7 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
                 if p.current_token() == CppTokenKind::Less
                     && super::types::could_start_template_arguments(p)
                 {
-                    let before_the_arguments = p.checkpoint();
-                    let read = super::types::parse_template_argument_list(p);
-
-                    // The operand rule is suspended **inside a clause**, except when the operand is inside
-                    // parentheses that are still open — see [`an_operand_is_decisive`], which is the same question
-                    // the cast rule asks about its own `)`.
-                    let an_operand_ends_the_constraint =
-                        an_operand_is_decisive(p) && starts_an_operand(p, 0);
-
-                    if read.is_err() || an_operand_ends_the_constraint {
-                        // Not a template-id after all: the name ends here and the `<` belongs to the comparison
-                        // rule. The argument list's nodes go back with the rollback.
-                        p.rollback(before_the_arguments);
+                    if !read_a_template_id_here(p) {
                         break;
                     }
                 }
@@ -2270,11 +2360,127 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
                 // return _STD f(x); taken
                 // C<T> T value      **not** taken — no `(`, and `T` is the declaration's own type
                 // ```
+                // **And the same shape with the parentheses moved**, which is the idiom the standard library uses
+                // to stop a function-like macro from eating the call:
+                //
+                // ```cpp
+                // return (_STD min) (_Hw_threads * _Oversubscription_multiplier, _Size_count);   // <execution>
+                // return (_STD min) (_Size, static_cast<size_type>(_Mysize - _Off));             // <xstring>
+                // ```
+                //
+                // `(_STD min)` is a parenthesised qualified name, so after `_STD` the next token is `min` and the
+                // one after *that* is `)`, not `(` — and the narrowing above, which exists to protect `X Y` as a
+                // type and a declarator, refused it. Measured, this one shape is most of what the worst files were
+                // losing: `<execution>` summarised 4% of itself and `<xstring>` 12%, and their raw readings report
+                // `expected ), but get identifier — min` as the first error each.
+                //
+                // **All three tokens are required**, and the third is not decoration: `(_STD min) (…)` is the
+                // idiom, and it is what a name inside parentheses is *for*. Taking any `X Y)` inside parentheses —
+                // the first version — cost `<vector>` its whole file: 538 declarations covering it became 157
+                // covering half, because a parenthesised declarator (`(Widget w)`) and a parenthesised type
+                // (`sizeof(T)`, `decltype(a) b`) both reach this rule with an identifier after an identifier and a
+                // `)` after that. Requiring the `(` to follow is what says "this pair is a name and a call" rather
+                // than "this pair is whatever the file happened to write".
+                // **All three tokens are required, and they are asked for in one lookahead** — `)` and then `(`.
+                // `(_STD min) (…)` is the idiom, and the call is what a name inside parentheses is *for*. Two
+                // measurements stand behind the third token:
+                //
+                // * taking any `X Y)` inside parentheses cost `<vector>` its whole file — 538 declarations covering
+                //   it became 157 covering half — because a parenthesised declarator and a parenthesised type
+                //   (`sizeof(T)`, `decltype(a) b`) both reach this rule with a `)` after the second name;
+                // * and asking for the two tokens **separately** silently did nothing, because the whitespace
+                //   between `)` and `(` in `(_STD min) (…)` is a token in this lexer. The window is one call so
+                //   that the skipping is the parser's business rather than a caller's arithmetic.
+                // **…and the same call with template arguments in between.**
+                //
+                // ```cpp
+                // _Ptr = _STD _Refancy_maybe_null<_Tptr>(const_cast<value_type*>(_It));   // <vector>
+                // const auto _Count = _STD _Convert_size<size_type>(_Length);
+                // ```
+                //
+                // The name is not followed by `(` but by `<`, so neither test above fires and the run stops one
+                // token short — after which the specifier sequence holds a name it cannot use, the declaration
+                // fails, and everything after it in the file goes unread. Measured **490 times across the 102
+                // headers**, which makes it the most common macro spelling in the standard library.
+                //
+                // **Only after a name has already been taken**, and that is the whole of the narrowing. The shape
+                // being read is `MACRO name<targs>(…)` — two identifiers in a row with the second carrying
+                // arguments — so the `<` case may only fire where the **first** identifier is already in hand.
+                // Firing it on the first identifier instead reads `T<U>(v)` as a name, and that spelling is a
+                // declaration in every file that meets it: measured, `<xmemory>` fell from a whole file to a fifth
+                // of one, `<chrono>` to one line in a hundred, and `<mdspan>` and `<expected>` the same. Those
+                // files are what says the rule is about the **pair** and not about the `<`.
+                let mut taken = 0usize;
                 while an_operand_is_decisive(p)
                     && p.current_token() == CppTokenKind::Identifier
-                    && p.peek_token_kind_at(1..2).first() == Some(&CppTokenKind::LeftParen)
+                    && match p.peek_token_kind_at(1..3).as_slice() {
+                        [CppTokenKind::LeftParen, ..] => true,
+                        [CppTokenKind::RightParen, CppTokenKind::LeftParen] => {
+                            p.is_open(CppSyntaxKind::ParenExpr)
+                        }
+                        // **The `<` is taken when the name it follows is a macro's second half**, and the question
+                        // is now asked of the **environment** rather than of the spelling.
+                        //
+                        // What the spelling could not do, measured four ways before this became possible: `_STD
+                        // _Convert_size<size_type>(…)` (a macro, a name and a call) and `_STD declval<_Alloc&>()` (a
+                        // macro, a name used as a template argument) are identical up to the `<` — same spelling,
+                        // same position, same nesting — so every rule keyed on how the words are written took
+                        // MSVC's `<xmemory>` from 582 declarations covering the file to 153 covering a fifth, and
+                        // left `<chrono>` at a hundredth of itself. The two differ in **what the first name is**,
+                        // and only the include closure knows that.
+                        //
+                        // `taken > 0` is the fallback and not the rule: with no environment — a buffer parsed on
+                        // its own — the reading is the one that keeps the most files whole, and the name already in
+                        // hand is the only evidence there is. With one, the `<` is taken wherever the word before
+                        // it is really a macro, which is both shapes.
+                        [CppTokenKind::Less, ..] => {
+                            let the_prefix_is_a_macro = macro_name_before(p)
+                                .map(|name| {
+                                    // **The environment can only add evidence, never take the fallback away.**
+                                    //
+                                    // What it knows is the macros a file **includes** — `IncludedMacro`'s own
+                                    // definition is "a macro the file *includes* rather than writes" — so a name the
+                                    // file defines itself is `Some(false)` there, and reading that as "not a macro"
+                                    // hid `_STD` in every file that spells its own:
+                                    //
+                                    // ```text
+                                    // #define _STD ::std::
+                                    // void t() { _STD f<A>(); }   → `expected ; after expression` at `f`
+                                    // ```
+                                    //
+                                    // The spelling is what a file's own defines leave as evidence, and it is the
+                                    // reading this rule had before an environment could be passed at all.
+                                    p.is_a_macro(&name) == Some(true) || super::types::written_like_a_macro(&name)
+                                })
+                                .unwrap_or(taken > 0);
+                            the_prefix_is_a_macro && a_template_id_here_is_called(p)
+                        }
+                        _ => false,
+                    }
                 {
                     p.bump();
+                    taken += 1;
+                }
+
+                // **A `<` at the cursor is the rest of this name, not the end of it.**
+                //
+                // The run above takes `_STD f` and leaves `<A>` at the cursor, and ending the name here handed those
+                // arguments to nobody: every macro-prefixed template-id in the standard library became a name, a
+                // stray `<`, and a parse error. Measured on the smallest spelling of it:
+                //
+                // ```text
+                // void t() { g<A&>(); }       0 errors   — no macro prefix, so the run never fires
+                // void t() { _STD f<A>(); }   1 error    — the run fires, and the arguments were dropped
+                // ```
+                //
+                // The arguments are read **here** rather than by letting the loop turn again: the loop's template-id
+                // step sits above this one, so a `continue` would re-enter at the top and meet the segment match with
+                // a `<` it has no arm for — measured, one error per ordinary `for (i = 0; i < n; i++)` in the crate's
+                // own test suite.
+                if p.current_token() == CppTokenKind::Less
+                    && super::types::could_start_template_arguments(p)
+                {
+                    read_a_template_id_here(p);
                 }
                 break;
             }

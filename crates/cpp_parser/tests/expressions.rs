@@ -649,3 +649,68 @@ fn a_declarator_name_is_never_a_bare_template_id() {
         "the declaration after an instantiation is still read by the ordinary rules"
     );
 }
+
+/// **A class definition missing its `;` is reported, and the file after it is still read.**
+///
+/// The semicolon is part of a class definition ([dcl.dcl]), and refusing the spelling without it is not pedantry:
+/// the reading that accepted it **silently swallowed the rest of the file**. Measured on a reader's own file, one
+/// missing semicolon took it from **8 declarations to 2 with no diagnostic at all** — which reached the editor as
+/// "the class I just wrote has no members, and neither does the variable I declared below it", with nothing to say
+/// why.
+///
+/// Both halves are asserted, and the second is the one that matters to a reader: the **error**, and the
+/// declarations after it that the recovery gets back.
+///
+/// The three spellings that **are** legal are asserted too, because the rule has to tell them apart and a test that
+/// only held the broken one would pass for a parser that refuses `struct S { … } x;`:
+///
+/// ```text
+/// struct S { int a; };        the `;`
+/// struct S { int a; } x;      a declarator
+/// struct S { int a; } *p;     a declarator through a `*`
+/// ```
+#[test]
+fn a_class_definition_without_its_semicolon_is_reported() {
+    let errors = |source: &str| -> Vec<String> {
+        let tree = CppParser::parse(source, ParserConfig::default());
+        tree.get_errors()
+            .iter()
+            .map(|error| error.message.clone())
+            .collect()
+    };
+
+    // **The broken spelling**, in the shape that used to say nothing: a class definition, then a declaration.
+    for source in [
+        "struct S { int a; }\nstruct After { int b; };\n",
+        "struct S { int a; }\nint g;\n",
+        "class C {}\nint main() { C c; return 0; }\n",
+        "enum E { A }\nstruct After { int b; };\n",
+        "struct S { int a; }\n",
+    ] {
+        // **That it is said at all is the assertion.** Two rules reach this defect — the class head's own check
+        // (which has the classifier for what may follow a body) and the declaration's end-of-input check — and
+        // their wordings differ: `expected `;` after a class definition` and a plain `expected `;``. Holding one
+        // wording would be a test of which rule ran rather than of what the reader is told, and the reader is told
+        // the same thing either way.
+        let reported = errors(source);
+        assert!(
+            reported.iter().any(|message| message.contains(';')),
+            "the missing `;` has to be said: {source:?} reported {reported:?}"
+        );
+    }
+
+    // **…and the three legal spellings stay clean**, which is what says the rule reads the token after the body
+    // rather than refusing every class definition.
+    for source in [
+        "struct S { int a; };\nstruct After { int b; };\n",
+        "struct S { int a; } x;\nstruct After { int b; };\n",
+        "struct S { int a; } *p;\nstruct After { int b; };\n",
+        "enum E { A };\nstruct After { int b; };\n",
+    ] {
+        let reported = errors(source);
+        assert!(
+            reported.is_empty(),
+            "this spelling is legal and must not be refused: {source:?} reported {reported:?}"
+        );
+    }
+}

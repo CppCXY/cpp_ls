@@ -144,7 +144,13 @@ fn main() {
                 };
                 // A binding is "in a namespace" when some scope above it has a name — which for a file at file
                 // scope is exactly the question: `_STD_BEGIN`'s `namespace std {` is the only thing that names one.
-                let nested = nested || scope.name.is_some();
+                // **A namespace, not "anything with a name".** The first version counted a scope as naming when
+                // `scope.name` was `Some`, which a **function** scope also is — so `algorithm` read as 278 bindings
+                // "not in a namespace" when every one of them was a parameter or a local of an unnamed `__std_*`
+                // helper at global scope, which is where the standard library really puts them. The metric was
+                // wrong, not the reading, and a metric that counts the wrong thing is how a correct reading gets
+                // chased for a round.
+                let nested = nested || scope.kind == cpp_code_analysis::ScopeKind::Namespace;
                 for _ in &scope.bindings {
                     out.0 += 1;
                     if nested {
@@ -191,6 +197,31 @@ fn main() {
         show("asked", asked);
         show("built", built);
         show("eager", eager);
+        // **The raw reading's own parse errors**, which is the diagnostic this section was missing: the numbers
+        // above say *that* a reading stopped early, and only the errors say **where** and **on what**. A file whose
+        // cooked reading is clean can still have a raw reading that gives up at line 279 of 6000, and the two are
+        // different documents rather than two opinions about one.
+        if let Some(view) = session.view(&file) {
+            let errors = view.errors();
+            println!("   raw parse errors: {}", errors.len());
+            for error in errors.iter().take(4) {
+                let at = usize::from(error.range.start());
+                let line = view.source[..at.min(view.source.len())]
+                    .bytes()
+                    .filter(|byte| *byte == b'\n')
+                    .count()
+                    + 1;
+                println!(
+                    "      line {line}: {} — `{}`",
+                    error.message,
+                    view.source[at..usize::from(error.range.end()).min(view.source.len())]
+                        .trim()
+                        .chars()
+                        .take(48)
+                        .collect::<String>()
+                );
+            }
+        }
         // **Where the bindings that are *not* in a namespace actually are.** A count says how many; the scopes
         // they sit in say why, and the difference between "one namespace was missed" and "the file's tail is at
         // file scope" is the difference between two different bugs.
@@ -207,6 +238,30 @@ fn main() {
                     }
                 }
             }
+            // **The shape of the tree one level down**, which says whether an unnamed scope is a linkage block, a
+            // class whose own name was missed, or something else again.
+            let mut shape: Vec<String> = Vec::new();
+            if let Some(root) = view.scopes.root()
+                && let Some(scope) = view.scopes.scope(root)
+            {
+                for child in &scope.children {
+                    if let Some(child) = view.scopes.scope(*child) {
+                        shape.push(format!(
+                            "{:?}({})x{}",
+                            child.name.as_deref().unwrap_or("<unnamed>"),
+                            match child.kind {
+                                cpp_code_analysis::ScopeKind::Namespace => "ns",
+                                cpp_code_analysis::ScopeKind::Class => "class",
+                                cpp_code_analysis::ScopeKind::Function => "fn",
+                                cpp_code_analysis::ScopeKind::Block => "block",
+                                _ => "other",
+                            },
+                            child.bindings.len()
+                        ));
+                    }
+                }
+            }
+            println!("   root children: {}", shape.join(" "));
             println!(
                 "   file-scope bindings: {} — {:?}",
                 at_the_top.iter().map(|(_, count)| count).sum::<usize>(),

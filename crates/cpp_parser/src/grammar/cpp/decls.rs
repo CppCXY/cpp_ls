@@ -1077,8 +1077,35 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
             p.close_marks_above(base);
             return Err(err);
         }
+        // **The `;` a class definition ends with, and the error when it is not there.**
+        //
+        // `struct S { int a; }` with nothing after it is a **syntax error** — [dcl.dcl] makes the semicolon part of
+        // the member-specification's declaration — and refusing it is not pedantry: the reading that accepted it
+        // silently swallowed the rest of the file. Measured on a reader's own file, one missing semicolon took it
+        // from **8 declarations to 2 with no diagnostic at all**, which is what the editor showed as "the class I
+        // just wrote has no members and neither has anything after it", and the two symptoms reported from it —
+        // no completion for a class in the current file, no completion for `v.` below it — are the same defect seen
+        // twice.
+        //
+        // **Only where the absence is unambiguous.** A class definition may be followed by a declarator
+        // (`struct S { … } x;`, `enum E { … } *p;`) and by a `;`, and those are the readings the parser already has;
+        // what is left when neither follows is a token that **begins a declaration** or closes a scope, and there
+        // the `;` can only have been forgotten. Measured, the three shapes are told apart exactly:
+        //
+        // ```text
+        // struct S { int a; };       4 declarations   the `;` is there
+        // struct S { int a; } x;     4 declarations   a declarator follows, and the declaration path reads it
+        // struct S { int a; }        2 declarations   **nothing follows** — this error, and the recovery that
+        //                                              gets the reader the six declarations it was losing
+        // ```
         if p.current_token() == CppTokenKind::Semicolon {
             p.bump();
+        } else if a_declaration_cannot_follow(p) {
+            p.close_marks_above(base);
+            return Err(CppParseError::syntax_error_from(
+                "expected `;` after a class definition",
+                p.current_token_range(),
+            ));
         }
         return Ok(m.complete(p));
     }
@@ -3373,8 +3400,7 @@ fn a_type_keyword_precedes_the_declarator_name(p: &CppParser) -> bool {
 }
 
 /// Does a declarator begin where the cursor stands?
-fn starts_a_declarator(p: &CppParser) -> bool {
-    matches!(
+fn starts_a_declarator(p: &CppParser) -> bool {    matches!(
         p.current_token(),
         CppTokenKind::Star
             | CppTokenKind::Ampersand
@@ -3396,6 +3422,53 @@ fn is_declaration_trivia(kind: CppTokenKind) -> bool {
             | CppTokenKind::LineComment
             | CppTokenKind::BlockComment
             | CppTokenKind::None
+    )
+}
+
+/// **Is the token at the cursor one that cannot follow a class definition at all?**
+///
+/// The question the missing-`;` error rests on, and it is deliberately narrow: a class definition may be followed
+/// by a `;` or by a declarator, and **those readings are left alone**. What this answers is the residue — a token
+/// that begins a new declaration, closes the enclosing scope, or ends the file. In each of those the `;` can only
+/// have been forgotten, and saying so is what gets the reader the declarations that follow instead of losing them:
+/// measured, one missing semicolon in a reader's own file took it from 8 declarations to 2 **with no diagnostic**.
+///
+/// A keyword is what most of the list is, and every one of them is a **declaration-specifier** the grammar already
+/// knows how to begin a declaration with. An identifier is deliberately **not** here: `struct S { … } x;` is the
+/// declarator reading, and it is a shape the parser handles.
+fn a_declaration_cannot_follow(p: &CppParser) -> bool {
+    use CppTokenKind::*;
+
+    matches!(
+        p.current_token(),
+        // The end of the enclosing scope, or of the file.
+        RightBrace | None
+        // A declaration-specifier, which cannot continue the declaration this one is.
+            | StructKeyword
+            | ClassKeyword
+            | UnionKeyword
+            | EnumKeyword
+            | TemplateKeyword
+            | NamespaceKeyword
+            | UsingKeyword
+            | TypedefKeyword
+            | StaticKeyword
+            | InlineKeyword
+            | ExternKeyword
+            | ConstexprKeyword
+            | ConstevalKeyword
+            | ConstinitKeyword
+            | FriendKeyword
+            | VirtualKeyword
+            | PublicKeyword
+            | PrivateKeyword
+            | ProtectedKeyword
+            | VoidKeyword
+            | AutoKeyword
+            | CharKeyword
+            | IntKeyword
+            | FloatKeyword
+            | DoubleKeyword
     )
 }
 
