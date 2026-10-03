@@ -925,6 +925,11 @@ impl<T: MacroFacts + ?Sized> MacroBodies for T {
 /// else — a name nobody defines, a name whose body has tokens in it, and a name whose body could not be resolved.
 /// The last is the safe direction: a cycle and "nobody says" are both `None`, and dropping a word because of a
 /// cycle would be inventing a shape out of a body that was never read.
+///
+/// **Retired as a step of its own**, and kept because it is still the rule: [`shape_of_a_body_at`] now asks it as
+/// one of the three answers `body_at` can give — empty means the word is dropped, tokens mean it is spliced in,
+/// `None` means it is kept. Splitting it out again would be two readings of one lookup.
+#[allow(dead_code)]
 fn expands_to_nothing(bodies: &(impl MacroBodies + ?Sized), name: &str, at: usize) -> bool {
     bodies
         .body_at(name, at)
@@ -977,6 +982,13 @@ fn expands_to_nothing(bodies: &(impl MacroBodies + ?Sized), name: &str, at: usiz
 /// shapes: a name nobody defines is left where it is and the body is still `Other`. `_END_EXTERN_CXX_WORKAROUND`
 /// is the same idea on the closing side — it is empty in the same arm — and it is why `_STD_END` is read as `}`
 /// rather than as nothing.
+/// **How many leading names a body's shape reader will expand before it gives up.**
+///
+/// A bound rather than a policy: a replacement list can name itself (`#define A A`, or two names that stand for
+/// each other), and a reader that followed one would not return. Four is past every spelling that occurs — MSVC's
+/// `_STD_BEGIN` needs one (`_EXTERN_CXX_WORKAROUND` → `extern "C++" {`) and `_STD_END` needs one for its closer —
+/// and short enough that the cost of a body nobody can read is four lookups.
+const MAX_EXPANSIONS_IN_A_HEAD: usize = 4;
 pub fn shape_of_a_body(text: &str) -> BodyShape {
     shape_of_a_body_at(text, &NothingAtAll, 0)
 }
@@ -1037,34 +1049,84 @@ pub fn a_body_opens_an_inline_namespace(text: &str) -> bool {
 pub fn shape_of_a_body_at(text: &str, bodies: &(impl MacroBodies + ?Sized), at: usize) -> BodyShape {
     use crate::{CppLexer, CppTokenKind, LexerConfig};
 
-    let mut errors = Vec::new();
-    let mut lexer = CppLexer::new(text, LexerConfig::default(), &mut errors);
-    let tokens: Vec<_> = lexer
-        .tokenize()
-        .into_iter()
-        .filter(|token| {
-            !matches!(
-                token.kind,
-                CppTokenKind::Whitespace
-                    | CppTokenKind::Newline
-                    | CppTokenKind::LineContinuation
-                    | CppTokenKind::LineComment
-                    | CppTokenKind::BlockComment
-            )
-        })
-        .filter(|token| {
-            // A name that expands to nothing is dropped; everything else, keywords included, is kept. See the
-            // function's documentation for the measurement.
-            token.kind != CppTokenKind::Identifier
-                || !expands_to_nothing(
-                    bodies,
-                    &text[token.range.start_offset..token.range.end_offset()],
-                    at,
-                )
-        })
-        .collect();
+    // **A token's kind and what it is spelled as.** The spelling is carried rather than the token's range, because
+    // a **spliced** token — one that came out of a replacement list — has offsets into the *body's* text and not
+    // into `text`. Reading a name back out of `text` by a range that belongs to another string is how a namespace
+    // would come to be called whatever happened to sit at those offsets.
+    type Spelled = (CppTokenKind, String);
 
-    let kinds: Vec<CppTokenKind> = tokens.iter().map(|token| token.kind).collect();
+    /// The significant tokens of a piece of text, as `(kind, spelling)`.
+    fn significant(source: &str) -> Vec<Spelled> {
+        let mut errors = Vec::new();
+        let mut lexer = CppLexer::new(source, LexerConfig::default(), &mut errors);
+        lexer
+            .tokenize()
+            .into_iter()
+            .filter(|token| {
+                !matches!(
+                    token.kind,
+                    CppTokenKind::Whitespace
+                        | CppTokenKind::Newline
+                        | CppTokenKind::LineContinuation
+                        | CppTokenKind::LineComment
+                        | CppTokenKind::BlockComment
+                )
+            })
+            .map(|token| {
+                let spelling =
+                    source[token.range.start_offset..token.range.end_offset()].to_string();
+                (token.kind, spelling)
+            })
+            .collect()
+    }
+
+    // **The stream the shape is read from: the body's own tokens, with a leading name replaced by what it stands
+    // for.**
+    //
+    // This is the second half of the rule the note on `_EXTERN_CXX_WORKAROUND` describes, and the half that was
+    // missing. MSVC's `_STD_BEGIN` is `_EXTERN_CXX_WORKAROUND namespace std {`, so the reader was handed a body
+    // whose **first token is a name it could only keep or drop** — and the filter below dropped a name that
+    // expands to nothing while keeping one that expands to something, as an identifier. The `extern "C++" {` that
+    // `_EXTERN_CXX_WORKAROUND` stands for under `c++latest` was therefore never in the stream, and
+    // `namespace std {` was never the head: every declaration of every MSVC header was filed at **file scope**.
+    //
+    // # What is expanded, and what is not
+    //
+    // Only the **head** — the tokens before the first `{` — and only a bounded number of them. A body's shape is
+    // decided by how it begins and ends, so expanding what follows the opening brace would be reading a definition
+    // rather than a shape, and a replacement list that expands to itself (`A` → `A`) would not terminate.
+    let mut stream: Vec<Spelled> = Vec::new();
+    let mut pending: std::collections::VecDeque<Spelled> = significant(text).into();
+    let mut left_to_expand = MAX_EXPANSIONS_IN_A_HEAD;
+
+    while let Some((kind, spelling)) = pending.pop_front() {
+        let at_the_head = !stream
+            .iter()
+            .any(|(kind, _)| *kind == CppTokenKind::LeftBrace);
+
+        if at_the_head && kind == CppTokenKind::Identifier && left_to_expand > 0 {
+            match bodies.body_at(&spelling, at) {
+                // **Stands for nothing**: dropped, which is the rule this function has always had.
+                Some(body) if body.trim().is_empty() => continue,
+                // **Stands for something**: spliced in, and its own leading names are expanded in turn because
+                // they go back on the front of the queue.
+                Some(body) => {
+                    left_to_expand -= 1;
+                    for spliced in significant(&body).into_iter().rev() {
+                        pending.push_front(spliced);
+                    }
+                    continue;
+                }
+                // **Nobody says**: kept as a name, which is the reading a caller with no environment gets and the
+                // reason `NothingAtAll` gives exactly what this function gave before the parameter existed.
+                None => {}
+            }
+        }
+
+        stream.push((kind, spelling));
+    }
+
+    let kinds: Vec<CppTokenKind> = stream.iter().map(|(kind, _)| *kind).collect();
     if kinds.as_slice() == [CppTokenKind::RightBrace] {
         return BodyShape::ClosesABlock;
     }
@@ -1096,11 +1158,47 @@ pub fn shape_of_a_body_at(text: &str, bodies: &(impl MacroBodies + ?Sized), at: 
     //
     // `export` is *not* looked past: `export namespace X {` is not a thing the standard spells, and a macro body
     // is read for what it says.
-    let head = if kinds.first() == Some(&CppTokenKind::InlineKeyword) {
+    let mut head = if kinds.first() == Some(&CppTokenKind::InlineKeyword) {
         1
     } else {
         0
     };
+
+    // **A linkage specification is looked past, and it is the same kind of case `inline` was.**
+    //
+    // MSVC's `_STD_BEGIN` is not `namespace std {`. It is:
+    //
+    // ```cpp
+    // #define _STD_BEGIN         \
+    //     _EXTERN_CXX_WORKAROUND \
+    //     namespace std {
+    // ```
+    //
+    // and under `c++latest` — where `_HAS_CXX20` is 1, so `_USE_EXTERN_CXX_EVERYWHERE_FOR_STL` is 1 —
+    // `_EXTERN_CXX_WORKAROUND` is `extern "C++" {` rather than nothing (`yvals_core.h:1891-1897`). So the body
+    // `shape_of_a_body_at` reads, with every word resolved, is `extern "C++" { namespace std {`: the first token
+    // is `extern`, the reader answered `Other`, **and every MSVC header's namespace was never opened.**
+    //
+    // That is not a detail of one header: `_STD_BEGIN` is how the whole standard library enters `std`, so the
+    // declarations of `<string>`, `<vector>`, `<memory>` and the rest were filed at **file scope** — which is why
+    // a view of a standard header has bindings and no namespaces at all. Measured, an `extern "C++" {` in front of
+    // a namespace head takes a file from three namespace-placed bindings to one, and `<string>` from every
+    // declaration placed to none.
+    //
+    // The block `{` after the string is part of the head, and the string is what makes it a linkage
+    // specification rather than a brace: `extern "C" {`, `extern "C++" {`. Anything else beginning with `extern`
+    // is left alone, which is what keeps `extern int x;` — a body that does not end at `{` and so never reaches
+    // here — and `extern "C" int f();` out of this rule by the same test.
+    if kinds.get(head) == Some(&CppTokenKind::ExternKeyword)
+        && kinds.get(head + 1) == Some(&CppTokenKind::StringLiteral)
+        && kinds.get(head + 2) == Some(&CppTokenKind::LeftBrace)
+    {
+        head += 3;
+        // …and the linkage block may itself be preceded by `inline namespace`, or contain it.
+        if kinds.get(head) == Some(&CppTokenKind::InlineKeyword) {
+            head += 1;
+        }
+    }
 
     if kinds.get(head) != Some(&CppTokenKind::NamespaceKeyword) {
         // …and a body that ends at a `{` without naming a namespace **opens a block**: `try {`, `do {`,
@@ -1114,11 +1212,9 @@ pub fn shape_of_a_body_at(text: &str, bodies: &(impl MacroBodies + ?Sized), at: 
     }
 
     let mut segments = Vec::new();
-    for token in &tokens[head + 1..tokens.len() - 1] {
-        match token.kind {
-            CppTokenKind::Identifier => {
-                segments.push(text[token.range.start_offset..token.range.end_offset()].to_string())
-            }
+    for (kind, spelling) in &stream[head + 1..stream.len() - 1] {
+        match kind {
+            CppTokenKind::Identifier => segments.push(spelling.clone()),
             CppTokenKind::Scope => {}
             _ => return BodyShape::Other,
         }

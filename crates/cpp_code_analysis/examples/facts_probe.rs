@@ -54,6 +54,42 @@ fn main() {
             .max()
             .unwrap_or(0);
         println!("   highest declaration offset: {highest} of {} bytes", source.len());
+
+        // **What the `auto`s are written with.** Deduction is the next piece of work and its shape decides how
+        // much of a type system it needs: a declaration whose initializer is a call needs the callee's return
+        // type, one whose initializer is a literal needs nothing at all, and one whose initializer is another
+        // `auto` needs that one resolved first. Counted by **what follows the name**, which is the question,
+        // rather than by total, which is not.
+        let mut by_shape: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        for fact in &summary.declarations {
+            if fact.type_of.as_deref() != Some("auto") {
+                continue;
+            }
+            let written = source
+                .get(fact.range.start_offset..fact.range.end_offset())
+                .unwrap_or_default();
+            let shape = if !written.contains('=') {
+                "no initializer — `auto` as a return type, or declared and assigned later"
+            } else if written.contains('{') {
+                "a braced initializer"
+            } else if written.contains("static_cast")
+                || written.contains("reinterpret_cast")
+                || written.contains("const_cast")
+            {
+                "a cast"
+            } else if written.contains('(') {
+                "a call"
+            } else {
+                "a plain expression"
+            };
+            *by_shape.entry(shape).or_default() += 1;
+        }
+        if !by_shape.is_empty() {
+            println!("   `auto` declarations, by what follows the name:");
+            for (shape, count) in &by_shape {
+                println!("      {count:5}  {shape}");
+            }
+        }
         return;
     }
 
@@ -67,12 +103,16 @@ fn main() {
         println!("`{name}`: {} fact(s)", found.len());
         for fact in found {
             println!(
-                "   @{:<7} {:<44} kind {:?} bases {:?} type_of {:?}",
+                "   @{:<7} {:<44} kind {:?} bases {:?} type_of {:?} returns {:?}",
                 fact.range.start_offset,
                 fact.qualified_name(),
                 fact.kind,
                 fact.bases,
-                fact.type_of
+                fact.type_of,
+                // **`returns` is where a function's `auto` lives**, and it was missing from this dump — which is
+                // how a test that looked for `type_of` in both places spent a round reporting "`a_return_type` is
+                // declared `auto`" about a fact that was right there.
+                fact.returns
             );
         }
     }

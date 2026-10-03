@@ -110,6 +110,16 @@ use crate::PathInterner;
 /// of them. The rest stays in the list and the next drain takes the next few — see `Session::pending`, which is
 /// what tells a caller there is work left.
 const COOK_SLICE: usize = 4;
+/// **How many macro environments one drain builds.**
+///
+/// One, where [`COOK_SLICE`] is four, and the difference is **measured**: a cook is a unit walk over one file's
+/// closure with the results indexed, while building a macro environment takes a copy of every file's text in the
+/// closure — 103.7 ms for a 151-file closure against a view's 163.2 µs. A slice of four of those would be most of a
+/// second in one drain, which is the thing the slice exists to prevent.
+///
+/// The queue is what makes a slice this small acceptable: a query that asked for an environment still answers from
+/// the plain reading, so nothing is waiting on this — it is a reading being improved, not a request being served.
+const MACRO_SLICE: usize = 1;
 
 /// How many files [`Session::want_the_closure_cooked`] reaches for **one level below the direct includes**.
 ///
@@ -414,6 +424,32 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// that half when a build system hands over more translation units, and a completion may be asked for before,
     /// during or after. The search-path half never changes after this field is built.
     headers: crate::SharedHeaders,
+    /// **The macros a file's closure defines, remembered by the content they were read from.**
+    ///
+    /// [`Session::view_with_macros`] walks the file's whole closure and takes a copy of every file's text to build
+    /// one of these, and that is **measured at 106.7 ms** beside 167.8 µs for a view without it — 635×, on a
+    /// closure of 151 files. Which is affordable once and not per query, so it is kept.
+    ///
+    /// The key carries the **content hash** rather than the path: a buffer being typed in has a new text on every
+    /// keystroke and the same path, and an environment built from the old text would be a wrong answer rather than
+    /// a stale one. Two files with the same content share an entry, which is right — the environment is a reading
+    /// of that text and its closure.
+    ///
+    /// Behind a lock because the queries that want it hold a read on the session, and an environment is only ever
+    /// added (§[`Session::view_with_macros`] takes `&self`).
+    macro_environments: std::sync::Mutex<
+        std::collections::HashMap<
+            (PathBuf, u64),
+            std::sync::Arc<cpp_parser::MacroEnvironment>,
+        >,
+    >,
+    /// **Files whose macros something has asked for and not yet got.**
+    ///
+    /// The other half of the arrangement [`Session::macro_environments`] describes: a query cannot pay 103.7 ms,
+    /// so it asks for the environment and reads the plain view, and the **work loop** builds it — the same shape
+    /// [`Session::want_cooked_reading`] and `Cooking` have, for the same reason. Behind a lock because the asking
+    /// happens in a query (`&self`) and the building happens in the loop (`&mut self`).
+    macro_work: std::sync::Mutex<Cooking>,
 }
 
 impl Session<DiskFiles> {
@@ -674,6 +710,8 @@ impl<F: FileProvider + Clone> Session<F> {
             directive_signatures: std::collections::HashMap::new(),
             prefetched: HashMap::new(),
             headers,
+            macro_environments: std::sync::Mutex::new(std::collections::HashMap::new()),
+            macro_work: std::sync::Mutex::new(Cooking::default()),
         };
 
         // The scan is the queue's **seed**, not a list to consult later: opening a project is the caller saying
@@ -1390,6 +1428,27 @@ impl<F: FileProvider + Clone> Session<F> {
                 // names, then whatever a request asked about — so the file a reader is looking at is ready first.
                 self.cook(&path);
             }
+
+            // **…and the macro environments a query asked for**, once each per pass.
+            //
+            // One per drain rather than four, and the difference from `COOK_SLICE` is measured rather than chosen:
+            // cooking a file is a render and a parse of **that file**, while building an environment walks the
+            // file's whole closure and copies every file's text — 103.7 ms against a cook's fraction of that on the
+            // same headers. This is the budget that keeps a pass responsive while still getting there: the query
+            // that asked read the plain view, and the next one about the same text finds the environment.
+            for _ in 0..MACRO_SLICE {
+                let Some(path) = self
+                    .macro_work
+                    .lock()
+                    .ok()
+                    .and_then(|mut work| work.take(1).into_iter().next())
+                else {
+                    break;
+                };
+                if let Some(text) = self.text(&path) {
+                    self.the_macros_of(&path, &text);
+                }
+            }
         }
 
         done
@@ -1636,7 +1695,116 @@ impl<F: FileProvider + Clone> Session<F> {
     /// the view shares both rather than copying either. What is done here is the parse and the scopes, which are
     /// the two things a position needs and a summary cannot hold.
     pub fn view(&self, path: impl AsRef<Path>) -> Option<FileView> {
-        Some(FileView::parse(self.vfs.held(path)?))
+        let file = self.vfs.held(path)?;
+
+        // **The macros if they are already read, and a request for them if they are not.** Nothing here builds
+        // one: it is 103.7 ms (measured, a closure of 151 files), and a query must not pay it. So the answer is
+        // the plain view this call has always given, the file is put in the work loop's hands, and the **next**
+        // query about it finds the environment built — the same "not now, next time" the diagnostics channel
+        // states through `isIncomplete`, and the same shape `want_cooked_reading` has.
+        match self.known_macros_of(&file.path, &file.text) {
+            Some(macros) => Some(FileView::parse_with(file, &macros)),
+            None => {
+                if let Ok(mut work) = self.macro_work.lock() {
+                    work.want(&file.path);
+                }
+                Some(FileView::parse(file))
+            }
+        }
+    }
+
+    /// **The same view, with the macros this file's own includes define, built if it has to be.**
+    ///
+    /// [`Session::view`] reads a file's tokens and nothing else, and the note on [`FileView::parse`] says why: a
+    /// view is a buffer and its index entry, and "nothing here has read the include graph". **A session has.** The
+    /// closure is in its index and the text is in its VFS, so the bodies are a walk away — and without them a
+    /// buffer is read as a reader of one file reads it, where
+    ///
+    /// ```cpp
+    /// _STD_BEGIN                       // `namespace std {` to a compiler
+    /// struct widget { … };
+    /// _STD_END
+    /// ```
+    ///
+    /// puts `widget` at **file scope** instead of in `std`. Every MSVC header opens its namespaces this way, so
+    /// this is the difference between a declaration being reachable as `std::widget` and not being reachable at
+    /// all — and it is the reading the index itself uses for these files ([`crate::index::FileIndexer`] is given
+    /// the same environment through `with_macro_bodies`).
+    ///
+    /// # The eager half, and when to want it
+    ///
+    /// [`Session::view`] gets the same reading **one query later** without ever blocking on it. This is for a
+    /// caller that would rather wait: a batch, a test, or a first query after a file is opened. The cost is the
+    /// one below.
+    ///
+    /// # Cost, measured
+    ///
+    /// Building the environment walks the file's whole closure and takes a copy of every file's text
+    /// ([`Session::closure_with_text`]): on a closure of 151 files that is **103.7 ms**, beside **163.2 µs** for a
+    /// view without it. Warm, from [`Session::macro_environments`], it is **186.6 µs** — 1.14× — which is what
+    /// makes [`Session::view`]'s arrangement worth having: the walk is paid once, by the work loop, and every query
+    /// after it pays a hash and a lookup.
+    pub fn view_with_macros(&self, path: impl AsRef<Path>) -> Option<FileView> {
+        let file = self.vfs.held(path)?;
+        match self.the_macros_of(&file.path, &file.text) {
+            Some(macros) => Some(FileView::parse_with(file, &macros)),
+            None => Some(FileView::parse(file)),
+        }
+    }
+
+    /// The environment for `text`, **if it is already read** — a hash and a lookup, and nothing else.
+    fn known_macros_of(
+        &self,
+        path: &Path,
+        text: &str,
+    ) -> Option<std::sync::Arc<cpp_parser::MacroEnvironment>> {
+        let key = (path.to_path_buf(), crate::cache::content_hash(text));
+        self.macro_environments
+            .lock()
+            .ok()?
+            .get(&key)
+            .cloned()
+    }
+
+    /// The macros `path`'s own includes define, as both readers of a body want them.
+    ///
+    /// The walk is [`crate::summary::macros_from_the_closure_with_bodies`] — the same one
+    /// [`crate::SummaryStore`] uses when it has no unit timeline — fed from this session's own closure and
+    /// overlay, so an unsaved buffer is what the macros come from. The result is remembered against `text`, and a
+    /// second call with the same text is a lookup.
+    fn the_macros_of(
+        &self,
+        path: &Path,
+        text: &str,
+    ) -> Option<std::sync::Arc<cpp_parser::MacroEnvironment>> {
+        if let Some(known) = self.known_macros_of(path, text) {
+            return Some(known);
+        }
+
+        let summary = self.store.index().summary(path)?;
+        let (closure, by_key) = self.closure_with_text(path);
+        let mut definitions = crate::summary::MacroDefinitions::default();
+
+        let evidence = crate::summary::macros_from_the_closure_with_bodies(
+            summary,
+            |wanted| {
+                let key = normalize_path(wanted, cfg!(windows));
+                let (defined_in, text) = closure.get(*by_key.get(&key)?)?;
+                Some((self.store.index().summary(defined_in)?, text.as_str()))
+            },
+            self.store.index().macros(),
+            &mut definitions,
+        );
+
+        let made = std::sync::Arc::new(
+            cpp_parser::MacroEnvironment::from_included_macros(evidence.macros)
+                .with_bodies_in_force(evidence.conditional_bodies),
+        );
+
+        if let Ok(mut known) = self.macro_environments.lock() {
+            known.insert((path.to_path_buf(), crate::cache::content_hash(text)), made.clone());
+        }
+        Some(made)
     }
 
     /// **What to report about one file, said in the file's own coordinates** — the answer the diagnostics channel

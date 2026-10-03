@@ -159,6 +159,56 @@ impl FileView {
         }
     }
 
+    /// **The same reading, with the macros the file's includes define.**
+    ///
+    /// The note above says a view has no macro evidence because "nothing here has read the include graph" — and
+    /// that is true of a view made from a [`VfsFile`] alone. A view made **by a session** is a different
+    /// situation: the closure is in its index, so the bodies are one lookup away, and handing them over is what
+    /// turns
+    ///
+    /// ```cpp
+    /// _STD addressof(*p)          // to a reader of this file: a name, then a call
+    /// _MY_BEGIN struct thing {};  // to a reader of this file: two names and a brace
+    /// ```
+    ///
+    /// into the qualified name and the namespace a compiler sees. `_STD` is `::std::` (`yvals_core.h:1906`) and
+    /// `_STD_BEGIN` is `namespace std {`, so the difference is not cosmetic: the first makes a name resolve and the
+    /// second is the only thing that says **which scope** a declaration belongs to.
+    ///
+    /// # Both readers get the same value
+    ///
+    /// The parse reads it through `ParserConfig::with_macros_from_includes` and the scope walk through
+    /// [`MacroBodies`](crate::MacroBodies) — the two consumers [`crate::index::FileIndexer`]'s note describes,
+    /// given one environment so they cannot disagree. That is the same arrangement the indexer uses; this is the
+    /// constructor for callers that have an environment but not a `FileIndexer`.
+    /// # The scope walk is what is wired, and the parse is not
+    ///
+    /// The two readers a body reader can serve are the **parse** and the **scope walk**, and
+    /// [`crate::index::FileIndexer`]'s note describes giving one value to both. Only the second is reachable from
+    /// here, and the reason is not a decision: `ParserConfig` has no way to take a `MacroFacts` — it offers
+    /// `with_dialect`, `with_lexer_config` and `with_symbol_table`, and the `macro_facts` field the indexer's note
+    /// says the parse reads through `with_macros_from_includes` is stored and never handed to a parse at all. So
+    /// `_STD_BEGIN` opening `std` works (this constructor's reason for existing) and `_STD addressof(*p)` being one
+    /// qualified name in the **tree** does not, and a reader that needs the second is reading the note for an API
+    /// that is not there.
+    pub fn parse_with(file: &VfsFile, macros: &cpp_parser::MacroEnvironment) -> FileView {
+        let source = file.text.clone();
+        let tree = cpp_parser::CppParser::parse(&source, cpp_parser::ParserConfig::default());
+        let root = tree.get_red_root();
+        let scopes = crate::sema::scopes::build_scopes(&root, macros);
+
+        FileView {
+            file: file.id,
+            path: file.path.clone(),
+            source,
+            line_index: file.line_index.clone(),
+            tree,
+            root,
+            scopes,
+            open: file.open,
+        }
+    }
+
     /// The parse diagnostics, as the parser reported them.
     ///
     /// A tolerant parser reports rather than fails, so this is empty for most files and non-empty for a file being

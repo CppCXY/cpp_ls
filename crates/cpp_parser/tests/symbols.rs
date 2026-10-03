@@ -247,3 +247,76 @@ fn a_table_can_be_built_and_shared_from_outside_the_crate() {
     // No table at all is the ordinary case, and it is not an error.
     assert!(ParserConfig::default().symbol_table().is_none());
 }
+
+/// **A namespace head behind a linkage specification** — MSVC's `_STD_BEGIN`.
+///
+/// Under `c++latest`, `_STD_BEGIN` resolves to `extern "C++" { namespace std {`, and the reader has to see the
+/// namespace through the linkage block. Without that, every declaration in every MSVC header was filed at file
+/// scope.
+#[test]
+fn a_namespace_behind_a_linkage_specification_opens_it() {
+    use cpp_parser::{shape_of_a_body, BodyShape, NothingAtAll};
+
+    // The plain spellings still work, and are asserted first so that a change which broke them would be caught
+    // here rather than in the one below.
+    assert_eq!(
+        shape_of_a_body("namespace std {"),
+        BodyShape::OpensANamespace(vec!["std".to_string()])
+    );
+    assert_eq!(
+        shape_of_a_body("inline namespace __p2286 {"),
+        BodyShape::OpensANamespace(vec!["__p2286".to_string()])
+    );
+
+    // …and the shape MSVC actually writes.
+    let _ = NothingAtAll;
+    assert_eq!(
+        shape_of_a_body("extern \"C++\" { namespace std {"),
+        BodyShape::OpensANamespace(vec!["std".to_string()]),
+        "`_STD_BEGIN` under `c++latest` is a linkage block in front of the namespace"
+    );
+    assert_eq!(
+        shape_of_a_body("extern \"C\" { inline namespace v1 {"),
+        BodyShape::OpensANamespace(vec!["v1".to_string()])
+    );
+
+    // **A linkage block on its own opens a block and names nothing** — the rule above must not turn it into a
+    // namespace, and `extern "C" int f();` must stay out of it by ending somewhere other than `{`.
+    assert_eq!(
+        shape_of_a_body("extern \"C\" {"),
+        BodyShape::OpensABlock,
+        "a linkage block is a block, not a namespace"
+    );
+    assert_ne!(
+        shape_of_a_body("extern \"C\" int f();"),
+        BodyShape::OpensANamespace(vec!["f".to_string()])
+    );
+}
+/// **The shape reader drops a word that expands to nothing, and keeps one that expands to something.**
+///
+/// This is the boundary my `extern "C++" {` fix sits behind, and it was measured the hard way: a real MSVC header
+/// still opened no namespace after the fix, because the body the reader is handed is **not** `extern "C++" {
+/// namespace std {`.
+///
+/// It is `_EXTERN_CXX_WORKAROUND namespace std {` — the nested name is kept as an **identifier**, and only a name
+/// whose body is empty is filtered out. The reader therefore never sees the `extern`, and the linkage case cannot
+/// be reached from the tokens it has.
+#[test]
+fn an_unexpanded_word_in_a_body_keeps_the_shape_out_of_reach() {
+    use cpp_parser::{shape_of_a_body, BodyShape};
+
+    // What the reader is handed for a body whose leading word is another macro.
+    assert_eq!(
+        shape_of_a_body("_EXTERN_CXX_WORKAROUND namespace std {"),
+        BodyShape::Other,
+        "an unexpanded name is kept, so the reader cannot see past it"
+    );
+
+    // …and what it would be if that word were resolved. The two differ, and the difference is the whole of why
+    // MSVC's `_STD_BEGIN` opened nothing.
+    assert_eq!(
+        shape_of_a_body("extern \"C++\" { namespace std {"),
+        BodyShape::OpensANamespace(vec!["std".to_string()]),
+        "resolved, the same body is a namespace head"
+    );
+}

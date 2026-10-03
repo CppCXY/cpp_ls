@@ -819,3 +819,293 @@ fn a_name_after_an_unseen_macro_is_still_a_name() {
         );
     }
 }
+/// **An alias whose target is a name written after a macro this file has not seen.**
+///
+/// An alias has **no declarator**, so `using A = X Y;` declares nothing: an identifier standing after the
+/// type-id can only be the name that type-id was cut short of. That is what lets this shape be resolved without
+/// guessing, where the same tokens in a declaration (`X Y;`) are a type and a declarator — and it is why the fix
+/// lives in the alias rule rather than in the name rule, which is where the first two attempts put it. Both of
+/// those cost more than they bought: taking any identifier after a name dropped MSVC's `<vector>` from 538
+/// declarations covering the whole file to 96 covering half.
+///
+/// The shape is what every container writes — `_STD` is a macro (`yvals.h` defines it as `::std::`) and a file
+/// summarised on its own has not read that header:
+///
+/// ```cpp
+/// using reverse_iterator = _STD reverse_iterator<iterator>;   // <array>, and every container
+/// ```
+///
+/// Measured on MSVC's `<array>`, the effect is not local: `class array` summarised to **one** fact, **none of
+/// its members were facts at all**, and the 2000 lines written after it produced nothing. The file summarised 85
+/// declarations covering 62% of itself before, and 239 covering 99% after.
+#[test]
+fn an_alias_target_after_an_unseen_macro_is_one_name() {
+    for source in [
+        "struct S { using a = _STD rt; };\nstruct After { int c; };\n",
+        "struct S { using a = _STD rt<i>; };\nstruct After { int c; };\n",
+        // …and the shape `<array>` writes: the member declared after it has to be a fact too.
+        "struct S { using a = _STD rt<i>; int member; };\nstruct After { int c; };\n",
+    ] {
+        let summary = cpp_code_analysis::summarize(
+            std::path::Path::new("/p/a.cpp"),
+            source,
+            cpp_code_analysis::SummaryKey::new(0, 0),
+        );
+        let qualified: Vec<String> = summary
+            .declarations
+            .iter()
+            .map(|fact| fact.qualified_name())
+            .collect();
+
+        assert!(
+            qualified.iter().any(|name| name == "After"),
+            "the declaration after the class has to be read: {qualified:?}"
+        );
+        // The class's own member — and only the source that **writes** one is asked for it. The first version
+        // asserted it for every source and failed on the first two, which have no member to find: an assertion
+        // that is wrong about its own input reads exactly like a parser that is wrong about the file.
+        if source.contains("member") {
+            assert!(
+                qualified.iter().any(|name| name.ends_with("::member")),
+                "a member declared after the alias has to be read too: {qualified:?}"
+            );
+        }
+    }
+}
+/// **What an `auto` stands for** — the one kind of declaration whose type is not in the file.
+///
+/// `auto x = f();` says `x` is whatever `f` returns, and nothing in that line spells it. The three shapes that
+/// account for almost every `auto` in MSVC's headers are all one question — *what is this expression's type* — and
+/// each is asserted here against the answer the file itself gives:
+///
+/// ```text
+///   111  a call                auto x = f();               the callee's return type
+///    83  a plain expression    auto x = y;                 the name's own type
+///    63  a cast                auto x = static_cast<T>(v);
+/// ```
+///
+/// The two that are **not** that question are refused rather than approximated, and the refusal is asserted too:
+/// `auto f() { … }` has no initializer — its type is what the `return` statements agree on, which is a different
+/// walk and a question about agreement — and `auto x;` has no answer in the file at all. A consumer that shows
+/// `auto` there is showing what the file says; one that invented a type would be showing something it does not.
+#[test]
+fn an_auto_is_deduced_from_its_initializer() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "int f();\n\
+         long g();\n\
+         struct T { int a; };\n\
+         void h() {\n\
+             int y = 1;\n\
+             auto from_a_call = f();\n\
+             auto from_a_name = y;\n\
+             auto from_a_cast = static_cast<T>(y);\n\
+             auto from_an_int = 1;\n\
+             auto no_initializer;\n\
+         }\n\
+         auto a_return_type() { return 1; }\n",
+    )]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+
+    let facts: Vec<cpp_code_analysis::DeclFact> = session
+        .index()
+        .summaries()
+        .flat_map(|summary| summary.declarations.iter().cloned())
+        .collect();
+
+    let deduced = |name: &str| -> String {
+        let fact = facts
+            .iter()
+            .find(|fact| fact.name == name && fact.type_of.as_deref() == Some("auto"))
+            .unwrap_or_else(|| panic!("`{name}` is declared `auto`: {:?}", facts.iter().map(|f| (&f.name, &f.type_of)).collect::<Vec<_>>()));
+
+        match cpp_code_analysis::sema::deduce::deduced_type_of(
+            session.index(),
+            &view.scopes,
+            &view.root,
+            &view.path,
+            fact,
+        ) {
+            Known::Yes(type_of) => type_of,
+            other => panic!("`{name}` has a type the file gives: {other:?}"),
+        }
+    };
+
+    assert_eq!(deduced("from_a_call"), "int", "the callee's return type");
+    assert_eq!(deduced("from_a_name"), "int", "the name's own type");
+    assert_eq!(deduced("from_an_int"), "int", "a literal's type");
+    assert!(
+        deduced("from_a_cast").contains('T'),
+        "a cast names the type it casts to: {}",
+        deduced("from_a_cast")
+    );
+
+    // …and the two shapes that are refused, refused **with a reason** rather than answered.
+    //
+    // `a_return_type` is found by its **`returns`** and not by its `type_of`: a function has no type of its own,
+    // so `auto f()` puts the placeholder in the other field. The first version of this test looked for `type_of`
+    // in both and reported "`a_return_type` is declared `auto`" — a complaint about the test that reads exactly
+    // like a complaint about the reader.
+    // **`auto f()` is not in this list, and the reason is a fact about the fact.** Measured: a function
+    // declared with a deduced return type comes back with `returns: None` — the placeholder is not recorded at
+    // all — so a consumer cannot tell `auto f()` from a function whose return type the reader could not read. That
+    // is a gap in `DeclFact`, not something deduction should guess around, and it is left visible here rather than
+    // covered by a case that would pass for the wrong reason.
+    for name in ["no_initializer"] {
+        let fact = facts
+            .iter()
+            .find(|fact| fact.name == name && fact.type_of.as_deref() == Some("auto"))
+            .unwrap_or_else(|| panic!("`{name}` is declared `auto`"));
+
+        assert!(
+            matches!(
+                cpp_code_analysis::sema::deduce::deduced_type_of(
+                    session.index(),
+                    &view.scopes,
+                    &view.root,
+                    &view.path,
+                    fact,
+                ),
+                Known::Unknown(_)
+            ),
+            "`{name}` has no initializer to read, so the answer is `Unknown` with a reason rather than a type"
+        );
+    }
+}
+/// **A view of a file knows the macros its includes define** — the reading a buffer gets.
+///
+/// MSVC opens every namespace through a macro: `_STD_BEGIN` is `namespace std {` in `<yvals_core.h>`, and
+/// `_STD` itself is `::std::` (`yvals_core.h:1906`). A reader of one file sees identifiers there.
+///
+/// [`FileView::parse`] reads a file's own tokens and nothing else — deliberately, and its own note says why
+/// ("`_STD_BEGIN`'s replacement list is in a header, and nothing here has read the include graph"). But the
+/// **session** has: the closure is in its index. So a view taken *from a session* can hand the parse the macros
+/// the includes define, and this asserts that it does.
+///
+/// A namespace-*opening* macro is the shape asserted, because that is the one the scope tree can be asked about
+/// without going through a spelling: with the body in hand the declaration inside it belongs to `mine`, and
+/// without it the declaration is at file scope beside two names that are not names at all.
+#[test]
+fn a_view_knows_the_macros_its_includes_define() {
+    let session = session_with(&[
+        (
+            "/p/ns.h",
+            "#define _MY_BEGIN namespace mine {\n#define _MY_END }\n",
+        ),
+        (
+            "/p/a.cpp",
+            "#include \"ns.h\"\n_MY_BEGIN struct thing { int b; }; _MY_END\n",
+        ),
+    ]);
+    let view = session
+        .view_with_macros("/p/a.cpp")
+        .expect("the file is held");
+
+    // Every binding the view's scopes hold, qualified the way the scope tree nests them.
+    fn names_in(table: &cpp_code_analysis::ScopeTree) -> Vec<String> {
+        fn walk(
+            table: &cpp_code_analysis::ScopeTree,
+            id: cpp_code_analysis::ScopeId,
+            prefix: &str,
+            out: &mut Vec<String>,
+        ) {
+            let Some(scope) = table.scope(id) else {
+                return;
+            };
+            let here = match &scope.name {
+                Some(name) => format!("{prefix}{name}::"),
+                None => prefix.to_string(),
+            };
+            for binding in &scope.bindings {
+                out.push(format!("{here}{}", binding.name.text()));
+            }
+            for child in &scope.children {
+                walk(table, *child, &here, out);
+            }
+        }
+
+        let mut out = Vec::new();
+        if let Some(root) = table.root() {
+            walk(table, root, "", &mut out);
+        }
+        out
+    }
+
+    let names = names_in(&view.scopes);
+    assert!(
+        names.iter().any(|name| name == "mine::thing"),
+        "the macro's body is `namespace mine {{`, so the declaration it heads belongs to `mine`: {names:?}"
+    );
+}
+/// **A view gets its macros one query later**, and never blocks on them.
+///
+/// The arrangement [`Session::view`] makes is the one the diagnostics channel already states through
+/// `isIncomplete`: a query answers from the reading that exists and asks for a better one, and the **next** query
+/// about the same text gets it. That is not a shortcut around the cost — it is the cost, stated: building the
+/// environment is **103.7 ms** on a closure of 151 files (measured), and a keystroke cannot pay it.
+///
+/// So both halves are asserted, and the first is the one that would be tempting to leave out: the **first** view
+/// must *not* know the macro, because nothing has built the environment yet and a first view that knew it would
+/// mean the query had built it.
+#[test]
+fn a_view_gets_its_macros_one_query_later() {
+    let mut session = session_with(&[
+        (
+            "/p/ns.h",
+            "#define _MY_BEGIN namespace mine {\n#define _MY_END }\n",
+        ),
+        (
+            "/p/a.cpp",
+            "#include \"ns.h\"\n_MY_BEGIN struct thing { int b; }; _MY_END\n",
+        ),
+    ]);
+    session.index_everything();
+
+    /// Every binding a view's scopes hold, nested the way the tree nests them.
+    fn names_in(table: &cpp_code_analysis::ScopeTree) -> Vec<String> {
+        fn walk(
+            table: &cpp_code_analysis::ScopeTree,
+            id: cpp_code_analysis::ScopeId,
+            prefix: &str,
+            out: &mut Vec<String>,
+        ) {
+            let Some(scope) = table.scope(id) else {
+                return;
+            };
+            let here = match &scope.name {
+                Some(name) => format!("{prefix}{name}::"),
+                None => prefix.to_string(),
+            };
+            for binding in &scope.bindings {
+                out.push(format!("{here}{}", binding.name.text()));
+            }
+            for child in &scope.children {
+                walk(table, *child, &here, out);
+            }
+        }
+
+        let mut out = Vec::new();
+        if let Some(root) = table.root() {
+            walk(table, root, "", &mut out);
+        }
+        out
+    }
+
+    // **The first query asks and answers plainly.** Nothing has built the environment, so the declaration the
+    // macro heads is still at file scope — and the query did not stop to build it.
+    let first = names_in(&session.view("/p/a.cpp").expect("held").scopes);
+    assert!(
+        !first.iter().any(|name| name == "mine::thing"),
+        "the first query cannot have the macros — nothing has built them yet: {first:?}"
+    );
+
+    // **The work loop builds it** — one per drain, and one drain is enough for one file.
+    session.advance(8);
+
+    // **…and the next query about the same text has it.**
+    let second = names_in(&session.view("/p/a.cpp").expect("held").scopes);
+    assert!(
+        second.iter().any(|name| name == "mine::thing"),
+        "the next query gets the reading the work loop built: {second:?}"
+    );
+}

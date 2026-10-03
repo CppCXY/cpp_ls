@@ -114,6 +114,122 @@ fn main() {
     session.did_open(&file, &text);
     session.index_everything();
 
+    // **What the open file's own view says, before anything is cooked.**
+    //
+    // This is the state a reader is in when they open a header: the file is held, its own `#define`s are read, and
+    // the closure's are not — the cooked readings are still being built (`COOK_SLICE` per drain). Every namespace
+    // MSVC opens is opened by a macro, so the question this answers is whether a declaration the file's own text
+    // hides behind one is placed where a compiler places it.
+    //
+    // Two readings, and the comparison is between them:
+    //
+    // ```text
+    // asked    session.view, first call   the plain reading, and a request for the macros recorded
+    // built    session.view, after work   the work loop built the environment — what the fix is for
+    // ```
+    //
+    // A `bare` reading (`FileView::parse` from a `VfsFile`) is what `asked` returns, and is left out rather than
+    // duplicated: a session does not hand out its `VfsFile`, and a second parse of the same text to prove they
+    // agree would be measuring the parse rather than the macros.
+    {
+        let count = |view: &cpp_code_analysis::FileView| -> (usize, usize) {
+            fn walk(
+                table: &cpp_code_analysis::ScopeTree,
+                id: cpp_code_analysis::ScopeId,
+                nested: bool,
+                out: &mut (usize, usize),
+            ) {
+                let Some(scope) = table.scope(id) else {
+                    return;
+                };
+                // A binding is "in a namespace" when some scope above it has a name — which for a file at file
+                // scope is exactly the question: `_STD_BEGIN`'s `namespace std {` is the only thing that names one.
+                let nested = nested || scope.name.is_some();
+                for _ in &scope.bindings {
+                    out.0 += 1;
+                    if nested {
+                        out.1 += 1;
+                    }
+                }
+                for child in &scope.children {
+                    walk(table, *child, nested, out);
+                }
+            }
+
+            let mut out = (0, 0);
+            if let Some(root) = view.scopes.root() {
+                walk(&view.scopes, root, false, &mut out);
+            }
+            out
+        };
+
+        let asked = session.view(&file).map(|view| count(&view));
+
+        // One drain is enough for one file (`MACRO_SLICE` is 1), and the probe asks again rather than waiting.
+        session.advance(4);
+        let built = session.view(&file).map(|view| count(&view));
+
+        // **The eager reading, for the comparison that says whether the environment does anything at all.** If
+        // this equals `built`, the difference between the two readings is not the *timing* of the environment —
+        // it is that the environment changes no scope, and the reason has to be looked for somewhere else.
+        let eager = session.view_with_macros(&file).map(|view| count(&view));
+
+        // **Why the numbers above are what they are**, when they are the same number twice. The three facts that
+        // decide it are not visible from outside, and reading them out is cheaper than reasoning about which of
+        // them was false — the mistake this line exists to prevent is a measurement that looks like "the fix does
+        // nothing" when what happened is "the work was never queued".
+        println!(
+            "   [debug] summary present: {}",
+            session.index().summary(&file).is_some()
+        );
+
+        println!("\n--- the open file's own scopes, before anything is cooked ---");
+        let show = |label: &str, seen: Option<(usize, usize)>| match seen {
+            Some((all, named)) => println!("   {label:<8} {all:4} bindings, {named:4} inside a namespace"),
+            None => println!("   {label:<8} (not held)"),
+        };
+        show("asked", asked);
+        show("built", built);
+        show("eager", eager);
+        // **Where the bindings that are *not* in a namespace actually are.** A count says how many; the scopes
+        // they sit in say why, and the difference between "one namespace was missed" and "the file's tail is at
+        // file scope" is the difference between two different bugs.
+        if let Some(view) = session.view(&file) {
+            let mut at_the_top: Vec<(String, usize)> = Vec::new();
+            if let Some(root) = view.scopes.root()
+                && let Some(scope) = view.scopes.scope(root)
+            {
+                for binding in &scope.bindings {
+                    let name = binding.name.text();
+                    match at_the_top.iter_mut().find(|(seen, _)| *seen == name) {
+                        Some((_, count)) => *count += 1,
+                        None => at_the_top.push((name, 1)),
+                    }
+                }
+            }
+            println!(
+                "   file-scope bindings: {} — {:?}",
+                at_the_top.iter().map(|(_, count)| count).sum::<usize>(),
+                at_the_top
+                    .iter()
+                    .take(12)
+                    .map(|(name, count)| format!("{name}x{count}"))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    // **…and then the whole closure, cooked.** The first pass reads every file the way a compiler reads a file it
+    // has only just opened — its own tokens — and only the files some *request* named get a cooked reading. That
+    // is the design (**`COOK_SLICE` files per drain**, because cooking one file walks its whole translation unit),
+    // and it means a fresh session answers from the raw reading for most of the closure: `_STD` is an identifier
+    // there, `namespace std {` never opened, and every declaration sits at file scope.
+    //
+    // Asking for it changes what the probe measures, which is the point: the numbers below are only about the
+    // reading the editor's *queries* use once the session has caught up.
+    session.want_everything_cooked();
+    session.index_everything();
+
     let Some(view) = session.view(&file) else {
         println!("{} is not held", file.display());
         return;
@@ -258,7 +374,22 @@ fn main() {
         // spells them: `_Choice_t` is a class at `std` scope (`concepts:264`), and `_Alvbase_traits` is a member
         // alias of `vector` declared twice (`vector:2828`, `2920`). If the plain spelling resolves and the one
         // a declaration wrote does not, what is missing is the step from one to the other.
-        "std::_Choice_t",
+        // **`<array>`'s tail**, which the raw reading of that file loses: the file summarised on its own stops
+        // producing declarations at line 572 (measured: 85 covering 62%), while the cooked reading — which has
+        // the include closure, and so expands `_STD` — is the one the editor actually uses. Asking both a member
+        // declared early and one declared after the stop says which reading is at fault.
+        // **The tails of the files the raw reading stops early in.** Each is declared after the point where
+        // `facts_probe`'s single-file reading gives up, so finding it here says the loss is the instrument's
+        // rather than the product's: `to_wstring` follows `<string>`'s stop at line 537, `to_chars` and the
+        // `pmr` map aliases follow `<map>`'s at 696.
+        "std::to_wstring",
+        "std::to_chars",
+        "std::pmr::map",
+        "std::pmr::multimap",        "std::array",
+        "std::array::at",
+        "std::array::front",
+        "std::to_array",
+        "std::get",        "std::_Choice_t",
         "std::ranges::_Begin::_Cpo::_Choice_t",
         "std::vector::_Alvbase_traits",
         "std::vector::_Alvbase_traits::size_type",
@@ -466,6 +597,118 @@ fn main() {
                 ));
             }
         }
+    }
+    // **How many of the `auto`s the reading now has a type for.** The count above treats a placeholder as a name
+    // it could not place, which is true of the *lookup* and no longer true of the analysis: `deduced_type_of`
+    // reads the initializer's own expression, and this says how often that succeeds. It is the payoff measurement
+    // for the deduction engine and it is kept beside the others for the same reason they are.
+    let (mut deducible, mut refused) = (0usize, 0usize);
+    let mut why: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for path in session.index().summaries().map(|summary| summary.path.clone()).collect::<Vec<_>>() {
+        let Some(facts) = session.index().cooked_declarations(&path) else {
+            continue;
+        };
+        let Some(view) = session.view(&path) else { continue };
+        for fact in facts {
+            if fact.type_of.as_deref() != Some("auto") {
+                continue;
+            }
+            match cpp_code_analysis::sema::deduce::deduced_type_of(
+                session.index(),
+                &view.scopes,
+                &view.root,
+                &view.path,
+                fact,
+            ) {
+                cpp_code_analysis::Known::Yes(_) => deducible += 1,
+                other => {
+                    refused += 1;
+                    // **Grouped by what was said, not by count, and by the *kind* of refusal rather than the
+                    // name.** The refusals are the work list, and a list of 400 distinct names says none of it:
+                    // "the name is not declared here" and "the type depends on a template argument" are
+                    // different pieces of work, and one of them is not work at all.
+                    let full = format!("{other:?}");
+                    let reason = full
+                        .split('(')
+                        .nth(1)
+                        .and_then(|inner| inner.split(['(', ')']).next())
+                        .unwrap_or(&full)
+                        .trim()
+                        .to_string();
+                    // **An `UnknownType` carries the spelling it could not read**, and that is the whole of the
+                    // work list: the variant says "the engine gave up" and the spelling says on what. Kept
+                    // together so the printout names the shapes rather than the category.
+                    let reason = if reason == "UnknownType" || reason == "NotDeclaredHere" {
+                        full.chars().skip(reason.len() + 1).take(52).collect()
+                    } else {
+                        reason
+                    };
+                    *why.entry(reason).or_default() += 1;
+                }
+            }
+        }
+    }
+    println!(
+        "\n--- `auto`, now that there is an engine for it ---\n{deducible} deduced from the initializer | \
+         {refused} refused, with a reason"
+    );
+    for (reason, count) in &why {
+        println!("   {count:5}  {reason}");
+    }
+    // **The two readings of the same closure, side by side** — the answer to "why is anything still missing".
+    //
+    // A file is read twice in this analysis and the two are not the same document. The **raw** reading is the
+    // file's own tokens: `_STD` is an identifier there, because the macro is defined in `<yvals.h>` and this file
+    // does not contain it. The **cooked** reading is the file after the preprocessor ran with its includes, where
+    // `_STD` is `::std::` and the text around it is a namespace. The index holds both, and the cooked one is what
+    // the editor's queries use.
+    //
+    // So a count of declarations taken from the raw reading — which is what `facts_probe` reports, and what the
+    // per-file numbers below are — is a floor and not the answer. This prints both, because the difference is the
+    // whole of the question: whatever it comes to is what the include closure is worth.
+    let (mut raw_total, mut cooked_total, mut cooked_files) = (0usize, 0usize, 0usize);
+    for summary in session.index().summaries() {
+        raw_total += summary.declarations.len();
+        if let Some(cooked) = session.index().cooked_declarations(&summary.path) {
+            cooked_total += cooked.len();
+            cooked_files += 1;
+        }
+    }
+    println!(
+        "\n--- the closure, read twice ---\nraw {raw_total} declarations in {} files | cooked \
+         {cooked_total} in {cooked_files} of them",
+        session.index().summaries().count()
+    );
+    // **What a view costs with the closure's macros, against without.** The decision this measurement exists for:
+    // `view` is on the path of every query, and handing it the closure means walking the closure and taking a copy
+    // of every file's text. The pair is timed on the *same* file, one after the other, so the difference is the
+    // environment and not the parse of two different documents.
+    {
+        let rounds = 5;
+        let bare = std::time::Instant::now();
+        for _ in 0..rounds {
+            let _ = session.view(&file);
+        }
+        let bare = bare.elapsed() / rounds;
+
+        // **Cold and warm apart**, because they are the two numbers the decision needs: the first query about a
+        // file pays the walk over its closure, and every query after it should pay a lookup. An average says
+        // neither — it read `21.75 ms` here, which is neither the walk nor the lookup but the two divided by five.
+        let cold = std::time::Instant::now();
+        let _ = session.view_with_macros(&file);
+        let cold = cold.elapsed();
+
+        let warm = std::time::Instant::now();
+        for _ in 0..rounds {
+            let _ = session.view_with_macros(&file);
+        }
+        let warm = warm.elapsed() / rounds;
+
+        println!(
+            "\n--- a view of `{}` ---\nplain {bare:?} | with the macros: cold {cold:?}, warm {warm:?}  ({:.1}x warm)",
+            file.display(),
+            warm.as_secs_f64() / bare.as_secs_f64().max(f64::MIN_POSITIVE)
+        );
     }
     real.sort();
     real.dedup();

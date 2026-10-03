@@ -9,6 +9,7 @@
 
 pub mod check;
 pub mod declarations;
+pub mod deduce;
 pub mod module_info;
 pub mod modules;
 pub mod parser_symbols;

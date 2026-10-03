@@ -4870,7 +4870,59 @@ pub fn parse_using_declaration(p: &mut CppParser) -> ParseResult {
             declared = true;
         }
 
+        // **`MACRO name` — a type-id that is one identifier, with another one after it.**
+        //
+        // An alias has **no declarator**, so `using A = X Y;` declares nothing: an identifier standing after the
+        // type-id can only be the name the type-id was cut short of. That is what makes this the one place the
+        // shape resolves without guessing — `X Y;` in a declaration is a type and a declarator, and the same
+        // tokens here are one type.
+        //
+        // **Both halves of the condition are measured.** `_STD` is a macro — `yvals.h` defines it as `::std::`,
+        // and a file parsed on its own has not read that header — so `/array`'s aliases arrive as two identifiers
+        // in a row, the type-id ends at `_STD`, the specifier sequence takes that for the type, and the real name
+        // becomes a nested `Declaration` from recovery: the class summarised to **one** fact, none of its members
+        // were facts, and the 2000 lines after it produced nothing.
+        //
+        // Taking *any* identifier that followed was the first attempt and it cost `<vector>` dearly — 538
+        // declarations covering the file became 96 covering half — because an alias there reaches a type this
+        // rule had already read correctly and the extra read consumed what came after. Requiring the type-id to
+        // have been **exactly one identifier** is what separates the two: a macro prefix is a lone identifier,
+        // while `unsigned int` and `_Ty*` are not.
+        //
+        // Counted over **non-trivia tokens**, because whitespace is a token in this lexer: `_STD rt` is three
+        // tokens and one name. The first version compared raw indices and so never fired at all — measured, the
+        // alias's `type_of` stayed `_STD` and `<array>` did not move.
+        let before_the_target = p.current_token_index();
         parse_type_id(p)?;
+        let consumed: Vec<CppTokenKind> = (before_the_target..p.current_token_index())
+            .map(|at| p.token_kind_at(at))
+            .filter(|kind| !is_declaration_trivia(*kind))
+            .collect();
+        let the_target_was_one_name =
+            matches!(consumed.as_slice(), [CppTokenKind::Identifier]) && !p.has_error();
+
+        // **…and the second spelling of the same thing: a calling convention.** `void __CC(void*)` is a function
+        // type whose convention is a macro, and the type-id stops at `__CC` for the same reason it stops at
+        // `_STD` — the macro is defined in a header this file has not read. Here the target has already ended in
+        // something else (`void*`, `void`), so the "one name" test above does not fire and the alias was left
+        // with `__CC(const void*);` hanging off it and no `;` to end on.
+        //
+        // ```cpp
+        // using _Destroy_fn = void __CLRCALL_PURE_OR_CDECL(void*) _NOEXCEPT_FNPTR;   // <any>
+        // using _Copy_fn    = void* __CLRCALL_PURE_OR_CDECL(const void*);
+        // ```
+        //
+        // The discriminator is the **`(` after the identifier**: `T MACRO(args)` is a function type, while
+        // `unsigned int` and `_Ty*` — the shapes the narrow test was written for — have nothing of the sort. It
+        // is what keeps this from re-introducing the fault that cost `<vector>` 442 declarations.
+        let a_convention_follows = p.current_token() == CppTokenKind::Identifier
+            && p.peek_token_kind_at(1..4)
+                .first()
+                .is_some_and(|_| (1..4).any(|at| p.token_kind_at(p.current_token_index() + at) == CppTokenKind::LeftParen));
+
+        if (the_target_was_one_name || a_convention_follows) && p.current_token() == CppTokenKind::Identifier {
+            parse_type_id(p)?;
+        }
 
         if (p.current_token() == CppTokenKind::LeftBracket
             || p.current_token() == CppTokenKind::LeftParen)

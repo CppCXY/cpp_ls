@@ -2008,6 +2008,36 @@ pub(crate) fn type_of_expression(
         return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
     }
 
+    // **A literal's type is the one thing about it nobody has to look up.**
+    //
+    // `auto x = 1;` is a declaration whose type the file spells in a form no name can carry, and the reader had
+    // no arm for it: the literal fell through to the name case, was found not to be one, and came back
+    // `UnparsableName` — which says the *spelling* could not be read when what is true is that it is not a name at
+    // all. Measured, this is 8 of the `auto` declarations in MSVC's `<vector>` alone, and the shape a reader meets
+    // before any other.
+    //
+    // Read from the **token**, not the text: `1` and `1.0f` and `"abc"` differ by their kind, and a suffix
+    // (`10u`, `1.0L`) is part of the literal rather than a separate thing to interpret. A user-defined literal
+    // (`10_km`) is deliberately **not** here: its type is whatever the literal operator returns, which is a lookup.
+    if let Some(kind) = expression
+        .children_with_tokens()
+        .filter_map(|element| element.into_token())
+        .map(|token| cpp_parser::CppTokenKind::from(token.kind()))
+        .find(|kind| !matches!(kind, cpp_parser::CppTokenKind::Whitespace | cpp_parser::CppTokenKind::Newline))
+    {
+        let literal = match kind {
+            cpp_parser::CppTokenKind::IntegerLiteral | cpp_parser::CppTokenKind::CharLiteral => Some("int"),
+            cpp_parser::CppTokenKind::FloatingLiteral => Some("double"),
+            cpp_parser::CppTokenKind::BoolLiteral | cpp_parser::CppTokenKind::TrueKeyword | cpp_parser::CppTokenKind::FalseKeyword => Some("bool"),
+            cpp_parser::CppTokenKind::StringLiteral => Some("const char*"),
+            cpp_parser::CppTokenKind::NullptrLiteral | cpp_parser::CppTokenKind::NullptrKeyword => Some("nullptr_t"),
+            _ => None,
+        };
+        if let Some(spelled) = literal {
+            return Known::Yes((Type::named(spelled), path.to_path_buf()));
+        }
+    }
+
     // `this` is the enclosing class, and no inference is involved: the scope chain already knows which class this
     // is, and it is the same answer inside every member function of it.
     if written == "this" {
@@ -2074,6 +2104,52 @@ pub(crate) fn type_of_expression(
         return match expression.children().next() {
             Some(inner) => type_of_expression(index, scopes, root, path, &inner, depth + 1),
             None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+        };
+    }
+
+    // **A binary operator**, which is where most of the `auto` declarations in a standard-library header get their
+    // type: `auto x = a & b;`, `auto y = p << n;`. Measured, 466 of the 488 `auto`s this could not answer were
+    // expressions of this shape — `(*_VbFirst & _FirstSourceMask) << _SourceShift` and the like.
+    //
+    // # Three rules, and only one of them is exact for free
+    //
+    // * **A comparison or a logical operator yields `bool`.** `==`, `<`, `&&` … That is C++'s own answer for every
+    //   operand type there is, so nothing is inferred and nothing can be wrong.
+    // * **An assignment yields its left operand's type**, which is also C++'s answer rather than an inference.
+    // * **Everything else is the usual arithmetic conversion**, and that is where this stops.** `a + b` is `int`
+    //   for two `int`s and `unsigned` for an `int` and an `unsigned`, so the answer is **exact when the two
+    //   operands already agree** — the common case in the code that survives — and is refused otherwise. Ranking
+    //   the conversions (`long long` beats `unsigned`, `double` beats everything) would be a table this analysis
+    //   would then have to keep right for every platform's widths; a wrong type shown for an `auto` is worse than
+    //   `auto`, because the second says the file did not spell it and the first says it did.
+    if let Some((operator, left, right)) = binary_operands_of(expression) {
+        if matches!(
+            operator.as_str(),
+            "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||"
+        ) {
+            return Known::Yes((Type::named("bool"), path.to_path_buf()));
+        }
+
+        let left_type = type_of_expression(index, scopes, root, path, &left, depth + 1);
+        if matches!(operator.as_str(), "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=")
+        {
+            return left_type;
+        }
+
+        let Known::Yes((left_type, file)) = left_type else {
+            return match left_type {
+                Known::Unknown(reason) => Known::Unknown(reason),
+                _ => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+            };
+        };
+
+        return match type_of_expression(index, scopes, root, path, &right, depth + 1) {
+            Known::Yes((right_type, _)) if right_type == left_type => Known::Yes((left_type, file)),
+            // **The two operands disagree, so the conversion decides and this does not rank conversions.** The
+            // answer is the spelling, which is what every other refusal in this layer carries.
+            Known::Yes(_) => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+            Known::Unknown(reason) => Known::Unknown(reason),
+            Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
         };
     }
 
@@ -2336,6 +2412,42 @@ fn declared_class(index: &ProjectIndex, declaring: &Path, class: &str) -> Option
 /// name would be a second place to update if the name changed.
 ///
 /// `-x` and `!x` are `UnaryExpr`s as well and are deliberately not this: what they have is not a pointer.
+/// **A binary expression's operator and its two operands**, or None when this is not one.
+///
+/// The node is left op right, so the operator is the one token between the two expression children — found by
+/// position rather than by spelling, because >> is one token here and > > would be two other readings.
+fn binary_operands_of(
+    node: &cpp_parser::CppSyntaxNode,
+) -> Option<(String, cpp_parser::CppSyntaxNode, cpp_parser::CppSyntaxNode)> {
+    if cpp_parser::CppSyntaxKind::from(node.kind()) != cpp_parser::CppSyntaxKind::BinaryExpr {
+        return None;
+    }
+
+    let mut operands = Vec::new();
+    let mut operator: Option<String> = None;
+    for element in node.children_with_tokens() {
+        // A child that is not a token is an operand; the first token that is not trivia is the operator. The two
+        // are told apart by `into_token`, which is this crate's idiom for the question — see `sema::semantic`.
+        if let Some(token) = element.as_token() {
+            if operator.is_none()
+                && !matches!(
+                    cpp_parser::CppTokenKind::from(token.kind()),
+                    cpp_parser::CppTokenKind::Whitespace | cpp_parser::CppTokenKind::Newline
+                )
+            {
+                operator = Some(token.text().to_string());
+            }
+        } else if let Some(child) = element.into_node() {
+            operands.push(child);
+        }
+    }
+
+    match (operator, operands.as_slice()) {
+        (Some(operator), [left, right]) => Some((operator, left.clone(), right.clone())),
+        _ => None,
+    }
+}
+
 fn unary_operand_with(
     node: &cpp_parser::CppSyntaxNode,
     operator: &str,
@@ -2955,35 +3067,53 @@ fn declaration_of_expression(
 
     match crate::sema::resolve::definition_at(scopes, root, offset) {
         Known::Yes(binding) => Known::Yes(NamedDeclaration::Here(binding)),
-        Known::Unknown(UnknownReason::NotDeclaredHere(name)) => match index.definition(&name, path) {
-            Known::Yes(found) => Known::Yes(NamedDeclaration::Indexed(
-                found.fact,
-                found.file,
-                TypeBindings::default(),
-            )),
-            // **Several declarations of one name, and one type between them.** A name query answers `Ambiguous`
-            // when more than one declaration is visible, and that is right for "where is this declared" — but the
-            // question here is *what type it has*, and a type is not ambiguous when every declaration spells it the
-            // same way. MSVC's `<iostream>` declares `cin` twice (once plain, once as
-            // `_EXPORT_STD extern "C++" … istream cin;`), so `std::cin` was `Ambiguous` and every use of it lost its
-            // type: `std::cin.read(…)`, `std::cin.eof()`, a completion after `std::cin.` — measured, 8 offsets in
-            // one file. Candidates that **disagree**, and functions (which have no type as a name), keep the
-            // `Unknown` that the name query gave.
-            Known::Unknown(UnknownReason::Ambiguous(_)) => match agreeing_type(index, path, &name) {
-                Some(found) => Known::Yes(NamedDeclaration::Indexed(
-                    found.0,
-                    found.1,
-                    TypeBindings::default(),
-                )),
-                None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
-            },
+        Known::Unknown(UnknownReason::NotDeclaredHere(name)) => {
+            // **A name whose spelling carries a macro prefix is two spellings, and one of them is real.** `_STD`
+            // is `::std::` to a compiler and an ordinary identifier to a file that has not read `<yvals.h>`, so
+            // the expression reads the pair as one name — `_STD f`, `_CSTD memmove` — and the lookup then asks the
+            // index for a name nobody declares. Measured, this is what most of the `auto` declarations in MSVC's
+            // headers were refused for: 476 of them reached this arm and stopped.
+            //
+            // The part **after** the prefix is the name, and it is tried second rather than first: a file whose
+            // macro the analysis *can* see has its full spelling bound in the scope tree, and that case never
+            // reaches here at all. What is left is the prefix, and dropping it is what a reader does with the
+            // line in front of them.
+            let mut candidates: Vec<&str> = vec![name.as_ref()];
+            if let Some((_, without_the_prefix)) = name.split_once(' ') {
+                candidates.push(without_the_prefix.trim());
+            }
+
+            for candidate in candidates {
+                let found: Option<(crate::DeclFact, PathBuf)> = match index.definition(candidate, path) {
+                    Known::Yes(found) => Some((found.fact, found.file)),
+                    // **Several declarations of one name, and one type between them.** A name query answers
+                    // `Ambiguous` when more than one declaration is visible, and that is right for "where is this
+                    // declared" — but the question here is *what type it has*, and a type is not ambiguous when
+                    // every declaration spells it the same way. MSVC's `<iostream>` declares `cin` twice (once
+                    // plain, once as `_EXPORT_STD extern "C++" … istream cin;`), so `std::cin` was `Ambiguous` and
+                    // every use of it lost its type: `std::cin.read(…)`, `std::cin.eof()`, a completion after
+                    // `std::cin.` — measured, 8 offsets in one file. Candidates that **disagree**, and functions
+                    // (which have no type as a name), keep the `Unknown` that the name query gave.
+                    Known::Unknown(UnknownReason::Ambiguous(_)) => {
+                        agreeing_type(index, path, candidate)
+                    }
+                    Known::Unknown(_) | Known::No => None,
+                };
+
+                if let Some((fact, file)) = found {
+                    return Known::Yes(NamedDeclaration::Indexed(
+                        fact,
+                        file,
+                        TypeBindings::default(),
+                    ));
+                }
+            }
+
             // The declaration is nowhere this analysis can see, so there is no type to read. Reporting the *name*
             // reason would say "the owner is missing" where what is missing is the type of an expression — a
             // different answer for a consumer deciding what to tell the user.
-            Known::Unknown(_) | Known::No => {
-                Known::Unknown(UnknownReason::UnknownType(Box::from(written)))
-            }
-        },
+            Known::Unknown(UnknownReason::UnknownType(Box::from(written)))
+        }
         // A name this layer cannot place at all is not a type it can read. `No` means the offset is not on a name;
         // any other `Unknown` is already the most specific answer available and is passed through.
         Known::Unknown(reason) => Known::Unknown(reason),
