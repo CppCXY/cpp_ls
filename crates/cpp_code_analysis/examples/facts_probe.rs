@@ -119,6 +119,13 @@ fn main() {
             // template's list is what a call's return type is written with — so "is this recorded for functions too"
             // is the question a substitution step turns on, and it is not answerable from `returns` alone.
             println!("        template parameters {:?}", fact.parameters);
+            // **The scope on its own, which is what a lookup keys on.** `qualified_name()` joins it to the name, so
+            // a reader cannot see from that line whether `std::basic_string::size` is a fact whose *scope* is
+            // `std::basic_string` or one whose name happens to contain colons — and the difference decides whether a
+            // member query finds it. Printed for every fact rather than only for the interesting ones because
+            // "which scope did the *raw* reading file this under" is the question a cooked-versus-raw difference
+            // turns on, and it is invisible in every other view this crate has.
+            println!("        scope {:?}", fact.scope);
         }
     }
 }

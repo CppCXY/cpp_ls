@@ -141,7 +141,7 @@ pub fn hover(session: &Session<DiskFiles>, view: &FileView, offset: usize) -> Op
         // is asking for ("what can I call here"), and the index can now show each one's parameters.
         Known::Unknown(UnknownReason::Ambiguous(_)) => match session.definitions(view, offset) {
             Known::Yes(found) if found.found.len() > 1 => {
-                Some(markdown(overloads_markdown(session, &found)))
+                Some(markdown(overloads_markdown(session, Some(view), &found)))
             }
             _ => expression_markdown(session, view, offset).map(markdown),
         },
@@ -166,6 +166,7 @@ pub fn hover(session: &Session<DiskFiles>, view: &FileView, offset: usize) -> Op
 /// the `(…)` the old detail line used: less than the truth, and not more.
 fn overloads_markdown(
     session: &Session<DiskFiles>,
+    view: Option<&FileView>,
     found: &cpp_code_analysis::ProjectDefinitions,
 ) -> String {    let mut lines = String::new();
     for declaration in &found.found {
@@ -198,7 +199,7 @@ fn overloads_markdown(
         .collect();
     out.push_str(&format!(
         "\nDeclared in {}",
-        where_clause(session, first.file.as_path(), first.fact.name_range.start_offset)
+        where_clause(session, view, first.file.as_path(), first.fact.name_range.start_offset)
     ));
     if files.len() > 1 {
         out.push_str(&format!(" and {} other file(s)", files.len() - 1));
@@ -256,13 +257,13 @@ fn macro_markdown(session: &Session<DiskFiles>, view: &FileView, found: &Project
         return format!(
             "`#undef {}`{}\n\n`{}` is not a macro at this point in the file.",
             fact.name,
-            where_clause(session, &found.file, fact.range.start_offset),
+            where_clause(session, Some(view), &found.file, fact.range.start_offset),
             fact.name
         );
     }
 
     let mut out = String::new();
-    let definition = definition_line(session, &found.file, fact.range.start_offset, fact.body_range);
+    let definition = definition_line(session, view, &found.file, fact.range.start_offset, fact.body_range);
     out.push_str(&code_block(&definition.text));
 
     out.push_str(&format!(
@@ -277,7 +278,7 @@ fn macro_markdown(session: &Session<DiskFiles>, view: &FileView, found: &Project
             Some(value) => format!(" whose value is `{value}`"),
             None => String::new(),
         },
-        where_clause(session, &found.file, fact.range.start_offset)
+        where_clause(session, Some(view), &found.file, fact.range.start_offset)
     ));
 
     if let Some(documentation) =
@@ -298,7 +299,7 @@ fn declaration_markdown(
     let fact = &found.fact;
     let mut out = String::new();
 
-    let declaration = declaration_text(session, &found.file, fact);
+    let declaration = declaration_text(session, Some(view), &found.file, fact);
     out.push_str(&code_block(&declaration));
 
     out.push_str(&format!(
@@ -317,7 +318,7 @@ fn declaration_markdown(
 
     out.push_str(&format!(
         "\nDeclared in {}",
-        where_clause(session, &found.file, fact.name_range.start_offset)
+        where_clause(session, Some(view), &found.file, fact.name_range.start_offset)
     ));
 
     if let FactGuard::Region(_) = fact.guard {
@@ -449,6 +450,18 @@ fn kind_words(fact: &DeclFact) -> String {
     };
 
     let mut words = kind.to_string();
+
+    // **The template parameters, which the head cannot show.** `DeclFact::range` is the *declarator*, so a class
+    // template's `template <class T>` is not in it: the head of `Box` comes out as `class Box`, and a reader of
+    // `Box<int> b;` has no way to see that the class takes anything at all. The names are in the fact, and they are
+    // shown as the fact gives them.
+    //
+    // The one word *not* shown is `class` or `typename`: the fact records the parameter names and not their keywords,
+    // and printing `class` for a `typename` would be a guess dressed as a fact.
+    if !fact.parameters.is_empty() {
+        words.push_str(&format!(" template over `{}`", fact.parameters.join("`, `")));
+    }
+
     match (&fact.type_of, &fact.returns) {
         (Some(written), _) => words.push_str(&format!(" of type `{written}`")),
         (None, Some(written)) => words.push_str(&format!(" returning `{written}`")),
@@ -470,37 +483,129 @@ fn kind_words(fact: &DeclFact) -> String {
     words
 }
 
-/// The declaration's own text: the file's bytes between the fact's range.
+/// **The declaration's head**, as the file writes it — the signature, with any body left out.
+///
+/// This is the shape rust-analyzer's hover has, and the reason is not fashion: what a reader wants from a popup is
+/// the *interface* of the thing under the cursor. `class Sux { public: void print() { printf(…); } };` says nothing
+/// the head does not, and it pushes the documentation and the location off the screen.
+///
+/// # Why the head is taken from the source rather than composed from the fact
+///
+/// The fact carries the name, the kind, the return type, the parameter list, the template parameters and the bases —
+/// enough to *build* a signature, and that was the first thing tried. It does not carry the keyword: [`DeclKind`]
+/// says `Type`, and whether the file wrote `class`, `struct`, `union` or `enum class` is not in it. Composing would
+/// therefore mean printing `class` for a `struct`, which is a guess dressed as a fact — the kind of answer this
+/// codebase refuses everywhere else. So the spelling stays the file's and only the *extent* is decided here.
+///
+/// The head ends at the first `{`: a declaration's head cannot contain one (`= {}` as a default argument is the one
+/// case, and it is rare enough that cutting there beats a brace-matching scan that would have to know about strings,
+/// comments and character literals to be right). `class Sux {` becomes `class Sux`, `void print() {` becomes
+/// `void print()`, and a declaration with no body (`int x = 1;`) is unchanged. A head that was cut keeps the
+/// punctuation that says it is one — a definition's `)` reads as a call otherwise.
 fn declaration_text(
     session: &Session<DiskFiles>,
+    view: Option<&FileView>,
     file: &std::path::Path,
     fact: &DeclFact,
 ) -> String {
-    // From the VFS, which holds the file and its lines: a hover that names a declaration in a header nobody has
-    // opened reads that header **once per session**, not once per hover.
-    match session.files().held(file) {
-        Some(declaring) => {
-            slice_lines(&declaring.text, fact.range.start_offset, fact.range.end_offset())
-        }
+    // **The text the fact's offsets are offsets into**, not simply the file's — see
+    // [`the_text_a_facts_offsets_are_in`]. Reading the file's bytes at a rendering's offsets is what put `tream>`,
+    // the tail of `#include <iostream>`, at the top of a popup about `main`.
+    let Some(text) = the_text_a_facts_offsets_are_in(session, view, file) else {
         // The file cannot be read (deleted since it was indexed, or a buffer that was closed unsaved): the fact is
         // still true, and what it says is shown without the text.
-        None => format!("{} {}", kind_words(fact), fact.qualified_name()),
+        return format!("{} {}", kind_words(fact), fact.qualified_name());
+    };
+
+    // **A variable is shown by its type**, because the fact's `range` is the *declarator* — the name and its
+    // initializer — so `auto n = 1;` slices to `n = 1` and `Box<int> b;` to `b`, and neither is an interface.
+    //
+    // `auto` is not a type: it is the word the file used instead of one, so it is treated exactly like no type at
+    // all and the analysis is asked. That distinction was got wrong first time round — `auto n = 1;` keeps
+    // `Some("auto")`, the fallback was written for `None`, and the popup went on showing the initializer.
+    if matches!(fact.kind, DeclKind::Variable) {
+        let from_the_fact = fact.type_of.as_deref().filter(|type_of| *type_of != "auto");
+        let written_type = match from_the_fact {
+            Some(type_of) => Some(type_of.to_string()),
+            // The file's own bindings carry no `type_of` at all, and the offset to ask at is the fact's own name —
+            // which is in this view's coordinates exactly when the fact is about this file.
+            None if view.is_some_and(|view| is_the_viewed_file(view, file)) => {
+                match session.type_at(view.expect("established above"), fact.name_range.start_offset) {
+                    Known::Yes(type_of) => Some(type_of.type_of.clone()),
+                    _ => None,
+                }
+            }
+            None => None,
+        };
+
+        if let Some(type_of) = written_type {
+            let type_of = type_of.trim();
+            if !type_of.is_empty() && type_of != "auto" {
+                return format!("{type_of} {};", fact.name);
+            }
+        }
     }
+
+    let written = slice_lines(text, fact.range.start_offset, fact.range.end_offset());
+    let head = match written.find('{') {
+        Some(at) => written[..at].trim_end(),
+        None => written.trim_end(),
+    };
+
+    match head.chars().last() {
+        Some(')') => format!("{head};"),
+        _ => head.to_string(),
+    }
+}
+
+/// **The text a fact's offsets are offsets into** — which is not always the file's own text.
+///
+/// A fact about a declaration in **another file** carries that file's offsets: the index maps a cooked reading back
+/// into the file it stands in before it stores anything, so the VFS copy is the right ruler. A fact about a
+/// declaration in **the file being viewed** does not — it comes from the view's own tree, whose offsets are the
+/// **rendering's**, because the rendering is what the parser was handed.
+///
+/// So the rendering's own text answers for the viewed file, and that is not a workaround: it is what the declaration
+/// looked like to the reader that produced the fact.
+fn the_text_a_facts_offsets_are_in<'a>(
+    session: &'a Session<DiskFiles>,
+    view: Option<&'a FileView>,
+    file: &std::path::Path,
+) -> Option<&'a str> {
+    match view {
+        Some(view) if is_the_viewed_file(view, file) => Some(&view.source),
+        _ => session.files().held(file).map(|held| &*held.text),
+    }
+}
+
+/// Is this the file the view is of?
+///
+/// **Compared through the crate's one normaliser, and on both sides.** The two spellings reach here from different
+/// journeys — one from the session's own file list, one out of an index that stored it — and on Windows they differ
+/// in the drive letter's case and the separator: `d:/…/main.cpp` against `D:\…\main.cpp`. Comparing a normalised
+/// path against a raw one is never equal, and the branch that depends on this then answers as if the fact were about
+/// some other file. Measured: a popup read `#include <vector>` where the declaration was.
+fn is_the_viewed_file(view: &FileView, file: &std::path::Path) -> bool {
+    cpp_code_analysis::normalize_path(&view.path, cfg!(windows))
+        == cpp_code_analysis::normalize_path(file, cfg!(windows))
 }
 
 /// The `#define` line a macro fact points at, body included.
 fn definition_line(
     session: &Session<DiskFiles>,
+    view: &FileView,
     file: &std::path::Path,
     name_offset: usize,
     body_range: Option<cpp_parser::SourceRange>,
 ) -> RenderedText {
-    let Some(defining) = session.files().held(file) else {
+    // **The text the offsets are into**, not simply the file's — see [`the_text_a_facts_offsets_are_in`]: a macro
+    // fact about the viewed file carries the rendering's offsets, and its `#define` line is the rendering's line.
+    let Some(text) = the_text_a_facts_offsets_are_in(session, Some(view), file) else {
         return RenderedText {
             text: format!("<the macro is defined in an unreadable file: {}>", file.display()),
         };
     };
-    let text: &str = &defining.text;
+    let name_offset = name_offset.min(text.len());
 
     // The name's range is the name; the body's range (when there is one) is everything after the parameters, and
     // it is stored precisely so that a consumer does not have to search for the end of the directive.
@@ -541,18 +646,32 @@ fn slice_lines(text: &str, start: usize, end: usize) -> String {
 }
 
 /// `file.h:12` — where something is, as a client can follow.
-fn where_clause(session: &Session<DiskFiles>, file: &std::path::Path, offset: usize) -> String {
+fn where_clause(
+    session: &Session<DiskFiles>,
+    view: Option<&FileView>,
+    file: &std::path::Path,
+    offset: usize,
+) -> String {
     let name = file
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| file.display().to_string());
 
-    match session
-        .files()
-        .held(file)
-        .and_then(|declaring| declaring.position_at(offset))
-    {
-        Some((line, column)) => format!("`{name}:{}:{}`", line + 1, column + 1),
+    // **The view's ruler only for the view's own file.** A declaration in a header carries that header's offsets, and
+    // translating those through *this* file's rendering would move them somewhere they never were. For the file being
+    // viewed the offsets are the rendering's, so asking the file's line index answers with a line number from a
+    // different document: measured, a class on line 6 of a file with five `#include`s above it was announced as
+    // `main.cpp:1:7` — the column right and the line five short.
+    let asked = match view {
+        Some(view) if is_the_viewed_file(view, file) => crate::util::position_at_offset(view, offset),
+        _ => session
+            .files()
+            .held(file)
+            .and_then(|declaring| crate::util::position_in_file(declaring, offset)),
+    };
+
+    match asked {
+        Some(position) => format!("`{name}:{}:{}`", position.line + 1, position.character + 1),
         None => format!("`{name}`"),
     }
 }

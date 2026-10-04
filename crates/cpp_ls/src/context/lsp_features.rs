@@ -92,6 +92,22 @@ impl LspFeatures {
             .unwrap_or_default()
     }
 
+    /// May the server ask the client to ask again for the inlay hints it is showing?
+    ///
+    /// The capability that makes a hint answer **repairable**. A request that arrives while the index is still
+    /// reading is answered with *fewer* hints than the file deserves — a callee in a file nobody has read yet
+    /// resolves to nothing, and a hint naming the wrong parameter would be worse than none — so the answer changes
+    /// without the document changing, which is the one case a client cannot notice by itself. See
+    /// [`Client::refresh_inlay_hints`], where the measurement behind this lives.
+    pub fn supports_refresh_inlay_hint(&self) -> bool {
+        self.client_capabilities
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.inlay_hint.as_ref())
+            .and_then(|hint| hint.refresh_support)
+            .unwrap_or_default()
+    }
+
     pub fn supports_dynamic_watched_files_registration(&self) -> bool {
         self.client_capabilities
             .workspace

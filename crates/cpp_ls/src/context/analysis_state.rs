@@ -109,6 +109,68 @@ impl AnalysisState {
         tokio::time::timeout(timeout, self.work.notified()).await.is_ok()
     }
 
+    /// **Wait until the analysis has nothing queued — bounded, and cancellable, and holding no lock.**
+    ///
+    /// # Why a question waits instead of answering what it has
+    ///
+    /// Every answer here is built to degrade rather than lie: a name whose declaration has not been read yet is
+    /// *skipped*, so an index that is still filling gives **fewer** results and never wrong ones. That is the right
+    /// trade for a server that may be asked at any instant — but on its own it makes the first minute of a session
+    /// look broken. Measured on a report: opening a file showed **no inlay hints at all** and a completion list of
+    /// nothing but keywords, while hover worked — because hover's answer comes from the file's own text and the
+    /// other two need the declarations of things the file includes. The index was empty and said so by being quiet.
+    ///
+    /// # Why it is not a lock
+    ///
+    /// The session is behind an `RwLock` and the pump needs it to make progress, so *holding* anything while waiting
+    /// for the pump is a deadlock by construction — and a lock cannot be cancelled, which is the other half of the
+    /// same mistake. So this takes the lock only to **ask a question** (`is_idle`), releases it, and then waits on
+    /// the pump's own notification with nothing held. What makes the wait finite is the budget; what makes it
+    /// polite is the cancellation token, which a client sets the moment the user types another character — the
+    /// answer being waited for is about a cursor that no longer exists.
+    ///
+    /// Returns whether the session settled. `false` means the budget ran out or the client gave up, and the caller
+    /// answers with what it has — which is exactly what it would have answered without this.
+    pub async fn settle(&self, cancel: Option<&tokio_util::sync::CancellationToken>, budget: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + budget;
+        loop {
+            // **Asked, not held.** `is_idle` is the indexing queue's question; the cooking backlog is deliberately
+            // not part of it, because a cooked reading arrives *after* the declarations a first answer needs and
+            // waiting for it would put a file's whole include closure in front of every keystroke.
+            if self.with_snapshot(|session| session.is_idle()).unwrap_or(true) {
+                return true;
+            }
+
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+
+            // **`sleep`, and never `wait_for_work`.**
+            //
+            // The first version of this waited on the pump's own `Notify`, and that is what broke the feature it was
+            // written to fix. `Notify` stores **one** permit: the edit's `wake` leaves it for the pump, this loop
+            // polls first and **takes it**, the pump never wakes, the queue never drains, `is_idle` is never true,
+            // and every request after an edit waits out the whole budget while the client cancels long before. That
+            // is exactly the shape of the report — *"the first one works and then completion and the hints are
+            // gone"* — and exactly why hover and diagnostics were unaffected: neither of them touches the queue.
+            //
+            // A sleep cannot steal anything. It costs at most this delay in noticing that the drain finished, and the
+            // pump keeps every wake-up it was sent. The cancellation still ends the wait at once.
+            tokio::select! {
+                _ = tokio::time::sleep(left.min(Duration::from_millis(10))) => {}
+                _ = async {
+                    match cancel {
+                        Some(token) => token.cancelled().await,
+                        // No token is no cancellation: a caller that has none waits out the budget, which is the
+                        // honest reading of "nobody can tell me to stop".
+                        None => std::future::pending::<()>().await,
+                    }
+                } => return false,
+            }
+        }
+    }
+
     /// Run `f` against the live session, or answer `None` when no workspace has been opened.
     pub fn with_snapshot<T>(&self, f: impl FnOnce(&Session<DiskFiles>) -> T) -> Option<T> {
         let session = self.read();

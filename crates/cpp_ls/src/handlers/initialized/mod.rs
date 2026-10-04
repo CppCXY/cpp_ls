@@ -333,6 +333,34 @@ async fn index_in_background(context: ServerContextSnapshot) {
                 // nobody takes is missing). Nothing else would ask again: the per-change task has already published,
                 // and a push client has no reason to re-request a file it did not touch.
                 republish_open_file_diagnostics(&context).await;
+
+                // **…and the hints, for the same reason and with a measurement of their own.**
+                //
+                // A hint's parameter names come from the callee's declaration, so a request that arrives while the
+                // index is filling is answered with fewer hints — a callee nobody has read yet resolves to nothing,
+                // and a hint naming the wrong parameter would be worse than none. The answer therefore changes
+                // without the document changing, and inlay hints carry no "incomplete" flag: a client that asked
+                // once has no reason to ask again.
+                //
+                // Measured on the report that raised this: an edit re-queues the file for **~48 ms**, the editor asks
+                // for hints immediately afterwards, and a person typing is inside that window at every keystroke —
+                // so the hints vanished exactly while the code was being written. The handler used to refuse during
+                // that window, which made it permanent; it now answers from what is known, and this is what makes
+                // the incomplete answer whole.
+                if context.lsp_features().supports_refresh_inlay_hint() {
+                    log::info!("the queue drained; asking the client to ask again for its inlay hints");
+                    context.client().refresh_inlay_hints();
+                } else {
+                    // **Said out loud, because this is the half that cannot be tested from inside the server.** An
+                    // inlay hint has no "incomplete" flag, so a client that asked during the window holds an empty
+                    // answer until something moves it — and the only thing that can is this request. A client that
+                    // does not advertise `workspace.inlayHint.refreshSupport` gets no repair, and one log line is
+                    // the difference between "the fix did not work" and "the client was never told".
+                    log::info!(
+                        "the queue drained, but this client does not advertise \
+                         `workspace.inlayHint.refreshSupport`, so its hints stay as they are"
+                    );
+                }
             }
             was_pending = false;
 

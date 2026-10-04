@@ -188,4 +188,20 @@ impl ClientProxy {
     pub fn refresh_workspace_diagnostics(&self) {
         self.send_request_no_response("workspace/diagnostic/refresh", ());
     }
+
+    /// Ask the client to ask again for the inlay hints it is showing.
+    ///
+    /// **The answer changes without the document changing**, which is the one case a client cannot notice by itself.
+    /// A hint's parameter names come from the declaration the callee resolves to, and a callee in a file the index
+    /// has not read yet resolves to nothing — so a request that arrives during indexing is answered with **fewer**
+    /// hints, and the client has no reason to ask a second time: its document did not change, and inlay hints carry
+    /// no "incomplete" flag the way completion does.
+    ///
+    /// Measured on a real report, this is what "the hints never come back after I type" was: an edit re-queues the
+    /// file, the hint request the editor sends immediately afterwards lands inside that window, and a person typing
+    /// is inside it at every keystroke. The window is ~48 ms and it is not the cost that matters — it is that
+    /// **nothing ever told the client to look again**.
+    pub fn refresh_inlay_hints(&self) {
+        self.send_request_no_response("workspace/inlayHint/refresh", ());
+    }
 }

@@ -59,6 +59,15 @@ fn main() {
         .and_then(|at| std::env::args().nth(at + 1))
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(usize::MAX);
+    // **Cook the files in the list before reading them**, which is what the product does for the files it was
+    // asked about and which this probe did not do at all.
+    //
+    // The distinction is the whole of a round lost: a member lookup reaches a class through the **index**, and a
+    // file's cooked reading is in that index only once something has cooked it. `view_of_the_rendering` renders
+    // without inserting, so a probe that only called it measured every *included* header through its **raw**
+    // summary — which for `<xstring>` is 15% of itself. `--cook` inserts, which is what a session does for the
+    // file a request names and for the direct includes of the file a reader has open.
+    let cook_first = std::env::args().any(|argument| argument == "--cook");
 
     let paths: Vec<PathBuf> = std::fs::read_to_string(&list)
         .expect("the list reads")
@@ -109,6 +118,12 @@ fn main() {
     let mut refusals: HashMap<String, usize> = HashMap::new();
 
     for path in paths.iter().take(limit) {
+        // **Into the index, not only rendered.** See `cook_first`: a probe that renders without inserting reads
+        // every *other* file through its raw summary, and the raw summary of a standard-library header is a fraction
+        // of what a compiler sees.
+        if cook_first {
+            session.cook(path);
+        }
         // **The rendering, built here rather than waited for.** `Session::view` answers from the file's own tokens
         // when no rendering is cached yet and asks the work loop for one — which is right for an editor, where a
         // query must not block, and wrong for a probe: it takes one look per file, so it would measure the reading

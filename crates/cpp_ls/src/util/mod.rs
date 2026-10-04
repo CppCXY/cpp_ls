@@ -19,7 +19,7 @@ mod uri;
 
 pub use catch_unwind::catch_unwind;
 pub use kind::symbol_kind;
-pub use position::{offset_at_position, position_at_offset, position_in_file};
+pub use position::{offset_at_position, position_at_offset, position_in_file, view_and_offset_at};
 // `position_in_file` is the one a handler wants (a file the VFS is holding); `position_in` is the piece it is built
 // from, and what a handler with a view's own text and line index uses.
 pub use time_cancel_token::time_cancel_token;

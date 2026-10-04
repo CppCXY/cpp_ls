@@ -53,23 +53,50 @@ pub async fn on_inlay_hint(
         context.analysis().prepare(&path).await;
     }
 
+    // **A hint waits for the analysis, because nothing else will ask again.**
+    //
+    // A hint's parameter names come from the declaration the callee resolves to, so a request that arrives while the
+    // index is filling is answered with **no hints at all** — measured on a report: opening a file showed nothing
+    // while hover worked, because hover's answer comes from the file's own text and a hint's does not. Inlay hints
+    // carry no "incomplete" flag either, so a client has no reason to ask a second time and the empty answer stands
+    // until something else moves the editor.
+    //
+    // So this is the query that waits. The budget is short and the wait is cancellable — see
+    // [`AnalysisState::settle`] for why it holds no lock, and why a budget is what makes it finite. A settled
+    // session pays one lock acquisition here and answers immediately.
+    context
+        .analysis()
+        .settle(Some(&cancel_token), std::time::Duration::from_millis(2000))
+        .await;
+
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
+        // **The file's own tokens, deliberately, and this is not the fallback it looks like.**
+        //
+        // The analysis does not need this file's macros to name a call's parameters: the names come from the
+        // *callee's* declaration, which is in another file and unaffected by anything typed here. Measured on a
+        // 31-line file with four `#include`s: the same question yields **4 hints on either reading**, so asking for
+        // the rendering would buy nothing and cost a render plus a parse of the file at every keystroke.
+        //
+        // It also keeps the two coordinate systems apart by construction. A hint's offset comes back in *this*
+        // view's coordinates and is placed with the file's line index — which is the same thing exactly when the
+        // view is the file's own tokens. Asking for a rendering here would silently move every hint by however many
+        // lines the directives had taken out, which is the mistake the hover handler had.
         let view = session.view_of_the_file(&path)?;
         let held = session.files().held(&view.path)?;
 
-        // **No answer while the index is still reading.** A hint's parameter names come from the declaration the
-        // callee resolves to, and a callee in a file that has not been read yet resolves to nothing — so the honest
-        // answer here is the one the protocol has for "ask again later", not an empty list, which says "there is
-        // nothing to draw". The client re-asks on the next edit or scroll.
-        if session.pending() > 0 {
-            log::debug!(
-                "no hints yet: {} file(s) are queued, and a callee in one of them would have no parameters",
-                session.pending()
-            );
-            return None;
-        }
-
+        // **Answered from what is known, rather than withheld until everything is.**
+        //
+        // This used to return `None` while any file was queued, on the reasoning that a callee in a file nobody has
+        // read yet resolves to nothing. That reasoning is right about the *cause* and wrong about the *remedy*: an
+        // unresolved callee is **skipped** by `parameter_hints`, so an index still filling gives fewer hints and
+        // never a wrong one — the same trade [`Session::classified_names`] makes in its own words.
+        //
+        // Withholding instead made the feature disappear. An edit re-queues the file, and the client asks for hints
+        // immediately afterwards: measured, the queue is non-empty for **~48 ms** after a keystroke, and a person
+        // typing is inside that window at every stroke. So the hints vanished exactly while they were being written
+        // — which is what the report said, in those words. What makes the incomplete answer repairable is the
+        // refresh the pump sends when the queue drains, not a refusal here.
         let hints = session.inlay_hints(&view, visible_range(&view, requested)?);
 
         Some(

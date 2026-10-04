@@ -58,7 +58,7 @@ use tokio_util::sync::CancellationToken;
 use super::RegisterCapabilities;
 use crate::handlers::hover::documentation_text;
 use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
-use crate::util::{offset_at_position, position_at_offset, uri_to_file_path};
+use crate::util::{position_at_offset, uri_to_file_path, view_and_offset_at};
 
 pub async fn on_completion(
     context: ServerContextSnapshot,
@@ -97,10 +97,31 @@ pub async fn on_completion(
         crate::handlers::read_the_modules(&context, &path, true).await;
     }
 
+    // **A completion waits too, and for the same measured reason.**
+    //
+    // The list is built to degrade rather than lie — a name whose declaration has not been read is skipped — so an
+    // index that is still filling gives fewer items and never wrong ones. Measured on a report: opening a file
+    // showed a popup of **nothing but keywords** while hover worked, which is precisely what "fewer" looks like when
+    // there is nothing to be less than. The list says `is_incomplete`, so a client does ask again — but only when
+    // the user types, and the first look at a file deserves the same answer as the second.
+    //
+    // The budget is deliberately the same short one the hints use: a settled session pays one lock acquisition, and
+    // a session that is still reading gives its answer after two seconds rather than never.
+    context
+        .analysis()
+        .settle(Some(&cancel_token), std::time::Duration::from_millis(2000))
+        .await;
+
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
-        let view = session.view(&path)?;
-        let offset = offset_at_position(&view, position)?;
+        // **A position the rendering cannot place is answered from the file's own tokens, not refused** — see
+        // [`view_and_offset_at`], which is where that decision lives and why. `Session::view` hands back a
+        // rendering, and a rendering does not contain the `#include` lines, the comments or whatever a conditional
+        // excluded: a cursor in one of them has nowhere to map to, and this handler used to return that `None` to
+        // the client, which is **no list at all**. The cursor lands there constantly — the end of a line is a
+        // newline, and the newline above a function is often inside what the directives took out — and the server's
+        // own log recorded it: `completion at main.cpp:425 (asked line 23 character 5, on '\n')`.
+        let (view, offset) = view_and_offset_at(session, &path, position)?;
 
         let found = session.completions(&view, offset);
         log_a_member_that_produced_no_members(
@@ -114,7 +135,14 @@ pub async fn on_completion(
         Some(CompletionResponse::List(lsp_types::CompletionList {
             // See the module documentation: pending work means "a file may not have been read yet", a capped list
             // means "there are more names than fitted, and the next keystroke asks a narrower question".
-            is_incomplete: session.pending() > 0 || found.truncated,
+            // **An empty list is never final**, and this is the third case — added after a report that named it
+            // exactly: *"the first time I type `s` I get `std` and the rest; I delete it and type `s` again and
+            // there is no completion at all"*. `isIncomplete: false` tells the client the list stands for the whole
+            // prefix, so a final **empty** answer is cached as "nothing here" and the next keystroke that deserves
+            // an answer is never asked. Every reason the list can be empty is temporary: the file's summary was just
+            // dropped by an edit, a declaration it needs has not been read yet, the cursor is mid-word in a way this
+            // layer cannot see. None of them is a fact about the prefix.
+            is_incomplete: found.items.is_empty() || session.pending() > 0 || found.truncated,
             items: found
                 .items
                 .iter()

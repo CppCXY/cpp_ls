@@ -2411,10 +2411,27 @@ fn agreeing_type(
     let mut agreeing: Option<(DeclFact, PathBuf)> = None;
 
     for found in &candidates {
-        let type_of = found.fact.type_of.as_deref()?;
+        // **A class's type is the class**, and reading `type_of` alone said otherwise.
+        //
+        // `DeclFact::type_of` is what a declaration wrote *as a type of something else* — a variable's type, an
+        // alias's target — and a class has none, so the `?` below returned `None` for the whole list the moment one
+        // candidate was a class. Measured on the report that started this: `std::vector` is declared thirteen times
+        // (the primary template, `vector<bool>`, the deduction guides), every one of them a class, and
+        // `auto x = std::vector<int>();` was refused as `UnknownType("std::vector<int>")` while `ns::Box<int>()` —
+        // **one** declaration, in a fixture — deduced. The candidates were never disagreeing; they were being read
+        // with a field that is not the answer for a class.
+        //
+        // A class candidate therefore agrees with every other class candidate **of the same qualified name**, which
+        // is what makes `std::vector` and its partial specialisations one answer rather than thirteen.
+        let type_of = match found.fact.kind {
+            crate::DeclKind::Type => found.fact.qualified_name(),
+            _ => found.fact.type_of.clone()?,
+        };
+
         match &agreeing {
             None => agreeing = Some((found.fact.clone(), found.file.clone())),
-            Some((first, _)) if first.type_of.as_deref() == Some(type_of) => {}
+            Some((first, _)) if first.type_of.as_deref() == Some(type_of.as_str()) => {}
+            Some((first, _)) if first.kind == crate::DeclKind::Type && first.qualified_name() == type_of => {}
             Some(_) => return None,
         }
     }
@@ -3159,6 +3176,21 @@ fn written_like_a_macro(word: &str) -> bool {
 fn writes_a_name(written: &str) -> bool {
     let spelling = written.strip_prefix("::").unwrap_or(written);
 
+    // **A whole expression is not a name**, and this is the half that keeps the widening below from swallowing one.
+    //
+    // `static_cast<T>(y)` has no `::` trouble and its segments pass once the argument list comes off — but the name
+    // arm asks its question at the **last identifier**, which is `y` there, so the answer became `int` for a cast
+    // that names `T`. Measured by a test that had been passing: `a cast names the type it casts to: int`. The arms
+    // below this gate exist for exactly those spellings, and a gate that lets them through answers a different
+    // question than the caller asked.
+    //
+    // What is left after this test is a name: `std::vector<int>` and `A<B>::C<D>` pass, `f(x)`, `a + b`, `{1, 2}`
+    // and `static_cast<T>(y)` do not. `,` is in the list because `A<B, C>` is a name and `f(a, b)` is not — and
+    // after the argument list comes off, the two are otherwise the same shape.
+    if spelling.contains('(') || spelling.contains(')') || spelling.contains(',') {
+        return false;
+    }
+
     !spelling.is_empty()
         && spelling
             .split("::")
@@ -3166,7 +3198,21 @@ fn writes_a_name(written: &str) -> bool {
             // and the name it stands in front of. A segment with a space in the middle of a word (`_STD  f` with
             // two) is still a run, because `split_whitespace` is what reads it.
             .all(|segment| {
-                let mut words = segment.split_whitespace();
+                // **A template-id is still a name, and this gate used to say it was not.**
+                //
+                // `std::vector<int>` splits on `::` into `std` and `vector<int>`, and the second is not an
+                // identifier — so the gate refused, the whole name lookup was **skipped**, and the answer was
+                // `UnknownType("std::vector<int>")`. Measured on the report that started this: `auto x =
+                // std::vector<int>();` refused while `std::vector<int> v;` worked, because a *declaration's* type
+                // is read by another reader — one that understands a template-id — and only the call path came
+                // through here.
+                //
+                // What comes off is the argument list, not the name: `A<B>::C<D>` is two segments and the name of
+                // the first is `A`. A spelling that only *looks* like a template-id (`i<n` from a comparison the
+                // grammar read as one) is harmless: this is a gate, and the lookup that follows finds nothing for a
+                // name nobody declared.
+                let bare = segment.split('<').next().unwrap_or(segment);
+                let mut words = bare.split_whitespace();
                 words.clone().count() > 0 && words.all(is_an_identifier)
             })
 }
@@ -3368,6 +3414,21 @@ fn written_template_arguments(callee: &cpp_parser::CppSyntaxNode) -> Vec<Type> {
     };
 
     crate::sema::types::read_template_arguments(&list)
+}
+
+/// **The scope a bare class name was declared in**, as `scope::name`, from the index.
+///
+/// The companion of the note in [`member_fact`]: a member query arrives with the spelling the *use* wrote, and an
+/// unqualified one names a class whose declaration is filed under a scope the use did not spell out. This is the
+/// step that recovers it — by bare name, over the files visible from `from`, taking the first declaration that has
+/// a scope at all.
+///
+/// `None` when nothing declares the name, or when the only declaration has no scope (a class at file scope is
+/// already spelled correctly, and qualifying it would look for `::Widget`).
+fn qualified_from_the_index(index: &ProjectIndex, from: &Path, class: &str) -> Option<String> {
+    let found = index.files_declaring(class, from).into_iter().next()?;
+    let scope = found.fact.scope.as_deref()?;
+    (!scope.is_empty()).then(|| format!("{scope}::{class}"))
 }
 
 /// The declaration a **callee expression** names — `make` in `make()`, `fac.build` in `fac.build()`.
@@ -3635,6 +3696,33 @@ fn member_fact(
 
     if let Some(found) = direct_member(index, scopes, root, path, class, member) {
         return Known::Yes(found);
+    }
+
+    // **An unqualified class name has to be looked up in a scope, and this is where that was missing.**
+    //
+    // The spelling a member query arrives with is the one the *use* wrote, and a use inside a namespace writes the
+    // class without it: MSVC's `<vector>` says `_Compressed_pair<_Alty, _Scary_val> _Mypair;` and then
+    // `_Mypair._Myval2`, because the file is inside `_STD_BEGIN`. The fact is filed under `std::_Compressed_pair` —
+    // correctly, from the rendering — and `declarations_in("_Compressed_pair")` therefore finds nothing at all.
+    //
+    // Measured on `<vector>`: **42 `auto` declarations refused with `NotDeclaredHere("_Compressed_pair::_Myval2")`**
+    // — every `auto& _My_data = _Mypair._Myval2;` in the file — while `v.size()` on a `std::vector<int>` worked,
+    // because *that* spelling was qualified by the reader who wrote it. The difference looked like an alias problem,
+    // then a partial-specialization problem, for several rounds; it is neither.
+    //
+    // The scope is found the way the base-clause note above finds one for a base name — from the declaration, which
+    // is the only thing that knows where it was written. [`ProjectIndex::files_declaring`] searches by **bare name**,
+    // so an unqualified spelling reaches a declaration filed under any scope; the first visible one is taken, which
+    // is the same choice [`resolve_aliases`] makes and for the same reason.
+    //
+    // Only for a **bare** name: `std::_Compressed_pair` and `_Compressed_pair` are different questions, and a
+    // qualified spelling that found nothing has already said which scope it meant.
+    if !class.contains("::") {
+        if let Some(declared_in) = qualified_from_the_index(index, path, class) {
+            if let Some(found) = direct_member(index, scopes, root, path, &declared_in, member) {
+                return Known::Yes(found);
+            }
+        }
     }
 
     // Inherited members, **level by level**: a member of a direct base hides a member of that base's own base,
@@ -5204,7 +5292,21 @@ impl ProjectIndex {
             };
 
             for fact in candidates.filter(|fact| contributes(fact)) {
-                if raw.iter().any(|known| known.name == fact.name && known.kind == fact.kind) {
+                // **By the whole qualified name, not by `(name, kind)`.** The two readings place a declaration in
+                // the same scope *usually*, and the exception is the reason the cooked reading exists: `_STD_BEGIN`
+                // is `namespace std {` to a compiler and an ordinary identifier to a file read on its own, so
+                // `<xstring>`'s raw reading files `basic_string::size` where its cooked reading files
+                // `std::basic_string::size`. Those are two different entities to every lookup there is, and
+                // collapsing them by `(name, kind)` dropped the one a query asks for.
+                //
+                // Measured: `std::string::size()` and `std::basic_string<char>::size()` both answered
+                // `NotDeclaredHere` **while the fact was in the index**, because the raw twin had won the
+                // deduplication and its scope was `basic_string`. `std::vector<int>::size()` worked, which is what
+                // made the difference look like an alias problem for a round. Two facts that differ only by scope
+                // are two declarations; one that differs by nothing is one.
+                if raw.iter().any(|known| {
+                    known.name == fact.name && known.kind == fact.kind && known.scope == fact.scope
+                }) {
                     continue;
                 }
                 found.push(VisibleDeclaration {

@@ -2676,6 +2676,26 @@ fn line_of(text: &str, needle: &str) -> u64 {
         .expect("a fixture this size fits in a u32")
 }
 
+/// **The inlay fixture whose callee is in a header** — the shape a reported file has, and the one that makes the
+/// refusal visible.
+///
+/// The fixture below declares `scale` in the same file it is called from, which hides the bug the refusal caused:
+/// an edit drops that file's summary, so the analysis itself answers nothing until the drain, and a test cannot tell
+/// "refused" from "honestly empty". A callee in a header is untouched by an edit to the file that calls it, so the
+/// answer is available the whole time — and anything that suppresses it is then the only thing being measured.
+const INLAY_HEADER: &str = "\
+#pragma once
+double scale(int count, double factor);
+";
+
+const INLAY_ACROSS_FILES: &str = "\
+#include \"widget.h\"
+
+double f(int count) {
+    return scale(count, 1);
+}
+";
+
 /// The inlay fixture: a call whose argument already spells the parameter, one that does not, and a member call.
 const INLAY_CPP: &str = "\
 double scale(int count, double factor);
@@ -2691,11 +2711,122 @@ double f(Widget& w, int count) {
 
 /// **A parameter name is drawn at the argument — and not where the argument already says it.**
 ///
+/// **The hints a person is actually looking at**: asked one turn after an edit, with the queue still busy.
+///
+/// This is the case that made the feature look broken, and the report was exact: *"as soon as I have edited the code
+/// the inlay hints stop appearing"*. The handler answered `null` — not an empty list, a refusal — while
+/// `Session::pending() > 0`, on the reasoning that a callee in a file nobody has read yet resolves to nothing. The
+/// reasoning is right about the cause and wrong about the remedy: `parameter_hints` **skips** an unresolved callee,
+/// so a filling index yields fewer hints and never a wrong one.
+///
+/// What that cost, measured on a 31-line file with four `#include`s: an edit leaves the queue busy for **~48 ms**,
+/// the editor asks for hints immediately afterwards, and a person typing is inside that window at every keystroke.
+/// The hints vanished exactly while the code was being written. Measured with `examples/edit_cost_probe`, the same
+/// question about the same file returns **4 hints on the file's own tokens with the index complete** — so the
+/// reading was never the problem and the refusal was the whole of it.
+///
+/// The ask here waits for **the first answer that is not a refusal**, and then edits and asks **once**, with no
+/// retry: a retry would let the queue drain and measure the wrong thing.
+///
+/// # What this test does not prove, recorded because it was tried
+///
+/// It **passes with the refusal put back**. The notification and the request are two messages and the server drains
+/// in between — the window is ~48 ms, and this test does not control the race. The instrument that does show the
+/// window is `examples/edit_cost_probe`, which holds the two apart deliberately: it asks at a known queue depth and
+/// reports the depth and the count together.
+///
+/// And even there one number is ambiguous, which is worth knowing before trusting it: for a fixture whose callees
+/// are declared **in the edited file**, the analysis itself answers nothing until the drain, because the edit
+/// dropped that file's summary — so "the refusal" and "the honest empty answer" read the same. The reported file is
+/// the other shape: its calls are into headers (`std::format`, `printf`), whose declarations the edit did not
+/// touch, so the analysis had the answer all along and only the refusal was hiding it.
+#[test]
+fn the_hints_survive_the_edit_that_asks_for_them() {
+    let project = Project::new("inlay-hints-after-an-edit");
+    project.write("widget.h", INLAY_HEADER);
+    project.write("main.cpp", INLAY_ACROSS_FILES);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+    let whole = json!({
+        "start": { "line": 0, "character": 0 },
+        "end": { "line": INLAY_ACROSS_FILES.lines().count(), "character": 0 },
+    });
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": { "textDocument": { "inlayHint": {} } },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": main_uri,
+                "languageId": "cpp",
+                "version": 1,
+                "text": INLAY_ACROSS_FILES,
+            }
+        }),
+    );
+
+    // Settled first, so that what is measured below is the **edit** and not the initial index.
+    let settled = server.ask_until_it(
+        100,
+        |id| {
+            json!({
+                "id": id,
+                "method": "textDocument/inlayHint",
+                "params": { "textDocument": { "uri": main_uri }, "range": whole },
+            })
+        },
+        |answer| answer["result"].as_array().is_some_and(|hints| !hints.is_empty()),
+    );
+    assert!(
+        settled["result"].as_array().is_some_and(|hints| hints.len() == 1),
+        "one argument that does not spell its parameter: {settled}"
+    );
+
+    // **One keystroke**, in a function body: no directive moves, so this is the cheapest edit there is — and it is
+    // the one whose hint request used to be refused. The callee is in `widget.h`, which the edit does not touch, so
+    // the analysis can answer immediately and nothing but a refusal can be suppressing it.
+    let edited = INLAY_ACROSS_FILES.replace("return scale(count, 1);", "return scale(count, 1) ;");
+    server.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": main_uri, "version": 2 },
+            "contentChanges": [{ "text": edited }],
+        }),
+    );
+
+    let after = server.request(
+        200,
+        "textDocument/inlayHint",
+        json!({ "textDocument": { "uri": main_uri }, "range": whole }),
+    );
+    let hints = after["result"].as_array().unwrap_or_else(|| {
+        panic!("**the hints were refused outright after an edit**: {after}")
+    });
+    assert_eq!(
+        hints.len(),
+        1,
+        "an edit that moves no directive changes nothing a hint depends on, and the callee is in a header: {after}"
+    );
+}
+
 /// Three arguments, two hints: `scale(count, …)` needs no `count:` in front of `count`, `1` is the second
 /// parameter however it is spelled, and the member call's argument is named by the *member's* declaration rather
-/// than by anything in the calling file. The request is refused (`null`) until the index has read everything,
-/// which is why this goes through `ask_until`: a hint whose callee has not been read yet would be *missing* rather
-/// than wrong, and "no hints" is not something a client should be told while that is true.
+/// than by anything in the calling file.
+///
+/// The `ask_until` below is about the **index**, not about a refusal: this request is made before the workspace has
+/// been read at all, when the callee genuinely has no declaration to take parameter names from, and the answer is an
+/// empty list. It is the loop that gets it past that moment — see
+/// [`the_hints_survive_the_edit_that_asks_for_them`] for the case that used to be answered with `null` instead.
 #[test]
 fn parameter_names_are_drawn_at_the_arguments() {
     let project = Project::new("inlay-hints");
@@ -3052,4 +3183,315 @@ fn a_signature_survives_being_inside_a_macro_argument() {
         json!(1),
         "the second argument is the one being typed: {answer}"
     );
+}
+
+/// **What the popup says, for every shape a declaration comes in** — printed, not asserted.
+///
+/// A hover is the one answer a reader judges by how it *looks*, and no assertion states that well. This exists so
+/// the shapes can be read side by side while the rendering is being changed: a template, a member function with a
+/// body, a documented class, a variable the file gave no type to, and a member of a class template from another
+/// file. Ignored by default — run it with `--ignored --nocapture`.
+#[test]
+#[ignore = "a reading aid: it prints popups rather than checking them"]
+fn what_the_popups_look_like() {
+    let project = Project::new("hover-shapes");
+    project.write(
+        "box.h",
+        "#pragma once\n\
+         /// A box that holds one `T`.\n\
+         ///\n\
+         /// The documentation is the file's own words.\n\
+         template <class T>\n\
+         class Box {\n\
+         public:\n\
+             /// What is in the box.\n\
+             T get() const { return v; }\n\
+             T v;\n\
+         };\n",
+    );
+    project.write(
+        "main.cpp",
+        "#include \"box.h\"\n\
+         \n\
+         int main() {\n\
+             auto n = 1;\n\
+             Box<int> b;\n\
+             b.v = n;\n\
+             return 0;\n\
+         }\n",
+    );
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+    let main_text = "#include \"box.h\"\n\nint main() {\n    auto n = 1;\n    Box<int> b;\n    b.v = n;\n    \
+                     return 0;\n}\n";
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": { "textDocument": { "hover": {} } },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": main_text }
+        }),
+    );
+
+    // (line, character, what is being hovered) — 0-based, as a client sends them.
+    let asked: [(u64, u64, &str); 5] = [
+        (3, 9, "the local `n`, whose type is an `auto` the file wrote"),
+        (4, 4, "`Box` in `Box<int> b;` — a class template from a header"),
+        (5, 6, "the member `v` of that class template"),
+        (4, 13, "the variable `b`, whose type is that class template"),
+        (1, 4, "`main` itself, a function this file defines"),
+    ];
+
+    for (line, character, what) in asked {
+        let mut answer = server.ask_until_it(
+            100,
+            |id| {
+                json!({
+                    "id": id,
+                    "method": "textDocument/hover",
+                    "params": {
+                        "textDocument": { "uri": main_uri },
+                        "position": { "line": line, "character": character },
+                    },
+                })
+            },
+            |answer| !answer["result"].is_null(),
+        );
+        // Asked more than once so the server has had the turns it needs to read the file the way a client that
+        // waited gets it — see the note in the coordinate test above.
+        for _ in 0..4 {
+            answer = server.ask_until_it(
+                100,
+                |id| {
+                    json!({
+                        "id": id,
+                        "method": "textDocument/hover",
+                        "params": {
+                            "textDocument": { "uri": main_uri },
+                            "position": { "line": line, "character": character },
+                        },
+                    })
+                },
+                |answer| !answer["result"].is_null(),
+            );
+        }
+        let markdown = answer["result"]["contents"]["value"]
+            .as_str()
+            .unwrap_or("<no popup>")
+            .to_string();
+        println!("=== {line}:{character} — {what} ===\n{markdown}\n");
+    }
+}
+
+/// **A declaration's own line, when the file it is in is the file being read.**
+///
+/// The tooltip's last line is `file:line:column`, and the line is the one part of this server that can be wrong
+/// without anything looking broken: a fact about a declaration in **another** file carries that file's offsets,
+/// while a fact about a declaration in **the file being viewed** comes from the view's own tree — whose offsets are
+/// the **rendering's**, because the rendering is what the parser was handed, and whose line numbers are therefore
+/// short by however many `#include` and `#define` lines the directives took out.
+///
+/// Measured on a real report: a class on line 6 of a file with five `#include`s above it was announced as
+/// `main.cpp:1:7` — **the column right and the line five short**, which is exactly the number of lines between them.
+/// The existing hover test cannot catch it: its declaration is in a header, so it takes the other branch.
+///
+/// The criterion is the line and the column together, because the column is what was right in the report — a test
+/// that only checked "which file" would pass on the broken answer.
+#[test]
+fn a_declaration_in_the_viewed_file_is_reported_on_its_own_line() {
+    let project = Project::new("hover-coordinates");
+    // Five lines of directives above the class, so a rendering that drops them is five lines short — the number in
+    // the report, and the number that makes the difference visible rather than rounded away.
+    project.write(
+        "main.cpp",
+        "#include <vector>\n\
+         #include <string>\n\
+         #include <format>\n\
+         #include <iostream>\n\
+         \n\
+         class Sux {\n\
+         public:\n\
+             void print() {}\n\
+         };\n\
+         \n\
+         int main() {\n\
+             Sux sux;\n\
+             return 0;\n\
+         }\n",
+    );
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": { "textDocument": { "hover": {} } },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": main_uri,
+                "languageId": "cpp",
+                "version": 1,
+                "text": "#include <vector>\n#include <string>\n#include <format>\n#include <iostream>\n\n\
+                         class Sux {\npublic:\n    void print() {}\n};\n\nint main() {\n    Sux sux;\n    \
+                         return 0;\n}\n",
+            }
+        }),
+    );
+
+    // **Asked until the file has been read the way a client that waited gets it.**
+    //
+    // `Session::view` answers from the file's own tokens until a rendering exists and builds it for the next query —
+    // a deliberate cost, because a rendering cannot be built behind an `&self`. In that first reading every offset is
+    // the file's, so both readers below agree by accident and a test that asked once would pass on the broken answer.
+    // Measured: with the fix disabled this test still passed, which is what sent it back here.
+    let mut answer = server.ask_until_it(
+        100,
+        |id| {
+            json!({
+                "id": id,
+                "method": "textDocument/hover",
+                "params": {
+                    "textDocument": { "uri": main_uri },
+                    "position": { "line": 11, "character": 4 },
+                },
+            })
+        },
+        |answer| !answer["result"].is_null(),
+    );
+    for _ in 0..4 {
+        answer = server.ask_until_it(
+            100,
+            |id| {
+                json!({
+                    "id": id,
+                    "method": "textDocument/hover",
+                    "params": {
+                        "textDocument": { "uri": main_uri },
+                        "position": { "line": 11, "character": 4 },
+                    },
+                })
+            },
+            |answer| !answer["result"].is_null(),
+        );
+    }
+
+    let markdown = answer["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a hover was expected, got {answer}"));
+    println!("--- the popup about `Sux` ---\n{markdown}\n---");
+    assert!(
+        markdown.contains("main.cpp:6:7"),
+        "the class is written on line 6, column 7 — not on a line measured in the rendering: {markdown}"
+    );
+    // **And the popup's own text, read at the fact's offsets.** Those offsets are the rendering's, so reading the
+    // file's bytes at them lands wherever the directives had taken lines out: measured on the same report, a popup
+    // about `main` began with `tream>`, the tail of `#include <iostream>`, because the four `#include`s above `main`
+    // had moved it 60 bytes. The line *number* was right by then — the two are separate readers and this is the one
+    // that was still wrong.
+    assert!(
+        markdown.contains("class Sux"),
+        "the declaration as it is written, not the bytes at that offset in another document: {markdown}"
+    );
+    assert!(
+        !markdown.contains("tream>"),
+        "and no fragment of an `#include` line: {markdown}"
+    );
+}
+
+/// **The reported file itself, asked at every position a cursor sits in** — printed rather than asserted.
+///
+/// A report in three sentences: *"completion outside a namespace is gone too, and the inlay hints no longer appear
+/// at all"*. The server's own log agrees that the member path declined for both positions it names — a plain name
+/// and a qualifier are not member accesses, so that part is correct — and that the index held 157 files with **0
+/// queued**. So whatever completion answered, it answered from a complete index, and a wrong answer here is the
+/// handler's rather than the analysis's.
+///
+/// A list of a hundred names and an empty list need different fixes, and no assertion states which one came back.
+#[test]
+#[ignore = "a reading aid for a reported file"]
+fn what_the_completion_answers_here() {
+    let Ok(source) = std::fs::read_to_string(r"C:\Users\ZC\Desktop\stdproj\main.cpp") else {
+        println!("the reported file is not on this machine");
+        return;
+    };
+
+    let project = Project::new("completion-report");
+    project.write("main.cpp", &source);
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": { "textDocument": { "completion": {} } },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": source }
+        }),
+    );
+
+    // **Every position a cursor can be typed at**, which is the survey a "completion is gone" report needs: the
+    // handler's own log had already said the member path declined for the two positions it named — correctly, since
+    // a plain name and a qualifier are not member accesses — so what is missing is *which* positions come back
+    // empty, and a list of them is the finding.
+    let mut asked: Vec<(u64, u64)> = Vec::new();
+    for (number, line) in source.lines().enumerate() {
+        let line = line.trim_end();
+        for (column, _) in line.char_indices() {
+            let at = &line[..column];
+            let ends = at
+                .chars()
+                .last()
+                .is_some_and(|last| last.is_alphanumeric() || last == '_' || last == ':' || last == '.');
+            if ends {
+                asked.push((number as u64, column as u64));
+            }
+        }
+    }
+    for (number, character) in asked {
+        let number = number as usize;
+        let body = source.lines().nth(number).unwrap_or("").trim_end();
+
+        let answer = server.request(
+            100 + number as i64,
+            "textDocument/completion",
+            json!({
+                "textDocument": { "uri": main_uri },
+                "position": { "line": number, "character": character },
+            }),
+        );
+        let items = match &answer["result"] {
+            Value::Array(items) => items.len(),
+            Value::Object(object) => object["items"].as_array().map(Vec::len).unwrap_or(0),
+            _ => 0,
+        };
+        let first: Vec<&str> = match &answer["result"] { serde_json::Value::Array(items) => items.iter().filter_map(|i| i["label"].as_str()).take(8).collect(), serde_json::Value::Object(o) => o["items"].as_array().map(|a| a.iter().filter_map(|i| i["label"].as_str()).take(8).collect()).unwrap_or_default(), _ => Vec::new() };
+        println!("{number:>3}: {:<40} -> {items} item(s): {first:?}", body.trim());
+    }
 }
