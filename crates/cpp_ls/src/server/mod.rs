@@ -43,20 +43,7 @@ pub async fn run_ls(cmd_args: CmdArgs) -> Result<(), Box<dyn Error + Sync + Send
 
     // Create async connection wrapper
     let async_connection = AsyncConnection::from_sync(connection);
-    let ended = main_loop::main_loop(async_connection, initialization_params, cmd_args).await;
-
-    // **Why this process is ending, in the log the user can send.**
-    //
-    // A server that is *dead* and a server that is *slow* look identical from inside an editor — completion stops,
-    // hints stop, "everything stalls" — and the difference is the whole of the diagnosis. It was a report of exactly
-    // that shape which sent this line here: the log's last entry was two minutes old and `Get-Process cpp_ls` found
-    // no process at all, with nothing anywhere saying whether it had exited cleanly (the client closed the pipes),
-    // returned an error, or was killed. The `eprintln!` below has always announced a clean shutdown, but stderr goes
-    // to the client's output panel and is not in the file a user sends.
-    match &ended {
-        Ok(()) => log::info!("the main loop returned: the client closed the connection, or asked to exit"),
-        Err(error) => log::error!("the main loop ended with an error: {error}"),
-    }
+    main_loop::main_loop(async_connection, initialization_params, cmd_args).await?;
 
     // The I/O threads are deliberately **not** joined. They read and write the client's pipes, and the reader
     // blocks until the client closes stdin — so joining here would make a clean shutdown (`shutdown`, then `exit`)
@@ -65,5 +52,5 @@ pub async fn run_ls(cmd_args: CmdArgs) -> Result<(), Box<dyn Error + Sync + Send
     drop(threads);
 
     eprintln!("Server shutting down.");
-    ended
+    Ok(())
 }

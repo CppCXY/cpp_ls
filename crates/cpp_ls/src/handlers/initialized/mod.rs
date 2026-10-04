@@ -348,18 +348,7 @@ async fn index_in_background(context: ServerContextSnapshot) {
                 // that window, which made it permanent; it now answers from what is known, and this is what makes
                 // the incomplete answer whole.
                 if context.lsp_features().supports_refresh_inlay_hint() {
-                    log::info!("the queue drained; asking the client to ask again for its inlay hints");
                     context.client().refresh_inlay_hints();
-                } else {
-                    // **Said out loud, because this is the half that cannot be tested from inside the server.** An
-                    // inlay hint has no "incomplete" flag, so a client that asked during the window holds an empty
-                    // answer until something moves it — and the only thing that can is this request. A client that
-                    // does not advertise `workspace.inlayHint.refreshSupport` gets no repair, and one log line is
-                    // the difference between "the fix did not work" and "the client was never told".
-                    log::info!(
-                        "the queue drained, but this client does not advertise \
-                         `workspace.inlayHint.refreshSupport`, so its hints stay as they are"
-                    );
                 }
             }
             was_pending = false;

@@ -124,6 +124,7 @@ pub async fn on_completion(
         let (view, offset) = view_and_offset_at(session, &path, position)?;
 
         let found = session.completions(&view, offset);
+
         log_a_member_that_produced_no_members(
             session,
             &view,

@@ -2720,8 +2720,9 @@ double f(Widget& w, int count) {
 /// so a filling index yields fewer hints and never a wrong one.
 ///
 /// What that cost, measured on a 31-line file with four `#include`s: an edit leaves the queue busy for **~48 ms**,
-/// the editor asks for hints immediately afterwards, and a person typing is inside that window at every keystroke.
-/// The hints vanished exactly while the code was being written. Measured with `examples/edit_cost_probe`, the same
+/// question about the same file returns **4 hints on the file's own tokens with the index complete** — so the
+/// reading was never the problem and the refusal was the whole of it.
+/// two apart deliberately; it was removed with the rest of the scaffolding once the cause was found.
 /// question about the same file returns **4 hints on the file's own tokens with the index complete** — so the
 /// reading was never the problem and the refusal was the whole of it.
 ///
@@ -2732,7 +2733,8 @@ double f(Widget& w, int count) {
 ///
 /// It **passes with the refusal put back**. The notification and the request are two messages and the server drains
 /// in between — the window is ~48 ms, and this test does not control the race. The instrument that does show the
-/// window is `examples/edit_cost_probe`, which holds the two apart deliberately: it asks at a known queue depth and
+/// in between — the window is ~48 ms, and this test does not control the race. The instrument that did show it
+/// was a probe that held the two apart deliberately, and it was removed with the rest of the scaffolding.
 /// reports the depth and the count together.
 ///
 /// And even there one number is ambiguous, which is worth knowing before trusting it: for a fixture whose callees

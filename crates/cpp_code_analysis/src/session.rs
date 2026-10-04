@@ -3153,20 +3153,6 @@ impl<F: FileProvider + Clone> Session<F> {
         crate::inlay::parameter_hints(self.store.index(), view, range, |path| self.view(path))
     }
 
-    /// **The same answer, with a count of every way it could have been empty** — a probe's door.
-    ///
-    /// See [`crate::inlay::parameter_hints_saying_why`]: a hint that is not drawn has four different causes that a
-    /// screenshot cannot tell apart — the callee does not resolve, the declaration has no parameter list, the
-    /// declaration's own **file cannot be read**, the argument is outside the asked range — and each needs a
-    /// different fix. This is how the one that is happening gets named instead of guessed at.
-    pub fn inlay_hints_saying_why(
-        &self,
-        view: &FileView,
-        range: cpp_parser::SourceRange,
-    ) -> (Vec<ParameterHint>, [usize; 6]) {
-        crate::inlay::parameter_hints_saying_why(self.store.index(), view, range, |path| self.view(path))
-    }
-
     /// **What each name in this file is** — the classification a semantic highlighter draws colours from.
     ///
     /// Read from the file's own bindings and macro directives, and from the index for a spelling the file does not

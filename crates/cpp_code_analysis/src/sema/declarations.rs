@@ -787,9 +787,12 @@ fn deduced_returns_of(root: &CppSyntaxNode, binding: &Binding) -> Option<String>
         let written = type_a_return_states(expression, &declaration)?;
         match &agreed {
             None => agreed = Some(written),
-            Some(previous) if *previous == written => {}
             // Two returns of different types: the answer depends on which branch is instantiated, and this layer
-            // does not instantiate.
+            // does not instantiate. Note for the next reader: relaxing this to "agree once references and `const`
+            // come off" — which is what an `auto` initializer strips, and so would be sound for the caller — was
+            // written and **measured at no change** (306 deduced before and after), because the returns that
+            // disagree never reach this comparison: `_Get_unwrapped` returns `_It + 0`, and that expression has no
+            // type to compare until `_Iter` is substituted for `_It`. It belongs with instantiation.
             Some(_) => return None,
         }
     }

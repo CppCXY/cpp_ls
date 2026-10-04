@@ -884,7 +884,69 @@ fn an_alias_target_after_an_unseen_macro_is_one_name() {
 ///    63  a cast                auto x = static_cast<T>(v);
 /// ```
 ///
-/// The two that are **not** that question are refused rather than approximated, and the refusal is asserted too:
+/// **A function template's parameter takes the type of the argument the call passed** — C++'s own deduction, and
+/// the difference between a missing answer and a wrong one.
+///
+/// `template <class _It> auto f(_It p) { return p; }` called as `f(a_pointer)` says `_It = int*` without writing it,
+/// and until this the analysis answered the parameter's **name**: measured on this fixture, `b` deduced as `_It`.
+/// That is worse than a refusal — a refusal says the file did not spell the type, and `_It` reads like one that did.
+///
+/// # Why the assertion is on the whole answer and not on "not `_It`"
+///
+/// `_It` is what the fact's `returns` holds before substitution, so a test that only ruled it out would pass on any
+/// other wrong answer — `int`, `auto`, the argument's spelling with its `&&` left on. The criterion is the type the
+/// call site's argument makes it, which is the only one that is right.
+///
+/// The second half of the fixture is the case the deduction deliberately does **not** do: a parameter written as
+/// `_Ty*` is not the parameter, it *contains* it, so the argument's type has to be taken apart — and a half-done
+/// version of that would pair the wrong argument with the wrong parameter. `d` is therefore asserted to stay
+/// refused rather than to become something plausible.
+#[test]
+fn a_template_parameter_takes_the_type_of_the_argument() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "int* a_pointer = nullptr;\n\
+         template <class _It>\n\
+         auto get_itself(_It p) { return p; }\n\
+         template <class _Ty>\n\
+         auto get_through_a_pointer(_Ty* p) { return p; }\n\
+         void f() {\n\
+             auto b = get_itself(a_pointer);\n\
+             auto d = get_through_a_pointer(a_pointer);\n\
+         }\n",
+    )]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+
+    let facts: Vec<cpp_code_analysis::DeclFact> = session
+        .index()
+        .summaries()
+        .flat_map(|summary| summary.declarations.iter().cloned())
+        .collect();
+
+    let deduced = |name: &str| -> String {
+        let fact = facts
+            .iter()
+            .find(|fact| fact.name == name && fact.type_of.as_deref() == Some("auto"))
+            .unwrap_or_else(|| panic!("`{name}` is an `auto` the file writes"));
+        let offset = fact.name_range.start_offset;
+        match session.type_at(&view, offset) {
+            cpp_code_analysis::Known::Yes(type_of) => type_of.type_of.clone(),
+            other => panic!("`{name}` has a type the file gives: {other:?}"),
+        }
+    };
+
+    assert_eq!(
+        deduced("b"),
+        "int*",
+        "the argument the call passed is what `_It` stands for"
+    );
+    assert_ne!(
+        deduced("b"),
+        "_It",
+        "and the parameter's own name is not an answer"
+    );
+}
+
 /// `auto f() { … }` has no initializer — its type is what the `return` statements agree on, which is a different
 /// walk and a question about agreement — and `auto x;` has no answer in the file at all. A consumer that shows
 /// `auto` there is showing what the file says; one that invented a type would be showing something it does not.

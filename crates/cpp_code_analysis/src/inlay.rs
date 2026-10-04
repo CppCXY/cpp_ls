@@ -77,61 +77,24 @@ pub fn parameter_hints<F>(
 where
     F: FnMut(&Path) -> Option<FileView>,
 {
-    parameter_hints_saying_why(index, view, range, &mut view_of).0
-}
-
-/// **The same walk, with a count of every way it can come back empty.**
-///
-/// A hint that is not drawn has four possible reasons and they need four different fixes: the call's callee does not
-/// resolve, the declaration has no parameter list, the declaration's own file cannot be **read**, or the argument
-/// falls outside the range the client asked about. From a screenshot all four look identical — an empty editor — and
-/// every one of them has been guessed at in turn. This is the same walk with the guesses removed: it returns the
-/// hints and, beside them, the tally.
-///
-/// The tally is a probe's question rather than a caller's, which is why [`parameter_hints`] is the door a handler
-/// uses and this one is what [`crate::INLAY_WHY`] reports through.
-pub fn parameter_hints_saying_why<F>(
-    index: &ProjectIndex,
-    view: &FileView,
-    range: SourceRange,
-    mut view_of: F,
-) -> (Vec<ParameterHint>, [usize; 6])
-where
-    F: FnMut(&Path) -> Option<FileView>,
-{
     let mut hints = Vec::new();
-    // [calls, callee did not resolve, no parameter list, the declaring file could not be read, no arguments, out of
-    //  range]
-    let mut why = [0usize; 6];
 
     // Declaring files, parsed once each: a file with twenty calls into it is parsed once, not twenty times.
     let mut declaring: HashMap<PathBuf, FileView> = HashMap::new();
 
     for call in call_expressions(&view.root, range) {
-        why[0] += 1;
         let Known::Yes(callee) = callee_of_a_call(index, &view.scopes, &view.root, &view.path, &call)
         else {
             // No declaration, or none this layer can place: the parameter list is unknown, and a hint naming the
             // wrong parameter is a wrong answer printed into the code.
-            why[1] += 1;
             continue;
         };
 
         let Some(names) = parameter_names_for(view, &callee, &mut declaring, &mut view_of) else {
-            // **Which half of it failed**, because the two have different fixes: a declaration with no parameter
-            // list is a fact about the header, and a declaration whose *file* cannot be read is a fact about this
-            // session — the file is not in the VFS, so `Session::view` answers `None` and every call into it loses
-            // its hints at once.
-            if view_of(&callee.file).is_none() {
-                why[3] += 1;
-            } else {
-                why[2] += 1;
-            }
             continue;
         };
 
         let Some(arguments) = arguments_of(&call) else {
-            why[4] += 1;
             continue;
         };
 
@@ -143,7 +106,6 @@ where
             };
 
             if !contains(range, argument.text_range().start().into()) {
-                why[5] += 1;
                 continue;
             }
 
@@ -159,9 +121,8 @@ where
         }
     }
 
-    (hints, why)
+    hints
 }
-
 /// The parameter names of the declaration a call names, or `None` when they cannot be read.
 fn parameter_names_for<F>(
     view: &FileView,

@@ -2173,20 +2173,28 @@ pub(crate) fn type_of_expression(
         return match type_of_expression(index, scopes, root, path, &right, depth + 1) {
             Known::Yes((right_type, _)) if right_type == left_type => {
                 // **Two pointers subtracted are not a pointer.** `p - q` is a *count of elements*, and C++ spells
-                // it `ptrdiff_t` — so the rule below, "the operands agree, therefore the answer is their type",
-                // holds for arithmetic and is wrong for exactly this pair. Measured on a fixture: `auto d = q -
-                // raw();` with both operands `int*` answered **`int*`**, which is not a missing answer but a wrong
-                // one, and a wrong type shown for an `auto` is worse than a refusal — the refusal says the file did
-                // not spell it, and the wrong answer says it did.
+                // it `ptrdiff_t` — so "the operands agree, therefore the answer is their type" holds for
+                // arithmetic and is wrong for exactly this pair. Measured on a fixture: `auto d = q - raw();` with
+                // both operands `int*` answered **`int*`**, which is not a missing answer but a wrong one, and a
+                // wrong type shown for an `auto` is worse than a refusal — the refusal says the file did not spell
+                // it, the wrong answer says it did.
                 //
                 // Refused rather than answered `ptrdiff_t`: a file that spells its own difference type — MSVC's
-                // `difference_type`, a `_Distance` — would be shown a name from another library, and the analysis
-                // has no way to know which of them this code is written against.
+                // `difference_type`, a `_Distance` — would be shown a name from another library, and this layer has
+                // no way to know which of them the code is written against.
                 if operator == "-" && left_type.pointee().is_some() {
                     return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
                 }
                 Known::Yes((left_type, file))
             }
+            // **A pointer plus an integer literal is the pointer** — C++'s own rule, [expr.add] — and it is
+            // written here rather than left out because the case it is for is the one this layer cannot reach yet.
+            //
+            // `_Get_unwrapped` returns `_It + 0` in every branch: 54 `auto` declarations over eight MSVC headers,
+            // each a template parameter plus a literal. The rule needs `left_type.pointee()` — and `_It`'s type is
+            // the **name** `_Iter`, not a `T*` spelling, so the analysis cannot see that it is a pointer at all
+            // until the call site's argument is substituted for it. It was written, measured (306 deduced before
+            // and after — it never fired) and taken back out for that reason. Instantiation is what makes it fire.
             // **The two operands disagree, so the conversion decides and this does not rank conversions.** The
             // answer is the spelling, which is what every other refusal in this layer carries.
             Known::Yes(_) => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
@@ -2672,7 +2680,31 @@ impl NamedDeclaration {
         root: &cpp_parser::CppSyntaxNode,
         path: &Path,
         written_arguments: &[Type],
+        argument_types: &[Type],
     ) -> Option<Type> {
+        // **The template arguments the call did not write**, deduced from the types of the arguments it did.
+        //
+        // Writing `<size_type>` is one way to say what a function template's parameter stands for; passing an
+        // argument whose type *is* that parameter is the other, and it is the one the standard library uses almost
+        // everywhere: `_Get_unwrapped(_First)` never writes `<int*>`, it passes one. Until this, only the written
+        // form substituted — so a deduced return that *is* the parameter came back as the parameter's **name**:
+        // measured on a two-line fixture, `template <class _It> auto f(_It p) { return p; }` called as `f(a_pointer)`
+        // deduced **`_It`**, which is not a missing answer but a wrong one, and worse than a refusal because it reads
+        // like a type.
+        //
+        // The rule is C++'s own, restricted to the case this layer can be sure of: a function parameter **written as
+        // exactly one template parameter** takes that parameter's place, so the argument passed there is what the
+        // parameter stands for. A parameter written as `vector<_Ty> const&` needs the argument's own template-id
+        // taken apart, and that is not attempted — it is a different deduction, and half of it would be a guess.
+        let deduced;
+        let written_arguments = if written_arguments.is_empty() && !argument_types.is_empty() {
+            let (names, written_list) = self.parameters_of(index, scopes, root, path);
+            deduced = deduce_the_parameters(&names, written_list.as_deref(), argument_types);
+            &deduced[..]
+        } else {
+            written_arguments
+        };
+
         match self {
             NamedDeclaration::Here(binding) => {
                 if binding.kind == crate::BindingKind::Class {
@@ -2748,7 +2780,30 @@ impl NamedDeclaration {
         }
     }
 
-    /// The offset of the declared **name**, in the file [`NamedDeclaration::file`] answers with.
+    /// **What a call of this declaration may leave for the call site to say** — its template parameter names, and the
+    /// parameter list as the declaration wrote it.
+    ///
+    /// Both halves are needed by the deduction [`what_a_call_has`] does, and neither is enough alone: the names say
+    /// *which* words are placeholders, and the written list says *where* they stand among the function's parameters.
+    /// A declaration that is not a template answers with no names, which is the ordinary case and costs nothing.
+    fn parameters_of(
+        &self,
+        index: &ProjectIndex,
+        _scopes: &crate::ScopeTree,
+        root: &cpp_parser::CppSyntaxNode,
+        _path: &Path,
+    ) -> (Vec<String>, Option<String>) {
+        let _ = index;
+        match self {
+            NamedDeclaration::Here(binding) => (
+                crate::sema::declarations::declared_template_parameters_of(root, binding),
+                crate::sema::declarations::parameter_list_at(root, binding.name_range.start_offset),
+            ),
+            NamedDeclaration::Indexed(fact, _, _) => {
+                (fact.parameters.clone(), fact.parameter_list.clone())
+            }
+        }
+    }
     ///
     /// A name range rather than the declaration's range, because the two answer different questions: a rename
     /// edits the name, and a caller looking for the declaration's own declarator has to be *at* the name — see
@@ -3225,6 +3280,91 @@ fn is_an_identifier(segment: &str) -> bool {
             .all(|character| character.is_alphanumeric() || character == '_')
 }
 
+/// **What a function template's parameters stand for, from the types of the arguments the call passed.**
+///
+/// `template <class _It> auto f(_It p)` called as `f(a_pointer)` says `_It = int*` without writing it. The rule is
+/// C++'s, restricted to the one case this layer can be sure of: a function parameter written as **exactly one**
+/// template parameter takes that parameter's place, so the argument passed there is what the parameter stands for.
+///
+/// A parameter written as `vector<_Ty> const&` would need the argument's own template-id taken apart, and that is a
+/// different deduction — attempted for none of the parameters if it is attempted for one, because a half-substituted
+/// list is a type nobody wrote.
+///
+/// The result is **positional against the template parameter names**, which is how every consumer of a substitution
+/// reads it: a name with no deduced argument stays itself, so `_Alloc` in `template <class _Ty, class _Alloc>` does
+/// not silently become `_Ty`'s argument.
+fn deduce_the_parameters(
+    names: &[String],
+    written_list: Option<&str>,
+    argument_types: &[Type],
+) -> Vec<Type> {
+    let mut deduced: Vec<Type> = names.iter().map(|name| Type::named(name)).collect();
+    if names.is_empty() || argument_types.is_empty() {
+        return deduced;
+    }
+
+    let Some(list) = written_list else {
+        return deduced;
+    };
+
+    for (at, parameter) in written_parameters(list).into_iter().enumerate() {
+        // **The parameter's type, which is the parameter minus its name.** `_It p` is `_It` and `int count` is `int`;
+        // a parameter written with no name at all (`int`) is one word and is its own type. Getting this wrong is
+        // silent: the first version compared the whole `_It p` against the template parameter's `_It`, never matched,
+        // and deduced nothing — so the wrong answer it was written to remove (`b = _It`) stayed exactly as it was.
+        let words: Vec<&str> = parameter.split_whitespace().collect();
+        let written_type = match words.len() {
+            0 => continue,
+            1 => words[0],
+            _ => &parameter[..parameter.rfind(words[words.len() - 1]).unwrap_or(parameter.len())],
+        };
+        let written_type = written_type.trim();
+        if written_type.is_empty() {
+            continue;
+        }
+
+        // **Exactly one parameter name and nothing else.** `_It` is a deduction; `_It*` is one this does not do.
+        let Some(name_at) = names.iter().position(|name| name == written_type) else {
+            continue;
+        };
+        let Some(argument) = argument_types.get(at) else {
+            continue;
+        };
+
+        deduced[name_at] = argument.clone();
+    }
+
+    deduced
+}
+
+/// A written parameter list, cut into its parameters at the commas that are **not inside brackets**.
+///
+/// `(int count, double factor)` is two; `(_Ty (*fn)(int, char))` is one, and a split on every comma would make it
+/// three and pair the wrong argument with the wrong parameter — worse than not deducing at all.
+fn written_parameters(list: &str) -> Vec<String> {
+    let body = list.trim();
+    let body = body.strip_prefix('(').unwrap_or(body);
+    let body = body.strip_suffix(')').unwrap_or(body);
+
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut at = 0usize;
+    for (index, character) in body.char_indices() {
+        match character {
+            '(' | '[' | '<' => depth += 1,
+            ')' | ']' | '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                out.push(body[at..index].to_string());
+                at = index + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(body[at..].to_string());
+
+    out
+}
+
 /// **The offset at which "which name is this" is asked**: the expression's **last identifier**.
 ///
 /// The offset decides the question, because [`crate::sema::resolve::definition_at`] builds a name's spelling by
@@ -3390,8 +3530,25 @@ fn type_of_a_call(
     // `read_template_arguments` gives — an argument's text can contain commas a splitter would get wrong.
     let written_arguments = written_template_arguments(&callee);
 
+    // **The types of the arguments the call passed**, which is the other way a function template is told what its
+    // parameters stand for — and the way the standard library uses almost everywhere: `_Get_unwrapped(_First)`
+    // never writes `<int*>`, it passes one. Computed only when nothing was written, which is the only case it is
+    // used in, because typing every argument of every call is not free.
+    let argument_types: Vec<Type> = if written_arguments.is_empty() {
+        crate::inlay::arguments_of(call)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|argument| match type_of_expression(index, scopes, root, path, argument, 0) {
+                Known::Yes((type_of, _)) => Some(type_of),
+                _ => None,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     match declaration_of_a_callee(index, scopes, root, path, &callee, written) {
-        Known::Yes(named) => match named.what_a_call_has(index, scopes, root, path, &written_arguments) {
+        Known::Yes(named) => match named.what_a_call_has(index, scopes, root, path, &written_arguments, &argument_types) {
             Some(type_of) => Known::Yes((type_of, named.file(path))),
             None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
         },
