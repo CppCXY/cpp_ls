@@ -83,7 +83,7 @@ where
     let mut declaring: HashMap<PathBuf, FileView> = HashMap::new();
 
     for call in call_expressions(&view.root, range) {
-        let Known::Yes(callee) = callee_of_a_call(index, &view.scopes, &view.root, &view.path, &call)
+        let Known::Yes(callee) = callee_of_a_call(index, &mut |_: &Path| None, &view.scopes, &view.root, &view.path, &call)
         else {
             // No declaration, or none this layer can place: the parameter list is unknown, and a hint naming the
             // wrong parameter is a wrong answer printed into the code.

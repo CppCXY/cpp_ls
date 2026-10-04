@@ -770,6 +770,251 @@ pub fn declared_returns_of(root: &CppSyntaxNode, binding: &Binding) -> Option<St
 /// All the `return` statements must agree, which is C++'s own requirement. `if constexpr` makes that requirement
 /// subtler than it looks — only one branch is instantiated per instantiation — so a body whose returns disagree is
 /// refused rather than resolved by picking one.
+/// [`deduced_returns_of`] for a caller that knows what the template parameters stand for.
+///
+/// # Why this exists separately, and why it is the call site that asks
+///
+/// A fact is built with **no call site in hand** — the index reads a file and records what it declares — so a body
+/// that branches on a template parameter has no single answer when the fact is made. At a call site both halves
+/// exist: the argument types say what the parameters stand for, and the declaring file can be read again. This is the
+/// second reading, and it is what lets `if constexpr` **pick its branch**: with `_Iter = int*`, the condition
+/// `is_pointer_v<decay_t<_Iter>>` holds, the `else` branches are not instantiated, and the returns that remain agree
+/// on `_Iter&&` — where before they were `_Iter&&`, an unknown member call and `_Iter&&`, and the one unknown took
+/// the whole answer away.
+///
+/// # What it does not do
+///
+/// Only the traits decidable from a **spelling** are evaluated — `is_pointer_v`, `is_integral_v`, `is_same_v` and
+/// `decay_t` over them. A condition it cannot decide leaves every branch in play, which is what this layer did before
+/// and is the honest answer: not knowing which branch a compiler takes is not a licence to pick one.
+pub fn deduced_returns_of_substituted(
+    root: &CppSyntaxNode,
+    binding: Binding,
+    substitutions: &crate::sema::types::TypeSubstitutions<'_>,
+) -> Option<String> {
+    if binding.kind != BindingKind::Function {
+        return None;
+    }
+
+    let declaration = declaration_of(root, &binding)?;
+    let body = body_of(&declaration)?;
+    let returns = returned_expressions_in(&body)
+        .into_iter()
+        .filter(|expression| a_branch_that_is_taken(expression, &body, substitutions))
+        .collect::<Vec<_>>();
+    if returns.is_empty() {
+        return None;
+    }
+
+    let mut agreed: Option<String> = None;
+    for expression in &returns {
+        let written = type_a_return_states_with(expression, &declaration, substitutions)?;
+        match &agreed {
+            None => agreed = Some(written),
+            Some(previous) if *previous == written => {}
+            Some(_) => return None,
+        }
+    }
+    agreed
+}
+
+/// **Is the `if constexpr` this return sits in one the compiler would instantiate?**
+///
+/// `true` for a return that is not inside a conditional at all, and for one whose enclosing conditions all hold under
+/// the substitutions. A condition that cannot be decided answers `true` as well — leaving the return in play is what
+/// this layer did before it could read conditions, and dropping a return because a trait was unfamiliar would turn an
+/// unknown into a wrong answer.
+fn a_branch_that_is_taken(
+    expression: &CppSyntaxNode,
+    body: &CppSyntaxNode,
+    substitutions: &crate::sema::types::TypeSubstitutions<'_>,
+) -> bool {
+    // The `if constexpr` statements containing this return, innermost first — which is the order they are decided in,
+    // and the reason for the sort: `len` is the extent, so the smallest is the one nearest around it.
+    let mut conditions: Vec<CppSyntaxNode> = body
+        .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::IfStat)
+        .filter(|node| {
+            let range = node.text_range();
+            range.start() <= expression.text_range().start()
+                && expression.text_range().end() <= range.end()
+        })
+        .collect();
+    conditions.sort_by_key(|node| node.text_range().len());
+
+    for condition in conditions {
+        let Some(written) = constexpr_condition_of(&condition) else {
+            continue;
+        };
+        let Some(held) = evaluate_a_trait(&written, substitutions) else {
+            // A condition this layer cannot decide leaves the return in play, which is what it did before it could
+            // read conditions at all.
+            continue;
+        };
+
+        // **Which side of the `if` the return is on**, because the condition alone does not say whether the return
+        // is instantiated: both branches are inside the same statement, and both see the same condition.
+        //
+        // That was the first version's mistake, and it is invisible from the count alone — the condition evaluated
+        // to `true`, nothing was filtered, and the two branches went on disagreeing. A return after the `else` is in
+        // the branch taken when the condition is **false**; one before it is in the branch taken when it is **true**.
+        let in_the_else = else_offset_of(&condition)
+            .is_some_and(|at| usize::from(expression.text_range().start()) > at);
+
+        if held == in_the_else {
+            // The branch is not instantiated, so this return is not a return.
+            return false;
+        }
+    }
+
+    true
+}
+
+/// **Where the `else` of this `if` begins**, in the file's offsets — `None` for an `if` with no `else`.
+///
+/// Asked of the **token stream**, not of the children: `else` is a keyword rather than a node here, so it is found the
+/// way every other operator in this layer is — by looking at the tokens the statement is made of.
+fn else_offset_of(statement: &CppSyntaxNode) -> Option<usize> {
+    statement
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .find(|token| token.text() == "else")
+        .map(|token| usize::from(token.text_range().start()))
+}
+
+/// The parenthesised condition of an `if constexpr`, when that is what this statement is.
+fn constexpr_condition_of(statement: &CppSyntaxNode) -> Option<String> {
+    let text = statement.text().to_string();
+    let at = text.find("constexpr")?;
+    let rest = &text[at + "constexpr".len()..];
+    let open = rest.find('(')?;
+
+    let mut depth = 0usize;
+    for (index, character) in rest[open..].char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(rest[open + 1..open + index].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// **What a type trait says about a spelling** — `None` for a condition this layer cannot decide.
+///
+/// Spelling-level, like every comparison in this file, and deliberately narrow: only the traits whose answer follows
+/// from the **written form** of the type are decided, because those need no instantiation.
+///
+/// ```text
+/// decay_t<X>       a reference and top-level `const` come off. What `decay` does to arrays and functions is not
+///                  attempted — no spelling in this layer distinguishes them yet.
+/// is_pointer_v<X>  X ends with `*`. A smart pointer is not one, and this says so.
+/// is_integral_v<X> X is one of the builtin integer names. A `typedef` of one is not recognised, which is the
+///                  direction that costs an answer rather than giving a wrong one.
+/// is_same_v<A, B>  the two spellings are equal after `decay_t` and whitespace.
+/// ```
+fn evaluate_a_trait(
+    condition: &str,
+    substitutions: &crate::sema::types::TypeSubstitutions<'_>,
+) -> Option<bool> {
+    let condition = condition.trim();
+
+    if let Some(rest) = condition.strip_prefix('!') {
+        return evaluate_a_trait(rest, substitutions).map(|held| !held);
+    }
+    if let Some((left, right)) = condition.split_once("&&") {
+        return match (
+            evaluate_a_trait(left, substitutions),
+            evaluate_a_trait(right, substitutions),
+        ) {
+            (Some(false), _) | (_, Some(false)) => Some(false),
+            (Some(true), Some(true)) => Some(true),
+            _ => None,
+        };
+    }
+    if let Some((left, right)) = condition.split_once("||") {
+        return match (
+            evaluate_a_trait(left, substitutions),
+            evaluate_a_trait(right, substitutions),
+        ) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (Some(false), Some(false)) => Some(false),
+            _ => None,
+        };
+    }
+
+    let (name, argument) = condition.split_once('<')?;
+    let argument = argument.trim_end().strip_suffix('>')?;
+    let (first, second) = match argument.split_once(',') {
+        Some((first, second)) => (first.trim(), Some(second.trim())),
+        None => (argument.trim(), None),
+    };
+    let first = substituted_spelling(first, substitutions);
+
+    match name.trim() {
+        "is_pointer_v" => Some(first.ends_with('*')),
+        "is_integral_v" => Some(matches!(
+            first.as_str(),
+            "bool" | "char" | "signed char" | "unsigned char" | "short" | "unsigned short" | "int"
+                | "unsigned int" | "long" | "unsigned long" | "long long" | "unsigned long long"
+                | "wchar_t" | "char8_t" | "char16_t" | "char32_t" | "size_t" | "ptrdiff_t"
+        )),
+        "is_same_v" => {
+            let second = substituted_spelling(second?, substitutions);
+            Some(first == second)
+        }
+        _ => None,
+    }
+}
+
+/// A spelling with `decay_t<…>` applied and the template parameters substituted — see [`evaluate_a_trait`].
+fn substituted_spelling(
+    written: &str,
+    substitutions: &crate::sema::types::TypeSubstitutions<'_>,
+) -> String {
+    let mut text = written.trim();
+    while let Some(inner) = text
+        .strip_prefix("decay_t<")
+        .and_then(|rest| rest.strip_suffix('>'))
+    {
+        text = inner.trim();
+    }
+
+    let replaced = substitutions.get(text).map(|argument| argument.to_string());
+    let text = replaced.as_deref().unwrap_or(text);
+    strip_reference_and_const(text)
+}
+
+/// A type spelling with its references and top-level `const` off — what `decay` does to the part this layer knows.
+fn strip_reference_and_const(written: &str) -> String {
+    let mut text = written.trim();
+    loop {
+        let trimmed = text.trim_end();
+        let without = trimmed
+            .strip_suffix("&&")
+            .or_else(|| trimmed.strip_suffix('&'));
+        match without {
+            Some(without) => text = without.trim_end(),
+            None => break,
+        }
+    }
+
+    let mut words: Vec<&str> = text.split_whitespace().collect();
+    while words
+        .first()
+        .is_some_and(|word| matches!(*word, "const" | "volatile"))
+        && !words.iter().any(|word| word.contains('*'))
+    {
+        words.remove(0);
+    }
+    words.join(" ")
+}
+
 fn deduced_returns_of(root: &CppSyntaxNode, binding: &Binding) -> Option<String> {
     if binding.kind != BindingKind::Function {
         return None;
@@ -880,6 +1125,70 @@ fn returned_expressions_in(body: &CppSyntaxNode) -> Vec<CppSyntaxNode> {
 /// Everything else is refused. `return f(x);` needs the callee's declaration, which is in another file and another
 /// layer; a member access needs the object's type; and two operands that *disagree* need the conversion ranks this
 /// deliberately does not keep.
+/// [`type_a_return_states`] with what the template parameters stand for.
+///
+/// The substitution is applied to **the type of a parameter**, which is where a template parameter can appear in a
+/// return statement: `return p;` gives `_Iter&&`, and at a call site with `_Iter = int*` that is `int*&&` — the answer
+/// the `auto` variable's declaration is asking for. Everything else in this walk is about the expression's shape and
+/// does not depend on what a name stands for.
+fn type_a_return_states_with(
+    expression: &CppSyntaxNode,
+    declaration: &CppSyntaxNode,
+    substitutions: &crate::sema::types::TypeSubstitutions<'_>,
+) -> Option<String> {
+    match CppSyntaxKind::from(expression.kind()) {
+        CppSyntaxKind::NameExpr | CppSyntaxKind::IdentifierExpr => {
+            let written = parameter_type(expression, declaration)?;
+            Some(substituted_spelling(&written, substitutions))
+        }
+        // **A member access on a cast**, which is the shape `_Get_unwrapped`'s middle branch has:
+        // `static_cast<_Iter&&>(_It)._Unwrapped()`. The member's own type is a lookup this layer cannot do — it needs
+        // the class, and the class is what the instantiation would name — so the answer is `None` and the branch is
+        // skipped rather than guessed.
+        CppSyntaxKind::BinaryExpr => {
+            let operands: Vec<CppSyntaxNode> = expression.children().collect();
+            let comparison = expression
+                .children_with_tokens()
+                .filter_map(|element| element.into_token())
+                .any(|token| {
+                    matches!(token.text(), "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||")
+                });
+            if comparison {
+                return Some("bool".to_string());
+            }
+
+            let (left, right) = (operands.first()?, operands.last()?);
+            let left_type = type_a_return_states_with(left, declaration, substitutions)?;
+            let right_type = type_a_return_states_with(right, declaration, substitutions)?;
+            if left_type == right_type {
+                return Some(left_type);
+            }
+
+            // **`X + 0` is `X`** — [expr.add]: the integer is a count and never part of the answer. Asked of the
+            // operand's **text**, not of its type: the type of `0` is `int`, and comparing that against `"0"` is a
+            // test that can never pass.
+            let literal_zero = |operand: &CppSyntaxNode| {
+                CppSyntaxKind::from(operand.kind()) == CppSyntaxKind::LiteralExpr
+                    && matches!(
+                        operand.text().to_string().trim(),
+                        "0" | "0L" | "0U" | "0UL" | "0LL" | "0ULL"
+                    )
+            };
+            if matches!(operator_of(expression).as_deref(), Some("+" | "-")) {
+                if literal_zero(right) {
+                    return Some(left_type);
+                }
+                if literal_zero(left) {
+                    return Some(right_type);
+                }
+            }
+
+            None
+        }
+        _ => type_a_return_states(expression, declaration),
+    }
+}
+
 fn type_a_return_states(expression: &CppSyntaxNode, declaration: &CppSyntaxNode) -> Option<String> {
     match CppSyntaxKind::from(expression.kind()) {
         CppSyntaxKind::CastExpr => {
@@ -914,12 +1223,71 @@ fn type_a_return_states(expression: &CppSyntaxNode, declaration: &CppSyntaxNode)
                 return Some("bool".to_string());
             }
             let (left, right) = (operands.first()?, operands.last()?);
-            let left = type_a_return_states(left, declaration)?;
-            let right = type_a_return_states(right, declaration)?;
-            (left == right).then_some(left)
+            let left_type = type_a_return_states(left, declaration)?;
+            let right_type = type_a_return_states(right, declaration)?;
+            if left_type == right_type {
+                return Some(left_type);
+            }
+
+            // **`X + 0` is `X`**, and this is C++'s own rule rather than an approximation: [expr.add] says `P + I`
+            // has the type of `P` for any integral `I`, because the integer is a *count* and never part of the answer.
+            //
+            // It is here because the shape it unlocks is the one the standard library is written in. `_Get_unwrapped`
+            // returns `_It + 0` in one `if constexpr` branch and `static_cast<_Iter&&>(_It)` in the other — the same
+            // type, `_Iter&&`, spelled through an addition that says nothing. Without this the two branches disagree,
+            // the function has no return type at all, and every call of it is refused: 54 `auto` declarations over
+            // eight MSVC headers, the largest single family in the count.
+            //
+            // **Only when the other operand is a literal**, and the restriction is what keeps it honest. `+ 0` means
+            // the count is zero and the type is the left operand's; `+ n` would need to know what `n` is, and a named
+            // integer could be a class with `operator+` that returns anything. A literal cannot be.
+            // **Only when the other operand is a literal zero**, and the restriction is what keeps it honest. `+ 0`
+            // means the count is zero and the type is the left operand's; `+ n` would need to know what `n` is, and
+            // a named integer could be a class with `operator+` that returns anything. A literal cannot be.
+            //
+            // Asked of the operand's **text**, not of its type: the type of `0` is `int`, and comparing *that*
+            // against `"0"` is a test that can never pass. That was the first version, and it is why the rule sat
+            // here changing nothing while the count stayed at 306 — the same mistake as the deduction's parameter
+            // split, and worth saying twice: in this layer the *spelling* is the thing compared, and reaching for
+            // its computed form is how a rule silently never fires.
+            let literal_zero = |operand: &CppSyntaxNode| {
+                CppSyntaxKind::from(operand.kind()) == CppSyntaxKind::LiteralExpr
+                    && matches!(
+                        operand.text().to_string().trim(),
+                        "0" | "0L" | "0U" | "0UL" | "0LL" | "0ULL" | "0u" | "0ul" | "0ll" | "0ull"
+                    )
+            };
+            if matches!(operator_of(expression).as_deref(), Some("+" | "-")) {
+                if literal_zero(right) {
+                    return Some(left_type);
+                }
+                if literal_zero(left) {
+                    return Some(right_type);
+                }
+            }
+
+            None
         }
         _ => None,
     }
+}
+
+/// The operator token of a binary expression, as written.
+///
+/// A binary expression is three children — left, operator, right — and the operator is a **token** rather than a node,
+/// so it is found by asking the children-with-tokens for the one that is not either operand. `None` when the shape is
+/// not that, which is what the recovery parses produce.
+fn operator_of(expression: &CppSyntaxNode) -> Option<String> {
+    expression
+        .children_with_tokens()
+        .filter_map(|element| element.into_token())
+        .map(|token| token.text().to_string())
+        .find(|text| {
+            !text.trim().is_empty()
+                && text
+                    .chars()
+                    .all(|character| !character.is_alphanumeric() && character != '_')
+        })
 }
 
 /// The type a literal spells, by the shape of its own text.

@@ -80,7 +80,7 @@ pub fn deduced_type_of(
         return Known::Unknown(UnknownReason::UnknownType(Box::from("auto{}")));
     };
 
-    match crate::index::project::type_of_expression(index, scopes, root, path, &expression, 0) {
+    match crate::index::project::type_of_expression(index, &mut |_: &Path| None, scopes, root, path, &expression, 0) {
         Known::Yes((type_of, _)) => Known::Yes(type_of.to_string()),
         Known::Unknown(reason) => Known::Unknown(reason),
         // The expression engine says the question does not apply to what it was handed — which for an initializer

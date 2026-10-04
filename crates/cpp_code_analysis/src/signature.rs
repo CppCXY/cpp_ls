@@ -99,7 +99,7 @@ where
         return Vec::new();
     };
 
-    let Known::Yes(candidates) = callees_of_a_call(index, &view.scopes, &view.root, &view.path, &call)
+    let Known::Yes(candidates) = callees_of_a_call(index, &mut |_: &Path| None, &view.scopes, &view.root, &view.path, &call)
     else {
         return Vec::new();
     };

@@ -393,7 +393,7 @@ fn members(
         why,
     };
 
-    let written = match crate::index::project::type_of_expression(index, scopes, root, path, &access.object, 0) {
+    let written = match crate::index::project::type_of_expression(index, &mut |_: &Path| None, scopes, root, path, &access.object, 0) {
         Known::Yes((written, _)) => written,
         // The object's type could not be worked out — a call, a dereference, a subscript: each needs a type
         // *computed* rather than read off a declaration. **Nothing is offered**, and that is the answer rather than

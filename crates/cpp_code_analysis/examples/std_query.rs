@@ -351,6 +351,7 @@ disk, {} not stored, {} unresolved includes)",
 
         let answer = cpp_code_analysis::index::project::member_across_files(
             store.index(),
+            &mut |_: &Path| None,
             &scopes,
             &root_node,
             &probe,

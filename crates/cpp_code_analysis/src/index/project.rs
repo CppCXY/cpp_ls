@@ -189,12 +189,13 @@ pub fn header_at(
 /// the same reason: the failure is not "not here".
 pub fn definition_across_files(
     index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     offset: usize,
 ) -> Known<ProjectDefinition> {
-    match definitions_across_files(index, scopes, root, path, offset) {
+    match definitions_across_files(index, declaring, scopes, root, path, offset) {
         Known::Yes(mut found) if found.found.len() == 1 => Known::Yes(found.found.remove(0)),
         Known::Yes(_) => Known::Unknown(UnknownReason::Ambiguous(Box::from(
             // The spelling the cursor wrote, read back from the tree rather than taken from the list: a reader
@@ -224,6 +225,7 @@ pub fn definition_across_files(
 /// walk the completion after `.` shows, so a jump and the list a reader was just looking at cannot disagree.
 pub fn member_definitions_across_files(
     index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
@@ -237,10 +239,10 @@ pub fn member_definitions_across_files(
         return Known::Unknown(UnknownReason::UnparsableName);
     }
 
-    let Known::Yes((object_type, _)) = type_of_expression(index, scopes, root, path, &access.object, 0)
+    let Known::Yes((object_type, _)) = type_of_expression(index, declaring, scopes, root, path, &access.object, 0)
     else {
         let Known::Unknown(reason) =
-            type_of_expression(index, scopes, root, path, &access.object, 0)
+            type_of_expression(index, declaring, scopes, root, path, &access.object, 0)
         else {
             unreachable!("the first match established that this is an `Unknown`")
         };
@@ -299,6 +301,7 @@ pub fn member_definitions_across_files(
 /// answer a client can use.
 pub fn definitions_across_files(
     index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
@@ -315,7 +318,7 @@ pub fn definitions_across_files(
     //   member of the same name would be a jump to a place the language does not name, which the handler's own
     //   rule ("a wrong location is worse than none") forbids.
     if crate::sema::resolve::member_access_at(root, offset).is_some() {
-        match member_definitions_across_files(index, scopes, root, path, offset) {
+        match member_definitions_across_files(index, declaring, scopes, root, path, offset) {
             Known::Yes(found) => return Known::Yes(found),
             // The member question could not be asked (the object's type is unknown) **or** was answered with
             // nothing, and both fall through to the name query — which is what answered before the member path
@@ -539,6 +542,7 @@ pub struct ProjectIndex {
 /// * `Unknown(UnparsableName)` — the offset is not on a member access at all.
 pub fn member_across_files(
     index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
@@ -557,10 +561,10 @@ pub fn member_across_files(
     }
 
     // The type of the object, which is what decides which class the member is looked for in.
-    let Known::Yes((written, _)) = type_of_expression(index, scopes, root, path, &access.object, 0)
+    let Known::Yes((written, _)) = type_of_expression(index, declaring, scopes, root, path, &access.object, 0)
     else {
         let Known::Unknown(reason) =
-            type_of_expression(index, scopes, root, path, &access.object, 0)
+            type_of_expression(index, declaring, scopes, root, path, &access.object, 0)
         else {
             unreachable!("the first match established that this is an `Unknown`")
         };
@@ -1132,6 +1136,7 @@ pub struct MemberCompletions {
 /// * `Unknown(UnparsableName)` — the cursor is not on a member access at all.
 pub fn member_completions_at(
     index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
@@ -1151,7 +1156,7 @@ pub fn member_completions_at(
         return Known::Unknown(UnknownReason::UnparsableName);
     };
 
-    let written = match type_of_expression(index, scopes, root, path, &access.object, 0) {
+    let written = match type_of_expression(index, declaring, scopes, root, path, &access.object, 0) {
         Known::Yes((written, _)) => written,
         Known::Unknown(reason) => return Known::Unknown(reason),
         // The only `No` the type layer produces is "nothing says what this is", which is the same answer as an
@@ -1989,7 +1994,8 @@ const MAX_TYPE_DEPTH: usize = 8;
 /// than read off a declaration, which is a different and much larger problem — and answering `Unknown` is what
 /// keeps this layer from being wrong in a way a consumer cannot see.
 pub(crate) fn type_of_expression(
-    index: &ProjectIndex,
+      index: &ProjectIndex,
+      declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
@@ -2057,7 +2063,7 @@ pub(crate) fn type_of_expression(
     // `std::cin`, `ns::make()` — measured, `a_qualified_name_in_this_file_has_the_type_its_declaration_wrote`.
     if writes_a_name(written) {
         return match declaration_of_expression(index, scopes, root, path, expression) {
-            Known::Yes(named) => match declared_type(index, scopes, root, path, &named, depth) {
+            Known::Yes(named) => match declared_type(index, declaring, scopes, root, path, &named, depth) {
                 Known::Yes(type_of) => Known::Yes((type_of, named.file(path))),
                 Known::Unknown(reason) => Known::Unknown(reason),
                 // The declaration is a function, a class or an alias: none of them has a type *as a name*, which
@@ -2078,7 +2084,7 @@ pub(crate) fn type_of_expression(
             return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
         };
 
-        return match type_of_expression(index, scopes, root, path, &first, depth + 1) {
+        return match type_of_expression(index, declaring, scopes, root, path, &first, depth + 1) {
             // The named type is a class, and a class has no `type_of` of its own — so the *spelling* is the answer,
             // which is what the initializer wrote.
             Known::Yes((type_of, file)) => Known::Yes((type_of, file)),
@@ -2094,7 +2100,7 @@ pub(crate) fn type_of_expression(
 
     // A **call**: what the callee returns, or a temporary of the class it names.
     if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::CallExpr {
-        return type_of_a_call(index, scopes, root, path, expression);
+        return type_of_a_call(index, declaring, scopes, root, path, expression);
     }
 
     // **A named cast has the type it names**, and that is C++'s own rule rather than an inference: `static_cast<T>`,
@@ -2129,7 +2135,7 @@ pub(crate) fn type_of_expression(
     // stop one level above the answer — which is exactly where it used to stop.
     if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::ParenExpr {
         return match expression.children().next() {
-            Some(inner) => type_of_expression(index, scopes, root, path, &inner, depth + 1),
+            Some(inner) => type_of_expression(index, declaring, scopes, root, path, &inner, depth + 1),
             None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
         };
     }
@@ -2157,7 +2163,7 @@ pub(crate) fn type_of_expression(
             return Known::Yes((Type::named("bool"), path.to_path_buf()));
         }
 
-        let left_type = type_of_expression(index, scopes, root, path, &left, depth + 1);
+        let left_type = type_of_expression(index, declaring, scopes, root, path, &left, depth + 1);
         if matches!(operator.as_str(), "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=")
         {
             return left_type;
@@ -2170,7 +2176,7 @@ pub(crate) fn type_of_expression(
             };
         };
 
-        return match type_of_expression(index, scopes, root, path, &right, depth + 1) {
+        return match type_of_expression(index, declaring, scopes, root, path, &right, depth + 1) {
             Known::Yes((right_type, _)) if right_type == left_type => {
                 // **Two pointers subtracted are not a pointer.** `p - q` is a *count of elements*, and C++ spells
                 // it `ptrdiff_t` — so "the operands agree, therefore the answer is their type" holds for
@@ -2206,7 +2212,7 @@ pub(crate) fn type_of_expression(
     // A **dereference**: `*p` has the type `p` points at. Nothing is looked up — the pointer's own declaration
     // already spells the pointee, and the `*` is arithmetic on that spelling.
     if let Some(operand) = unary_operand_with(expression, "*") {
-        let operand_type = type_of_expression(index, scopes, root, path, &operand, depth + 1);
+        let operand_type = type_of_expression(index, declaring, scopes, root, path, &operand, depth + 1);
         return match operand_type {
             // **A `*` is the type model's own operation.** `Widget**` gives `Widget*`, an array gives its
             // element, and a class with an `operator*` gives nothing — that one needs the class's members and
@@ -2226,7 +2232,7 @@ pub(crate) fn type_of_expression(
     // so that the two operators are one rule rather than one rule and one hole: `(&r)->size` is a member access
     // whose object is this, and the `->` already knows what to do with a pointer.
     if let Some(operand) = unary_operand_with(expression, "&") {
-        let operand_type = type_of_expression(index, scopes, root, path, &operand, depth + 1);
+        let operand_type = type_of_expression(index, declaring, scopes, root, path, &operand, depth + 1);
         return match operand_type {
             Known::Yes((type_of, file)) => {
                 // `&x` is a pointer to `x`, and the decay first is what makes `&arr` a pointer to the array's
@@ -2248,7 +2254,7 @@ pub(crate) fn type_of_expression(
     // with an `operator[]` — `v[0]` on a `std::vector` — needs the template instantiated, and this answers
     // `Unknown` for the same reason it does everywhere else: see [`element_type_name`].
     if let Some(base) = subscript_base(expression) {
-        let base_type = type_of_expression(index, scopes, root, path, &base, depth + 1);
+        let base_type = type_of_expression(index, declaring, scopes, root, path, &base, depth + 1);
         return match base_type {
             // **An array's element is the model's own operation**, and a *class* with an `operator[]` is the case
             // this arm deliberately leaves alone: `v[0]` on a `std::vector` gives the template's `reference`, which
@@ -2268,10 +2274,10 @@ pub(crate) fn type_of_expression(
     // A member access: the type of the member, which is a fact on its declaration.
     if let Some(inner) = crate::sema::resolve::member_access_of(expression) {
         let Known::Yes((inner_type, declared_in)) =
-            type_of_expression(index, scopes, root, path, &inner.object, depth + 1)
+            type_of_expression(index, declaring, scopes, root, path, &inner.object, depth + 1)
         else {
             let Known::Unknown(reason) =
-                type_of_expression(index, scopes, root, path, &inner.object, depth + 1)
+                type_of_expression(index, declaring, scopes, root, path, &inner.object, depth + 1)
             else {
                 unreachable!("the first match established that this is an `Unknown`")
             };
@@ -2676,6 +2682,7 @@ impl NamedDeclaration {
     fn what_a_call_has(
         &self,
         index: &ProjectIndex,
+        declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
         scopes: &crate::ScopeTree,
         root: &cpp_parser::CppSyntaxNode,
         path: &Path,
@@ -2713,8 +2720,27 @@ impl NamedDeclaration {
                         .identifier_text()
                         .map(Type::named);
                 }
-                let returns = crate::sema::declarations::declared_returns_of(root, binding)?;
-                let returns = parse_type_spelling(&returns);
+                // **A body that `if constexpr` decides, read again with what the call site knows.**
+                //
+                // `declared_returns_of` answers for a return type the file *wrote*; a function whose return type is
+                // deduced has none there, and the fact is built with no call site in hand — so a body branching on a
+                // template parameter has no single answer when the index is made. Here both halves exist, and the
+                // body is in this very tree, so no other file has to be read: the branch whose condition holds under
+                // the substitutions is the only one instantiated, and `_It + 0` becomes `int* + 0`.
+                let names_for_the_call = crate::sema::declarations::declared_template_parameters_of(root, binding);
+                let returns = match crate::sema::declarations::declared_returns_of(root, binding) {
+                    Some(returns) => parse_type_spelling(&returns),
+                    None => {
+                        let substitutions =
+                            crate::sema::types::TypeSubstitutions::new(&names_for_the_call, written_arguments);
+                        let written = crate::sema::declarations::deduced_returns_of_substituted(
+                            root,
+                            binding.clone(),
+                            &substitutions,
+                        )?;
+                        parse_type_spelling(&written)
+                    }
+                };
 
                 // **The same pairing the indexed half does, for the declaration this file writes.**
                 //
@@ -2736,7 +2762,38 @@ impl NamedDeclaration {
             // class template's parameters — so the same pairing that finishes a member's type finishes this, and
             // the same walk over the class's own member names finishes it too.
             NamedDeclaration::Indexed(fact, file, bindings) => {
-                let returns = what_a_call_has_in(fact)?;
+                // **A fact with no return type whose body can be read again with what the call site knows.**
+                //
+                // `what_a_call_has_in` answers `None` for a function whose return type is deduced and whose body
+                // this layer could not type when the index was built — and the index is built with **no call site**
+                // in hand, so a body that branches on a template parameter has no single answer there. At the call
+                // site both halves exist: the argument types say what the parameters stand for, and the declaring
+                // file can be read again. So the body is typed a second time, **with the substitutions**, and that
+                // is what lets `if constexpr` pick its branch: `_It + 0` becomes `int* + 0` and the two branches of
+                // `_Get_unwrapped` finally agree.
+                let name = fact.name.clone();
+                let offset = fact.name_range.start_offset;
+                let returns = match what_a_call_has_in(fact) {
+                    Some(returns) => returns,
+                    None => {
+                        let substitutions = crate::sema::types::TypeSubstitutions::new(&fact.parameters, written_arguments);
+                        let Some(declared_in) = declaring(file.as_path()) else {
+                            return None;
+                        };
+                        let Known::Yes(binding) =
+                            crate::sema::resolve::definition_at(&declared_in.scopes, &declared_in.root, offset)
+                        else {
+                            return None;
+                        };
+                        let written = crate::sema::declarations::deduced_returns_of_substituted(
+                            &declared_in.root,
+                            binding,
+                            &substitutions,
+                        )?;
+                        parse_type_spelling(&written)
+                    }
+                };
+                let _ = &name;
                 // **The class's arguments first, then the function's.** Both substitute into the same spelling and
                 // they are written with disjoint names - the class's _Elem and the function's _Size_type in
                 // asic_string<char>::_Convert_size<size_t> - so the order does not decide the answer; it decides
@@ -2914,6 +2971,7 @@ fn finish_a_nested_name(
 /// * **a chain longer than [`MAX_TYPE_DEPTH`]** — see the guard in [`type_of_expression`].
 fn declared_type(
     index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
@@ -2958,7 +3016,7 @@ fn declared_type(
     //
     // `Known::No` still means the walk declined to take the question at all, which is what the placeholder reason is
     // for; only a walk that *tried and failed* has a better answer to give.
-    let deduced = match initializer_type(index, scopes, root, path, named, depth + 1) {
+    let deduced = match initializer_type(index, declaring, scopes, root, path, named, depth + 1) {
         Known::Yes((deduced, _)) => deduced,
         Known::Unknown(reason) => return Known::Unknown(reason),
         Known::No => return unknown(),
@@ -3003,6 +3061,7 @@ fn writes_auto(written: &str) -> bool {
 /// shape the parser gives every initialized declaration, `int x = 0;` and `auto x = f();` alike.
 fn initializer_type(
     index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
@@ -3016,7 +3075,7 @@ fn initializer_type(
         return Known::Unknown(UnknownReason::UnknownType(Box::from("auto")));
     };
 
-    type_of_expression(index, scopes, root, path, &expression, depth)
+    type_of_expression(index, declaring, scopes, root, path, &expression, depth)
 }
 
 /// The spelling `auto` stands for, and the expression that decides it.
@@ -3512,6 +3571,7 @@ fn declaration_of_expression(
 /// declaration, which is the same boundary the rest of this function has.
 fn type_of_a_call(
     index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
@@ -3538,7 +3598,7 @@ fn type_of_a_call(
         crate::inlay::arguments_of(call)
             .unwrap_or_default()
             .iter()
-            .filter_map(|argument| match type_of_expression(index, scopes, root, path, argument, 0) {
+            .filter_map(|argument| match type_of_expression(index, declaring, scopes, root, path, argument, 0) {
                 Known::Yes((type_of, _)) => Some(type_of),
                 _ => None,
             })
@@ -3547,8 +3607,8 @@ fn type_of_a_call(
         Vec::new()
     };
 
-    match declaration_of_a_callee(index, scopes, root, path, &callee, written) {
-        Known::Yes(named) => match named.what_a_call_has(index, scopes, root, path, &written_arguments, &argument_types) {
+    match declaration_of_a_callee(index, declaring, scopes, root, path, &callee, written) {
+        Known::Yes(named) => match named.what_a_call_has(index, declaring, scopes, root, path, &written_arguments, &argument_types) {
             Some(type_of) => Known::Yes((type_of, named.file(path))),
             None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
         },
@@ -3599,6 +3659,7 @@ fn qualified_from_the_index(index: &ProjectIndex, from: &Path, class: &str) -> O
 /// consumer reporting "not known" should name the code the user wrote, not the half of it the lookup started at.
 fn declaration_of_a_callee(
     index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
@@ -3607,7 +3668,7 @@ fn declaration_of_a_callee(
 ) -> Known<NamedDeclaration> {
     // A member call: the object's type, then the member's declaration.
     if let Some(access) = crate::sema::resolve::member_access_of(callee) {
-        let object = match type_of_expression(index, scopes, root, path, &access.object, 0) {
+        let object = match type_of_expression(index, declaring, scopes, root, path, &access.object, 0) {
             Known::Yes((type_of, _)) => type_of,
             Known::Unknown(reason) => return Known::Unknown(reason),
             Known::No => return Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
@@ -3666,6 +3727,7 @@ pub(crate) struct Callee {
 /// two share.
 pub(crate) fn callees_of_a_call(
     index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
@@ -3679,7 +3741,7 @@ pub(crate) fn callees_of_a_call(
     };
 
     if let Some(access) = crate::sema::resolve::member_access_of(&callee) {
-        let members = member_callees(index, scopes, root, path, &access);
+        let members = member_callees(index, declaring, scopes, root, path, &access);
 
         // A member whose set could not be listed — the object's type is unknown, the class is not declared
         // anywhere the index can see — falls back to the singular path, which reports *why* rather than an empty
@@ -3688,7 +3750,7 @@ pub(crate) fn callees_of_a_call(
             Known::Yes(found) if !found.is_empty() => Known::Yes(found),
             other => match other {
                 Known::Unknown(reason) => Known::Unknown(reason),
-                _ => match callee_of_a_call(index, scopes, root, path, call) {
+                _ => match callee_of_a_call(index, declaring, scopes, root, path, call) {
                     Known::Yes(one) => Known::Yes(vec![one]),
                     Known::Unknown(reason) => Known::Unknown(reason),
                     Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
@@ -3749,12 +3811,13 @@ pub(crate) fn callees_of_a_call(
 /// members" and "this analysis cannot say" are different answers and a caller shows them differently.
 fn member_callees(
     index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
     access: &crate::sema::resolve::MemberAccess,
 ) -> Known<Vec<Callee>> {
-    let object = match type_of_expression(index, scopes, root, path, &access.object, 0) {
+    let object = match type_of_expression(index, declaring, scopes, root, path, &access.object, 0) {
         Known::Yes((type_of, _)) => type_of,
         Known::Unknown(reason) => return Known::Unknown(reason),
         Known::No => {
@@ -3810,6 +3873,7 @@ fn member_callees(
 /// than one declarator (`void (*f(int a))(int b)`).
 pub(crate) fn callee_of_a_call(
     index: &ProjectIndex,
+    declaring: &mut dyn FnMut(&Path) -> Option<crate::FileView>,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
     path: &Path,
@@ -3822,7 +3886,7 @@ pub(crate) fn callee_of_a_call(
         return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
     };
 
-    match declaration_of_a_callee(index, scopes, root, path, &callee, written) {
+    match declaration_of_a_callee(index, declaring, scopes, root, path, &callee, written) {
         Known::Yes(named) => Known::Yes(Callee {
             file: named.file(path),
             name_offset: named.name_offset(),
@@ -7988,6 +8052,7 @@ mod tests {
         let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
         let found = super::definition_across_files(
             &index,
+            &mut |_: &Path| None,
             &scopes,
             &root,
             Path::new("/p/main.cpp"),
@@ -8034,6 +8099,7 @@ mod tests {
         let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
         let found = super::definition_across_files(
             &index,
+            &mut |_: &Path| None,
             &scopes,
             &root,
             Path::new("/p/main.cpp"),
@@ -8064,6 +8130,7 @@ mod tests {
         let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
         let found = super::definition_across_files(
             &index,
+            &mut |_: &Path| None,
             &scopes,
             &root,
             Path::new("/p/main.cpp"),
@@ -8096,6 +8163,7 @@ mod tests {
         let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
         let found = super::member_across_files(
             &index,
+            &mut |_: &Path| None,
             &scopes,
             &root,
             Path::new("/p/main.cpp"),
@@ -8125,6 +8193,7 @@ mod tests {
         let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
         let found = super::definition_across_files(
             &index,
+            &mut |_: &Path| None,
             &scopes,
             &root,
             Path::new("/p/main.cpp"),
@@ -8154,6 +8223,7 @@ mod tests {
         let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
         let found = super::definition_across_files(
             &index,
+            &mut |_: &Path| None,
             &scopes,
             &root,
             Path::new("/p/main.cpp"),
@@ -8183,6 +8253,7 @@ mod tests {
         let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
         let found = super::definition_across_files(
             &index,
+            &mut |_: &Path| None,
             &scopes,
             &root,
             Path::new("/p/main.cpp"),
@@ -8213,6 +8284,7 @@ mod tests {
         let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
         let found = super::definition_across_files(
             &index,
+            &mut |_: &Path| None,
             &scopes,
             &root,
             Path::new("/p/main.cpp"),
@@ -8246,7 +8318,7 @@ mod tests {
         let root = tree.get_red_root();
         let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
 
-        super::member_across_files(&index, &scopes, &root, Path::new(from), at(source, needle))
+        super::member_across_files(&index, &mut |_: &Path| None, &scopes, &root, Path::new(from), at(source, needle))
     }
 
     // -------------------------------------------------------------------------------------------
@@ -8490,6 +8562,7 @@ mod tests {
         let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
         let found = super::member_across_files(
             &index,
+            &mut |_: &Path| None,
             &scopes,
             &root,
             Path::new("/p/main.cpp"),
@@ -8873,6 +8946,7 @@ mod tests {
         let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
         let found = super::member_across_files(
             &index,
+            &mut |_: &Path| None,
             &scopes,
             &root,
             Path::new("/p/main.cpp"),
@@ -8938,6 +9012,7 @@ mod tests {
         let scopes = crate::build_scopes(&root, &crate::NoMacroBodies);
         let found = super::definition_across_files(
             &index,
+            &mut |_: &Path| None,
             &scopes,
             &root,
             Path::new("/p/main.cpp"),
@@ -9539,6 +9614,7 @@ mod tests {
 
         super::member_completions_at(
             &index,
+            &mut |_: &Path| None,
             &scopes,
             &root,
             Path::new(from),
@@ -9816,6 +9892,7 @@ void f(Derived& d) {
 
         let found = super::member_completions_at(
             &index,
+            &mut |_: &Path| None,
             &scopes,
             &root,
             Path::new("/p/main.cpp"),
@@ -9926,6 +10003,7 @@ void f(Derived& d) {
 
         let found = super::member_completions_at(
             &index,
+            &mut |_: &Path| None,
             &scopes,
             &root,
             Path::new("/p/a.cpp"),
@@ -9952,7 +10030,7 @@ void f(Derived& d) {
         let cursor = at(source, "w.size") + 2 + 2;
 
         let found =
-            super::member_completions_at(&index, &scopes, &root, Path::new("/p/a.cpp"), cursor);
+            super::member_completions_at(&index, &mut |_: &Path| None, &scopes, &root, Path::new("/p/a.cpp"), cursor);
         let Known::Yes(completions) = found else {
             panic!("the cursor is inside the member's name: {found:?}");
         };
@@ -9996,6 +10074,7 @@ void f(Derived& d) {
 
         let found = super::member_across_files(
             &index,
+            &mut |_: &Path| None,
             &scopes,
             &root,
             Path::new("/p/a.cpp"),

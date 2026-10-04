@@ -2913,6 +2913,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn definition(&self, view: &FileView, offset: usize) -> Known<ProjectDefinition> {
         definition_across_files(
             self.store.index(),
+            &mut |path| self.view(path),
             &view.scopes,
             &view.root,
             &view.path,
@@ -2928,6 +2929,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn definitions(&self, view: &FileView, offset: usize) -> Known<ProjectDefinitions> {
         definitions_across_files(
             self.store.index(),
+            &mut |path| self.view(path),
             &view.scopes,
             &view.root,
             &view.path,
@@ -2991,6 +2993,7 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn member_completions(&self, view: &FileView, offset: usize) -> Known<MemberCompletions> {
         member_completions_at(
             self.store.index(),
+            &mut |path| self.view(path),
             &view.scopes,
             &view.root,
             &view.path,
@@ -3128,6 +3131,7 @@ impl<F: FileProvider + Clone> Session<F> {
         let written = expression.text().to_string().trim().to_string();
         match crate::index::project::type_of_expression(
             self.store.index(),
+            &mut |path| self.view(path),
             &view.scopes,
             &view.root,
             &view.path,
