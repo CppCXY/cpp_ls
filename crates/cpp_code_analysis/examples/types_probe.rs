@@ -12,6 +12,46 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
+/// **The kind of node an `auto` declaration's initializer is** — what the refusal was about.
+///
+/// Found by descending to the declaration holding `name_at`, then to its `Initializer`, then to that node's last
+/// child that is a node rather than a token: the same three steps the analysis itself takes, so a shape reported
+/// here is the shape the rules were handed. `"no initializer"` when the walk finds none, which is a different
+/// answer from every expression shape and is counted as one.
+fn initializer_shape(root: &cpp_parser::CppSyntaxNode, name_at: usize) -> String {
+    // **The innermost node holding the name**, then **up**: the outermost node containing it is the root, and a
+    // search from there finds the file's *first* initializer rather than this declaration's. Measured, that is what
+    // the first version did: `auto d = q - raw();` was reported as a `CallExpr`, because the initializer it found
+    // belonged to some earlier declaration and happened to end in a call.
+    let Some(innermost) = root
+        .descendants()
+        .filter(|node| {
+            let range = cpp_parser::source_range(node.text_range());
+            range.start_offset <= name_at && name_at < range.end_offset()
+        })
+        .last()
+    else {
+        return "not found".to_string();
+    };
+
+    // Up until a node that **has** an initializer, which is the declaration: a declarator does not, its declaration
+    // does, and the first ancestor that has one is the smallest such node rather than the file.
+    for candidate in innermost.ancestors() {
+        let initializer = candidate.descendants().find(|node| {
+            cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::Initializer
+        });
+        let Some(initializer) = initializer else {
+            continue;
+        };
+        return match initializer.children().last() {
+            Some(expression) => format!("{:?}", cpp_parser::CppSyntaxKind::from(expression.kind())),
+            None => "empty initializer".to_string(),
+        };
+    }
+
+    "no initializer".to_string()
+}
+
 fn main() {
     let list = std::env::args().nth(1).expect("a file list");
     let limit = std::env::args()
@@ -65,6 +105,7 @@ fn main() {
     let mut still_auto = 0usize;
     let mut examples: Vec<(String, String, String)> = Vec::new();
     let mut refused_examples: Vec<(String, String, String)> = Vec::new();
+    let mut refusal_shapes: HashMap<String, usize> = HashMap::new();
     let mut refusals: HashMap<String, usize> = HashMap::new();
 
     for path in paths.iter().take(limit) {
@@ -112,20 +153,29 @@ fn main() {
                     }
                     cpp_code_analysis::Known::Unknown(reason) => {
                         refused += 1;
+                        // **The reason in full, payload and all.** It carries the spelling that could not be
+                        // answered — `UnknownType("_Mypair._Myval2")` — and the first version of this probe split on
+                        // the parenthesis and threw that away, so every refusal read as the same four words. The
+                        // payload is what says *which* expression stopped the walk.
                         let why = format!("{reason:?}");
-                        let why = why.split('(').next().unwrap_or(&why).to_string();
-                        *refusals.entry(why).or_default() += 1;
+                        *refusals.entry(why.clone()).or_default() += 1;
                         // **What the refusal was about, not only how many there were.** A count says the analysis
                         // does not know a type; the declaration says whether that is a shape the rule is missing or
                         // one no rule can answer — and without it the 501 refusals below are a number rather than a
                         // work list, which is what the first version of this probe printed.
-                        if refused_examples.len() < 24 {
+                        if refused_examples.len() < 400 {
                             refused_examples.push((
                                 binding.name.text(),
                                 written.to_string(),
                                 path.file_name().unwrap_or_default().to_string_lossy().to_string(),
                             ));
                         }
+                        // **The shape of the initializer**, because that is what a work list is divided by: a
+                        // member access and a cast reach their types by different routes through this analysis, and
+                        // a total of 500 across both says nothing about which route to build.
+                        *refusal_shapes
+                            .entry(initializer_shape(&view.root, binding.name_range.start_offset))
+                            .or_default() += 1;
                         String::new()
                     }
                     cpp_code_analysis::Known::No => {
@@ -143,6 +193,12 @@ fn main() {
         "\n--- `auto` declarations: {written_with_auto} written | {deduced} deduced | {refused} refused | \
          {still_auto} still `auto` ---"
     );
+    let mut shapes: Vec<(String, usize)> = refusal_shapes.into_iter().collect();
+    shapes.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    println!("--- refusals by the shape of the initializer ---");
+    for (shape, count) in shapes {
+        println!("{count:8}  {shape}");
+    }
     let mut ranked: Vec<(String, usize)> = refusals.into_iter().collect();
     ranked.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
     for (why, count) in ranked {

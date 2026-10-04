@@ -114,6 +114,11 @@ fn main() {
                 // declared `auto`" about a fact that was right there.
                 fact.returns
             );
+            // **The template parameters, which are a different question from everything above.** A class template's
+            // list is what a member's type is written with (`vector`'s `reference` says `_Ty&`), and a *function*
+            // template's list is what a call's return type is written with — so "is this recorded for functions too"
+            // is the question a substitution step turns on, and it is not answerable from `returns` alone.
+            println!("        template parameters {:?}", fact.parameters);
         }
     }
 }

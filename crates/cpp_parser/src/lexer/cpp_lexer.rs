@@ -170,6 +170,15 @@ impl<'a> CppLexer<'a> {
             // `__typeof__` from `decltype` reads the token, not the kind — and one that asks "is this a type
             // expression?" gets the right answer for both.
             "__typeof__" | "__typeof" | "__decltype" => CppTokenKind::DecltypeKeyword,
+            // **The four named casts.** Absent until now, and their absence was invisible: an unrecognised
+            // `static_cast` is an *identifier*, so `static_cast<int>(x)` lexes as `static_cast` `<` `int` `>` `(`
+            // `x` `)` and parses — without an error — as a comparison chain. Measured: `auto x =
+            // static_cast<int>(a);` refused with `UnknownType("static_cast<int>")`, which is the left half of that
+            // chain.
+            "static_cast" => CppTokenKind::StaticCastKeyword,
+            "dynamic_cast" => CppTokenKind::DynamicCastKeyword,
+            "const_cast" => CppTokenKind::ConstCastKeyword,
+            "reinterpret_cast" => CppTokenKind::ReinterpretCastKeyword,
             "explicit" => CppTokenKind::ExplicitKeyword,
             "export" => CppTokenKind::ExportKeyword,
             "mutable" => CppTokenKind::MutableKeyword,

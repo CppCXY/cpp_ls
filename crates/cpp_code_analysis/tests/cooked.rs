@@ -26,6 +26,33 @@ fn text(source: &str) -> String {
     cooked(source).spellings()
 }
 
+/// **The spellings a rendering's own text holds, in order** — the whole of what a rendering promises.
+///
+/// The layout is not a contract and never was: a preprocessor may lay its output out however it likes, and
+/// `cook_vs_compiler` compares the compiler's `-E` output this way for that reason. Three tests here asserted the
+/// exact spacing until the renderer stopped inserting spaces that change nothing — at which point they were
+/// asserting a property nothing depends on. The stronger claim, **that the same tokens come out**, is what they
+/// make now: a token missing, doubled or merged fails this, and one written `3+2` instead of `3 + 2` does not.
+fn spelled(rendered: &str) -> Vec<String> {
+    let (tokens, _) = cpp_parser::lex(rendered, &cpp_parser::LexerConfig::default());
+    tokens
+        .iter()
+        .filter(|token| {
+            !matches!(
+                token.kind,
+                cpp_parser::CppTokenKind::Whitespace
+                    | cpp_parser::CppTokenKind::Newline
+                    | cpp_parser::CppTokenKind::LineComment
+                    | cpp_parser::CppTokenKind::BlockComment
+            )
+        })
+        .map(|token| {
+            rendered[usize::from(token.range.start_offset)..usize::from(token.range.end_offset())]
+                .to_string()
+        })
+        .collect()
+}
+
 #[test]
 fn an_object_like_macro_is_replaced_by_its_body() {
     assert_eq!(text("#define N 42\nint x = N;\n"), "int x = 42 ;");
@@ -524,7 +551,7 @@ fn a_macro_from_an_included_header_is_expanded_by_the_cooked_stream() {
 
     let rendered = cpp_code_analysis::cook_with(source, &tokens, &configuration.table).render();
     assert!(
-        rendered.text.starts_with("namespace std {"),
+        spelled(&rendered.text).starts_with(&["namespace".to_string(), "std".to_string(), "{".to_string()]),
         "the body of the included macro is what the parser sees: {:?}",
         rendered.text
     );
@@ -593,7 +620,14 @@ fn an_object_like_body_in_force_is_used_by_default_and_can_be_turned_off() {
     assert_eq!(default.in_force_without_a_parameter_list, 2);
     let rendered = cpp_code_analysis::cook_with(source, &tokens, &default.table).render();
     assert!(
-        rendered.text.starts_with("__declspec ( dllimport ) int f"),
+        spelled(&rendered.text).starts_with(&[
+            "__declspec".to_string(),
+            "(".to_string(),
+            "dllimport".to_string(),
+            ")".to_string(),
+            "int".to_string(),
+            "f".to_string(),
+        ]),
         "{:?}",
         rendered.text
     );
@@ -630,7 +664,7 @@ fn a_cook_over_two_layers_answers_like_the_two_merged() {
 
     assert_eq!(from_layers.text, from_the_merge.text);
     assert_eq!(
-        from_layers.text.trim(),
+        spelled(&from_layers.text).join(" "),
         "3 + 2 + seed_1",
         "the newer layer's `MY_API` wins, the seed answers for what the newer layer never mentions, and both \
          directions expand"

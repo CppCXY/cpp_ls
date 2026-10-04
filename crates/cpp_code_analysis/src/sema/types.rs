@@ -1262,7 +1262,7 @@ fn read_named(node: &CppSyntaxNode) -> Option<Type> {
 ///   `std::array<int, 4>`;
 /// * a **pack expansion** (`std::tuple<Args...>`) is a parameter standing for several arguments, which is a shape
 ///   of its own because substituting into it is not substituting into a name.
-fn read_template_arguments(list: &CppSyntaxNode) -> Vec<Type> {
+pub(crate) fn read_template_arguments(list: &CppSyntaxNode) -> Vec<Type> {
     let mut arguments = Vec::new();
 
     for child in list.children() {

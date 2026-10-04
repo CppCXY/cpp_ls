@@ -127,12 +127,15 @@ impl CookedStream {
         // See the note on the separator below: two tokens that touched are one spelling, and rendering them apart
         // is how a `>>` becomes something the parser cannot put back together.
         let mut previous_source_end: Option<usize> = None;
+    // The previous token's spelling, whatever it came from: the join test below needs it for a pair the cook
+    // produced, which has no source offsets to compare.
+    let mut previous_cooked: Option<String> = None;
 
         for (index, cooked) in self.tokens.iter().enumerate() {
             while lines.next_if(|line| line.end <= index).is_some() {}
             let starts_a_line = lines.peek().is_some_and(|line| line.start == index);
 
-            // **A space only where the source had one.**
+            // **A space only where the source had one, or where leaving it out would change the spelling.**
             //
             // This was "one space between tokens, always", on the argument that a space "cannot merge two
             // spellings into one token, which is the one way layout *can* change a parse". That argument has a
@@ -144,10 +147,40 @@ impl CookedStream {
             // Measured: the cooked `<vector>` stream went from 0 diagnostics to **77**, the first of them at byte
             // 4127, where the file writes `is_same_v<_Ty1, _Ty2>>` and the rendering wrote `_Ty2 > >`.
             //
-            // Tokens the cook **produced** — pasted, stringised, expanded — keep their space: they have no shared
-            // spelling to preserve, and separating them is the direction that cannot invent a token.
-            let touching = matches!(cooked.origin, Origin::Source)
-                && previous_source_end == Some(cooked.token.range.start_offset);
+            // Tokens the cook **produced** — pasted, stringised, expanded — used to keep their space
+            // unconditionally, on the grounds that they have no shared spelling to preserve. That is the wrong
+            // test, and it cost more than the `>` case: `_STD` expands to three tokens `::` `std` `::`, the
+            // rendering wrote them `:: std ::`, and a **name reader** then had a spelling with spaces in it where
+            // the source had one qualified name. Measured on eight standard-library headers: 24 `auto` refusals
+            // reading `UnknownType(":: std :: _Get_unwrapped")`, 11 more for `_To_address`, 11 for
+            // `_Convert_size` — 50-odd declarations refused over a space.
+            //
+            // The test is now the question itself rather than a guess about it: **join the two spellings, lex the
+            // result, and separate them only if the join produces a different first token.** `::` and `std` do not
+            // merge and are left touching; `+` and `+` do and are separated; `>` and `>` do and are separated,
+            // which is the case the old rule was written for.
+            //
+            // # Three kinds of pair, and the third is the one that is easy to miss
+            //
+            // Source-next-to-source is answered by adjacency, which is what the file's own layout says. Cooked-
+            // next-to-cooked has no adjacency to appeal to and is answered by the join test. **Source-next-to-
+            // cooked** is the pair that a *macro argument* makes — `CALL(unwrap(a))` renders as the expansion of
+            // `CALL` followed by the `unwrap` the caller wrote — and answering it by adjacency alone separates
+            // them, which is how `::std:: unwrap` still had a space in it after the first version of this rule.
+            let touching = match cooked.origin {
+                Origin::Source => match previous_source_end {
+                    Some(end) => end == cooked.token.range.start_offset,
+                    None => match previous_cooked.as_deref() {
+                        Some(previous) => !joining_would_merge(previous, cooked.token.text()),
+                        None => false,
+                    },
+                },
+                // Everything the cook produced — an expansion, a `##` paste, a `#` stringisation.
+                _ => match previous_cooked.as_deref() {
+                    Some(previous) => !joining_would_merge(previous, cooked.token.text()),
+                    None => false,
+                },
+            };
 
             if !text.is_empty() {
                 if break_next || starts_a_line {
@@ -161,6 +194,11 @@ impl CookedStream {
                 Origin::Source => Some(cooked.token.range.end_offset()),
                 _ => None,
             };
+            // **The spelling to compare the next one against**, which is the previous token's text whatever it
+            // came from: two source tokens are judged by adjacency, two cooked ones by whether joining them
+            // changes the first, and the pair that straddles the two is judged by the cooked rule — its source
+            // half has no adjacency to appeal to.
+            previous_cooked = Some(cooked.token.text().to_string());
 
             let start = text.len();
             text.push_str(cooked.token.text());
@@ -223,6 +261,37 @@ pub struct RenderedCooked {
     pub text: String,
     /// One entry per token of the stream it was rendered from, in the same order.
     pub spans: Vec<RenderedSpan>,
+}
+
+/// **Would writing these two spellings with nothing between them produce a different first token?**
+///
+/// The whole of the decision about whether the renderer may leave a space out, asked rather than guessed: the two
+/// are joined, the join is lexed, and the answer is whether the first token of the join is still the left one. It is
+/// exact for every pair there is — `::` and `std` do not merge and are left touching, `+` and `+` do and are
+/// separated, `>` and `>` do and are separated.
+///
+/// # Why not a table of operator pairs
+///
+/// Because the table would have to be right about `>>`, `<:`, `.5`, `1e+5`, `u8"`, `R"(` and every other place
+/// where two spellings are one token — and each of them is a *parse* difference that shows up as a wrong answer
+/// rather than as an error. Asking the lexer costs one call per token of a rendering, which is built once per file
+/// and then cached; being wrong costs a name that reads as two.
+///
+/// An empty side is not a join at all, and a call with nothing to lex would answer about the wrong thing.
+fn joining_would_merge(left: &str, right: &str) -> bool {
+    if left.is_empty() || right.is_empty() {
+        return false;
+    }
+    let joined = format!("{left}{right}");
+    let (tokens, _) = cpp_parser::lex(&joined, &cpp_parser::LexerConfig::default());
+    match tokens.first() {
+        // **By range, not by text**: a lexer token carries where it is rather than what it says, and "the first
+        // token is exactly the left spelling" is the same claim as "the first token ends where the left one does".
+        Some(first) => usize::from(first.range.end_offset()) != left.len(),
+        // A join that lexes to nothing is one the lexer refused; separating is the direction that cannot invent a
+        // token, so the answer is that it would.
+        None => true,
+    }
 }
 
 /// One token's place in the rendering, the place it was written, and the place to act on it.

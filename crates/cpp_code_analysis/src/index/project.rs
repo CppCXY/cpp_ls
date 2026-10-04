@@ -2097,6 +2097,33 @@ pub(crate) fn type_of_expression(
         return type_of_a_call(index, scopes, root, path, expression);
     }
 
+    // **A named cast has the type it names**, and that is C++'s own rule rather than an inference: `static_cast<T>`,
+    // `dynamic_cast<T>`, `const_cast<T>` and `reinterpret_cast<T>` all have the type `T`, whatever the operand is —
+    // the operand's type is what the *programmer* had to know, and the cast is the statement of the answer. So
+    // nothing is walked and nothing can be wrong: the `TypeId` the grammar read is the type.
+    //
+    // Measured before this arm existed: 39 `auto` declarations across `<vector>` and `<xutility>` refused, every one
+    // of them a cast — `UnknownType("static_cast<size_t>")`, `UnknownType("const_cast<char*>")` — with the cast
+    // expression already in the tree and nothing asking it.
+    if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::CastExpr {
+        let target = expression.children().find(|child| {
+            CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TypeId
+        });
+        return match target {
+            Some(target) => {
+                let written = target.text().to_string();
+                let written = written.trim();
+                Known::Yes((
+                    crate::sema::types::parse_type_spelling(written),
+                    path.to_path_buf(),
+                ))
+            }
+            // A `CastExpr` with no type in it is one the recovery built around a keyword with nothing after it,
+            // which is a file being typed at rather than a cast.
+            None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+        };
+    }
+
     // A **parenthesised** expression has the type of what it wraps, and the parentheses are a node of their own:
     // `(*p).size` makes the object of the `.` a `ParenExpr`, so a recursion that did not step through it would
     // stop one level above the answer — which is exactly where it used to stop.
@@ -2627,6 +2654,7 @@ impl NamedDeclaration {
         scopes: &crate::ScopeTree,
         root: &cpp_parser::CppSyntaxNode,
         path: &Path,
+        written_arguments: &[Type],
     ) -> Option<Type> {
         match self {
             NamedDeclaration::Here(binding) => {
@@ -2636,15 +2664,48 @@ impl NamedDeclaration {
                         .identifier_text()
                         .map(Type::named);
                 }
-                crate::sema::declarations::declared_returns_of(root, binding)
-                    .map(|returns| parse_type_spelling(&returns))
+                let returns = crate::sema::declarations::declared_returns_of(root, binding)?;
+                let returns = parse_type_spelling(&returns);
+
+                // **The same pairing the indexed half does, for the declaration this file writes.**
+                //
+                // A function template declared in the buffer is a `Here` binding, and only the `Indexed` arm below
+                // substituted — so `_Convert_size<size_type>(n)` in the file that declares `_Convert_size` answered
+                // with the unsubstituted `_Size_type` while the identical call through a header's fact answered
+                // `size_type`. One question, two answers, and the difference was which of the two arms the lookup
+                // happened to land in. Measured on a fixture with both: the same-file call refused and the
+                // header's call deduced.
+                let names = crate::sema::declarations::declared_template_parameters_of(root, binding);
+                if names.is_empty() || written_arguments.is_empty() {
+                    return Some(returns);
+                }
+                let substitutions =
+                    crate::sema::types::TypeSubstitutions::new(&names, written_arguments);
+                Some(returns.substituted(&substitutions))
             }
             // A **call of a member**: `v.data()` has what `data` returns, and what it returns is written with the
             // class template's parameters — so the same pairing that finishes a member's type finishes this, and
             // the same walk over the class's own member names finishes it too.
             NamedDeclaration::Indexed(fact, file, bindings) => {
                 let returns = what_a_call_has_in(fact)?;
+                // **The class's arguments first, then the function's.** Both substitute into the same spelling and
+                // they are written with disjoint names - the class's _Elem and the function's _Size_type in
+                // asic_string<char>::_Convert_size<size_t> - so the order does not decide the answer; it decides
+                // which name is left standing when the two lists overlap, and the function's is the nearer.
                 let started = bindings.applied_to(&returns);
+                let started = if fact.parameters.is_empty() || written_arguments.is_empty() {
+                    started
+                } else {
+                    // **Written with names nobody had recorded until now.** _Convert_size returns _Size_type`r
+                    // and is called _Convert_size<size_type>(_Length): the argument list is right there in the
+                    // callee, the parameter names are in the fact, and the whole of the answer is the pairing - the
+                    // same positional substitution a member's type already goes through. Measured on
+                    // <vector>/<xutility>: 11 uto refusals were exactly this call, every one of them a return
+                    // type that had been read and left unpaired.
+                    let substitutions =
+                        crate::sema::types::TypeSubstitutions::new(&fact.parameters, written_arguments);
+                    started.substituted(&substitutions)
+                };
 
                 let Some(class) = fact.scope.as_deref() else {
                     // A free function: there is no class whose members could name its return type. An alias at
@@ -2816,8 +2877,19 @@ fn declared_type(
         return unknown();
     };
 
-    let Known::Yes((deduced, _)) = initializer_type(index, scopes, root, path, named, depth + 1) else {
-        return unknown();
+    // **The walk's own reason, rather than the placeholder again.** The initializer walk knows *which* expression it
+    // could not type — `UnknownType("_Mypair._Myval2")` — and returning `UnknownType("auto")` in its place threw that
+    // away: every refusal in a standard-library header read as the same four characters, and a reader could not tell
+    // "the initializer is not there" from "the initializer is there and its third subexpression is a template
+    // parameter". Measured on eight headers: 294 refusals, **246 of them reported as `UnknownType("auto")`** — a
+    // payload that answers no question, and one that hid the real reason from a probe written to find it.
+    //
+    // `Known::No` still means the walk declined to take the question at all, which is what the placeholder reason is
+    // for; only a walk that *tried and failed* has a better answer to give.
+    let deduced = match initializer_type(index, scopes, root, path, named, depth + 1) {
+        Known::Yes((deduced, _)) => deduced,
+        Known::Unknown(reason) => return Known::Unknown(reason),
+        Known::No => return unknown(),
     };
 
     match auto_substituted(&as_written, &deduced) {
@@ -3120,15 +3192,30 @@ fn is_an_identifier(segment: &str) -> bool {
 /// offset lands *past* the name and the lookup answers `UnparsableName` — every plain name in the file losing its
 /// type at once.
 fn end_of_the_written_name(expression: &cpp_parser::CppSyntaxNode) -> usize {
+    // **Not the last identifier in the text — the last identifier of the *name*.** The difference is the whole of
+    // how a template-id is called: `_Convert_size<size_type>(n)` holds two identifiers, and the later of them is
+    // the template **argument**. Taking it asked the scope for `size_type` — an alias, not a function — and the
+    // call was then refused with a type that had nothing to do with the callee. Measured on a fixture where the
+    // same function called through a header deduced and called in its own file refused.
+    //
+    // A `TemplateArgumentList` is where those identifiers live, and skipping its subtrees is the whole fix: the
+    // name of `A<B>::C<D>` is still `C`, and the arguments on both sides are no longer candidates.
     let mut last = None;
 
     for element in expression.descendants_with_tokens() {
         let Some(token) = element.into_token() else {
             continue;
         };
-        if cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::Identifier {
-            last = Some(usize::from(token.text_range().start()));
+        if cpp_parser::CppTokenKind::from(token.kind()) != cpp_parser::CppTokenKind::Identifier {
+            continue;
         }
+        if token
+            .parent_ancestors()
+            .any(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::TemplateArgumentList)
+        {
+            continue;
+        }
+        last = Some(usize::from(token.text_range().start()));
     }
 
     last.unwrap_or_else(|| usize::from(expression.text_range().start()))
@@ -3251,14 +3338,36 @@ fn type_of_a_call(
         return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
     };
 
+    // **The template arguments the call wrote**, which is the half of a function-template call that was being read
+    // and thrown away: `_Convert_size<size_type>(_Length)` names the type it returns, and nothing was pairing that
+    // name with the declaration's parameters. Read from the **syntax** rather than from the text, for the reason
+    // `read_template_arguments` gives — an argument's text can contain commas a splitter would get wrong.
+    let written_arguments = written_template_arguments(&callee);
+
     match declaration_of_a_callee(index, scopes, root, path, &callee, written) {
-        Known::Yes(named) => match named.what_a_call_has(index, scopes, root, path) {
+        Known::Yes(named) => match named.what_a_call_has(index, scopes, root, path, &written_arguments) {
             Some(type_of) => Known::Yes((type_of, named.file(path))),
             None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
         },
         Known::Unknown(reason) => Known::Unknown(reason),
         Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
     }
+}
+
+/// The types a callee's own `<…>` names, when it wrote one.
+///
+/// An empty list is what both "no argument list" and "an argument list this could not read" give, and the caller's
+/// only use for it is a positional substitution — substituting nothing is what it already does when there is nothing
+/// to substitute, so the two need not be told apart.
+fn written_template_arguments(callee: &cpp_parser::CppSyntaxNode) -> Vec<Type> {
+    let Some(list) = callee
+        .descendants()
+        .find(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::TemplateArgumentList)
+    else {
+        return Vec::new();
+    };
+
+    crate::sema::types::read_template_arguments(&list)
 }
 
 /// The declaration a **callee expression** names — `make` in `make()`, `fac.build` in `fac.build()`.

@@ -52,6 +52,12 @@ fn main() {
         .and_then(|at| rest.get(at + 1))
         .and_then(|count| count.parse().ok())
         .unwrap_or(8);
+    let has: Vec<String> = rest
+        .iter()
+        .enumerate()
+        .filter(|(at, _)| rest.get(at.wrapping_sub(1)).map(String::as_str) == Some("--has"))
+        .map(|(_, name)| name.clone())
+        .collect();
     let files: Vec<std::path::PathBuf> = rest
         .iter()
         .enumerate()
@@ -152,6 +158,37 @@ fn main() {
             if let Some(reading) = session.rendered_text_of(file) {
                 let _ = std::fs::write(into, reading);
                 println!("    wrote the rendering to {into}");
+            }
+        }
+
+        // **Whether a particular name is in each reading**, which the set difference cannot answer: a name both
+        // readings have is in neither "only" list, and "is `get_tzdb` there at all" is the question a missing
+        // declaration turns on. `--has <name> …` prints membership in both, per file.
+        if !has.is_empty() {
+            let raw_names: BTreeSet<String> = raw_summary
+                .declarations
+                .iter()
+                .map(cpp_code_analysis::DeclFact::qualified_name)
+                .collect();
+            let cooked_names: BTreeSet<String> = session
+                .index()
+                .cooked_declarations(file)
+                .unwrap_or_default()
+                .iter()
+                .map(cpp_code_analysis::DeclFact::qualified_name)
+                .collect();
+
+            for name in &has {
+                let in_raw = raw_names.iter().any(|found| found.contains(name.as_str()));
+                let in_cooked = cooked_names.iter().any(|found| found.contains(name.as_str()));
+                let found_in_cooked = cooked_names
+                    .iter()
+                    .find(|found| found.contains(name.as_str()))
+                    .cloned()
+                    .unwrap_or_default();
+                println!(
+                    "    `{name}`: raw {in_raw} / cooked {in_cooked}   (cooked spelling: `{found_in_cooked}`)"
+                );
             }
         }
 

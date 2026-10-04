@@ -146,6 +146,20 @@ pub enum CppTokenKind {
     NullptrKeyword,
     /// static_assert - static assertion (C++11)
     StaticAssertKeyword,
+    /// **`static_cast` — one of the four named casts.**
+    ///
+    /// A keyword of its own rather than an identifier, because `static_cast<int>(x)` and `a < b > (c)` are the same
+    /// twelve tokens otherwise: read as an identifier, the cast is a **comparison chain**, and it parses without an
+    /// error into an expression of an entirely different shape. Measured before this existed: `auto x =
+    /// static_cast<int>(a);` refused with `UnknownType("static_cast<int>")` — the analysis had read
+    /// `(static_cast < int) > (a)`, which is why the payload is the left half of a comparison rather than a type.
+    StaticCastKeyword,
+    /// `dynamic_cast` — the four named casts, one kind each so that a diagnostic can name the one the file wrote.
+    DynamicCastKeyword,
+    /// `const_cast`.
+    ConstCastKeyword,
+    /// `reinterpret_cast`.
+    ReinterpretCastKeyword,
     /// template - template
     TemplateKeyword,
     /// thread_local - thread local storage (C++11)
@@ -460,6 +474,10 @@ impl fmt::Display for CppTokenKind {
             Self::NoexceptKeyword => write!(f, "noexcept"),
             Self::NullptrKeyword => write!(f, "nullptr"),
             Self::StaticAssertKeyword => write!(f, "static_assert"),
+            Self::StaticCastKeyword => write!(f, "static_cast"),
+            Self::DynamicCastKeyword => write!(f, "dynamic_cast"),
+            Self::ConstCastKeyword => write!(f, "const_cast"),
+            Self::ReinterpretCastKeyword => write!(f, "reinterpret_cast"),
             Self::TemplateKeyword => write!(f, "template"),
             Self::ThreadLocalKeyword => write!(f, "thread_local"),
             Self::ConstevalKeyword => write!(f, "consteval"),

@@ -2190,6 +2190,49 @@ fn parse_primary_expr(p: &mut CppParser, fold_operand: bool) -> ParseResult {
         // library asks exactly that question (`compare`, `bits/ranges_cmp.h`). The segment loop below already read
         // an operator name in every position *except* this one — it is reached for `Foo::operator+()` but not for
         // a bare `operator+()`, because the arm's pattern did not include the keyword.
+        // **A named cast**: `static_cast<T>(e)`, and the three others, which have the same shape.
+        //
+        // The shape is `keyword < type-id > ( expression )`, and every part of it is required: the `<` is what
+        // separates the cast from a functional conversion, the `>` closes the type, and the parentheses hold the one
+        // expression being converted. A pack expansion may follow the whole thing —
+        // `static_cast<Ts&&>(args)...` — which the caller's own suffix rule takes.
+        //
+        // The four keywords were ordinary **identifiers** until this round, and the cost was invisible because
+        // nothing errored: `static_cast<int>(x)` lexed as `static_cast` `<` `int` `>` `(` `x` `)` and parsed as a
+        // comparison chain. Measured on MSVC's `<vector>`/`<xutility>`: 39 `auto` declarations refused with
+        // `UnknownType("static_cast<size_t>")` and the like — the payload being the *left half of a comparison*
+        // rather than a type, which is what gave the misreading away.
+        CppTokenKind::StaticCastKeyword
+        | CppTokenKind::DynamicCastKeyword
+        | CppTokenKind::ConstCastKeyword
+        | CppTokenKind::ReinterpretCastKeyword => {
+            let m = p.mark(CppSyntaxKind::CastExpr);
+            p.bump(); // the keyword
+
+            let parsed = expect_token(p, CppTokenKind::Less)
+                .and_then(|_| super::types::parse_type_id(p))
+                .and_then(|_| expect_token(p, CppTokenKind::Greater))
+                .and_then(|_| expect_token(p, CppTokenKind::LeftParen))
+                // **The operand may be empty**: `static_cast<T>()` is a value-initialisation, and refusing it
+                // would make this arm fail on a construct the grammar has to read.
+                .and_then(|_| {
+                    if p.current_token() == CppTokenKind::RightParen {
+                        Ok(())
+                    } else {
+                        parse_expr(p).map(|_| ())
+                    }
+                })
+                .and_then(|_| expect_token(p, CppTokenKind::RightParen));
+
+            match parsed {
+                Ok(()) => Ok(m.complete(p)),
+                Err(err) => {
+                    m.undo(p);
+                    Err(err)
+                }
+            }
+        }
+
         CppTokenKind::Identifier
         | CppTokenKind::Scope
         | CppTokenKind::OperatorKeyword

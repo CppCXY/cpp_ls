@@ -740,8 +740,240 @@ fn without(text: &str, node: &CppSyntaxNode, name: cpp_parser::SourceRange) -> S
 /// recording it as one would answer `make().size` with "the type `auto` has no members" — a wrong answer where
 /// "nothing is known" is the true one. See [`DeclFact::returns`].
 pub fn declared_returns_of(root: &CppSyntaxNode, binding: &Binding) -> Option<String> {
-    declared_returns_of_with(&DeclarationShapes::of(root), binding)
+    let written = declared_returns_of_with(&DeclarationShapes::of(root), binding);
+    if written.is_some() {
+        return written;
+    }
+    deduced_returns_of(root, binding)
 }
+
+/// **The type a function with no written return type returns** — `auto f() { … }` and `decltype(auto) f()`.
+///
+/// This is the half [`declared_returns_of_with`] refuses by design: `auto` is not a class anything can be looked
+/// up in, so recording it would answer "no member `size` in `auto`" where the honest answer is that the file never
+/// said. What the file *did* say is in the body, and this reads it.
+///
+/// # What is provable here, and what is not
+///
+/// A function's return type is the type of its `return` statements, and this layer is **syntax** — it has the file's
+/// tree and its bindings, and no index, no scopes and no argument types. So it types a `return` only where the
+/// syntax alone settles it, which today is:
+///
+/// * a **cast**: `return static_cast<T>(x);` has the type `T`, whatever `x` is, which is C++'s rule rather than an
+///   inference — and it is the shape the standard library's helpers use to state a type they cannot spell.
+///
+/// Everything else is refused: `return f(x);` needs the callee's declaration, `return x;` needs the parameter's
+/// type, and `return a + b;` needs both operands — each of them a question for a layer that has the index. A
+/// **guess** here would be worse than the refusal, because `returns` is read by the member lookup: a wrong type
+/// offers the wrong members, while a missing one offers none.
+///
+/// All the `return` statements must agree, which is C++'s own requirement. `if constexpr` makes that requirement
+/// subtler than it looks — only one branch is instantiated per instantiation — so a body whose returns disagree is
+/// refused rather than resolved by picking one.
+fn deduced_returns_of(root: &CppSyntaxNode, binding: &Binding) -> Option<String> {
+    if binding.kind != BindingKind::Function {
+        return None;
+    }
+
+    let declaration = declaration_of(root, binding)?;
+    let body = body_of(&declaration)?;
+    let returns = returned_expressions_in(&body);
+    if returns.is_empty() {
+        return None;
+    }
+
+    let mut agreed: Option<String> = None;
+    for expression in &returns {
+        let written = type_a_return_states(expression, &declaration)?;
+        match &agreed {
+            None => agreed = Some(written),
+            Some(previous) if *previous == written => {}
+            // Two returns of different types: the answer depends on which branch is instantiated, and this layer
+            // does not instantiate.
+            Some(_) => return None,
+        }
+    }
+    agreed
+}
+
+/// The `CompoundStatement` a function's declarator is followed by, when the file writes one.
+///
+/// Asked of the **declarator the name sits in** rather than of the declaration's whole range, because a declaration
+/// can hold several declarators (`int a, f() { … }` is not C++ but `auto f() -> T; auto g() { … }` in one scope is
+/// The `CompoundStat` this declaration's body is written with, when the file writes one.
+///
+/// Asked of the **declaration the name sits in** rather than of the file, because a range that merely *contains* a
+/// body would find the body of the next function along. See [`declaration_of`] for how that declaration is found,
+/// and for why it is a `Declaration` rather than a `FunctionDef`.
+fn body_of(declaration: &CppSyntaxNode) -> Option<CppSyntaxNode> {
+    declaration
+        .descendants()
+        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
+}
+
+/// **The innermost declaration the name sits in** — a function definition, as this tree writes one.
+///
+/// A function *definition* is not a node of its own here. Measured on `auto mixed(int* _First) { … }`, the ancestors
+/// of the name are `TranslationUnit → Declaration → InitDeclarator → Declarator → NameExpr`, so a search for a
+/// `FunctionDef` finds nothing and every deduced return type is refused for a reason that has nothing to do with the
+/// deduction. The innermost is the **last** containing node in document order, because a pre-order walk visits a
+/// parent before its children: among the nodes whose range contains the name, the last is the smallest.
+fn declaration_of(root: &CppSyntaxNode, binding: &Binding) -> Option<CppSyntaxNode> {
+    let at = binding.name_range.start_offset;
+    root.descendants()
+        .filter(|node| {
+            matches!(
+                CppSyntaxKind::from(node.kind()),
+                CppSyntaxKind::Declaration | CppSyntaxKind::FunctionDef
+            )
+        })
+        .filter(|node| {
+            let range = cpp_parser::source_range(node.text_range());
+            range.start_offset <= at && at < range.end_offset()
+        })
+        .last()
+}
+
+
+/// Every expression a `return` statement in this body returns, in document order.
+///
+/// Nested functions and lambdas are **skipped**: their `return`s belong to them, and counting one here would make a
+/// function's type depend on a body it does not own. `return;` contributes nothing rather than an empty expression.
+fn returned_expressions_in(body: &CppSyntaxNode) -> Vec<CppSyntaxNode> {
+    let mut found = Vec::new();
+
+    for statement in body.descendants() {
+        if CppSyntaxKind::from(statement.kind()) != CppSyntaxKind::ReturnStat {
+            continue;
+        }
+        if statement.ancestors().any(|node| {
+            matches!(
+                CppSyntaxKind::from(node.kind()),
+                CppSyntaxKind::LambdaExpr | CppSyntaxKind::FunctionDef
+            )
+        }) {
+            continue;
+        }
+        if let Some(expression) = statement.children().last() {
+            found.push(expression);
+        }
+    }
+
+    found
+}
+
+/// The type this expression **states**, when the syntax alone states one.
+///
+/// Four shapes, and each is a *reading* rather than an inference — the type is written in the expression or in a
+/// declaration beside it:
+///
+/// * **a cast**: `return static_cast<T>(x);` has the type `T`, whatever `x` is.
+/// * **a literal**: `return 1;` is an `int`, and no declaration anywhere says otherwise.
+/// * **a parameter**: `return _First;` has the parameter's own declared type, which is in this function's
+///   parameter list — the same tree, one walk away.
+/// * **a binary whose operands agree**: `return a + b;` with both `int` is an `int`, which is C++'s usual
+///   arithmetic conversion in the one case that needs no table (see `type_of_expression`'s note on ranking).
+///
+/// Everything else is refused. `return f(x);` needs the callee's declaration, which is in another file and another
+/// layer; a member access needs the object's type; and two operands that *disagree* need the conversion ranks this
+/// deliberately does not keep.
+fn type_a_return_states(expression: &CppSyntaxNode, declaration: &CppSyntaxNode) -> Option<String> {
+    match CppSyntaxKind::from(expression.kind()) {
+        CppSyntaxKind::CastExpr => {
+            let target = expression
+                .children()
+                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TypeId)?;
+            let written = target.text().to_string().trim().to_string();
+            (!written.is_empty()).then_some(written)
+        }
+        // **A literal's type is its own**, and the four C++ gives are `int`, `double`, `bool` and a pointer. Read
+        // by the shape of the text rather than by a table: `1` and `1'000` and `0x10` are one type, and `1.5f` is
+        // not `1.5`.
+        CppSyntaxKind::LiteralExpr => Some(literal_type(&expression.text().to_string()).to_string()),
+        CppSyntaxKind::NameExpr | CppSyntaxKind::IdentifierExpr => {
+            parameter_type(expression, declaration)
+        }
+        CppSyntaxKind::BinaryExpr => {
+            // Three children — left, operator, right — and the operator is a token rather than a node, so the two
+            // that are nodes are the operands. A comparison is `bool` whatever its operands are, which is C++'s own
+            // answer and needs no agreement at all.
+            let operands: Vec<CppSyntaxNode> = expression.children().collect();
+            let comparison = expression
+                .children_with_tokens()
+                .filter_map(|element| element.into_token())
+                .any(|token| {
+                    matches!(
+                        token.text(),
+                        "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||"
+                    )
+                });
+            if comparison {
+                return Some("bool".to_string());
+            }
+            let (left, right) = (operands.first()?, operands.last()?);
+            let left = type_a_return_states(left, declaration)?;
+            let right = type_a_return_states(right, declaration)?;
+            (left == right).then_some(left)
+        }
+        _ => None,
+    }
+}
+
+/// The type a literal spells, by the shape of its own text.
+///
+/// The suffixes are what separate the cases: `1` is `int` and `1u` is not, `1.5` is `double` and `1.5f` is not.
+/// A string literal is **not** attempted — `"x"` is a `const char*` and `L"x"` is not — because the caller reads
+/// this for an `auto` variable's type, where a wrong answer is worse than none.
+fn literal_type(written: &str) -> &'static str {
+    let trimmed = written.trim();
+    if trimmed == "true" || trimmed == "false" {
+        return "bool";
+    }
+    if trimmed == "nullptr" {
+        return "nullptr_t";
+    }
+    if trimmed.starts_with('"') || trimmed.starts_with("'") {
+        return "const char*";
+    }
+    let looks_like_a_float = trimmed.contains('.')
+        || (trimmed.contains('e') || trimmed.contains('E')) && !trimmed.starts_with("0x");
+    if looks_like_a_float {
+        return "double";
+    }
+    "int"
+}
+
+/// The type of the **parameter** this name is, when it is one of `declaration`'s own parameters.
+///
+/// The parameter list is in the declaration the return statement belongs to, so this is a walk within one node
+/// rather than a lookup: `auto f(int* _First) { return _First; }` says `int*` twice, and the second time nobody has
+/// to be asked. `None` for any other name — a local, a global, a template parameter — because their types are
+/// declared where this layer cannot reach without the scope tree.
+fn parameter_type(name: &CppSyntaxNode, declaration: &CppSyntaxNode) -> Option<String> {
+    let written = name.text().to_string();
+    let written = written.trim();
+
+    let parameter = declaration.descendants().find(|node| {
+        if CppSyntaxKind::from(node.kind()) != CppSyntaxKind::Parameter {
+            return false;
+        }
+        node.descendants().any(|child| {
+            matches!(
+                CppSyntaxKind::from(child.kind()),
+                CppSyntaxKind::Declarator | CppSyntaxKind::NameExpr
+            ) && child.text().to_string().trim() == written
+        })
+    })?;
+
+    // The parameter's own text with the name taken out, which is the type as the file wrote it. `rfind` rather
+    // than `find`: `int int_` has the name inside the type's spelling as well as at the end.
+    let whole = parameter.text().to_string();
+    let whole = whole.trim();
+    let at = whole.rfind(written)?;
+    let the_type = whole[..at].trim();
+    (!the_type.is_empty()).then(|| the_type.to_string())
+}
+
 
 /// [`declared_returns_of`] for a caller that has the file's shapes already.
 fn declared_returns_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
@@ -1041,7 +1273,30 @@ pub fn declared_template_parameters_of(root: &CppSyntaxNode, binding: &Binding) 
 /// outermost. The table is in document order, so the last entry that contains the name is the one that introduces
 /// it.
 fn declared_template_parameters_with(shapes: &DeclarationShapes, binding: &Binding) -> Vec<String> {
-    if binding.kind != BindingKind::Class {
+    // **A function template's list is as real as a class template's, and it was being thrown away.**
+    //
+    // This refused every binding that was not a class, so `template <class _Size_type, class _Unsigned_type>
+    // constexpr _Size_type _Convert_size(const _Unsigned_type)` recorded `returns: Some("_Size_type")` and
+    // `parameters: []` — the return type written with a name that nothing said the meaning of. A caller could then
+    // read the return type and had no way to pair it with an argument, which is why `_Convert_size<size_type>(_Len)`
+    // and every other call of a function template came back `UnknownType`.
+    //
+    // Measured on MSVC's `<vector>`/`<xutility>`: 11 `auto` refusals were calls with an **explicit** template
+    // argument — `_Convert_size<size_type>(_Length)` — where the answer is a substitution and nothing else.
+    //
+    // The walk below never was class-specific: it finds the innermost `template <…>` whose introduced range contains
+    // the name, which is as true of `template <class T> T f()` as of `template <class T> struct S`. The kinds are
+    // the ones [`parameter_list_at`] is read for, so a declaration has either both or neither.
+    if !matches!(
+        binding.kind,
+        BindingKind::Class
+            | BindingKind::Function
+            | BindingKind::Constructor
+            | BindingKind::Destructor
+            | BindingKind::ConversionFunction
+            | BindingKind::OperatorFunction
+            | BindingKind::LiteralOperator
+    ) {
         return Vec::new();
     }
 
@@ -1178,7 +1433,12 @@ fn fact_for(
     });
     let returns = {
         let _timer = crate::stages::StageTimer::new(crate::stages::Stage::Returns);
-        declared_returns_of_with(shapes, binding)
+        // **The written return type, and the deduced one when there is none to write.** `declared_returns_of_with`
+        // answers `None` for `auto`, by design and for a reason that has not changed — `auto` is not a class
+        // anything can be looked up in. What is new is that the **body** is in this function's hands, and a `return`
+        // statement states a type where a specifier sequence does not. See [`deduced_returns_of`] for how little of
+        // that is provable at this layer, and why the rest is refused rather than approximated.
+        declared_returns_of_with(shapes, binding).or_else(|| deduced_returns_of(root, binding))
     };
     let bases = {
         let _timer = crate::stages::StageTimer::new(crate::stages::Stage::Bases);

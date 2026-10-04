@@ -1275,3 +1275,82 @@ fn a_view_of_the_rendering_has_no_macros_left_to_guess_about() {
         "…and the text it points into is the one the reader wrote, macro and all"
     );
 }
+
+/// **A function with no written return type returns what its `return` statements state.**
+///
+/// `auto f() { … }` records `returns: None`, and the reason has not changed: `auto` is not a class anything can be
+/// looked up in. What the body says is a different question, and four of its shapes settle it without an inference —
+/// a cast names its type, a literal is its own, a parameter is declared beside the body, and two operands that agree
+/// need no conversion table. Every one of the five answers below was checked against the compiler before this test
+/// was written (`static_assert(std::is_same_v<decltype(x), …>)` on each), which is the criterion a *type* deserves.
+///
+/// The refusal matters as much as the answers: `return b.p;` is a member access, whose type is declared in `beta` —
+/// a lookup this layer cannot do — and a **guess** there would be worse than the refusal, because `returns` is what
+/// the member lookup reads. A wrong type offers the wrong members; a missing one offers none.
+#[test]
+fn a_function_with_no_written_return_type_states_one_in_its_body() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "struct beta { int* p; };\n\
+         auto a_literal() { return 1; }\n\
+         auto a_cast(int n) { return static_cast<unsigned long long>(n); }\n\
+         auto a_binary(int a, int b) { return a + b; }\n\
+         auto a_compare(int a, int b) { return a < b; }\n\
+         auto a_parameter(int* q) { return q; }\n\
+         auto a_member(beta b) { return b.p; }\n\
+         auto disagrees(int a, int* q) {\n\
+             if (a) { return reinterpret_cast<int*>(q); }\n\
+             return reinterpret_cast<const char*>(q);\n\
+         }\n",
+    )]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+
+    let returns = |name: &str| -> Option<String> {
+        session
+            .index()
+            .summaries()
+            .flat_map(|summary| summary.declarations.iter())
+            .find(|fact| fact.name == name)
+            .unwrap_or_else(|| panic!("`{name}` is declared"))
+            .returns
+            .clone()
+    };
+
+    assert_eq!(
+        returns("a_literal").as_deref(),
+        Some("int"),
+        "a literal's type is its own"
+    );
+    assert_eq!(
+        returns("a_cast").as_deref(),
+        Some("unsigned long long"),
+        "a cast names the type it produces"
+    );
+    assert_eq!(
+        returns("a_binary").as_deref(),
+        Some("int"),
+        "two operands that agree need no conversion table"
+    );
+    assert_eq!(
+        returns("a_compare").as_deref(),
+        Some("bool"),
+        "a comparison is `bool` whatever its operands are"
+    );
+    assert_eq!(
+        returns("a_parameter").as_deref(),
+        Some("int*"),
+        "the parameter's own declaration is in the same tree"
+    );
+
+    let _ = &view;
+    assert_eq!(
+        returns("a_member"),
+        None,
+        "a member access needs the object's type, which is a lookup rather than a reading"
+    );
+    assert_eq!(
+        returns("disagrees"),
+        None,
+        "`if constexpr` makes one branch per instantiation, and this layer does not instantiate"
+    );
+}
