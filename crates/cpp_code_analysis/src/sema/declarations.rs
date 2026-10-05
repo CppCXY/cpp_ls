@@ -1854,6 +1854,11 @@ fn fact_for(
         None
     };
 
+    // **The class's name as the declaration wrote it, when that name carries a pattern.** See [`DeclFact::pattern`]
+    // for the wrong answer this exists to remove — a partial specialization's member answering for an instantiation
+    // that does not match it.
+    let pattern = pattern_of(root, binding);
+
     Some(DeclFact {
         kind: DeclKind::from_binding_kind(binding.kind),
         name,
@@ -1867,6 +1872,7 @@ fn fact_for(
         returns,
         bases,
         parameters,
+        pattern,
         parameter_list,
         access,
         exported,
@@ -1878,6 +1884,66 @@ fn fact_for(
         // Filled in by `assign_guards`, which is the only place that knows where the directives are.
         guard: FactGuard::Unconditional,
     })
+}
+
+/// **The class's own name as the declaration wrote it, when the name carries a pattern.**
+///
+/// `shared_ptr<_Ty>` for `template <class _Ty> struct atomic<shared_ptr<_Ty>>`, and `None` for a name that is a
+/// single identifier — the ordinary class — and for everything that is not a class. See [`DeclFact::pattern`] for
+/// what the difference is used for.
+///
+/// The declaration's **text**, cut the way a reader cuts it: after the `class`/`struct`/`union` keyword and before
+/// the `:` of a base clause or the `{` of the body. A spelling rather than a structured pattern, for the reason the
+/// rest of this file gives — matching it against a use's arguments is done where those arguments are known.
+fn pattern_of(root: &CppSyntaxNode, binding: &Binding) -> Option<String> {
+    if binding.kind != BindingKind::Class {
+        return None;
+    }
+
+    let declaration = declaration_of(root, binding)?;
+    let text = declaration.text().to_string();
+
+    // **The head only.** The declaration's text is the whole class — body included — and a body holds `class` and
+    // `struct` keywords of its own (nested classes, `using` declarations). A walk that took the last one in the text
+    // pointed into the body, produced a spelling with no `<` in it, and the field was `None` for every class in the
+    // standard library: measured, all five `std::atomic::load` candidates had `pattern: None` and the wrong answer
+    // this field exists to remove stayed exactly where it was. Cutting at the body's `{` first is what makes the
+    // keyword search mean "the one that introduces this class".
+    //
+    // A forward declaration has no `{`, and ends at its `;` — cut there too, so `struct Widget;` is the same
+    // nothing-to-see as a body.
+    let head = text
+        .find(['{', ';'])
+        .map(|end| &text[..end])
+        .unwrap_or(&text[..]);
+
+    // The keyword that introduces it, and the last one before the name: `template <class _Ty> struct atomic<…>` has
+    // `class` inside the parameter list and `struct` before the name, so the search runs over the **head** and the
+    // last match is the one that introduces the class.
+    let mut at = 0usize;
+    let mut found = None;
+    for (index, _) in head.match_indices(|character: char| character.is_alphabetic()) {
+        if index < at {
+            continue;
+        }
+        let word = &head[index..];
+        let end = word
+            .find(|character: char| !character.is_alphanumeric() && character != '_')
+            .unwrap_or(word.len());
+        let word = &word[..end];
+        if matches!(word, "class" | "struct" | "union") {
+            found = Some(index + end);
+        }
+        at = index + end.max(1);
+    }
+
+    let after = &head[found?..];
+    let end = after
+        .find([':', '{', ';'])
+        .unwrap_or(after.len());
+    let written = after[..end].trim();
+
+    written.contains('<').then(|| written.to_string())
 }
 
 /// **The namespaces enclosing `at`, outermost first** — or `None` when only the file does.

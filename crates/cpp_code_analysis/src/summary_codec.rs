@@ -232,6 +232,7 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
             put_str(&mut out, parameter);
         }
         put_opt_str(&mut out, fact.parameter_list.as_deref());
+        put_opt_str(&mut out, fact.pattern.as_deref());
         put_range(&mut out, fact.range);
         put_range(&mut out, fact.name_range);
         put_u8(&mut out, u8::from(fact.local));
@@ -616,6 +617,7 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
                 parameters
             },
             parameter_list: reader.optional_string()?,
+            pattern: reader.optional_string()?,
             range: reader.range()?,
             name_range: reader.range()?,
             local: reader.u8()? != 0,
@@ -1175,6 +1177,9 @@ mod tests {
                     // And a parameter list, which is the other list-shaped field: a class template's parameter
                     // names, in the order the declaration wrote them.
                     parameters: vec!["_Ty".to_string(), "_Alloc".to_string()],
+                    // **A pattern**, so the round trip carries one: the field a member lookup uses to tell a partial
+                    // specialization from its primary template. The `None` branch is covered by the two facts below.
+                    pattern: Some("Widget<_Ty, _Alloc>".to_string()),
                     parameter_list: Some("(int, int)".to_string()),
                     // A member of a class, with the level its class body gave it — the one field a completion
                     // filters on, so the round trip has to carry a *some* as well as the `None`s below.
@@ -1203,6 +1208,7 @@ mod tests {
                     returns: Some("ns::Container<int>".to_string()),
                     bases: Vec::new(),
                     parameters: Vec::new(),
+                    pattern: None,
                     // The one field a completion's detail line reads: a function with no parameters is written
                     // `()`, which is an answer, and `None` would be "nobody looked".
                     parameter_list: Some("()".to_string()),
@@ -1225,6 +1231,7 @@ mod tests {
                     returns: None,
                     bases: Vec::new(),
                     parameters: Vec::new(),
+                    pattern: None,
                     parameter_list: None,
                     access: None,
                     exported: false,

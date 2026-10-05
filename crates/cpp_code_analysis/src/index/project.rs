@@ -279,6 +279,20 @@ pub fn member_definitions_across_files(
     if found.is_empty() {
         // **Not a definite no**: the class may be a template this layer does not instantiate, or inherit from one
         // it could not open — [`MemberList::unlisted`] is the same gap, and it is why this is `Unknown`.
+        if access.member.starts_with("_Lock") || access.member == "data" {
+            eprintln!(
+                "[member] `{class}::{}` not among {} members {:?} (unlisted {:?})",
+                access.member,
+                members.members.len(),
+                members
+                    .members
+                    .iter()
+                    .map(|m| m.fact.name.clone())
+                    .take(14)
+                    .collect::<Vec<_>>(),
+                members.unlisted,
+            );
+        }
         return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(format!(
             "{class}::{}",
             access.member
@@ -3709,7 +3723,8 @@ fn written_template_arguments(callee: &cpp_parser::CppSyntaxNode) -> Vec<Type> {
 /// `None` when nothing declares the name, or when the only declaration has no scope (a class at file scope is
 /// already spelled correctly, and qualifying it would look for `::Widget`).
 fn qualified_from_the_index(index: &ProjectIndex, from: &Path, class: &str) -> Option<String> {
-    let found = index.files_declaring(class, from).into_iter().next()?;
+    let declared = index.files_declaring(class, from);
+    let found = declared.into_iter().next()?;
     let scope = found.fact.scope.as_deref()?;
     (!scope.is_empty()).then(|| format!("{scope}::{class}"))
 }
@@ -4427,6 +4442,49 @@ fn direct_member(
     //
     // A consumer that wants all of them asks [`members_of`], which is the query that exists for it — the split is
     // "a jump takes the first, a list takes them all".
+    //
+    // # A known wrong answer this rule can give, and the fix it needs
+    //
+    // **The declarations in one scope are not always overloads of one another.** A class template's *partial
+    // specializations* are filed under the same scope as the primary — `atomic<shared_ptr<_Ty>>` and `atomic<_Ty>`
+    // both have `qualified_name() == "std::atomic"` — so taking the first name match can take a **specialization's**
+    // member for an instantiation that does not match its pattern.
+    //
+    // Measured, and it is a wrong type rather than a missing one: `std::shared_ptr<int> sp; std::atomic<int>
+    // counter; auto n = counter.load();` answered **`shared_ptr<int>`** — the return of
+    // `atomic<shared_ptr<_Ty>>::load` — because `<memory>` was indexed before `<atomic>` and its specialization came
+    // first. Five declarations named `std::atomic::load` are visible and only one is the primary's.
+    //
+    // **Two fixes were tried and are not here**, so that nobody writes them again. Refusing whenever the candidates
+    // disagree removes the wrong answer and also removes `v.begin()` — `vector`'s `const` and non-`const` overloads
+    // return `iterator` and `const_iterator`, so they "disagree" too, and that is a call every file makes: measured
+    // on a one-line fixture, one `auto` went from an answer to a refusal. Preferring the candidate whose return type
+    // is one of the class's own parameters (`atomic<_Ty>::load` returns `_Ty`) keeps that fixture right and does
+    // nothing for `begin`, whose overloads both return compound spellings.
+    //
+    // # The rule that belongs here, and the two things it still needs
+    //
+    // [`DeclFact::pattern`] is the class's own name as its declaration wrote it — `atomic<_Ty>` for the primary,
+    // `atomic<shared_ptr<_Ty>>` for the specialization — and the rule is that a candidate is kept when its pattern
+    // matches the arguments the **use** wrote: a pattern argument that is one of the class's own parameter names is
+    // a **slot** and takes whatever the use put there, and anything else has to be equal to it. So `atomic<_Ty>`
+    // would match `atomic<int>` and `atomic<shared_ptr<_Ty>>` would not — which is the wrong answer this removes.
+    //
+    // It is **not written here**, because two things are missing and both are outside this function:
+    //
+    // ```text
+    // 1. The arguments are gone by the time this is called. `member_access_class` strips a type to its bare class
+    //    name, so the spelling arriving here is `std::atomic` and not `std::atomic<int>` — measured: the class
+    //    reaches this line with no angle brackets in it, and there is nothing to match against. The pairing already
+    //    exists one step up, in `member_access_class_and_arguments`, which returns the class **and** the arguments;
+    //    they would have to be threaded down to here.
+    // 2. The field is not populated yet. Measured on the same lookup: all five `std::atomic::load` candidates have
+    //    `pattern: None`, so even with the arguments in hand there is nothing to compare them to. `pattern_of`, in
+    //    `sema::declarations`, is where it is meant to come from, and it is not producing one for a class template
+    //    whose declaration is a specialization.
+    // ```
+    //
+    // Until both are true the first name match stands, which is what every other answer here is built on.
     if let Some(found) = index
         .declarations_in(class, path)
         .into_iter()
@@ -4497,6 +4555,9 @@ fn fact_from_binding(root: &cpp_parser::CppSyntaxNode, class: &str, binding: &cr
         // A member list's facts carry no parameters: this path answers *which members* a class has, and substitution
         // is the caller's step — it is the caller that knows the arguments. See [DeclFact::parameters].
         parameters: Vec::new(),
+        // …and no pattern, for the same reason: this path looks a member up **by the class the object already has**,
+        // rather than choosing between classes that share a scope. See [`DeclFact::pattern`].
+        pattern: None,
         // …but the **parameter list as written** is here, because this is the path a member list's detail line is
         // built from: `size()` and `size_type size() const` are two rows a reader tells apart by exactly this, and
         // the declaration is in the buffer, so reading it costs one walk up the tree. See
@@ -5455,6 +5516,7 @@ impl ProjectIndex {
         // by `#include` has no such restriction at all.
         let (visible_files, through_an_import) = self.visible_files_with_modules(visible_from);
         let files = self.visible_in_order_of(visible_files);
+
 
         let mut found = Vec::new();
 
@@ -7148,6 +7210,9 @@ impl ProjectDefinition {
                 returns: None,
                 bases: Vec::new(),
                 parameters: Vec::new(),
+                // Nor a pattern: this fact is a place to jump to, and the class it names is already the one the
+                // caller asked about. See [`DeclFact::pattern`].
+                pattern: None,
                 // Nor a parameter list, for exactly that reason: this fact is a place to jump to, and the file it
                 // points at has the summary that says what the declaration looks like.
                 parameter_list: None,

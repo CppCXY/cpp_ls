@@ -176,6 +176,33 @@ pub struct DeclFact {
     /// is right for it and wrong for the primary template — see [`crate::ProjectIndex::template_parameters_of`],
     /// which takes the first *template* it finds rather than the first declaration.
     pub parameters: Vec<String>,
+    /// **The class's own name as the declaration wrote it, when that name carries a pattern** — `shared_ptr<_Ty>`
+    /// for `struct atomic<shared_ptr<_Ty>>`, and `None` for anything whose name is a single identifier.
+    ///
+    /// # What this exists to tell apart, and the wrong answer it removes
+    ///
+    /// A partial specialization is filed under the **same scope as its primary template**: both
+    /// `atomic<shared_ptr<_Ty>>` and `atomic<_Ty>` have `qualified_name() == "std::atomic"`, and every member of one
+    /// is a declaration in that scope. A member lookup that takes the first name match therefore takes a
+    /// *specialization's* member for an instantiation that does not match its pattern — and it gives a **wrong
+    /// type**, which is worse than none: a wrong type offers the wrong members and silently mis-navigates every
+    /// access built on it.
+    ///
+    /// Measured, and it is what this field was added for: `std::shared_ptr<int> sp; std::atomic<int> counter;
+    /// auto n = counter.load();` answered **`shared_ptr<int>`** — the return of `atomic<shared_ptr<_Ty>>::load` —
+    /// because `<memory>` is indexed before `<atomic>` and its specialization came first. Five declarations named
+    /// `std::atomic::load` are visible in that compilation; exactly one of them is the primary's.
+    ///
+    /// With the pattern recorded, a lookup keeps the candidates whose pattern **matches the arguments the use
+    /// wrote** (`shared_ptr<_Ty>` does not match `int`; a bare `_Ty` matches anything), and the answer is `int`.
+    ///
+    /// # Why it is a spelling, and why it is not `parameters`
+    ///
+    /// A spelling, for the reason every other field here is: it is what the file says, and the matching is done
+    /// where the use's arguments are known. And **not** `parameters`, which the doc comment above already warns
+    /// about: that one is the *parameter names* (`["_Ty"]`) and is identical for the primary and the specialization —
+    /// it is what the types inside refer to, not what the class is a pattern of.
+    pub pattern: Option<String>,
     /// **The parameter list a function was declared with**, as the file spells it — `(_Ty* _First, size_type _Count)`,
     /// parentheses and all. `None` for everything that is not a function, and for a function whose declarator the
     /// shapes could not reach.
