@@ -1416,3 +1416,63 @@ fn a_function_with_no_written_return_type_states_one_in_its_body() {
         "`if constexpr` makes one branch per instantiation, and this layer does not instantiate"
     );
 }
+
+/// **`c ? a : b` is the type the arms agree on**, which is C++'s rule for the case this layer can decide.
+///
+/// The condition is a `bool` and never part of the answer, so the whole question is the two arms. When they have the
+/// same type that is the type, whichever arm runs — measured: `_Val ? *_VbFirst : ~*_VbFirst` in MSVC's `<vector>`,
+/// seven `auto` declarations whose arms are both the `_Vb_reference` the bit iterator's operators return.
+///
+/// # Why the mixed case is asserted to *stay* refused
+///
+/// `c ? 1 : 2.0` is a `double`, and the conversion is what decides. This layer does not rank conversions — the same
+/// boundary the binary arm draws, for the same reason — so a test that only checked the agreeing arms would pass on
+/// an implementation that answered "the first arm's type", and that answer is wrong exactly where `auto` matters.
+#[test]
+fn a_conditional_has_the_type_its_arms_agree_on() {
+    let session = session_with(&[(
+        "/p/a.cpp",
+        "int a_value = 1;\n\
+         int b_value = 2;\n\
+         bool pick_it = true;\n\
+         int* p = nullptr;\n\
+         void f() {\n\
+             auto from_ints = pick_it ? a_value : b_value;\n\
+             auto from_a_pointer = pick_it ? p : p;\n\
+             auto from_mixed = pick_it ? a_value : p;\n\
+         }\n",
+    )]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+
+    let facts: Vec<cpp_code_analysis::DeclFact> = session
+        .index()
+        .summaries()
+        .flat_map(|summary| summary.declarations.iter().cloned())
+        .collect();
+
+    let deduced = |name: &str| -> String {
+        let fact = facts
+            .iter()
+            .find(|fact| fact.name == name && fact.type_of.as_deref() == Some("auto"))
+            .unwrap_or_else(|| panic!("`{name}` is an `auto` the file writes"));
+        match session.type_at(&view, fact.name_range.start_offset) {
+            cpp_code_analysis::Known::Yes(type_of) => type_of.type_of.clone(),
+            other => panic!("`{name}` has a type the file gives: {other:?}"),
+        }
+    };
+
+    assert_eq!(deduced("from_ints"), "int", "both arms are `int`");
+    assert_eq!(deduced("from_a_pointer"), "int*", "both arms are `int*`");
+
+    let mixed = facts
+        .iter()
+        .find(|fact| fact.name == "from_mixed" && fact.type_of.as_deref() == Some("auto"))
+        .expect("`from_mixed` is an `auto` the file writes");
+    assert!(
+        !matches!(
+            session.type_at(&view, mixed.name_range.start_offset),
+            cpp_code_analysis::Known::Yes(_)
+        ),
+        "the arms disagree, so the conversion decides — and this layer does not rank conversions"
+    );
+}

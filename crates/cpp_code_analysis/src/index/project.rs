@@ -2250,6 +2250,38 @@ pub(crate) fn type_of_expression(
         };
     }
 
+    // A **conditional**: `c ? a : b` has the type the two arms agree on, and nothing else about it matters — the
+    // condition is a `bool` and never part of the answer.
+    //
+    // That is C++'s rule for the case this layer can decide: when the arms have the same type, that is the type,
+    // whichever arm runs. When they differ the *conversion* decides — `c ? 1 : 2.0` is a `double` — and this layer
+    // does not rank conversions, which is the same refusal the binary arm makes and for the same reason.
+    //
+    // Measured: this is `_Val ? *_VbFirst : ~*_VbFirst`, seven `auto` declarations in MSVC's `<vector>`. Both arms
+    // are the `_Vb_reference` the bit iterator's operators return, so they agree, and the answer is that type.
+    if CppSyntaxKind::from(expression.kind()) == CppSyntaxKind::TernaryExpr {
+        let arms: Vec<cpp_parser::CppSyntaxNode> = expression.children().collect();
+        // Three nodes — the condition, the `?` arm and the `:` arm — with the two punctuation tokens between them.
+        let (Some(then_arm), Some(else_arm)) = (arms.get(1), arms.get(2)) else {
+            return Known::Unknown(UnknownReason::UnknownType(Box::from(written)));
+        };
+        let then_type = type_of_expression(index, declaring, scopes, root, path, then_arm, depth + 1);
+        let else_type = type_of_expression(index, declaring, scopes, root, path, else_arm, depth + 1);
+
+        return match (then_type, else_type) {
+            (Known::Yes((then_type, file)), Known::Yes((else_type, _))) if then_type == else_type => {
+                Known::Yes((then_type, file))
+            }
+            (Known::Yes(_), Known::Yes(_)) => {
+                Known::Unknown(UnknownReason::UnknownType(Box::from(written)))
+            }
+            // One arm unknown is the whole answer unknown, and the reason is the arm's: a caller reading
+            // "`x` is not a type I know" should be told about `x`, not about the conditional around it.
+            (Known::Unknown(reason), _) | (_, Known::Unknown(reason)) => Known::Unknown(reason),
+            _ => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+        };
+    }
+
     // A **subscript**: `arr[0]` has the array's element type. That is the whole of it for an array; a *class*
     // with an `operator[]` — `v[0]` on a `std::vector` — needs the template instantiated, and this answers
     // `Unknown` for the same reason it does everywhere else: see [`element_type_name`].
@@ -2780,9 +2812,11 @@ impl NamedDeclaration {
                         let Some(declared_in) = declaring(file.as_path()) else {
                             return None;
                         };
-                        let Known::Yes(binding) =
-                            crate::sema::resolve::definition_at(&declared_in.scopes, &declared_in.root, offset)
-                        else {
+                        let Known::Yes(binding) = crate::sema::resolve::definition_at(
+                            &declared_in.scopes,
+                            &declared_in.root,
+                            offset,
+                        ) else {
                             return None;
                         };
                         let written = crate::sema::declarations::deduced_returns_of_substituted(
@@ -3382,8 +3416,26 @@ fn deduce_the_parameters(
             continue;
         }
 
-        // **Exactly one parameter name and nothing else.** `_It` is a deduction; `_It*` is one this does not do.
-        let Some(name_at) = names.iter().position(|name| name == written_type) else {
+        // **Exactly one parameter name**, once a reference is taken off — and the reference is the point.
+        //
+        // Standard library functions are written `template <class _Iter> auto f(_Iter&& _It)`, which is a **forwarding
+        // reference**: C++ deduces `_Iter` from the argument, and that is what the syntax is for. A rule that insisted
+        // on the bare name matched nothing here, and the failure was quiet — the substitution fell back to the
+        // parameter's own name, so `written_arguments` was `["_Iter"]` and every substitution was a no-op. Measured:
+        // 54 `auto` declarations over eight MSVC headers, every one of them a `_STD` call whose callee takes `_Iter&&`.
+        //
+        // What this layer does with the reference is the part `auto` would do anyway: an argument passed to `_Iter&&`
+        // gives `_Iter` the argument's own type, and the caller is an `auto` initializer, which strips references and
+        // top-level `const` by definition. `_Iter*` — the parameter *contains* the parameter — is still not attempted,
+        // because undoing a `*` needs the argument taken apart and a half-done version pairs the wrong argument with
+        // the wrong parameter.
+        let bare = written_type
+            .strip_suffix("&&")
+            .or_else(|| written_type.strip_suffix('&'))
+            .map(str::trim)
+            .unwrap_or(written_type);
+
+        let Some(name_at) = names.iter().position(|name| name == bare) else {
             continue;
         };
         let Some(argument) = argument_types.get(at) else {
@@ -3504,6 +3556,20 @@ fn declaration_of_expression(
             // is a spelling here for the same reason: the environment that could settle it is not part of a name's
             // spelling, and the segment in front of a `::` is what a reader would look at.
             let mut candidates: Vec<&str> = vec![name.as_ref()];
+
+            // **A leading `::` is not part of the name.** It says "start at the global namespace", and for a name
+            // that is already qualified — which is every name this arm is handed — that is a no-op: `::std::f` and
+            // `std::f` are one entity. The index stores the second spelling, so a lookup with the first finds nothing.
+            //
+            // This is what kept every `_STD`-prefixed call in the standard library refused, and the count said so
+            // without saying where: 54 `auto` declarations over eight MSVC headers, every one of them
+            // `UnknownType("::std::…")`. The comment above notes that the spelling arrives as `_STD::f` — and for
+            // `_STD`, which is `::std::`, that is `::std::f`. The fallback below is asked about the segment **before**
+            // the first `::`, which for a leading `::` is the empty string: never macro-like, so it never fired.
+            if let Some(without) = name.strip_prefix("::") {
+                candidates.push(without);
+            }
+
             if let Some((_, without_the_prefix)) = name.split_once(' ') {
                 candidates.push(without_the_prefix.trim());
             }
