@@ -287,13 +287,7 @@ pub fn completion_at(
     offset: usize,
     headers: &HeaderIndex,
 ) -> CompletionSet {
-    // **Which reading of the cursor the answer came from.** The kinds have nothing in common as fixes — a `Name` that
-    // lists no locals is a scope question, a `Member` that lists the names in scope is a type question, and a
-    // `Nothing` is a position question — and the client sees one list either way.
-    let context = context_at(root, offset);
-    log::info!("[completion] the cursor at offset {offset} reads as {context:?}");
-
-    match context {
+    match context_at(root, offset) {
         CompletionContext::Nothing => CompletionSet {
             replace: SourceRange::new(offset, 0),
             ..CompletionSet::default()

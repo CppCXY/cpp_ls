@@ -47,15 +47,6 @@ pub async fn on_inlay_hint(
     let uri = params.text_document.uri;
     let requested = params.range;
 
-    // **Every request.** See the completion handler for why: "the hints are often missing" is answered by whether the
-    // client asked, and a log that records only the answers cannot tell the two apart.
-    log::info!(
-        "[hints] asked for {} lines {}..{}",
-        uri.as_str(),
-        requested.start.line,
-        requested.end.line
-    );
-
     // Read in first, under the write lock: a hint needs the file's text, and a file nobody has read has none. The
     // *callee's* file is not prepared here — the analysis reaches it through the session, which reads it on demand.
     if let Some(path) = uri_to_file_path(&uri) {
@@ -73,28 +64,10 @@ pub async fn on_inlay_hint(
     // So this is the query that waits. The budget is short and the wait is cancellable — see
     // [`AnalysisState::settle`] for why it holds no lock, and why a budget is what makes it finite. A settled
     // session pays one lock acquisition here and answers immediately.
-    let settled = context
+    context
         .analysis()
         .settle(Some(&cancel_token), std::time::Duration::from_millis(2000))
         .await;
-    log::info!(
-        "[hints] settle: {}",
-        if settled {
-            "the queue drained".to_string()
-        } else {
-            format!(
-                "the budget ran out — {} still to read, {} in all",
-                context
-                    .analysis()
-                    .with_snapshot(|session| session.pending())
-                    .unwrap_or(0),
-                context
-                    .analysis()
-                    .with_snapshot(|session| session.pending_work())
-                    .unwrap_or(0)
-            )
-        }
-    );
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
@@ -125,22 +98,13 @@ pub async fn on_inlay_hint(
         // — which is what the report said, in those words. What makes the incomplete answer repairable is the
         // refresh the pump sends when the queue drains, not a refusal here.
         let hints = session.inlay_hints(&view, visible_range(&view, requested)?);
-        let produced = hints.len();
 
-        // The analysis logs one line per call and a total ([`parameter_hints`]); this is the last step, where a hint
-        // whose position the file cannot place is dropped. A count that differs from the analysis's own is a hint
-        // lost to the **coordinate** conversion, which is a different fix from a call that produced none.
-        let placed: Vec<_> = hints
-            .into_iter()
-            .filter_map(|hint| inlay_hint_of(held, hint))
-            .collect();
-        log::info!(
-            "[hints] placed {} of {produced} hint(s) in {}",
-            placed.len(),
-            view.path.display()
-        );
-
-        Some(placed)
+        Some(
+            hints
+                .into_iter()
+                .filter_map(|hint| inlay_hint_of(held, hint))
+                .collect(),
+        )
     })
     .await
 }

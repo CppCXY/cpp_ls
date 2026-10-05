@@ -120,14 +120,50 @@ const LEGEND: &[Legend] = &[
     },
 ];
 
-/// The one modifier this server can honestly set: "this is where the name is declared".
+/// **What a token's colour can be qualified by** — and the order is the encoding, so an entry is never moved.
 ///
-/// The protocol has a dozen more — `readonly`, `static`, `deprecated`, `defaultLibrary` — and every one of them is
-/// a fact this layer does not have: a summary records a kind, a scope and whether a declaration is conditional,
-/// and none of those is "is this object const". A modifier that was wrong would be a visible claim about the
-/// code, so only the one that is known is sent.
-const TOKEN_MODIFIERS: &[lsp_types::SemanticTokenModifier] =
-    &[lsp_types::SemanticTokenModifier::DECLARATION];
+/// The protocol has a dozen of these and a client declares which it draws. Four are sent:
+///
+/// ```text
+/// declaration   this is where the name is declared — a fact the scope tree gives for free
+/// readonly      a `const` object — read from the declaration's own specifiers, in the file's shape table
+/// static        `static`, at file scope or in a class — the same source
+/// deprecated    a declaration that says it is deprecated — again the same source
+/// ```
+///
+/// The last three are new, and the note that stood here said why they could not be: *"every one of them is a fact
+/// this layer does not have — a summary records a kind, a scope and whether a declaration is conditional"*. That is
+/// true of a **summary**, which is what the index holds about a file the cursor is not in. It was never true of the
+/// file being edited: its declaration shapes record each declaration's specifier tokens, which is the same table
+/// `access_at` reads, and `const` is one of them.
+///
+/// So these are sent for a name whose declaration is **in this file**, and not for a use of a header's `const`
+/// variable. That direction is deliberate — a modifier is a visible claim about the code, and the honest answer for
+/// a declaration this layer cannot read is to say nothing and let the client's own theme colour it.
+const TOKEN_MODIFIERS: &[lsp_types::SemanticTokenModifier] = &[
+    lsp_types::SemanticTokenModifier::DECLARATION,
+    lsp_types::SemanticTokenModifier::READONLY,
+    lsp_types::SemanticTokenModifier::STATIC,
+    lsp_types::SemanticTokenModifier::DEPRECATED,
+];
+
+/// A name's modifiers, as the bitset the legend indexes — see [`TOKEN_MODIFIERS`].
+fn modifier_bits(name: &cpp_code_analysis::semantic::Name) -> u32 {
+    use cpp_code_analysis::semantic::NameModifier;
+
+    let mut bits = 0;
+    if name.declaration {
+        bits |= 1 << 0;
+    }
+    for modifier in &name.modifiers {
+        bits |= match modifier {
+            NameModifier::ReadOnly => 1 << 1,
+            NameModifier::Static => 1 << 2,
+            NameModifier::Deprecated => 1 << 3,
+        };
+    }
+    bits
+}
 
 /// The legend, as advertised in `initialize` and as the encoding indexes it.
 fn legend() -> SemanticTokensLegend {
@@ -246,7 +282,7 @@ pub fn encode(
             delta_start,
             length,
             token_type: entry.index,
-            token_modifiers_bitset: if name.declaration { 1 } else { 0 },
+            token_modifiers_bitset: modifier_bits(name),
         });
     }
 

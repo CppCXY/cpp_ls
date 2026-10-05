@@ -1400,25 +1400,11 @@ fn visible_names(
     written: &str,
 ) -> Known<Vec<OfferedName>> {
     let Some(innermost) = scopes.scope_at(offset) else {
-        log::info!("[names] no scope at offset {offset}");
         return Known::Unknown(UnknownReason::UnparsableName);
     };
 
     let chain = scopes.scope_chain(innermost);
     let mut names: Vec<OfferedName> = Vec::new();
-
-    // **The chain the answer is built from.** A report of "the variables in scope are missing" is answered here and
-    // nowhere else: the names come from the scopes this walk reaches, so a chain that starts at the translation unit
-    // produces the include closure and nothing of the file's own — which is exactly what the list looks like, and
-    // exactly what a count cannot distinguish from a short list.
-    log::info!(
-        "[names] at offset {offset} the chain is {:?}",
-        chain
-            .iter()
-            .filter_map(|scope| scopes.scope(*scope))
-            .map(|data| data.kind)
-            .collect::<Vec<_>>()
-    );
 
     // The file the cursor is in, as the store spells paths, so that the declaration-order filter can tell this
     // file's offsets from another file's.
@@ -6302,6 +6288,18 @@ impl ProjectIndex {
         {
             candidates = self.files_declaring(&rewritten, visible_from);
         }
+
+        // **A bare-name fallback was tried here and is not here**, and the reason is a rule this file already holds
+        // and tests: *a qualified name is not answered by a same-named declaration elsewhere*
+        // (`a_qualified_name_is_not_answered_by_a_same_named_declaration_elsewhere`). The case that asked for it is
+        // real — `std::endl` answered `NotDeclaredHere` while `__msvc_ostream.hpp` holds `endl` with `scope: None`,
+        // because the **raw** reading of a standard-library header cannot see `_STD_BEGIN` as a namespace — but
+        // answering it with the bare name breaks `ns::Widget` for every project that has a `Widget` of its own.
+        //
+        // What that case actually needs is for the **cooked** reading's fact to be found: it is the reading that
+        // resolves `_STD_BEGIN`, so its `endl` is filed under `std` and the qualified query matches it. Why it was
+        // not found is the open question — the summary is sparse by design, so the answer is likely "the header was
+        // never cooked", which is a question about *when* a file is cooked rather than about how a name is matched.
 
         if candidates.is_empty() {
             return Err(UnknownReason::NotDeclaredHere(Box::from(name)));

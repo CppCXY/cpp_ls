@@ -52,38 +52,6 @@ pub fn offset_at_position(view: &FileView, position: Position) -> Option<usize> 
     view.reading_offset_of(in_the_file)
 }
 
-/// **The view and the offset for a client's position** — the pair, resolved together because they must agree.
-///
-/// # Why this exists rather than eight callers doing it
-///
-/// Eight handlers held the same two lines — `session.view(&path)?` then `offset_at_position(&view, position)?` —
-/// and the second `?` is a trap. A rendering does not contain every byte of the file: the `#include` lines, the
-/// comments, and whatever a conditional excluded are all gone from it, so a cursor in one of them has **nowhere to
-/// map to** and `offset_at_position` answers `None`. Every one of those eight handlers then returned `None` to the
-/// client, which is not a worse answer but **no answer at all** — and the cursor lands in such a region constantly,
-/// because the end of a line is a newline and the newline above a function is often inside what the directives took
-/// out. The server's own log recorded it: `completion at main.cpp:425 (asked line 23 character 5, on '\n')`.
-///
-/// `Session::view_of_the_file` is not a fallback in the sense of "less accurate": it is the reading whose coordinates
-/// are the ones the client is sending, so where the rendering cannot answer for a position it is the *right* reading
-/// rather than a worse one. Both halves are returned together because an offset means nothing without the view it is
-/// an offset into.
-pub fn view_and_offset_at(
-    session: &cpp_code_analysis::Session<cpp_code_analysis::DiskFiles>,
-    path: &std::path::Path,
-    position: Position,
-) -> Option<(cpp_code_analysis::FileView, usize)> {
-    let rendering = session.view(path)?;
-    if let Some(offset) = offset_at_position(&rendering, position) {
-        return Some((rendering, offset));
-    }
-
-    // The rendering has no place for this position — see the note above. The file's own tokens do, and the offset
-    // that comes back is in their coordinates, which is what the caller's query will be run against.
-    let written = session.view_of_the_file(path)?;
-    let offset = offset_at_position(&written, position)?;
-    Some((written, offset))
-}
 
 /// **A client's position for a byte offset in a view's reading** — the other half of the seam
 /// [`offset_at_position`] documents.

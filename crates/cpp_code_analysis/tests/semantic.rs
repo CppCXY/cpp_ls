@@ -250,27 +250,41 @@ int area(Widget& w) { return w.size; }
         size,
         vec![
             // The member's declaration, the free function's declaration, the parameter's declaration and its two
-            // uses — and then **nothing** for the member access, see the test below.
+            // uses — and then the **member access**, which is `w.size` and is a `Variable` because that is what
+            // `Widget::size` is.
+            //
+            // This last one used to be absent, and the note here said why: the member was looked up by its **bare
+            // name**, the file declares a free `size` too, and a spelling that two declarations share was left
+            // unclassified rather than guessed at. That rule is right about the *spelling* and wrong about the
+            // *question* — `w.size` is not a question about the name `size`, it is a question about the type of `w`,
+            // which this file declares — and [`member_kinds`] is where it is now asked. Measured on a real file, the
+            // old rule left every standard-library member uncoloured (`v.push_back`, `t.size`) because those
+            // spellings are exactly the ones a whole project shares.
             (NameKind::Variable, true),
             (NameKind::Function, true),
             (NameKind::Parameter, true),
             (NameKind::Parameter, false),
             (NameKind::Parameter, false),
+            (NameKind::Variable, false),
         ],
-        "a parameter is not the file-scope function that shares its spelling"
+        "a parameter is not the file-scope function that shares its spelling, and a member is what its object's type says"
     );
 }
 
 /// **A member access is not the file-scope declaration that shares its spelling** — the shape that made the old
 /// spelling map most visibly wrong.
 ///
-/// `w.size` is looked up in the type of `w`, which a scope chain cannot do, so the index is asked — and when the
-/// class is not among the files this one can see, the question is asked about a *name*, where the file's own free
-/// `size` is a different declaration with the same spelling. That is genuinely ambiguous, and an ambiguous name gets
-/// **no** colour rather than one of the two: drawing `w.size` as a free function is the mistake this module was
-/// rewritten to stop making, and drawing it as a member would be a guess from the spelling.
+/// `w.size` is looked up in the type of `w`, which a scope chain cannot do. What the first version did instead was
+/// ask the **index** by the bare name — and `size` is a spelling a whole project shares, so the answer came back
+/// `Ambiguous` and the member got **no** colour. That rule was written as the honest one ("drawing it as a member
+/// would be a guess from the spelling") and it is the guess it was avoiding: the object's type is right there, and
+/// asking it is not a guess at all.
+///
+/// Measured on a real file, the cost of the old rule was the whole feature: `v.push_back` and `t.size` went
+/// uncoloured while `sux.print()` was coloured, because `print` happened to be the only one of its spelling in that
+/// project. This test's fixture is the same shape, and it now asserts the answer rather than the silence.
 #[test]
-fn a_member_access_whose_spelling_is_ambiguous_is_left_unclassified() {
+fn a_member_access_whose_spelling_is_shared_is_still_classified() {
     let source = "\
 struct Widget { int size; };
 int size(int value);
@@ -280,10 +294,14 @@ int area(Widget& w) { return w.size; }
     assert_eq!(
         size,
         vec![
+            // The member's declaration, the free function's declaration, and the **member access** — which is a
+            // `Variable` because `Widget::size` is one. The free `size` is a different declaration entirely, and a
+            // reader looking at `w.size` is not looking at it.
             (NameKind::Variable, true),
             (NameKind::Function, true),
+            (NameKind::Variable, false),
         ],
-        "the two declarations are drawn; the member access is not"
+        "the two declarations are drawn, and the member access is drawn as the member it names"
     );
 }
 

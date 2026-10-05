@@ -88,6 +88,7 @@
 //! ```
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use cpp_parser::{CppTokenKind, SourceRange};
 
@@ -150,11 +151,36 @@ pub struct Name {
     pub kind: NameKind,
     /// Is this where the name is declared, rather than a use of it?
     ///
-    /// The one modifier this layer can honestly set, and it is the one a reader benefits from most: clients draw a
+    /// The one modifier this layer could set at first, and it is the one a reader benefits from most: clients draw a
     /// declaration in a different weight, which is how "where does this come from" is answered at a glance.
     pub declaration: bool,
+    /// **What else is true of the declaration**, where the file's own text says so. See [`NameModifier`].
+    pub modifiers: Vec<NameModifier>,
     /// Which layer answered, and by which rule — see [`Provenance`].
     pub provenance: Provenance,
+}
+
+/// **A property of a name that is not its kind** — what a client draws as a *modifier* beside the colour.
+///
+/// The protocol has a fixed set of these and a client declares which it can draw, so this is chosen against that set
+/// rather than against the language: `readonly` for a `const` object, `static` for one with internal linkage or no
+/// instance, `deprecated` for a declaration that says so.
+///
+/// # Why only the file's own declarations have one
+///
+/// Because a modifier is a fact about a **declaration**, and the only declarations this layer can read are the ones
+/// in the file in hand: the specifiers are tokens of a tree that is already parsed. A declaration reached through
+/// the index carries a kind, a scope and a type — and none of those is "is this object `const`" — so a use of a
+/// header's `const` variable is drawn without the modifier rather than with a guess. That is the direction this whole
+/// module fails in: a colour missing is a colour the client's own theme supplies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NameModifier {
+    /// A `const` object: the declaration's own specifiers say so.
+    ReadOnly,
+    /// `static`, at file scope or in a class.
+    Static,
+    /// A declaration marked deprecated — `[[deprecated]]` or the MSVC `[[deprecated]]` spelling of it.
+    Deprecated,
 }
 
 /// **What each name in this file is** — the classification a semantic highlighter draws colours from.
@@ -193,7 +219,7 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
     let parameters = parameter_offsets(view);
     let macros = macro_names(view);
     let defined = definitions_of(view);
-    let members = member_offsets(view);
+    let members = member_kinds(index, view);
     let qualified = qualified_names(view);
 
     // **Both layers are asked once per spelling.** Neither question depends on *where* in the file the name is
@@ -206,7 +232,7 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
     // visibility walk.
     //
     // The one shape that cannot be cached by spelling is a member access, which is a question about a type — see
-    // [`member_offsets`].
+    // [`member_kinds`], which answers it and is asked once per access rather than once per spelling.
     let mut held: HashMap<&str, Option<NameKind>> = HashMap::new();
     let mut asked: HashMap<String, Option<NameKind>> = HashMap::new();
     let mut out: Vec<Name> = Vec::new();
@@ -228,6 +254,7 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
                 range,
                 kind,
                 declaration: true,
+                modifiers: modifiers_of(view, at, kind),
                 provenance: Provenance::DeclaredHere,
             });
             continue;
@@ -241,6 +268,7 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
                 range,
                 kind: NameKind::Macro,
                 declaration: define.start_offset == at,
+                modifiers: Vec::new(),
                 provenance: Provenance::Macro,
             });
             continue;
@@ -250,11 +278,24 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
         //    a scope walk that cannot succeed is the expensive way to learn nothing, and most of what a real
         //    header's identifiers are is names declared somewhere else entirely.
         //
-        //    A **member access** skips this step and the filter both: `w.size` is resolved through the type of `w`,
-        //    which is not a scope, so what this file declares under that spelling says nothing about it.
-        let a_member_access = members.contains(&at);
+        //    A **member access** is answered before this step and instead of it: `w.size` is resolved through the
+        //    type of `w`, which is not a scope, so what this file declares under that spelling says nothing about it.
+        //    See [`member_kinds`], which is where that answer comes from — and which is why a member of a
+        //    standard-library class is coloured now rather than falling through to a bare-name query that the whole
+        //    project answers `Ambiguous`.
+        if let Some(kind) = members.get(&at) {
+            out.push(Name {
+                range,
+                kind: *kind,
+                declaration: false,
+                modifiers: modifiers_of(view, at, *kind),
+                provenance: Provenance::Found,
+            });
+            continue;
+        }
+
         let declared_here = defined.contains(text);
-        if declared_here && !a_member_access {
+        if declared_here {
             let resolved = *held.entry(text).or_insert_with(|| match held_at(view, at) {
                 Held::InThisFile(binding) => kind_of_binding(
                     &binding,
@@ -269,6 +310,10 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
                     range,
                     kind,
                     declaration: false,
+                    // **A use carries no modifiers.** They are properties of a *declaration*, and this position is not
+                    // one — the shape table would answer with whatever declaration happens to enclose the use, which
+                    // is how `x` in `int x = n;` would take `n`'s `const` if `n` were declared in the same statement.
+                    modifiers: Vec::new(),
                     provenance: Provenance::Held,
                 });
                 continue;
@@ -299,6 +344,10 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
                 range,
                 kind: *kind,
                 declaration: false,
+                // A use, and the index's answer — neither is a declaration in this tree, so there are no specifiers
+                // to read. See the `modifiers_of` note: the file's own declarations are the only ones whose
+                // `const`-ness this layer can see.
+                modifiers: Vec::new(),
                 provenance: Provenance::Found,
             });
         }
@@ -379,28 +428,133 @@ fn definitions_of(view: &FileView) -> HashSet<&str> {
 /// because an operator is a direct child of the expression it belongs to.
 ///
 /// [`member_access_of`]: crate::sema::resolve::member_access_of
-fn member_offsets(view: &FileView) -> HashSet<usize> {
+/// **What else is true of the declaration a name is**, from the file's own tokens.
+///
+/// The specifiers are the tokens between the start of a declaration and its name, and they are read the way every
+/// other spelling in this project is: by text, from a tree that is already parsed. `constexpr` counts as `const`
+/// because it is one — an object `constexpr int n` cannot be written through either — and `const` is looked for as a
+/// **word**, so `constexpr` and `const_iterator` are not mistaken for it.
+///
+/// `None` for a name whose declaration this layer cannot see: a use of a name from a header, whose specifiers are not
+/// in any tree this pass holds. See [`NameModifier`] for why that is the right answer rather than a guess.
+fn modifiers_of(view: &FileView, name_at: usize, kind: NameKind) -> Vec<NameModifier> {
+    // **Only what can carry these modifiers at all.** `readonly` and `static` are properties of an *object* and of a
+    // function — not of a type, a namespace or an enumerator — and asking the shape table for them anyway is what
+    // produced a `struct Widget` marked `readonly static`, measured: the specifiers a shape records are not always
+    // the ones a reader would point at. A modifier is a visible claim about the code, and the cheap way not to make
+    // a wrong one is not to make it where it cannot be true.
+    if !matches!(
+        kind,
+        NameKind::Variable | NameKind::Parameter | NameKind::Method | NameKind::Function
+    ) {
+        return Vec::new();
+    }
+
+    // The declaration's own specifiers, in the shape table — the same source `access_at` reads, and for the same
+    // reason: it is one entry per declaration rather than a walk of the tree.
+    let shapes = crate::sema::declarations::DeclarationShapes::of(&view.root);
+    let Some(specifiers) = shapes.specifiers_at(name_at) else {
+        return Vec::new();
+    };
+
+    let written = specifiers.text().to_string();
+    let words: Vec<&str> = written
+        .split(|character: char| !character.is_alphanumeric() && character != '_')
+        .filter(|word| !word.is_empty())
+        .collect();
+
+    let mut out = Vec::new();
+    if words
+        .iter()
+        .any(|word| matches!(*word, "const" | "constexpr" | "consteval"))
+    {
+        out.push(NameModifier::ReadOnly);
+    }
+    if words.contains(&"static") {
+        out.push(NameModifier::Static);
+    }
+    if written.contains("deprecated") {
+        out.push(NameModifier::Deprecated);
+    }
+    out
+}
+
+/// **What each member access in this file names**, by the offset of the member.
+///
+/// # Why a scope tree cannot answer this, and what the first version settled for
+///
+/// `w.size` is resolved through the **type of `w`**, which is not a scope: what this file declares under the
+/// spelling `size` says nothing about it. The first version collected the member offsets and let them fall through
+/// to the index by their **bare name** — and that is where the feature stopped working, because a bare member name
+/// is exactly the spelling the whole project shares: measured on a real file, `v.push_back` and `t.size()` got **no
+/// colour at all** (the index answers `Ambiguous` and this layer refuses to guess) while `sux.print()` did, because
+/// `print` happens to be unique in that project. A reader saw every standard-library member go grey and concluded
+/// the highlighter was crude — which it was, in the one place members are the whole point.
+///
+/// The answer is the one the note above has always named: ask the **type**. [`member_across_files`] is the query
+/// that does it — the same one a jump to a member's declaration uses, so a member that can be jumped to is a member
+/// that is coloured — and its answer carries the declaration's kind, which is what a colour is chosen from.
+fn member_kinds(index: &ProjectIndex, view: &FileView) -> HashMap<usize, NameKind> {
     fn writes_the_operator(node: &cpp_parser::CppSyntaxNode) -> bool {
         node.children_with_tokens()
             .filter_map(|element| element.into_token())
             .any(|token| matches!(token.text(), "." | "->"))
     }
 
-    view.root
-        .descendants()
-        .filter(|node| {
-            matches!(
-                cpp_parser::CppSyntaxKind::from(node.kind()),
-                cpp_parser::CppSyntaxKind::MemberExpr
-                    | cpp_parser::CppSyntaxKind::ArrowExpr
-                    | cpp_parser::CppSyntaxKind::IndexExpr
-            )
-        })
-        .filter(writes_the_operator)
-        .filter_map(|node| crate::sema::resolve::member_access_of(&node))
-        .filter(|access| access.member_range.length > 0)
-        .map(|access| access.member_range.start_offset)
-        .collect()
+    let mut kinds = HashMap::new();
+
+    for node in view.root.descendants().filter(|node| {
+        matches!(
+            cpp_parser::CppSyntaxKind::from(node.kind()),
+            cpp_parser::CppSyntaxKind::MemberExpr
+                | cpp_parser::CppSyntaxKind::ArrowExpr
+                | cpp_parser::CppSyntaxKind::IndexExpr
+        )
+    }) {
+        if !writes_the_operator(&node) {
+            continue;
+        }
+
+        let Some(access) = crate::sema::resolve::member_access_of(&node) else {
+            continue;
+        };
+        if access.member_range.length == 0 {
+            continue;
+        }
+
+        // A file the declaring class is in is not opened here: the class's own members come from the index, and the
+        // object's type comes from this file. `None` for the view means a query that needs another file's text
+        // answers nothing, which is this layer's ordinary way of declining rather than guessing — and it costs one
+        // `Option` rather than a parse of a header per member.
+        let found = crate::index::project::member_across_files(
+            index,
+            &mut |_: &Path| None,
+            &view.scopes,
+            &view.root,
+            &view.path,
+            access.member_range.start_offset,
+        );
+
+        let Known::Yes(found) = found else {
+            continue;
+        };
+
+        // The same mapping the index answer goes through — see [`kind_of_index`] — so `push_back` is a method and
+        // not a function, which is the difference between the colour a member gets and the one a free function does.
+        let kind = match found.fact.kind {
+            DeclKind::Function if found.fact.scope.is_some() => NameKind::Method,
+            DeclKind::Function => NameKind::Function,
+            DeclKind::Variable => NameKind::Variable,
+            DeclKind::Type => NameKind::Type,
+            DeclKind::Namespace => NameKind::Namespace,
+            DeclKind::MacroLike => NameKind::Macro,
+            DeclKind::Other => continue,
+        };
+
+        kinds.insert(access.member_range.start_offset, kind);
+    }
+
+    kinds
 }
 
 /// The declaration the name at `offset` refers to, within this file — see [`Held`].

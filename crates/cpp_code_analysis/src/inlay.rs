@@ -82,63 +82,35 @@ where
     // Declaring files, parsed once each: a file with twenty calls into it is parsed once, not twenty times.
     let mut declaring: HashMap<PathBuf, FileView> = HashMap::new();
 
-    // **One line per call, and one summary line.** A report that says "the hints come and go" is answered by *which*
-    // of the four ways a call yields nothing it took, and that cannot be seen from outside this function: the LSP
-    // layer knows only that the list came back short. The four are tried in order below, and the line names the one
-    // that stopped it.
-    let calls = call_expressions(&view.root, range);
-    if calls.is_empty() {
-        log::info!(
-            "[hints] no call starts inside the requested range of {}",
-            view.path.display()
-        );
-    }
-
-    for call in calls {
-        let written = call.text().to_string();
-        let written = written.trim();
-        let mut why = "hinted";
-
+    for call in call_expressions(&view.root, range) {
         let Known::Yes(callee) = callee_of_a_call(index, &mut |_: &Path| None, &view.scopes, &view.root, &view.path, &call)
         else {
             // No declaration, or none this layer can place: the parameter list is unknown, and a hint naming the
             // wrong parameter is a wrong answer printed into the code.
-            why = "the callee did not resolve";
-            log::info!("[hints] `{written}` — {why}");
             continue;
         };
 
         let Some(names) = parameter_names_for(view, &callee, &mut declaring, &mut view_of) else {
-            why = "the parameter list could not be read";
-            log::info!(
-                "[hints] `{written}` — {why} (declared at {} in {})",
-                callee.name_offset,
-                callee.file.display()
-            );
             continue;
         };
 
         let Some(arguments) = arguments_of(&call) else {
-            why = "the arguments are not a readable list";
-            log::info!("[hints] `{written}` — {why}");
             continue;
         };
 
-        let before = hints.len();
-        let mut skipped = Vec::new();
-        for (at, (argument, name)) in arguments.iter().zip(names.iter()).enumerate() {
+        for (argument, name) in arguments.iter().zip(names.iter()) {
+            // A parameter with no name breaks the alignment for every parameter *after* it rather than shifting
+            // them up: see `parameters_of`. Nothing is hinted for a position nothing declares.
             let Some(name) = name else {
-                skipped.push(format!("arg{at}: the parameter has no name"));
                 continue;
             };
 
             if !contains(range, argument.text_range().start().into()) {
-                skipped.push(format!("arg{at}: outside the requested range"));
                 continue;
             }
 
+            // The argument already spells the parameter, so the hint would repeat the line back at the reader.
             if argument.text().to_string().trim() == name {
-                skipped.push(format!("arg{at}: already spells `{name}`"));
                 continue;
             }
 
@@ -147,29 +119,11 @@ where
                 name: name.clone(),
             });
         }
-
-        let made = hints.len() - before;
-        log::info!(
-            "[hints] `{written}` — {why}: {made} of {} argument(s){}",
-            arguments.len(),
-            if skipped.is_empty() {
-                String::new()
-            } else {
-                format!("; skipped {}", skipped.join("; "))
-            }
-        );
     }
-
-    log::info!(
-        "[hints] {} hint(s) for {} in range {}..{}",
-        hints.len(),
-        view.path.display(),
-        range.start_offset,
-        range.end_offset()
-    );
 
     hints
 }
+
 /// The parameter names of the declaration a call names, or `None` when they cannot be read.
 fn parameter_names_for<F>(
     view: &FileView,

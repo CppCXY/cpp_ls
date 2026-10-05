@@ -99,6 +99,13 @@ pub async fn on_hover(
             return Some(markdown(macro_markdown(session, &written, &found)));
         }
 
+        // **Both readings, each for the questions only it can answer.** See the note above: the file answers a header
+        // name and a macro's name because a rendering has *resolved* both, and the rendering answers everything else
+        // because it is the reading whose includes are **expanded** — asking the file's own view for `std` fails, and
+        // measured, it fails exactly there: `std::cout` and `std::endl` live in headers the file only names.
+        //
+        // What is measured and **not** explained by that split: `void f() {}` declared in the file itself has no
+        // hover at all, on either reading. That is the question the logging below is for.
         let view = session.view(&path)?;
         let offset = offset_at_position(&view, position)?;
         hover(session, &view, offset)

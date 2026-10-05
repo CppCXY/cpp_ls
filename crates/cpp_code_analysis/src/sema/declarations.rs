@@ -505,6 +505,27 @@ impl DeclarationShapes {
         found
     }
 
+    /// **The specifier tokens of the declaration this offset belongs to** — `const`, `static`, `constexpr`,
+    /// `[[deprecated]]`, and whatever else a declaration may be preceded by.
+    ///
+    /// The innermost shape that **has** specifiers, which is the same direction [`DeclarationShapes::access_at`]
+    /// reads and for the same reason: a name inside a function body is inside its declaration's shape, and the
+    /// specifiers recorded there are that declaration's. A shape with none is not a declaration — a body, a class
+    /// region — and is skipped rather than answering "no specifiers".
+    ///
+    /// The node rather than a reading of it: what a specifier *means* is a question each caller asks differently —
+    /// a semantic highlighter wants `const`, a future layer might want `virtual` — and a function that returned one
+    /// particular reading would be a second place for the list of keywords to live.
+    pub fn specifiers_at(&self, offset: usize) -> Option<CppSyntaxNode> {
+        let mut found = None;
+        self.on_the_path(offset, |shape| {
+            if let Some(specifiers) = &shape.specifiers {
+                found = Some(specifiers.clone());
+            }
+        });
+        found
+    }
+
     /// **Is a declaration written at this offset exported** from the module the file declares?
     ///
     /// `false` outside every `export`ed region, which is the answer for an ordinary translation unit and for a
