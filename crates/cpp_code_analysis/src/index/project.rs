@@ -1400,11 +1400,25 @@ fn visible_names(
     written: &str,
 ) -> Known<Vec<OfferedName>> {
     let Some(innermost) = scopes.scope_at(offset) else {
+        log::info!("[names] no scope at offset {offset}");
         return Known::Unknown(UnknownReason::UnparsableName);
     };
 
     let chain = scopes.scope_chain(innermost);
     let mut names: Vec<OfferedName> = Vec::new();
+
+    // **The chain the answer is built from.** A report of "the variables in scope are missing" is answered here and
+    // nowhere else: the names come from the scopes this walk reaches, so a chain that starts at the translation unit
+    // produces the include closure and nothing of the file's own — which is exactly what the list looks like, and
+    // exactly what a count cannot distinguish from a short list.
+    log::info!(
+        "[names] at offset {offset} the chain is {:?}",
+        chain
+            .iter()
+            .filter_map(|scope| scopes.scope(*scope))
+            .map(|data| data.kind)
+            .collect::<Vec<_>>()
+    );
 
     // The file the cursor is in, as the store spells paths, so that the declaration-order filter can tell this
     // file's offsets from another file's.

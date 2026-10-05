@@ -6,6 +6,14 @@ edition = "2024"
 [dependencies]
 cpp_parser.workspace = true
 
+# **The decisions this layer makes are invisible from outside it**, and a report that says "completion and the hints
+# come and go" cannot be answered from the LSP layer alone: whether a callee resolved, whether its parameter list was
+# readable, and which of the four ways a call produces no hint are all decided here, in `inlay` and `index::project`.
+# The alternative is a signature that returns its own diagnosis, which is a worse shape for every other caller.
+#
+# Already in the graph — `cpp_ls` logs through it — so this is a dependency edge rather than a new crate.
+log.workspace = true
+
 # `WatchFilter` ignores paths by *pattern* as well as by directory (`**/build/**`, `*.generated.h`): which trees a
 # project considers its own source is a convention no analysis can guess, so a caller says it — and a caller with a
 # configuration file has a glob in its hand, not a directory.

@@ -58,7 +58,7 @@ use tokio_util::sync::CancellationToken;
 use super::RegisterCapabilities;
 use crate::handlers::hover::documentation_text;
 use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
-use crate::util::{position_at_offset, uri_to_file_path, view_and_offset_at};
+use crate::util::{offset_at_position, position_at_offset, uri_to_file_path};
 
 pub async fn on_completion(
     context: ServerContextSnapshot,
@@ -68,6 +68,17 @@ pub async fn on_completion(
     let uri = params.text_document_position.text_document.uri;
     let position = params.text_document_position.position;
     let snippets = snippets_of(context.lsp_features().supports_snippets());
+
+    // **Every request, whether or not anything goes wrong with it.** The report is "补全时有时无" — sometimes there,
+    // sometimes not — and a log that records only the empty answers cannot tell "the client asked and got nothing"
+    // from "the client never asked", which have nothing in common as fixes. This line and the one at the answer are
+    // the pair that separates them.
+    log::info!(
+        "[completion] asked at {}:{}:{}",
+        uri.as_str(),
+        position.line,
+        position.character
+    );
 
     // Read in first, under the write lock, so the query itself can be a read — the same boundary every handler has.
     //
@@ -107,10 +118,32 @@ pub async fn on_completion(
     //
     // The budget is deliberately the same short one the hints use: a settled session pays one lock acquisition, and
     // a session that is still reading gives its answer after two seconds rather than never.
-    context
+    // **Did the wait end because the analysis settled, or because the budget ran out?** The two look identical from
+    // the answer — a shorter list — and they are opposite diagnoses: the first says the index is current and the
+    // answer is the whole one, the second says the answer is a snapshot of a queue that was still moving. The second
+    // is the shape a report of "sometimes" has, and nothing recorded it before this line.
+    let settled = context
         .analysis()
         .settle(Some(&cancel_token), std::time::Duration::from_millis(2000))
         .await;
+    log::info!(
+        "[completion] settle: {} after the wait",
+        if settled {
+            "the queue drained".to_string()
+        } else {
+            format!(
+                "the budget ran out — {} still to read, {} still in all (including cooking)",
+                context
+                    .analysis()
+                    .with_snapshot(|session| session.pending())
+                    .unwrap_or(0),
+                context
+                    .analysis()
+                    .with_snapshot(|session| session.pending_work())
+                    .unwrap_or(0)
+            )
+        }
+    );
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
@@ -121,9 +154,45 @@ pub async fn on_completion(
         // the client, which is **no list at all**. The cursor lands there constantly — the end of a line is a
         // newline, and the newline above a function is often inside what the directives took out — and the server's
         // own log recorded it: `completion at main.cpp:425 (asked line 23 character 5, on '\n')`.
-        let (view, offset) = view_and_offset_at(session, &path, position)?;
+        // **The offset and the view together, and both from the file.** Resolving the position through
+        // `view_and_offset_at` and then querying the file's own view would be the exact mixing this change exists to
+        // remove — and it was, for one build: measured, the same client position resolved to offset 53 before an edit
+        // and 26 after it, because the first came from one reading and the answer from the other.
+        //
+        // `view_and_offset_at` is the right entry point for a handler that answers from **whatever reading it is
+        // given**; this one answers from the file, so it resolves its own position, against the same view.
+        let view = session.view_of_the_file(&path)?;
+        let offset = offset_at_position(&view, position)?;
 
         let found = session.completions(&view, offset);
+
+        // **What the view says is around the offset**, because the position a client sends is resolved against one
+        // reading and the answer built from it, and a mismatch between the two is invisible in a count. A report of
+        // "the variables in scope are missing" is answered by what the analysis thinks is written where the cursor
+        // is: the names in scope come from the **scope tree of this view**, so if the byte under the offset is not
+        // the byte the client sent, the list is of the wrong scope and no amount of looking at the list says so.
+        let around = view
+            .source
+            .get(offset.saturating_sub(30)..(offset + 30).min(view.source.len()))
+            .unwrap_or("")
+            .replace('\n', "\\n");
+        log::info!("[completion] the view around offset {offset} is {around:?}");
+
+        // **The count, every time.** The existing diagnosis below explains an empty member list; this says whether
+        // the list was empty at all, and which of the two readings answered it.
+        //
+        // Which reading is told from the **shape of the text**: `Session::view` hands back the compiler's rendering
+        // when one is cached and the file's own tokens otherwise, and a rendering has no line breaks except at
+        // `#pragma` — so a file that reads as one line in the log is the rendering, and the same file with its own
+        // lines is not. That is the whole question a report of "编辑之后就不对了" turns on, and it needs no accessor
+        // the session does not already have.
+        log::info!(
+            "[completion] answering at offset {offset} from a view of {} bytes on {} line(s): {} item(s){}",
+            view.source.len(),
+            view.source.lines().count(),
+            found.items.len(),
+            if found.truncated { " (capped)" } else { "" }
+        );
 
         log_a_member_that_produced_no_members(
             session,

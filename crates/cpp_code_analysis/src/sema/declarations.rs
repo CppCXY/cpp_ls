@@ -1947,24 +1947,42 @@ fn pattern_of(root: &CppSyntaxNode, binding: &Binding) -> Option<String> {
 
 /// **The innermost class-like declaration containing this binding**, when there is one.
 ///
-/// Innermost by **extent**, not by walk order: a member of a nested class sits inside two class nodes, and the one
-/// that describes it is the smaller. `descendants` yields the tree in no guaranteed order, so the smallest
-/// containing node is taken rather than the first.
+/// # Why this descends instead of filtering `descendants`
+///
+/// The first version took `root.descendants()`, kept the class-like nodes whose range contains the offset, and
+/// took the smallest. It is correct and it is **quadratic**: `pattern_of` asks this once per declaration, so a file
+/// costs declarations × nodes. Measured on eight MSVC headers, the same probe went from about thirty seconds to
+/// **over ten minutes**, and a real workspace pays it on every file it indexes at startup — which is what made
+/// loading a project crawl.
+///
+/// What replaces it walks **down** from the root and keeps only the children that contain the offset. Children
+/// partition their parent's range, so at most one contains any given offset: the walk visits the path to the leaf
+/// and nothing else, which is the depth of the tree rather than its size.
 fn enclosing_class_of(root: &CppSyntaxNode, binding: &Binding) -> Option<CppSyntaxNode> {
     let at = binding.name_range.start_offset;
 
-    root.descendants()
-        .filter(|node| {
-            matches!(
-                CppSyntaxKind::from(node.kind()),
-                CppSyntaxKind::ClassDef | CppSyntaxKind::StructDef | CppSyntaxKind::UnionDef
-            )
-        })
-        .filter(|node| {
-            let range = node.text_range();
-            usize::from(range.start()) <= at && at <= usize::from(range.end())
-        })
-        .min_by_key(|node| node.text_range().len())
+    let mut innermost = None;
+    let mut node = root.clone();
+    loop {
+        if matches!(
+            CppSyntaxKind::from(node.kind()),
+            CppSyntaxKind::ClassDef | CppSyntaxKind::StructDef | CppSyntaxKind::UnionDef
+        ) {
+            innermost = Some(node.clone());
+        }
+
+        let next = node.children().find(|child| {
+            let range = child.text_range();
+            usize::from(range.start()) <= at && at < usize::from(range.end())
+        });
+
+        match next {
+            Some(child) => node = child,
+            None => break,
+        }
+    }
+
+    innermost
 }
 
 /// **The namespaces enclosing `at`, outermost first** — or `None` when only the file does.

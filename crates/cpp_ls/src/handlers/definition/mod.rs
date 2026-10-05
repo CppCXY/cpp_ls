@@ -76,7 +76,19 @@ pub async fn on_goto_definition_handler(
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
-        let view = session.view(&path)?;
+        // **The cursor is read from the file's own text, and the question is asked of the same reading.**
+        //
+        // The note below says why for the `#include` case, and the reason does not stop there: a rendering has the
+        // directives *resolved*, its line breaks **deleted**, and everything a macro expanded written out in place —
+        // so a line and a column from a client name a different place in it, and the reader at that place is not the
+        // reader the client is looking at. Measured on a live server: a plain identifier inside a function was read as
+        // a qualified name in scope `std`, because with the whole file on one line the recovery glued the `std::` of
+        // `std::string name;` to the name being typed.
+        //
+        // The offset and the view are taken **together**, from one reading. Resolving the position through one and
+        // querying the other is the mistake this replaces — and it is not hypothetical: a completion fix that did
+        // exactly that resolved the same client position to offset 53 before an edit and 26 after it.
+        let view = session.view_of_the_file(&path)?;
         let offset = offset_at_position(&view, position)?;
 
         // **A header name before a declaration**, because the two cannot both be here and only one of them can
@@ -89,15 +101,11 @@ pub async fn on_goto_definition_handler(
         // `#include` line is gone from it, because what it stood for is written out in its place. So the one
         // position a reader most obviously wants to jump from — the header they wrote — is not in the reading the
         // rest of this handler works in, and asking there finds nothing.
-        if let Some(written) = session.view_of_the_file(&path) {
-            if let Some(in_the_file) = offset_at_position(&written, position) {
-                if let Known::Yes(header) = session.header_at(&written, in_the_file) {
-                    // A header this session cannot hold — the file is on disk but the VFS refused it — answers
-                    // `None` rather than a location with no range, which is the same "nothing to go to" the reader
-                    // had before.
-                    return location_of_a_file(session, &header).map(GotoDefinitionResponse::Scalar);
-                }
-            }
+        if let Known::Yes(header) = session.header_at(&view, offset) {
+            // A header this session cannot hold — the file is on disk but the VFS refused it — answers
+            // `None` rather than a location with no range, which is the same "nothing to go to" the reader
+            // had before.
+            return location_of_a_file(session, &header).map(GotoDefinitionResponse::Scalar);
         }
 
         let Known::Yes(found) = session.definitions(&view, offset) else {

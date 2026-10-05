@@ -453,6 +453,10 @@ pub fn name_position_at(root: &CppSyntaxNode, offset: usize) -> Option<NamePosit
     let mut written = String::new();
     let mut global = false;
     let mut range = None;
+    // **What the token just before this one was.** See the cursor-at-a-name branch below: the qualification is only
+    // this name's when a `::` stands between them, and a recovery node can hold a `std` and a `::` that belong to a
+    // statement twenty bytes back.
+    let mut last_was_a_scope = false;
 
     // The chain is written as flat tokens of one node — see [`identifier_written_at`] — so this walks them in
     // order and stops at the cursor. Trivia is stepped over rather than treated as an end: `ns :: Wid` is the same
@@ -467,21 +471,64 @@ pub fn name_position_at(root: &CppSyntaxNode, offset: usize) -> Option<NamePosit
         // not part of the scope either. This is what keeps a recovery from answering: `ns::` at the end of a body
         // has the closing `}` inside the same node, and a reader that walked past it would report a name that is
         // not there.
+        let kind = cpp_parser::CppTokenKind::from(token.kind());
+        let previous_was_a_scope = last_was_a_scope;
+        last_was_a_scope = kind == cpp_parser::CppTokenKind::Scope;
+
         if token_range.start_offset >= offset {
             // **The cursor sits exactly at the start of a name**, which is a position a client does ask about —
             // the user puts the cursor on `Widget` and presses the completion key. Nothing of it is written, so
             // nothing filters, but the chosen name has to **replace** it: an answer that only inserted would turn
             // `Widget` into `WidgetWidget`. That is this type's `Wid|` rule, one keystroke earlier.
-            if token_range.start_offset == offset
-                && cpp_parser::CppTokenKind::from(token.kind())
-                    == cpp_parser::CppTokenKind::Identifier
-            {
+            if token_range.start_offset == offset && kind == cpp_parser::CppTokenKind::Identifier {
                 range = Some(token_range);
+
+                // **The qualification belongs to this name only when a `::` stands immediately before it.** A
+                // recovered name node can carry a `std` and a `::` that belong to an earlier statement — measured on
+                // a live server, the cursor on `local_` inside a function was read as a qualified name in scope
+                // `std`, so the completion listed `std`'s two hundred members while the variables in the function and
+                // the file's own globals were missing. That is what a user reported, and it is the shape of answer
+                // that looks full and is about the wrong scope.
+                //
+                // This is the reading C++ itself uses: `a::b` is a qualified-id because the `::` joins those two
+                // names, and `a; b` is two statements however the recovery grouped them.
+                if !previous_was_a_scope {
+                    segments.clear();
+                    written.clear();
+                    global = false;
+                }
             }
             break;
         }
 
-        match cpp_parser::CppTokenKind::from(token.kind()) {
+        match kind {
+            // **A token that cannot stand inside a qualified name ends it**, and everything collected before it
+            // belongs to a different statement.
+            //
+            // This is the recovery's own damage, and it is why a completion can list the wrong scope entirely: a
+            // name node the parser recovered around can span a `;` — measured on a live server, the cursor on
+            // `local_` inside a function was read as a **qualified name in scope `std`**, because the node the walk
+            // was handed ran back through `std::string name;` and found that `::`. The list was then `std`'s members,
+            // which looks like a full popup and is the wrong scope: the variables in the function and the file's own
+            // globals were missing, which is what a user reported.
+            //
+            // What may appear *inside* a qualified name is an identifier, a `::`, and the angle brackets and commas of
+            // a template argument list — so those are the ones that do **not** reset, and the list below is the
+            // punctuators that cannot appear there at all. Deliberately not `<` and `>`, which a template-id needs.
+            cpp_parser::CppTokenKind::Semicolon
+            | cpp_parser::CppTokenKind::LeftBrace
+            | cpp_parser::CppTokenKind::RightBrace
+            | cpp_parser::CppTokenKind::LeftParen
+            | cpp_parser::CppTokenKind::RightParen
+            | cpp_parser::CppTokenKind::LeftBracket
+            | cpp_parser::CppTokenKind::RightBracket
+            | cpp_parser::CppTokenKind::Comma
+            | cpp_parser::CppTokenKind::Assign => {
+                segments.clear();
+                written.clear();
+                global = false;
+                range = None;
+            }
             cpp_parser::CppTokenKind::Identifier => {
                 if token_range.end_offset() <= offset {
                     written.push_str(token.text());

@@ -3151,10 +3151,25 @@ impl<F: FileProvider + Clone> Session<F> {
     /// **The parameter names to draw at the calls in `range`** — see [`crate::inlay`].
     ///
     /// `range` is the range the client asked about, in the file's own coordinates. Everything this needs beyond
-    /// the file in hand is the *callee's* file, which is why it is a session method: [`Session::view`] is how a
-    /// header a call reaches into is parsed, and it is parsed once per declaring file however many calls reach it.
+    /// the file in hand is the *callee's* file, which is why it is a session method: this is how a header a call
+    /// reaches into is parsed, and it is parsed once per declaring file however many calls reach it.
+    ///
+    /// # Why the declaring file is read **as itself**, and not through [`Session::view`]
+    ///
+    /// Because `callee.name_offset` is an offset in the declaring file's **own text** — that is what a summary
+    /// records — and `view` hands back the compiler's *rendering* whenever one is cached. A rendering has no line
+    /// breaks and no comments, so the same number names a different place in it, `parameter_list_of` finds no
+    /// declarator there, and the call yields **no hint**.
+    ///
+    /// Measured, and it is the whole of a report that said the hints came and went: an edit drops the rendering, so
+    /// the request made **immediately** after a keystroke read the file as itself and hinted correctly; two seconds
+    /// later the pump had rebuilt the rendering, the same call resolved to the same declaration with the same offset,
+    /// and the parameter list could no longer be read. The refresh the pump sends then asks the client to ask again —
+    /// and the second answer was the same broken one, which is why the hints did not come back.
     pub fn inlay_hints(&self, view: &FileView, range: cpp_parser::SourceRange) -> Vec<ParameterHint> {
-        crate::inlay::parameter_hints(self.store.index(), view, range, |path| self.view(path))
+        crate::inlay::parameter_hints(self.store.index(), view, range, |path| {
+            self.view_of_the_file(path)
+        })
     }
 
     /// **What each name in this file is** — the classification a semantic highlighter draws colours from.
