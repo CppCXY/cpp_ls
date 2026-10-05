@@ -4632,6 +4632,9 @@ fn fact_from_binding(root: &cpp_parser::CppSyntaxNode, class: &str, binding: &cr
         // no qualified scope at all, and `Some("")` would be a scope that matches nothing while looking like one.
         // Every other caller passes the class or namespace the binding is in.
         scope: (!class.is_empty()).then(|| class.to_string()),
+        // Known, and always: this path is handed the class a member belongs to, so there is no scope the file's text
+        // could have left open. See [`DeclFact::scope_unknown`].
+        scope_unknown: false,
         // Answered rather than defaulted, and the answer is always `false`: this path exists for **members**, and a
         // member is declared in a class body by construction — the `class` spelling it is keyed by has no meaning
         // inside a function. A local class's members are members of that class, and the caller that asked for them
@@ -6289,17 +6292,28 @@ impl ProjectIndex {
             candidates = self.files_declaring(&rewritten, visible_from);
         }
 
-        // **A bare-name fallback was tried here and is not here**, and the reason is a rule this file already holds
-        // and tests: *a qualified name is not answered by a same-named declaration elsewhere*
-        // (`a_qualified_name_is_not_answered_by_a_same_named_declaration_elsewhere`). The case that asked for it is
-        // real — `std::endl` answered `NotDeclaredHere` while `__msvc_ostream.hpp` holds `endl` with `scope: None`,
-        // because the **raw** reading of a standard-library header cannot see `_STD_BEGIN` as a namespace — but
-        // answering it with the bare name breaks `ns::Widget` for every project that has a `Widget` of its own.
+        // **A qualified name whose scope the declaring file could not read.**
         //
-        // What that case actually needs is for the **cooked** reading's fact to be found: it is the reading that
-        // resolves `_STD_BEGIN`, so its `endl` is filed under `std` and the qualified query matches it. Why it was
-        // not found is the open question — the summary is sparse by design, so the answer is likely "the header was
-        // never cooked", which is a question about *when* a file is cooked rather than about how a name is matched.
+        // [`DeclFact::scope_unknown`] is the third state `scope` needed: `None` means "declared at file scope" and
+        // is what a declaration inside a **macro-opened namespace** was also filed as, because the `{` is inside the
+        // macro. MSVC's headers are written that way from the first line, so `__msvc_ostream.hpp` holds `endl` with
+        // `scope: None` while the use writes `std::endl` — measured, and the popup for `std::endl` was empty while
+        // `std::vector::size` worked, because that one is filed with a scope the cooked reading could see.
+        //
+        // The rule this keeps is the one the fallback must not break, and it is tested: *a qualified name is not
+        // answered by a same-named declaration elsewhere*. A declaration at **file scope** is elsewhere, and is not
+        // a candidate here — the flag is what tells the two apart, which is the whole reason it exists. Only a
+        // declaration whose own file said "there is a scope here I cannot name" may answer for a qualified one.
+        if candidates.is_empty()
+            && let Some((_, bare)) = name.rsplit_once("::")
+            && !bare.is_empty()
+        {
+            candidates = self
+                .files_declaring(bare, visible_from)
+                .into_iter()
+                .filter(|found| found.fact.scope_unknown)
+                .collect();
+        }
 
         if candidates.is_empty() {
             return Err(UnknownReason::NotDeclaredHere(Box::from(name)));
@@ -7305,6 +7319,7 @@ impl ProjectDefinition {
                     .unwrap_or_default()
                     .to_string(),
                 scope,
+                scope_unknown: false,
                 local,
                 // `None` for the same reason `type_of` below is: this answer is a **place to jump to**, built
                 // from a binding, and the namespaces around a body are a fact about the file's text that lives in

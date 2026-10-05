@@ -55,6 +55,32 @@ pub struct DeclFact {
     ///
     /// [`ScopeId`]: crate::ScopeId
     pub scope: Option<String>,
+    /// **Is `scope` unknown rather than absent?** The third state [`DeclFact::scope`] needs and did not have.
+    ///
+    /// `scope: None` means "declared at **file** scope" — `void helper();`, `extern int errno;` — and it is that
+    /// answer because the file's own text says so. But a file's text does **not** always say: a namespace opened by
+    /// a **macro** leaves no trace in the reading that does not expand macros, because the `{` is inside the macro's
+    /// body. MSVC's headers are written that way from the first line — `_STD_BEGIN` is `namespace std {` — so every
+    /// declaration inside it was filed as if it were at file scope, and the qualified name it really has was
+    /// unrecoverable.
+    ///
+    /// Measured, and it is the whole of a report that said a popup came and went: `__msvc_ostream.hpp` holds `endl`
+    /// with `scope: None`, the use writes `std::endl`, and a qualified lookup matches on the **qualified** name or
+    /// on an exact bare one — so `std::endl` found **nothing**, and `std::endl`'s hover was empty while
+    /// `std::vector::size` worked, because that one is filed with a scope the cooked reading could see.
+    ///
+    /// # Why a flag rather than a third variant of `scope`
+    ///
+    /// Because `scope` is read in hundreds of places as `as_deref()`, and every one of them means "the qualified
+    /// name this declaration is under, when there is one". A declaration whose scope is unknown has **no better
+    /// answer to give them** than `None` — they are all asking about *this* file's own text, where the distinction
+    /// changes nothing. The two questions that do care are name lookup across files (which may treat an unknown
+    /// scope as a possible match, and a file scope as no match) and nothing else. So the flag travels beside the
+    /// field, the ninety-nine readers keep working, and the two that matter ask.
+    ///
+    /// `true` only for a declaration at the **file level** of a file whose text leaves a scope open — never for one
+    /// inside a namespace the text spells out, because that scope is known and is in `scope`.
+    pub scope_unknown: bool,
     /// Was this declaration written inside a **function body, a block or a lambda**?
     ///
     /// The other half of [`DeclFact::scope`], and the reason it is a field rather than something a consumer can

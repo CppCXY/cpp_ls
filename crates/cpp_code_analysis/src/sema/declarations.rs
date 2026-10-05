@@ -31,6 +31,7 @@
 use std::collections::HashMap;
 
 use crate::preprocess::directive::{Directive, DirectiveKind, SpannedDirective};
+use crate::condition::MacroValues;
 use crate::preprocess::FilePreprocessing;
 use crate::sema::symbol::{Binding, BindingKind, ScopeId, ScopeKind, ScopeTree};
 use crate::summary::{
@@ -1800,6 +1801,9 @@ fn fact_for(
     local: bool,
     scopes: &ScopeTree,
     declarations: &Declarations<'_>,
+    // **What the reading could not expand**, which is what decides [`DeclFact::scope_unknown`] —
+    // see [`opens_something_the_reading_cannot_see`].
+    preprocessing: &FilePreprocessing,
 ) -> Option<DeclFact> {
     // A binding whose name has no identifier is a destructor, an operator, or a conversion function. Its
     // **spelling** is still a name a lookup can be keyed on — `std::vector::~vector`, `std::vector::operator=` —
@@ -1880,10 +1884,28 @@ fn fact_for(
     // that does not match it.
     let pattern = pattern_of(root, binding);
 
+    // **Is the scope this declaration reports one the file's text could actually see?**
+    //
+    // `scope: None` means "declared at file scope", and it is that answer because the text says so. A namespace
+    // opened by a **macro** leaves no trace in a reading that does not expand macros — the `{` is inside the macro's
+    // body — and MSVC's headers are written that way from the first line (`_STD_BEGIN` is `namespace std {`). So the
+    // declarations inside it were filed as if they were at file scope, and the qualified name they really have was
+    // unrecoverable: measured, `std::endl` answered `NotDeclaredHere` while `__msvc_ostream.hpp` held `endl` with
+    // `scope: None`, and the popup was empty while `std::vector::size` — filed with a scope the cooked reading could
+    // see — worked.
+    //
+    // The evidence is **an unexpanded macro invocation at file level**: a token that this compilation defines as a
+    // macro and that the reading left standing as an identifier. That is not a guess about what the macro expands
+    // to — it is the reading saying "there is something here I could not process", which is exactly what makes the
+    // scope it reports untrustworthy. A file whose macros are all inside conditions, or inside bodies, invokes none
+    // at file level and keeps the file scope it earned.
+    let scope_unknown = scope.is_none() && opens_something_the_reading_cannot_see(root, preprocessing);
+
     Some(DeclFact {
         kind: DeclKind::from_binding_kind(binding.kind),
         name,
         scope,
+        scope_unknown,
         // Asked of the scope the binding was made in rather than of the declaration's shape: `bool` is the one
         // answer a *shape* cannot give, because `void f() { int x; }` and `void f() { }` differ by a declaration
         // that is not in a scope at all. See [`ScopeTree::declares_a_local`].
@@ -1923,6 +1945,48 @@ fn fact_for(
 /// declarations named `std::atomic::load` are all members, all of them answered `None`, and the field changed
 /// nothing. Measured: the same five candidates, one version apart. A fact carries the pattern of the class it was
 /// written in, so that a lookup never has to walk back up to the class to ask.
+/// **Does this file's text invoke a macro that the reading left unexpanded, at a level a scope can be opened?**
+///
+/// The signal [`DeclFact::scope_unknown`] is built on, and the honest one: a token the compilation defines as a
+/// macro, still standing as an identifier in a reading that does not expand macros, means the text's structure from
+/// there on is not what the reading thinks it is. `_STD_BEGIN` is the case that matters — its body is
+/// `namespace std {` — so every declaration after it is inside a scope the reading cannot name.
+///
+/// Only a token written at the **start of its line**, which is where a macro that opens something is written and
+/// almost never where one that computes a value is: MSVC's headers put `_STD_BEGIN` alone on its line and
+/// `_STD move(x)` inside expressions. Without that narrowing the flag would fire for every file that calls any
+/// macro anywhere — and a fact marked "scope unknown" is one a qualified name is **allowed** to match, so the
+/// narrowing is what keeps the answer a claim rather than a blanket.
+fn opens_something_the_reading_cannot_see(
+    root: &CppSyntaxNode,
+    preprocessing: &FilePreprocessing,
+) -> bool {
+    let text = root.text().to_string();
+
+    root.descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .filter(|token| token.kind() == cpp_parser::CppTokenKind::Identifier.into())
+        .any(|token| {
+            let at = usize::from(token.text_range().start());
+            if at > text.len() {
+                return false;
+            }
+
+            let alone_on_its_line = match text[..at].rfind('\n') {
+                Some(line) => text[line + 1..at].trim().is_empty(),
+                None => text[..at].trim().is_empty(),
+            };
+            if !alone_on_its_line {
+                return false;
+            }
+
+            !matches!(
+                preprocessing.macros_at(at).lookup(token.text()),
+                crate::condition::Lookup::Undefined | crate::condition::Lookup::Unanswered
+            )
+        })
+}
+
 fn pattern_of(root: &CppSyntaxNode, binding: &Binding) -> Option<String> {
     let declaration = enclosing_class_of(root, binding)?;
     let text = declaration.text().to_string();
@@ -2205,7 +2269,7 @@ impl<'a> DeclarationFacts<'a> {
             let local = scopes.declares_a_local(ScopeId(index));
 
             for binding in &scope.bindings {
-                if let Some(fact) = fact_for(root, &shapes, binding, prefix.clone(), local, scopes, &declarations) {
+                if let Some(fact) = fact_for(root, &shapes, binding, prefix.clone(), local, scopes, &declarations, preprocessing) {
                     facts.push(fact);
                 }
             }
