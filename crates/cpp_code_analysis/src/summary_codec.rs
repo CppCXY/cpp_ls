@@ -198,7 +198,23 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// record. The reader rejects an older version, so the field needs no compatibility arm: an entry written
 /// before it has no answer to give, and `None` would be the wrong one — it says "only the file encloses this",
 /// which is exactly what a standard-library local is not.
-pub const CODEC_VERSION: u32 = 25;
+///
+/// # Version 26
+///
+/// A declaration fact gained `pattern` — the bump to version 26: the class's own name as its declaration wrote it,
+/// when that name carries a pattern (`shared_ptr<_Ty>` for `struct atomic<shared_ptr<_Ty>>`). See
+/// [`crate::DeclFact::pattern`] for the wrong answer it exists to remove.
+///
+/// **The version is the point of this note, not the field.** The first attempt at the field added the bytes to the
+/// encoder and the decoder and left the number alone, on the reasoning that the layout change is what a reader
+/// notices. What a reader actually notices is the number: an entry written before the field decodes with the new
+/// layout as if it had one, every field after `pattern` shifts, and the answer is not "no pattern" but **whatever
+/// happens to sit at that offset**. Measured: the same probe answered every candidate `pattern: None` on a warm
+/// store and produced the right values when the store was cold — the same command, two answers, which is the shape
+/// of a layout bug and not of a logic one.
+///
+/// So the number moves, the old entries are dropped on sight, and the field is what the reader sees.
+pub const CODEC_VERSION: u32 = 26;
 
 /// Write a summary as bytes.
 ///

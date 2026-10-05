@@ -1886,29 +1886,30 @@ fn fact_for(
     })
 }
 
-/// **The class's own name as the declaration wrote it, when the name carries a pattern.**
+/// **The pattern of the class this declaration sits in**, when that class's name carries one.
 ///
-/// `shared_ptr<_Ty>` for `template <class _Ty> struct atomic<shared_ptr<_Ty>>`, and `None` for a name that is a
-/// single identifier — the ordinary class — and for everything that is not a class. See [`DeclFact::pattern`] for
-/// what the difference is used for.
+/// `shared_ptr<_Ty>` for anything declared inside `template <class _Ty> struct atomic<shared_ptr<_Ty>>` — the class
+/// itself, and **every member of it**, which is the part that matters: a member lookup is handed a *member's* fact
+/// and has to tell which class declaration that member came from. See [`DeclFact::pattern`].
 ///
-/// The declaration's **text**, cut the way a reader cuts it: after the `class`/`struct`/`union` keyword and before
-/// the `:` of a base clause or the `{` of the body. A spelling rather than a structured pattern, for the reason the
-/// rest of this file gives — matching it against a use's arguments is done where those arguments are known.
+/// `None` at file scope, inside a function, and inside a class whose name is a single identifier — the ordinary
+/// case, and free.
+///
+/// # Why the enclosing class rather than the binding
+///
+/// The first version asked this of the binding itself and answered `None` for everything that was not a class, on
+/// the reasoning that a pattern is a property of a class. It is — but the *question* is asked of members: the five
+/// declarations named `std::atomic::load` are all members, all of them answered `None`, and the field changed
+/// nothing. Measured: the same five candidates, one version apart. A fact carries the pattern of the class it was
+/// written in, so that a lookup never has to walk back up to the class to ask.
 fn pattern_of(root: &CppSyntaxNode, binding: &Binding) -> Option<String> {
-    if binding.kind != BindingKind::Class {
-        return None;
-    }
-
-    let declaration = declaration_of(root, binding)?;
+    let declaration = enclosing_class_of(root, binding)?;
     let text = declaration.text().to_string();
 
     // **The head only.** The declaration's text is the whole class — body included — and a body holds `class` and
     // `struct` keywords of its own (nested classes, `using` declarations). A walk that took the last one in the text
     // pointed into the body, produced a spelling with no `<` in it, and the field was `None` for every class in the
-    // standard library: measured, all five `std::atomic::load` candidates had `pattern: None` and the wrong answer
-    // this field exists to remove stayed exactly where it was. Cutting at the body's `{` first is what makes the
-    // keyword search mean "the one that introduces this class".
+    // standard library.
     //
     // A forward declaration has no `{`, and ends at its `;` — cut there too, so `struct Widget;` is the same
     // nothing-to-see as a body.
@@ -1938,12 +1939,32 @@ fn pattern_of(root: &CppSyntaxNode, binding: &Binding) -> Option<String> {
     }
 
     let after = &head[found?..];
-    let end = after
-        .find([':', '{', ';'])
-        .unwrap_or(after.len());
+    let end = after.find([':', '{', ';']).unwrap_or(after.len());
     let written = after[..end].trim();
 
     written.contains('<').then(|| written.to_string())
+}
+
+/// **The innermost class-like declaration containing this binding**, when there is one.
+///
+/// Innermost by **extent**, not by walk order: a member of a nested class sits inside two class nodes, and the one
+/// that describes it is the smaller. `descendants` yields the tree in no guaranteed order, so the smallest
+/// containing node is taken rather than the first.
+fn enclosing_class_of(root: &CppSyntaxNode, binding: &Binding) -> Option<CppSyntaxNode> {
+    let at = binding.name_range.start_offset;
+
+    root.descendants()
+        .filter(|node| {
+            matches!(
+                CppSyntaxKind::from(node.kind()),
+                CppSyntaxKind::ClassDef | CppSyntaxKind::StructDef | CppSyntaxKind::UnionDef
+            )
+        })
+        .filter(|node| {
+            let range = node.text_range();
+            usize::from(range.start()) <= at && at <= usize::from(range.end())
+        })
+        .min_by_key(|node| node.text_range().len())
 }
 
 /// **The namespaces enclosing `at`, outermost first** — or `None` when only the file does.

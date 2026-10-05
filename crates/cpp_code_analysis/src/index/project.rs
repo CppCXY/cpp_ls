@@ -594,7 +594,7 @@ pub fn member_across_files(
     // template is applied by the callers that ask for its type — see [`NamedDeclaration::type_of`] — and applying
     // it here as well would have to rewrite the fact's own spelling, which is what
     // `DeclFact::type_of` is documented to be *as the file wrote it*.
-    let found = member_fact(index, scopes, root, path, &class, &access.member);
+    let found = member_fact(index, scopes, root, path, &class, &access.member, None);
     let Known::Yes((fact, file)) = found else {
         let Known::Unknown(reason) = found else {
             unreachable!("the first match established that this is an `Unknown`")
@@ -2353,11 +2353,32 @@ pub(crate) fn type_of_expression(
         // last step between that and `char&`. See [`member_access_class_and_arguments`].
         let (class, arguments) =
             member_access_class_and_arguments(index, scopes, root, path, &class, &inner_type);
-        let found = member_fact(index, scopes, root, path, &class, &inner.member);
+        // The arguments as **spellings**, which is what a pattern comparison is: a pattern is what the other
+        // declaration wrote, and two spellings of one type would not compare equal. The direction this rule fails in
+        // is "no match", which keeps an answer rather than removing one.
+        let written_arguments: Vec<String> =
+            arguments.iter().map(|argument| argument.to_string()).collect();
+        let found = member_fact(
+            index,
+            scopes,
+            root,
+            path,
+            &class,
+            &inner.member,
+            Some(&written_arguments),
+        );
         let found = match found {
             Known::Yes(found) => Known::Yes(found),
             Known::Unknown(reason) => match declared_class(index, &declared_in, &class) {
-                Some(qualified) => match member_fact(index, scopes, root, path, &qualified, &inner.member) {
+                Some(qualified) => match member_fact(
+                    index,
+                    scopes,
+                    root,
+                    path,
+                    &qualified,
+                    &inner.member,
+                    Some(&written_arguments),
+                ) {
                     Known::Yes(found) => Known::Yes(found),
                     Known::Unknown(_) | Known::No => Known::Unknown(reason),
                 },
@@ -2974,7 +2995,7 @@ fn finish_a_nested_name(
         }
         asked.push(nested.clone());
 
-        let Known::Yes((inner, inner_file)) = member_fact(index, scopes, root, path, class, &nested)
+        let Known::Yes((inner, inner_file)) = member_fact(index, scopes, root, path, class, &nested, None)
         else {
             break;
         };
@@ -3766,7 +3787,18 @@ fn declaration_of_a_callee(
             member_access_class_and_arguments(index, scopes, root, path, &class, &object);
         let bindings = member_bindings(index, scopes, root, path, &class, &arguments);
 
-        return match member_fact(index, scopes, root, path, &class, &access.member) {
+        // The arguments as **spellings**, for the pattern rule — see [`direct_member`].
+        let written_arguments: Vec<String> =
+            arguments.iter().map(|argument| argument.to_string()).collect();
+        return match member_fact(
+            index,
+            scopes,
+            root,
+            path,
+            &class,
+            &access.member,
+            Some(&written_arguments),
+        ) {
             Known::Yes((fact, file)) => Known::Yes(NamedDeclaration::Indexed(fact, file, bindings)),
             Known::Unknown(reason) => Known::Unknown(reason),
             Known::No => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
@@ -3989,6 +4021,10 @@ fn member_fact(
     path: &Path,
     class: &str,
     member: &str,
+    // **The arguments the use wrote**, when the caller has them. See [`direct_member`]'s pattern rule: a class
+    // template's partial specializations share their primary's scope, and this is what tells them apart. `None`
+    // from a caller that does not know them, which answers the way this did before the rule existed.
+    arguments: Option<&[String]>,
 ) -> Known<(DeclFact, PathBuf)> {
     // Followed **before** anything else, so that both the lookup and the spelling this answer reports when it
     // fails name the class rather than the alias: `Widget::size` is the question that could not be answered, and
@@ -3996,7 +4032,7 @@ fn member_fact(
     // where the step is idempotent — a class resolves to itself.
     let class = &resolve_aliases(index, scopes, root, path, class);
 
-    if let Some(found) = direct_member(index, scopes, root, path, class, member) {
+    if let Some(found) = direct_member(index, scopes, root, path, class, member, arguments) {
         return Known::Yes(found);
     }
 
@@ -4021,7 +4057,7 @@ fn member_fact(
     // qualified spelling that found nothing has already said which scope it meant.
     if !class.contains("::") {
         if let Some(declared_in) = qualified_from_the_index(index, path, class) {
-            if let Some(found) = direct_member(index, scopes, root, path, &declared_in, member) {
+            if let Some(found) = direct_member(index, scopes, root, path, &declared_in, member, arguments) {
                 return Known::Yes(found);
             }
         }
@@ -4055,7 +4091,7 @@ fn member_fact(
 
             // A base that cannot be resolved contributes nothing *and* stops nothing: whatever it might inherit
             // from is unknown, not absent, and the levels below it are still worth asking.
-            if let Some(member_found) = direct_member(index, scopes, root, path, &base, member) {
+            if let Some(member_found) = direct_member(index, scopes, root, path, &base, member, arguments) {
                 found.push(member_found);
             }
             next.extend(
@@ -4412,6 +4448,7 @@ fn direct_member(
     path: &Path,
     class: &str,
     member: &str,
+    arguments: Option<&[String]>,
 ) -> Option<(DeclFact, PathBuf)> {
     // An alias has no members of its own, so the spelling is followed to the class it names before anything is
     // looked up: `std::string`'s members are `std::basic_string`'s. This is the one place a spelling becomes a
@@ -4455,40 +4492,35 @@ fn direct_member(
     // `atomic<shared_ptr<_Ty>>::load` — because `<memory>` was indexed before `<atomic>` and its specialization came
     // first. Five declarations named `std::atomic::load` are visible and only one is the primary's.
     //
-    // **Two fixes were tried and are not here**, so that nobody writes them again. Refusing whenever the candidates
-    // disagree removes the wrong answer and also removes `v.begin()` — `vector`'s `const` and non-`const` overloads
-    // return `iterator` and `const_iterator`, so they "disagree" too, and that is a call every file makes: measured
-    // on a one-line fixture, one `auto` went from an answer to a refusal. Preferring the candidate whose return type
-    // is one of the class's own parameters (`atomic<_Ty>::load` returns `_Ty`) keeps that fixture right and does
-    // nothing for `begin`, whose overloads both return compound spellings.
-    //
-    // # The rule that belongs here, and the two things it still needs
+    // # The rule that is here
     //
     // [`DeclFact::pattern`] is the class's own name as its declaration wrote it — `atomic<_Ty>` for the primary,
-    // `atomic<shared_ptr<_Ty>>` for the specialization — and the rule is that a candidate is kept when its pattern
-    // matches the arguments the **use** wrote: a pattern argument that is one of the class's own parameter names is
-    // a **slot** and takes whatever the use put there, and anything else has to be equal to it. So `atomic<_Ty>`
-    // would match `atomic<int>` and `atomic<shared_ptr<_Ty>>` would not — which is the wrong answer this removes.
+    // `atomic<shared_ptr<_Ty>>` for the specialization — and a candidate is kept when its pattern matches the
+    // arguments the **use** wrote: a pattern argument that is one of the class's own parameter names is a **slot**
+    // and takes whatever the use put there, and anything else has to be equal to it. So `atomic<_Ty>` matches
+    // `atomic<int>` and `atomic<shared_ptr<_Ty>>` does not — which is the wrong answer this removes.
     //
-    // It is **not written here**, because two things are missing and both are outside this function:
+    // The arguments arrive as a parameter rather than being read off `class`, because **the class spelling reaching
+    // this function has already been stripped to its bare name** — measured: `std::atomic`, never `std::atomic<int>`.
+    // The pairing exists one step up, in `member_access_class_and_arguments`, and callers that have it pass it.
     //
-    // ```text
-    // 1. The arguments are gone by the time this is called. `member_access_class` strips a type to its bare class
-    //    name, so the spelling arriving here is `std::atomic` and not `std::atomic<int>` — measured: the class
-    //    reaches this line with no angle brackets in it, and there is nothing to match against. The pairing already
-    //    exists one step up, in `member_access_class_and_arguments`, which returns the class **and** the arguments;
-    //    they would have to be threaded down to here.
-    // 2. The field is not populated yet. Measured on the same lookup: all five `std::atomic::load` candidates have
-    //    `pattern: None`, so even with the arguments in hand there is nothing to compare them to. `pattern_of`, in
-    //    `sema::declarations`, is where it is meant to come from, and it is not producing one for a class template
-    //    whose declaration is a specialization.
-    // ```
-    //
-    // Until both are true the first name match stands, which is what every other answer here is built on.
+    // **Two other fixes were tried and are not here**, so that nobody writes them again. Refusing whenever the
+    // candidates disagree removes the wrong answer and also removes `v.begin()` — `vector`'s `const` and non-`const`
+    // overloads return `iterator` and `const_iterator`, so they "disagree" too, and that is a call every file makes:
+    // measured on a one-line fixture, one `auto` went from an answer to a refusal. Preferring the candidate whose
+    // return type is one of the class's own parameters (`atomic<_Ty>::load` returns `_Ty`) keeps that fixture right
+    // and does nothing for `begin`, whose overloads both return compound spellings.
     if let Some(found) = index
         .declarations_in(class, path)
         .into_iter()
-        .find(|declaration| declaration.fact.name == member)
+        .find(|declaration| {
+            declaration.fact.name == member
+                && a_pattern_matches(
+                    declaration.fact.pattern.as_deref(),
+                    &declaration.fact.parameters,
+                    arguments,
+                )
+        })
     {
         return Some((found.fact.clone(), found.file.clone()));
     }
@@ -4500,6 +4532,71 @@ fn direct_member(
         Known::Yes(found) => Some((found.fact, found.file)),
         Known::Unknown(_) | Known::No => None,
     }
+}
+
+/// **Does this declaration's class pattern match the arguments the use wrote?**
+///
+/// See the rule where it is used, in [`direct_member`]. `None` for either side is "cannot be compared" and answers
+/// `true`: a class with no pattern is an ordinary class and matches any use of its name, and a use whose arguments
+/// could not be read is not evidence against the declaration. That direction is deliberate — this rule removes a
+/// **wrong** answer, and a spelling it could not read must not remove a right one.
+fn a_pattern_matches(pattern: Option<&str>, parameters: &[String], written: Option<&[String]>) -> bool {
+    let (Some(pattern), Some(written)) = (pattern, written) else {
+        return true;
+    };
+
+    // **The whole pattern, once.** `arguments_in_a_spelling` finds the outermost `<…>` itself and splits at the
+    // commas that are not inside brackets, so handing it the part between the brackets — which is what this did
+    // first — makes it split again at the *inner* `<`: `shared_ptr<_Ty>` produced the slots `["_Ty"]`, `_Ty` is one
+    // of the class's own parameters, and the specialization matched `atomic<int>` after all. The wrong answer
+    // survived a version whose whole purpose was to remove it, and the shape of the mistake is the one this file
+    // keeps making: a reader that takes a spelling apart twice.
+    let Some(slots) = arguments_in_a_spelling(pattern) else {
+        return true;
+    };
+    if slots.len() != written.len() {
+        return true;
+    }
+
+    slots.iter().zip(written).all(|(slot, argument)| {
+        let slot = slot.trim();
+        // A **slot** is one of the class's own parameters, and takes whatever the use put there; anything else has
+        // to be equal to it. `_Ty` against `int` matches; `shared_ptr<_Ty>` against `int` does not.
+        parameters.iter().any(|name| name == slot) || slot == argument.trim()
+    })
+}
+
+/// The arguments written between the outermost `<` and `>` of a spelling — `atomic<int>` gives `["int"]`, and a
+/// spelling with no angle brackets gives `None`.
+///
+/// Split at the commas that are **not inside brackets**, which is the rule [`written_parameters`] uses for a
+/// parameter list and for the same reason: `pair<int, int>` is one argument.
+fn arguments_in_a_spelling(written: &str) -> Option<Vec<String>> {
+    let (_, after) = written.split_once('<')?;
+    let inside = after.trim_end().strip_suffix('>')?;
+
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut at = 0usize;
+    for (index, character) in inside.char_indices() {
+        match character {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                out.push(inside[at..index].to_string());
+                at = index + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(inside[at..].to_string());
+
+    let out: Vec<String> = out
+        .into_iter()
+        .map(|argument| argument.trim().to_string())
+        .filter(|argument| !argument.is_empty())
+        .collect();
+    (!out.is_empty()).then_some(out)
 }
 
 /// One binding as a [`DeclFact`], under the qualified name of the scope it was written in.
