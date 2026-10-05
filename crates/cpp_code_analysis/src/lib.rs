@@ -156,9 +156,11 @@ pub use index::{
     NameProvenance, NotIndexed, NotIndexedReason, OfferedName, PathPattern, Priority, ProjectDefinition,
     ProjectDefinitions,
     ProjectIndex, ProjectMacro, ProjectMember, ProjectSymbol, Reference, ReferenceBudget, ReferenceKind,
-    Rename, Response, Step, StepOutcome, StoreStats, SummaryReadError, SummaryStore, UnlistedBase,
+    Rename, Response, Step, StepOutcome, StoreStats, SummaryReadError, SummaryStore,
+    SymbolReferences, SymbolToFind, UnlistedBase,
     UnresolvedEdge, VisibleDeclaration, WatchFilter, Worklist, definition_across_files,
     macro_across_files, macro_references, member_across_files, member_completions_at, members_of,
+    symbol_references,
     header_at, name_completions_at, outcome_of, read_summary, summarize, write_summary,
 };
 pub use macros::{MacroBody, MacroDef, MacroTable, Parameter, ParameterKind};

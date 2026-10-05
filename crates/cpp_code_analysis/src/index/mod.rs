@@ -52,7 +52,7 @@ pub use project::{
 };
 pub use references::{
     FileReferences, MacroReferences, Reference, ReferenceBudget, ReferenceKind, Rename,
-    macro_references,
+    SymbolReferences, SymbolToFind, macro_references, symbol_references,
 };
 pub use store::{
     IncludeBudget, IncludeIndex, NotIndexed, NotIndexedReason, StoreStats, SummaryStore,

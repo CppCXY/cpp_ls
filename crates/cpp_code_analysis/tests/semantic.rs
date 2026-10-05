@@ -1494,3 +1494,48 @@ fn a_conditional_has_the_type_its_arms_agree_on() {
         "the arms disagree, so the conversion decides — and this layer does not rank conversions"
     );
 }
+
+/// **`const` and `static` are drawn as modifiers, and a type is not.**
+///
+/// See [`NameModifier`]: a modifier is a claim about a declaration, read from the file's own specifier tokens —
+/// the same table `access_at` uses. Three cases are pinned because two of them were wrong on the first attempt: a
+/// `const` object and a `static` one must carry their modifier, and a **type** must carry neither, which is what a
+/// first version got wrong (`struct Widget` came out `readonly static`, because it asked the shape table for
+/// specifiers a type cannot have).
+#[test]
+fn a_modifier_is_read_from_the_declarations_own_specifiers() {
+    use cpp_code_analysis::semantic::NameModifier;
+
+    // **The nesting is the point, and it is why the type is inside a namespace.** The false positive this pins was
+    // `struct Widget` coming out `readonly static`, and it came from asking the shape table for specifiers a type
+    // cannot have: the walk finds the innermost shape that *has* specifiers, and a declaration inside a namespace
+    // has that namespace's shapes above it. A bare `struct Widget { … };` at file scope has no specifiers anywhere
+    // near it, so the first version of this test passed with the guard removed — it was testing nothing.
+    let source = "namespace outer {\n\
+                  struct Widget { static int count; };\n\
+                  }\n\
+                  const int limit = 3;\n\
+                  static int file_scope = 0;\n\
+                  int plain = 0;\n";
+    let session = session_with(&[("/p/a.cpp", source)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let names = session.classified_names(&view);
+
+    let modifiers_of = |spelling: &str| -> Vec<NameModifier> {
+        names
+            .iter()
+            .filter(|name| {
+                &source[name.range.start_offset..name.range.end_offset()] == spelling
+            })
+            .flat_map(|name| name.modifiers.clone())
+            .collect()
+    };
+
+    assert!(modifiers_of("limit").contains(&NameModifier::ReadOnly), "`const int limit` is readonly");
+    assert!(modifiers_of("file_scope").contains(&NameModifier::Static), "`static int file_scope` is static");
+    assert!(modifiers_of("plain").is_empty(), "a plain `int` carries nothing");
+    assert!(
+        modifiers_of("Widget").is_empty(),
+        "a type is not readonly and not static — a modifier that cannot be true is a visible wrong claim"
+    );
+}

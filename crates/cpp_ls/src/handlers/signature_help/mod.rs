@@ -55,6 +55,18 @@ pub async fn on_signature_help(
         // this handler has its own reason to care: it declines to answer while files are queued, and a module whose
         // interface unit nobody read is exactly that state. `false`: no edit to catch up on.
         crate::handlers::read_the_modules(&context, &path, false).await;
+        // **And then wait for the analysis, because the answer is not in this file.**
+        //
+        // `prepare` reads *this* file and wants its cooked reading; the declaration being jumped to is usually in a
+        // header, and a header's facts exist only once the pump has cooked the include closure. Measured on a live
+        // server for `std::endl` — the gap this pattern was added to the hover handler for — the first three queries
+        // after an open answered **nothing at all** and the fourth answered correctly.
+        //
+        // The same short, cancellable budget the completion and inlay-hint handlers use.
+        context
+            .analysis()
+            .settle(Some(&cancel_token), std::time::Duration::from_millis(2000))
+            .await;
     }
 
     snapshot_query(context.analysis(), cancel_token, move |session| {

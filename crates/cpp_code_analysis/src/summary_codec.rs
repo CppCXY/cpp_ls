@@ -236,7 +236,6 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
     for fact in &summary.declarations {
         put_str(&mut out, &fact.name);
         put_opt_str(&mut out, fact.scope.as_deref());
-        put_u8(&mut out, u8::from(fact.scope_unknown));
         put_u8(&mut out, decl_kind_code(fact.kind));
         put_opt_str(&mut out, fact.type_of.as_deref());
         put_opt_str(&mut out, fact.returns.as_deref());
@@ -616,7 +615,6 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
         declarations.push(DeclFact {
             name: reader.string()?,
             scope: reader.optional_string()?,
-            scope_unknown: reader.u8()? != 0,
             kind: decl_kind_from(reader.u8()?)?,
             type_of: reader.optional_string()?,
             returns: reader.optional_string()?,

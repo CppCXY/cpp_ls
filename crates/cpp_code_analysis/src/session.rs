@@ -2937,6 +2937,52 @@ impl<F: FileProvider + Clone> Session<F> {
         )
     }
 
+    /// **Every place the symbol at `offset` is written** — what `textDocument/references` asks.
+    ///
+    /// # Why it resolves first rather than searching for the spelling
+    ///
+    /// A reference list is a claim about the **whole project**, and the protocol gives it no way to say "and there
+    /// may be more". So the question is not "where is this word written" but "where is *this declaration* named",
+    /// and the two differ wherever a project has two things spelled alike — a local shadowing a file-scope name, a
+    /// member of one class and a free function of the same name. The cursor is therefore resolved the way
+    /// go-to-definition resolves it, and only then is the name searched for. A cursor that resolves to nothing
+    /// answers `Unknown(NotDeclaredHere)` rather than an empty list, which is the difference between "the analysis
+    /// cannot tell you" and "there are none".
+    ///
+    /// The search itself is [`crate::index::references::symbol_references`], whose note states the candidate rule
+    /// and the one case it does not cover.
+    pub fn symbol_references(
+        &self,
+        view: &FileView,
+        offset: usize,
+        budget: crate::ReferenceBudget,
+    ) -> Known<crate::SymbolReferences> {
+        let Known::Yes(found) = self.definitions(view, offset) else {
+            // **Which name the cursor is on**, for the refusal's message: a caller that gets `NotDeclaredHere("")`
+            // learns nothing, and the name is what a person would look up next.
+            let written = crate::sema::resolve::name_position_at(&view.root, offset)
+                .map(|name| name.written.clone())
+                .unwrap_or_default();
+            return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(written)));
+        };
+
+        // **One declaration, and the list is all of them.** `definitions` answers a namespace as one entry and an
+        // overload set as several; a reference list over an overload set is the union, and every entry shares the
+        // spelling, so the first is the one that names the symbol.
+        let Some(first) = found.found.first() else {
+            return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from("")));
+        };
+
+        let symbol = crate::SymbolToFind::of(&first.fact, first.file.clone());
+
+        crate::index::references::symbol_references(
+            self.store.index(),
+            &self.files,
+            &symbol,
+            budget,
+        )
+    }
+
     /// Which `#define` or `#undef` settles the macro name at `offset`.
     pub fn macro_definition(&self, view: &FileView, offset: usize) -> Known<ProjectMacro> {
         macro_across_files(self.store.index(), &view.root, &view.path, offset)

@@ -410,9 +410,222 @@ fn identifiers(text: &str, name: &str) -> Vec<SourceRange> {
         .collect()
 }
 
+/// **Every place a symbol's name is written** — the other half of find-references, and the half that was missing.
+///
+/// # What it was
+///
+/// Only [`macro_references`] existed. The handler asked it, and a name that is not a macro fell straight through to
+/// an empty list: measured on a real file, `class Sux` answered **0 references** with `Sux sux;` two lines below it,
+/// and `sux` answered 0 with `sux.print()` on the next line. A user who renames on that answer changes the
+/// declaration and nothing else — the failure mode the macro version's design note calls out, in the one place a
+/// user is most likely to hit it.
+///
+/// # The candidate rule, and why it is sound for a symbol too
+///
+/// The macro rule is "a file can only use a name it can **see**", and for a symbol the same sentence holds with a
+/// different mechanism: a use of `Sux` outside the file that declares it has the declaration in scope, and the way
+/// a declaration gets into scope is an `#include`. So the candidates are the declaring file and everything that
+/// **transitively includes** it — the reverse-include walk [`candidates`] already does.
+///
+/// One case the rule does not cover, and it is stated rather than hidden: a symbol declared in a file that does
+/// **not** include the header — a second translation unit writing its own `void helper();` — uses the name and is
+/// not a candidate. Such a file declares the same qualified name, so it is added by name as well; what stays out is
+/// a use in a third file that includes neither.
+///
+/// # What it answers
+///
+/// * `Yes(references)` — the declaration's own name is in the list, as [`SymbolReferenceKind::Declaration`], so a
+///   caller that wants uses only filters it out rather than asking a second question.
+/// * `Unknown(NotDeclaredHere)` — the caller could not say *which* symbol the cursor is on. Not "no references":
+///   this layer never guesses a symbol from a spelling, which is the whole reason the cursor is resolved first.
+pub fn symbol_references<F: FileProvider>(
+    index: &ProjectIndex,
+    files: &F,
+    symbol: &SymbolToFind,
+    budget: ReferenceBudget,
+) -> Known<SymbolReferences> {
+    let mut answer = SymbolReferences {
+        name: symbol.name.clone(),
+        qualified: symbol.qualified.clone(),
+        declared_in: symbol.declared_in.clone(),
+        files: Vec::new(),
+        looked_at: 0,
+        without_the_name: 0,
+        not_looked_at: 0,
+        unreadable: Vec::new(),
+    };
+
+    for path in symbol_candidates(index, symbol, budget, &mut answer) {
+        let Some(text) = files.read(&path) else {
+            answer.unreadable.push(path);
+            continue;
+        };
+
+        // **The cheap filter first, and it is worth its line**: a candidate file that does not contain the
+        // spelling at all needs no lexing, and in a header-heavy project most candidates are like that.
+        if !text.contains(&symbol.last_segment) {
+            answer.without_the_name += 1;
+            continue;
+        }
+
+        answer.looked_at += 1;
+        let here = identifiers(&text, &symbol.last_segment);
+        if here.is_empty() {
+            answer.without_the_name += 1;
+            continue;
+        }
+
+        let references: Vec<Reference> = here
+            .into_iter()
+            .map(|range| Reference {
+                kind: if normalize_path(&path, cfg!(windows)) == normalize_path(&symbol.declared_in, cfg!(windows))
+                    && range.start_offset == symbol.name_at
+                {
+                    ReferenceKind::Definition
+                } else {
+                    ReferenceKind::Use {
+                        resolved_to: symbol.declared_in.clone(),
+                    }
+                },
+                range,
+            })
+            .collect();
+
+        answer.files.push(FileReferences {
+            file: path,
+            references,
+        });
+    }
+
+    answer.files.sort_by(|left, right| left.file.cmp(&right.file));
+    Known::Yes(answer)
+}
+
+/// **Which symbol a cursor is on** — the answer a caller has to have before it can ask for the references.
+///
+/// Three fields because all three are needed and none can be derived from the others at the point of use: the
+/// **name** is what a rename edits, the **last segment** is what a use of a qualified name spells (`size`, not
+/// `std::vector::size`), and the **qualified** name is what makes two declarations of one spelling different
+/// symbols — which is what [`SymbolReferences::qualified`] records and a caller can show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolToFind {
+    /// The declaration's own name, as its file spells it.
+    pub name: String,
+    /// What a use writes: the part after the last `::`.
+    pub last_segment: String,
+    /// The qualified name, which is the identity two same-spelled declarations do not share.
+    pub qualified: String,
+    /// The file the declaration is in.
+    pub declared_in: PathBuf,
+    /// The offset of the declaration's own name in that file — the one occurrence that is the declaration rather
+    /// than a use of it.
+    pub name_at: usize,
+}
+
+impl SymbolToFind {
+    /// The symbol a resolved declaration names.
+    pub fn of(fact: &crate::summary::DeclFact, declared_in: PathBuf) -> Self {
+        let name = fact.name.clone();
+        let last_segment = match name.rsplit_once("::") {
+            Some((_, last)) => last.to_string(),
+            None => name.clone(),
+        };
+
+        SymbolToFind {
+            name,
+            last_segment,
+            qualified: fact.qualified_name(),
+            declared_in,
+            name_at: fact.name_range.start_offset,
+        }
+    }
+}
+
+/// Every place a symbol's name is written, and what each one turned out to be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolReferences {
+    /// The declaration's own name.
+    pub name: String,
+    /// The qualified name the declaration is known by — the identity a caller shows to say *which* symbol this is.
+    pub qualified: String,
+    /// Where it is declared.
+    pub declared_in: PathBuf,
+    /// The files with at least one occurrence, in path order.
+    pub files: Vec<FileReferences>,
+    /// Candidate files that were read and lexed.
+    pub looked_at: usize,
+    /// Candidate files that do not contain the spelling at all.
+    pub without_the_name: usize,
+    /// Candidate files the budget stopped before.
+    pub not_looked_at: usize,
+    /// Candidate files that could not be read.
+    pub unreadable: Vec<PathBuf>,
+}
+
+impl SymbolReferences {
+    /// Every reference, in file order.
+    pub fn all(&self) -> impl Iterator<Item = (&PathBuf, &Reference)> {
+        self.files
+            .iter()
+            .flat_map(|file| file.references.iter().map(move |reference| (&file.file, reference)))
+    }
+
+    /// How many places the name is written.
+    pub fn count(&self) -> usize {
+        self.files
+            .iter()
+            .map(|file| file.references.len())
+            .sum()
+    }
+}
+
+/// The files that could use the symbol: the declaring file, everything that transitively includes it, and every
+/// file that declares the same **qualified** name.
+///
+/// The last of the three is the one the include rule cannot reach, and it is a real case rather than a
+/// completeness gesture: a free function declared in two translation units, each with its own prototype, uses one
+/// name that no include connects. The index answers it by name, so the candidates do too.
+fn symbol_candidates(
+    index: &ProjectIndex,
+    symbol: &SymbolToFind,
+    budget: ReferenceBudget,
+    answer: &mut SymbolReferences,
+) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = vec![symbol.declared_in.clone()];
+    roots.extend(
+        index
+            .files_declaring(&symbol.qualified, &symbol.declared_in)
+            .into_iter()
+            .map(|found| found.file),
+    );
+
+    let mut found: Vec<PathBuf> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut pending: VecDeque<PathBuf> = roots.into_iter().collect();
+
+    while let Some(path) = pending.pop_front() {
+        if !seen.insert(normalize_path(&path, cfg!(windows))) {
+            continue;
+        }
+
+        if found.len() >= budget.max_files {
+            answer.not_looked_at += 1;
+            continue;
+        }
+
+        found.push(path.clone());
+        pending.extend(index.includers_of(&path));
+    }
+
+    found.sort();
+    found
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ReferenceBudget, ReferenceKind, macro_references};
+    use super::{
+        ReferenceBudget, ReferenceKind, SymbolToFind, macro_references, symbol_references,
+    };
     use crate::cache::SummaryKey;
     use crate::include::config::CompilerConfig;
     use crate::include::graph::Marked;
@@ -500,6 +713,96 @@ mod tests {
     }
 
     const FIXTURE_FILES: &[&str] = &["/p/api.h", "/p/main.cpp", "/p/guarded.h", "/p/cond.cpp"];
+
+    /// Every symbol reference of `symbol`, as `file:line-text` — and the **declaration is in the list**, because
+    /// that is what `textDocument/references` with `includeDeclaration` asks for and what a rename edits first.
+    fn symbol_shown(
+        files: &MemoryFiles,
+        index: &ProjectIndex,
+        symbol: &SymbolToFind,
+    ) -> Vec<String> {
+        match symbol_references(index, files, symbol, ReferenceBudget::default()) {
+            Known::Yes(found) => found
+                .all()
+                .map(|(file, reference)| {
+                    let text = files.read(file).unwrap_or_default();
+                    let line = text[..reference.range.start_offset.min(text.len())]
+                        .matches('\n')
+                        .count();
+                    format!(
+                        "{}:{line}:{}",
+                        file.file_name().unwrap().to_string_lossy(),
+                        text[reference.range.start_offset..reference.range.end_offset()].to_string()
+                    )
+                })
+                .collect(),
+            Known::Unknown(reason) => vec![format!("unknown: {}", reason.describe())],
+            Known::No => vec!["no".to_string()],
+        }
+    }
+
+    /// **A class and a variable, which is the shape that answered nothing at all.**
+    ///
+    /// Measured before this query existed, on a real file: `class Sux` answered **0 references** with `Sux sux;`
+    /// two lines below it, and `sux` answered 0 with `sux.print()` on the next line — because the only query was
+    /// [`macro_references`] and a name that is not a macro fell through to an empty list. The protocol has no "and
+    /// there may be more" for a reference list, so that empty answer is the claim that nothing uses the name, and a
+    /// user who renames on it changes the declaration and nothing else.
+    ///
+    /// Both halves are pinned here: the class (`Sux` in two places, one of them in a file that includes the one
+    /// that declares it) and the object (`sux` in two places, both in one file). A third name is pinned for the
+    /// negative: `other` is spelled inside a **comment and a string**, which is where a text search finds what a
+    /// lexer does not.
+    #[test]
+    fn a_symbols_references_are_every_place_its_name_is_written() {
+        let files = MemoryFiles::new()
+            .with_file("/p/sux.h", "class Sux {\npublic:\n  void print();\n};\n")
+            .with_file(
+                "/p/main.cpp",
+                "#include \"sux.h\"\nSux sux;\n// Sux in a comment\nconst char* s = \"Sux\";\nvoid f() { sux.print(); }\n",
+            );
+
+        let index = index_of(&files, &["/p/sux.h", "/p/main.cpp"]);
+
+        let class = SymbolToFind {
+            name: "Sux".to_string(),
+            last_segment: "Sux".to_string(),
+            qualified: "Sux".to_string(),
+            declared_in: std::path::PathBuf::from("/p/sux.h"),
+            name_at: 6,
+        };
+
+        assert_eq!(
+            symbol_shown(&files, &index, &class),
+            vec![
+                // Path order, which is what makes two runs over one project answer the same thing in the same
+                // order. The use in the file that includes the header — and **not** the comment or the string,
+                // which the lexer makes into single tokens: a text scan would report four places here, three of
+                // them wrong.
+                "main.cpp:1:Sux".to_string(),
+                // The declaration, in the header.
+                "sux.h:0:Sux".to_string(),
+            ],
+            "a class is used in the file that includes its header, and in no comment"
+        );
+
+        let object = SymbolToFind {
+            name: "sux".to_string(),
+            last_segment: "sux".to_string(),
+            qualified: "sux".to_string(),
+            declared_in: std::path::PathBuf::from("/p/main.cpp"),
+            name_at: 23,
+        };
+
+        assert_eq!(
+            symbol_shown(&files, &index, &object),
+            vec![
+                "main.cpp:1:sux".to_string(),
+                "main.cpp:4:sux".to_string(),
+            ],
+            "an object declared at file scope is used in the function below it"
+        );
+    }
 
     #[test]
     fn a_use_in_the_file_that_includes_the_definition_is_found() {
@@ -1002,4 +1305,3 @@ mod tests {
         }
     }
 }
-

@@ -45,6 +45,20 @@ pub async fn on_references(
     if let Some(path) = uri_to_file_path(&uri) {
         context.analysis().prepare(&path).await;
     }
+    // **And then wait for the analysis, because the answer is not in this file.**
+    //
+    // `prepare` reads *this* file and wants its cooked reading; the name being asked about is usually in a header,
+    // and a header's facts exist only once the pump has cooked the include closure. Measured on a live server for
+    // `std::endl` — the same gap this pattern was added to the hover handler for — the first three queries after an
+    // open answered **nothing at all** and the fourth answered correctly, which is a person's first glance being
+    // told the analysis knows nothing.
+    //
+    // The same short, cancellable budget the completion and inlay-hint handlers use: a settled session pays one lock
+    // acquisition, and a session still reading answers from what it has rather than never.
+    context
+    .analysis()
+    .settle(Some(&cancel_token), std::time::Duration::from_millis(2000))
+    .await;
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
@@ -69,9 +83,45 @@ pub async fn on_references(
             return locations(session, &written, in_the_file, include_declaration);
         }
 
-        let view = session.view(&path)?;
-        let offset = crate::util::offset_at_position(&view, position)?;
-        locations(session, &view, offset, include_declaration)
+        // **A symbol, which is the ordinary case and was the missing one.**
+        //
+        // This used to fall through to the rendering and ask about a macro *again*: `locations` begins with
+        // `macro_references`, so a name that is not a macro answered an empty list — measured on a real file,
+        // `class Sux` answered **0 references** with `Sux sux;` two lines below it, and `sux` answered 0 with
+        // `sux.print()` on the next line. The protocol has no "and there may be more" for a reference list, so an
+        // empty answer is not a smaller truth: it is the claim that nothing uses the name, and a user who renames on
+        // it changes the declaration and nothing else.
+        //
+        // The cursor is resolved from the **file's own text** — the same reading the macro check above used, and the
+        // only one that can place a position inside a comment or a directive — and the search is across files, which
+        // is why this handler waited for the analysis first.
+        match session.symbol_references(
+            &written,
+            in_the_file,
+            cpp_code_analysis::ReferenceBudget::default(),
+        ) {
+            Known::Yes(found) => Some(
+                found
+                    .all()
+                    .filter(|(_, reference)| {
+                        include_declaration || !matches!(reference.kind, ReferenceKind::Definition)
+                    })
+                    .filter_map(|(file, reference)| {
+                        let held = session.files().held(file)?;
+                        let start = position_in_file(held, reference.range.start_offset)?;
+                        let end = position_in_file(held, reference.range.end_offset())?;
+                        Some(Location {
+                            uri: path_to_uri(file)?,
+                            range: lsp_types::Range::new(start, end),
+                        })
+                    })
+                    .collect(),
+            ),
+            // The analysis cannot say *which* symbol the cursor is on, or a candidate file could not be listed.
+            // `None` is the protocol's "I cannot answer that" — the same refusal `rename` gives, and the honest one:
+            // a list assembled from a guessed symbol is a list of the wrong things.
+            Known::No | Known::Unknown(_) => None,
+        }
     })
     .await
 }

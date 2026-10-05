@@ -74,6 +74,27 @@ pub async fn on_hover(
         // A hover over `std::string` in a file that says `import std;` is the same question the definition handler
         // asks, and it needs the same file read in: `std.ixx` is outside the project. `false`: no edit to catch up on.
         crate::handlers::read_the_modules(&context, &path, false).await;
+
+        // **And then wait for the analysis, because the answer is not in this file.**
+        //
+        // `prepare` reads the file and wants its cooked reading — and the *cooked reading is not where `std::endl`
+        // lives*: the name is in `__msvc_ostream.hpp`, inside a namespace opened by `_STD_BEGIN`, and it is filed
+        // under `std` only by the cooked reading of **that** header. Nothing has asked for it, so the pump is still
+        // working through the include closure when the first query arrives.
+        //
+        // Measured on a live server, hovering `std::endl` in a file just opened: **no popup whatsoever** immediately,
+        // at 250 ms, at 1 s and at 3 s — the answer appeared only at the next ask. A person opens a file and moves
+        // the pointer; that is the first three of those, which is why the report was "`endl` has no hover" rather
+        // than "it is slow".
+        //
+        // The wait is the same short, cancellable budget the completion and inlay-hint handlers already use, and it
+        // is the same reasoning: a settled session pays one lock acquisition, and a session that is still reading
+        // answers from what it has rather than never. Without it this handler is the one query that can be asked
+        // *before* the analysis knows what it is being asked about.
+        context
+            .analysis()
+            .settle(Some(&cancel_token), std::time::Duration::from_millis(2000))
+            .await;
     }
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
