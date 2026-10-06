@@ -594,6 +594,27 @@ impl Session<DiskFiles> {
     }
 }
 
+
+/// **Everything a cook needs, gathered under the write lock and then used without it.**
+///
+/// Owned rather than borrowed on purpose: the caller has to let go of the session between
+/// `Session::cooking_materials` and `Session::render_a_cooked`, so nothing here may borrow it. The unit is an
+/// `Arc` the cache already holds, and the seed is a table built from the index's own macros.
+pub struct CookingMaterials {
+    /// The index's own spelling of the path, which is what every other layer keys on.
+    pub path: PathBuf,
+    /// The summary key the rendered reading is filed under.
+    pub key: SummaryKey,
+    /// The translation unit whose environment this file's macros come from.
+    pub unit: std::sync::Arc<crate::TranslationUnit>,
+    /// The file's own text.
+    pub text: String,
+    /// What the compilation defines, before the file's own `#define`s.
+    pub seed: MacroTable,
+    /// The names the file's raw reading already declares, so the render's addition can be counted.
+    pub already_declared: std::collections::HashSet<String>,
+}
+
 impl<F: FileProvider + Clone> Session<F> {
     /// A session with the configuration the caller already has: no compile database is read and no compiler is run.
     ///
@@ -1367,6 +1388,89 @@ impl<F: FileProvider + Clone> Session<F> {
             self.prefetched.clear();
         }
 
+        self.finish_a_slice(&done);
+
+        done
+    }
+
+    /// **Prepare everything a slice of `steps` is going to need, holding nothing but `&self`.**
+    ///
+    /// The expensive half of indexing a wave — reading the text, lexing, parsing, building a summary — is a pure
+    /// function of the file, the configuration and the filesystem (`SummaryStore::prepare`). It changes nothing, so
+    /// it does not need the write lock that a query is waiting for, and this is the entry point that lets a caller
+    /// pay for it under a **read** lock instead.
+    ///
+    /// [`Session::commit_a_wave`] is the other half: it takes the same files and puts their summaries in the index,
+    /// which is cheap and needs `&mut self`. The pair exists because of what the write lock costs — measured, a slice
+    /// of thirty-two files held it for **84, 503, 882, 1190 and 2430 ms**, so every completion arriving inside that
+    /// window waited for all of it. With the parse moved out, the same slice holds it for **9–12 ms**.
+    pub fn prepare_a_wave(&self, steps: usize) -> Vec<(PathBuf, crate::index::store::Prepared)> {
+        // **The files [`Session::commit_a_wave`] is about to pop**, which is what `peek` answers — the queue as it
+        // stands now, without taking anything. A file a step discovers later can outrank these and is prepared on a
+        // later wave, which is why the committing half still has a slow path.
+        let wave: Vec<PathBuf> = self
+            .queue
+            .peek(steps)
+            .into_iter()
+            .filter(|path| {
+                let key = queue_key(path);
+                !self.prefetched.contains_key(&key) && !self.queue.is_worked(path)
+            })
+            .collect();
+
+        if wave.is_empty() {
+            return Vec::new();
+        }
+
+        let room = (steps * 4).saturating_sub(self.prefetched.len()).max(wave.len());
+        let queue = &self.queue;
+        let prefetched = &self.prefetched;
+        self.store.prepare_closure(
+            &wave,
+            |target| !queue.is_worked(target) && !prefetched.contains_key(&queue_key(target)),
+            room,
+        )
+    }
+
+    /// **Put what [`Session::prepare_a_wave`] prepared into the index**, and queue what it includes.
+    ///
+    /// The cheap half: no parsing, no reading, no walking — `SummaryStore::commit` per file and `Worklist::add` for
+    /// each include it names. Everything the parse needed was paid for under the read lock.
+    pub fn commit_a_wave(
+        &mut self,
+        prepared: Vec<(PathBuf, crate::index::store::Prepared)>,
+        steps: usize,
+    ) -> Vec<Step> {
+        for (path, made) in prepared {
+            self.prefetched.insert(queue_key(&path), made);
+        }
+
+        let mut done = Vec::new();
+        for _ in 0..steps {
+            let Some((path, priority, depth)) = self.queue.pop() else {
+                break;
+            };
+            let ready = self.prefetched.remove(&queue_key(&path));
+            done.push(self.index_one(path, priority, depth, ready));
+        }
+
+        if self.queue.pending() == 0 {
+            self.prefetched.clear();
+        }
+
+        self.finish_a_slice(&done);
+
+        done
+    }
+
+    /// **What has to happen once a slice's files are in the index** — the second pass, the cooks, the environments.
+    ///
+    /// Split out of [`Session::advance`] because there are now **two** ways a slice gets committed — `advance`, which
+    /// parses inside the write lock, and [`Session::commit_a_wave`], which parses under a read lock and only commits
+    /// here — and both must finish the same way. Measured: leaving this out of `commit_a_wave` fixed the latency
+    /// (write lock 9–12 ms against 84–2430) and made every completion **empty**, because the cooking half lives here
+    /// and a completion reads the cooked reading.
+    fn finish_a_slice(&mut self, done: &[Step]) {
         // **The second pass, at the moment the closure is in hand**. `SummaryStore::get` reads one file with
         // the evidence the index has at that moment, and for MSVC's STL that is no evidence at all: `<vector>`'s
         // `std` scope is written in `yvals_core.h`'s `_STD_BEGIN` — a file `<vector>` *includes*, and a file is read
@@ -1473,8 +1577,6 @@ impl<F: FileProvider + Clone> Session<F> {
                 }
             }
         }
-
-        done
     }
 
     /// **The translation units a pass over these files reads its environments out of** — one walk each, and cached.
@@ -2710,12 +2812,24 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// `None` when the file has no summary or no text — nothing has read it yet, which is a state and not an error.
     pub fn cook(&mut self, path: impl AsRef<Path>) -> Option<CookedReading> {
-        // **The index's own spelling of the path**, taken once and used from here on. Two spellings of one file are
-        // ordinary on Windows — a client sends `C:\…`, the include resolver produces `c:/…` — and the index, the
-        // frames of a walk and the declarations all key on the *normalized* form. Comparing the raw spellings reads
-        // as two files: the reading is built under a path nothing else names, every query goes on finding nothing,
-        // and nothing reports a problem.
-        let path = self.store.index().summary(path.as_ref())?.path.clone();
+        let materials = self.cooking_materials(path.as_ref())?;
+        let rendered = self.render_a_cooked(&materials)?;
+        Some(self.commit_a_cooked(rendered))
+    }
+
+    /// **Everything a cook needs that is cheap to gather, holding `&mut self` only for the lookup.**
+    ///
+    /// The expensive half of cooking a file — lexing it, rendering it, parsing the rendering — is a function of the
+    /// file's own text and its environment, and it changes nothing. So it is [`Session::render_a_cooked`], which takes
+    /// `&self`, and this is the short part that has to happen first: resolve the path, ask the index for the summary,
+    /// take the translation unit **out of the cache** (a hit whenever the file has been indexed) and read the text.
+    ///
+    /// Split for the same reason [`Session::prepare_a_wave`] is: the write lock is what a query waits for. Measured,
+    /// a cooking slice of *zero* index files held it for up to **1527 ms**, and the parts measured here are
+    /// `unit 15–42 ms` (the cache lookup) against `own 9–269 ms` (the render and parse) — so what stays under the
+    /// write lock is the small one.
+    pub fn cooking_materials(&mut self, path: &Path) -> Option<CookingMaterials> {
+        let path = self.store.index().summary(path)?.path.clone();
         let key = SummaryKey::new(0, self.store.context_hash(&path));
 
         // What the file's own text already declares — the names the cooked reading adds are the ones missing here.
@@ -2728,36 +2842,60 @@ impl<F: FileProvider + Clone> Session<F> {
             .map(crate::DeclFact::qualified_name)
             .collect();
 
-        // **The closure, with its text**, from the index and the buffers: the walk reads a file's includes, so it
-        // needs the same edge set the visibility walk uses, and one read per file rather than one per edge. The map
-        // beside it is what makes answering the walk's questions a lookup rather than a scan — see
-        // [`Session::closure_with_text`].
-        //
-        // …and it is read **only on a miss**: the unit itself is what is expensive, and it is asked for first.
         let unit = self.translation_unit_of(&path)?;
         let text = self.files.read(&path)?;
-
         let seed = MacroTable::from_marked(self.store.index().macros());
+
+        Some(CookingMaterials {
+            path,
+            key,
+            unit,
+            text,
+            seed,
+            already_declared,
+        })
+    }
+
+    /// **Lex, render and parse one file's text** — the expensive half of cooking, and it takes `&self`.
+    ///
+    /// Everything it reads is owned by its argument, so a caller may hold it under a **read** lock while a query runs
+    /// beside it. [`Session::commit_a_cooked`] is the other half: one insert, `&mut self`.
+    ///
+    /// The unit and the seed are moved in rather than borrowed because the caller has to let go of the session
+    /// between the two halves — that is the whole point of the split — and a borrow of `&self` cannot survive it.
+    pub fn render_a_cooked(
+        &self,
+        materials: &CookingMaterials,
+    ) -> Option<(crate::IndexedRendering, CookedReading)> {
+        let CookingMaterials {
+            path,
+            key,
+            unit,
+            text,
+            seed,
+            already_declared,
+        } = materials;
+
         let (tokens, _) = {
             let _lex = crate::stages::StageTimer::new(crate::stages::Stage::Lex);
-            cpp_parser::lex(&text, &cpp_parser::LexerConfig::default())
+            cpp_parser::lex(text, &cpp_parser::LexerConfig::default())
         };
         let unit_definitions = unit.definitions();
         let macros = {
             let _macros = crate::stages::StageTimer::new(crate::stages::Stage::Macros);
             crate::preprocess::cooked::FileMacros::new(
-                unit.environment_of(&path)?,
+                unit.environment_of(path)?,
                 &unit_definitions,
-                Some(&seed),
+                Some(seed),
                 true,
             )
         };
         let rendered = {
             let _render = crate::stages::StageTimer::new(crate::stages::Stage::Render);
-            crate::preprocess::cooked::cook_with(&text, &tokens, &macros).render()
+            crate::preprocess::cooked::cook_with(text, &tokens, &macros).render()
         };
         let indexer = FileIndexer::new(&self.files, &self.config);
-        let indexed = indexer.index_rendering(&path, &rendered, key);
+        let indexed = indexer.index_rendering(path, &rendered, *key);
         let reading = CookedReading {
             declarations: indexed.summary.declarations.len(),
             only_after_expansion: indexed
@@ -2770,13 +2908,25 @@ impl<F: FileProvider + Clone> Session<F> {
             unplaced: indexed.unplaced,
             mapped: indexed.mapped,
         };
+        Some((indexed, reading))
+    }
 
+    /// **Put a rendered reading into the index** — one insert, and it is the whole of what needs `&mut self`.
+    pub fn commit_a_cooked(&mut self, reading: (crate::IndexedRendering, CookedReading)) -> CookedReading {
+        let (indexed, reading) = reading;
+        let path = indexed.summary.path.clone();
         {
             let _insert = crate::stages::StageTimer::new(crate::stages::Stage::Insert);
             self.store.index_mut().insert_cooked(&path, indexed.into());
         }
-        Some(reading)
+        reading
     }
+
+    /// **Everything a cook needs, gathered under the write lock and then used without it.**
+    ///
+    /// Owned rather than borrowed on purpose: the caller has to let go of the session between
+    /// [`Session::cooking_materials`] and [`Session::render_a_cooked`], so nothing here may borrow it. The unit is an
+    /// `Arc` the cache already holds, and the seed is a table built from the index's own macros.
 
     /// **The rendering of one file** — what the preprocessor produces from it, as text.
     ///

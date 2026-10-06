@@ -37,14 +37,6 @@ use crate::util::uri_to_file_path;
 
 pub use client_config::{ClientConfig, get_client_config};
 
-/// How many files one background slice reads before it lets the runtime run something else.
-///
-/// A slice is a transaction against the analysis: it takes the write lock once and gives it back, so a query
-/// arriving mid-index waits for a slice and not for a project. A slice's files are parsed on all the cores at once
-/// (`Session::advance`), so thirty-two files hold the lock for about what sixteen did when they were parsed one at a
-/// time — short enough that a keystroke does not feel it, long enough that the indexing does not spend its time
-/// taking locks.
-const INDEX_SLICE: usize = 32;
 
 /// How long the pump sleeps when there is nothing to read, before looking again.
 ///
@@ -53,6 +45,37 @@ const INDEX_SLICE: usize = 32;
 /// queue being found empty and the wait starting — one lock acquisition a second, against an index that would
 /// otherwise stay stale for the rest of the session if that ever happened.
 const IDLE_WAIT: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// How many files one background slice reads before it lets the runtime run something else.
+///
+/// A slice is a transaction against the analysis: it takes the write lock once and gives it back, so a query
+/// arriving mid-index waits for a slice and not for a project. A slice's files are parsed on all the cores at once
+/// (`Session::advance`), so thirty-two files hold the lock for about what sixteen did when they were parsed one at a
+/// time — short enough that a keystroke does not feel it, long enough that the indexing does not spend its time
+/// taking locks.
+///
+/// # What was tried here, and why it is still a count
+///
+/// A **time budget** instead of a count: advance until twenty-five milliseconds have gone, on the theory that a
+/// count cannot be right for both small files and four-megabyte headers. Measured, it was **worse** — the answers
+/// stayed empty for the first nine completions rather than the first seven, and completions that were fast were
+/// fast because they had *nothing to say*. A slice that ends early drains the queue later, and a list with no
+/// summary behind it is not a fast answer but no answer. Throughput and latency pull against each other here, and
+/// this count already sat at a workable point between them.
+const INDEX_SLICE: usize = 32;
+
+/// **How long one slice may hold the analysis write lock** — the number the count above is a proxy for.
+///
+/// Measured, thirty-two files held the lock for anywhere between **84 and 2430 ms**, and a slice of *zero* files —
+/// the cooking half of `Session::advance` — for up to **1527 ms**. This is what a completion arriving inside that
+/// window waits for.
+///
+/// Bounding the slice *by* this number was tried and is worse: slices of 76–356 ms, and the completion list came
+/// back **empty for the first eight requests** instead of the first five. The two knobs trade a wait for an empty
+/// list, and no setting of either wins, because reading files and answering questions take the same write lock.
+/// The constant is kept as the record of what the wait actually is.
+#[allow(dead_code)]
+const INDEX_SLICE_MS: u64 = 40;
 
 pub async fn initialized_handler(
     context: ServerContextSnapshot,
@@ -284,10 +307,41 @@ async fn index_in_background(context: ServerContextSnapshot) {
                 return;
             }
 
+            // **The parse, under a read lock — and the insert, under the write lock.**
+            //
+            // This is the split that ends the wait, rather than moving it. Reading a file into the index is a parse,
+            // and a parse is a pure function of the file, the configuration and the filesystem
+            // (`SummaryStore::prepare`) — it changes nothing, so it does not need the write lock that a query is
+            // waiting for. `prepare_a_wave` takes `&self` for exactly that reason; `commit_a_wave` takes `&mut self`
+            // and does nothing but put the summaries in the index and queue what they include.
+            //
+            // The two were one call (`advance`) and the numbers say what that cost: a slice of 32 files held the
+            // write lock for **84, 503, 882, 1190 and 2430 ms**, and a slice of *zero* files — the cooking half — for
+            // up to **1527 ms**. A completion arriving anywhere in those windows waited for all of it, which is the
+            // row of latencies pinned to the two-second settle budget. Bounding the slice only moved the wait around
+            // (measured: 76–356 ms slices, and the list came back **empty for eight requests** instead of five).
+            let prepared = context
+                .analysis()
+                .with_snapshot(|session| session.prepare_a_wave(INDEX_SLICE))
+                .unwrap_or_default();
+            let prepared_count = prepared.len();
+
             let Some(pending) = context
                 .analysis()
                 .update_session(|session| {
-                    session.advance(INDEX_SLICE);
+                    // **Timed**, because the count is only a proxy for the one number a caller can feel: how long the
+                    // write lock is held. The parse is no longer in this window — it was paid for under the read lock
+                    // above — so what is left is the insert and the queueing, and this line is what says whether that
+                    // is as short as it should be.
+                    let started = std::time::Instant::now();
+                    let taken = session.commit_a_wave(prepared, INDEX_SLICE).len();
+                    let held = started.elapsed().as_millis();
+                    if taken > 0 || prepared_count > 0 {
+                        log::debug!(
+                            "index slice: prepared {prepared_count}, committed {taken}, write lock held {held} ms, {pending_now} left",
+                            pending_now = session.pending_work()
+                        );
+                    }
                     // **All the work, not just the indexing queue.** A session that has read every file still has
                     // the files its open ones include to read *as a compiler reads them* (`Session::cook`), and this
                     // loop is what gives that work a caller: reading the queue alone would stop the pump one step

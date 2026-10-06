@@ -102,7 +102,7 @@ pub async fn on_completion(
         crate::handlers::read_the_modules(&context, &path, true).await;
     }
 
-    // **A completion waits too, and for the same measured reason.**
+    // **A completion waits — but only while waiting is what stands between an answer and none.**
     //
     // The list is built to degrade rather than lie — a name whose declaration has not been read is skipped — so an
     // index that is still filling gives fewer items and never wrong ones. Measured on a report: opening a file
@@ -110,12 +110,36 @@ pub async fn on_completion(
     // there is nothing to be less than. The list says `is_incomplete`, so a client does ask again — but only when
     // the user types, and the first look at a file deserves the same answer as the second.
     //
-    // The budget is deliberately the same short one the hints use: a settled session pays one lock acquisition, and
-    // a session that is still reading gives its answer after two seconds rather than never.
-    context
-        .analysis()
-        .settle(Some(&cancel_token), std::time::Duration::from_millis(2000))
-        .await;
+    // # Why the wait is not paid unconditionally
+    //
+    // It was, and that is what a person feels as "completion is very slow". The budget is two seconds and indexing
+    // a workspace takes about six, so the first **four** completions after opening a project each burned the whole
+    // budget. Measured against a one-file project on MSVC's headers: **1915, 2188, 1420, 811 ms** — and then 19 ms,
+    // once the index was up. Four of those is a second and a half of spinner per keystroke, for answers that were
+    // already **48 items long**: the wait was not buying anything, because the file was read and only *other* files
+    // were still arriving.
+    //
+    // So the wait is asked for **when this file has no summary yet**, which is the case the paragraph above
+    // describes — the popup of nothing but keywords is a file whose own declarations have not been read. Once it
+    // has one, the answer is as good as it is going to get for this keystroke and there is nothing to wait for.
+    let path = uri_to_file_path(&uri);
+    let read_already = path
+        .as_ref()
+        .map(|path| {
+            context
+                .analysis()
+                .with_snapshot(|session| session.index().summary(path).is_some())
+                .unwrap_or(true)
+        })
+        .unwrap_or(true);
+    let asked_at = std::time::Instant::now();
+    if !read_already {
+        context
+            .analysis()
+            .settle(Some(&cancel_token), std::time::Duration::from_millis(2000))
+            .await;
+    }
+    let _waited = asked_at.elapsed().as_millis();
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
