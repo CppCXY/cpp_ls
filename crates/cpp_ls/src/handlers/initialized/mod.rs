@@ -64,6 +64,14 @@ const IDLE_WAIT: std::time::Duration = std::time::Duration::from_millis(1000);
 /// this count already sat at a workable point between them.
 const INDEX_SLICE: usize = 32;
 
+/// **How many files one slice cooks** — the same shape as [`INDEX_SLICE`], and the same reason.
+///
+/// Cooking a file is a render and a parse of it, which is the largest single thing this pump does: measured
+/// `own 9–269 ms` per file against the `unit 15–42 ms` a lookup costs. The count is small because the work is
+/// large, and because the expensive half now runs under a **read** lock ([`Session::render_them`]) while only the
+/// insert needs the write one.
+const COOK_A_SLICE: usize = 4;
+
 /// **How long one slice may hold the analysis write lock** — the number the count above is a proxy for.
 ///
 /// Measured, thirty-two files held the lock for anywhere between **84 and 2430 ms**, and a slice of *zero* files —
@@ -326,6 +334,7 @@ async fn index_in_background(context: ServerContextSnapshot) {
                 .unwrap_or_default();
             let prepared_count = prepared.len();
 
+            let mut cooking = Vec::new();
             let Some(pending) = context
                 .analysis()
                 .update_session(|session| {
@@ -346,6 +355,15 @@ async fn index_in_background(context: ServerContextSnapshot) {
                     // the files its open ones include to read *as a compiler reads them* (`Session::cook`), and this
                     // loop is what gives that work a caller: reading the queue alone would stop the pump one step
                     // before the declarations a reader asks about exist.
+                    //
+                    // **And the materials for a slice of that work**, gathered here because this is the same short
+                    // window: a summary lookup, a unit out of the cache, and the text. The lex, the render and the
+                    // parse are the expensive part and are [`Session::render_them`], which takes `&self` — so they run
+                    // under a read lock below, beside whatever a person is typing.
+                    let taken_for_cooking = session.take_cooking_materials(COOK_A_SLICE);
+                    for materials in taken_for_cooking {
+                        cooking.push(Some(materials));
+                    }
                     session.pending_work()
                 })
                 .await
@@ -353,6 +371,26 @@ async fn index_in_background(context: ServerContextSnapshot) {
                 log::warn!("the workspace was closed while it was being indexed");
                 return;
             };
+
+            // **The cooking slice's expensive half, under a read lock.** Measured, this is `own 9–269 ms` per file
+            // against the `unit 15–42 ms` gathered above — and it was the largest thing left inside the write lock,
+            // held for up to **1527 ms** for a slice that read *no* index files at all.
+            let rendered_cooks = context
+                .analysis()
+                .with_snapshot(move |session| {
+                    session.render_them(cooking.into_iter().flatten().collect())
+                })
+                .unwrap_or_default();
+
+            // **And the insert, under the write lock** — one `insert_cooked` per file and nothing else.
+            if !rendered_cooks.is_empty() {
+                context
+                    .analysis()
+                    .update_session(|session| {
+                        session.commit_them(rendered_cooks);
+                    })
+                    .await;
+            }
 
             if pending > 0 {
                 context.status_bar().update_progress_task(

@@ -2922,6 +2922,53 @@ impl<F: FileProvider + Clone> Session<F> {
         reading
     }
 
+    /// **The materials for up to `how_many` of the files waiting to be cooked**, in queue order.
+    ///
+    /// The cheap half of a cooking slice: a summary lookup, a translation unit **out of the cache** (a hit whenever
+    /// the file has been indexed, which is the ordinary case here) and the text. What it does *not* do is the lex,
+    /// the render and the parse — [`Session::render_them`] does those, and takes `&self`, so the pump can hold a read
+    /// lock for them instead of the write lock a query is waiting for.
+    ///
+    /// It takes the queue's front, so a caller that renders and commits them in order has done exactly what
+    /// `finish_a_slice`'s loop does — with the expensive part outside the write lock.
+    pub fn take_cooking_materials(&mut self, how_many: usize) -> Vec<CookingMaterials> {
+        let mut taken = Vec::new();
+        for _ in 0..how_many {
+            let Some(path) = self.cooking.take(1).into_iter().next() else {
+                break;
+            };
+            // A file the cook queue names but the index cannot describe yet is dropped rather than re-queued:
+            // `want_cooked_reading` and the closure sweep both ask for it again, and a queue that re-adds its own
+            // failures is a queue that never empties — the note on `want_the_closure_cooked` records that hang.
+            if let Some(materials) = self.cooking_materials(&path) {
+                taken.push(materials);
+            }
+        }
+        taken
+    }
+
+    /// **Lex, render and parse a slice's worth of materials** — the expensive half, under a read lock.
+    pub fn render_them(
+        &self,
+        materials: Vec<CookingMaterials>,
+    ) -> Vec<(crate::IndexedRendering, CookedReading)> {
+        materials
+            .into_iter()
+            .filter_map(|materials| self.render_a_cooked(&materials))
+            .collect()
+    }
+
+    /// **Put a slice's worth of rendered readings into the index** — one insert each, under the write lock.
+    pub fn commit_them(
+        &mut self,
+        rendered: Vec<(crate::IndexedRendering, CookedReading)>,
+    ) -> Vec<CookedReading> {
+        rendered
+            .into_iter()
+            .map(|reading| self.commit_a_cooked(reading))
+            .collect()
+    }
+
     /// **Everything a cook needs, gathered under the write lock and then used without it.**
     ///
     /// Owned rather than borrowed on purpose: the caller has to let go of the session between
