@@ -422,6 +422,20 @@ pub fn macro_across_files(
 pub struct CookedFile {
     /// The declarations the rendering read as, every range mapped back into the file.
     pub declarations: Vec<DeclFact>,
+    /// **The macros the rendering was read with** — and this is the half that answers a question the file's own
+    /// reading cannot.
+    ///
+    /// A rendering has no directives left in it: the preprocessor already chose which branches are compiled, so
+    /// every `#define` the rendering contains is one that **is** in force, and every fact here carries
+    /// `FactGuard::Unconditional`. The file's own reading keeps all of them, each tagged with the region it was
+    /// written in, and every consumer then has to **decide those regions again** — which is a second implementation
+    /// of the preprocessor's own decision, and it is the one that keeps being wrong.
+    ///
+    /// Measured on `vcruntime.h`, which writes `_STL_LANG` once per branch of `#ifdef __cplusplus`: the raw reading
+    /// files all three, the last of them `0L`, and a lookup that takes "the last binding at or before this offset"
+    /// answers `0L` for a file the compiler read as C++20. The rendering holds the taken one and nothing else, so a
+    /// consumer that reads **these** has no region to judge.
+    pub macros: Vec<MacroFact>,
     /// The rendering's parse errors, placed in the file — see [`crate::CookedDiagnostic`].
     pub diagnostics: Vec<crate::CookedDiagnostic>,
     /// Errors the parse of the rendering reported that **this file cannot show**, because the text they are about is
@@ -441,6 +455,7 @@ impl CookedFile {
     pub fn declarations(declarations: Vec<DeclFact>) -> Self {
         CookedFile {
             declarations,
+            macros: Vec::new(),
             diagnostics: Vec::new(),
             unplaced: 0,
         }
@@ -448,13 +463,17 @@ impl CookedFile {
 }
 
 impl From<crate::IndexedRendering> for CookedFile {
-    /// What the index keeps of a rendering's reading: the declarations, the errors this file can show, and the count
-    /// of the ones it cannot — and **not** the summary they came out of, because a rendering's summary describes text
-    /// this crate spelled out: its directives and includes are empty, and keeping it would invite a reader to believe
-    /// them (see the `cooked` field).
+    /// What the index keeps of a rendering's reading: the declarations, **the macros it was read with**, the errors
+    /// this file can show, and the count of the ones it cannot.
+    ///
+    /// The summary itself is still not kept, and the reason stands: a rendering's **directives and includes** are
+    /// empty, because that text was spelled out by this crate rather than by the file, and keeping them would invite
+    /// a reader to believe them. Macros are the exception and the point — a rendering's macros are the ones the
+    /// preprocessor *chose*, with no region left to judge (see [`CookedFile::macros`]).
     fn from(indexed: crate::IndexedRendering) -> Self {
         CookedFile {
             declarations: indexed.summary.declarations,
+            macros: indexed.summary.macros,
             diagnostics: indexed.diagnostics,
             unplaced: indexed.unplaced,
         }
@@ -1018,6 +1037,45 @@ fn direct_members(
                 .map(|declaration| (declaration.file.clone(), declaration.fact.clone()))
                 .collect(),
         );
+    }
+
+    // **The class spelling a use writes is not the key its facts are stored under, and asking again with the key is
+    // not a guess.**
+    //
+    // `declarations_in` matches `fact.scope == class` **exactly**, and the two strings come from different places:
+    // the spelling is what the *use* wrote — for `_Repptr._Lock_and_load()`, the object's type as the declaration in
+    // this file spells it, `_Locked_pointer` — while a fact's `scope` is the class's **fully qualified** name,
+    // `std::_Locked_pointer`, because MSVC's headers open their namespace with the `_STD_BEGIN` macro.
+    //
+    // Measured: ten `auto` declarations in `<memory>` were refused as `NotDeclaredHere`, seven of them for
+    // `_Locked_pointer::_Lock_and_load` — and the fact was there all along with `scope=std::_Locked_pointer`,
+    // `qualified=std::_Locked_pointer::_Lock_and_load`, and the lookup asking for a name without the `std::`.
+    //
+    // So the class is **resolved**, the same way go-to-definition resolves it, and the retry uses the qualified name
+    // its own declaration gives. That is the difference between this and a bare-name fallback: a bare name would
+    // answer with a `_Locked_pointer` from anywhere, while this asks *which class the spelling names* and then uses
+    // the answer's own identity. The level walk above is unaffected — it works on facts, which are already keyed
+    // correctly.
+    //
+    // **The template arguments come off first**, and they have to: a use writes the type of its object, so the class
+    // arrives as `_Locked_pointer<_Ty>` — and a *declaration* is never keyed by that spelling. Measured on the same
+    // name: `_Locked_pointer` resolves to `std::_Locked_pointer` while `_Locked_pointer<_Ty>` answers
+    // `NotDeclaredHere`, which is why a retry that skipped this step changed nothing at all. The arguments are what
+    // [`super::member_bindings`] pairs with the class's parameters *after* the class is found; they are not part of
+    // its name.
+    if let Known::Yes(resolved) = index.definition(without_arguments(class), path) {
+        let qualified = resolved.fact.qualified_name();
+        if qualified != *class {
+            let found = index.declarations_in(&qualified, path);
+            if !found.is_empty() {
+                return Known::Yes(
+                    found
+                        .into_iter()
+                        .map(|declaration| (declaration.file.clone(), declaration.fact.clone()))
+                        .collect(),
+                );
+            }
+        }
     }
 
     // Nothing is written *in* it, so the name is either an empty class or no class at all. Which one is decided by
@@ -1989,6 +2047,33 @@ fn sort_and_hide(names: &mut Vec<OfferedName>) {
 const MAX_NESTED_TYPE_DEPTH: usize = 8;
 
 const MAX_TYPE_DEPTH: usize = 8;
+/// **What a `new` expression allocates** — the spelling of its type, which is the whole of the answer.
+///
+/// The type is the `TypeId` child the grammar built: `new` is the one expression whose operand is a **type**, and
+/// `parse_new_type_and_initializer` reads it with the type grammar rather than the expression one. So this is a
+/// lookup in a tree that is already there, not an inference.
+///
+/// A placement list comes first and parses as an `ArgumentList` rather than a `TypeId`, so taking the first
+/// `TypeId` child skips it without a rule about parentheses. `None` for a `new` with no type, which is a parse
+/// error rather than an allocation.
+fn new_expression_allocates(expression: &cpp_parser::CppSyntaxNode) -> Option<String> {
+    let allocated = expression.children().find(|child| {
+        cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::TypeId
+    })?;
+
+    let written = allocated.text().to_string();
+    let written = written.trim();
+
+    // `new int[10]` parses its type as `int[10]`, and the suffix belongs to the declarator rather than to the
+    // allocated type: the expression type is `int*`, not `int[10]*`.
+    let name = match written.find('[') {
+        Some(at) => written[..at].trim(),
+        None => written,
+    };
+
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 /// The type of an expression, as far as this layer can tell, and the file that declared it.
 ///
 /// The core of the `infer` layer, and it is **recursive** because that is what an expression is: `a.b.size` is a
@@ -2068,6 +2153,23 @@ pub(crate) fn type_of_expression(
         };
     }
 
+    // **A `new` expression is a pointer to what it allocates**, and that is C++'s rule rather than an inference:
+    // `new T`, `new T(args)`, `new T[n]` and `new T{args}` all have the type `T*`. Nothing about `T`'s own type has
+    // to be known, which is what makes this arm worth having where the callee's return type is not — and the shapes
+    // it covers are exactly the ones a factory writes.
+    //
+    // Measured on MSVC's `<memory>`: **5** `auto` declarations refused with `UnknownType("new _Ref_count_obj2<_Ty>
+    // (…)")` and its `_Ref_count_bounded_array` siblings — every one of them answerable from the spelling alone,
+    // with the type already in the tree and nothing asking it. The template arguments are kept rather than resolved:
+    // `_Ref_count_obj2<_Ty>*` is what a reader wants to see, and an attempt to resolve `_Ty` would turn a certain
+    // answer into an uncertain one.
+    if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::NewExpr {
+        return match new_expression_allocates(expression) {
+            Some(allocated) => Known::Yes((Type::named(format!("{allocated}*")), path.to_path_buf())),
+            None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
+        };
+    }
+
     // A name: its declaration says what type it has. The file being edited is asked first, because a buffer that
     // has never been saved has no summary — the two-layer split the name query uses, for the same reason.
     //
@@ -2111,6 +2213,7 @@ pub(crate) fn type_of_expression(
             },
         };
     }
+
 
     // A **call**: what the callee returns, or a temporary of the class it names.
     if cpp_parser::CppSyntaxKind::from(expression.kind()) == cpp_parser::CppSyntaxKind::CallExpr {
@@ -4055,8 +4158,17 @@ fn member_fact(
     //
     // Only for a **bare** name: `std::_Compressed_pair` and `_Compressed_pair` are different questions, and a
     // qualified spelling that found nothing has already said which scope it meant.
+    //
+    // **And the template arguments come off first**, which is what this step was missing for the second half of the
+    // family. The spelling arrives as the type of the *object* — `_Locked_pointer<_Ty>` — and a declaration is never
+    // keyed by that: measured on the same name, `_Locked_pointer` resolves to `std::_Locked_pointer` while
+    // `_Locked_pointer<_Ty>` answers `NotDeclaredHere`. Ten `auto` declarations in `<memory>` were refused that way,
+    // seven of them for `_Locked_pointer::_Lock_and_load`, and the fact had `scope=std::_Locked_pointer` the whole
+    // time. The arguments are not lost: [`member_bindings`] pairs them with the class's parameters **after** the
+    // class is found.
     if !class.contains("::") {
-        if let Some(declared_in) = qualified_from_the_index(index, path, class) {
+        let bare = without_arguments(class);
+        if let Some(declared_in) = qualified_from_the_index(index, path, bare) {
             if let Some(found) = direct_member(index, scopes, root, path, &declared_in, member, arguments) {
                 return Known::Yes(found);
             }
@@ -4115,7 +4227,45 @@ fn member_fact(
     ))))
 }
 
-/// The parameter names a class was declared with, from the buffer or from the index.
+/// **A class spelling without its template arguments** — `_Locked_pointer<_Ty>` becomes `_Locked_pointer`.
+///
+/// A **trailing** `<…>` comes off, which is the shape a use writes: the type of an object is the class with the
+/// arguments that finish it, and it is exactly that spelling which is never a declaration's own key. The arguments
+/// are still used — [`member_bindings`] pairs them with the class's parameters once the class is found — so
+/// dropping them here loses nothing and is the only reason a lookup keyed on the class can succeed at all.
+///
+/// Only the **last** angle-bracket group is removed, and that is deliberate rather than a parser: `A<B>::C<D>` has
+/// two, and cutting at the first `<` would turn the qualification into nonsense. Stripping from the end leaves
+/// `A<B>::C`, which is still not a key the index holds — and a lookup that fails is this module's ordinary answer,
+/// where a lookup that matched a mangled spelling would be a wrong one.
+fn without_arguments(class: &str) -> &str {
+    let trimmed = class.trim();
+    if !trimmed.ends_with('>') {
+        return trimmed;
+    }
+
+    // Backwards to the `<` that opened this group, counting nesting so that `Box<Pair<int, int>>` closes at the
+    // right place.
+    let mut depth = 0usize;
+    for (at, character) in trimmed.char_indices().rev() {
+        match character {
+            '>' => depth += 1,
+            '<' => {
+                depth -= 1;
+                if depth == 0 {
+                    let name = trimmed[..at].trim();
+                    // `operator<` and a stray `<` with nothing before it: nothing to strip, and the spelling as
+                    // written is the honest answer.
+                    return if name.is_empty() { trimmed } else { name };
+                }
+            }
+            _ => {}
+        }
+    }
+
+    trimmed
+}
+
 ///
 /// Two sources for the two-layer split every query in this module makes: a class the file being edited declares is
 /// in its scope tree (and its parameters are in its syntax), while a class a header declares is a fact, and the
@@ -6635,7 +6785,16 @@ impl ProjectIndex {
         // would read the region's own body as evidence about its condition, which is backwards for exactly the
         // shape that matters: `#ifndef NAME / #define NAME / #include <a.h> / #endif` has to include `a.h` on the
         // first pass, and a fresh look at the same condition after the `#define` would say it does not.
-        let mut verdicts: HashMap<u32, Option<bool>> = HashMap::new();
+        //
+        // **Keyed by the region *and the branch asked about***, which is the pair the answer is actually a function
+        // of: "is branch *b* of region *r* the one that gets compiled" depends on the branches before *b* and on
+        // nothing else, so it does not move as the walk advances. Keyed by the region alone it did move — the
+        // branch asked about is the one the **fact** sits in, which is a position, so a verdict recorded for a fact
+        // inside the `#if` was reused for a fact inside the `#else`. Measured on `vcruntime.h`: `_STL_LANG`'s live
+        // definition at 7124 put `Region(32) → Some(true)` (7124 is in the `#if`) in this map, and the dead
+        // `#define _STL_LANG 0L` at 7422 (in the `#else`) read that verdict back, so a `#define` no compiler reads
+        // was applied and `_HAS_CXX17` came out `0`.
+        let mut verdicts: HashMap<(u32, usize), Option<bool>> = HashMap::new();
 
         // The two lists are each in offset order (the indexer sorts them), so one merge of them *is* the order a
         // preprocessor reads in. A fact and an include can never start at the same offset.
@@ -6710,7 +6869,7 @@ impl ProjectIndex {
     fn fact_reach(
         &self,
         summary: &FileSummary,
-        verdicts: &mut HashMap<u32, Option<bool>>,
+        verdicts: &mut HashMap<(u32, usize), Option<bool>>,
         state: &Marked,
         guard: FactGuard,
         offset: usize,
@@ -6727,7 +6886,7 @@ impl ProjectIndex {
     fn include_visibility(
         &self,
         summary: &FileSummary,
-        verdicts: &mut HashMap<u32, Option<bool>>,
+        verdicts: &mut HashMap<(u32, usize), Option<bool>>,
         state: &Marked,
         guard: FactGuard,
         offset: usize,
@@ -6754,20 +6913,31 @@ impl ProjectIndex {
         let mut unknown = false;
 
         for at in summary.guards.conditions_of(region) {
-            let holds = match verdicts.get(&at.region) {
+            // The branch this position sits in, which is what the verdict below is *about* — and half of the key it
+            // is remembered under, because "is this branch compiled" does not depend on where the fact stands.
+            let Some(branch) = summary
+                .guards
+                .region_at(at.region, offset)
+                .map(|region| region.active_branch)
+            else {
+                // A guard naming a region this summary does not describe — a summary written before the regions
+                // carried their conditions, or one whose bytes were produced by something else. Nothing can be said
+                // about it, and `Unknown` is what every query said about every region before this existed.
+                unknown = true;
+                continue;
+            };
+
+            let holds = match verdicts.get(&(at.region, branch)) {
                 Some(recorded) => *recorded,
                 None => {
-                    let decided = summary
-                        .guards
-                        .region_at(at.region, offset)
-                        .and_then(|region| {
-                            region.visibility(&crate::index::environment::MacrosHere::from_walk(
-                                state,
-                                at.condition_at,
-                            ))
-                        });
+                    let decided = summary.guards.region_at(at.region, offset).and_then(|region| {
+                        region.visibility(&crate::index::environment::MacrosHere::from_walk(
+                            state,
+                            at.condition_at,
+                        ))
+                    });
 
-                    verdicts.insert(at.region, decided);
+                    verdicts.insert((at.region, branch), decided);
                     decided
                 }
             };
@@ -6775,7 +6945,7 @@ impl ProjectIndex {
             match holds {
                 Some(true) => {}
                 Some(false) => {
-                    // **An `#else` is taken precisely when the condition is *not***. The verdict above
+                    // **An `#else` is taken precisely when the condition is *not*.** The verdict above
                     // answers "did this region's `#if` hold", which is the right question for the branch the
                     // condition guards and the wrong one for the `#else`, whose whole meaning is "nothing before me
                     // was taken". One of those decides MSVC's entire STL: `yvals_core.h` writes
@@ -6784,28 +6954,26 @@ impl ProjectIndex {
                     // #if defined(RC_INVOKED) || defined(Q_MOC_RUN) || defined(__midl)
                     // #define _STL_COMPILER_PREPROCESSOR 0
                     // #else
-                    // #define _STL_COMPILER_PREPROCESSOR 1     // ← this is the definition that is in force
+                    // #define _STL_COMPILER_PREPROCESSOR 1     // <- this is the definition that is in force
                     // #endif
                     // ```
                     //
                     // so the definition that *is* compiled was judged "not taken" (measured: `reach = Inactive`
                     // for both facts), `#if _STL_COMPILER_PREPROCESSOR` then had no value, and every query in the
                     // library answered `ConditionalCompilation`.
-                    // Inverted for the #else: see the note above this match.
-                    let in_the_else = summary
-                        .guards
-                        .conditionals
-                        .get(at.region as usize)
-                        .is_some_and(|conditional| {
-                            conditional.branches.iter().any(|branch| {
-                                branch.kind == crate::DirectiveKind::Else
-                                    && offset >= branch.body.start_offset
-                                    && offset <= branch.body.end_offset()
-                            })
-                        });
-                    if in_the_else {
-                        continue;
-                    }
+                    //
+                    // # The inversion compensated for the memo, and the memo is fixed
+                    //
+                    // Removing it is the *obvious* correction — `region_at` chooses a branch by offset, so
+                    // `Region::visibility` already answers "is the branch in force here the one compiled", and one
+                    // inversion on top of that turns a dead `#else` into a live one.
+                    //
+                    // It was tried once and reverted: **eight MSVC headers went from 319 deduced to 251, refused
+                    // 312 → 380**. That measurement was taken **before** `verdicts` was keyed by `(region, branch)`.
+                    // With the memo keyed by region alone, a `Some(false)` for a position inside an `#else` was
+                    // almost unreachable — the verdict read back was the one recorded for a fact inside the `#if` —
+                    // so this rule was load-bearing for a reason that was itself a bug. The numbers above are a
+                    // measurement of that bug, not of this rule.
                     return Visibility::Inactive;
                 }
                 None => unknown = true,
@@ -8467,7 +8635,6 @@ mod tests {
         assert_eq!(definition.fact.qualified_name(), "a::Widget");
     }
 
-    #[test]
     #[test]
     fn a_qualified_name_is_not_answered_by_a_same_named_declaration_elsewhere() {
         // The wrong answer qualification exists to prevent, one file further out: `b::Widget` is in scope (its

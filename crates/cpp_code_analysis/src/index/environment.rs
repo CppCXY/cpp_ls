@@ -90,7 +90,35 @@ impl MacroValues for MacrosHere<'_> {
         // really does remove a compiler's built-in.
         if let Some(fact) = self.last_word_about(name) {
             return match fact.kind {
-                MacroKind::Definition => Lookup::DefinedWithoutAValue,
+                MacroKind::Definition => {
+                    // **A body that is one integer literal, or one other macro's name, is a value a condition can
+                    // read** — and the second is not an optimisation, it is the shape half of MSVC's headers are
+                    // built out of. `vcruntime.h` writes
+                    //
+                    // ```cpp
+                    // #if defined(_MSVC_LANG) && _MSVC_LANG > __cplusplus
+                    // #define _STL_LANG _MSVC_LANG
+                    // #else
+                    // #define _STL_LANG __cplusplus
+                    // #endif
+                    // #if _STL_LANG > 201402L
+                    // #define _HAS_CXX17 1
+                    // ```
+                    //
+                    // and answering `DefinedWithoutAValue` for `_STL_LANG` makes `#if _STL_LANG > 201402L`
+                    // **undecidable**, so `_HAS_CXX17` is never defined, so every `#if _HAS_CXX17` below it —
+                    // including the one around `<atomic>` in `<memory>` — is undecidable too.
+                    //
+                    // Following one alias is what the expander would do with the body, and it is done here rather
+                    // than by handing over a `MacroDef` because a summary stores a fact's body as a `MacroBody`
+                    // whose tokens live in the *file* it was written in, not in the summary. The chain is bounded by
+                    // [`ALIAS_DEPTH`] so that `#define A B` / `#define B A` answers `DefinedWithoutAValue` instead
+                    // of recursing forever, which is the same answer the expander's own depth cap gives.
+                    match self.alias_of(fact, ALIAS_DEPTH) {
+                        Some(alias) => self.lookup(alias),
+                        None => Lookup::DefinedWithoutAValue,
+                    }
+                }
                 MacroKind::Undefinition => Lookup::Undefined,
             };
         }
@@ -102,7 +130,31 @@ impl MacroValues for MacrosHere<'_> {
     }
 }
 
+const ALIAS_DEPTH: usize = 8;
+
 impl<'a> MacrosHere<'a> {
+    /// **The one name a fact's body *is*, when the body is exactly one identifier.**
+    ///
+    /// `#define _STL_LANG __cplusplus` is an alias: a condition that reads `_STL_LANG` gets whatever
+    /// `__cplusplus` is, and a summary cannot say that by holding a body — its `MacroBody`'s tokens point into
+    /// the file the `#define` was written in, not into the summary. So the alias is followed by name instead,
+    /// which is the same chain the expander walks (`condition::macro_value` → `expand_with_budget`) for a body it
+    /// *can* see.
+    ///
+    /// `depth` counts the aliases already followed, so `#define A B` beside `#define B A` stops rather than
+    /// recursing: the answer is then `DefinedWithoutAValue`, the same `Unknown` the expander's own depth cap
+    /// produces.
+    ///
+    /// A body of anything else — two tokens, a literal, a call — is `None`, because reading *that* is the
+    /// expander's job and guessing at it here would be a second evaluator.
+    fn alias_of(&self, fact: &'a MacroFact, depth: usize) -> Option<&'a str> {
+        if depth == 0 {
+            return None;
+        }
+
+        fact.alias.as_deref()
+    }
+
     /// The file's own last fact about `name` at or above `offset`.
     ///
     /// Only facts **outside every conditional** count. A `#define FOO` written inside an `#if` may not be there
@@ -250,7 +302,74 @@ pub fn a_guard_is_in_force<M: crate::MacroValues>(
     a_guard_holds(file, fact.guard, fact.range.start_offset, macros_at)
 }
 
-/// [`a_guard_is_in_force`] for **any** guarded fact, not only a macro one.
+/// **A `MacroValues` over what the compilation already knows**, for a question asked *before* a file's own table
+/// exists — which is the position `preprocess` is in.
+///
+/// Only definedness is answered, and only from [`cpp_parser::MacroFacts::kind_of`], which is the positional answer
+/// the parser and the scope walk already read: `Some` is "this name is a macro there" and `None` is "it is not",
+/// including when an `#undef` took it away. A body would be needed to evaluate an *expression* (`#if __cplusplus >=
+/// 201703L`), and it is deliberately not synthesised here: that question is answered where the file has been read.
+pub struct KnownMacros<'a> {
+    facts: &'a dyn cpp_parser::MacroFacts,
+    offset: usize,
+}
+
+impl<'a> KnownMacros<'a> {
+    pub fn new(facts: &'a dyn cpp_parser::MacroFacts, offset: usize) -> Self {
+        KnownMacros { facts, offset }
+    }
+}
+
+impl crate::condition::MacroValues for KnownMacros<'_> {
+    fn lookup(&self, name: &str) -> crate::condition::Lookup<'_> {
+        match self.facts.kind_of(name, self.offset) {
+            Some(_) => crate::condition::Lookup::DefinedWithoutAValue,
+            None => crate::condition::Lookup::Undefined,
+        }
+    }
+}
+
+/// **Is this branch the one that gets compiled?** Asked of the compilation's own knowledge, before a file is read.
+///
+/// `None` when nobody can say — no environment, or a condition whose expression needs a body — which leaves the
+/// branch exactly as the walk treated it before this existed. The direction is deliberate: a branch wrongly called
+/// *dead* loses a `#define` that is really there, while one wrongly called *live* keeps a definition that shadows a
+/// better one. Only an answer the environment is **sure** of is turned into a decision.
+///
+/// Written for `vcruntime.h`:
+///
+/// ```cpp
+/// #ifdef __cplusplus
+///     #define _STL_LANG _MSVC_LANG
+/// #else
+///     #define _STL_LANG 0L          // <- recorded as the definition, because it is the last one
+/// #endif
+/// ```
+///
+/// `__cplusplus` is the compiler's own name and is in the environment, so this answers `true` for the first branch
+/// and `false` for the `#else` — which is what stops `0L` from shadowing the real value.
+pub fn a_branch_is_taken(
+    is_a_macro: &mut dyn FnMut(&str, usize) -> bool,
+    kind: crate::DirectiveKind,
+    branch: &crate::preprocess::guard::Branch,
+    offset: usize,
+) -> Option<bool> {
+    match kind {
+        // **The two forms that only ask whether a name is a macro**, and therefore the two this can decide.
+        crate::DirectiveKind::Ifdef => {
+            let name = branch.name.as_deref()?;
+            Some(is_a_macro(name, offset))
+        }
+        crate::DirectiveKind::Ifndef => {
+            let name = branch.name.as_deref()?;
+            Some(!is_a_macro(name, offset))
+        }
+        // Everything else is left as it was: an expression needs bodies (`#if X > 2`, `defined X`), and an
+        // `#elif`'s verdict depends on the branches before it rather than on itself.
+        _ => None,
+    }
+}
+
 ///
 /// Written because a `#include` is a guarded fact too, and the walk used to descend into one **without asking**.
 /// That is not a small omission on a compiler's own headers: every conditional include in them was entered, so

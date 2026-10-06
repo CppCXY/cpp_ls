@@ -729,6 +729,17 @@ pub struct MacroFact {
     /// Stored as the literal's **text**, so that reading it back needs no lexer: whoever reads it knows what it is
     /// — the same reason the fact stores a name's range rather than a way to find it.
     pub value: Option<Box<str>>,
+    /// **The one name the body *is*, when the body is exactly one identifier** — `#define A B`.
+    ///
+    /// The second piece of a body a condition can read, and the one an index cannot otherwise recover: the body is
+    /// stored as a [`cpp_parser::MacroBody`], which is a **shape** rather than tokens, so "which name did it
+    /// alias" is not derivable from the summary. Set where the replacement list is in hand (see
+    /// `macro_alias`), and read by `MacrosHere::alias_of`, which follows the chain by name.
+    ///
+    /// Why it is not a nicety: `vcruntime.h` writes `#define _STL_LANG __cplusplus`, and
+    /// `#if _STL_LANG > 201402L` is undecidable while the alias is unreadable — so `_HAS_CXX17` is never defined,
+    /// and neither is anything gated on it, including the `#include <atomic>` in `<memory>`.
+    pub alias: Option<Box<str>>,
     /// Where the fact is, for "go to macro definition".
     pub range: cpp_parser::SourceRange,
     pub guard: FactGuard,
@@ -1397,6 +1408,22 @@ pub struct TranslationUnit {
     /// conditional at all and whether the environment could answer.
     pub conditional_facts: usize,
     pub facts_in_force: usize,
+    /// **The `#define`s the walk decided are *not* compiled**, by file and directive offset.
+    ///
+    /// The walk evaluates every guarded macro fact against the unit's own state ([`UnitMacros`]) — the same
+    /// evaluation the cook uses, and the only one that knows what the compilation defines. A fact it skips is a
+    /// `#define` a compiler would not have read, and the counters above say *how many* there were; this says
+    /// **which**, because a consumer needs to act on it.
+    ///
+    /// What acts on it: a file's **summary**, which is built from the raw reading and keeps every `#define` with the
+    /// region it was written in. Left alone, a consumer decides that region a second time against a different
+    /// environment and answers differently. Measured on `vcruntime.h`, which writes `_STL_LANG` once per branch of
+    /// `#ifdef __cplusplus`: the walk takes the `_MSVC_LANG` branch and skips the `#else`'s `0L`, while a lookup over
+    /// the raw facts answers `0L` — for a file the compiler reads as C++20.
+    ///
+    /// Not in the cache format: a stored timeline is rebuilt from its events, and this is a function of them **and
+    /// the environment that walked them** — a field that was *written* could disagree with what it derives from.
+    pub(crate) dead_macros: std::collections::HashMap<std::path::PathBuf, Vec<usize>>,
 }
 
 /// One macro fact of the unit, with **where** it was written and **which frame** it belongs to.
@@ -1540,12 +1567,17 @@ impl TranslationUnit {
         );
 
         let timeline = walked.timeline.take().expect("just built");
-        TranslationUnit::from_parts(
+        let mut built = TranslationUnit::from_parts(
             timeline.events,
             timeline.frames,
             walked.conditional_facts,
             walked.facts_in_force,
-        )
+        );
+        // **The walk's own decision, kept.** `from_parts` cannot know it — it is a function of the events *and the
+        // environment that walked them* — so the walk hands it over rather than deriving it again. See
+        // [`TranslationUnit::dead_macros`].
+        built.dead_macros = walked.dead_macros;
+        built
     }
 
     /// Rebuild a timeline from its parts — the decoder's constructor, and the only caller that may hand this type
@@ -1604,6 +1636,10 @@ impl TranslationUnit {
             entered,
             conditional_facts,
             facts_in_force,
+            // **Empty when a stored timeline is read back**, and that is a statement about the cache rather than
+            // about the walk: the decision belongs to the environment that made it, and a decode has no environment.
+            // A caller that needs it re-walks — which is what the store does when it rebuilds a summary.
+            dead_macros: std::collections::HashMap::new(),
         }
     }
 
@@ -2534,6 +2570,21 @@ impl cpp_parser::MacroFacts for MacroView<'_> {
 pub struct RenderedUnit {
     /// The tokens of every file the unit reached, in the order a compiler would read them.
     pub text: String,
+    /// **The `#define`s the walk decided are *not* compiled, by file** — the offsets of the directives it skipped.
+    ///
+    /// The walk evaluates every guarded fact against the unit's own state ([`UnitMacros`]), which is the same
+    /// evaluation the cook uses and the only one that knows what the compilation defines. A fact it skips is a
+    /// `#define` a compiler would not have read — and the file's **summary** kept it anyway, because a summary is
+    /// built from the raw reading and records every `#define` with the region it was written in.
+    ///
+    /// Leaving it in the summary is what makes a consumer **decide the region a second time**, with a different
+    /// environment, and get a different answer. Measured on `vcruntime.h`, which writes `_STL_LANG` once per branch
+    /// of `#ifdef __cplusplus`: the walk takes the `_MSVC_LANG` branch and skips the `#else`'s `0L`, while a lookup
+    /// over the raw facts answers `0L` — for a file the compiler reads as C++20.
+    ///
+    /// Offsets rather than facts because that is what a summary can be filtered by, and because the decision is
+    /// about a **directive**, which is a position in a file.
+    pub dead_macros: std::collections::HashMap<std::path::PathBuf, Vec<usize>>,
     /// **The `#error` and `#warning` lines the compilation would have said**, in file order.
     ///
     /// A message is not program text, so the stream keeps no token for it — this is the only channel by which it
@@ -2587,11 +2638,23 @@ pub struct RenderedUnit {
     ///
     /// # What is done instead
     ///
-    /// The text goes **in**, and the crossed pairing it creates is repaired where every other crossed pairing is
-    /// repaired: [`crate::FileIndexer::index_unit_rendering`] finds the `{` this file opened paired with a `}` in
-    /// another file, neutralises **that pair**, and reads this file on its own as well. So the declarations are
-    /// filed at the scope their own file gives them, the file after this one is not swallowed, and this list is the
-    /// **record of which files those were** — a reason to doubt the files named, not a reason to have read nothing.
+    /// **Nothing in this crate.** The text goes **in** unmodified, and the crossing is refused where it is created:
+    /// [`cpp_parser::ParserConfig::with_file_boundaries`], set from [`RenderedUnit::file_boundaries`] by whoever
+    /// parses the unit. The parser's body loops stop at a boundary, so the `{` one file left open is closed at the
+    /// end of that file rather than paired with a `}` another file wrote — no file is dropped, no pair is
+    /// neutralised, and no second parse is needed.
+    ///
+    /// This paragraph used to describe a repair in `FileIndexer::index_unit_rendering` — find the crossed pair,
+    /// neutralise it, read the file again on its own. That was the *analysis* layer absorbing a **grammar** defect,
+    /// and it was deleted on purpose (see the note in `index/mod.rs`, and the sibling note on
+    /// [`RenderedUnit::file_boundaries`], which was written for exactly this and went uncalled). The layer that
+    /// pairs braces is the layer that must not pair them across files.
+    ///
+    /// # This corpus never needed it
+    ///
+    /// Measured on MSVC's standard library, so that the rule is not mistaken for an MSVC defect: a **94-file** unit
+    /// rooted at `<memory>` reports `unbalanced: 0` and a stream balance of `0`, and `vcruntime.h`'s own text holds
+    /// three `{` and three `}`. The `/analyze` header above is the shape this exists for; MSVC's headers are not it.
     ///
     /// A file named here is still a file worth looking at: its text genuinely does not balance, which is either a
     /// real idiom (the open/close-across-includes shape above) or a defect in the file. What changed is that the
@@ -2974,6 +3037,14 @@ struct Walked<'a> {
     conditional_bodies: std::collections::BTreeMap<Box<str>, ConditionalBodyValue>,
     conditional_facts: usize,
     facts_in_force: usize,
+    /// **The `#define`s this walk decided are not compiled**, by file and offset.
+    ///
+    /// The decision is made here, against the unit's own state ([`UnitMacros`]) — the same evaluation the cook uses
+    /// and the only one that knows what the compilation defines. It has to be handed on, because the file's
+    /// **summary** was built from the raw reading and kept every `#define` with the region it was written in; a
+    /// consumer that reads the summary instead decides the region again with a different environment and answers
+    /// differently. See [`RenderedUnit::dead_macros`].
+    dead_macros: std::collections::HashMap<std::path::PathBuf, Vec<usize>>,
     /// **Includes the walk did not enter because their guard was not in force.**
     ///
     /// Counted rather than silent, for the same reason [`Walked::conditional_facts`] is: it is the size of the
@@ -3114,6 +3185,14 @@ fn walk_one_file<'a>(
             };
 
             if !in_force {
+                // **Recorded before the skip**, because the file's own summary kept this `#define` and a consumer
+                // would otherwise decide the region again with a different environment. See
+                // [`RenderedUnit::dead_macros`], which is where that decision is handed on.
+                walked
+                    .dead_macros
+                    .entry(path.to_path_buf())
+                    .or_default()
+                    .push(fact.range.start_offset);
                 continue;
             }
 

@@ -266,6 +266,7 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
         put_u8(&mut out, u8::from(fact.function_like));
         put_u8(&mut out, macro_body_code(fact.body));
         put_opt_str(&mut out, fact.value.as_deref());
+        put_opt_str(&mut out, fact.alias.as_deref());
         put_range(&mut out, fact.range);
         match fact.body_range {
             Some(range) => {
@@ -653,6 +654,7 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
             function_like: reader.u8()? != 0,
             body: macro_body_from(reader.u8()?)?,
             value: reader.optional_string()?.map(Box::from),
+            alias: reader.optional_string()?.map(Box::from),
             range: reader.range()?,
             body_range: match reader.u8()? {
                 0 => None,
@@ -1267,6 +1269,9 @@ mod tests {
                 // A value rather than the common `None`, for the same reason `settles_the_name` is `true` here: a
                 // field the encoder dropped and the decoder defaulted would round-trip a *default* and look fine.
                 value: Some("1".into()),
+                // Set rather than `None`, for the same reason as the two below: an encoder that dropped it and a
+                // decoder that defaulted it would round-trip a default and look fine.
+                alias: Some("OTHER_API".into()),
                 range: range(80, 30),
                 // Present rather than `None`, for the same reason: a field the encoder dropped and the
                 // decoder defaulted would round-trip a default and look fine.

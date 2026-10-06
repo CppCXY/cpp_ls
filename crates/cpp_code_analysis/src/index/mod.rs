@@ -66,7 +66,6 @@ use crate::include::config::CompilerConfig;
 use crate::file::paths::{FileProvider, PathInterner};
 use crate::include::IncludeResolver;
 use crate::preprocess::directive::{Directive, SpannedDirective};
-use crate::preprocess::preprocess;
 use crate::sema::declarations::{assign_guards, build_facts, mark_settling_macro_facts};
 use crate::sema::scopes::build_scopes;
 use crate::stages::{Stage, StageTimer};
@@ -102,6 +101,12 @@ pub struct FileIndexer<'a, F: FileProvider> {
     /// A **unit's timeline** ([`crate::MacroView`]) is such a value: it answers the parser's questions positionally
     /// out of one walk, where the alternative was materialising a map per file.
     macro_facts: Option<&'a dyn cpp_parser::MacroFacts>,
+    /// Macro facts whose directive sits at one of these offsets are left out of the summary — the unit walk's own
+    /// decision about which `#define`s a compiler would have read. See [`FileIndexer::without_these_macros`].
+    dead_macros: Vec<usize>,
+    /// **What the compilation defines**, which no file in the closure knows: `__cplusplus` and the rest of the
+    /// compiler's own names. See [`FileIndexer::with_seed`].
+    seed: Option<&'a crate::Marked>,
     /// The includes a scan already resolved — see [`FileIndexer::scan_includes`]. Resolving an include is a
     /// filesystem search, so a caller that has done it once passes the answers along instead of paying twice.
     scanned: Option<&'a ScannedIncludes>,
@@ -140,6 +145,8 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             config,
             bodies: None,
             macro_facts: None,
+            dead_macros: Vec::new(),
+            seed: None,
             scanned: None,
         }
     }
@@ -163,6 +170,37 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
     pub fn with_macro_bodies<T: cpp_parser::MacroFacts>(mut self, bodies: &'a T) -> Self {
         self.bodies = Some(bodies);
         self.macro_facts = Some(bodies);
+        self
+    }
+
+    /// **What the compilation itself defines** — `-D`s, `-std=`, and the compiler's own several hundred names.
+    ///
+    /// Here for one question, and it is the question this type could not previously answer: *is `__cplusplus`
+    /// defined?* A file's closure knows what its includes define, and the answer for a name the **compiler**
+    /// predefines is nowhere in that closure. Measured on `vcruntime.h`, whose `#ifdef __cplusplus` decides
+    /// `_STL_LANG`: the closure answered "does not know it", so the branch came out false, so `_STL_LANG` was `0L`
+    /// while `__cplusplus` and `_MSVC_LANG` were both `202400L`.
+    ///
+    /// The same value the store was seeded with (`SummaryStore::with_macros`), so that there is one answer to what
+    /// the compilation defines rather than two.
+    pub fn with_seed(mut self, seed: &'a crate::Marked) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
+    /// **`#define`s the unit's walk decided are not compiled**, by directive offset.
+    ///
+    /// The decision belongs to the walk, which evaluates each guarded fact against the unit's own state — the same
+    /// evaluation the cook uses, and the only one that knows what the compilation defines. This type cannot make it:
+    /// it has a file and a `Marked`, and the question (`#ifdef __cplusplus`) is about the *unit*.
+    ///
+    /// What it does with the answer is **drop those facts**, so that a consumer reading the summary does not have to
+    /// decide the region a second time — which it would do with a different environment, and answer differently.
+    /// Measured on `vcruntime.h`, which writes `_STL_LANG` once per branch of `#ifdef __cplusplus`: the walk takes
+    /// the `_MSVC_LANG` branch and skips the `#else`'s `0L`, while a lookup over the raw facts answers `0L` for a
+    /// file the compiler reads as C++20.
+    pub fn without_these_macros(mut self, dead: &[usize]) -> Self {
+        self.dead_macros = dead.to_vec();
         self
     }
 
@@ -468,7 +506,16 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // workaround" this milestone exists to delete.
         let tree = {
             let _parse = StageTimer::new(Stage::RenderParse);
-            CppParser::parse(&stream.text, config())
+            // **And where one file's text ends and the next begins**, which is the parser's half of "a scope may not
+            // cross a file boundary". `stream` has known it all along — [`crate::RenderedUnit::file_boundaries`] is
+            // the first token of each file after the first — and nothing passed it on until now, which is why a
+            // header that opens a `namespace` and never closes it held every file spliced after it. The note above
+            // is the same rule from the other side: the repair this replaces was deleted on purpose, and the parser
+            // is where it belongs.
+            CppParser::parse(
+                &stream.text,
+                config().with_file_boundaries(stream.file_boundaries()),
+            )
         };
 
         let summary = {
@@ -525,7 +572,19 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         let root = tree.get_red_root();
         let preprocessing = {
             let _scan = StageTimer::new(Stage::Scan);
-            preprocess(source, tree.get_tokens())
+            // **With what the compilation already knows**, so a `#define` in a branch nobody compiles is not
+            // recorded: `vcruntime.h` writes `_STL_LANG` once per branch of `#ifdef __cplusplus`, the last of them
+            // `0L`, and a table that keeps all three answers `0L` for a file compiled as C++20. See
+            // [`preprocess_with`], which is where the rule and its cost are stated.
+            match self.seed {
+                Some(seed) => {
+                    let started = crate::preprocess::preprocess_with_a_seed(source, tree.get_tokens(), seed);
+                    started
+                }
+                None => {
+                    crate::preprocess::preprocess(source, tree.get_tokens())
+                }
+            }
         };
         // The same evidence object for both readers — see the field's note. The cast is the point: the scope walk
         // asks the trait, the parse asked the concrete type, and there is one value behind both.
@@ -826,6 +885,7 @@ fn macro_fact(spanned: &SpannedDirective) -> Option<MacroFact> {
                 function_like: definition.is_function_like(),
                 body: macro_body_shape(definition),
                 value: macro_value(definition),
+                alias: macro_alias(definition),
                 // The *name's* range, not the directive's: "go to macro definition" is a jump to the name a user
                 // can see, and a rename edits it. The guard sweep reads this fact's offset too, and the name is
                 // inside the same conditional region as the directive that wrote it — a `#define` cannot span an
@@ -850,6 +910,7 @@ fn macro_fact(spanned: &SpannedDirective) -> Option<MacroFact> {
             body: cpp_parser::MacroBody::Unknown,
             // An `#undef` has no value: the name stops being a macro, which is the whole of what it says.
             value: None,
+            alias: None,
             range: spanned.range,
             body_range: None,
             guard: crate::summary::FactGuard::Unconditional,
@@ -879,6 +940,32 @@ fn macro_value(definition: &crate::preprocess::macros::MacroDef) -> Option<Box<s
     }
 
     (only.kind == cpp_parser::CppTokenKind::IntegerLiteral).then(|| only.text.clone())
+}
+
+/// **The one name a macro's body *is*, when the body is exactly one identifier** — `#define A B`.
+///
+/// Computed here, where the replacement list is in hand, because a `MacroSummary` cannot answer it later: what it
+/// stores of a body is a [`cpp_parser::MacroBody`] (a *shape*, not tokens) and a range into the file the `#define`
+/// was written in. The name is the whole of what following the alias needs, and it is one token to read now.
+///
+/// Why it matters: a condition read against an index answers `#if _STL_LANG > 201402L` only if it learns that
+/// `_STL_LANG` is `__cplusplus`, which is itself a macro with a value. `vcruntime.h` writes exactly that, and with
+/// the alias unreadable `_HAS_CXX17` never became defined — so every `#if _HAS_CXX17` below it, including the one
+/// around `<atomic>` in `<memory>`, was undecidable.
+fn macro_alias(definition: &crate::preprocess::macros::MacroDef) -> Option<Box<str>> {
+    // `#define A(x) x` used without arguments is a name, not `x`: only an object-like macro aliases another.
+    if definition.is_function_like() {
+        return None;
+    }
+
+    let mut significant = definition.body.significant();
+    let only = significant.next()?;
+
+    if significant.next().is_some() {
+        return None;
+    }
+
+    (only.kind == cpp_parser::CppTokenKind::Identifier).then(|| Box::from(only.text()))
 }
 
 /// The region a file's own include guard opens, when it has one.
@@ -1355,7 +1442,6 @@ mod tests {
     use crate::include::IncludeResolver;
     use crate::preprocess::directive::{Directive, IncludeForm};
     use crate::preprocess::macros::MacroTable;
-    use crate::preprocess::preprocess;
     use crate::summary::{DeclKind, FactGuard, MacroKind};
     use cpp_parser::{CppParser, MacroBody, ParserConfig};
     use std::path::{Path, PathBuf};
@@ -1979,7 +2065,7 @@ mod tests {
 
         for (source, expected) in cases {
             let tree = CppParser::parse(source, ParserConfig::default());
-            let preprocessing = preprocess(source, tree.get_tokens());
+            let preprocessing = crate::preprocess::preprocess(source, tree.get_tokens());
 
             let Directive::Define(define) = &preprocessing.directives[0].directive else {
                 panic!("{source:?} must be a define");
@@ -2000,7 +2086,7 @@ mod tests {
         // it an expression would be right in this case and wrong for a statement that happens to be written that
         // way, so the answer is `Unknown` — which still rules out the call reading.
         let tree = CppParser::parse("#define A (a) + (b)", ParserConfig::default());
-        let preprocessing = preprocess("#define A (a) + (b)", tree.get_tokens());
+        let preprocessing = crate::preprocess::preprocess("#define A (a) + (b)", tree.get_tokens());
 
         let Directive::Define(define) = &preprocessing.directives[0].directive else {
             panic!("must be a define");
@@ -2013,7 +2099,7 @@ mod tests {
     #[test]
     fn an_unresolved_include_does_not_stop_the_other_facts() {
         let tree = CppParser::parse("#include <nonexistent_xyz>\nstruct W { int a; };\n", ParserConfig::default());
-        let preprocessing = preprocess("#include <nonexistent_xyz>\nstruct W { int a; };\n", tree.get_tokens());
+        let preprocessing = crate::preprocess::preprocess("#include <nonexistent_xyz>\nstruct W { int a; };\n", tree.get_tokens());
 
         let files = MemoryFiles::new();
         let config = CompilerConfig::default();

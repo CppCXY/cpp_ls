@@ -39,9 +39,33 @@ pub struct FilePreprocessing {
     /// Empty for a well-formed file. Non-empty means an `#if` was never closed — the normal state of a
     /// file being edited, and the reason this is reported rather than treated as an error.
     pub unclosed_guard: Guard,
+
+    /// **The spans of regions that were decided not to be compiled**, sorted by their start.
+    ///
+    /// Kept because one file produces **two** answers from these same directives — [`FilePreprocessing::macros`],
+    /// which is a table, and the macro facts a summary carries — and a rule applied to one of them is not applied to
+    /// the other. That is not hypothetical: `vcruntime.h` writes `_STL_LANG` once per branch of
+    /// `#ifdef __cplusplus`, the table was taught to skip the dead ones, and the criterion did not move **at all**,
+    /// because the environment a guard is evaluated against is built from the facts.
+    ///
+    /// Empty when no branch was decidable, which is the ordinary state: the two forms decided here are `#ifdef` and
+    /// `#ifndef` against a name the compilation defines. Everything else is left as it was, deliberately — a region
+    /// wrongly called dead loses a name that is really there.
+    pub skipped_regions: Vec<(usize, usize)>,
 }
 
 impl FilePreprocessing {
+    /// **Is the code at `offset` inside a branch that was decided not to be compiled?**
+    ///
+    /// The question [`FilePreprocessing::macros`] answers for itself while it is built, asked afterwards by a second
+    /// consumer of the same directives. Two answers to one question is the shape of the defect this exists to close;
+    /// one array and one method is the shape that stops it.
+    pub fn is_skipped(&self, offset: usize) -> bool {
+        self.skipped_regions
+            .iter()
+            .any(|(from, to)| *from <= offset && offset < *to)
+    }
+
     /// The macros in force at `offset`.
     pub fn macros_at(&self, offset: usize) -> PositionalMacros<'_> {
         PositionalMacros {
@@ -145,37 +169,188 @@ impl crate::condition::MacroValues for PositionalMacros<'_> {
 /// fact about tokens. The tree is built *from* this same stream (see `cpp_parser::lex`), so the two cannot
 /// disagree about where a token is — there is one stream and both read it.
 pub fn preprocess(source: &str, tokens: &[CppTokenData]) -> FilePreprocessing {
+    preprocess_with(source, tokens, None)
+}
+
+/// [`preprocess`], with **what the compilation defines**.
+///
+/// The seed rather than the file's closure, and that is the whole point: the questions that decide a branch here —
+/// `#ifdef __cplusplus`, `#ifndef _MSC_VER` — are about names the **compiler** predefines, and no file in the
+/// closure knows them. Measured on `vcruntime.h`: its closure answered "does not know it" for `__cplusplus`, the
+/// branch came out false, and `_STL_LANG` was recorded as `0L` while `_MSVC_LANG` was `202400L`.
+///
+/// [`preprocess_with`] takes the closure's own environment instead, for a caller that has one.
+pub fn preprocess_with_a_seed(
+    source: &str,
+    tokens: &[CppTokenData],
+    seed: &crate::Marked,
+) -> FilePreprocessing {
+    preprocess_using(source, tokens, &mut |name, offset| {
+        crate::MacroValues::lookup(
+            &crate::index::environment::MacrosHere::from_walk(seed, offset),
+            name,
+        ) != crate::Lookup::Undefined
+    })
+}
+
+/// [`preprocess`], with **what the compilation already knows** so that a branch nobody could compile is not
+/// recorded as a definition.
+///
+/// # The defect this exists for
+///
+/// A `#define` inside a region that is not compiled does not take effect — the module note says so — and the first
+/// version honoured that by **recording every `#define` anyway** and leaving "which one is in force" to the guard on
+/// the table. That is right for a consumer that wants to *see* a dead definition, and wrong for one asking what a
+/// name means: the table answers "the last binding at or before this offset", and a dead binding is later than the
+/// live one it shadows.
+///
+/// Measured, and it is the whole of a long report: `vcruntime.h` writes
+///
+/// ```cpp
+/// #ifdef __cplusplus
+///     #if defined(_MSVC_LANG) && _MSVC_LANG > __cplusplus
+///         #define _STL_LANG _MSVC_LANG
+///     #else
+///         #define _STL_LANG __cplusplus
+///     #endif
+/// #else
+///     #define _STL_LANG 0L          // <- the branch that was recorded, because it is the last
+/// #endif
+/// ```
+///
+/// so `_STL_LANG` came out `0L` while `__cplusplus` and `_MSVC_LANG` were both `202400L` — and the chain from there
+/// is `_STL_LANG = 0` → `_HAS_CXX17 0` → `_HAS_CXX20 0` → the `#if _HAS_CXX20` around `#include <atomic>` in
+/// `memory` decided inactive → `_Locked_pointer` invisible → ten `auto` declarations refused as `NotDeclaredHere`.
+///
+/// # What it asks, and what it leaves alone
+///
+/// Only a branch that **cannot have been taken**: `#ifdef NAME` where `NAME` is certainly undefined, `#ifndef NAME`
+/// where it is certainly defined, and an `#else` whose `#if` was certainly taken. Everything else — every condition
+/// that mentions a name the environment does not know, and every `#if` with operators, which this does not evaluate
+/// — is recorded exactly as before. The direction matters: a definition wrongly kept costs a wrong answer in one
+/// branch, and a definition wrongly dropped loses a name that is really there, so the rule fires only on an answer
+/// the environment is **sure** of.
+pub fn preprocess_with(
+    source: &str,
+    tokens: &[CppTokenData],
+    environment: Option<&dyn cpp_parser::MacroFacts>,
+) -> FilePreprocessing {
+    preprocess_using(source, tokens, &mut |name, offset| {
+        environment.is_some_and(|facts| facts.kind_of(name, offset).is_some())
+    })
+}
+
+/// [`preprocess_with`] over the one question it asks: **is this name a macro at this offset?**
+///
+/// A closure rather than a trait object because the two callers answer it from different places — the seed for one,
+/// the file's closure for the other — and neither answer is a `MacroValues` borrow that outlives the call.
+fn preprocess_using(
+    source: &str,
+    tokens: &[CppTokenData],
+    is_a_macro: &mut dyn FnMut(&str, usize) -> bool,
+) -> FilePreprocessing {
     let directives = scan_directives(source, tokens);
     let mut macros = MacroTable::new();
     let mut stack = GuardStack::new();
 
+    // **Which branch of the enclosing `#if`s is the one that gets compiled**, innermost last: `true` for a branch
+    // that is taken, `false` for one that is not. A `#define` is recorded unless one of those is `false`.
+    let mut live: Vec<bool> = Vec::new();
+
+    // **The spans of the regions that were decided dead**, kept so that a consumer building a *second* answer from
+    // the same directives — `macro_fact`, which turns them into facts — can ask the same question rather than
+    // deriving its own. See [`FilePreprocessing::is_skipped`] for the defect that made this necessary.
+    let mut skipped_regions: Vec<(usize, usize)> = Vec::new();
+    // The offsets at which the current region's branches began, so a dead one can be closed when its `#endif`
+    // arrives. Innermost last, like `live`.
+    let mut openings: Vec<(usize, bool)> = Vec::new();
+
     for spanned in &directives {
         let kind = spanned.directive.kind();
 
-        // A `#define` in a region that is not compiled never takes effect — but it is still recorded,
-        // because the region may be compiled under a different configuration, and because a consumer
-        // asking "where is this macro defined" wants to see it either way.
+        // A `#define` in a region that is not compiled never takes effect — but it is still recorded when nobody
+        // can say it was skipped, because the region may be compiled under a different configuration, and because a
+        // consumer asking "where is this macro defined" wants to see it either way.
+        let skipped = live.iter().any(|taken| !taken);
         match &spanned.directive {
-            Directive::Define(define) => {
+            Directive::Define(define) if !skipped => {
                 if let Some(definition) = &define.macro_def {
                     macros.define(definition.clone());
                 }
             }
-            Directive::Undef { name: Some(name) } => {
+            Directive::Undef { name: Some(name) } if !skipped => {
                 macros.undefine(name, spanned.range.start_offset);
             }
             _ => {}
         }
 
         if let Some(branch) = branch_of(&spanned.directive, spanned.range) {
+            // **The branch's verdict**, asked of the compilation rather than of the file's own table: these are
+            // questions about names the compiler predefines (`__cplusplus`, `_MSC_VER`), and no directive above them
+            // in this file has anything to say about those. `None` leaves the branch exactly as it was.
+            let taken = crate::index::environment::a_branch_is_taken(
+                is_a_macro,
+                kind,
+                &branch,
+                spanned.range.start_offset,
+            );
+
+            // **The span of a branch that is dead is remembered**, from the directive that opens it to the one that
+            // closes it. `Endif` closes whatever is innermost; `Elif`/`Else` close the branch they replace and open
+            // their own.
+            let here = spanned.range.start_offset;
+            let settled = |taken: Option<bool>| taken.unwrap_or(true);
+
+            match kind {
+                DirectiveKind::If | DirectiveKind::Ifdef | DirectiveKind::Ifndef => {
+                    let taken = settled(taken);
+                    live.push(taken);
+                    openings.push((here, taken));
+                }
+                DirectiveKind::Elif | DirectiveKind::Else => {
+                    // **The branch being replaced is read before it is popped**, which the first version got
+                    // backwards: it popped first and then read `live.last()`, which is the *enclosing* region
+                    // rather than the branch before this one — so an `#else` inherited its grandparent's verdict.
+                    let before = live.pop();
+                    if let Some((opened, was_taken)) = openings.pop()
+                        && !was_taken
+                    {
+                        skipped_regions.push((opened, here));
+                    }
+                    // **An `#else` is the opposite of the branch before it**, when that one was decided: it has no
+                    // expression of its own, and `Branch::holds` answers `true` for it, which would keep a dead
+                    // `#else`'s `#define` — the shape that made `_STL_LANG` `0L` in the first place. An `#elif` is a
+                    // question of its own, and is left to the answer above.
+                    let answer = match (kind, taken, before) {
+                        (DirectiveKind::Else, _, Some(before)) => Some(!before),
+                        _ => taken,
+                    };
+                    let taken = settled(answer);
+                    live.push(taken);
+                    openings.push((here, taken));
+                }
+                DirectiveKind::Endif => {
+                    live.pop();
+                    if let Some((opened, was_taken)) = openings.pop()
+                        && !was_taken
+                    {
+                        // To the end of the `#endif` directive, so that a fact written on that line is covered too.
+                        skipped_regions.push((opened, spanned.range.end_offset()));
+                    }
+                }
+                _ => {}
+            }
+
             stack.observe(kind, branch);
         }
     }
 
+    skipped_regions.sort_unstable();
     FilePreprocessing {
         unclosed_guard: stack.guard(),
         directives,
         macros,
+        skipped_regions,
     }
 }
 

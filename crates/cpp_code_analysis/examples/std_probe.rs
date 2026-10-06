@@ -827,6 +827,7 @@ standard {}",
                             path.clone(),
                             cpp_code_analysis::CookedFile {
                                 declarations: cooked_summary.declarations.clone(),
+                                macros: cooked_summary.macros.clone(),
                                 diagnostics: indexed.diagnostics.clone(),
                                 unplaced: indexed.unplaced,
                             },

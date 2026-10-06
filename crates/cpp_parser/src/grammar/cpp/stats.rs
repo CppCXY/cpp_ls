@@ -81,8 +81,19 @@ pub fn parse_stats(p: &mut CppParser) {
     // ```
     let mut unclosed_braces = 0isize;
 
+    // **Where this block began**, so that a file boundary crossed after it can end it. A scope may not cross a file
+    // boundary: a header that opens a `namespace` and never closes it must not hold the files spliced after it. See
+    // [`crate::ParserConfig::with_file_boundaries`], and note that the boundaries are empty for a parse of one
+    // file's own text, which is every parse but a stitched unit.
+    let since = p.current_token_range().start_offset;
+
     while !block_follow(p) || unclosed_braces > 0 {
         if p.is_eof() {
+            break;
+        }
+
+        // The file this block is written in has ended, and the `}` it never wrote is not in the next one.
+        if p.crossed_a_file_boundary_since(since) {
             break;
         }
 

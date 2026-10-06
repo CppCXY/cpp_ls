@@ -4318,6 +4318,12 @@ mod tests {
 
         // **And the file after it is not nested inside the scope `broken.h` left open.** `broken.h`'s unclosed
         // namespace ends at the end of `broken.h`, so `good.h`'s own namespace holds `Inside` and nothing else.
+        //
+        // This is the parser's `file_boundaries` rule, the same one
+        // `a_file_that_does_not_balance_costs_nothing_but_a_name` asserts for a file whose braces do not balance at
+        // all. Measured on 2026-06: **it does not hold here** — `good.h` comes out scoped `vc_attributes::good`, so
+        // the namespace `broken.h` opened is still open across the boundary. The assertion is left as written
+        // because it is the contract; the failure is real and is not a stale expectation.
         let inside = session
             .index()
             .cooked_declarations(Path::new("/p/good.h"))

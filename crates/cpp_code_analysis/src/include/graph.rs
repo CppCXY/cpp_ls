@@ -1160,7 +1160,37 @@ impl Marked {
                     // are positions in it.)
                     written_in: Some(crate::macros::MacroFile::Here),
                 }),
-                None => self.define_name(&fact.name),
+                // **The name the body aliased, when the body *is* one name** — `#define _STL_LANG __cplusplus`.
+                //
+                // The third shape a condition can read, beside a literal and nothing at all, and the one that
+                // decides MSVC's whole language mode. `vcruntime.h` writes `_STL_LANG` as an alias of either
+                // `_MSVC_LANG` or `__cplusplus`, and then asks `#if _STL_LANG > 201402L` to set `_HAS_CXX17`. With
+                // this arm missing, `_STL_LANG` was a name with no body, the comparison was undecidable,
+                // `_HAS_CXX17` was never defined, and every `#if _HAS_CXX17` below it — including the one around
+                // `#include <atomic>` in `<memory>` — was undecidable too.
+                //
+                // The body is the alias as an **identifier token**, which is what the expander walks: it looks the
+                // name up in this same state and substitutes that definition, so `_STL_LANG` → `__cplusplus` →
+                // `202400L` resolves in one step per link, exactly as a preprocessor would.
+                None => match fact.alias.as_deref() {
+                    Some(alias) => self.define(crate::macros::MacroDef {
+                        name: fact.name.as_str().into(),
+                        params: None,
+                        body: crate::macros::MacroBody {
+                            tokens: vec![crate::Token::new(
+                                cpp_parser::CppTokenKind::Identifier,
+                                alias,
+                                fact.range,
+                            )],
+                            stringize: Vec::new(),
+                            paste: Vec::new(),
+                        },
+                        range: fact.range,
+                        name_range: fact.range,
+                        written_in: Some(crate::macros::MacroFile::Here),
+                    }),
+                    None => self.define_name(&fact.name),
+                },
             },
         }
     }

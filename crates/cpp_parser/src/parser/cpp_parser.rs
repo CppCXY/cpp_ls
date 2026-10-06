@@ -602,6 +602,33 @@ impl<'a> CppParser<'a> {
         self.tokens[self.token_index].range
     }
 
+    /// **Has the cursor crossed a file boundary since `since`?**
+    ///
+    /// A scope may not cross a file boundary — see [`ParserConfig::with_file_boundaries`]. A block's body loop asks
+    /// this with the offset its own `{` (or its own start) sits at, and stops where that file's text stopped, so
+    /// that the `{` a header left open is closed at the end of that header rather than paired with a `}` written
+    /// later, or holding every file spliced after it.
+    ///
+    /// # Why it takes the block's own start
+    ///
+    /// "Is the cursor past some boundary" is not the question: a block that begins **inside** file *n* has every
+    /// token of file *n* past the boundaries of the files before it, and would stop immediately. What matters is a
+    /// boundary strictly after the block began and at or before the cursor — a boundary the block has *crossed*.
+    ///
+    /// `[since, at]` rather than `(since, at]` is deliberate. A block that begins exactly on a boundary is a block
+    /// that begins in a new file, which is the state after a header's leaked scope was closed: the boundary is the
+    /// cursor's own position, and treating it as crossed would close the new file's block at its own first token.
+    pub fn crossed_a_file_boundary_since(&self, since: usize) -> bool {
+        let boundaries = self.parse_config.file_boundaries();
+        if boundaries.is_empty() {
+            return false;
+        }
+        let at = self.current_token_range().start_offset;
+        boundaries
+            .iter()
+            .any(|boundary| *boundary > since && *boundary <= at)
+    }
+
     pub fn current_token_text(&self) -> &str {
         match self.tokens.get(self.token_index) {
             Some(token) => &self.text[token.range.start_offset..token.range.end_offset()],

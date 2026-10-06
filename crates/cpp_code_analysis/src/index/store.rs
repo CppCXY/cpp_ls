@@ -86,6 +86,21 @@ pub struct SummaryStore<F: FileProvider = DiskFiles> {
     files: F,
     index: ProjectIndex,
     stats: StoreStats,
+    /// **What the unit walk decided about each file's `#define`s**, kept here because two paths build a summary and
+    /// only one of them has a unit in hand.
+    ///
+    /// The decision itself belongs to the walk, which evaluates every guarded fact against the unit's own state —
+    /// the same evaluation the cook uses, and the only one that knows what the compilation defines. Handing it over
+    /// through a parameter works for the re-read (`index_includes_from`, which has the units) and **not** for
+    /// [`SummaryStore::prepare`], which is the path a query takes when it needs a file *before* the re-read reaches
+    /// it. A header made only of `#define`s is exactly that file: the re-read skips it (`mentions_one_of`), so
+    /// without this map its summary keeps every guarded `#define` forever and a consumer decides the regions again
+    /// against a different environment.
+    ///
+    /// Measured on `vcruntime.h`, which writes `_STL_LANG` once per branch of `#ifdef __cplusplus`: the walk takes
+    /// the `_MSVC_LANG` branch and skips the `#else`'s `0L`, and a lookup over the raw facts answered `0L` — for a
+    /// file the compiler reads as C++20.
+    dead_macros: std::collections::HashMap<PathBuf, Vec<usize>>,
 }
 
 /// More threads than this stop paying: the parse is memory-bound long before it is core-bound.
@@ -328,6 +343,7 @@ impl<F: FileProvider> SummaryStore<F> {
             files,
             index: ProjectIndex::new(),
             stats: StoreStats::default(),
+            dead_macros: std::collections::HashMap::new(),
         }
     }
 
@@ -456,12 +472,21 @@ impl<F: FileProvider> SummaryStore<F> {
 
         let scanned = {
             let _scan = crate::stages::StageTimer::new(crate::stages::Stage::IncludeScan);
-            let scanned = FileIndexer::new(&self.files, &self.config).scan_includes(path, &source);
+            let scanned = FileIndexer::new(&self.files, &self.config)
+            .with_seed(self.index.macros())
+            .scan_includes(path, &source);
             includes(&scanned.targets());
             scanned
         };
         let summary = FileIndexer::new(&self.files, &self.config)
+            .with_seed(self.index.macros())
             .with_scanned_includes(&scanned)
+            // **Whatever the unit walk already decided about this file's `#define`s.** `prepare` is the path a file
+            // takes when a query needs it *before* the unit's re-read reaches it — and a header made only of
+            // `#define`s is exactly the file the re-read skips (`mentions_one_of`), so without this its summary
+            // keeps every guarded `#define` and a consumer decides the regions again, with a different environment.
+            // See [`SummaryStore::dead_macros`].
+            .without_these_macros(&self.dead_macros_for(path))
             .index(path, &source, key);
 
         // The one rule about the filesystem: a summary that records a *failed* search must not be stored, because
@@ -840,6 +865,15 @@ impl<F: FileProvider> SummaryStore<F> {
         // **Every** file only for a caller that has no timelines. With units the pass reads the files it *re-parses*
         // and, once it knows which names they mention, the files that define one of those names — the two things it
         // slices text out of. On a project of a hundred thousand files the edit that parsed one of them used to read
+        // **What the walk decided is remembered here**, once, before any summary is built — so that both paths that
+        // build one (`prepare`, which has no unit in hand, and the re-read below, which does) agree about which
+        // `#define`s a compiler would have read. See [`SummaryStore::dead_macros`].
+        for unit in units {
+            for (path, offsets) in &unit.dead_macros {
+                self.dead_macros.insert(path.clone(), offsets.clone());
+            }
+        }
+
         // and copy all of them, on every drain.
         let mut sources: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let eager = units.is_empty();
@@ -1079,7 +1113,19 @@ impl<F: FileProvider> SummaryStore<F> {
                 let _filter = crate::stages::StageTimer::new(crate::stages::Stage::ReFilter);
                 mentions_one_of(source, &bodied_names)
             };
-            if !mentioned {
+            // **And a file whose `#define`s the walk decided about, whether or not it mentions a bodied macro.**
+            //
+            // `mentions_one_of` is a filter about *macro bodies*: parsing a file that expands nothing cannot change
+            // what a body reads as, so it is skipped. A file whose guarded `#define`s the walk judged — one that is
+            // all conditionals and no declarations, which a compiler's own `vcruntime.h` is — mentions no body and
+            // is exactly the file whose summary has to change: it was built during indexing, **before** the unit was
+            // walked, with no decision to apply.
+            //
+            // Measured: `cppls-build: vcruntime.h built with 0 dead offset(s)` during indexing, and nothing built it
+            // again afterwards — so its summary kept every guarded `#define` and a lookup answered `_STL_LANG = 0L`
+            // for a file the compiler reads as C++20. See [`SummaryStore::dead_macros`].
+            let decided_about = !self.dead_macros_for(path).is_empty();
+            if !mentioned && !decided_about {
                 continue;
             }
 
@@ -1089,7 +1135,7 @@ impl<F: FileProvider> SummaryStore<F> {
             }
 
             let key = SummaryKey::new(content_hash(source), self.context_hash(path));
-            let indexer = FileIndexer::new(&self.files, &self.config);
+            let indexer = FileIndexer::new(&self.files, &self.config).with_seed(self.index.macros());
             // **A caller with no timeline** — a probe indexing a closure from an entry point, a test — keeps
             // the reading this pass has always had: the file's own closure, walked once for it. The session
             // passes units and never comes here; dropping this arm would silently unscope every declaration
@@ -1117,8 +1163,19 @@ impl<F: FileProvider> SummaryStore<F> {
             let view = units.iter().find_map(|unit| unit.environment_of(path))?;
 
             let key = SummaryKey::new(content_hash(source), self.context_hash(path));
+            // **And what the walk decided is not compiled.** The unit has already evaluated every guarded `#define`
+            // against its own state — the same evaluation the cook uses — and a fact it skipped is one a compiler
+            // would not have read. The summary is built from the raw reading and would keep it, which is how a
+            // consumer comes to decide the same region a second time and answer differently. See
+            // [`crate::TranslationUnit::dead_macros`].
+            // **What the walk decided, by the spelling both sides agree on.** The unit keys its map by the path the
+            // *include graph* spells (`c:/users/…`) and this holds the one the session was given (`C:\Users\…`).
+            // See [`SummaryStore::dead_macros_for`].
+            let dead = self.dead_macros_for(path);
             let rebuilt = FileIndexer::new(&self.files, &self.config)
+                .with_seed(self.index.macros())
                 .with_macro_bodies(&view)
+                .without_these_macros(&dead)
                 .index(path, source, key);
 
             let stored = !truncated && !has_unresolved_includes(&rebuilt);
@@ -1146,7 +1203,23 @@ impl<F: FileProvider> SummaryStore<F> {
         self.index.insert(rebuilt);
     }
 
-    /// Read `path`'s text into `sources` under the normalized spelling the walk asks with, unless it is there.
+    /// **What the unit walk decided about this file's `#define`s**, for a caller building its summary without a unit
+    /// in hand — see [`SummaryStore::dead_macros`].
+    ///
+    /// **Normalized on both sides**, and that is not tidiness: the walk keys its map by the path the *include graph*
+    /// spells (`c:/users/…`), while a caller here holds the one the session was given (`C:\Users\…`). Compared raw,
+    /// the two never match — measured as `vcruntime.h` being absent from the re-read log entirely, so its summary
+    /// kept every guarded `#define` and a lookup answered `_STL_LANG = 0L`.
+    fn dead_macros_for(&self, path: &Path) -> Vec<usize> {
+        let wanted = normalize_path(path, cfg!(windows));
+        self.dead_macros
+            .iter()
+            .find(|(held, _)| normalize_path(held, cfg!(windows)) == wanted)
+            .map(|(_, offsets)| offsets.clone())
+            .unwrap_or_default()
+    }
+
+
     fn read_into(&self, sources: &mut std::collections::HashMap<String, String>, path: &Path) {
         let key = normalize_path(path, cfg!(windows));
         if sources.contains_key(&key) {

@@ -165,6 +165,35 @@ fn an_auto_declaration_takes_the_type_of_its_initializer() {
             "p",
             "int*",
         ),
+        // **A `new` expression is a pointer to what it allocates**, and that is C++'s rule rather than an
+        // inference: `new T`, `new T(args)`, `new T[n]` and `new T{args}` all have the type `T*`, and nothing about
+        // `T`'s own type has to be known. Measured on MSVC's `<memory>`, this was the largest answerable family
+        // among the refusals — five of them, every one reporting `UnknownType("new _Ref_count_obj2<_Ty>(…)")` and
+        // its siblings, with the type already in the tree and nothing asking it.
+        //
+        // The template arguments are **kept** rather than resolved: `Box<int>*` is what a reader wants to see, and
+        // trying to resolve the argument would turn a certain answer into an uncertain one.
+        //
+        // Each spelling appears **once** in its fixture, which is not decoration: `type_of_use` asks about the last
+        // occurrence, and `auto p = new int; return *p;` puts that occurrence inside the dereference — a question
+        // about `*p` rather than about `p`, whose answer is `int` and which says nothing about this arm.
+        (
+            "template <class T> struct Box { T value; };\nint f() { auto boxed = new Box<int>(); return 0; }\n",
+            "boxed",
+            "Box<int>*",
+        ),
+        (
+            "int f() { auto plain = new int; return 0; }\n",
+            "plain",
+            "int*",
+        ),
+        // The array form: the bound is a **sibling** `ArrayType` node rather than part of the `TypeId`, and the
+        // expression's type is still a plain pointer — `new int[10]` is `int*`, not `int[10]*`.
+        (
+            "int f() { auto many = new int[10]; return 0; }\n",
+            "many",
+            "int*",
+        ),
     ];
 
     for (source, spelling, expected) in cases {

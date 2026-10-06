@@ -30,6 +30,16 @@ pub struct ParserConfig<'cache> {
     /// `None` is "nobody says", and a grammar rule that asks must then fall back to the spelling it used before
     /// this field existed — see [`ParserConfig::is_a_macro_at`].
     macro_facts: Option<&'cache dyn MacroFacts>,
+    /// **Where one file's text ends and the next begins**, as token offsets into the text being parsed.
+    ///
+    /// A scope may not cross a file boundary. A header that opens a `namespace` and never closes it — which is a
+    /// real idiom, and MSVC's `/analyze` headers do it — would otherwise hold **every file spliced after it**, and
+    /// the declarations of those files would be filed under a scope that is not theirs. This is the parser's half
+    /// of a rule the analysis layer used to enforce by quarantining files; that repair was deleted, and
+    /// [`crate::ParserConfig::with_file_boundaries`] is what was supposed to replace it.
+    ///
+    /// Empty for a parse of one file's own text, where there is no boundary to respect.
+    file_boundaries: Vec<usize>,
 }
 
 impl<'cache> ParserConfig<'cache> {
@@ -41,7 +51,31 @@ impl<'cache> ParserConfig<'cache> {
             node_cache,
             symbol_table: None,
             macro_facts: None,
+            file_boundaries: Vec::new(),
         }
+    }
+
+    /// **Tell the parser where one file's text ends and the next begins.**
+    ///
+    /// A scope may not cross a file boundary: the `{` a header left open is closed at the end of that header,
+    /// rather than paired with a `}` another file wrote or leaving the next file's declarations inside it. The
+    /// offsets are the first token of each file **after the first**, which is what
+    /// `cpp_code_analysis::RenderedUnit::file_boundaries` answers for a stitched unit.
+    ///
+    /// # Why the grammar, and not the event stream
+    ///
+    /// Measured before this existed, by closing the open nodes in the mark-event stream at each boundary: the tree
+    /// shape does not move — `TranslationUnit → NamespaceDecl → CompoundStat → Declaration` either way — because
+    /// the holder is a `CompoundStat` whose `{` the **grammar** paired with the `}` at the end of the file. The
+    /// leak happens while the tokens are read, so it has to be refused there.
+    pub fn with_file_boundaries(mut self, boundaries: Vec<usize>) -> Self {
+        self.file_boundaries = boundaries;
+        self
+    }
+
+    /// The boundaries in force, in ascending order — see [`ParserConfig::with_file_boundaries`].
+    pub fn file_boundaries(&self) -> &[usize] {
+        &self.file_boundaries
     }
 
     pub fn lexer_config(&self) -> LexerConfig {
@@ -129,6 +163,7 @@ impl Default for ParserConfig<'_> {
             node_cache: None,
             symbol_table: None,
             macro_facts: None,
+            file_boundaries: Vec::new(),
         }
     }
 }
