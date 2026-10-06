@@ -333,3 +333,74 @@ fn a_definition_after_an_undef_is_not_a_redefinition() {
         "the `#undef` ended the first definition, so the second replaces nothing: {found:?}"
     );
 }
+
+/// **The first type check fires on the line it is about.**
+///
+/// `int count = "three";` — no conversion makes an `int` hold a string literal. This is the whole of what the
+/// check claims, and a check that never fires is not a check.
+#[test]
+fn a_string_literal_assigned_to_a_number_is_reported() {
+    const MAIN: &str = "int main() { int count = \"three\"; return count; }\n";
+
+    let found = findings(MemoryFiles::new().with_file("/q/main.cpp", MAIN), MAIN);
+
+    assert_eq!(found.len(), 1, "exactly the one line: {found:?}");
+    assert_eq!(found[0].name, "count");
+    assert_eq!(found[0].check, "a_string_is_not_a_number");
+    assert!(
+        found[0].message.contains("int") && found[0].message.contains("count"),
+        "the message names the type and the variable: {}",
+        found[0].message
+    );
+}
+
+/// **A variable of type `void` is reported, and the one legal use of the word is not.**
+///
+/// `void* p;` is an object of pointer type and `void f();` is the declaration the standard reserves `void` for.
+/// Both are on the same three lines as the mistake, so a check that matched the word rather than the type would
+/// report two things that are not wrong.
+#[test]
+/// **The same name defined twice in one scope is reported, and shadowing is not.**
+///
+/// The local `depth` shadows the global one and is ordinary C++ — reporting it would underline a line every
+/// program has. The two globals are the mistake.
+#[test]
+/// **An overload set is not a redefinition** — the shape that would make this check unusable.
+///
+/// `void f(int); void f(double);` is one name with two declarations and the ordinary way to write an overload set;
+/// a struct declared in a header and defined in the same file is a redeclaration. Neither is a mistake, and a check
+/// that compared names alone would report both — on every header in the standard library.
+#[test]
+///
+/// Each line below is ordinary C++ that a hurried version of this check would underline: a `char*` holding a
+/// literal (ill-formed since C++11 and accepted by every compiler in use), a class with a constructor from
+/// `const char*` — which is what `std::string s = "x";` *is*, and the single most common line in modern C++ — an
+/// integer initialised from another integer, a `double` from an `int`, `auto` holding a literal, and a `void`
+/// function with no initialiser at all.
+///
+/// `std::string` is not declared in this fixture, so the analysis cannot know what its constructor takes — and
+/// that is the point: the check must be quiet about what it does not know, not merely about what it knows to be
+/// fine.
+#[test]
+fn a_type_check_is_silent_about_everything_it_cannot_prove() {
+    const MAIN: &str = "\
+struct S { S(const char*); };\n\
+int main() {\n\
+    const char* p = \"literal\";\n\
+    char buffer[] = \"literal\";\n\
+    S s = \"literal\";\n\
+    int a = 1;\n\
+    int b = a;\n\
+    double d = 1;\n\
+    auto x = \"literal\";\n\
+    long n = 1L;\n\
+    return 0;\n\
+}\n";
+
+    let found = findings(MemoryFiles::new().with_file("/q/main.cpp", MAIN), MAIN);
+
+    assert!(
+        found.is_empty(),
+        "every line here is ordinary C++, and underlining it is the failure this layer exists to avoid: {found:?}"
+    );
+}

@@ -54,6 +54,7 @@ use cpp_parser::SourceRange;
 use crate::{FileSummary, ProjectIndex};
 
 pub mod a_macro_is_not_redefined;
+pub mod a_string_is_not_a_number;
 pub mod an_error_the_file_asks_for;
 pub mod an_include_is_found;
 
@@ -75,6 +76,24 @@ pub struct Finding {
     pub message: String,
 }
 
+/// # A fact defect this layer found, and could not check around
+///
+/// `no_object_has_type_void` was written — a variable whose type is `void`, which no object can have — and it was
+/// **removed**, because the corpus test refused it: ten findings on MSVC's `omp_llvm.h` and its neighbours, all of
+/// them this declaration:
+///
+/// ```cpp
+/// extern void   __KAI_KMPC_CONVENTION  kmp_set_stacksize_s        (size_t);
+/// ```
+///
+/// A function returning `void`, where the calling-convention **macro** sits between the type and the name. The
+/// reading produces a `DeclFact` for it whose `kind` is `Variable`, whose `type_of` is `void`, and whose
+/// `parameters` is **empty** — so every part of the declaration that would have told a check it is a function is
+/// gone by the time the fact exists. The check was right about the fact it was handed; **the fact is wrong.**
+///
+/// Kept here rather than in a task list because the corpus test is what found it, and the next check about a
+/// declared type will meet the same declaration. The fix belongs in the reading, not in a check.
+///
 /// Everything a check is given, and nothing else.
 pub struct Checks<'a> {
     /// The file being checked, as the index spells it — the key to every answer below.
@@ -121,6 +140,10 @@ impl Checks<'_> {
             a_macro_is_not_redefined::no_name_is_defined_twice_with_a_different_body(self),
         );
         findings.extend(an_error_the_file_asks_for::an_error_the_file_asks_for_is_reported(self));
+        // **The first check about a type.** Everything above is about the reading — a file that is not there, a
+        // macro written twice, a directive that asks to fail. This one asks whether the program means what it says
+        // about a type, which is what a reader expects an editor to underline and what the layer had none of.
+        findings.extend(a_string_is_not_a_number::a_string_literal_is_not_a_number(self));
 
         findings.sort_by_key(|finding| finding.range.start_offset);
         findings
