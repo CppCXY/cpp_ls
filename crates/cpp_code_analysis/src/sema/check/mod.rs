@@ -54,7 +54,7 @@ use cpp_parser::SourceRange;
 use crate::{FileSummary, ProjectIndex};
 
 pub mod a_macro_is_not_redefined;
-pub mod a_string_is_not_a_number;
+pub mod an_initializer_does_not_convert;
 pub mod an_error_the_file_asks_for;
 pub mod an_include_is_found;
 
@@ -123,6 +123,12 @@ pub struct Checks<'a> {
     /// documentation ("a search is a second implementation of the same rule, free to disagree with the one that
     /// assigned the name"). The tree is the same one the rest of the analysis read.
     pub tree: &'a cpp_parser::CppSyntaxNode,
+    /// **The scopes of the file's own text**, which is what turns a name in an expression into a declaration.
+    ///
+    /// Needed by a check that asks about a **type**: `type_of_expression` resolves a name through the scope tree, so
+    /// a check about types without it can only compare spellings. The same view the tree came from holds it, so
+    /// handing it over costs nothing — the alternative is a second parse, which is what this layer must not do.
+    pub scopes: &'a crate::ScopeTree,
 }
 
 impl Checks<'_> {
@@ -143,7 +149,7 @@ impl Checks<'_> {
         // **The first check about a type.** Everything above is about the reading — a file that is not there, a
         // macro written twice, a directive that asks to fail. This one asks whether the program means what it says
         // about a type, which is what a reader expects an editor to underline and what the layer had none of.
-        findings.extend(a_string_is_not_a_number::a_string_literal_is_not_a_number(self));
+        findings.extend(an_initializer_does_not_convert::an_initializer_does_not_convert(self));
 
         findings.sort_by_key(|finding| finding.range.start_offset);
         findings

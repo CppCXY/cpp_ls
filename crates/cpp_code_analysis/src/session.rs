@@ -2278,6 +2278,7 @@ impl<F: FileProvider + Clone> Session<F> {
             index,
             source: &view.source,
             tree: &view.root,
+            scopes: &view.scopes,
         }
         .run()
     }

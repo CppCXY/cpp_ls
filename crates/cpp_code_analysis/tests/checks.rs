@@ -40,6 +40,11 @@ fn findings(files: MemoryFiles, main: &str) -> Vec<cpp_code_analysis::Finding> {
     let mut store = SummaryStore::with_provider(&dir, CompilerConfig::default(), files);
     store.index_includes_from(std::path::Path::new("/q/main.cpp"), Default::default());
 
+    // **The scopes of the same file**, built from the same tree a check is handed: a check that asks about a *type*
+    // resolves a name through them, and a fixture that passed a different file's scopes would be checking a
+    // different program.
+    let scopes = cpp_code_analysis::build_scopes(&root, &cpp_code_analysis::NoMacroBodies);
+
     let index = store.index();
     let Some(summary) = index.summary(std::path::Path::new("/q/main.cpp")) else {
         panic!("main.cpp must be indexed");
@@ -51,6 +56,7 @@ fn findings(files: MemoryFiles, main: &str) -> Vec<cpp_code_analysis::Finding> {
         index,
         source: main,
         tree: &root,
+        scopes: &scopes,
     }
     .run()
 }
@@ -346,7 +352,7 @@ fn a_string_literal_assigned_to_a_number_is_reported() {
 
     assert_eq!(found.len(), 1, "exactly the one line: {found:?}");
     assert_eq!(found[0].name, "count");
-    assert_eq!(found[0].check, "a_string_is_not_a_number");
+    assert_eq!(found[0].check, "an_initializer_does_not_convert");
     assert!(
         found[0].message.contains("int") && found[0].message.contains("count"),
         "the message names the type and the variable: {}",
@@ -354,33 +360,17 @@ fn a_string_literal_assigned_to_a_number_is_reported() {
     );
 }
 
-/// **A variable of type `void` is reported, and the one legal use of the word is not.**
+/// **The check is silent on every shape that is not that one** — which is the half that decides whether the check
+/// is worth having.
 ///
-/// `void* p;` is an object of pointer type and `void f();` is the declaration the standard reserves `void` for.
-/// Both are on the same three lines as the mistake, so a check that matched the word rather than the type would
-/// report two things that are not wrong.
-#[test]
-/// **The same name defined twice in one scope is reported, and shadowing is not.**
+/// Each line below is ordinary C++ that a version of this check with a hand-written rule would underline:
+/// a `char*` holding a literal (ill-formed since C++11 and accepted by every compiler in use), a class with a
+/// constructor from `const char*` — which is what `std::string s = "x";` *is*, and the single most common line in
+/// modern C++ — an integer initialised from another integer, a `double` from an `int`, and `auto` holding a literal.
 ///
-/// The local `depth` shadows the global one and is ordinary C++ — reporting it would underline a line every
-/// program has. The two globals are the mistake.
-#[test]
-/// **An overload set is not a redefinition** — the shape that would make this check unusable.
-///
-/// `void f(int); void f(double);` is one name with two declarations and the ordinary way to write an overload set;
-/// a struct declared in a header and defined in the same file is a redeclaration. Neither is a mistake, and a check
-/// that compared names alone would report both — on every header in the standard library.
-#[test]
-///
-/// Each line below is ordinary C++ that a hurried version of this check would underline: a `char*` holding a
-/// literal (ill-formed since C++11 and accepted by every compiler in use), a class with a constructor from
-/// `const char*` — which is what `std::string s = "x";` *is*, and the single most common line in modern C++ — an
-/// integer initialised from another integer, a `double` from an `int`, `auto` holding a literal, and a `void`
-/// function with no initialiser at all.
-///
-/// `std::string` is not declared in this fixture, so the analysis cannot know what its constructor takes — and
-/// that is the point: the check must be quiet about what it does not know, not merely about what it knows to be
-/// fine.
+/// `S` **is** declared here, with the constructor a converting one has, so the case that matters is not "a class we
+/// know nothing about" but "a class whose constructor could take this" — which is exactly what the relation
+/// refuses to decide, because deciding it needs the class's members.
 #[test]
 fn a_type_check_is_silent_about_everything_it_cannot_prove() {
     const MAIN: &str = "\

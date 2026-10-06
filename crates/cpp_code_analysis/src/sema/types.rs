@@ -225,6 +225,95 @@ impl Type {
         }
     }
 
+    /// **Can a value of this type initialise one of `target`?**
+    ///
+    /// The one relation the two type checks are made of — `int x = "three";` is an assignment and `f("three")` is a
+    /// parameter, and both are the same question asked at a different place. Written once here so that they cannot
+    /// disagree, which is the rule this crate keeps having to relearn: one question, one implementation.
+    ///
+    /// # Only what is certain
+    ///
+    /// `Known::Yes` and `Known::No` are answers; `Known::Unknown` is the absence of one, and a check reports only a
+    /// definite `No` — see `sema::check`'s contract. So this relation is deliberately **partial**: it answers for the
+    /// conversions the standard makes unconditionally and refuses to guess at everything that needs more of the
+    /// program than two types.
+    ///
+    /// What it answers:
+    ///
+    /// ```text
+    ///   identical after decay                  -> Yes     `int` to `int`, `const char*` to `const char*`
+    ///   arithmetic to arithmetic               -> Yes     `double` to `int`, `char` to `long`
+    ///   array or function to pointer           -> Yes     `int[4]` to `int*`
+    ///   pointer to arithmetic, or the reverse  -> No      `const char*` to `int`
+    ///   anything to `void`, or `void` to it    -> No      no object has type `void`
+    ///   anything named, or a template parameter-> Unknown `S` may have a converting constructor
+    ///   pointer to a different pointee         -> Unknown `Derived*` to `Base*` is a real conversion
+    /// ```
+    ///
+    /// # Why a class is never an answer
+    ///
+    /// `std::string s = "x";` is a conversion *constructor* and `int n = widget;` may be a conversion *operator*, and
+    /// neither is visible in the two types: the first needs the class's constructors and the second needs its
+    /// members. Answering either from the spellings alone is the invented finding the check layer exists to avoid —
+    /// and `std::string s = "x";` is the most ordinary line in modern C++.
+    pub fn convertible_to(&self, target: &Type) -> crate::sema::symbol::Known<()> {
+        use crate::sema::symbol::Known;
+
+        let from = self.decay();
+        let to = target.decay();
+
+        // **Identical is always convertible**, before anything else is asked: a spellings-equal pair needs no rule,
+        // and this is what makes `int` to `int` and a pointer to its own type answer `Yes` rather than falling into
+        // the "different pointee" case below.
+        if from == to {
+            return Known::Yes(());
+        }
+
+        // **`void` is not a value.** An object cannot have it, so nothing converts *to* it and it converts to
+        // nothing — written before the arithmetic rule, which would otherwise call `void` an arithmetic type and
+        // answer `Yes` for `void x = 1;`.
+        if from.is_void() || to.is_void() {
+            return Known::No;
+        }
+
+        match (&from, &to) {
+            // The standard conversions between arithmetic types, which are unconditional.
+            (a, b) if a.is_arithmetic() && b.is_arithmetic() => Known::Yes(()),
+
+            // Array-to-pointer and function-to-pointer. `decay` already did this, so a pair that arrives here with
+            // one side an array did not come through `decay` — kept for a caller that built the types by hand.
+            (Type::Array { .. } | Type::Function { .. }, Type::Pointer { .. }) => Known::Yes(()),
+
+            // **A pointer and a number are not interconvertible here.** A literal `0` is, and that is a fact about
+            // the *value* rather than about the type this relation is handed — so it is `Unknown`'s neighbour rather
+            // than its case: a caller that knows the initialiser was the literal `0` does not ask.
+            (Type::Pointer { .. }, b) if b.is_arithmetic() => Known::No,
+            (a, Type::Pointer { .. }) if a.is_arithmetic() => Known::No,
+
+            _ => Known::Unknown(crate::sema::symbol::UnknownReason::UnknownType(
+                Box::from("a conversion between these two types is not decided by their shapes"),
+            )),
+        }
+    }
+
+    /// Is this spelling one of the arithmetic types?
+    pub fn is_arithmetic(&self) -> bool {
+        match self {
+            Type::Builtin { spelling } => !matches!(spelling.as_str(), "void" | "decltype(auto)"),
+            Type::Qualified { of } => of.is_arithmetic(),
+            _ => false,
+        }
+    }
+
+    /// Is this `void` — the incomplete type no object can have?
+    pub fn is_void(&self) -> bool {
+        match self {
+            Type::Builtin { spelling } => spelling == "void",
+            Type::Qualified { of } => of.is_void(),
+            _ => false,
+        }
+    }
+
     /// The type a `*` on this one gives: the pointee, for a pointer or an array — **as a shared handle**, because
     /// the pointee is already an allocation inside this type and a caller asking for it is looking at it rather
     /// than taking it away.
