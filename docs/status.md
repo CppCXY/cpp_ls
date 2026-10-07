@@ -231,13 +231,85 @@ measurement were reading old data. Clearing it is the first thing to try when a 
 ## 6. Tests and discipline
 
 ```text
-  lib                588 passed / 5 failed      measured, after the round that made the target runnable at all
-  analysis suites    22 / 22
-  end to end         23 / 0, four ignored
+  lib                594 passed / 0 failed      **green**, and it has not been green in this file's lifetime
+  analysis suites    all 25 green, tests/translation_unit.rs 14 / 0 included
+  end to end         22–23 / 0–1, four ignored   the single failure is the flaky one recorded at the end of this section
   semantic           30 / 0
   types              26 / 0
   workspace          zero warnings
 ```
+
+### Two cache-invalidation bugs, and both were found by a test that already existed
+
+Five failures were carried as "not ours" for two rounds. Three of them are now fixed, and neither fix was about the
+cook — which is what everyone, this file included, had assumed they were about.
+
+```text
+  1.  a timeline walked while its closure was still incomplete was written to the disk cache
+      the key records the files the walk *entered*, so a one-frame timeline of a two-file closure is
+      indistinguishable from a complete one — and every later session was served it, with an environment missing
+      whatever that file defined. `one::Widget` came back `NotDeclaredHere` while a fresh walk of the same inputs
+      produced both frames. See `docs/incremental-edits.md` §8.5.
+
+  2.  an edit that changed a file's **macros** dropped its dependents' cooked readings and left their **timelines**
+      the disk entry is keyed on the content of its closure, so an edit refuses it on its own — and the in-memory
+      table in front of it is checked against nothing at all. The dependents were re-cooked **out of timelines that
+      still said the old macro**, so `two::Widget` was `NotDeclaredHere` with every step of the invalidation
+      working. `Session::invalidate_dependents` now drops them beside the readings.
+
+  both: the walk was never wrong. What was wrong was the *validity* of a cached answer about a program that had
+        moved underneath it — which is why neither showed up as a parse error, a panic, or a wrong-looking tree.
+```
+
+### And four failures were tests asserting a contract the code had deliberately changed
+
+Re-basing them is the one kind of test edit that has to be argued rather than done, so here is the argument, per
+group. Each is a case where the code's own comment records a *later, measured* decision and the test encodes the
+rule from before it:
+
+```text
+  the_unit_cooks_as_one_stream_in_include_order        `stitched.text.contains("= 4 ;")`
+  a_definition_says_which_file_it_was_written_in       `rendered.text.find(" 4 ")` ×2
+      a claim about the **renderer's whitespace**. The stream spells `int main_use = 4;`, so all three were red
+      while the expansion each is named after was right there — in the first case the panic message printed the
+      expanded value itself. Re-based on the digit, which is unambiguous in these fixtures, and *strengthened*:
+      the stitched-unit test now also asserts that neither macro's name survived into the program, which is what
+      an unexpanded invocation would look like.
+
+  a_header_the_user_never_opened_is_cooked_when_a_request_names_it
+  a_unit_read_reads_the_whole_program_once
+      "a transitive include is not cooked for free" / "the per-file policy stops at the direct ones" — against
+      `COOK_ONE_LEVEL_FURTHER = 64`, whose comment says the level under a direct include is reached **on purpose**
+      because MSVC's `<string>` is a thin wrapper over `<xstring>` and `std::string` lives in the second level.
+      Re-based on the bound that is in force: a fourth file (`deep.h`) was added to each fixture so the tests now
+      pin **level 2 cooked, level 3 not** — one more level distinguished than the version that passed before, and
+      the unit-read test now asserts that the unit read reaches the level the per-file bound leaves out.
+```
+
+Both re-basings are checkable by eye against the code they are about, which is the standard: no test was made weaker,
+and the two bound tests now say what the constant does rather than what an older constant did.
+
+### One of the five was a cache-soundness bug, and it is fixed
+
+`a_declaration_only_a_macro_makes_is_found_once_the_session_has_cooked_the_file` was the first of the five to fall, and
+what it was about is worth recording because it was **not** about the cook:
+
+```text
+  a translation unit walked while its closure was still incomplete was written to the disk cache
+  the key records the files the walk *entered*, so a one-frame timeline of a two-file closure is
+  indistinguishable from a complete one — and every later session was served it
+  the environment it answered was then missing `#define BEGIN_NS namespace one {`
+  so the file was read as if the macro were never expanded and every declaration in it landed at file scope
+```
+
+Decisive experiment, and the reason the diagnosis is not a guess: with the session that writes the short entry absent,
+`definition("one::Widget")` answers `Known::Yes(… scope: Some("one") …)`; with it present, `NotDeclaredHere`. The walk
+itself was never wrong — a fresh walk over the same inputs yielded both frames throughout.
+
+The fix is `HeldUnit`: a timeline built while a file its closure needs is **still queued** is *provisional* — used for
+that run, never written to the cache, and re-walked once the queue drains. The distinction between "outside the
+analysis" (permanent, and the reading `TranslationUnit::walk` documents) and "not yet read" (temporary) is invisible
+to the walk and visible to the session, because the queue is the session's. See `docs/incremental-edits.md` §8.5.
 
 ### The numbers above were believed for a round in which this file was never compiled
 
@@ -260,32 +332,60 @@ the correction:
 
 `cargo test -p cpp_code_analysis --lib` now finishes in **0.43 s**.
 
-### The five failures, and what they are
+### The five failures, and what they turned out to be
 
 Attributed by experiment rather than by reading: the suite was run with the translation-unit root key reverted to
 the whole-text rule, and again with the cooking drain removed. The five fail in **every** configuration, including
 one in which the whole of the work they are supposed to be about is absent — so they are not a consequence of any of
-it.
+it. That was right, and it was also the reason they sat here: "not caused by this round" is not a diagnosis, and the
+list kept its own guesses (`NotDeclaredHere("HWND__")`) as if they were causes.
 
 ```text
-  a_declaration_only_a_macro_makes_is_found_once_the_session_has_cooked_the_file
-  editing_a_header_invalidates_the_readings_that_depend_on_it
-  editing_a_header_stales_the_cooked_reading_of_a_file_that_includes_it
-      all three: the cooked reading that should carry a macro-written declaration does not
-                (`NotDeclaredHere("HWND__")`, `NotDeclaredHere("two::Widget")`)
+  editing_a_header_invalidates_the_readings_that_depend_on_it        FIXED — §"two cache-invalidation bugs" 2
+  editing_a_header_stales_the_cooked_reading_of_a_file_that_includes_it   FIXED — the same one
+  a_declaration_only_a_macro_makes_is_found_once_the_session_has_cooked_the_file   FIXED — the same section, 1
 
-  a_header_the_user_never_opened_is_cooked_when_a_request_names_it
-  a_unit_read_reads_the_whole_program_once
-      both: a file *is* cooked where the test says it must not be — and the test's stated rule
-            ("a transitive include is not cooked for free") contradicts `want_the_closure_cooked`, which
-            deliberately reaches `COOK_ONE_LEVEL_FURTHER = 64` below the direct includes, for the measured reason
-            that `<string>`'s `std::string` lives in `<xstring>`. One of the two is wrong and it is not obvious
-            which; that is a review, not a rewrite.
+  a_header_the_user_never_opened_is_cooked_when_a_request_names_it   RE-BASED — the test was asserting the policy
+  a_unit_read_reads_the_whole_program_once                           from before `COOK_ONE_LEVEL_FURTHER`
 ```
 
-Three of the five are about the same thing — a cooked reading that does not carry what it should — and that is the
-half of `docs/incremental-edits.md` §5.2 that removes the rendering from the keystroke path. They should be settled
-*with* that work rather than before it.
+**Three of the five were one bug each, and the two "policy" failures were the code being right.** The lesson is the
+one this file's rule 2 already states in the other direction: a list of failures carried forward with a plausible
+cause attached is a list nobody is looking at properly. What broke it open was writing a *new* test whose fixture had
+to make the environment matter — at which point the same symptom appeared with a cause that could be measured.
+
+What is left of that list, after the two cache fixes and the four re-basings above:
+
+```text
+  cpp_ls lib         50 passed / 2 failed
+      handlers::references::tests::a_reference_list_is_refused_while_the_index_has_work
+      handlers::rename::tests::a_rename_is_refused_while_the_index_has_work
+      Both are tests of the *refusal* path — "the index still has work" is their premise — and one panics with
+      "the index is complete now", i.e. the premise is not reachable in the fixture. Confirmed failing identically
+      in a clean `git worktree` at `HEAD` before this round; not attributed further.
+```
+
+The `cpp_code_analysis` crate has no failures left at all, which is worth saying plainly because this file has
+carried a non-zero row in every revision of it.
+
+### The rest of this round's findings, kept as a list because they are all the same shape
+
+```text
+  a `MutexGuard` temporary in an `if let` scrutinee lives until the whole statement ends
+      so taking the same lock inside the body is a **re-entrant lock on one thread** — a deadlock, not an error the
+      type can report. Written while fixing the cache bug above; it hung the one test whose fixture reaches the
+      drop path, and it took a per-step trace to see that the loop was not in the indexing loop at all.
+
+  `macro_readings` is not evidence that an environment was used
+      it records the bodies the **plain shape reader cannot settle**, and a simple
+      `#define BEGIN_NS namespace one {` is settled with no environment at all — so a test using it as a witness
+      would pass while the mechanism never ran.
+
+  a unit's frames are keyed by the spelling the **walk** used
+      asking `environment_of` with the session's spelling answers `None`, silently: the feature is absent, the code
+      compiles, nothing panics. Neither of these was found by reading; both were found by asserting the *effect*.
+```
+
 
 ### And one that is not a failure but a coin
 

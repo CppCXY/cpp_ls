@@ -285,35 +285,136 @@ the ones that are not.
 `Closure` stages of `crate::stages` gain **zero entries**, and the unit for the edited file is the same allocation
 before and after (a pointer comparison in a probe is enough).
 
-### 5.2 The file being edited is parsed once, not four times
+### 5.2 The file being edited is parsed once, and not rendered
 
-**Today.** lex #1 (`directive.rs:415`), lex #2 (`index/mod.rs:281`), parse #1 (`index/mod.rs:242`), parse #2 (the
-second pass), then lex #3 + expand + render + parse-the-rendering + map (`session.rs:3210-3229`), plus parse #4 per
-request (`session.rs:1977`).
+**Measured first, because the plan above was written from the call graph and the call graph was wrong.**
 
-**Change, in four parts, each independently shippable:**
+```text
+  cargo run --release -p cpp_code_analysis --example keystroke
+```
 
-1. **One scan, not two lexes.** `directive_signature` (`directive.rs:414-436`) and `scan_includes`
-   (`index/mod.rs:280-304`) both lex the whole file, for the same edit, one after the other. Neither needs a lexer:
-   what both want is the lines that begin with `#`, and what `directive_signature` additionally wants is each
-   directive's own text and offset. One line-oriented scan producing `(directive text, start offset, the `#include`
-   spelling)` answers both, and removes lex #1 **and** lex #2.
-2. **The edited file must not go through the second pass.** The second pass exists because a file first parsed
-   before its includes were in the index may have wrong scopes. For the file being edited, the unit is already in
-   hand, so its `environment_of(path)` is too — and `FileIndexer::with_macro_bodies` is the call that reads a file
-   correctly with an environment. Parse it once, with the environment.
-3. **The edited file must not be rendered at all, unless a question needs the rendering.** The codebase has measured
-   what the rendering buys: **one declaration in a thousand** (`session.rs:1262-1265`), over a `raw + macro bodies`
-   reading that costs one parse. So:
-   ```text
-     raw parse with macro bodies      ← what the index holds for the edited file, per keystroke
-     the rendering                    ← built on demand, when a view or a macro question asks
-   ```
-   This removes lex #3, the expansion, the render, the render-parse and the mapping pass from the keystroke.
-   **The policy already exists** — `Session::view` (`session.rs:2105-2129`) answers from a cached rendering when
-   `(path, content_hash(text))` matches, and otherwise parses the file's own tokens and enqueues
-   `macro_work.want(path)` for the pump to build the rendering later. The cook is the one caller that does not
-   follow it.
+```text
+  --- a character in a body ---
+    include-scan 1, parse 1, sweep 1, lex 1, render 1, render-parse 1, render-sweep 1, map 1
+    …units  memory +3, disk +0, WALKED +0
+    => parsed 1 time(s), lexed 1, rendered 1, rendering parsed 1
+```
+
+Three things follow, and the first two contradict what this section used to say.
+
+```text
+  1.  there is no second parse to remove. The second pass re-reads a file only when its scope walk could depend on
+      a macro body (`mentions_one_of`) or when the unit walk decided about its `#define`s — and a `.cpp` that
+      invokes no namespace-opening macro is in neither set. `parse` is **1** already, for this shape and for the
+      `#define`-below-the-body edit beside it. Item 2 of the old plan would have bought nothing.
+
+  2.  the closure walk is gone. `WALKED +0` for a body edit is stage 1 working; the same counter moves for the
+      two edits that really are inputs to the file's timeline (a `#define` below the body, an `#include` above
+      it), which is what says the rule is a rule and not a hole.
+
+  3.  **the render is the whole of what is left.** One character costs a lex, a macro-table build, a full
+      expansion and splice of the file, a parse of the result, a sweep of that parse and a pass mapping every
+      range back — six stages over the file's tokens, on top of the raw parse and sweep. §1 counted it as one of
+      three parses; it is in fact the *only* one that the edit does not need.
+```
+
+So the change is the one §5.2 always named and never justified: **the edited file must not be rendered unless a
+question asks for the rendering.** And the measurement changes why it is hard:
+
+> The raw reading has to be good enough to answer without the rendering — which means it has to have been built
+> **with the closure's macro bodies**. Today it is not: the raw parse of the edited file is made without an
+> environment, and the second pass repairs it *only for files the filter selects*.
+
+That is the item that was missing, and it is the enabling step rather than a saving of its own:
+
+```text
+  1.  SummaryStore::prepare_with_the_environment(path, bodies)
+      the same body as `prepare`, plus `FileIndexer::with_macro_bodies` — one parse, from the text and the
+      environment the session already holds for this file
+
+  2.  Session::index_one uses it when a unit is *already held* for the path
+      `held_units().get`, never a walk: a unit that is not in memory is one the closure has not been read for,
+      and an index step must not be where that happens. A miss is today's path, unchanged.
+
+  3.  the file is then marked as built-with-its-environment, so the second pass has nothing to repair
+      (`Step` carries the fact; `finish_a_slice` leaves those files out of `parsed_since_the_last_pass`)
+
+  4.  and only then can the render be skipped — because now the raw reading answers with the same scopes the
+      rendering would have given it
+```
+
+**Steps 1–3 buy no passes on their own** — measured, there are none to buy. They exist so that step 4 is a change
+of *policy* with the quality already in hand, rather than a change of policy that trades quality for speed.
+
+### Steps 1–3 are done. Step 4 is blocked, and the reason is a defect, not a plan
+
+```text
+  SummaryStore::prepare_with_the_environment(path, bodies, facts)   src/index/store.rs
+  FileIndexer::with_macro_body_readers / with_a_macro_environment   src/index/mod.rs
+  Session::index_one reads a file with the environment it holds     src/session.rs — held units only, never a walk
+  Step::with_the_environment                                        src/index/worklist.rs
+  …and `finish_a_slice` leaves those files out of `parsed_since_the_last_pass`
+```
+
+Verified by `a_file_read_back_through_its_own_unit_is_not_read_again_by_the_second_pass`: with no unit in memory the
+file goes to the second pass exactly as before; with one, it does not. The probe is unchanged — which is the point,
+because these steps are not where the passes are.
+
+**And step 4 must not be taken yet.** While tightening that test it came out that the sharper assertion cannot be
+written, because the thing step 4 assumes is *not currently true*:
+
+```text
+  fixture      ns.h:  #define BEGIN_NS namespace one {
+               api.h: #include "ns.h"   BEGIN_NS struct Widget { int size; }; END_NS
+
+  after a full index_everything:
+      api.h's RAW reading      ["Widget", "Widget::size"]     scope = None
+      api.h's COOKED reading   ["Widget", "Widget::size"]     scope = None   ← the rendering did not expand it
+      definition("one::Widget", api.h)   Unknown(NotDeclaredHere("one::Widget"))
+      definition("Widget", api.h)        Yes(… scope: None …)
+```
+
+**The rendering does not place the macro's scope.** That is not a new defect and not this document's subject: it is
+one of the five failures `status.md` §6 records, and `editing_a_header_invalidates_the_readings_that_depend_on_it`
+fails through the same fixture and the same name (`two::Widget` there, `one::Widget` here).
+
+It matters here because it removes the ground step 4 stands on. Step 4 is justified by *"the rendering is worth one
+declaration in a thousand over `raw + macro bodies`"* (`session.rs:1262`) — and a measurement of what the two
+readings differ by cannot be made while one of them is not doing its job. Skipping the render now would trade a
+partially working capability for speed and make the resulting loss **indistinguishable from the bug that is already
+there**, which is the worst of both: no speed measurement anyone can trust, and a new failure with an old name.
+
+So the order changes again, and for the third time it is a measurement that changed it:
+
+```text
+  done     the three failures about a cooked reading that does not carry what it should
+           they were two cache-invalidation bugs, one layer apart — §8.5 and §8.6 — and neither was about the cook
+  now      step 4, with a measurement of raw-vs-rendered that means something
+  then     stage 3, stage 4
+```
+
+**What step 4 must not break, and it is a list, not a hope.**
+
+```text
+  cooked_declarations(path)          the queries that read a file through the index. They fall back to the raw
+                                     summary — which is the whole point — and `cook(<string>)`'s "one declaration in
+                                     a thousand" (session.rs:1262) is the measurement that says how much that costs
+  diagnostics from the rendering      `Session::diagnostics` answers from the cooked reading *if it is held* and
+                                     from the file's own text otherwise. The rendering's parse errors are richer than
+                                     the raw parse's, and that difference is visible to a user
+  every other file                   unchanged: the direct includes and the level under them are still cooked, which
+                                     is what `<string>`/`<xstring>` needs
+```
+
+Steps 1–3 are safe and independently verifiable; step 4 is a behaviour change and should ship behind the ability to
+measure that list. All four are **not done**, except the scan:
+
+**Done: item 1 of the old plan — one scan, not two.** `SummaryStore::prepare` no longer runs the early include scan
+(`SummaryStore::prepare_inner`, with the scan optional), because the scan exists to feed a *wave*'s frontier
+(`prepare_closure`) and a caller preparing one file has no frontier. The parse resolves the same `#include` lines a
+moment later; what is saved is a full lex of the edited file on the `get`/`catch_up` path. The probe still shows
+`include-scan 1` for an edit driven through `index_everything`, because that path *is* a wave — which is the rule
+working as intended rather than a hole in it.
 
 **Acceptance.** One keystroke in a body: the `Parse` stage gains **one** entry for that file. Reported by a probe
 that reads `StageTimes` before and after a `did_change` + drain.
@@ -343,11 +444,16 @@ typed into) and not sixty-five.
 ## 6. Order, and what each stage is judged by
 
 ```text
-  1.  the preamble bound, and a unit keyed on it
-      judged by: zero `Walk`/`Closure` entries for a body edit in a >100-file closure
+  1.  the preamble bound, and a unit keyed on it                                    DONE
+      judged by: zero `Walk` entries for a body edit        — and measured: `WALKED +0`, with the two edits that
+                                                              are inputs to the timeline still walking
 
-  2.  one parse of the edited file
-      judged by: the `Parse` stage's entry count for one keystroke is 1, and the rendering is built on demand
+  2.  one parse of the edited file, and no rendering of it                          PARTLY
+      judged by: the probe's line reads "parsed 1, rendered 0"
+      done:      the early include scan off the one-file path (`SummaryStore::prepare_inner`)
+      measured:  there is **no second parse to remove** — `parsed 1` already — so the plan's item 2 was empty and
+                 the render is the whole of what remains
+      left:      `prepare_with_the_environment` (steps 1–3 of §5.2) and then the policy change (step 4)
 
   3.  the hot set, and a cheap validity check
       judged by: `Render` entries per drain is 1, not 65
@@ -356,14 +462,13 @@ typed into) and not sixty-five.
       judged by: a query's `Parse` entries, once 1–3 have made the file's own parse cheap
 ```
 
-**Stage 1 is first** because it is the one that removes a *walk of the closure* from the keystroke, and because it
-is small: a bound function, a key that uses it, and an invalidation rule that names one file instead of sixteen.
-Stage 2 is second because it removes three passes from the file the user is typing into. Stage 3 is third because
-it bounds how much *other* work a keystroke can set off, which only matters once the other two are cheap.
+**Revised order, and the reason.** Stage 2 splits: the render cannot be skipped until the raw reading is
+environment-correct (§5.2 steps 1–3), and those steps buy nothing on their own. So the honest order is **1 (done) →
+the enabling steps of 2 → the policy change of 2 → 3 → 4**, with the probe as the instrument at every step, and
+`Session::unit_stats` beside it for the walk.
 
-**Stage 4 is deliberately last.** The per-request parse is real (a cursor query needs a tree), and it is the one
-stage whose fix is not obvious: a session cannot keep a tree per file without deciding what evicts it. Stages 1–3 do
-not depend on it.
+**Stage 4 is still last.** The per-request parse is real (a cursor query needs a tree), and it is the one stage
+whose fix is not obvious: a session cannot keep a tree per file without deciding what evicts it.
 
 ---
 
@@ -384,13 +489,18 @@ question needs it and it costs nothing at all.
 ### What is not yet measured, and must be before stage 1 is believed
 
 ```text
-  how many files a body edit currently re-parses        the passes above are counted from the call graph,
-                                                        not from a run — a probe must count them
-  how long one closure walk is on this machine          the code's numbers (1003 ms for a unit walk, 572 ms for a
-                                                        drain's write hold) came from a slower machine
-  how often `moved.layout` is actually true             the argument assumes body typing does not move it, which is
-                                                        true for a file whose directives are all at the top and
-                                                        must be checked on a real one
+  how many files a body edit currently re-parses        MEASURED — examples/keystroke.rs. One parse, one lex, one
+                                                        render, one render-parse; no walk. §5.2 has the table,
+                                                        and it falsified one of the plan's own items.
+  how long one closure walk is on this machine          still open. The code's numbers (1003 ms for a unit walk,
+                                                        572 ms for a drain's write hold) came from a slower
+                                                        machine, and the probe's fixture is four small files — its
+                                                        `unit-get` of 1.5 ms is not a number about a real closure.
+  how often `moved.layout` is actually true             still open. The probe shows it does move for a `#define`
+                                                        below the body and for an `#include` above it, which are
+                                                        both inputs to the timeline — but a real file, with its
+                                                        directives interleaved through its body, is the case the
+                                                        rule has to survive.
 ```
 
 ### Two things the audit found that are not this document's subject, and are not obviously right
@@ -461,4 +571,212 @@ failure and has not been attributed at all.
 the file. The test loop had the same shape: it looped on a count that included a kind of work it never did. A bound
 that cannot be reached and a loop that cannot terminate are one bug wearing two hats, and both stayed invisible
 because the thing that would have shown them — running the suite — was the thing that was broken.
+
+### 8.3 Stage 2: the plan's second item was empty, and the third is the whole of it
+
+The probe (§5.2) says one character in a body costs `parsed 1, lexed 1, rendered 1, rendering parsed 1, WALKED +0`.
+Two of the three things §1 listed as the cost of a keystroke were already gone or never existed:
+
+```text
+  the closure walk        gone, and that is stage 1 — `WALKED +0`, with the two edits that really are inputs to
+                          the file's timeline still walking
+  the second parse        never happened for this shape. The second pass re-reads a file only when its scopes could
+                          depend on a macro body, and a `.cpp` that invokes no namespace-opening macro is not in
+                          that set. The plan's item 2 would have bought nothing.
+  the render              the whole of what is left: lex, macro table, expansion, splice, parse of the rendering,
+                          sweep, and the map back
+```
+
+**The plan was written from the call graph and the call graph was wrong about which of the three mattered.** It cost
+one probe to find out, and the probe is now in the repository
+(`cargo run --release -p cpp_code_analysis --example keystroke`) with the acceptance line the section asks for. That
+is the whole argument for §7's first rule, one more time: the count is cheap, the rewrite is not.
+
+**What is done of stage 2:** the early include scan is off the one-file path (`SummaryStore::prepare_inner`), which
+is a full lex of the edited file that the `get`/`catch_up` path was paying for a frontier it does not have. The
+probe still shows `include-scan 1` when the edit goes through `index_everything`, because that path *is* a wave and
+the scan is what feeds it — the rule working, not a hole.
+
+**What is not:** §5.2's step 4, the policy change that stops the render. It was blocked on the three cooked-reading
+failures and **is no longer**: §8.5 and §8.6 are both fixed, `cargo test -p cpp_code_analysis` is green for the first
+time, and the measurement step 4 needs — what the rendering buys over `raw + macro bodies` — can now be taken on a
+suite that is not lying about its baseline.
+
+### 8.4 Stage 2's enabling steps, and what they cost to verify
+
+```text
+  done   SummaryStore::prepare_with_the_environment   one parse, from the text and the environment a caller holds
+  done   FileIndexer::with_macro_body_readers         the same evidence as two trait objects, for a caller that has
+                                                      already erased the type (a `dyn MacroFacts` is not a
+                                                      `MacroFacts`, which is why the existing setter is generic)
+  done   Session::index_one                           uses it when a unit is **already held** — `held_units().get`,
+                                                      never a walk: an index step is not where a closure is read
+  done   Step::with_the_environment                   and `finish_a_slice` leaves those files out of the second pass
+```
+
+The verification is worth more than the change. Three attempts were needed, and the two failures are the kind this
+document keeps finding:
+
+```text
+  1.  `macro_readings` as the witness            WRONG. It records the bodies the **plain shape reader cannot
+                                                 settle**, and `#define BEGIN_NS namespace one {` is settled
+                                                 without any environment — so a fixture with an easy macro would
+                                                 have passed a test about a mechanism that never ran.
+  2.  `environment_of(path)` with the session's  WRONG, and silently: a unit's frames are keyed by the spelling the
+      own spelling of the path                    *walk* used, so the lookup answered `None` and the whole feature
+                                                 was a no-op that compiled. `Session::units_for_the_pass` records
+                                                 the same trap from the other side; the fix is to ask with
+                                                 `index.summary(path).path`.
+  3.  the scope, `definition("one::Widget")`     RIGHT, and it fails — for a reason that is not this change. See
+                                                 §5.2: the cooked reading does not place the scope either.
+```
+
+The third is the one that changed the plan. It also produced the test that is in the repository, which asserts the
+thing the change is about — **which files the second pass is handed** — and carries the note to tighten it into the
+scope assertion when the cook defect is fixed. A test asserting the scope today would be red for a reason with
+nothing to do with the flag, which is `status.md` §6's second rule ("a criterion that bites may still bite the wrong
+shape") arriving from a new direction.
+
+**And the second failure is the one to remember.** A `HashMap` keyed by the walk's spelling, asked with the
+session's, is not a compile error and not a panic — it is a feature that is silently absent. It was found only
+because a test asserted the *effect* rather than the *call*.
+
+### 8.5 The first of the three cooked-reading failures was a cache-soundness bug
+
+Tightening the test above needed a fixture where the environment *matters*, and building it found the defect that
+`status.md` §6 had been listing as "a cooked reading that does not carry what it should" without a cause:
+
+```text
+  fixture   ns.h:  #define BEGIN_NS namespace one {
+            api.h: #include "ns.h"   BEGIN_NS struct Widget { int size; }; END_NS
+
+  a session that reads ONE step    indexes api.h, queues ns.h, and walks api.h while ns.h is not yet in the index
+                                   → WALK "/p/api.h" frames=["/p/api.h"]      a closure of one, from a closure of two
+  …and writes that timeline        the entry's recorded closure is the one frame it *entered*, so its key cannot
+                                   tell a short closure from a complete one
+  every later session              served it
+  the environment it answers       without `namespace one {`
+  so the reading of the file       `struct Widget` at file scope, `one::Widget` NotDeclaredHere
+```
+
+**The walk was never wrong.** A fresh walk over the same inputs produced both frames throughout — which is what the
+probe showed, and what made the diagnosis a measurement rather than a reading:
+
+```text
+  cached unit frames = ["/p/api.h"]              what the session was serving
+  fresh walk frames  = ["/p/api.h", "/p/ns.h"]   the same inputs, walked now
+  …and with the offending session removed altogether:  definition("one::Widget") → Yes(… scope: Some("one") …)
+```
+
+#### The two meanings of a file the closure does not hold
+
+`TranslationUnit::walk` stops at a file its closure cannot offer, and its early return says why that is right: a
+system header nobody indexed is **outside the analysis**, and treating it as "may define anything" was measured to
+collapse the corpus's conditional evidence from millions of facts to tens of thousands. That reading is permanent.
+
+While an index is running the same absence means **not yet** — the file is in the queue and will be read — and a
+timeline built without it is a timeline of a *smaller program*. Nothing in the timeline says which of the two it is,
+so caching it asserts the wrong one. The distinction is invisible to the walk and visible to the **session**, because
+the queue is the session's:
+
+```rust
+// session.rs
+fn closure_is_still_growing(&self, closure, in_closure) -> bool {
+    // a target that is missing **and queued** is a target that is coming
+}
+```
+
+#### The fix
+
+```text
+  HeldUnit                    a held timeline carries `provisional`
+  translation_unit_of         a provisional timeline is used for this run, and dropped as soon as the queue drains
+  put                          a provisional timeline is **never written to the cache**
+  unit_and_state_of           and `cooking_materials` refuses one outright
+```
+
+The last line is a rule of its own and it is the same defect one layer up: **a rendering sticks.** A timeline is
+re-walked the moment the queue drains, but a cooked reading is filed in the index and nothing re-cooks a file that has
+one — so a rendering made from an environment missing whatever the queue had not read stays wrong for the life of the
+session. Leaving the file uncooked keeps it *wanted* (`want_the_closure_cooked` asks for every open file without a
+reading), so a later drain renders it when the timeline is the whole program.
+
+**That last rule is not verified by a test.** The suite is identical with and without it. It is in because the
+argument is the same one that the measurement above settled for timelines, and it is written down here as unverified
+rather than as done.
+
+#### What this changed, measured
+
+```text
+  lib suite        589 passed / 5 failed  →  590 passed / 4 failed
+                   `a_declaration_only_a_macro_makes_is_found_once_the_session_has_cooked_the_file` passes
+  the other two of the three cooked-reading failures stay red, and are now one **path** rather than a class:
+                   after `ns.h`'s macro changes from `namespace one` to `namespace two`, the reading is not rebuilt
+                   around the new body. The unchanged form of the same fixture works.
+  the probe        unchanged — the fix is about correctness, and it buys no passes
+```
+
+#### And one mistake worth keeping
+
+The fix's first version **hung the suite**, and the reason is a rule about Rust that a compiler cannot report:
+
+```rust
+if let Some((provisional, unit)) = self.held_units().get(&key) {   // a MutexGuard temporary
+    …
+    self.held_units().remove(&key);                                // ← re-entrant lock, one thread, deadlock
+}
+```
+
+A `MutexGuard` created in an `if let` **scrutinee** lives until the whole statement ends. Binding the result to a `let`
+first is the fix. It cost a per-step trace to find, because the first guess — that the loop was in
+`Session::index_everything` — was wrong, and the trace that would have said so printed nothing at all.
+
+### 8.6 The other two were the same bug one layer out: a stale timeline, not a stale reading
+
+`two::Widget` came back `NotDeclaredHere` after `ns.h`'s macro changed from `namespace one` to `namespace two`, and
+every step of the invalidation was *working*: the test's own preceding assertion (both `api.h` and `other.cpp` lose
+their cooked readings) passed. So the reading was dropped correctly and then rebuilt wrongly.
+
+```text
+  a cooked reading is built from a translation unit's environment (`cooking_materials` → `environment_of`)
+  the unit cache **on disk** is keyed on the content of its closure, so an edit refuses it on its own
+  the unit cache **in memory** is checked against nothing at all
+  …so `invalidate_dependents` dropped the reading, kept the timeline, and the file was re-cooked out of a timeline
+  that still said `namespace one`
+```
+
+**The disk cache looked invalidation-proof, and the table in front of it was not.** That is why this hid for so long
+in the same place as §8.5: both are questions about the *validity* of a cached answer, asked one layer apart, and
+neither shows up as a parse error, a panic, or a wrong-looking tree.
+
+The fix is one line beside the one that was already there:
+
+```rust
+// Session::invalidate_dependents — the set was already being walked; it just was not being cleared
+self.held_units().remove(&queue_key(&dependent));
+self.store.index_mut().forget_cooked(&dependent);
+```
+
+#### What this one changed, measured
+
+```text
+  lib suite        590 passed / 4 failed  →  594 passed / 0 failed
+                   the first time this suite has been green, and it cost no new behaviour: both fixes are about
+                   refusing to serve an answer that was made about a program that has since moved
+  the probe        unchanged — `parsed 1, lexed 1, rendered 1, WALKED +0`, as every correctness fix in this section is
+```
+
+#### And four of the five were tests, which is the part to be careful about
+
+Re-basing a failing test is the one edit that has to be argued rather than made, so the argument is written down in
+`status.md` §6 per group. In short: three assertions were claims about the **renderer's whitespace**
+(`text.contains("= 4 ;")`, `find(" 4 ")` twice) and were red while the expansion each is named after was visibly
+present; two more asserted the cooking policy from **before** `COOK_ONE_LEVEL_FURTHER`, whose own comment records why
+the level under a direct include is reached on purpose (`<string>` → `<xstring>`). The whitespace ones are re-based on
+the digit and *strengthened* (the stitched test now also asserts neither macro's name survived); the policy ones gained
+a fourth fixture file so they pin **level 2 cooked, level 3 not**, distinguishing one more level than the versions that
+used to pass.
+
+
+
 

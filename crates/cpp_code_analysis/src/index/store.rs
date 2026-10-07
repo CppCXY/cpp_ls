@@ -457,7 +457,46 @@ impl<F: FileProvider> SummaryStore<F> {
     /// and [`SummaryStore::commit`] — the half that needs `&mut self` — applied to them in whatever order the caller
     /// wants the index to see them.
     pub fn prepare(&self, path: &Path) -> Prepared {
-        self.prepare_telling(path, &mut |_| {})
+        // **And no early include scan**, which is a whole lex of the file that nothing here reads: the scan exists
+        // so that a *wave* can put a file's includes on a shared frontier while this one is still being parsed
+        // ([`SummaryStore::prepare_closure`]), and a caller preparing one file has no frontier to feed. The
+        // includes come out of the parse either way — `summary.includes` is the same answer — so the only thing
+        // this gives up is being told about them a moment sooner, and what it saves is measured per keystroke,
+        // because a rebuilt summary is exactly what an edit produces. See `docs/incremental-edits.md` §5.2.
+        self.prepare_inner(path, None, None)
+    }
+
+    /// **Prepare a file the caller already has the macro environment for** — the one parse an edit needs.
+    ///
+    /// # What this is for
+    ///
+    /// A file's scopes can come out of a macro *body* written in another file: MSVC's `<vector>` writes
+    /// `_STD_BEGIN` and `namespace std {` is in `yvals_core.h`, so a summary built from the file's own text alone
+    /// files every one of those declarations at file scope. The second pass
+    /// ([`SummaryStore::prepare_the_re_read`]) exists to repair that afterwards, and it re-parses the file to do
+    /// it — which is a parse the *caller* can make unnecessary when it already holds the environment, because
+    /// [`FileIndexer::with_macro_bodies`] builds the right summary the first time.
+    ///
+    /// `bodies` and `facts` are the **same value** passed twice; see
+    /// [`FileIndexer::with_macro_body_readers`] for why the type has to be erased here.
+    ///
+    /// # What it does not change
+    ///
+    /// The disk lookup: a summary is keyed by the text and the configuration, and the environment deliberately
+    /// left that key (see `crate::cache`), so an entry written by a caller *without* an environment is served to
+    /// one *with* it. That is the existing rule for [`SummaryStore::get`] and this does not alter it — it means a
+    /// warm cache is as cheap here as anywhere else, and a cold one is where the saving is.
+    ///
+    /// A caller that sets `Step::with_the_environment` from this is claiming the second pass has nothing to do for
+    /// that file. It is the same claim the flag's documentation makes, and it is only true because the parse below
+    /// was given the environment.
+    pub fn prepare_with_the_environment(
+        &self,
+        path: &Path,
+        bodies: &dyn cpp_parser::MacroBodies,
+        facts: &dyn cpp_parser::MacroFacts,
+    ) -> Prepared {
+        self.prepare_inner(path, None, Some((bodies, facts)))
     }
 
     /// [`SummaryStore::prepare`] that says what the file includes **as soon as it knows** — before the parse.
@@ -468,6 +507,18 @@ impl<F: FileProvider> SummaryStore<F> {
     /// expensive part starts — which is what lets [`SummaryStore::prepare_closure`] have other cores reading those
     /// files while this one is still busy with this one.
     fn prepare_telling(&self, path: &Path, includes: &mut dyn FnMut(&[PathBuf])) -> Prepared {
+        self.prepare_inner(path, Some(includes), None)
+    }
+
+    /// The one body, with the early include notification and the macro environment **both optional** — see
+    /// [`SummaryStore::prepare`] for what the callers want from the first and
+    /// [`SummaryStore::prepare_with_the_environment`] for the second.
+    fn prepare_inner(
+        &self,
+        path: &Path,
+        mut includes: Option<&mut dyn FnMut(&[PathBuf])>,
+        environment: Option<(&dyn cpp_parser::MacroBodies, &dyn cpp_parser::MacroFacts)>,
+    ) -> Prepared {
         let Some(source) = ({
             let _read = crate::stages::StageTimer::new(crate::stages::Stage::Read);
             self.files.read(path)
@@ -485,34 +536,52 @@ impl<F: FileProvider> SummaryStore<F> {
                 && stored.key == key
                 && self.resolution_still_holds(path, &stored)
             {
-                let targets: Vec<PathBuf> = stored
-                    .includes
-                    .iter()
-                    .filter_map(|include| include.resolved.clone())
-                    .collect();
-                includes(&targets);
+                if let Some(tell) = includes.as_mut() {
+                    let targets: Vec<PathBuf> = stored
+                        .includes
+                        .iter()
+                        .filter_map(|include| include.resolved.clone())
+                        .collect();
+                    tell(&targets);
+                }
                 return Prepared(PreparedOutcome::Stored(stored));
             }
         }
 
-        let scanned = {
-            let _scan = crate::stages::StageTimer::new(crate::stages::Stage::IncludeScan);
-            let scanned = FileIndexer::new(&self.files, &self.config)
-            .with_seed(self.index.macros())
-            .scan_includes(path, &source);
-            includes(&scanned.targets());
-            scanned
+        // The scan is what tells a *wave* that there is work to hand out; a caller with no wave does not pay it,
+        // and its own parse resolves the same `#include` lines a moment later.
+        let scanned = match includes.is_some() {
+            true => {
+                let scanned = {
+                    let _scan = crate::stages::StageTimer::new(crate::stages::Stage::IncludeScan);
+                    FileIndexer::new(&self.files, &self.config)
+                        .with_seed(self.index.macros())
+                        .scan_includes(path, &source)
+                };
+                if let Some(tell) = includes.as_mut() {
+                    tell(&scanned.targets());
+                }
+                Some(scanned)
+            }
+            false => None,
         };
-        let summary = FileIndexer::new(&self.files, &self.config)
+
+        let indexer = FileIndexer::new(&self.files, &self.config)
             .with_seed(self.index.macros())
-            .with_scanned_includes(&scanned)
+            // Without a scan the sweep finds the `#include`s itself. With one it is handed them, so that the
+            // search is not run twice for the same file.
+            .with_scanned_includes_opt(scanned.as_ref())
+            // **The environment, when the caller has one** — the difference between a summary whose scopes are
+            // right and one the second pass has to come back for. See
+            // [`SummaryStore::prepare_with_the_environment`].
+            .with_a_macro_environment(environment)
             // **Whatever the unit walk already decided about this file's `#define`s.** `prepare` is the path a file
             // takes when a query needs it *before* the unit's re-read reaches it — and a header made only of
             // `#define`s is exactly the file the re-read skips (`mentions_one_of`), so without this its summary
             // keeps every guarded `#define` and a consumer decides the regions again, with a different environment.
             // See [`SummaryStore::dead_macros`].
-            .without_these_macros(&self.dead_macros_for(path))
-            .index(path, &source, key);
+            .without_these_macros(&self.dead_macros_for(path));
+        let summary = indexer.index(path, &source, key);
 
         // The one rule about the filesystem: a summary that records a *failed* search must not be stored, because
         // nothing in the key would notice the header appearing. See the module documentation.

@@ -157,6 +157,17 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         self
     }
 
+    /// The same, for a caller that may or may not have run the scan — `None` leaves the sweep to find the
+    /// `#include`s itself, which is the same answer one search later.
+    ///
+    /// One method rather than a `match` at each call site, because "the scan is optional" is a property of this
+    /// builder and not of the callers: [`crate::SummaryStore::prepare`] has no wave to feed and skips it, and
+    /// [`crate::SummaryStore::prepare_closure`] needs it. See that pair for the measurement.
+    pub fn with_scanned_includes_opt(mut self, scanned: Option<&'a ScannedIncludes>) -> Self {
+        self.scanned = scanned;
+        self
+    }
+
     /// Index with what the file's includes say about the macros it invokes.
     ///
     /// The one piece of evidence a summary can contain that is **not** in the file it describes: `_STD_BEGIN`'s
@@ -171,6 +182,38 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         self.bodies = Some(bodies);
         self.macro_facts = Some(bodies);
         self
+    }
+
+    /// The same evidence, for a caller that **already holds it as two trait objects**.
+    ///
+    /// [`FileIndexer::with_macro_bodies`] is generic because a `dyn MacroFacts` does not itself satisfy
+    /// `MacroFacts` — the blanket impl that makes a facts reader a bodies reader cannot be seen through the trait
+    /// object. A caller that has already erased the type (`SummaryStore::prepare_with_the_environment`, which is
+    /// handed one from a session) says so here instead of naming a concrete type it does not have.
+    ///
+    /// Both arguments are the **same value** in every call in this crate — the field documentation above says why
+    /// there are two of them at all — so a caller passes one thing twice.
+    pub fn with_macro_body_readers(
+        mut self,
+        bodies: &'a dyn cpp_parser::MacroBodies,
+        facts: &'a dyn cpp_parser::MacroFacts,
+    ) -> Self {
+        self.bodies = Some(bodies);
+        self.macro_facts = Some(facts);
+        self
+    }
+
+    /// The same, for a caller that has the two readers as one `Option` — which is how
+    /// [`crate::SummaryStore::prepare_with_the_environment`] carries them, since a caller preparing a whole wave
+    /// may or may not have an environment for each file of it.
+    pub fn with_a_macro_environment(
+        self,
+        environment: Option<(&'a dyn cpp_parser::MacroBodies, &'a dyn cpp_parser::MacroFacts)>,
+    ) -> Self {
+        match environment {
+            Some((bodies, facts)) => self.with_macro_body_readers(bodies, facts),
+            None => self,
+        }
     }
 
     /// **What the compilation itself defines** — `-D`s, `-std=`, and the compiler's own several hundred names.

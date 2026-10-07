@@ -1277,6 +1277,18 @@ impl<F: FileProvider + Clone> Session<F> {
     /// other way is a stale answer.
     fn invalidate_dependents(&mut self, path: &Path) {
         for dependent in self.store.index().dependents_of(path) {
+            // **And the timeline it was read out of.** A cooked reading is not the only thing a dependent holds
+            // that was made out of this file: it also has a **translation unit**, and the in-memory one is checked
+            // against nothing at all. The disk entry is keyed on the content of its closure, so this edit refuses
+            // it on its own — which is why the defect hid here: the cache looked invalidation-proof, and the table
+            // in front of it was not.
+            //
+            // Measured: with the readings dropped and the timelines left behind, `ns.h`'s macro changed from
+            // `namespace one` to `namespace two`, the file was re-cooked **out of the timeline that still said
+            // `one`**, and `two::Widget` came back `NotDeclaredHere` — with every step of the invalidation
+            // working. The re-cook is what needs the new timeline, so this is where it has to go.
+            self.held_units().remove(&queue_key(&dependent));
+
             // **Only the files that had a reading are asked for another one.** Dropping a stale reading is what this
             // loop is for; re-marking a file that never had one would cook a file nobody has looked at, which is the
             // 11.7 s the cooking policy was narrowed to avoid — paid here one header edit at a time. A file with no
@@ -1555,6 +1567,18 @@ impl<F: FileProvider + Clone> Session<F> {
         // It is `&self` work, so it is allowed here — what it is not allowed to be is *inside the writer* on the
         // pump's path, which is what [`Session::prepare_a_wave`] exists for.
         let units = self.units_for_the_pass(&done.iter().map(|step| step.path.clone()).collect::<Vec<_>>());
+        if std::env::var_os("CPPLS_TRACE_UNITS").is_some() {
+            eprintln!(
+                "ADVANCE steps={} done={:?} closure(api.h)={:?}",
+                steps,
+                done.iter().map(|step| step.path.clone()).collect::<Vec<_>>(),
+                self.closure_with_text(Path::new("/p/api.h"))
+                    .0
+                    .iter()
+                    .map(|(path, _)| path.clone())
+                    .collect::<Vec<_>>()
+            );
+        }
         let drain = self.finish_a_slice(&done, units);
         // **This path pays for its own drain, here.** `advance` is the non-pump entry point — a test, a batch caller —
         // and it holds no lock at all, so the split that exists to keep the pump's write lock short costs it one
@@ -1696,9 +1720,16 @@ impl<F: FileProvider + Clone> Session<F> {
         // disk cache was stored with whatever reading the run that wrote it had, and a file whose text did not
         // change reads the same way. So the warm path — everything reused — pays nothing, and an editing drain pays
         // for the one file the edit produced.
+        //
+        // **And not the files that were parsed *with* their environment.** This pass exists to repair a reading
+        // made without one, and `Step::with_the_environment` is the mark that says the repair has already happened
+        // — a file whose summary was built from the closure's macro bodies the first time has nothing a re-parse
+        // could change. That is the whole of what the flag is for; see `SummaryStore::prepare_with_the_environment`
+        // for why the session can hold an environment for a file at all.
         self.parsed_since_the_last_pass.extend(
             done.iter()
                 .filter(|step| matches!(step.outcome, StepOutcome::Built | StepOutcome::Unstored))
+                .filter(|step| !step.with_the_environment)
                 .map(|step| step.path.clone()),
         );
 
@@ -1953,9 +1984,49 @@ impl<F: FileProvider + Clone> Session<F> {
             self.vfs.load(&path);
         }
         let before = self.store.stats();
+
+        // **The environment this session already holds for this file, if it holds one.** A unit that is *not* in
+        // memory is one whose closure this session has not read, and an index step is not the place to start: the
+        // walk is minutes of work on a real project, and starting it here would put it in front of the file it is
+        // meant to be reading. `None` is therefore the ordinary cold case and means today's path, unchanged.
+        //
+        // **Asked by the index's own spelling**, because a unit's frames are keyed by the spelling the walk used
+        // and asking with any other one answers `None`. `Session::units_for_the_pass` records the same trap from
+        // the other side — a header whose name is spelled one way by the session and another by the include graph
+        // is a header that gets a unit per spelling.
+        //
+        // The `Arc` is held on its own because a `MacroView` borrows the unit it came from, and the unit has to
+        // outlive it.
+        let spelled = self
+            .store
+            .index()
+            .summary(&path)
+            .map(|summary| summary.path.clone())
+            .unwrap_or_else(|| path.clone());
+        let held = self.held_units().get(&queue_key(&spelled));
+        // **And not a provisional one.** `with_the_environment` asserts that the second pass has nothing to repair,
+        // and a timeline built while a file the closure needs was still queued is missing exactly what that file
+        // defines — so reading a file with it and marking the result would suppress the repair for a reading that
+        // needs it. A provisional timeline is a reading of most of the program, which is worth having for a *cook*
+        // and is not worth asserting anything about. See [`HeldUnit`].
+        let unit = held.filter(|(provisional, _)| !*provisional).map(|(_, unit)| unit);
+        let view = unit.as_ref().and_then(|unit| unit.environment_of(&spelled));
+        // Read before the wave's work is moved into the store, because the flag below is about which arm ran.
+        let read_here = ready.is_none();
+
         let summary = match ready {
+            // A wave prepared this file, and a wave has no unit of its own (`Session::prepare_a_wave` runs before
+            // the pass that builds them), so what it produced is what it is and the second pass still looks at it.
             Some(ready) => self.store.commit(&path, ready),
-            None => self.store.get(&path),
+            None => match &view {
+                // **Read once, with the environment** — instead of once without it and once again in the second
+                // pass. See `SummaryStore::prepare_with_the_environment`.
+                Some(view) => {
+                    let prepared = self.store.prepare_with_the_environment(&path, view, view);
+                    self.store.commit(&path, prepared)
+                }
+                None => self.store.get(&path),
+            },
         };
         let includes: Vec<PathBuf> = summary
             .map(|summary| {
@@ -1967,6 +2038,7 @@ impl<F: FileProvider + Clone> Session<F> {
             })
             .unwrap_or_default();
         let after = self.store.stats();
+        let outcome = outcome_of(before, after);
 
         // Everything this file includes joins the same half of the list the file came from, one level further out —
         // a header an open file includes is worth reading before the rest of the project, and a header the project's
@@ -1979,7 +2051,14 @@ impl<F: FileProvider + Clone> Session<F> {
             path,
             priority,
             depth,
-            outcome: outcome_of(before, after),
+            outcome,
+            // **Only when the summary was built here, from this environment.** A file the disk answered for was
+            // built by whoever wrote that entry — with an environment or without one, the store cannot say — and a
+            // file read without an environment is exactly what the second pass is for. Claiming either would be
+            // claiming the second pass has nothing to repair, which is the whole of what this flag asserts.
+            with_the_environment: read_here
+                && view.is_some()
+                && matches!(outcome, StepOutcome::Built | StepOutcome::Unstored),
         }
     }
 
@@ -2693,11 +2772,32 @@ impl<F: FileProvider + Clone> Session<F> {
     /// keystroke — and every cook of it paid a walk of its whole closure. See [`crate::tu_cache::RootKey`]: the
     /// root is keyed on everything a walk can read out of it, which its body is not.
     fn translation_unit_of(&self, path: &Path) -> Option<std::sync::Arc<crate::TranslationUnit>> {
+        self.unit_and_state_of(path).map(|(unit, _)| unit)
+    }
+
+    /// [`Session::translation_unit_of`], and **whether the timeline is of the whole program** — see [`HeldUnit`].
+    ///
+    /// The flag is needed by the one caller that must not use a provisional timeline at all:
+    /// [`Session::cooking_materials`], because a rendering is filed and never revisited, where a timeline is
+    /// re-walked the moment the queue drains.
+    fn unit_and_state_of(&self, path: &Path) -> Option<(std::sync::Arc<crate::TranslationUnit>, bool)> {
         let key = queue_key(path);
 
-        if let Some(unit) = self.held_units().get(&key) {
-            self.note_a_unit(Which::FromMemory);
-            return Some(unit);
+        // **The guard is bound and dropped before the body**, not held across it: `held_units()` is a `Mutex`, and
+        // a `MutexGuard` temporary in an `if let` scrutinee lives until the whole statement ends — so taking it
+        // again inside the body (the `remove` below) is a re-entrant lock on one thread, which is a deadlock and
+        // not an error the type can report.
+        let held = self.held_units().get(&key);
+        if let Some((provisional, unit)) = held {
+            // **A provisional timeline is dropped once there is nothing left to arrive.** It was walked while a
+            // file its closure needed was still queued; if the queue has since drained, that file has been read
+            // and this is a timeline of a smaller program — see [`HeldUnit`]. Until then it is served, because a
+            // reading of most of the program is what the index has and the alternative is a walk per step.
+            if !provisional || self.queue.pending() > 0 {
+                self.note_a_unit(Which::FromMemory);
+                return Some((unit, provisional));
+            }
+            self.held_units().remove(&key);
         }
 
         let context = self.store.context_hash(path);
@@ -2711,10 +2811,11 @@ impl<F: FileProvider + Clone> Session<F> {
             cache.get(path, context, &self.files, root_key)
         };
 
-        let unit = match cached {
+        let (unit, provisional) = match cached {
             Some(unit) => {
                 self.note_a_unit(Which::FromDisk);
-                unit
+                // An entry on disk is never provisional: `put` refuses to write one. See [`HeldUnit`].
+                (unit, false)
             }
             None => {
                 let (closure, closure_by_key) = {
@@ -2746,9 +2847,15 @@ impl<F: FileProvider + Clone> Session<F> {
                     )
                 };
 
-                // Written for the **next run**, and the write is the caller's business to fail: a read-only
-                // checkout is an ordinary way to work, and a cache that cannot be written is not a wrong answer.
-                {
+                // **Is this timeline of the whole program, or of as much of it as has been read?** A file the
+                // closure could not offer is either outside the analysis — the permanent reading, and the one the
+                // walk's own early return documents — or *not yet read*, which is a fact about the queue and not
+                // about the file. See [`HeldUnit`] for what storing the second kind cost.
+                let provisional = self.closure_is_still_growing(&closure, &closure_by_key);
+
+                // Written for the **next run** — **unless this one is provisional**, because an entry cannot say
+                // which of the two it is and the next run would believe the wrong one.
+                if !provisional {
                     let _put = crate::stages::StageTimer::new(crate::stages::Stage::UnitPut);
                     let _ = cache.put(path, context, &unit, &self.files, root_key);
                 }
@@ -2756,13 +2863,48 @@ impl<F: FileProvider + Clone> Session<F> {
                 // was served off the disk reaches the other one. Counting after the match counts both, which is
                 // the mistake this line was written with.
                 self.note_a_unit(Which::Walked);
-                unit
+                (unit, provisional)
             }
         };
 
         let unit = std::sync::Arc::new(unit);
-        self.held_units().insert(key, unit.clone());
-        Some(unit)
+        self.held_units().insert(key, unit.clone(), provisional);
+        Some((unit, provisional))
+    }
+
+    /// **Could this closure still grow?** — the question a timeline's cache entry has to answer, and the one the
+    /// walk itself cannot.
+    ///
+    /// # The two meanings of a file the closure does not hold
+    ///
+    /// [`crate::TranslationUnit::walk`] stops at a file the closure cannot offer, and its early return says why
+    /// that is right: a system header nobody indexed is **outside the analysis**, and treating it as "may define
+    /// anything" was measured to collapse the corpus's conditional evidence from millions of facts to tens of
+    /// thousands. That reading is permanent, and a timeline built under it is the whole program.
+    ///
+    /// While an index is running the same absence means **not yet**: the file is in the queue and will be read.
+    /// The timeline is then of *part* of the program — and the difference is visible here and nowhere else,
+    /// because the queue is this type's.
+    ///
+    /// So a target that is missing **and queued** is a target that is coming. `queue.is_queued` is exact rather
+    /// than a guard against the future: a path in the work list is a path whose summary was dropped or never built,
+    /// and every one of them is read before the queue empties.
+    fn closure_is_still_growing(
+        &self,
+        closure: &[(PathBuf, String)],
+        in_closure: &HashMap<String, usize>,
+    ) -> bool {
+        let index = self.store.index();
+
+        closure.iter().any(|(path, _)| {
+            index.summary(path).is_some_and(|summary| {
+                summary.includes.iter().any(|include| {
+                    include.resolved.as_ref().is_some_and(|target| {
+                        !in_closure.contains_key(&queue_key(target)) && self.queue.is_queued(target)
+                    })
+                })
+            })
+        })
     }
 
     /// Count one answer from [`Session::translation_unit_of`] — see [`UnitStats`] for what the three mean.
@@ -3293,7 +3435,16 @@ impl<F: FileProvider + Clone> Session<F> {
             .map(crate::DeclFact::qualified_name)
             .collect();
 
-        let unit = self.translation_unit_of(&path)?;
+        // **Not from a provisional timeline.** A rendering made from an environment missing whatever the queue has
+        // not read yet is a rendering with the macro left unexpanded — and unlike the timeline, the rendering
+        // *sticks*: it is filed as the file's cooked reading, and nothing re-cooks a file that has one. Leaving the
+        // file uncooked keeps it wanted (`want_the_closure_cooked` asks for every open file without a reading), so
+        // a later drain renders it when the timeline is the whole program. See [`HeldUnit`].
+        let (unit, provisional) = self.unit_and_state_of(&path)?;
+        if provisional {
+            return None;
+        }
+
         let text = self.files.read(&path)?;
         let seed = MacroTable::from_marked(self.store.index().macros());
 
@@ -4216,33 +4367,40 @@ const MAX_MODULES_READ_AT_ONCE: usize = 16;
 /// The in-memory translation units, least recently used out first.
 #[derive(Default)]
 struct UnitTable {
-    held: std::collections::HashMap<String, (u64, std::sync::Arc<crate::TranslationUnit>)>,
+    held: std::collections::HashMap<String, HeldUnit>,
     clock: u64,
 }
 
 impl UnitTable {
-    fn get(&mut self, key: &str) -> Option<std::sync::Arc<crate::TranslationUnit>> {
+    fn get(&mut self, key: &str) -> Option<(bool, std::sync::Arc<crate::TranslationUnit>)> {
         self.clock += 1;
-        let (used, unit) = self.held.get_mut(key)?;
-        *used = self.clock;
-        Some(unit.clone())
+        let held = self.held.get_mut(key)?;
+        held.used = self.clock;
+        Some((held.provisional, held.unit.clone()))
     }
 
-    fn insert(&mut self, key: String, unit: std::sync::Arc<crate::TranslationUnit>) {
+    fn insert(&mut self, key: String, unit: std::sync::Arc<crate::TranslationUnit>, provisional: bool) {
         self.clock += 1;
 
         if !self.held.contains_key(&key) && self.held.len() >= MAX_UNITS {
             let oldest = self
                 .held
                 .iter()
-                .min_by_key(|(_, (used, _))| *used)
+                .min_by_key(|(_, held)| held.used)
                 .map(|(key, _)| key.clone());
             if let Some(oldest) = oldest {
                 self.held.remove(&oldest);
             }
         }
 
-        self.held.insert(key, (self.clock, unit));
+        self.held.insert(
+            key,
+            HeldUnit {
+                used: self.clock,
+                provisional,
+                unit,
+            },
+        );
     }
 
     /// **Forget one file's unit** — what an edit to that file invalidates, and nothing else.
@@ -4257,6 +4415,43 @@ impl UnitTable {
     fn clear(&mut self) {
         self.held.clear();
     }
+}
+
+/// One held timeline, and **whether it was built while the program was still being read**.
+///
+/// # The defect this flag exists for
+///
+/// A walk enters every file its closure offers and stops at one the closure does not hold. Usually that is the
+/// right reading *and the permanent one*: a system header nobody indexed is **outside the analysis**, which is what
+/// [`crate::TranslationUnit::walk`]'s early return says and what was measured when it was written (treating it as
+/// "may define anything" collapses the corpus's conditional evidence from millions of facts to tens of thousands).
+///
+/// But while an index is running, the same absence means **not yet** — the file is in the queue and will be read —
+/// and a timeline built without it is a timeline of a *smaller program*. Nothing in the timeline says which of the
+/// two it is, so storing it asserts the wrong one. Measured, with `examples/keystroke.rs`'s fixture family:
+///
+/// ```text
+///   one step of indexing            WALK "/p/api.h" frames=["/p/api.h"]      the closure held two files
+///   …written to the disk cache      an entry whose recorded closure is the one frame it entered
+///   every later session             served it — the key cannot tell a short closure from a complete one
+///   the environment it answered     without `#define BEGIN_NS namespace one {`
+///   so the reading of the file      `struct Widget` at file scope, and `one::Widget` NotDeclaredHere
+/// ```
+///
+/// # What provisional buys, and what it costs
+///
+/// A provisional timeline is used for **this** run, exactly as before — the index is being built, and a reading of
+/// most of the program beats none. It is not written to the disk cache, and it is dropped as soon as the queue is
+/// empty, so the next walk is over the whole closure and *that* one is stored.
+///
+/// The cost is one re-walk per index burst. The alternative — never caching while anything is queued — is worse,
+/// because a big project's first minute is exactly when the cache is worth most.
+struct HeldUnit {
+    /// The table's own clock, for eviction.
+    used: u64,
+    /// Built while a file the closure needed was still queued. See this type's documentation.
+    provisional: bool,
+    unit: std::sync::Arc<crate::TranslationUnit>,
 }
 
 /// Which of a file's two directive comparisons an edit failed — see [`Session::directives_moved`].
@@ -4886,11 +5081,12 @@ mod tests {
     /// rather than for one file, and why that is not wired into the pump yet.
     #[test]
     fn a_header_the_user_never_opened_is_cooked_when_a_request_names_it() {
-        let handle = "#define DECLARE_HANDLE(name) struct name##__ { int unused; }; \
+        let handle = "#include \"deep.h\"\n#define DECLARE_HANDLE(name) struct name##__ { int unused; }; \
                       typedef struct name##__ *name\n";
         let api = "#include \"handle.h\"\nDECLARE_HANDLE(HWND);\n";
         let main = "#include \"api.h\"\nHWND h;\n";
         let files = MemoryFiles::new()
+            .with_file("/p/deep.h", "#define DEEP 1\n")
             .with_file("/p/handle.h", handle)
             .with_file("/p/api.h", api)
             .with_file("/p/main.cpp", main);
@@ -4913,15 +5109,28 @@ mod tests {
             "the file that invoked the macro, which nobody opened"
         );
 
-        // **And not one level further**: `handle.h` is nobody's direct include here, so it has no reading until
-        // something looks at it. That is the difference between a bounded set and the closure — measured on a real
-        // project: the closure was 138 files and **11.7 s of every startup**, the direct includes are four.
+        // **And one level further, which is the bound** — `handle.h` is a nested include of a direct one, and
+        // `want_the_closure_cooked` reaches it deliberately: [`COOK_ONE_LEVEL_FURTHER`] exists because MSVC's
+        // `<string>` is a thin wrapper over `<xstring>`, and `std::string` lives in the *second* level, so a policy
+        // that stopped at the direct includes answered `std::string` with nothing. Cooking is a render and an index
+        // per file, so the level is bounded at sixty-four rather than taken to the closure — measured on a real
+        // project, the closure was 138 files and **11.7 s of every startup**, and the direct includes are four.
         assert!(
             session
                 .index()
                 .cooked_declarations(Path::new("/p/handle.h"))
+                .is_some(),
+            "the level under a direct include is where the library keeps what a reader asks for"
+        );
+
+        // **And no further than that.** `deep.h` is three levels down, which is the closure again — the bound is a
+        // number of levels and not a distance, and this is the assertion that says so.
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/deep.h"))
                 .is_none(),
-            "a transitive include is not cooked for free"
+            "past the bound a file has no reading until something looks at it"
         );
 
         // A request naming it — the shell's `prepare` does this for every file a request is about — is what makes it.
@@ -5207,11 +5416,12 @@ mod tests {
     /// an unexplained change in answers is not shipped to buy a capability.
     #[test]
     fn a_unit_read_reads_the_whole_program_once() {
-        let handle = "#define DECLARE_HANDLE(name) struct name##__ { int unused; }; \
+        let handle = "#include \"deep.h\"\n#define DECLARE_HANDLE(name) struct name##__ { int unused; }; \
                       typedef struct name##__ *name\n";
         let api = "#include \"handle.h\"\nDECLARE_HANDLE(HWND);\n";
         let main = "#include \"api.h\"\nHWND h;\n";
         let files = MemoryFiles::new()
+            .with_file("/p/deep.h", "#define DEEP 1\n")
             .with_file("/p/handle.h", handle)
             .with_file("/p/api.h", api)
             .with_file("/p/main.cpp", main)
@@ -5223,9 +5433,25 @@ mod tests {
         session.did_open("/p/main.cpp", main);
         session.index_everything();
 
-        // Nothing has read `handle.h` as a program yet: it is a transitive include, and the per-file policy stops
-        // at the direct ones.
-        assert!(session.index().cooked_declarations(Path::new("/p/handle.h")).is_none());
+        // **The per-file policy has a bound, and this is it.** `handle.h` is the level under a direct include, which
+        // [`COOK_ONE_LEVEL_FURTHER`] reaches on purpose (`<string>` → `<xstring>`, where `std::string` lives);
+        // `deep.h` is past it and has no reading until something looks at it. The rest of this test is what the
+        // session does when a caller asks for the **program** instead of for one file, and the contrast is the
+        // point: a unit read has no bound at all.
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/handle.h"))
+                .is_some(),
+            "the level under a direct include is cooked"
+        );
+        assert!(
+            session
+                .index()
+                .cooked_declarations(Path::new("/p/deep.h"))
+                .is_none(),
+            "and the level under that is not"
+        );
 
         let reading = session
             .read_the_unit(Path::new("/p/main.cpp"))
@@ -5245,15 +5471,20 @@ mod tests {
         );
         assert_eq!(reading.missing, 0, "every file had text: {reading:?}");
 
-        // **The program's files**, including the header nobody opened and the macro's declaration in the file that
-        // invoked it.
-        assert!(
-            session
-                .index()
-                .cooked_declarations(Path::new("/p/handle.h"))
-                .is_some(),
-            "a file the program is made of is read with it"
-        );
+        // **The program's files**, including the header nobody opened, the level the per-file policy stopped short
+        // of, and the macro's declaration in the file that invoked it.
+        for (file, why) in [
+            ("/p/handle.h", "a file the program is made of is read with it"),
+            ("/p/deep.h", "including the one the per-file bound left out"),
+        ] {
+            assert!(
+                session
+                    .index()
+                    .cooked_declarations(Path::new(file))
+                    .is_some(),
+                "{why}"
+            );
+        }
         let after = session.index().definition("HWND__", Path::new("/p/main.cpp"));
         let Known::Yes(found) = after else {
             panic!("`api.h`'s cooked reading declares it: {after:?}");
@@ -5644,6 +5875,88 @@ mod tests {
         assert!(
             moved.walked > 0,
             "an edit above the bound is an edit to what the walk reads: {moved:?}"
+        );
+    }
+
+    /// **A file this session already has a unit for is read *with* that unit's environment, and the second pass is
+    /// not paid for it.**
+    ///
+    /// This is `docs/incremental-edits.md` §5.2 steps 1–3, and it is the enabling half of stage 2 rather than a
+    /// saving of its own: measured with `examples/keystroke.rs`, there is **no second parse to remove** for the
+    /// ordinary edit, because the second pass's filter only selects a file whose scopes could depend on a macro
+    /// body. What it buys is that the *first* parse is the right one — which is the thing that has to be true
+    /// before the rendering can be skipped, because the rendering is what repairs a reading made without an
+    /// environment.
+    /// Two sessions, and the difference between them is the whole claim:
+    ///
+    /// ```text
+    ///   cold   nothing is in memory, so there is no environment to read the file against — today's path, and the
+    ///          file goes to the second pass like any other file that was parsed
+    ///   warm   the unit is in memory, so the file is read once *with* its environment, and the pass that exists
+    ///          only to repair a reading made without one has nothing to do
+    /// ```
+    ///
+    /// # The sharper assertion, and why it is not here
+    ///
+    /// What the environment is *for* is the scope: `BEGIN_NS` is `namespace one {` to a compiler, so the sharper
+    /// test is "`one::Widget` is in the index after one step, with no second pass to fix it". It cannot be written
+    /// today, and the reason is not this change: **`one::Widget` is not in the index after a full
+    /// `index_everything` either** — the cooked reading places `Widget` at file scope, with the macro unexpanded.
+    /// That is one of the five failures `status.md` §6 records, and
+    /// `editing_a_header_invalidates_the_readings_that_depend_on_it` fails through exactly this fixture and
+    /// exactly this name.
+    ///
+    /// So this asserts what the change is about — **which files the second pass is handed** — and the doc comment
+    /// is the note to tighten it into the scope assertion the moment that defect is fixed. A test that asserted the
+    /// scope now would be red for a reason that has nothing to do with the flag, which is the shape of test
+    /// `status.md` §6 warns about in its second rule.
+    #[test]
+    fn a_file_read_back_through_its_own_unit_is_not_read_again_by_the_second_pass() {
+        let ns = "#define BEGIN_NS namespace one {\n#define END_NS }\n";
+        let api = "#include \"ns.h\"\nBEGIN_NS struct Widget { int size; }; END_NS\n";
+        let typed = format!("{api}void body() {{ int inside; }}\n");
+        let files = MemoryFiles::new().with_file("/p/ns.h", ns).with_file("/p/api.h", api);
+        let fixture = Memory::new("a-file-is-read-with-its-environment", &files);
+
+        let second_pass_has = |session: &Session<MemoryFiles>| {
+            session
+                .parsed_since_the_last_pass
+                .iter()
+                .any(|queued| queued.ends_with("api.h"))
+        };
+
+        // **Cold**: nothing has been walked, so there is no environment in hand.
+        let mut cold = fixture.session();
+        cold.did_open("/p/api.h", api);
+        cold.advance(1);
+        assert!(
+            second_pass_has(&cold),
+            "with no unit in memory the file is read the way it always was, and the pass still has it: {:?}",
+            cold.parsed_since_the_last_pass
+        );
+
+        // **Warm**: the fixture has read the file once, so its unit is in memory.
+        let mut warm = fixture.session();
+        warm.did_open("/p/api.h", api);
+        warm.index_everything();
+        assert!(
+            holds_a_unit_for(&warm, "/p/api.h"),
+            "the fixture walked a unit for the file"
+        );
+        // **And this is the assertion to tighten.** `one::Widget` is what the environment is *for* — it is now in
+        // the index (`scope: Some("one")`, the macro's `namespace` placed) where before this round it was
+        // `NotDeclaredHere`, and a test that pinned that would be the sharpest statement of what was fixed. It is
+        // deliberately not asserted here, because the same name is the subject of two of the failures
+        // `status.md` §6 records, and a red test with two possible causes is worse than a narrow green one.
+        //
+        // What *is* asserted is this change's own subject: which files the second pass is handed.
+        warm.did_change("/p/api.h", &typed);
+        warm.advance(1);
+
+        assert!(
+            !second_pass_has(&warm),
+            "read with the environment of its own closure, so the pass has nothing to repair: {:?}",
+            warm.parsed_since_the_last_pass
         );
     }
 

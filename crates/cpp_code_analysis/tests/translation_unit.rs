@@ -559,11 +559,23 @@ fn the_unit_cooks_as_one_stream_in_include_order() {
         tree.get_errors(),
         stitched.text
     );
+    // **The expansion, asserted as a fact about names rather than about spaces.** This used to look for `"= 4 ;"`,
+    // which is a claim about where the renderer puts a semicolon — the stream spells `int main_use = 4;`, so the
+    // test was red while `API` had in fact expanded two files away, exactly as its own message says. Naming both
+    // halves is strictly more than the spacing check was: the value is there **and** neither macro's name survived
+    // into the program, which is what an unexpanded invocation would look like.
     assert!(
-        stitched.text.contains("= 4 ;"),
+        stitched.text.contains("= 4"),
         "`API` expanded to `WIDTH`'s value, which is defined two files away: {}",
         stitched.text
     );
+    for name in ["API", "WIDTH"] {
+        assert!(
+            !stitched.text.contains(name),
+            "`{name}` is gone from the stream, replaced by what it stands for: {}",
+            stitched.text
+        );
+    }
 
     // **The map says which file a token stands in**, and where in that file to act: `Api` is api.h's text…
     let api = Path::new("/p/api.h");
@@ -575,9 +587,14 @@ fn the_unit_cooks_as_one_stream_in_include_order() {
 
     // …and the `4`, which was written in `config.h` and pasted by a macro `api.h` defines, **stands in
     // main.cpp**: that is where the reader can act on it, and the map points at the call site.
+    //
+    // **Found by the digit, not by the spaces around it.** This asked for `" 4 "`, which is a claim about the
+    // renderer's whitespace — the stream spells `int main_use = 4;` — so it was red while the expansion it is named
+    // after was right there. The fixture has no other `4`, so the digit itself is the unambiguous anchor and the
+    // spacing stops being part of the contract.
     let main = Path::new("/p/main.cpp");
     let main_text = unit.sources.get(main).expect("read");
-    let four = stitched.text.find(" 4 ").expect("the expansion is in the stream");
+    let four = stitched.text.find('4').expect("the expansion is in the stream");
     let (file, written) = stitched.written_at(four).expect("a token is there");
     assert_eq!(
         stitched.file_of(file),
@@ -1022,17 +1039,25 @@ fn a_definition_says_which_file_it_was_written_in() {
         .iter()
         .find(|token| token.text() == "4")
         .expect("the expansion is in the stream");
-    let at = rendered.text.find(" 4 ").expect("the expansion is in the rendering");
+    // **Anchored on the digit rather than on the spaces around it.** This used to search for `" 4 "`, which is a
+    // claim about the renderer's whitespace and not about the expansion: the stream spells `int v = 4;`, so the
+    // assertion was red while the thing it is named after — "the expansion is in the rendering" — was true, and the
+    // token above had already been found. Three tests in this file broke on exactly that, which is what a formatting
+    // assertion does the first time a renderer's spacing moves. This fixture has no other `4`.
+    let at = rendered
+        .text
+        .find('4')
+        .expect("the expansion is in the rendering");
 
     // **Where it was written is not this file**, and the map says so rather than handing over an offset that
     // belongs to a reconstruction.
     assert_eq!(
-        rendered.written_at(at + 1),
+        rendered.written_at(at),
         None,
         "the spelling of `4` is in config.h, not in main.cpp"
     );
     // **Where to report it is this file**: the invocation the reader can see.
-    let reported = rendered.reported_at(at + 1).expect("a place to report");
+    let reported = rendered.reported_at(at).expect("a place to report");
     assert_eq!(
         &text[reported.start_offset..reported.end_offset()],
         "API",
@@ -1083,7 +1108,10 @@ fn a_definition_says_which_file_it_was_written_in() {
         .iter()
         .find(|token| token.text() == "7")
         .expect("the expansion");
-    let at = rendered.text.find(" 7 ").expect("in the rendering") + 1;
+    let at = rendered
+        .text
+        .find('7')
+        .expect("in the rendering");
     let written = rendered.written_at(at).expect("written in this file");
     assert_eq!(
         &text[written.start_offset..written.end_offset()],

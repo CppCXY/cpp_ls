@@ -148,6 +148,9 @@ impl<'s, F: FileProvider> Worklist<'s, F> {
             priority,
             depth,
             outcome,
+            // A `Worklist` has no session and no unit, so it can never have an environment in hand: see
+            // [`Step::with_the_environment`].
+            with_the_environment: false,
         })
     }
 
@@ -193,6 +196,18 @@ pub struct Step {
     /// includes, and so on.
     pub depth: usize,
     pub outcome: StepOutcome,
+    /// **Was this file read with the macro environment of its own closure?** — see
+    /// [`crate::index::FileIndexer::with_macro_bodies`], which is what the flag is about.
+    ///
+    /// A summary built without one is a summary whose scopes may be wrong: `_STD_BEGIN` is `namespace std {` to a
+    /// compiler and an ordinary identifier to a reader of one file. The second pass
+    /// ([`crate::SummaryStore::prepare_the_re_read`]) exists to repair exactly those files, and this is how it
+    /// knows which ones not to bother with: **a file that was read with its environment has nothing the second
+    /// pass could change.**
+    ///
+    /// False for every step a [`Worklist`] takes, because a worklist has no session and therefore no unit to read
+    /// an environment out of.
+    pub with_the_environment: bool,
 }
 
 /// What one step did with its file.
