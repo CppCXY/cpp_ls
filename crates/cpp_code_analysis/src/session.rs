@@ -1442,7 +1442,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // It is `&self` work, so it is allowed here — what it is not allowed to be is *inside the writer* on the
         // pump's path, which is what [`Session::prepare_a_wave`] exists for.
         let units = self.units_for_the_pass(&done.iter().map(|step| step.path.clone()).collect::<Vec<_>>());
-        self.finish_a_slice(&done, Vec::new());
+        self.finish_a_slice(&done, units);
 
         done
     }
@@ -1479,9 +1479,29 @@ impl<F: FileProvider + Clone> Session<F> {
             };
         }
 
-        // **The units, for the files this wave is going to parse** — see [`Session::PreparedWave`]. Built here
-        // rather than in the committing half, because building one is the most expensive thing a drain does.
-        let units = self.units_for_the_pass(&wave);
+        // **The units, rooted at the files the pass after this one will actually re-read** — which is the slice
+        // [`Session::finish_a_slice`] is about to drain, **not** the wave about to be parsed.
+        //
+        // The first version of this asked for units over `wave`, and it measured **worse** — 2636 ms against
+        // 1105 ms — for a reason that is worth writing down, because it is a property of what a unit *is*: a
+        // translation unit is a **timeline over a whole include closure**, so rooting one at thirty-two files
+        // produces a bigger timeline than rooting one at four, and `definitions()` on it costs more. The cache is
+        // keyed by the content of the closure as well, so the two are separate entries and the walk happens twice.
+        //
+        // What the second pass costs is set by the slice it drains, and the reason is in `re_read_what_a_body_changes`:
+        // it scans every `#define` in the project and narrows the scan to the names the re-read files' **texts**
+        // mention. So the slice chooses how many names are in play, and the measurement agrees exactly — 1 file is
+        // 150 ms, 8 is 1105 ms, and a wave of 32 is 2636 ms.
+        //
+        // `parsed_since_the_last_pass` is a field, so the slice the commit will drain is known *here*: take the same
+        // prefix it will take, and the units cover precisely the files they are used for.
+        let slice: Vec<PathBuf> = self
+            .parsed_since_the_last_pass
+            .iter()
+            .take(RE_READ_SLICE)
+            .cloned()
+            .collect();
+        let units = self.units_for_the_pass(&slice);
 
         let room = (steps * 4).saturating_sub(self.prefetched.len()).max(wave.len());
         let queue = &self.queue;
@@ -1502,7 +1522,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// each include it names. Everything the parse needed was paid for under the read lock, and so was the unit walk
     /// that the pass after this one needs.
     pub fn commit_a_wave(&mut self, wave: PreparedWave, steps: usize) -> Vec<Step> {
-        let PreparedWave { prepared, .. } = wave;
+        let PreparedWave { prepared, units } = wave;
         for (path, made) in prepared {
             self.prefetched.insert(queue_key(&path), made);
         }
@@ -1520,7 +1540,7 @@ impl<F: FileProvider + Clone> Session<F> {
             self.prefetched.clear();
         }
 
-        self.finish_a_slice(&done, Vec::new());
+        self.finish_a_slice(&done, units);
 
         done
     }
@@ -1568,17 +1588,12 @@ impl<F: FileProvider + Clone> Session<F> {
             let take = self.parsed_since_the_last_pass.len().min(RE_READ_SLICE);
             let parsed: Vec<PathBuf> = self.parsed_since_the_last_pass.drain(..take).collect();
 
-            // **The timelines, built here from the drained slice** — and *not* from the units the preparing half
-            // built, which was tried and measured **worse**: those cover the whole wave (thirty-two files), so the
-            // pass below re-reads thirty-two files' worth of environments instead of four — the write lock went from
-            // 1105 ms to **2636 ms**. A unit is a timeline over an include closure, so a unit rooted at a bigger set
-            // is a bigger timeline, and this pass is proportional to what the timeline covers.
-            //
-            // The lesson is that a unit is not a free-floating cache entry: **which files it is rooted at is part of
-            // what it costs.** The field on `PreparedWave` stays, because the capability is real and a caller that
-            // wants the walk outside the writer has it — this caller does not, because the set it would walk is the
-            // wrong one.
-            let units = self.units_for_the_pass(&parsed);
+            // **The timelines came from the preparing half, rooted at exactly this slice.** They used to be built
+            // here, and moving them out is the change that took a **1003 ms** unit walk out of the writer — the
+            // largest single thing a drain did. What made the first attempt at that measure *worse* (2636 ms against
+            // 1105) was rooting them at the wave instead of at this slice: a unit is a timeline over a whole include
+            // closure, so a bigger root set is a bigger timeline and the pass is proportional to it. Rooted here, the
+            // walk happens once, at the size it is used at, and under the read lock.
             self.store.re_read_where_a_body_decides(&parsed, &units);
         }
 
