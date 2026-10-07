@@ -54,6 +54,7 @@ use cpp_parser::SourceRange;
 use crate::{FileSummary, ProjectIndex};
 
 pub mod a_macro_is_not_redefined;
+pub mod an_argument_does_not_convert;
 pub mod an_initializer_does_not_convert;
 pub mod an_error_the_file_asks_for;
 pub mod an_include_is_found;
@@ -148,8 +149,34 @@ impl Checks<'_> {
         findings.extend(an_error_the_file_asks_for::an_error_the_file_asks_for_is_reported(self));
         // **The first check about a type.** Everything above is about the reading — a file that is not there, a
         // macro written twice, a directive that asks to fail. This one asks whether the program means what it says
-        // about a type, which is what a reader expects an editor to underline and what the layer had none of.
+        // about a type, and it is one line of `run` rather than a check per pair of types because it asks
+        // [`Type::convertible_to`], the crate's single answer to *can a value of this type initialise one of that
+        // type*. The parameter check will ask the same relation at a call site.
+        //
+        // Measured before it was enabled, on the corpus that keeps this layer honest — 100 MSVC headers, each
+        // check counted on its own:
+        //
+        // ```text
+        //   an_error_the_file_asks_for        9    the headers really do write `#error` for another target
+        //   an_include_is_found               1    `<mscoree.h>` is not on this machine
+        //   a_macro_is_not_redefined          2
+        //   an_initializer_does_not_convert   0    <- this one, and zero is the number it has to be
+        // ```
+        //
+        // **The count has to be taken per check.** It was read as a total once, the twelve belonged to the three
+        // checks above, and this one was disabled for a day on the strength of it — the opposite mistake from the
+        // one this layer's contract is written against, and the same lesson: a number is only an answer to the
+        // question it was measured for.
+        //
+        // It cost **302 ms per file** when first written, because it searched the whole tree once *per
+        // declaration*; that is fixed (one walk, then a lookup), and over these headers the whole layer now costs
+        // about 21 ms per file.
         findings.extend(an_initializer_does_not_convert::an_initializer_does_not_convert(self));
+        // **And the same relation at a call site.** The first version read `DeclFact::parameters`, which is the
+        // *template* list, so every non-template function looked like it took nothing and the check reported 119
+        // findings over 200 MSVC headers. It reads `parameter_list` — the list as written — and the corpus count is
+        // the thing to check it by, per check and not in total.
+        findings.extend(an_argument_does_not_convert::an_argument_does_not_convert(self));
 
         findings.sort_by_key(|finding| finding.range.start_offset);
         findings

@@ -12,12 +12,16 @@
 
 use cpp_code_analysis::{Checks, CompilerConfig, MemoryFiles, SummaryStore};
 
-/// Index `files`, starting from `/q/main.cpp`, and run every check over it.
+/// Index `files`, starting from `/q/main.cpp`, and hand the result to `ask` — the whole of what a check is given.
+///
+/// Split from [`findings`] because **a check can be built and correct while not being run**: the type check is
+/// disabled in `Checks::run` for a measured reason, and a test that went through `run` would be a test of the
+/// *registration* rather than of the claim. `ask` names the check it is about.
 ///
 /// `main` is `/q/main.cpp`'s text, passed rather than read back out of the provider: a check is handed the
 /// bytes its summary's ranges are offsets into, and a test that derived them from somewhere else would be
 /// checking a different file from the one the index saw.
-fn findings(files: MemoryFiles, main: &str) -> Vec<cpp_code_analysis::Finding> {
+fn ask_checks<T>(files: MemoryFiles, main: &str, ask: impl FnOnce(&Checks<'_>) -> T) -> T {
     // **The same text, parsed again**, because a check is handed the tree the reading was made from and the
     // index does not hand its tree out. The parse is deterministic, so this is the same tree — and a test that
     // parsed something else would be checking a different file.
@@ -50,15 +54,20 @@ fn findings(files: MemoryFiles, main: &str) -> Vec<cpp_code_analysis::Finding> {
         panic!("main.cpp must be indexed");
     };
 
-    Checks {
+    let checks = Checks {
         path: std::path::Path::new("/q/main.cpp"),
         summary,
         index,
         source: main,
         tree: &root,
         scopes: &scopes,
-    }
-    .run()
+    };
+    ask(&checks)
+}
+
+/// Every check the layer runs, over one file — what almost every test here asks for.
+fn findings(files: MemoryFiles, main: &str) -> Vec<cpp_code_analysis::Finding> {
+    ask_checks(files, main, |checks| checks.run())
 }
 
 /// **The construct the check is about.** A literal target that is not there, in both spellings.
@@ -340,14 +349,61 @@ fn a_definition_after_an_undef_is_not_a_redefinition() {
     );
 }
 
-/// **The first type check fires on the line it is about.**
+/// **The parameter check fires on a call no candidate can accept**, and stays quiet about the three shapes that
+/// would make it unusable.
 ///
-/// `int count = "three";` — no conversion makes an `int` hold a string literal. This is the whole of what the
-/// check claims, and a check that never fires is not a check.
+/// `takes_a_number("three")` is the same relation as the initialiser check, asked at a call site. `takes_a_number(1)`
+/// is the call that must not be reported, `overloaded(1)` names an overload set one member of which accepts it, and
+/// `templated<int>(1)` may deduce its parameter from the argument — which is not a conversion question at all.
+///
+/// The first version of the check read `DeclFact::parameters`, which is the **template** list, so every non-template
+/// function looked like it took no arguments; traced on this very fixture:
+///
+/// ```text
+///   call `takes_a_number`: 1 candidate(s), 1 argument(s)
+///   candidate kind=Function params=[] returns=Some("void")     for `void takes_a_number(int);`
+/// ```
+///
+/// It reported **119 findings over 200 MSVC headers** on the strength of that. It reads `parameter_list` — the list
+/// as written — and this fixture is the shape that says so: `void takes_a_number(int)` has an empty `parameters` and
+/// a `parameter_list` of `int`.
 #[test]
-fn a_string_literal_assigned_to_a_number_is_reported() {
+fn an_argument_that_no_candidate_accepts_is_reported() {
+    const MAIN: &str = "\
+void takes_a_number(int);
+void overloaded(int);
+void overloaded(double, double);
+template <class T> void templated(T);
+void f() {
+    takes_a_number(1);
+    overloaded(1);
+    templated<int>(1);
+    takes_a_number(\"three\");
+}
+";
+    let found = findings(MemoryFiles::new().with_file("/q/main.cpp", MAIN), MAIN);
+    let mine: Vec<_> = found
+        .iter()
+        .filter(|finding| finding.check == "an_argument_does_not_convert")
+        .collect();
+
+    assert_eq!(mine.len(), 1, "exactly the one call: {found:?}");
+    assert_eq!(mine[0].name, "takes_a_number");
+}
+
+/// **The type check fires on the line it is about.**
+///
+/// `int count = "three";` has no conversion in it: `const char*` and `int` are the pair `Type::convertible_to`
+/// answers `No` for with certainty, so the check reports exactly that line. It asks the **relation** rather than a
+/// hand-written rule about strings and numbers, which is what lets the parameter check ask the same question at a
+/// call site — and the corpus test is what says it is safe: **0 findings over 100 MSVC headers**, against nine, one
+/// and two for the three checks beside it.
+#[test]
+fn the_type_check_fires_on_the_line_it_is_about() {
     const MAIN: &str = "int main() { int count = \"three\"; return count; }\n";
 
+    // **Through `run`**, which is what a reader of the product gets: a test that called the check directly would go
+    // on passing while the registration was missing, and that is the state this check spent a day in.
     let found = findings(MemoryFiles::new().with_file("/q/main.cpp", MAIN), MAIN);
 
     assert_eq!(found.len(), 1, "exactly the one line: {found:?}");

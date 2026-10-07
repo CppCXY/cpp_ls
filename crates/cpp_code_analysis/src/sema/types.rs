@@ -260,12 +260,17 @@ impl Type {
         use crate::sema::symbol::Known;
 
         let from = self.decay();
-        let to = target.decay();
+        // **The target is not decayed**, and that is the whole of a measured false positive: MSVC's
+        // `__msvc_formatter.hpp` declares `_CharT _Fill[]`, whose type is an **array** of a template parameter, and
+        // decaying the target turned it into `_CharT*` — so `int` met "a pointer" and the relation answered `No` for
+        // a pair it cannot decide at all. Array-to-pointer is a conversion the *source* undergoes; the destination
+        // of an initialisation keeps whatever shape it was written with.
+        let to = target;
 
         // **Identical is always convertible**, before anything else is asked: a spellings-equal pair needs no rule,
         // and this is what makes `int` to `int` and a pointer to its own type answer `Yes` rather than falling into
         // the "different pointee" case below.
-        if from == to {
+        if &from == to {
             return Known::Yes(());
         }
 
@@ -276,7 +281,7 @@ impl Type {
             return Known::No;
         }
 
-        match (&from, &to) {
+        match (&from, to) {
             // The standard conversions between arithmetic types, which are unconditional.
             (a, b) if a.is_arithmetic() && b.is_arithmetic() => Known::Yes(()),
 

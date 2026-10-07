@@ -2139,7 +2139,15 @@ pub(crate) fn type_of_expression(
             _ => None,
         };
         if let Some(spelled) = literal {
-            return Known::Yes((Type::named(spelled), path.to_path_buf()));
+            // **Parsed, not named.** `Type::named("int")` is a type whose *name* is `int` — a class as far as every
+            // later question is concerned — and the same for `const char*`. Measured: a string literal came back as
+            // `Named { name: "const char*" }`, so `has an arithmetic type` was false for `int` and the conversion
+            // relation answered `Unknown` for `int count = "three";`, which is the one pair it is certain about.
+            //
+            // `parse_type_spelling` is the crate's own reader for a written type: it knows the builtins, the
+            // qualifiers and the declarators, and it is the same function a declaration's own spelling goes through
+            // — so a literal's type and a declared type are built by one implementation.
+            return Known::Yes((crate::sema::types::parse_type_spelling(spelled), path.to_path_buf()));
         }
     }
 
