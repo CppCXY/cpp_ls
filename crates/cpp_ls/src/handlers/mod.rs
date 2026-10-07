@@ -85,7 +85,7 @@ pub async fn read_the_modules(context: &ServerContextSnapshot, path: &std::path:
 
     context
         .analysis()
-        .update_session(move |session| {
+        .update_session("a request caught the index up", move |session| {
             if !caught_up {
                 // The caller's summary may still be an edit behind — `catch_up` is what makes the *reading* current,
                 // and an import that is not in the reading cannot be read in. One parse of one file, and nothing at

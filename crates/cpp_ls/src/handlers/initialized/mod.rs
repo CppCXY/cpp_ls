@@ -182,7 +182,7 @@ async fn open_session(context: &ServerContextSnapshot) -> Option<PathBuf> {
         let count = open_files.len();
         context
             .analysis()
-            .update_session(move |session| {
+            .update_session("initialized: the files the client had open", move |session| {
                 for (uri, text) in &open_files {
                     if let Some(path) = uri_to_file_path(uri) {
                         session.did_open(path, text);
@@ -328,16 +328,20 @@ async fn index_in_background(context: ServerContextSnapshot) {
             // up to **1527 ms**. A completion arriving anywhere in those windows waited for all of it, which is the
             // row of latencies pinned to the two-second settle budget. Bounding the slice only moved the wait around
             // (measured: 76–356 ms slices, and the list came back **empty for eight requests** instead of five).
+            // **The whole of the expensive half, under one read lock.** Two things that used to be in the writer are
+            // here: the parse of the wave's files, and the **unit walk** the pass after it needs — measured holding
+            // the writer for **1003 ms** on the first slice after a cold start, which was the largest single thing a
+            // drain did. Neither changes anything, so neither belongs under the lock a query waits for.
             let prepared = context
                 .analysis()
                 .with_snapshot(|session| session.prepare_a_wave(INDEX_SLICE))
                 .unwrap_or_default();
-            let prepared_count = prepared.len();
+            let prepared_count = prepared.prepared.len();
 
             let mut cooking = Vec::new();
             let Some(pending) = context
                 .analysis()
-                .update_session(|session| {
+                .update_session("index slice", |session| {
                     // **Timed**, because the count is only a proxy for the one number a caller can feel: how long the
                     // write lock is held. The parse is no longer in this window — it was paid for under the read lock
                     // above — so what is left is the insert and the queueing, and this line is what says whether that
@@ -386,7 +390,7 @@ async fn index_in_background(context: ServerContextSnapshot) {
             if !rendered_cooks.is_empty() {
                 context
                     .analysis()
-                    .update_session(|session| {
+                    .update_session("index slice", |session| {
                         session.commit_them(rendered_cooks);
                     })
                     .await;
@@ -414,7 +418,14 @@ async fn index_in_background(context: ServerContextSnapshot) {
                     ProgressTask::LoadWorkspace,
                     Some("Workspace loaded".to_string()),
                 );
-                log::info!("the workspace is indexed");
+                // **The one number that bounds how long a request can have been made to wait.** A query and an update
+                // take the same lock, so this is the worst case *by construction*: if a completion felt slow and this
+                // says 12 ms, the wait was inside that completion's own work rather than in the queue behind the
+                // indexer — and if it says 701, the queue is the whole story and no amount of query tuning helps.
+                log::info!(
+                    "the workspace is indexed — the longest an update held the analysis was {} ms",
+                    context.analysis().worst_write_hold()
+                );
 
                 publish_workspace_diagnostics(&context).await;
             } else if was_pending {

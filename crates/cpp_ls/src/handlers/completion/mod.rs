@@ -92,7 +92,7 @@ pub async fn on_completion(
         let read = path.clone();
         context
             .analysis()
-            .update_session(move |session| session.catch_up(&read))
+            .update_session("a completion caught up with its file", move |session| session.catch_up(&read))
             .await;
 
         // …and the module interface units this file imports, which the index cannot name a file for until something

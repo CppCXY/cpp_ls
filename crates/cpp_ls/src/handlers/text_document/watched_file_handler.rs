@@ -82,7 +82,7 @@ pub async fn process_did_change_watched_files(
     if !changes.is_empty() {
         let response = context
             .analysis()
-            .update_session(move |session| session.changed(changes))
+            .update_session("a watched file changed", move |session| session.changed(changes))
             .await;
 
         let Some(response) = response else {

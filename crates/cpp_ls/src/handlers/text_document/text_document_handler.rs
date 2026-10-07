@@ -148,7 +148,7 @@ pub async fn process_did_close_document(
     // to the *back* of the queue, because the user has stopped looking at it (`Session::did_close`).
     context
         .analysis()
-        .update_session(|session| session.did_close(&path))
+        .update_session("didClose", |session| session.did_close(&path))
         .await;
     context.analysis().wake();
 
@@ -172,7 +172,7 @@ async fn apply_buffer(context: &ServerContextSnapshot, path: PathBuf, text: Stri
     let analysis: &AnalysisState = context.analysis();
     let for_session = path.clone();
     let applied = analysis
-        .update_session(move |session| session.did_open(&for_session, &text))
+        .update_session("didOpen", move |session| session.did_open(&for_session, &text))
         .await;
 
     if applied.is_none() {

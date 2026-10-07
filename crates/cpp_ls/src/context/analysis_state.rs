@@ -40,9 +40,22 @@ pub struct AnalysisState {
     /// running rather than interleaving with them. That is the whole reason it is separate from `inner`'s own lock:
     /// the write lock is taken *before* the blocking hop, which is what keeps a notification from being overtaken.
     gate: Arc<tokio::sync::RwLock<()>>,
+    /// **The longest an update has held `inner`**, in milliseconds — see [`AnalysisState::update`].
+    worst_write_hold: Arc<std::sync::atomic::AtomicU64>,
     /// "The queue has work in it" — how an edit reaches the task that reads.
     work: Arc<Notify>,
 }
+
+/// **How long an update may hold the analysis before it is a defect.**
+///
+/// A query and an update take the same lock, so this is a bound on how long any request can be made to wait by the
+/// background: not on average, not usually — **by construction**, because there is no other lock on the path and a
+/// request that is slow for another reason is slow inside its own work.
+///
+/// The number is chosen from what the work is: an update **inserts what a step produced**, and inserting is a map
+/// write per declaration. Measured, the insert half of an index slice is 8–19 ms. Fifty leaves room for a slice
+/// that has to grow a table and still fails a closure that parses a file, walks a unit, or runs a second pass.
+pub const WRITE_BUDGET: Duration = Duration::from_millis(50);
 
 impl AnalysisState {
     pub fn new() -> Self {
@@ -53,6 +66,7 @@ impl AnalysisState {
             files,
             gate: Arc::new(tokio::sync::RwLock::new(())),
             blocking_permits: Arc::new(Semaphore::new(Self::analysis_parallelism())),
+            worst_write_hold: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             work: Arc::new(Notify::new()),
         }
     }
@@ -74,7 +88,7 @@ impl AnalysisState {
     /// is the trade this exists to avoid.)
     pub async fn prepare(&self, path: &std::path::Path) -> bool {
         let path = path.to_path_buf();
-        self.update_session(move |session| {
+        self.update_session("prepare a file a request named", move |session| {
             let loaded = session.load(&path).is_some();
             // **A file a request is about gets its cooked reading** — and this is the only place that knows which
             // file a request named. Not "cook it now": the query below answers from the reading that exists (its own
@@ -210,7 +224,7 @@ impl AnalysisState {
     /// (`Session::did_open`) — see `handlers::initialized`.
     pub async fn open(&self, root: PathBuf, filter: WatchFilter, config_file: Option<PathBuf>) {
         let files = self.files.clone();
-        self.update(move |slot| {
+        self.update("open the session", move |slot| {
             *slot = Some(Session::open_with_config_file(
                 root,
                 files,
@@ -265,11 +279,13 @@ impl AnalysisState {
     ///
     /// The notification worker's entry point: `didOpen`, `didChange`, `didSave`, `didClose` and the client's file
     /// events all reach the session through here, and all of them need it to exist.
+    /// `label` names the caller for [`AnalysisState::update`]'s budget warning — see the note there.
     pub async fn update_session<R>(
         &self,
+        label: &'static str,
         f: impl FnOnce(&mut Session<DiskFiles>) -> R,
     ) -> Option<R> {
-        self.update(|slot| slot.as_mut().map(f)).await
+        self.update(label, |slot| slot.as_mut().map(f)).await
     }
 
     /// Change the analysis — including opening and closing the session itself.
@@ -277,17 +293,60 @@ impl AnalysisState {
     /// The closure sees the slot rather than a session because this is the one path that can *create* one
     /// ([`AnalysisState::open`] is written in terms of it); an update that has a session to work on wants
     /// [`AnalysisState::update_session`].
-    pub async fn update<R>(&self, f: impl FnOnce(&mut Option<Session<DiskFiles>>) -> R) -> R {
+    ///
+    /// # Which caller was slow, and why it is a label rather than `#[track_caller]`
+    ///
+    /// `#[track_caller]` is **a no-op on an `async fn`** — rustc says so in a warning, and the first version of this
+    /// did exactly that and reported `analysis_state.rs:308` for every slow update, which is this function rather
+    /// than the caller. A label is something a caller has to remember to pass, and that is its whole cost; what it
+    /// buys is a name in the warning that says which of a dozen call sites did the work.
+    pub async fn update<R>(
+        &self,
+        label: &'static str,
+        f: impl FnOnce(&mut Option<Session<DiskFiles>>) -> R,
+    ) -> R {
         let inner = self.inner.clone();
         let gate = self.gate.clone().write_owned().await;
+        let held = self.worst_write_hold.clone();
         let run = move || {
             let mut slot = inner
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             drop(gate);
-            f(&mut slot)
+            // **The number this server is judged by, taken by the server.**
+            //
+            // A query waits for whatever this closure does, so the *only* thing that makes this product slow is a
+            // closure that takes long — and there is no way to see that from the outside: the request it delayed
+            // reports its own total, which also includes the work the request asked for. So every update is timed
+            // here, the worst one is kept, and anything over the budget says so with its own number in the log.
+            //
+            // This is the architecture rather than a diagnostic: [`WRITE_BUDGET`] is the contract, this is what
+            // enforces it, and `worst_write_hold` is what a test asserts on. A fix that does not move this number
+            // has not fixed anything.
+            let started = std::time::Instant::now();
+            let answer = f(&mut slot);
+            let took = started.elapsed().as_millis() as u64;
+            held.fetch_max(took, std::sync::atomic::Ordering::Relaxed);
+            if took > WRITE_BUDGET.as_millis() as u64 {
+                log::warn!(
+                    "`{label}` held the analysis for {took} ms, over the {budget} ms budget — every request in \
+                     flight waited for it",
+                    budget = WRITE_BUDGET.as_millis()
+                );
+            }
+            answer
         };
         blocking(run)
+    }
+
+    /// **The longest any update has held the analysis**, in milliseconds, since this state was created.
+    ///
+    /// The one number that bounds a request's wait: a query takes the same lock an update does, so no request can be
+    /// delayed by more than this. Read by the tests, and worth reading from a log line when a report says a
+    /// completion took a second — if this is small and the request was slow, the wait was inside the request's own
+    /// work rather than in the queue.
+    pub fn worst_write_hold(&self) -> u64 {
+        self.worst_write_hold.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn read(&self) -> RwLockReadGuard<'_, Option<Session<DiskFiles>>> {

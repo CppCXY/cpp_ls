@@ -109,7 +109,29 @@ use crate::PathInterner;
 /// rendering and an index of it, so a slice keeps the writer lock short enough that the server answers between two
 /// of them. The rest stays in the list and the next drain takes the next few — see `Session::pending`, which is
 /// what tells a caller there is work left.
+// **How many files one cooking slice takes.** The drain itself is the pump's ([`Session::take_cooking_materials`]
+// is what it calls), and this is the count that call passes — kept here because the number is a property of cooking
+// rather than of a language server: one file is a render and a parse of it, measured at 9–269 ms on MSVC's headers.
+#[allow(dead_code)]
 const COOK_SLICE: usize = 4;
+
+/// **How many files one drain re-reads**, once the closure is in hand.
+///
+/// The second of the two things a drain does that are proportional to the project, and the one that was measured
+/// holding the writer for **10.9 s**: a file is re-read here when its reading may have changed now that its includes
+/// are in the index, and after a cold start that is every file in the closure. Eight is small on purpose — the work
+/// per file is a unit lookup and a re-index, and the queue the rest waits in is drained by the next call.
+///
+/// **Four is measured, not chosen.** The whole point of the number is the writer budget, so it was set by watching
+/// that budget move: at **8** a slice held the writer for 1105 ms and at **1** for 150 ms, which is linear in the
+/// count and says the re-read is the whole of what this constant controls. Four is the middle — the second pass
+/// costs four times what one file does and the queue still drains at sixteen files a second.
+///
+/// What it does **not** control is a second cost in the same closure: even at 1, one slice in this project held the
+/// writer for **1003 ms**. That is `units_for_the_pass` — the unit walk, which is one indivisible step because a
+/// translation unit is built for a closure rather than for a file. It is the next thing to cut, and the budget
+/// warning is what will say when it has been.
+const RE_READ_SLICE: usize = 4;
 /// **How many macro environments one drain builds.**
 ///
 /// One, where [`COOK_SLICE`] is four, and the difference is **measured**: a cook is a unit walk over one file's
@@ -337,7 +359,8 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// text and the same definition is in force for hundreds of files: project-wide cooking turned a per-cook cache
     /// into the difference between 4.5 s and 12.7 s for 255 files (measured; the census's own note records the same
     /// effect at 40 s). Invalidated **per path** when a file changes, since the keys are offsets in that file.
-    definitions: crate::MacroDefinitions,
+    /// **The macro definition cache, behind its own lock** — see [`Session::held_definitions`].
+    definitions: std::sync::Mutex<crate::MacroDefinitions>,
     /// **The project's translation units that have been read as programs** — see [Session::read_the_unit].
     ///
     /// Cleared wherever [Session::units] is: a unit read is a reading of the same timeline, so anything that
@@ -413,7 +436,14 @@ pub struct Session<F: FileProvider = DiskFiles> {
     ///
     /// **Bounded** ([`MAX_UNITS`]): a unit holds a whole closure's timeline, and a project with a thousand sources
     /// would otherwise keep one per source it was ever asked about.
-    units: UnitTable,
+    /// **The units table, behind its own lock rather than behind `&mut self`.** See [`UnitTable`].
+    ///
+    /// It was a plain field, which made [`Session::translation_unit_of`] take `&mut self` — and a unit build is the
+    /// single most expensive thing a drain does: measured from the server's write-budget warning, **1003 ms**, on
+    /// the first slice after a cold start. `&mut self` is what put it *inside* the writer, where every request in
+    /// flight waits for it. A lock of its own lets the unit walk happen under the **read** lock instead, beside
+    /// whatever a person is typing, which is the whole point.
+    units: std::sync::Mutex<UnitTable>,
     /// **The headers the include search path can name**, read once — what `#include` is completed from.
     ///
     /// Built with the session rather than on the first completion, and the reason is the budget rather than the
@@ -615,6 +645,22 @@ pub struct CookingMaterials {
     pub already_declared: std::collections::HashSet<String>,
 }
 
+/// **What a wave prepared, and the units the pass that follows it will need.**
+///
+/// Both halves are the same kind of thing: work that is a pure function of the files and the index, done under the
+/// read lock so that the write lock only has to *insert*. The units belong here for a measured reason — a unit walk
+/// held the writer for **1003 ms** on the first slice after a cold start, which was the largest single thing a drain
+/// did — and they can be built in the preparing half because `Session::units_for_the_pass` takes `&self`: the two
+/// caches a walk needs (the units table and the macro definitions) have locks of their own rather than needing
+/// `&mut self`.
+#[derive(Default)]
+pub struct PreparedWave {
+    /// The summaries `Session::commit_a_wave` is about to put into the index.
+    pub prepared: Vec<(PathBuf, crate::index::store::Prepared)>,
+    /// The timelines the second pass reads its environments out of, for the files this wave will parse.
+    pub units: Vec<std::sync::Arc<crate::TranslationUnit>>,
+}
+
 impl<F: FileProvider + Clone> Session<F> {
     /// A session with the configuration the caller already has: no compile database is read and no compiler is run.
     ///
@@ -735,8 +781,8 @@ impl<F: FileProvider + Clone> Session<F> {
             queue: Work::default(),
             parsed_since_the_last_pass: Vec::new(),
             cooking: Cooking::default(),
-            definitions: crate::MacroDefinitions::default(),
-            units: UnitTable::default(),
+            definitions: std::sync::Mutex::new(crate::MacroDefinitions::default()),
+            units: std::sync::Mutex::new(UnitTable::default()),
             units_read: std::collections::HashSet::new(),
             unit_index: None,
             rendered_unit: None,
@@ -967,7 +1013,7 @@ impl<F: FileProvider + Clone> Session<F> {
         self.store.forget(path);
         self.prefetched.clear();
         self.directive_signatures.remove(&queue_key(path));
-        self.units.clear();
+        self.units.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
         self.units_read.clear();
         self.queue.again(path.to_path_buf(), Priority::Rest, 0);
     }
@@ -1007,14 +1053,14 @@ impl<F: FileProvider + Clone> Session<F> {
             }
             // …and the definitions this session read **out of** that file: their keys are offsets in it, so an edit
             // that moved them would leave entries a later fact could reach and never wrote.
-            self.definitions.forget(path);
+            self.held_definitions().forget(path);
             // …and the **translation units**: a unit is a reading of its whole closure, so a file whose *directives*
             // moved anywhere in it makes every unit built over it a reading of a timeline that is no longer there.
             // Cleared whole, for the reason `Session::translation_unit_of` gives: the honest short answer to "did
             // something inside it move" is "assume so", and the disk entry checks file by file when it is asked
             // again. A change that left every directive where it was leaves the timeline as it was.
             if moved.layout {
-                self.units.clear();
+                self.units.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
                 self.units_read.clear();
             }
         }
@@ -1082,14 +1128,14 @@ impl<F: FileProvider + Clone> Session<F> {
         // declaration whose range points into the text the user just replaced is a wrong answer rather than a
         // missing one. The reading is rebuilt when the queue drains — see [`Session::cooking`].
         self.store.forget(path);
-        self.definitions.forget(path);
+        self.held_definitions().forget(path);
         // The **translation units** too — every one of them was a walk over a closure that contains this file — but
         // only when a directive moved: a unit is a timeline of directives, so an edit that leaves every one of them
         // where and what it was (typing in a function body, which is nearly every keystroke) leaves it as it was. This
         // is the rule the "no incremental AST" designs use for their preamble: the part above the first thing that
         // can change the environment is reused, and the part below is re-read.
         if moved.layout {
-            self.units.clear();
+            self.units.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
             self.units_read.clear();
         }
         self.cooking.want(path);
@@ -1388,7 +1434,15 @@ impl<F: FileProvider + Clone> Session<F> {
             self.prefetched.clear();
         }
 
-        self.finish_a_slice(&done);
+        // **The units, built by the caller even on this path.** `advance` is the non-pump entry point — a test, or
+        // `catch_up` — and it used to let `finish_a_slice` do the walk itself. Now that the walk belongs to the
+        // preparing half, this path has to do it here; passing nothing would make the second pass skip every file
+        // *silently*, which reads as "the re-read found nothing to change" rather than as a missing argument.
+        //
+        // It is `&self` work, so it is allowed here — what it is not allowed to be is *inside the writer* on the
+        // pump's path, which is what [`Session::prepare_a_wave`] exists for.
+        let units = self.units_for_the_pass(&done.iter().map(|step| step.path.clone()).collect::<Vec<_>>());
+        self.finish_a_slice(&done, Vec::new());
 
         done
     }
@@ -1404,7 +1458,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// which is cheap and needs `&mut self`. The pair exists because of what the write lock costs — measured, a slice
     /// of thirty-two files held it for **84, 503, 882, 1190 and 2430 ms**, so every completion arriving inside that
     /// window waited for all of it. With the parse moved out, the same slice holds it for **9–12 ms**.
-    pub fn prepare_a_wave(&self, steps: usize) -> Vec<(PathBuf, crate::index::store::Prepared)> {
+    pub fn prepare_a_wave(&self, steps: usize) -> PreparedWave {
         // **The files [`Session::commit_a_wave`] is about to pop**, which is what `peek` answers — the queue as it
         // stands now, without taking anything. A file a step discovers later can outrank these and is prepared on a
         // later wave, which is why the committing half still has a slow path.
@@ -1419,28 +1473,36 @@ impl<F: FileProvider + Clone> Session<F> {
             .collect();
 
         if wave.is_empty() {
-            return Vec::new();
+            return PreparedWave {
+                prepared: Vec::new(),
+                units: Vec::new(),
+            };
         }
+
+        // **The units, for the files this wave is going to parse** — see [`Session::PreparedWave`]. Built here
+        // rather than in the committing half, because building one is the most expensive thing a drain does.
+        let units = self.units_for_the_pass(&wave);
 
         let room = (steps * 4).saturating_sub(self.prefetched.len()).max(wave.len());
         let queue = &self.queue;
         let prefetched = &self.prefetched;
-        self.store.prepare_closure(
-            &wave,
-            |target| !queue.is_worked(target) && !prefetched.contains_key(&queue_key(target)),
-            room,
-        )
+        PreparedWave {
+            prepared: self.store.prepare_closure(
+                &wave,
+                |target| !queue.is_worked(target) && !prefetched.contains_key(&queue_key(target)),
+                room,
+            ),
+            units,
+        }
     }
 
     /// **Put what [`Session::prepare_a_wave`] prepared into the index**, and queue what it includes.
     ///
     /// The cheap half: no parsing, no reading, no walking — `SummaryStore::commit` per file and `Worklist::add` for
-    /// each include it names. Everything the parse needed was paid for under the read lock.
-    pub fn commit_a_wave(
-        &mut self,
-        prepared: Vec<(PathBuf, crate::index::store::Prepared)>,
-        steps: usize,
-    ) -> Vec<Step> {
+    /// each include it names. Everything the parse needed was paid for under the read lock, and so was the unit walk
+    /// that the pass after this one needs.
+    pub fn commit_a_wave(&mut self, wave: PreparedWave, steps: usize) -> Vec<Step> {
+        let PreparedWave { prepared, .. } = wave;
         for (path, made) in prepared {
             self.prefetched.insert(queue_key(&path), made);
         }
@@ -1458,7 +1520,7 @@ impl<F: FileProvider + Clone> Session<F> {
             self.prefetched.clear();
         }
 
-        self.finish_a_slice(&done);
+        self.finish_a_slice(&done, Vec::new());
 
         done
     }
@@ -1470,7 +1532,11 @@ impl<F: FileProvider + Clone> Session<F> {
     /// here — and both must finish the same way. Measured: leaving this out of `commit_a_wave` fixed the latency
     /// (write lock 9–12 ms against 84–2430) and made every completion **empty**, because the cooking half lives here
     /// and a completion reads the cooked reading.
-    fn finish_a_slice(&mut self, done: &[Step]) {
+    fn finish_a_slice(
+        &mut self,
+        done: &[Step],
+        units: Vec<std::sync::Arc<crate::TranslationUnit>>,
+    ) {
         // **The second pass, at the moment the closure is in hand**. `SummaryStore::get` reads one file with
         // the evidence the index has at that moment, and for MSVC's STL that is no evidence at all: `<vector>`'s
         // `std` scope is written in `yvals_core.h`'s `_STD_BEGIN` — a file `<vector>` *includes*, and a file is read
@@ -1488,12 +1554,30 @@ impl<F: FileProvider + Clone> Session<F> {
                 .map(|step| step.path.clone()),
         );
 
+        // **A slice of them, not all of them.** The pass is the expensive half of this function — measured from the
+        // server's own budget warning, one `index slice` held the writer for **10.9 s** where the insert it is named
+        // after takes 8–19 ms, and this is what was in the rest of it. A file is re-read here because its reading
+        // may have changed once its includes were in the index, so the work is proportional to how many files were
+        // parsed since the last pass — which after a cold start is *every file in the closure*.
+        //
+        // Slicing changes what the unit walk sees: it is asked about fewer files at a time, so it may build a unit
+        // for one slice that a later slice would have shared. That costs a cache lookup rather than a rebuild —
+        // `translation_unit_of` caches by the content of the closure — and it buys the property this function is
+        // now judged by: the writer is held for one slice's worth of work and no more.
         if self.is_idle() && !self.parsed_since_the_last_pass.is_empty() {
-            let parsed = std::mem::take(&mut self.parsed_since_the_last_pass);
-            // **The timelines the pass reads its environments out of**, built by the session because a unit is a
-            // session's fact rather than a store's: `translation_unit_of` walks a closure, caches on disk by the
-            // content of that closure, and holds the result in `units`. The pass used to walk a closure *per file*
-            // inside itself; this is one walk for the whole pass, and on the 138-file project it is **one unit**.
+            let take = self.parsed_since_the_last_pass.len().min(RE_READ_SLICE);
+            let parsed: Vec<PathBuf> = self.parsed_since_the_last_pass.drain(..take).collect();
+
+            // **The timelines, built here from the drained slice** — and *not* from the units the preparing half
+            // built, which was tried and measured **worse**: those cover the whole wave (thirty-two files), so the
+            // pass below re-reads thirty-two files' worth of environments instead of four — the write lock went from
+            // 1105 ms to **2636 ms**. A unit is a timeline over an include closure, so a unit rooted at a bigger set
+            // is a bigger timeline, and this pass is proportional to what the timeline covers.
+            //
+            // The lesson is that a unit is not a free-floating cache entry: **which files it is rooted at is part of
+            // what it costs.** The field on `PreparedWave` stays, because the capability is real and a caller that
+            // wants the walk outside the writer has it — this caller does not, because the set it would walk is the
+            // wrong one.
             let units = self.units_for_the_pass(&parsed);
             self.store.re_read_where_a_body_decides(&parsed, &units);
         }
@@ -1540,11 +1624,23 @@ impl<F: FileProvider + Clone> Session<F> {
                 self.want_the_closure_cooked(&open);
             }
 
-            for path in self.cooking.take(COOK_SLICE) {
-                // The queue is drained **in the order it was filled**: the open file first, then the includes it
-                // names, then whatever a request asked about — so the file a reader is looking at is ready first.
-                self.cook(&path);
-            }
+            // **The cooking queue is *not* drained here**, and that is the fix for the latency the product had.
+            //
+            // This loop used to be `for path in self.cooking.take(COOK_SLICE) { self.cook(&path); }` — the whole of a
+            // cook (unit walk, lex, render, parse, insert) inside the **write** lock. Measured from the server's own
+            // log on one open file: the last index slice held the writer for **749 ms**, and after it five seconds
+            // passed with no slice logged at all, which is this loop. A completion arriving anywhere in that window
+            // waited for all of it — the user's report was *"I type `s` and the completion takes forever"*, and the
+            // numbers agree: 1623 / 1049 / 2552 / 685 ms for the first four, 5 ms once the index had settled.
+            //
+            // The work is not gone, it moved: [`Session::take_cooking_materials`] gathers what a cook needs (a
+            // summary lookup and a unit out of the cache, cheap), [`Session::render_them`] does the lex, the render
+            // and the parse **under the read lock the pump takes**, and [`Session::commit_them`] inserts under the
+            // write one. `finish_a_slice` is called from inside `commit_a_wave`, so anything it drains here is by
+            // construction inside the writer.
+            //
+            // What stays is the queueing: a file a reader has open, and the includes it names, are what has to be
+            // cooked first, and that order is what `want_the_closure_cooked` writes into the queue.
 
             // **…and the macro environments a query asked for**, once each per pass.
             //
@@ -1587,7 +1683,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// environment", and the first unit that answers `environment_of` is that timeline. On the 138-file project
     /// this returns **one** unit, where the second pass used to walk a closure per file.
     fn units_for_the_pass(
-        &mut self,
+        &self,
         files: &[PathBuf],
     ) -> Vec<std::sync::Arc<crate::TranslationUnit>> {
         // Asked by the **index's own spelling** of each path: a unit's frames are keyed by the normalized form, so
@@ -2337,10 +2433,10 @@ impl<F: FileProvider + Clone> Session<F> {
     /// Any change to any file: the map is cleared whole. A unit is a reading of *its closure*, and the honest
     /// short answer to "did something in it move" is "assume so" — the disk entry is the one that can afford to
     /// check file by file (it hashes the closure), and it is consulted fresh each time this map misses.
-    fn translation_unit_of(&mut self, path: &Path) -> Option<std::sync::Arc<crate::TranslationUnit>> {
+    fn translation_unit_of(&self, path: &Path) -> Option<std::sync::Arc<crate::TranslationUnit>> {
         let key = queue_key(path);
 
-        if let Some(unit) = self.units.get(&key) {
+        if let Some(unit) = self.held_units().get(&key) {
             return Some(unit);
         }
 
@@ -2369,7 +2465,10 @@ impl<F: FileProvider + Clone> Session<F> {
                 // changes, since the keys are offsets in that file.
                 let index = self.store.index();
                 let root = index.summary(path)?;
-                let mut definitions = std::mem::take(&mut self.definitions);
+                // **Held rather than taken**, for the reason the units table carries: this cache is what made the
+                // unit walk need `&mut self`, and `&mut self` is what put the walk inside the writer. A lock of its
+                // own is enough — the walk is the only thing that ever holds it for long.
+                let mut definitions = self.held_definitions();
                 let unit = {
                     let _walk = crate::stages::StageTimer::new(crate::stages::Stage::Walk);
                     crate::TranslationUnit::walk(
@@ -2382,7 +2481,6 @@ impl<F: FileProvider + Clone> Session<F> {
                         &mut definitions,
                     )
                 };
-                self.definitions = definitions;
 
                 // Written for the **next run**, and the write is the caller's business to fail: a read-only
                 // checkout is an ordinary way to work, and a cache that cannot be written is not a wrong answer.
@@ -2395,8 +2493,25 @@ impl<F: FileProvider + Clone> Session<F> {
         };
 
         let unit = std::sync::Arc::new(unit);
-        self.units.insert(key, unit.clone());
+        self.held_units().insert(key, unit.clone());
         Some(unit)
+    }
+
+    /// The units table, with the lock taken — the one place the poison rule is written down.
+    fn held_units(&self) -> std::sync::MutexGuard<'_, UnitTable> {
+        self.units
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The macro definition cache, with the lock taken — same poison rule, see [`Session::held_units`].
+    ///
+    /// It is behind a lock for the same reason the units table is: this cache was what made a unit walk need
+    /// `&mut self`, and `&mut self` put the walk inside the writer where every request waits for it.
+    fn held_definitions(&self) -> std::sync::MutexGuard<'_, crate::MacroDefinitions> {
+        self.definitions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// **Cook one translation unit into a stream, without indexing it** — the compiler's own reading of the program,
