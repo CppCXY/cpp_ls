@@ -385,7 +385,7 @@ pub fn scan_directives(source: &str, tokens: &[CppTokenData]) -> Vec<SpannedDire
     out
 }
 
-/// What a file's directives say, as two numbers — the cheapest answer to "did this edit change what the file
+/// What a file's directives say, as three numbers — the cheapest answer to "did this edit change what the file
 /// tells the files that include it".
 ///
 /// # Two numbers, because two things depend on a directive
@@ -402,12 +402,26 @@ pub fn scan_directives(source: &str, tokens: &[CppTokenData]) -> Vec<SpannedDire
 /// conservative in the safe direction: two equal signatures mean the directives are the same lines at the same
 /// places, and two different ones only mean "assume so".
 ///
+/// # …and `preamble_end`, which is what a translation unit is read from
+///
+/// The offset **after the file's last directive**, or `0` for a file with none. Everything a walk reads out of a
+/// file — its `#include`s, its `#define`s, its conditions — is at or before this offset, so a file whose bytes up
+/// to here have not moved has not moved *as an input to a unit*, however much of its body was typed into.
+///
+/// That is the whole reason the field exists: it is what lets a translation unit be reused while the file it is
+/// rooted at is being edited, which is the case that matters and the one the cache used to miss on every keystroke
+/// (`crate::tu_cache`). It is taken at the **last** directive rather than at clangd's bound — the first
+/// declaration, with the `#define`s before it — because the last one is a superset and needs no patch
+/// (`PreamblePatch`-equivalent) to re-apply what it left out. The price is that an edit above the last directive
+/// still invalidates, which is the conservative direction.
+///
 /// A directive's own text is its logical line without the trailing comment: a comment is trivia, and an edit to
 /// one is not an edit to the directive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirectiveSignature {
     pub environment: u64,
     pub layout: u64,
+    pub preamble_end: usize,
 }
 
 /// Read the [`DirectiveSignature`] of `source`.
@@ -416,6 +430,7 @@ pub fn directive_signature(source: &str) -> DirectiveSignature {
 
     let mut environment = FNV_OFFSET;
     let mut layout = FNV_OFFSET;
+    let mut preamble_end = 0;
 
     for directive in scan_directives(source, &tokens) {
         let line = directive.line;
@@ -423,6 +438,7 @@ pub fn directive_signature(source: &str) -> DirectiveSignature {
             .get(line.start_offset..line.end_offset())
             .unwrap_or_default();
 
+        preamble_end = preamble_end.max(line.end_offset());
         environment = fnv_mix(environment, text.as_bytes());
         // A separator, so that two lines are not the same as one line made of both.
         environment = fnv_mix(environment, &[0xff]);
@@ -432,7 +448,20 @@ pub fn directive_signature(source: &str) -> DirectiveSignature {
         layout = fnv_mix(layout, &[0xff]);
     }
 
-    DirectiveSignature { environment, layout }
+    DirectiveSignature {
+        environment,
+        layout,
+        preamble_end,
+    }
+}
+
+/// **Where a file's preamble ends** — after its last directive, or `0` for a file with none.
+///
+/// [`directive_signature`]'s third field, as a function, for the caller that wants only the bound
+/// ([`crate::TranslationUnitCache`], which keys a unit's root on it). It scans, so a caller that wants the whole
+/// signature should call `directive_signature` once rather than both.
+pub fn preamble_end(source: &str) -> usize {
+    directive_signature(source).preamble_end
 }
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;

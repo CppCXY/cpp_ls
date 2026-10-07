@@ -231,7 +231,7 @@ measurement were reading old data. Clearing it is the first thing to try when a 
 ## 6. Tests and discipline
 
 ```text
-  lib                587 passed / 4 failed      (the four are pre-existing; the baseline was 585, +2 criteria)
+  lib                588 passed / 5 failed      measured, after the round that made the target runnable at all
   analysis suites    22 / 22
   end to end         23 / 0, four ignored
   semantic           30 / 0
@@ -239,10 +239,64 @@ measurement were reading old data. Clearing it is the first thing to try when a 
   workspace          zero warnings
 ```
 
-Two known failures that **predate this work** and are not in the 22: `translation_unit.rs`'s
-`a_definition_says_which_file_it_was_written_in` and `the_unit_cooks_as_one_stream_in_include_order`.
+### The numbers above were believed for a round in which this file was never compiled
 
-The rules this round was held to, in the order they were learned:
+The row used to read `587 passed / 4 failed`. It was wrong twice over, and the way it was wrong is worth more than
+the correction:
+
+```text
+  1.  the lib test target did not compile — 4 errors
+      analysis_state.rs      three calls to `update`/`update_session` without the `label` argument the signature
+                             gained
+      semantic_token/mod.rs  a `Name` literal without the `modifiers` field
+      session.rs             four assertions calling `units.is_empty()` on the `Mutex` that had replaced the field
+
+  2.  once it compiled, it did not finish — `Session::index_everything` never returned
+      it looped on `pending_work()` (the index queue **plus the cooking backlog**) and only ever called `advance`,
+      which *marks* files for cooking and drains nothing. The marking is idempotent, so the backlog sat at a fixed
+      size for ever. Every one of the ~40 `session::tests` hung for sixty seconds and then for ever; the suite was
+      killed rather than run, which is what "the tests are slow" turned out to mean.
+```
+
+`cargo test -p cpp_code_analysis --lib` now finishes in **0.43 s**.
+
+### The five failures, and what they are
+
+Attributed by experiment rather than by reading: the suite was run with the translation-unit root key reverted to
+the whole-text rule, and again with the cooking drain removed. The five fail in **every** configuration, including
+one in which the whole of the work they are supposed to be about is absent — so they are not a consequence of any of
+it.
+
+```text
+  a_declaration_only_a_macro_makes_is_found_once_the_session_has_cooked_the_file
+  editing_a_header_invalidates_the_readings_that_depend_on_it
+  editing_a_header_stales_the_cooked_reading_of_a_file_that_includes_it
+      all three: the cooked reading that should carry a macro-written declaration does not
+                (`NotDeclaredHere("HWND__")`, `NotDeclaredHere("two::Widget")`)
+
+  a_header_the_user_never_opened_is_cooked_when_a_request_names_it
+  a_unit_read_reads_the_whole_program_once
+      both: a file *is* cooked where the test says it must not be — and the test's stated rule
+            ("a transitive include is not cooked for free") contradicts `want_the_closure_cooked`, which
+            deliberately reaches `COOK_ONE_LEVEL_FURTHER = 64` below the direct includes, for the measured reason
+            that `<string>`'s `std::string` lives in `<xstring>`. One of the two is wrong and it is not obvious
+            which; that is a review, not a rewrite.
+```
+
+Three of the five are about the same thing — a cooked reading that does not carry what it should — and that is the
+half of `docs/incremental-edits.md` §5.2 that removes the rendering from the keystroke path. They should be settled
+*with* that work rather than before it.
+
+### And one that is not a failure but a coin
+
+`crates/cpp_ls/tests/handshake.rs`'s `a_completion_sees_a_change_to_an_included_header` **passes about half the
+time** — four consecutive runs of that binary: ok, failed, ok, ok. Its own message says why it is written that way
+("asked once, right after the change, with no retry to hide a stale answer"), so the flake *is* the finding: whether
+a completion asked in the instant after a header edit sees the edit depends on something that is not ordered. What
+that something is has **not** been established, and the method that established the five above applies unchanged —
+run the suite in a `git worktree` at `HEAD` and see whether it is a coin there too.
+
+### The rules this round was held to, in the order they were learned
 
 1. **Measure before changing.** Six of the eight layers in section 2 were guessed wrong. Each one was found in a
    single step *after* a probe could see it, and cost hours before.
@@ -250,7 +304,9 @@ The rules this round was held to, in the order they were learned:
    did not reproduce the real defect — a macro defined in the same file, a type with a modifier. A test proves what
    it tests and nothing more.
 3. **"It moved" may mean the cache moved.** See section 5.
-4. **Never set `sandbox_permissions`**; approval prompts are disabled in this session.
+4. **A green suite you cannot run is not a green suite.** See above: the row at the top of this section was copied
+   forward for a round in which the target did not compile and then did not terminate. Run it, or do not quote it.
+5. **Never set `sandbox_permissions`**; approval prompts are disabled in this session.
 
 ---
 

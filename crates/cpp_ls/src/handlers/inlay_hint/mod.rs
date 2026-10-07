@@ -51,23 +51,31 @@ pub async fn on_inlay_hint(
     // *callee's* file is not prepared here — the analysis reaches it through the session, which reads it on demand.
     if let Some(path) = uri_to_file_path(&uri) {
         context.analysis().prepare(&path).await;
+
+        // **And this file's own reading, because the wait this replaced was doing that too.**
+        //
+        // The wait was `AnalysisState::settle`, and what it bought was not only "the project's queue is empty": an
+        // edit **drops this file's summary** (`Session::buffer_changed`), the pump rebuilds it later, and a request
+        // that arrives in between reads a file whose declarations are not in the index — so a call in it resolves to
+        // nothing and the hint is missing. Inlay hints carry no "incomplete" flag, so an empty answer here stands
+        // until something else moves the editor.
+        //
+        // `catch_up` is that, as a question about **this file**: one parse of it when an edit is waiting, and
+        // nothing at all when there is not. Handlers that reach the index through a name — `hover`, `definition`,
+        // `signature_help` — get it from `read_the_modules`; the ones that ask about a *position* say it here.
+        context.analysis().catch_up(&path).await;
     }
 
-    // **A hint waits for the analysis, because nothing else will ask again.**
+    // **A hint no longer waits for the project's index to drain.**
     //
-    // A hint's parameter names come from the declaration the callee resolves to, so a request that arrives while the
-    // index is filling is answered with **no hints at all** — measured on a report: opening a file showed nothing
-    // while hover worked, because hover's answer comes from the file's own text and a hint's does not. Inlay hints
-    // carry no "incomplete" flag either, so a client has no reason to ask a second time and the empty answer stands
-    // until something else moves the editor.
+    // It did, and the reason is worth keeping: a hint's parameter names come from the callee's declaration, so an
+    // answer built while the index is filling can be **empty** — and inlay hints carry no "incomplete" flag, so a
+    // client has no reason to ask again. The wait was `AnalysisState::settle`, which asked whether the *whole
+    // project's* queue was empty with a two-second budget.
     //
-    // So this is the query that waits. The budget is short and the wait is cancellable — see
-    // [`AnalysisState::settle`] for why it holds no lock, and why a budget is what makes it finite. A settled
-    // session pays one lock acquisition here and answers immediately.
-    context
-        .analysis()
-        .settle(Some(&cancel_token), std::time::Duration::from_millis(2000))
-        .await;
+    // The question that matters is about this file, and it is answered above: `prepare` puts the file's text in
+    // reach, `catch_up` puts its declarations in the index, `read_the_modules` reads what it imports. See
+    // `docs/incremental-edits.md` §1 for the argument and [`AnalysisState::catch_up`] for what replaced the wait.
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;

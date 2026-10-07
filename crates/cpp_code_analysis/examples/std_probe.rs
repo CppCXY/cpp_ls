@@ -31,6 +31,7 @@ use std::path::PathBuf;
 
 /// The seam the two readings share: the unit's `MacroView` and the closure path's owned `MacroEnvironment` are
 /// asked the same questions through this trait — see where `environment` is bound.
+use cpp_code_analysis::RootKey;
 use cpp_parser::MacroFacts;
 
 fn main() {
@@ -422,8 +423,12 @@ standard {}",
         );
         // The **same** content cache the census read through: the cache's validity check reads every file of the
         // closure, and those bytes are the ones the census already has — see where `files` is built.
+        //
+        // `RootKey::WholeText`: this probe re-reads a *corpus* rather than serving a request about a file some
+        // editor is typing into, so the rule that keys the root on its preamble (and the body it deliberately
+        // ignores) would be measuring a different question than the one the census asks.
         if let Some(cache) = tu_cache.as_ref()
-            && let Some(unit) = cache.get(&root, key, &files)
+            && let Some(unit) = cache.get(&root, key, &files, RootKey::WholeText)
         {
             seeding_time += started.elapsed();
             the_unit_came_from_the_cache = true;
@@ -443,7 +448,7 @@ standard {}",
         seeding_time += started.elapsed();
 
         if let Some(cache) = tu_cache.as_ref() {
-            let _ = cache.put(&root, key, &unit, &files);
+            let _ = cache.put(&root, key, &unit, &files, RootKey::WholeText);
         }
         unit
     });

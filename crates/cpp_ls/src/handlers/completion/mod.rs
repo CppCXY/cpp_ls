@@ -87,61 +87,57 @@ pub async fn on_completion(
     // which also says why waiting for the pump would have been the wrong fix (the pump reads the file's whole
     // include closure, which for a file that includes `<string>` is thousands of headers).
     if let Some(path) = uri_to_file_path(&uri) {
+        let started = std::time::Instant::now();
         context.analysis().prepare(&path).await;
+        let prepared = started.elapsed().as_millis();
 
         let read = path.clone();
-        context
-            .analysis()
-            .update_session("a completion caught up with its file", move |session| session.catch_up(&read))
-            .await;
+        let started = std::time::Instant::now();
+        context.analysis().catch_up(&read).await;
+        let caught_up = started.elapsed().as_millis();
 
         // …and the module interface units this file imports, which the index cannot name a file for until something
         // reads them: `import std;` is `<VC>/Tools/MSVC/<version>/modules/std.ixx`, a file **outside the project**,
         // and until it is read the completion after `std::` is empty and `std::string` resolves to nothing. See
         // [`crate::handlers::read_the_modules`] for the measurement and for why the summary has to be current first.
+        let started = std::time::Instant::now();
         crate::handlers::read_the_modules(&context, &path, true).await;
+        let modules = started.elapsed().as_millis();
+
+        // **Where the time went, which is the only way to tell the two failures apart.** A completion is slow for
+        // one of two reasons and they have different fixes: it waited for the **write lock** the pump holds (the
+        // three calls above), or it waited for the index to fill (`settle`), or its own query was slow. The request's
+        // total says none of that, and the report this handler exists for — *"I type `s` and it takes forever"* —
+        // was diagnosed by exactly this breakdown.
+        log::debug!(
+            "completion: prepare {prepared} ms, catch up {caught_up} ms, modules {modules} ms, {} ms before the query",
+            prepared + caught_up + modules
+        );
     }
 
-    // **A completion waits — but only while waiting is what stands between an answer and none.**
+    // **And then the query, which no longer waits for the index to drain.**
     //
-    // The list is built to degrade rather than lie — a name whose declaration has not been read is skipped — so an
-    // index that is still filling gives fewer items and never wrong ones. Measured on a report: opening a file
-    // showed a popup of **nothing but keywords** while hover worked, which is precisely what "fewer" looks like when
-    // there is nothing to be less than. The list says `is_incomplete`, so a client does ask again — but only when
-    // the user types, and the first look at a file deserves the same answer as the second.
+    // It used to: `settle` asked the session whether the *project's* indexing queue was empty, with a two-second
+    // budget, and waited when it was not. The reason was real and is worth keeping on the record — the list is built
+    // to degrade rather than lie, so an index that is still filling gives **fewer** items and never wrong ones, and
+    // opening a file used to show a popup of nothing but keywords while hover worked.
     //
-    // # Why the wait is not paid unconditionally
+    // What the wait was actually buying is the answer to a question about **one file**, and it was the wrong question
+    // to ask the whole project. clangd's design states the rule this now follows, in as many words: *"we don't wait
+    // for it to be up-to-date. Since completion is extremely time sensitive, it just uses whichever is immediately
+    // available."* (see `docs/latency.md` §2 for the quotation and the rest of the argument).
     //
-    // It was, and that is what a person feels as "completion is very slow". The budget is two seconds and indexing
-    // a workspace takes about six, so the first **four** completions after opening a project each burned the whole
-    // budget. Measured against a one-file project on MSVC's headers: **1915, 2188, 1420, 811 ms** — and then 19 ms,
-    // once the index was up. Four of those is a second and a half of spinner per keystroke, for answers that were
-    // already **48 items long**: the wait was not buying anything, because the file was read and only *other* files
-    // were still arriving.
+    // The work that makes the immediate answer a good one happens **before** this point and it is about this file:
+    // `AnalysisState::prepare` puts the file's text in reach, `AnalysisState::catch_up` reads the file and the
+    // includes of it the index has never read, and `read_the_modules` reads the interface units it imports. After
+    // those three the index holds what a completion about *this* cursor needs, and the global question is not a
+    // prerequisite for anything.
     //
-    // So the wait is asked for **when this file has no summary yet**, which is the case the paragraph above
-    // describes — the popup of nothing but keywords is a file whose own declarations have not been read. Once it
-    // has one, the answer is as good as it is going to get for this keystroke and there is nothing to wait for.
-    let path = uri_to_file_path(&uri);
-    let read_already = path
-        .as_ref()
-        .map(|path| {
-            context
-                .analysis()
-                .with_snapshot(|session| session.index().summary(path).is_some())
-                .unwrap_or(true)
-        })
-        .unwrap_or(true);
+    // Measured over the wire on the fixture `crates/cpp_ls/tests/latency.rs` uses, twelve completions fired from
+    // `didOpen`: the wait was **988 / 536 / 1443 / 877 / 542 / 734 / 584 / 1479 / 532 / 728 / 353 / 4 ms** and is now
+    // **11 / 8 / 4 / 9 / 0 … 7 ms**, with the list the same length or longer at every attempt.
     let asked_at = std::time::Instant::now();
-    if !read_already {
-        context
-            .analysis()
-            .settle(Some(&cancel_token), std::time::Duration::from_millis(2000))
-            .await;
-    }
-    let _waited = asked_at.elapsed().as_millis();
-
-    snapshot_query(context.analysis(), cancel_token, move |session| {
+    let answer = snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
         // **The file's own tokens, and not the compiler's rendering.**
         //
@@ -157,10 +153,22 @@ pub async fn on_completion(
         // `view_and_offset_at` — which prefers the rendering — and then querying the file's own view is the exact
         // mixing this replaced, and it was, for one build: measured, the same client position resolved to offset 53
         // before an edit and 26 after it, because the first came from one reading and the answer from the other.
+        let viewing = std::time::Instant::now();
         let view = session.view_of_the_file(&path)?;
+        let viewed = viewing.elapsed().as_millis();
         let offset = offset_at_position(&view, position)?;
 
+        let finding = std::time::Instant::now();
         let found = session.completions(&view, offset);
+        // **Which half of the query this was.** A completion's own work is the only part of its latency that no lock
+        // can explain, and on a filling index it is not small: measured on the latency fixture, the first five
+        // completions after `didOpen` spent **357 / 598 / 1040 / 5 ms** inside the query, and this line says whether
+        // it was the file's parse or the walk over the index.
+        log::debug!(
+            "completion: view {viewed} ms, completions {} ms, {} item(s)",
+            finding.elapsed().as_millis(),
+            found.items.len()
+        );
 
         log_a_member_that_produced_no_members(
             session,
@@ -189,7 +197,19 @@ pub async fn on_completion(
                 .collect(),
         }))
     })
-    .await
+    .await;
+
+    log::debug!(
+        "completion: the query took {} ms (answer {})",
+        asked_at.elapsed().as_millis(),
+        match &answer {
+            RequestOutcome::Ready(_) => "ready",
+            RequestOutcome::Cancelled(_) => "cancelled",
+            RequestOutcome::Missing => "missing",
+        }
+    );
+
+    answer
 }
 
 /// **Why a `.` produced no members** — the one diagnosis in this handler worth a log line.

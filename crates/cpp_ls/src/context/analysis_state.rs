@@ -19,6 +19,50 @@
 //! client's notifications arrive with text that has to reach the same chain. `SessionFiles` is a **handle** — the
 //! buffers are a map behind a lock that clones share — so `files` and `documents` here and the session's copy are
 //! the same files, not copies of them. See `cpp_code_analysis::session`'s module documentation.
+//!
+//! # What a request waits for, and the `settle` that used to make it worse
+//!
+//! ```text
+//!   a request's wait  =  (the work the request does)
+//!                     +  (the time until the lock the request needs is free)
+//! ```
+//!
+//! The second term has two sources, and both were removed:
+//!
+//! * **the pump's write**, which is what the pump holds the session for while inserting. Every part of a drain that
+//!   is not an insert has been moved out from under it — the parse ([`cpp_code_analysis::Session::prepare_a_wave`]),
+//!   the second pass ([`cpp_code_analysis::Session::prepare_the_drain`]), the macro environments and the cook's
+//!   materials ([`cpp_code_analysis::Session::materials_for`]) — so a write is 0–25 ms measured, where a slice that
+//!   committed *no files at all* used to hold it for 572 ms;
+//! * **the pump's read**, which it holds while parsing and which a request's *write* must wait for. This is the one
+//!   that cannot be tuned away: parsing has to read the index. What removed it is that a request **no longer asks for
+//!   the write lock when it has nothing to write** — see [`AnalysisState::prepare`] and [`AnalysisState::catch_up`],
+//!   which ask a question about one file under the read lock and take the write one only when the answer is "there is
+//!   work".
+//!
+//! There used to be a third, and it is worth keeping on the record because it was written twice: `settle` asked
+//! whether the **whole project's** indexing queue had drained and waited up to two seconds for the answer to become
+//! yes. Every answer in this server is built to **degrade rather than lie** — a name whose declaration has not been
+//! read yet is skipped — so an index that is still filling gives *fewer* items and never wrong ones, and on its own
+//! that makes the first minute of a session look broken: measured on a report, opening a file showed **no inlay hints
+//! at all** and a completion list of nothing but keywords while hover worked.
+//!
+//! It was asked in eight handlers, and the question it asked was the wrong size:
+//!
+//! ```text
+//!   what the wait was a question about     the whole project
+//!   what the answer is a statement about   one file
+//! ```
+//!
+//! Measured over the wire, twelve completions fired from `didOpen`: **988 / 536 / 1443 / 877 / 542 / 734 / 584 /
+//! 1479 / 532 / 728 / 353 / 4 ms**. With the wait gone and the per-file reads in its place — the file's text, the
+//! file's summary and the includes nobody has read, the modules it imports — they take **11 / 8 / 4 / 9 / 0 … 7 ms**,
+//! with the list the same length or longer at every attempt. clangd states the rule this follows in as many words:
+//! *"we don't wait for it to be up-to-date. Since completion is extremely time sensitive, it just uses whichever is
+//! immediately available."*
+//!
+//! An empty popup is still the symptom to watch for. The fix for it is the hot set and the per-file reads, **never a
+//! global wait**.
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
@@ -57,6 +101,18 @@ pub struct AnalysisState {
 /// that has to grow a table and still fails a closure that parses a file, walks a unit, or runs a second pass.
 pub const WRITE_BUDGET: Duration = Duration::from_millis(50);
 
+/// **How long a read-only query may take before it is worth a line in the log.**
+///
+/// The read side's counterpart of [`WRITE_BUDGET`], and deliberately the same number: a keystroke's budget is around
+/// 16 ms and this server's answer to one is a query, so a query over fifty milliseconds is either waiting for
+/// something or doing too much — and [`AnalysisState::run_blocking`] says which, in four numbers that fail
+/// separately.
+///
+/// Reported rather than enforced: a query's own work is allowed to be as large as the question is (a completion
+/// after `std::` collects thousands of declarations), and the point of the line is to make that visible rather than
+/// to bound it.
+pub const QUERY_BUDGET: Duration = Duration::from_millis(50);
+
 impl AnalysisState {
     pub fn new() -> Self {
         let documents = OpenDocuments::new();
@@ -87,6 +143,24 @@ impl AnalysisState {
     /// other request. (A query that loaded what it needed would take `&mut Session` and serialize all of them, which
     /// is the trade this exists to avoid.)
     pub async fn prepare(&self, path: &std::path::Path) -> bool {
+        // **The shortcut that matters, and it is the ordinary case.** The file a request is about is normally one the
+        // editor has open, so the VFS already holds its text and its cooked reading is either built or already asked
+        // for — which is exactly the state in which the two steps below would each do nothing. Asking is a read, and
+        // a read takes the lock the pump takes **as a reader**, so it does not wait for the pump's parse; the write
+        // would.
+        //
+        // Measured over the wire on the latency fixture before this: a completion spent **9–1147 ms** here and every
+        // millisecond of it was the queue — the work is a `HashSet` lookup and a map lookup.
+        //
+        // `false` from the snapshot (no workspace open) falls through to the write, which answers `Missing` the same
+        // way it always did.
+        if self
+            .with_snapshot(|session| session.is_ready_for_a_request_about(path))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+
         let path = path.to_path_buf();
         self.update_session("prepare a file a request named", move |session| {
             let loaded = session.load(&path).is_some();
@@ -102,6 +176,37 @@ impl AnalysisState {
         })
         .await
         .unwrap_or(false)
+    }
+
+    /// **Read the file a request is about in, if the analysis is behind it** — the request path's form of
+    /// [`Session::catch_up`].
+    ///
+    /// # Why this is not just `update_session(|s| s.catch_up(path))`
+    ///
+    /// Because the lock is the whole cost. The pump parses a project's include closure while **holding the session
+    /// for reading** — measured, a hundred milliseconds a section and sometimes more than a second — and a request
+    /// that asks for the write lock waits for the section in flight. `catch_up`'s own work is conditional: the file
+    /// when an edit dropped its summary, and the includes the index has never read. For the ordinary request both
+    /// are empty and the call is a `HashSet` lookup, paid for with a second of queueing.
+    ///
+    /// Measured over the wire on the latency fixture, with the same shortcut already in place for
+    /// [`AnalysisState::prepare`]: `catch_up` cost **0–1108 ms** on a file whose summary was current.
+    ///
+    /// The check is a **read**, and a read does not wait for the pump's parse — only a write does. See
+    /// [`Session::needs_catching_up`] for why the answer is exact rather than a guess.
+    pub async fn catch_up(&self, path: &std::path::Path) {
+        if !self
+            .with_snapshot(|session| session.needs_catching_up(path))
+            .unwrap_or(true)
+        {
+            return;
+        }
+
+        let path = path.to_path_buf();
+        self.update_session("a request caught up with its file", move |session| {
+            session.catch_up(&path)
+        })
+        .await;
     }
 
     /// Tell the indexing pump that the queue has work in it.
@@ -121,68 +226,6 @@ impl AnalysisState {
     /// the rest of the session, and one lock acquisition a second is a cheap way never to find out.
     pub async fn wait_for_work(&self, timeout: Duration) -> bool {
         tokio::time::timeout(timeout, self.work.notified()).await.is_ok()
-    }
-
-    /// **Wait until the analysis has nothing queued — bounded, and cancellable, and holding no lock.**
-    ///
-    /// # Why a question waits instead of answering what it has
-    ///
-    /// Every answer here is built to degrade rather than lie: a name whose declaration has not been read yet is
-    /// *skipped*, so an index that is still filling gives **fewer** results and never wrong ones. That is the right
-    /// trade for a server that may be asked at any instant — but on its own it makes the first minute of a session
-    /// look broken. Measured on a report: opening a file showed **no inlay hints at all** and a completion list of
-    /// nothing but keywords, while hover worked — because hover's answer comes from the file's own text and the
-    /// other two need the declarations of things the file includes. The index was empty and said so by being quiet.
-    ///
-    /// # Why it is not a lock
-    ///
-    /// The session is behind an `RwLock` and the pump needs it to make progress, so *holding* anything while waiting
-    /// for the pump is a deadlock by construction — and a lock cannot be cancelled, which is the other half of the
-    /// same mistake. So this takes the lock only to **ask a question** (`is_idle`), releases it, and then waits on
-    /// the pump's own notification with nothing held. What makes the wait finite is the budget; what makes it
-    /// polite is the cancellation token, which a client sets the moment the user types another character — the
-    /// answer being waited for is about a cursor that no longer exists.
-    ///
-    /// Returns whether the session settled. `false` means the budget ran out or the client gave up, and the caller
-    /// answers with what it has — which is exactly what it would have answered without this.
-    pub async fn settle(&self, cancel: Option<&tokio_util::sync::CancellationToken>, budget: Duration) -> bool {
-        let deadline = tokio::time::Instant::now() + budget;
-        loop {
-            // **Asked, not held.** `is_idle` is the indexing queue's question; the cooking backlog is deliberately
-            // not part of it, because a cooked reading arrives *after* the declarations a first answer needs and
-            // waiting for it would put a file's whole include closure in front of every keystroke.
-            if self.with_snapshot(|session| session.is_idle()).unwrap_or(true) {
-                return true;
-            }
-
-            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if left.is_zero() {
-                return false;
-            }
-
-            // **`sleep`, and never `wait_for_work`.**
-            //
-            // The first version of this waited on the pump's own `Notify`, and that is what broke the feature it was
-            // written to fix. `Notify` stores **one** permit: the edit's `wake` leaves it for the pump, this loop
-            // polls first and **takes it**, the pump never wakes, the queue never drains, `is_idle` is never true,
-            // and every request after an edit waits out the whole budget while the client cancels long before. That
-            // is exactly the shape of the report — *"the first one works and then completion and the hints are
-            // gone"* — and exactly why hover and diagnostics were unaffected: neither of them touches the queue.
-            //
-            // A sleep cannot steal anything. It costs at most this delay in noticing that the drain finished, and the
-            // pump keeps every wake-up it was sent. The cancellation still ends the wait at once.
-            tokio::select! {
-                _ = tokio::time::sleep(left.min(Duration::from_millis(10))) => {}
-                _ = async {
-                    match cancel {
-                        Some(token) => token.cancelled().await,
-                        // No token is no cancellation: a caller that has none waits out the budget, which is the
-                        // honest reading of "nobody can tell me to stop".
-                        None => std::future::pending::<()>().await,
-                    }
-                } => return false,
-            }
-        }
     }
 
     /// Run `f` against the live session, or answer `None` when no workspace has been opened.
@@ -235,26 +278,75 @@ impl AnalysisState {
         .await;
     }
 
+    /// **Run a read-only query, and report where a slow one spent its time.**
+    ///
+    /// # The measurement, and why the read path needed one of its own
+    ///
+    /// [`AnalysisState::update`] has reported the longest it held the analysis since the first round of this work,
+    /// and that number bounds what a *write* can be made to wait. It says nothing about a **read**, and the two fail
+    /// separately — which is the distinction `crates/cpp_ls/tests/latency.rs` was written around and the one that got
+    /// lost for three rounds. A query can be slow for three unrelated reasons and this line tells them apart:
+    ///
+    /// ```text
+    ///   wait permit   every core is already running a query — the analysis pool is saturated
+    ///   wait gate     an update is in flight: `AnalysisState::update` takes the gate for writing first
+    ///   wait session  a writer holds the session, or one is waiting for it (a `SRWLOCK` queues new readers behind
+    ///                 a waiting writer, so this is where the pump's own commit shows up)
+    ///   ran           the query's own work — reading the index, parsing the file, resolving the scope
+    /// ```
+    ///
+    /// Measured on the latency fixture, this is what separated "the completion waits for the pump" from "the
+    /// completion's own query is slow": with the writes in good order the first five completions after `didOpen`
+    /// still took 60–1677 ms, and every millisecond of it was in this function's `ran` — the query's own work over an
+    /// index that was still filling.
     pub async fn run_blocking<R, F>(&self, f: F) -> Option<R>
     where
         R: Send + 'static,
         F: FnOnce(&Session<DiskFiles>) -> Option<R> + Send + 'static,
     {
+        let started = std::time::Instant::now();
         let _permit = self.blocking_permits.clone().acquire_owned().await.ok()?;
+        let waited_for_a_permit = started.elapsed().as_millis() as u64;
+
         let inner = self.inner.clone();
         let gate = self.gate.clone().read_owned().await;
+        let waited_for_the_gate = started.elapsed().as_millis() as u64;
+
         let result = tokio::task::spawn_blocking(move || {
+            let locked = std::time::Instant::now();
             let session = inner
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let waited_for_the_session = locked.elapsed().as_millis() as u64;
             // The gate is released before the query runs: it orders an update against the queries already in
             // flight, and holding it for the whole query would make every notification queue behind every read.
             drop(gate);
-            f(session.as_ref()?)
+            let ran = std::time::Instant::now();
+            // `?` cannot be used here — the closure answers with the timings as well — so `None` is threaded by hand:
+            // "no session has been opened" is the one thing the caller distinguishes, and it is the same answer
+            // whether the session was missing or the query declined.
+            let answer = session.as_ref().and_then(f);
+            (
+                waited_for_the_session,
+                ran.elapsed().as_millis() as u64,
+                answer,
+            )
         })
         .await;
+
         match result {
-            Ok(value) => value,
+            Ok((waited_for_the_session, ran, answer)) => {
+                let took = started.elapsed().as_millis() as u64;
+                if took > QUERY_BUDGET.as_millis() as u64 {
+                    log::debug!(
+                        "a query took {took} ms — permit {waited_for_a_permit} ms, gate {gate} ms, session \
+                         {session} ms, ran {ran} ms",
+                        gate = waited_for_the_gate - waited_for_a_permit,
+                        session = waited_for_the_session,
+                    );
+                }
+                answer
+            }
             Err(err) => {
                 if err.is_panic() {
                     std::panic::resume_unwind(err.into_panic());
@@ -390,15 +482,18 @@ mod tests {
         let files = state.files().clone();
         let root = root.to_path_buf();
         let opened = state
-            .update(move |slot| {
-                *slot = Some(Session::with_config(
-                    &root,
-                    files,
-                    WatchFilter::new(&root),
-                    CompilerConfig::default(),
-                ));
-                slot.is_some()
-            })
+            .update(
+                "a test's session",
+                move |slot: &mut Option<Session<DiskFiles>>| {
+                    *slot = Some(Session::with_config(
+                        &root,
+                        files,
+                        WatchFilter::new(&root),
+                        CompilerConfig::default(),
+                    ));
+                    slot.is_some()
+                },
+            )
             .await;
         assert!(opened);
     }
@@ -458,7 +553,7 @@ mod tests {
             .await;
         assert!(matches!(outcome, RequestOutcome::Missing));
 
-        let updated = state.update_session(|_| 1).await;
+        let updated = state.update_session("a test's update", |_| 1).await;
         assert_eq!(updated, None, "and there is nothing to update either");
     }
 
@@ -473,7 +568,7 @@ mod tests {
         let read_state = state.clone();
         let read = tokio::spawn(async move { read_state.run_blocking(|_| Some(1)).await });
         let write_state = state.clone();
-        let write = tokio::spawn(async move { write_state.update(|_| 2).await });
+        let write = tokio::spawn(async move { write_state.update("a test's update", |_| 2).await });
 
         assert_eq!(read.await.unwrap(), Some(1));
         assert_eq!(write.await.unwrap(), 2);

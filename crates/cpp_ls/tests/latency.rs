@@ -39,12 +39,42 @@ use serde_json::{Value, json};
 /// have done outside the lock.
 const UPDATE_BUDGET: Duration = Duration::from_millis(1000);
 
-/// **The bound a completion takes**, in milliseconds, asked repeatedly while the index fills.
+/// **The bound a completion takes while the index is still being filled**, in milliseconds.
 ///
 /// Larger than `UPDATE_BUDGET` on purpose: a completion's own work — resolving the scope, listing the members,
 /// reading what the index has — is real and is not what this test is about. What it is about is the *shape*: a
 /// request that waits for the indexer grows with the project, and a request that does its own work does not.
+///
+/// # The two regimes, and which one this bound is for
+///
+/// Measured, the twelve attempts below fall into two groups and they have different causes:
+///
+/// ```text
+///   the first four     300–1600 ms   the query's own work, while the index is being written to
+///   from the fifth on  4–10 ms       the same query against an index that has stopped changing
+/// ```
+///
+/// The first group is **not** queueing any more — a completion's three write-lock acquisitions cost 0 ms each once
+/// `AnalysisState::prepare` and `AnalysisState::catch_up` ask whether they have anything to do first, and the pump
+/// holds the write lock for 0–25 ms a slice. It is the query's own work, and the cause is recorded where it lives:
+/// `ProjectIndex::visibility_answers` is cleared whole by every insert, so each completion re-evaluates every
+/// guarded `#include` in its closure while the pump is inserting. Fixing that is the next round's work; the
+/// steady-state bound below is what must not regress while it is done.
 const COMPLETION_BUDGET: Duration = Duration::from_millis(2500);
+
+/// **The bound a completion takes once the index has settled**, in milliseconds.
+///
+/// The doc's own keystroke budget, and the number `docs/latency.md` §1 records for the tenth request: *"steady
+/// state, tenth request — 9 ms"*. It is asserted separately from `COMPLETION_BUDGET` because the two fail for
+/// different reasons and a single loose bound cannot tell them apart — a regression that made every completion a
+/// hundred milliseconds would pass a 2500 ms bound and must not.
+///
+/// Measured on this fixture: 4–10 ms, against 353–1479 ms before the write-lock work of this round.
+const STEADY_BUDGET: Duration = Duration::from_millis(50);
+
+/// How many attempts must be inside `STEADY_BUDGET`. The index in this fixture takes about six seconds to fill, so
+/// by the tenth request the pump has been quiet for a while — which is exactly the state the number is about.
+const STEADY_FROM: usize = 9;
 
 /// A file whose include closure is large enough that the index is still filling while the requests arrive.
 ///
@@ -115,6 +145,8 @@ fn a_completion_asked_while_the_index_fills_comes_back_within_the_budget() {
 
     let mut slowest = Duration::ZERO;
     let mut over: Vec<String> = Vec::new();
+    let mut every: Vec<String> = Vec::new();
+    let mut steady: Vec<Duration> = Vec::new();
 
     for attempt in 0..12u32 {
         let started = Instant::now();
@@ -134,6 +166,17 @@ fn a_completion_asked_while_the_index_fills_comes_back_within_the_budget() {
             .or_else(|| response["result"].as_array())
             .map(|items| items.len())
             .unwrap_or(0);
+        // **Every number, not only the bad ones.** The bound is what the test fails on, but the *shape* — the first
+        // attempt against the twelfth — is what the feature is judged by, and a run that reports only its failures
+        // cannot show a fix that moved the first four from 1.6 s to 40 ms.
+        eprintln!(
+            "  completion #{attempt}: {} ms, {items} item(s)",
+            took.as_millis()
+        );
+        every.push(format!("#{attempt}: {} ms, {items} item(s)", took.as_millis()));
+        if attempt as usize >= STEADY_FROM {
+            steady.push(took);
+        }
         if took > COMPLETION_BUDGET {
             over.push(format!("  #{attempt}: {} ms, {items} item(s)", took.as_millis()));
         }
@@ -143,10 +186,31 @@ fn a_completion_asked_while_the_index_fills_comes_back_within_the_budget() {
         over.is_empty(),
         "a completion asked while the index fills must come back inside {budget} ms — every request waits for \
          whatever an update holds the session for, and the numbers below are the wait:\n{list}\n\
-         (slowest {slowest} ms)",
+         (slowest {slowest} ms; every attempt was: {every})",
         budget = COMPLETION_BUDGET.as_millis(),
         list = over.join("\n"),
         slowest = slowest.as_millis(),
+        every = every.join(", "),
+    );
+
+    // **And the steady state, at the number a keystroke is actually budgeted.** Asserted apart from the bound above
+    // because the two fail for different reasons: a completion that is slow while the index fills has one cause
+    // (`ProjectIndex::visibility_answers` is cleared by every insert), and one slow *after* it has settled has
+    // another, and only the second is a regression in what this round of work achieved.
+    let slow_steady: Vec<String> = steady
+        .iter()
+        .enumerate()
+        .filter(|(_, took)| **took > STEADY_BUDGET)
+        .map(|(at, took)| format!("  #{}: {} ms", STEADY_FROM + at, took.as_millis()))
+        .collect();
+    assert!(
+        slow_steady.is_empty(),
+        "once the index has settled a completion must come back inside {budget} ms — that is `docs/latency.md`'s \
+         own steady-state number (\"steady state, tenth request: 9 ms\") and the one a keystroke is budgeted \
+         against:\n{list}\n(every attempt was: {every})",
+        budget = STEADY_BUDGET.as_millis(),
+        list = slow_steady.join("\n"),
+        every = every.join(", "),
     );
 }
 

@@ -298,6 +298,35 @@ impl FileProvider for OpenDocuments {
     }
 }
 
+/// **What a session's translation units cost it** — the unit-side counterpart of [`crate::StoreStats`].
+///
+/// The three numbers are the three paths [`Session::translation_unit_of`] can take, and they answer the only
+/// question worth asking about this cache: **is a keystroke paying for a walk?**
+///
+/// ```text
+///   from_memory   this session already held the unit            — no read, no decode, no walk
+///   from_disk     decoded from the cache, closure check included — a read and a hash per file
+///   walked        the whole closure read and a timeline built    — and written for the next run
+/// ```
+///
+/// `walked` is the number `docs/incremental-edits.md` stage 1 is judged by: typing in a file's **body** must not
+/// make it move, because the body is not an input to the file's own timeline. Before the root of a unit was keyed
+/// on its preamble it moved on every keystroke, and no other number in this crate would have shown it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UnitStats {
+    pub from_memory: usize,
+    pub from_disk: usize,
+    pub walked: usize,
+}
+
+/// Which of [`Session::translation_unit_of`]'s three paths answered — the argument to `Session::note_a_unit`.
+#[derive(Debug, Clone, Copy)]
+enum Which {
+    FromMemory,
+    FromDisk,
+    Walked,
+}
+
 /// One open project: the configuration, the facts read so far, and the order the rest will be read in.
 ///
 /// The provider chain is owned rather than borrowed, which is what lets a long-lived caller — a language server —
@@ -492,6 +521,14 @@ pub struct Session<F: FileProvider = DiskFiles> {
             std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
         >,
     >,
+    /// **What this session's units have cost it** — see [`UnitStats`], which says what the three numbers mean.
+    ///
+    /// Atomics rather than one `Mutex<UnitStats>`: `translation_unit_of` takes `&self` and runs on the pump's read
+    /// side, where the pump and a request can be inside it at once. Nothing here decides an answer, so a relaxed
+    /// order is all a counter needs.
+    unit_from_memory: std::sync::atomic::AtomicUsize,
+    unit_from_disk: std::sync::atomic::AtomicUsize,
+    unit_walked: std::sync::atomic::AtomicUsize,
 }
 
 impl Session<DiskFiles> {
@@ -661,6 +698,45 @@ pub struct PreparedWave {
     pub units: Vec<std::sync::Arc<crate::TranslationUnit>>,
 }
 
+/// **What a drained slice still has to do, decided but not paid for.**
+///
+/// The write lock's last remaining expenses — other than the inserts themselves — were the second pass
+/// ([`SummaryStore::prepare_the_re_read`], 150 ms per file measured) and one macro environment (65–190 ms). Neither
+/// changes the session when it is *worked out*; both were inside the writer only because the code that decided to do
+/// them was. So the decision is made here, cheaply, under the write lock, and the work is handed to
+/// [`Session::prepare_the_drain`], which takes `&self`.
+///
+/// A plan that is prepared and never committed is dropped, exactly like a [`PreparedWave`] that is never committed:
+/// the files it named are re-read when something asks about them again.
+#[derive(Default)]
+pub struct Drain {
+    /// The files the second pass will re-read, claimed from the backlog by this plan — see
+    /// [`Session::parsed_since_the_last_pass`].
+    files: Vec<PathBuf>,
+    /// The timelines that pass reads its environments out of, built for exactly this slice by
+    /// [`Session::prepare_a_wave`].
+    units: Vec<std::sync::Arc<crate::TranslationUnit>>,
+    /// The macro environments a query asked for and has not got — up to `MACRO_SLICE` of them.
+    environments: Vec<PathBuf>,
+}
+
+impl Drain {
+    /// Is there nothing to do? A caller that would take a lock only for this can skip it.
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty() && self.environments.is_empty()
+    }
+}
+
+/// **What [`Session::prepare_the_drain`] made** — the re-reads built and the environments rendered.
+#[derive(Default)]
+pub struct PreparedDrain {
+    /// The second pass, planned: `None` when the slice's backlog was empty.
+    re_read: Option<crate::index::store::ReRead>,
+    /// The rendered environments, keyed the way [`Session::known_rendering_of`] looks them up: the file, and the
+    /// hash of the text it was rendered from.
+    rendered: Vec<((PathBuf, u64), std::sync::Arc<crate::preprocess::cooked::RenderedCooked>)>,
+}
+
 impl<F: FileProvider + Clone> Session<F> {
     /// A session with the configuration the caller already has: no compile database is read and no compiler is run.
     ///
@@ -792,6 +868,9 @@ impl<F: FileProvider + Clone> Session<F> {
             macro_environments: std::sync::Mutex::new(std::collections::HashMap::new()),
             macro_work: std::sync::Mutex::new(Cooking::default()),
             renderings: std::sync::Mutex::new(std::collections::HashMap::new()),
+            unit_from_memory: std::sync::atomic::AtomicUsize::new(0),
+            unit_from_disk: std::sync::atomic::AtomicUsize::new(0),
+            unit_walked: std::sync::atomic::AtomicUsize::new(0),
         };
 
         // The scan is the queue's **seed**, not a list to consult later: opening a project is the caller saying
@@ -1129,15 +1208,18 @@ impl<F: FileProvider + Clone> Session<F> {
         // missing one. The reading is rebuilt when the queue drains — see [`Session::cooking`].
         self.store.forget(path);
         self.held_definitions().forget(path);
-        // The **translation units** too — every one of them was a walk over a closure that contains this file — but
-        // only when a directive moved: a unit is a timeline of directives, so an edit that leaves every one of them
-        // where and what it was (typing in a function body, which is nearly every keystroke) leaves it as it was. This
-        // is the rule the "no incremental AST" designs use for their preamble: the part above the first thing that
-        // can change the environment is reused, and the part below is re-read.
+        // **The translation unit of *this* file, and only this file's.** A unit is a timeline over a closure, so an
+        // edit that moves a directive has changed the one rooted here; it has not changed the one rooted at a file
+        // that merely *includes* this one, whose timeline is still the same sequence of directives at the same
+        // offsets. Clearing the whole table was the first version of this and it threw away up to sixteen units to
+        // invalidate one — including, on the next keystroke, the file's own.
+        //
+        // The disk entry needs no such care: it is keyed per file and checked against the closure's hashes, so it
+        // refuses itself the moment anything it was built from moves (`crate::tu_cache`).
         if moved.layout {
-            self.units.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
-            self.units_read.clear();
+            self.held_units().remove(&queue_key(path));
         }
+        self.units_read.remove(&queue_key(path));
         self.cooking.want(path);
 
         self.queue.again(path.to_path_buf(), Priority::Open, 0);
@@ -1328,6 +1410,37 @@ impl<F: FileProvider + Clone> Session<F> {
         self.cooking.want(path);
     }
 
+    /// **Would [`Session::want_cooked_reading`] change anything for this file?** — the question a caller asks *before*
+    /// taking the write lock.
+    ///
+    /// # Why this exists, and what it is worth
+    ///
+    /// A request's wait is the time until the lock it needs is free, and the pump holds the session for a hundred
+    /// milliseconds at a time and sometimes for more than a second — it is parsing a project's include closure, and
+    /// parsing has to read the index. So a request that takes the **write** lock for work it does not have to do
+    /// waits for all of it. Measured over the wire on the latency fixture: a completion's three write-lock
+    /// acquisitions cost **8, 9, 0 ms** of work and **9, 8, 499, 427, 137, 293, 179, 1147, 119, 306 ms** of *wait* —
+    /// every millisecond of it the queue, none of it the work.
+    ///
+    /// And the work is usually nothing at all: the file a request is about is normally one the editor has open, so
+    /// the VFS is holding its text (`didOpen`) and its cooked reading is either built or already asked for.
+    ///
+    /// # Why it is not a second opinion about anything
+    ///
+    /// It asks the two questions the mutation itself asks, of the same state: the VFS's own `held` table, the
+    /// index's own cooked-reading slot, and the cooking queue's own membership set ([`Cooking::wants`], which reads
+    /// the set [`Cooking::want`] inserts into). Nothing here re-derives a fact another way — the failure this crate
+    /// has already paid for twice (see `docs/status.md` §2) is two implementations of one question, and a predicate
+    /// that answered a *different* question would be the third.
+    ///
+    /// Conservative in the safe direction: `false` means "take the lock and do the work", which is always correct.
+    /// `true` means the two calls above would each do nothing, so skipping them changes no answer — the query that
+    /// follows reads what is already there.
+    pub fn is_ready_for_a_request_about(&self, path: &Path) -> bool {
+        self.vfs.held(path).is_some()
+            && (self.store.index().cooked_declarations(path).is_some() || self.cooking.wants(path))
+    }
+
     /// **Mark every indexed file for cooking** — the project-wide sweep, kept behind the caller's choice rather
     /// than done on every drain.
     ///
@@ -1442,7 +1555,12 @@ impl<F: FileProvider + Clone> Session<F> {
         // It is `&self` work, so it is allowed here — what it is not allowed to be is *inside the writer* on the
         // pump's path, which is what [`Session::prepare_a_wave`] exists for.
         let units = self.units_for_the_pass(&done.iter().map(|step| step.path.clone()).collect::<Vec<_>>());
-        self.finish_a_slice(&done, units);
+        let drain = self.finish_a_slice(&done, units);
+        // **This path pays for its own drain, here.** `advance` is the non-pump entry point — a test, a batch caller —
+        // and it holds no lock at all, so the split that exists to keep the pump's write lock short costs it one
+        // call each way. The answer is the same: what `finish_a_slice` planned is worked out and applied.
+        let prepared = self.prepare_the_drain(drain);
+        self.commit_the_drain(prepared);
 
         done
     }
@@ -1521,7 +1639,17 @@ impl<F: FileProvider + Clone> Session<F> {
     /// The cheap half: no parsing, no reading, no walking — `SummaryStore::commit` per file and `Worklist::add` for
     /// each include it names. Everything the parse needed was paid for under the read lock, and so was the unit walk
     /// that the pass after this one needs.
-    pub fn commit_a_wave(&mut self, wave: PreparedWave, steps: usize) -> Vec<Step> {
+    /// **Put what [`Session::prepare_a_wave`] prepared into the index**, and queue what it includes.
+    ///
+    /// The cheap half: no parsing, no reading, no walking — `SummaryStore::commit` per file and `Worklist::add` for
+    /// each include it names. Everything the parse needed was paid for under the read lock, and so was the unit walk
+    /// that the pass after this one needs.
+    ///
+    /// **What is left to do comes back as a [`Drain`]**, and this is the second half of the same idea: the pass that
+    /// used to run here re-reads files and walks environments, which is 150 ms per file, and it is `&self` work. The
+    /// caller takes the drain to [`Session::prepare_the_drain`] under a read lock and brings it back to
+    /// [`Session::commit_the_drain`] — so the write lock is held for the inserts and for nothing else.
+    pub fn commit_a_wave(&mut self, wave: PreparedWave, steps: usize) -> (Vec<Step>, Drain) {
         let PreparedWave { prepared, units } = wave;
         for (path, made) in prepared {
             self.prefetched.insert(queue_key(&path), made);
@@ -1540,9 +1668,9 @@ impl<F: FileProvider + Clone> Session<F> {
             self.prefetched.clear();
         }
 
-        self.finish_a_slice(&done, units);
+        let drain = self.finish_a_slice(&done, units);
 
-        done
+        (done, drain)
     }
 
     /// **What has to happen once a slice's files are in the index** — the second pass, the cooks, the environments.
@@ -1556,7 +1684,7 @@ impl<F: FileProvider + Clone> Session<F> {
         &mut self,
         done: &[Step],
         units: Vec<std::sync::Arc<crate::TranslationUnit>>,
-    ) {
+    ) -> Drain {
         // **The second pass, at the moment the closure is in hand**. `SummaryStore::get` reads one file with
         // the evidence the index has at that moment, and for MSVC's STL that is no evidence at all: `<vector>`'s
         // `std` scope is written in `yvals_core.h`'s `_STD_BEGIN` — a file `<vector>` *includes*, and a file is read
@@ -1584,18 +1712,23 @@ impl<F: FileProvider + Clone> Session<F> {
         // for one slice that a later slice would have shared. That costs a cache lookup rather than a rebuild —
         // `translation_unit_of` caches by the content of the closure — and it buys the property this function is
         // now judged by: the writer is held for one slice's worth of work and no more.
-        if self.is_idle() && !self.parsed_since_the_last_pass.is_empty() {
+        //
+        // **The slice is claimed here and re-read outside the writer.** What this function decides is *which* files,
+        // which is a drain of a `Vec`; the parse, the environment walk and the encode that follow are 150 ms per file
+        // measured, and they are `&self` work — see [`Session::prepare_the_drain`].
+        //
+        // **The timelines came from the preparing half, rooted at exactly this slice.** They used to be built
+        // here, and moving them out is the change that took a **1003 ms** unit walk out of the writer — the
+        // largest single thing a drain did. What made the first attempt at that measure *worse* (2636 ms against
+        // 1105) was rooting them at the wave instead of at this slice: a unit is a timeline over a whole include
+        // closure, so a bigger root set is a bigger timeline and the pass is proportional to it. Rooted here, the
+        // walk happens once, at the size it is used at, and under the read lock.
+        let files = if self.is_idle() {
             let take = self.parsed_since_the_last_pass.len().min(RE_READ_SLICE);
-            let parsed: Vec<PathBuf> = self.parsed_since_the_last_pass.drain(..take).collect();
-
-            // **The timelines came from the preparing half, rooted at exactly this slice.** They used to be built
-            // here, and moving them out is the change that took a **1003 ms** unit walk out of the writer — the
-            // largest single thing a drain did. What made the first attempt at that measure *worse* (2636 ms against
-            // 1105) was rooting them at the wave instead of at this slice: a unit is a timeline over a whole include
-            // closure, so a bigger root set is a bigger timeline and the pass is proportional to it. Rooted here, the
-            // walk happens once, at the size it is used at, and under the read lock.
-            self.store.re_read_where_a_body_decides(&parsed, &units);
-        }
+            self.parsed_since_the_last_pass.drain(..take).collect()
+        } else {
+            Vec::new()
+        };
 
         // **And the files whose cooked reading is out of date**, now that their environments are complete: a file's
         // macros are the ones its includes brought in, and the index queue emptying is the first moment that is
@@ -1604,6 +1737,17 @@ impl<F: FileProvider + Clone> Session<F> {
         //
         // A **slice**, like the indexing steps: cooking a file is a unit walk, a parse and an index, and a session
         // that did a whole closure in one call would hold the writer for seconds while the user types.
+        //
+        // **The plan this builds is what the caller pays for.** Both of the expensive things a drain does after its
+        // inserts are named here and worked out in [`Session::prepare_the_drain`], which takes `&self`: the second
+        // pass over `files`, and the rendering of `environments`. What is left in this function is a queue pop, a
+        // summary lookup and a `want`.
+        let mut drain = Drain {
+            files,
+            units,
+            environments: Vec::new(),
+        };
+
         if self.is_idle() {
             // **NOT WIRED, ON PURPOSE — and the reason has changed.** It used to be "the answers get worse": with a
             // unit read, `declarations_in("std")` *fell* by 49 and `std::size_t` went from "resolved in a header" to
@@ -1664,6 +1808,10 @@ impl<F: FileProvider + Clone> Session<F> {
             // file's whole closure and copies every file's text — 103.7 ms against a cook's fraction of that on the
             // same headers. This is the budget that keeps a pass responsive while still getting there: the query
             // that asked read the plain view, and the next one about the same text finds the environment.
+            //
+            // **Named here, rendered outside the writer.** [`Session::rendering_of`] takes `&self` — the lookup, the
+            // cached unit, the lex and the cook all read and change nothing — so the 65–190 ms it costs per header is
+            // paid by [`Session::prepare_the_drain`], and what is left inside the writer is the `Arc` insert.
             for _ in 0..MACRO_SLICE {
                 let Some(path) = self
                     .macro_work
@@ -1673,20 +1821,68 @@ impl<F: FileProvider + Clone> Session<F> {
                 else {
                     break;
                 };
-                if let Some(rendered) = self.rendering_of(&path) {
-                    // **Remembered under the text it was read from**, which is what the next `view` looks up. The
-                    // text is taken from the VFS rather than from the rendering: the key is the *file's* content,
-                    // because that is what a client's buffer changes.
-                    if let Some(text) = self.text(&path) {
-                        if let Ok(mut known) = self.renderings.lock() {
-                            known.insert(
-                                (path.clone(), crate::cache::content_hash(&text)),
-                                std::sync::Arc::new(rendered),
-                            );
-                        }
-                    }
-                }
+                drain.environments.push(path);
             }
+        }
+
+        drain
+    }
+
+    /// **Work out the expensive half of a drain, holding nothing but `&self`.**
+    ///
+    /// The counterpart of [`Session::prepare_a_wave`], for the work that happens *after* a slice's inserts: the second
+    /// pass ([`SummaryStore::prepare_the_re_read`]) and the macro environments a query asked for. Both are pure
+    /// functions of the session as it stands — the re-read re-parses files it already has the text of, and a rendering
+    /// is built from the index and the unit cache — and both were inside the write lock only because the code that
+    /// *decided* to do them was. Measured from the server's own budget warning: a slice that committed **no files at
+    /// all** held it for 260–572 ms, and this is the whole of what it was doing.
+    ///
+    /// [`Session::commit_the_drain`] applies the answer, and the pair is what lets the pump give a request the lock
+    /// back between the two.
+    pub fn prepare_the_drain(&self, drain: Drain) -> PreparedDrain {
+        let Drain {
+            files,
+            units,
+            environments,
+        } = drain;
+
+        let re_read = (!files.is_empty()).then(|| {
+            self.store
+                .prepare_the_re_read(&files, &units, false)
+        });
+
+        // **Remembered under the text it was read from**, which is what the next `view` looks up. The text is taken
+        // from the VFS rather than from the rendering: the key is the *file's* content, because that is what a
+        // client's buffer changes — and it is read here as well as rendered here, because both are the same read
+        // lock and neither changes the session.
+        let mut rendered = Vec::new();
+        for path in environments {
+            let Some(reading) = self.rendering_of(&path) else {
+                continue;
+            };
+            let Some(text) = self.text(&path) else {
+                continue;
+            };
+            rendered.push((
+                (path, crate::cache::content_hash(&text)),
+                std::sync::Arc::new(reading),
+            ));
+        }
+
+        PreparedDrain { re_read, rendered }
+    }
+
+    /// **Apply what [`Session::prepare_the_drain`] worked out** — the index insert, and the remembered renderings.
+    pub fn commit_the_drain(&mut self, prepared: PreparedDrain) -> usize {
+        for (key, rendered) in prepared.rendered {
+            if let Ok(mut known) = self.renderings.lock() {
+                known.insert(key, rendered);
+            }
+        }
+
+        match prepared.re_read {
+            Some(plan) => self.store.commit_the_re_read(plan),
+            None => 0,
         }
     }
 
@@ -1853,24 +2049,66 @@ impl<F: FileProvider + Clone> Session<F> {
             .collect()
     }
 
+    /// **Is there anything for [`Session::catch_up`] to read?** — the question a caller asks *before* taking the
+    /// write lock.
+    ///
+    /// `catch_up` is two reads and they are both conditional: the file itself when an edit has left its summary
+    /// dropped and the pump has not rebuilt it, and the files it includes that the index has never read. For the
+    /// ordinary keystroke — and for every request after the first on a file nobody has edited — both answers are
+    /// "nothing", and the whole of what the call costs is the lock it takes to find that out.
+    ///
+    /// Measured over the wire on the latency fixture: with the same shortcut already in place for `prepare`, a
+    /// completion's `catch_up` cost **0–1108 ms** for a file whose summary was current and whose includes were all
+    /// indexed. Every millisecond of that was the queue.
+    ///
+    /// Exact rather than approximate: [`Work::is_queued`] is the test `catch_up` itself acts on (and `forget` is
+    /// written in terms of it), and [`Session::unread_includes_of`] is the list `catch_up` itself walks. `false`
+    /// means "read nothing", and reading nothing changes nothing.
+    pub fn needs_catching_up(&self, path: &Path) -> bool {
+        self.queue.is_queued(path) || !self.unread_includes_of(path).is_empty()
+    }
+
     /// Work until there is nothing left, and say how many files were read.
     ///
     /// Chunked rather than one `advance(usize::MAX)`: the steps of a whole project are a `Vec` nobody wants, and a
-    /// caller that wants progress wants it per chunk. Terminates because every step removes one entry from the
-    /// queue and adds only files it has not already worked — and because the cooking backlog only shrinks during a
-    /// drain (`cook` never marks a file for cooking).
+    /// caller that wants progress wants it per chunk.
     ///
     /// **Both kinds of work**, which is [`Session::pending_work`]'s count rather than [`Session::is_idle`]'s: a caller
     /// asking for "everything" wants the cooked readings too, and a test that read one and not the other would be
     /// asserting about the parts it happened to wait for.
+    ///
+    /// # Why the cooking backlog is drained here, and why that is not an optimisation
+    ///
+    /// `advance` only **marks** files for cooking — `want_the_closure_cooked` runs at the bottom of every slice
+    /// whose index queue drained. The draining is [`Session::claim_cooking`] / [`Session::materials_for`] /
+    /// [`Session::render_them`] / [`Session::commit_them`], which in production is the pump's loop and here has to
+    /// be this one. Without it `pending_work` never falls to zero: the marking is idempotent, so the backlog sits
+    /// at a fixed size for ever and this loop spins — **a hang, not a slowdown**, and the reason the analysis
+    /// crate's test suite had to be killed rather than run.
+    ///
+    /// # Why it is a progress test rather than `pending_work() > 0`
+    ///
+    /// Because a file the index cannot describe can never be cooked, and `want_the_closure_cooked` marks it again
+    /// on every slice. That case is real and is recorded at that function ("a queue that refills with files that
+    /// have readings never empties… a hang, not a slowdown"). One round that neither read a file nor cooked one is
+    /// the end of the work there is.
     pub fn index_everything(&mut self) -> usize {
         let mut total = 0;
 
-        while self.pending_work() > 0 {
-            total += self.advance(64).len();
-        }
+        loop {
+            let read = self.advance(64).len();
+            total += read;
 
-        total
+            let cooked = {
+                let claimed = self.claim_cooking(COOK_SLICE);
+                let rendered = self.render_them(self.materials_for(claimed));
+                self.commit_them(rendered).len()
+            };
+
+            if read == 0 && cooked == 0 {
+                return total;
+            }
+        }
     }
 
     /// How many files are queued and not yet indexed.
@@ -2445,28 +2683,39 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// # What invalidates it
     ///
-    /// Any change to any file: the map is cleared whole. A unit is a reading of *its closure*, and the honest
-    /// short answer to "did something in it move" is "assume so" — the disk entry is the one that can afford to
-    /// check file by file (it hashes the closure), and it is consulted fresh each time this map misses.
+    /// ```text
+    /// the in-memory map    this session's own edits — and only the edited file's entry (Session::buffer_changed)
+    /// the disk entry       whatever RootKey says, which for a file being typed into is its *preamble*
+    /// ```
+    ///
+    /// The disk rule is the one that used to be wrong. It hashed every file of the closure whole, the root
+    /// included, so **the file a person was typing into could never be reused** — its own hash moved on every
+    /// keystroke — and every cook of it paid a walk of its whole closure. See [`crate::tu_cache::RootKey`]: the
+    /// root is keyed on everything a walk can read out of it, which its body is not.
     fn translation_unit_of(&self, path: &Path) -> Option<std::sync::Arc<crate::TranslationUnit>> {
         let key = queue_key(path);
 
         if let Some(unit) = self.held_units().get(&key) {
+            self.note_a_unit(Which::FromMemory);
             return Some(unit);
         }
 
         let context = self.store.context_hash(path);
         let cache = crate::TranslationUnitCache::of_store(&self.store);
+        let root_key = self.root_key_of(path);
 
         // Read out of the cache under a timer, then matched: a stage timer inside a `match` scrutinee is a block
         // clippy asks to hoist, and hoisting it is what the timer wants anyway — it should cover the read only.
         let cached = {
             let _get = crate::stages::StageTimer::new(crate::stages::Stage::UnitGet);
-            cache.get(path, context, &self.files)
+            cache.get(path, context, &self.files, root_key)
         };
 
         let unit = match cached {
-            Some(unit) => unit,
+            Some(unit) => {
+                self.note_a_unit(Which::FromDisk);
+                unit
+            }
             None => {
                 let (closure, closure_by_key) = {
                     let _closure = crate::stages::StageTimer::new(crate::stages::Stage::Closure);
@@ -2501,8 +2750,12 @@ impl<F: FileProvider + Clone> Session<F> {
                 // checkout is an ordinary way to work, and a cache that cannot be written is not a wrong answer.
                 {
                     let _put = crate::stages::StageTimer::new(crate::stages::Stage::UnitPut);
-                    let _ = cache.put(path, context, &unit, &self.files);
+                    let _ = cache.put(path, context, &unit, &self.files, root_key);
                 }
+                // **Counted here and not after the match**: reaching this arm is what a walk *is*, and a call that
+                // was served off the disk reaches the other one. Counting after the match counts both, which is
+                // the mistake this line was written with.
+                self.note_a_unit(Which::Walked);
                 unit
             }
         };
@@ -2510,6 +2763,45 @@ impl<F: FileProvider + Clone> Session<F> {
         let unit = std::sync::Arc::new(unit);
         self.held_units().insert(key, unit.clone());
         Some(unit)
+    }
+
+    /// Count one answer from [`Session::translation_unit_of`] — see [`UnitStats`] for what the three mean.
+    fn note_a_unit(&self, which: Which) {
+        use std::sync::atomic::Ordering::Relaxed;
+
+        let counter = match which {
+            Which::FromMemory => &self.unit_from_memory,
+            Which::FromDisk => &self.unit_from_disk,
+            Which::Walked => &self.unit_walked,
+        };
+        counter.fetch_add(1, Relaxed);
+    }
+
+    /// **What this session's translation units have cost it.** See [`UnitStats`].
+    ///
+    /// The number to watch is `walked`: it is a closure read and a timeline built, and the design in
+    /// `docs/incremental-edits.md` says a keystroke in a file's **body** must leave it where it was.
+    pub fn unit_stats(&self) -> UnitStats {
+        use std::sync::atomic::Ordering::Relaxed;
+
+        UnitStats {
+            from_memory: self.unit_from_memory.load(Relaxed),
+            from_disk: self.unit_from_disk.load(Relaxed),
+            walked: self.unit_walked.load(Relaxed),
+        }
+    }
+
+    /// **What a unit rooted at `path` is keyed on** — the file's preamble, when its text is in reach.
+    ///
+    /// A file that cannot be read is [`RootKey::WholeText`], which is the rule that can only ever be less
+    /// generous: it refuses the entry on any change at all, which is what happened for every file before this
+    /// existed. The read is the same one the walk is about to make, and the scan is one lex of one file against a
+    /// walk of a whole closure — see `crate::tu_cache::RootKey` for what the key is and why it is sound.
+    fn root_key_of(&self, path: &Path) -> crate::tu_cache::RootKey {
+        match self.files.read(path) {
+            Some(text) => crate::tu_cache::RootKey::of(&text),
+            None => crate::tu_cache::RootKey::WholeText,
+        }
     }
 
     /// The units table, with the lock taken — the one place the poison rule is written down.
@@ -2797,11 +3089,7 @@ impl<F: FileProvider + Clone> Session<F> {
             // The module names the index cannot point at a file for, from the file itself and from every file the
             // previous round brought in — a fresh walk each round, because a round is a handful of hashmap lookups
             // and the alternative is a worklist that has to be kept in step with the index.
-            let wanted: Vec<String> = self
-                .modules_in_view_of(path)
-                .into_iter()
-                .filter(|module| self.store.index().interface_unit_of(module).is_none())
-                .collect();
+            let wanted = self.modules_the_index_cannot_name(path);
 
             if wanted.is_empty() {
                 break;
@@ -2837,8 +3125,34 @@ impl<F: FileProvider + Clone> Session<F> {
         read_in
     }
 
-    /// **Which file each of these module names is declared in** — resolved the way `scan_imports` resolves them.
+    /// **The module names reachable from `path` that the index cannot point at a file for** — the list
+    /// [`Session::read_the_modules_a_file_imports`] reads in, and the question
+    /// [`Session::imports_a_module_that_is_not_read`] asks.
     ///
+    /// One implementation of both, because they are the same question: the caller that wants to know whether there
+    /// is work must not be able to disagree with the caller that does it.
+    fn modules_the_index_cannot_name(&self, path: &Path) -> Vec<String> {
+        self.modules_in_view_of(path)
+            .into_iter()
+            .filter(|module| self.store.index().interface_unit_of(module).is_none())
+            .collect()
+    }
+
+    /// **Would [`Session::read_the_modules_a_file_imports`] read anything?** — the question a caller asks *before*
+    /// taking the write lock.
+    ///
+    /// The call is a **request-driven** read precisely so that it happens once: the second time, the interface unit
+    /// is in the index and the answer is "nothing to do" — measured at **0.004 ms** for the work. What is not
+    /// 0.004 ms is the write lock it takes to discover that, and the pump holds the session for read while it parses
+    /// an include closure.
+    ///
+    /// So a file that imports nothing — which is nearly every file — asks this, gets `false`, and never queues for
+    /// the lock at all. A file that does import a module pays the lock exactly once, which is the call's whole point.
+    pub fn imports_a_module_that_is_not_read(&self, path: &Path) -> bool {
+        !self.modules_the_index_cannot_name(path).is_empty()
+    }
+
+    /// **Which file each of these module names is declared in** — resolved the way `scan_imports` resolves them.
     /// The naming convention, the importing file's own directory, and each include path's sibling `modules`
     /// directory (which is where a standard module lives: `<VC>/Tools/MSVC/<version>/modules/std.ixx` is *beside* the
     /// include directory, not inside it). Going through [`ModuleScanner`] rather than a second implementation is what
@@ -2948,7 +3262,7 @@ impl<F: FileProvider + Clone> Session<F> {
         Some(self.commit_a_cooked(rendered))
     }
 
-    /// **Everything a cook needs that is cheap to gather, holding `&mut self` only for the lookup.**
+    /// **Everything a cook needs that is cheap to gather** — and it takes `&self`, which is the whole point of it.
     ///
     /// The expensive half of cooking a file — lexing it, rendering it, parsing the rendering — is a function of the
     /// file's own text and its environment, and it changes nothing. So it is [`Session::render_a_cooked`], which takes
@@ -2957,9 +3271,15 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// Split for the same reason [`Session::prepare_a_wave`] is: the write lock is what a query waits for. Measured,
     /// a cooking slice of *zero* index files held it for up to **1527 ms**, and the parts measured here are
-    /// `unit 15–42 ms` (the cache lookup) against `own 9–269 ms` (the render and parse) — so what stays under the
-    /// write lock is the small one.
-    pub fn cooking_materials(&mut self, path: &Path) -> Option<CookingMaterials> {
+    /// `unit 15–42 ms` (the cache lookup) against `own 9–269 ms` (the render and parse).
+    ///
+    /// **And `&self` rather than `&mut self`, which it was until the measurement said so.** Every step of it reads:
+    /// the summary lookup, `context_hash`, the unit (behind its own lock, deliberately — see `Session::units`), the
+    /// text, the seed. What needed `&mut self` was the *queue pop*, and that is [`Session::claim_cooking`] — so a
+    /// slice is claimed under the write lock, which is a `Vec` operation, and gathered here under the read one.
+    /// Measured from the server's own budget warning, the gather was **58–76 ms** of every drain's write hold and the
+    /// pop was nothing.
+    pub fn cooking_materials(&self, path: &Path) -> Option<CookingMaterials> {
         let path = self.store.index().summary(path)?.path.clone();
         let key = SummaryKey::new(0, self.store.context_hash(&path));
 
@@ -3053,29 +3373,29 @@ impl<F: FileProvider + Clone> Session<F> {
         reading
     }
 
-    /// **The materials for up to `how_many` of the files waiting to be cooked**, in queue order.
+    /// **Which files the next cooking slice is for** — the queue pop, and the only part of taking a slice that needs
+    /// the write lock.
     ///
-    /// The cheap half of a cooking slice: a summary lookup, a translation unit **out of the cache** (a hit whenever
-    /// the file has been indexed, which is the ordinary case here) and the text. What it does *not* do is the lex,
-    /// the render and the parse — [`Session::render_them`] does those, and takes `&self`, so the pump can hold a read
-    /// lock for them instead of the write lock a query is waiting for.
+    /// The materials themselves are [`Session::cooking_materials`], which takes `&self`: a summary lookup, a unit out
+    /// of the cache and the text. Naming the files here and gathering them there is what lets the pump hold the read
+    /// lock for `unit 15–42 ms` per file rather than the write lock a query waits for.
     ///
-    /// It takes the queue's front, so a caller that renders and commits them in order has done exactly what
-    /// `finish_a_slice`'s loop does — with the expensive part outside the write lock.
-    pub fn take_cooking_materials(&mut self, how_many: usize) -> Vec<CookingMaterials> {
-        let mut taken = Vec::new();
-        for _ in 0..how_many {
-            let Some(path) = self.cooking.take(1).into_iter().next() else {
-                break;
-            };
-            // A file the cook queue names but the index cannot describe yet is dropped rather than re-queued:
-            // `want_cooked_reading` and the closure sweep both ask for it again, and a queue that re-adds its own
-            // failures is a queue that never empties — the note on `want_the_closure_cooked` records that hang.
-            if let Some(materials) = self.cooking_materials(&path) {
-                taken.push(materials);
-            }
-        }
-        taken
+    /// It takes the queue's front, so a caller that gathers, renders and commits them in order has done exactly what
+    /// `finish_a_slice`'s loop used to do — with everything but the pop outside the write lock.
+    pub fn claim_cooking(&mut self, how_many: usize) -> Vec<PathBuf> {
+        self.cooking.take(how_many)
+    }
+
+    /// **The materials for a claimed slice**, skipping the files the index cannot describe yet.
+    ///
+    /// A file the cook queue names but the index cannot describe is dropped rather than re-queued:
+    /// `want_cooked_reading` and the closure sweep both ask for it again, and a queue that re-adds its own failures
+    /// is a queue that never empties — the note on `want_the_closure_cooked` records that hang.
+    pub fn materials_for(&self, paths: Vec<PathBuf>) -> Vec<CookingMaterials> {
+        paths
+            .into_iter()
+            .filter_map(|path| self.cooking_materials(&path))
+            .collect()
     }
 
     /// **Lex, render and parse a slice's worth of materials** — the expensive half, under a read lock.
@@ -3123,7 +3443,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// *different* rendering. They share the steps — the unit, the file's macros, `cook_with` — and this method
     /// exists rather than `cook` returning its text because the text is large (a header's rendering is megabytes)
     /// and every caller of `cook` but this one discards it.
-    pub fn rendered_text_of(&mut self, path: impl AsRef<Path>) -> Option<String> {
+    pub fn rendered_text_of(&self, path: impl AsRef<Path>) -> Option<String> {
         Some(self.rendering_of(path)?.text)
     }
 
@@ -3133,8 +3453,13 @@ impl<F: FileProvider + Clone> Session<F> {
     /// The same artifact as [`Session::rendered_text_of`] with the half that makes it usable for a **view**:
     /// [`crate::FileView::parse_rendering`] needs the spans, because a rendering's offsets are its own and a client
     /// speaks the file's.
+    ///
+    /// **`&self`, and that is load-bearing.** Every step of it — the lookup, the unit (cached, behind its own lock),
+    /// the read, the lex, the cook — reads the session and changes nothing, so a caller can build a rendering under
+    /// the **read** lock instead of the write one a query is waiting for. The drain's macro-environment slice used to
+    /// be the largest thing left inside the writer after the parse moved out, at 65–190 ms per header.
     pub fn rendering_of(
-        &mut self,
+        &self,
         path: impl AsRef<Path>,
     ) -> Option<crate::preprocess::cooked::RenderedCooked> {
         let path = self.store.index().summary(path.as_ref())?.path.clone();
@@ -3409,6 +3734,11 @@ impl<F: FileProvider + Clone> Session<F> {
     /// differently: pending work means "ask me again as you type, a name may be missing for the only reason that
     /// its file has not been read yet", while a capped list means the opposite ("do not ask again, this is the best
     /// I have"). A caller that merged them would leave a client retrying a list that cannot change.
+    /// # What the two halves cost
+    ///
+    /// The header index is **cloned** rather than borrowed — see [`Session::headers`] — and on a project the size of
+    /// the latency fixture that clone measures **0 ms**, against 350–1270 ms for the query beside it while the index
+    /// was filling. It is named here because it is the obvious suspect for a per-keystroke cost and it is not one.
     pub fn completions(&self, view: &FileView, offset: usize) -> crate::CompletionSet {
         // The header index through its lock, and **an empty one on a poisoned lock**: a completion is a suggestion
         // list, and a thread that panicked while adding project files is no reason to fail the request — the
@@ -3915,13 +4245,17 @@ impl UnitTable {
         self.held.insert(key, (self.clock, unit));
     }
 
-    fn clear(&mut self) {
-        self.held.clear();
+    /// **Forget one file's unit** — what an edit to that file invalidates, and nothing else.
+    ///
+    /// `clear` was the only removal for most of this table's life, and it is the wrong width: see
+    /// [`Session::buffer_changed`]. `clear` stays for the one case that really is whole-table — a closed buffer,
+    /// whose text every unit in the table may have been built from.
+    fn remove(&mut self, key: &str) {
+        self.held.remove(key);
     }
 
-    #[cfg(test)]
-    fn is_empty(&self) -> bool {
-        self.held.is_empty()
+    fn clear(&mut self) {
+        self.held.clear();
     }
 }
 
@@ -3962,6 +4296,12 @@ impl Cooking {
         // second opinion about identity.
         self.wanted.push_front(path.to_path_buf());
         true
+    }
+
+    /// Is `path` already waiting to be cooked? The **membership set** [`Cooking::want`] inserts into, asked without
+    /// taking anything — see [`Session::is_ready_for_a_request_about`].
+    fn wants(&self, path: &Path) -> bool {
+        self.held.contains(&queue_key(path))
     }
 
     /// Take up to `how_many` files to cook, in order.
@@ -4087,15 +4427,23 @@ impl Work {
     /// whoever read it synchronously — and a later `add` for it (an include discovered by another file) must not
     /// queue a second read of a file the store already answered for.
     fn forget(&mut self, path: &Path) -> bool {
-        let key = queue_key(path);
-
-        if matches!(self.standing.get(&key), Some(Standing::Queued(_))) {
-            self.standing.insert(key, Standing::Worked);
-            self.queued -= 1;
-            return true;
+        if !self.is_queued(path) {
+            return false;
         }
 
-        false
+        self.standing.insert(queue_key(path), Standing::Worked);
+        self.queued -= 1;
+        true
+    }
+
+    /// **Is `path` waiting to be read?** — the test [`Work::forget`] is built on, asked on its own because a caller
+    /// that only wants to know whether there is work to do must be able to ask it without doing any.
+    ///
+    /// One implementation, two callers: [`Work::forget`] decides what to forget with it and
+    /// [`Session::needs_catching_up`] decides whether to take the write lock with it. A second spelling of "is this
+    /// file queued" is exactly the shape of defect `docs/status.md` §2 records twice.
+    fn is_queued(&self, path: &Path) -> bool {
+        matches!(self.standing.get(&queue_key(path)), Some(Standing::Queued(_)))
     }
 
     /// The next file to work, and the half it came from.
@@ -4378,7 +4726,7 @@ fn is_a_source_file(path: &Path, extra: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{OpenDocuments, Session, SessionFiles};
+    use super::{OpenDocuments, Session, SessionFiles, queue_key};
     use crate::include::config::{CommandLineMacro, CompilerConfig};
     use crate::include::toolchain::{Toolchain, ToolchainSource};
     use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
@@ -5192,6 +5540,113 @@ mod tests {
         );
     }
 
+    /// **Typing in a file's body does not cost the walk of its closure, and typing above the body does.**
+    ///
+    /// This is the acceptance of `docs/incremental-edits.md` stage 1, and it is written as a *count* rather than a
+    /// duration because the design is about what gets recomputed. The numbers are [`Session::unit_stats`]'s:
+    /// `walked` is a closure read and a timeline built, `from_disk` is the entry that replaces it.
+    ///
+    /// The fixture is two sessions over one cache directory, because the disk entry is the thing under test: a
+    /// unit walked by the first session is what the second has to be served, and the in-memory table would hide
+    /// whether that happened.
+    ///
+    /// # Why the root used to be walked on every keystroke
+    ///
+    /// A unit's closure includes the file it is rooted at, and the key was every file's whole text — so the file
+    /// being typed into invalidated its own unit on every character. The key is now that file's **preamble**: see
+    /// [`crate::RootKey`] for what that is and why the tail is checked separately.
+    #[test]
+    fn typing_in_a_body_does_not_cost_the_walk_a_translation_unit_is() {
+        let main = "#include \"b.h\"\nint main() { return A; }\n";
+        let files = MemoryFiles::new()
+            .with_file("/p/a.h", "#pragma once\n#define A 1\n")
+            .with_file("/p/b.h", "#pragma once\n#include \"a.h\"\nstruct B { int b; };\n")
+            .with_file("/p/main.cpp", main);
+        let fixture = Memory::new("a-body-edit-is-not-a-walk", &files);
+
+        // **The first session walks, because there is nothing to reuse** — and writes the entry for the next one.
+        // `index_everything` is the whole of the work: it reads the queue *and* drains the cooking backlog, which
+        // is where a unit is reached.
+        let mut first = fixture.session();
+        first.add_project_files([PathBuf::from("/p/main.cpp")]);
+        first.did_open("/p/main.cpp", main);
+        first.index_everything();
+        assert!(
+            first.index().cooked_declarations(Path::new("/p/main.cpp")).is_some(),
+            "the fixture cooked the file, which is what walks its unit"
+        );
+        assert!(
+            first.unit_stats().walked > 0,
+            "…and nothing was on disk to serve it: {:?}",
+            first.unit_stats()
+        );
+        // **And it left the entry behind**, which is the whole of what the sessions below are reading: a walk that
+        // was not written is a walk the next one pays for again.
+        let units_on_disk = fixture
+            .root
+            .join(crate::CACHE_DIRECTORY)
+            .join(crate::TRANSLATION_UNITS_DIRECTORY);
+        let written = std::fs::read_dir(&units_on_disk)
+            .map(|entries| entries.flatten().count())
+            .unwrap_or(0);
+        assert!(
+            written > 0,
+            "the first session wrote the unit it walked into {units_on_disk:?}"
+        );
+
+        // **One fresh session per question**, because the in-memory table would otherwise answer and hide whether
+        // the entry on disk was usable at all — and the entry on disk is the thing under test: it is what has to
+        // survive a keystroke, for a session that has not seen the file before and for the one that has.
+        let over_a_fresh_session = |what: &str, text: &str| {
+            let mut session = fixture.session();
+            session.add_project_files([PathBuf::from("/p/main.cpp")]);
+            session.did_open("/p/main.cpp", text);
+            session.index_everything();
+            let stats = session.unit_stats();
+            assert!(
+                session
+                    .index()
+                    .cooked_declarations(Path::new("/p/main.cpp"))
+                    .is_some(),
+                "{what}: the fixture cooked the file"
+            );
+            stats
+        };
+
+        // **The text that was walked**: served off the disk, with no walk of its own.
+        let unedited = over_a_fresh_session("unedited", main);
+        assert_eq!(
+            unedited.walked, 0,
+            "the entry the first session wrote answers for the text it was walked from: {unedited:?}"
+        );
+        assert!(
+            unedited.from_disk > 0,
+            "…and it is the disk entry that answered: {unedited:?}"
+        );
+
+        // **A character typed into the body.** Nothing above the file's last directive moves, and nothing below it
+        // can be read by a walk — so the unit the first session built is still this file's unit. **This is the
+        // acceptance of stage 1**: before the root of a unit was keyed on its preamble, this session walked.
+        let typed = format!("{main}\nint more() {{ return A; }}\n");
+        let edited = over_a_fresh_session("a body edit", &typed);
+        assert_eq!(
+            edited.walked, 0,
+            "a body edit is not an input to the file's own timeline, so it must not cost a walk: {edited:?}"
+        );
+        assert!(
+            edited.from_disk > 0,
+            "…and the entry the first session wrote is what answered: {edited:?}"
+        );
+
+        // **An `#include` above the body is a different matter**: it moves the preamble, which is the key.
+        let with_an_include = "#include \"a.h\"\n#include \"b.h\"\nint main() { return A; }\n";
+        let moved = over_a_fresh_session("an include above the body", with_an_include);
+        assert!(
+            moved.walked > 0,
+            "an edit above the bound is an edit to what the walk reads: {moved:?}"
+        );
+    }
+
     /// **An `#include` added to a header that defines nothing is still a change to its includers' environment.**
     #[test]
     fn an_include_added_to_a_header_invalidates_the_readings_that_include_it() {
@@ -5215,11 +5670,17 @@ mod tests {
         );
     }
 
-    /// **Typing below the last directive keeps the translation units; touching a directive drops them.**
+    /// **Typing below the last directive keeps the edited file's unit; touching a directive drops it — and it
+    /// drops that one, not the table.**
     ///
     /// A unit is a timeline of directives, so what decides whether an edit can have moved it is whether any directive
     /// did — nearly every keystroke is in a body, and re-walking the closure for each of them was most of what a
     /// keystroke cost.
+    ///
+    /// **The second half is `docs/incremental-edits.md` stage 1.** Dropping the whole table was the first version of
+    /// this rule and it invalidated up to `MAX_UNITS` units to invalidate one — including, on the next keystroke,
+    /// the one the file needed. A file that merely *includes* the edited one has a timeline of its own, and it is
+    /// still the same directives at the same offsets: `ns.h` knows nothing about `api.h`.
     #[test]
     fn a_unit_survives_typing_in_a_body_and_not_a_change_to_a_directive() {
         let ns = "#define BEGIN_NS namespace one {\n#define END_NS }\n";
@@ -5230,18 +5691,50 @@ mod tests {
 
         session.did_open("/p/api.h", api);
         session.index_everything();
-        assert!(!session.units.is_empty(), "the fixture cooked a file, which walked a unit");
+        assert!(
+            holds_a_unit_for(&session, "/p/api.h"),
+            "the fixture cooked the file, which walked a unit"
+        );
+        assert!(
+            holds_a_unit_for(&session, "/p/ns.h"),
+            "…and the header it includes, whose closure does not contain `api.h`"
+        );
 
         let typed = format!("{api}void body() {{ int inside; }}\n");
         session.did_change("/p/api.h", &typed);
-        assert!(!session.units.is_empty(), "a body was typed below the last directive");
+        assert!(
+            holds_a_unit_for(&session, "/p/api.h"),
+            "a body was typed below the last directive"
+        );
 
         let typed_more = format!("{api}void body() {{ int inside; int more; }}\n");
         session.did_change("/p/api.h", &typed_more);
-        assert!(!session.units.is_empty(), "and again");
+        assert!(holds_a_unit_for(&session, "/p/api.h"), "and again");
 
         session.did_change("/p/api.h", &format!("#include \"ns.h\"\n#define EXTRA 1\n{typed_more}"));
-        assert!(session.units.is_empty(), "a directive appeared, so the timeline is out of date");
+        assert!(
+            !holds_a_unit_for(&session, "/p/api.h"),
+            "a directive appeared, so `api.h`'s timeline is out of date"
+        );
+        assert!(
+            holds_a_unit_for(&session, "/p/ns.h"),
+            "…and `ns.h`'s is not: nothing in its closure moved, and dropping it would be a walk bought for nothing"
+        );
+    }
+
+    /// **Is a translation unit held for this file?** — asked through the table's own lock, and per file, because
+    /// what an edit invalidates is one file's timeline rather than the whole table.
+    ///
+    /// Four assertions here used to call `units.is_empty()` on the `Mutex` itself, so the *test* had stopped
+    /// compiling when the field gained a lock; they were then rewritten to ask about the whole table, which was
+    /// right while an edit cleared it and is wrong now that it does not.
+    fn holds_a_unit_for(session: &Session<MemoryFiles>, path: &str) -> bool {
+        session
+            .units
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .held
+            .contains_key(&queue_key(Path::new(path)))
     }
 
     /// **Editing a header invalidates the reading of the open file that includes it.**

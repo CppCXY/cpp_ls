@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use cpp_code_analysis::graph::Marked;
 use cpp_code_analysis::{
-    CompilerConfig, FileIndexer, FileSummary, MacroBindings, MacroDefinitions, MemoryFiles,
+    CompilerConfig, FileIndexer, FileSummary, MacroBindings, MacroDefinitions, MemoryFiles, RootKey,
     SummaryKey, TranslationUnit, TranslationUnitCache,
 };
 use cpp_parser::MacroFacts;
@@ -425,11 +425,15 @@ fn a_walked_unit_can_be_kept_and_read_back() {
     let cache = TranslationUnitCache::new(&directory);
 
     let root = Path::new("/p/main.cpp");
+    let main_cpp = unit.sources.get(root).cloned().unwrap_or_default();
+    // **Keyed the way a session keys the file a person is typing into**: on its preamble. See
+    // [`cpp_code_analysis::RootKey`] for why the body of the root is not part of its own unit's key.
+    let key = RootKey::of(&main_cpp);
     cache
-        .put(root, 11, &walked, &unit.files)
+        .put(root, 11, &walked, &unit.files, key)
         .expect("the entry writes");
     let served = cache
-        .get(root, 11, &unit.files)
+        .get(root, 11, &unit.files, key)
         .expect("the entry is served while the closure is unchanged");
 
     assert_eq!(
@@ -477,8 +481,28 @@ fn a_walked_unit_can_be_kept_and_read_back() {
         changed.insert(path, text);
     }
     assert!(
-        cache.get(root, 11, &changed).is_none(),
+        cache.get(root, 11, &changed, key).is_none(),
         "an edited header in the closure refuses the entry"
+    );
+
+    // **And a body edit to the root itself does not** — the case the preamble key exists for, on a real walk
+    // rather than on the hand-built frames `tu_cache`'s own tests use. Nothing is added to the file that a walk
+    // could read, so the timeline it produced is still the timeline this file has.
+    let typed_main = format!("{main_cpp}\nint typed_a_line() {{ return 0; }}\n");
+    let mut typed = MemoryFiles::new();
+    for (path, text) in &files {
+        let text = if *path == "/p/main.cpp" {
+            typed_main.as_str()
+        } else {
+            *text
+        };
+        typed.insert(path, text);
+    }
+    assert!(
+        cache
+            .get(root, 11, &typed, RootKey::of(&typed_main))
+            .is_some(),
+        "a body edit to the root keeps the entry: the key is everything a walk can read out of it"
     );
 
     let _ = std::fs::remove_dir_all(&directory);

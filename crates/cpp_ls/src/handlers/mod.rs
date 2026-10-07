@@ -81,6 +81,25 @@ pub use text_document::{
 /// [`Analysis::prepare`]: crate::context::AnalysisState::prepare
 /// [`Session::catch_up`]: cpp_code_analysis::Session::catch_up
 pub async fn read_the_modules(context: &ServerContextSnapshot, path: &std::path::Path, caught_up: bool) {
+    // **Nothing to read, so no lock to take.** Both halves of this call are conditional and both are asked here
+    // first: the summary is current (`caught_up` says the caller already did it, `needs_catching_up` asks the
+    // session), and no module in view is one the index cannot point at a file for — which is the ordinary answer for
+    // a file that imports nothing, and the answer for every call after the first on a file that does.
+    //
+    // The check is a **read**, and a read does not wait for the pump's parse; the write would. Measured over the
+    // wire on the latency fixture, this call was the last **151–1648 ms** of a completion's wait once the same
+    // shortcut was in place for `prepare` and `catch_up`.
+    let nothing_to_read = context
+        .analysis()
+        .with_snapshot(|session| {
+            (caught_up || !session.needs_catching_up(path))
+                && !session.imports_a_module_that_is_not_read(path)
+        })
+        .unwrap_or(false);
+    if nothing_to_read {
+        return;
+    }
+
     let read = path.to_path_buf();
 
     context

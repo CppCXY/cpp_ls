@@ -72,18 +72,17 @@ pub async fn on_goto_definition_handler(
         // go-to-definition on `std::string` in a file that says `import std;` has nothing to point at until that file
         // is read. `false`: this handler has no edit to catch up on, so the read does it itself.
         crate::handlers::read_the_modules(&context, &path, false).await;
-        // **And then wait for the analysis, because the answer is not in this file.**
+        // **And then the query, which no longer waits for the project's index to drain.**
         //
-        // `prepare` reads *this* file and wants its cooked reading; the declaration being jumped to is usually in a
-        // header, and a header's facts exist only once the pump has cooked the include closure. Measured on a live
-        // server for `std::endl` — the gap this pattern was added to the hover handler for — the first three queries
-        // after an open answered **nothing at all** and the fourth answered correctly.
+        // The defect is real and worth keeping on the record: `prepare` reads *this* file, while the declaration
+        // being jumped to is usually in a header whose facts exist only once the pump has cooked the include closure
+        // — and measured on a live server for `std::endl`, the first three queries after an open answered **nothing
+        // at all** while the fourth answered correctly. The wait added for it was `AnalysisState::settle`, which
+        // asked whether the *whole project's* indexing queue was empty.
         //
-        // The same short, cancellable budget the completion and inlay-hint handlers use.
-        context
-            .analysis()
-            .settle(Some(&cancel_token), std::time::Duration::from_millis(2000))
-            .await;
+        // The question that matters is about this file's own closure, and `read_the_modules` above is what answers it:
+        // it catches this file's summary up and reads the files it reaches that nobody has read. See
+        // `docs/latency.md` §5.2.
     }
 
     snapshot_query(context.analysis(), cancel_token, move |session| {

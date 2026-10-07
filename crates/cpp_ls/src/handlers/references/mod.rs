@@ -44,21 +44,19 @@ pub async fn on_references(
 
     if let Some(path) = uri_to_file_path(&uri) {
         context.analysis().prepare(&path).await;
+
+        // **And then the query, which no longer waits for the project's index to drain.**
+        //
+        // The defect was real: `prepare` reads *this* file, while the name being asked about is usually in a header
+        // whose facts exist only once the pump has cooked the include closure — measured on a live server for
+        // `std::endl`, the first three queries after an open answered **nothing at all** and the fourth answered
+        // correctly. The wait added for it was `AnalysisState::settle`, which asked whether the *whole project's*
+        // indexing queue was empty — a question about the project standing in for a question about this file.
+        //
+        // A query about a name needs this file's summary and the files it includes, and that is what
+        // `AnalysisState::catch_up` reads. See `docs/latency.md` §5.2.
+        context.analysis().catch_up(&path).await;
     }
-    // **And then wait for the analysis, because the answer is not in this file.**
-    //
-    // `prepare` reads *this* file and wants its cooked reading; the name being asked about is usually in a header,
-    // and a header's facts exist only once the pump has cooked the include closure. Measured on a live server for
-    // `std::endl` — the same gap this pattern was added to the hover handler for — the first three queries after an
-    // open answered **nothing at all** and the fourth answered correctly, which is a person's first glance being
-    // told the analysis knows nothing.
-    //
-    // The same short, cancellable budget the completion and inlay-hint handlers use: a settled session pays one lock
-    // acquisition, and a session still reading answers from what it has rather than never.
-    context
-    .analysis()
-    .settle(Some(&cancel_token), std::time::Duration::from_millis(2000))
-    .await;
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;

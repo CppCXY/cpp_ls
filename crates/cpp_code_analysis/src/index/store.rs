@@ -100,7 +100,32 @@ pub struct SummaryStore<F: FileProvider = DiskFiles> {
     /// Measured on `vcruntime.h`, which writes `_STL_LANG` once per branch of `#ifdef __cplusplus`: the walk takes
     /// the `_MSVC_LANG` branch and skips the `#else`'s `0L`, and a lookup over the raw facts answered `0L` — for a
     /// file the compiler reads as C++20.
-    dead_macros: std::collections::HashMap<PathBuf, Vec<usize>>,
+    ///
+    /// # Why it is behind a lock now
+    ///
+    /// Because the pass that fills it ([`SummaryStore::prepare_the_re_read`]) takes `&self`: it is the expensive half
+    /// of the second pass and it runs under the **read** lock, beside whatever a query is doing, so that the write
+    /// lock a request waits for is held for the insert and nothing else. A `#define` decision has to be visible to
+    /// every summary built after it — [`SummaryStore::prepare_telling`] consults this map — so the record is made
+    /// where it was always made, at the start of the pass, and the lock is what makes that legal from `&self`.
+    dead_macros: std::sync::Mutex<std::collections::HashMap<PathBuf, Vec<usize>>>,
+}
+
+/// **The second pass, planned but not applied** — what [`SummaryStore::prepare_the_re_read`] worked out.
+///
+/// The split exists for the reason every other prepare/commit pair in this crate does: the pass re-parses files and
+/// walks their environments, which is 150 ms per file measured, and it used to do all of it while holding the write
+/// lock a request waits for. What is left for [`SummaryStore::commit_the_re_read`] is an index insert per file.
+pub struct ReRead {
+    /// The files whose reading changed, and whether each may be written down.
+    rebuilt: Vec<(FileSummary, bool)>,
+}
+
+impl ReRead {
+    /// Is there nothing to apply? A caller that would take the write lock only for this can skip it.
+    pub fn is_empty(&self) -> bool {
+        self.rebuilt.is_empty()
+    }
 }
 
 /// More threads than this stop paying: the parse is memory-bound long before it is core-bound.
@@ -343,7 +368,7 @@ impl<F: FileProvider> SummaryStore<F> {
             files,
             index: ProjectIndex::new(),
             stats: StoreStats::default(),
-            dead_macros: std::collections::HashMap::new(),
+            dead_macros: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -778,10 +803,11 @@ impl<F: FileProvider> SummaryStore<F> {
 
         // **The second pass**, and the reason it is here rather than inside the loop: a file whose scopes come out
         // of a macro body needs the files it includes to be indexed first, and the walk above cannot have that.
-        // See [`SummaryStore::re_read_what_a_body_changes`] for the filter and for what is deliberately not stored.
+        // See [`SummaryStore::prepare_the_re_read`] for the filter and for what is deliberately not stored.
         let truncated = !outcome.not_indexed.is_empty();
         let indexed = outcome.indexed.clone();
-        outcome.re_read = self.re_read_what_a_body_changes(&indexed, &[], truncated);
+        let plan = self.prepare_the_re_read(&indexed, &[], truncated);
+        outcome.re_read = self.commit_the_re_read(plan);
 
         outcome.stats = self.stats.since(before);
         outcome
@@ -836,16 +862,49 @@ impl<F: FileProvider> SummaryStore<F> {
         files: &[PathBuf],
         units: &[std::sync::Arc<crate::TranslationUnit>],
     ) -> usize {
-        self.re_read_what_a_body_changes(files, units, false)
+        let plan = self.prepare_the_re_read(files, units, false);
+        self.commit_the_re_read(plan)
     }
 
-    /// Returns how many files were re-read.
-    fn re_read_what_a_body_changes(
-        &mut self,
+    /// **Put what [`SummaryStore::prepare_the_re_read`] worked out into the index.**
+    ///
+    /// The cheap half: one `ProjectIndex::insert` per file the pass re-read, and nothing read, parsed or walked. The
+    /// pair exists because of what the write lock costs — measured on this project, a slice of four files held it for
+    /// **572 ms**, and the whole of that was the pass above.
+    ///
+    /// # What it refuses to overwrite
+    ///
+    /// A reading is only applied when the file's summary **is still the one the pass re-read**: the key names the
+    /// text, so a key that moved means something read that file again in between — a request's `catch_up`, which
+    /// builds a summary from text this plan never saw — and the newer reading is the right one. The check costs a
+    /// lookup and it is what makes the split safe rather than merely fast; the file is simply left for the next pass,
+    /// which will re-read it from the text it now has.
+    pub fn commit_the_re_read(&mut self, plan: ReRead) -> usize {
+        let mut re_read = 0;
+        for (rebuilt, stored) in plan.rebuilt {
+            let current = self.index.summary(&rebuilt.path).map(|summary| summary.key);
+            if current != Some(rebuilt.key) {
+                continue;
+            }
+            self.commit_reread(rebuilt, stored);
+            re_read += 1;
+        }
+        re_read
+    }
+
+    /// **The second pass, planned but not applied** — everything that does not change the store.
+    ///
+    /// This is [`SummaryStore::re_read_what_a_body_changes`] with the two writes taken out of it: the `#define`
+    /// decisions it records (which stay here, because a summary built later in this same pass has to see them) and
+    /// the index inserts (which are [`SummaryStore::commit_the_re_read`]'s). Everything else — reading the texts,
+    /// building the environments, re-parsing the candidates, writing the summaries to disk — is a pure function of
+    /// the store as it stands, which is what lets it run under the **read** lock a query already holds.
+    pub fn prepare_the_re_read(
+        &self,
         indexed: &[PathBuf],
         units: &[std::sync::Arc<crate::TranslationUnit>],
         truncated: bool,
-    ) -> usize {
+    ) -> ReRead {
         // Every indexed file's text, read once: the walk slices each macro's body out of it, and a candidate is
         // re-parsed from it. One read per file per pass, rather than one per candidate include.
         //
@@ -868,9 +927,15 @@ impl<F: FileProvider> SummaryStore<F> {
         // **What the walk decided is remembered here**, once, before any summary is built — so that both paths that
         // build one (`prepare`, which has no unit in hand, and the re-read below, which does) agree about which
         // `#define`s a compiler would have read. See [`SummaryStore::dead_macros`].
-        for unit in units {
-            for (path, offsets) in &unit.dead_macros {
-                self.dead_macros.insert(path.clone(), offsets.clone());
+        //
+        // Recorded from `&self` through the map's own lock, and recorded **here** rather than at the commit below:
+        // a summary built by anything at all in between — a request's `catch_up` is the one that happens — has to
+        // see the same decision, and the position this loop has always had is what says so.
+        if let Ok(mut dead) = self.dead_macros.lock() {
+            for unit in units {
+                for (path, offsets) in &unit.dead_macros {
+                    dead.insert(path.clone(), offsets.clone());
+                }
             }
         }
 
@@ -1083,7 +1148,9 @@ impl<F: FileProvider> SummaryStore<F> {
         scan.stop();
 
         if bodied.is_empty() {
-            return 0;
+            return ReRead {
+                rebuilt: Vec::new(),
+            };
         }
 
         // **The names as a set, not as a list.** `mentions_one_of` walks every word of a file and asks whether it
@@ -1096,7 +1163,10 @@ impl<F: FileProvider> SummaryStore<F> {
         // The fallback's cache of parsed `#define`s — one parse per definition rather than one per definition per
         // file. Read only by a caller that has no timeline to hand this pass (see the `None` arm below).
         let mut definitions = crate::summary::MacroDefinitions::default();
-        let mut re_read = 0usize;
+        // **The re-reads themselves, waiting to be applied.** Everything below builds a summary; putting one in the
+        // index is the one thing that is not a pure function of the store, and it is what
+        // [`SummaryStore::commit_the_re_read`] is for — so the plan is a list here and a loop there.
+        let mut rebuilt: Vec<(FileSummary, bool)> = Vec::new();
 
         // **Two kinds of re-read, and only one of them waits for the other.** A file a unit's timeline covers is
         // re-read through that timeline — a pure function of the file, the configuration and the walk the pass
@@ -1143,15 +1213,14 @@ impl<F: FileProvider> SummaryStore<F> {
             let Some(environment) = self.closure_environment(path, &sources, &mut definitions) else {
                 continue;
             };
-            let rebuilt = indexer.with_macro_bodies(&environment).index(path, source, key);
+            let made = indexer.with_macro_bodies(&environment).index(path, source, key);
 
-            let stored = !truncated && !has_unresolved_includes(&rebuilt);
+            let stored = !truncated && !has_unresolved_includes(&made);
             if stored {
                 let _encode = crate::stages::StageTimer::new(crate::stages::Stage::Encode);
-                let _ = write_summary(&rebuilt, &self.cache);
+                let _ = write_summary(&made, &self.cache);
             }
-            self.commit_reread(rebuilt, stored);
-            re_read += 1;
+            rebuilt.push((made, stored));
         }
 
         // **The unit's timeline again, and this is the half that used to walk a closure per file** (3 363 ms,
@@ -1159,7 +1228,7 @@ impl<F: FileProvider> SummaryStore<F> {
         // is read here as the program reads it: `MacroView` is a *position* in the walk the pass already paid
         // for, and it answers the parser's questions — `kind_of`, `body_text_of`, the in-force bodies — out of
         // that walk rather than out of a map materialised for this file alone.
-        let rebuilt = parallel_map(&through_a_timeline, |(path, source)| {
+        let rebuilt_through_a_timeline = parallel_map(&through_a_timeline, |(path, source)| {
             let view = units.iter().find_map(|unit| unit.environment_of(path))?;
 
             let key = SummaryKey::new(content_hash(source), self.context_hash(path));
@@ -1186,12 +1255,9 @@ impl<F: FileProvider> SummaryStore<F> {
             Some((rebuilt, stored))
         });
 
-        for (rebuilt, stored) in rebuilt.into_iter().flatten() {
-            self.commit_reread(rebuilt, stored);
-            re_read += 1;
-        }
+        rebuilt.extend(rebuilt_through_a_timeline.into_iter().flatten());
 
-        re_read
+        ReRead { rebuilt }
     }
 
     /// Count a re-read summary and put it in the index.
@@ -1212,8 +1278,10 @@ impl<F: FileProvider> SummaryStore<F> {
     /// kept every guarded `#define` and a lookup answered `_STL_LANG = 0L`.
     fn dead_macros_for(&self, path: &Path) -> Vec<usize> {
         let wanted = normalize_path(path, cfg!(windows));
-        self.dead_macros
-            .iter()
+        let Ok(dead) = self.dead_macros.lock() else {
+            return Vec::new();
+        };
+        dead.iter()
             .find(|(held, _)| normalize_path(held, cfg!(windows)) == wanted)
             .map(|(_, offsets)| offsets.clone())
             .unwrap_or_default()

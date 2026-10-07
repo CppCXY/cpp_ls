@@ -1248,7 +1248,14 @@ fn an_auto_written_through_a_macro_is_still_deduced() {
             &view.path,
             fact,
         ) {
-            Known::Yes(type_of) => seen.push(format!("{name}={type_of}")),
+            // **The expectation is asserted, not just recorded.** It was a tuple the loop never read, so the six
+            // types below were written down and then discarded — the test only checked the last line's `a=int`, and
+            // a deduction that answered `long` for a `1` would have passed. A deduction that disagrees with what
+            // the initializer says is the defect this file is about, whichever of the six it is.
+            Known::Yes(type_of) => {
+                assert_eq!(type_of, expected, "`{name}`'s deduced type");
+                seen.push(format!("{name}={type_of}"));
+            }
             other => seen.push(format!("{name}={other:?}")),
         }
     }

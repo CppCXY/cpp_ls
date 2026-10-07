@@ -338,37 +338,37 @@ async fn index_in_background(context: ServerContextSnapshot) {
                 .unwrap_or_default();
             let prepared_count = prepared.prepared.len();
 
-            let mut cooking = Vec::new();
-            let Some(pending) = context
+            let Some((pending, drain, claimed)) = context
                 .analysis()
                 .update_session("index slice", |session| {
-                    // **Timed**, because the count is only a proxy for the one number a caller can feel: how long the
-                    // write lock is held. The parse is no longer in this window — it was paid for under the read lock
-                    // above — so what is left is the insert and the queueing, and this line is what says whether that
-                    // is as short as it should be.
+                    // **Timed, and split, because the count is only a proxy for the one number a caller can feel:**
+                    // how long the write lock is held. The parse is no longer in this window — it was paid for under
+                    // the read lock above — and neither is the drain that follows the inserts, which comes back as a
+                    // plan and is paid for under the read lock below. What is left is the insert and the queueing.
                     let started = std::time::Instant::now();
-                    let taken = session.commit_a_wave(prepared, INDEX_SLICE).len();
+                    let (done, drain) = session.commit_a_wave(prepared, INDEX_SLICE);
+                    let taken = done.len();
                     let held = started.elapsed().as_millis();
-                    if taken > 0 || prepared_count > 0 {
-                        log::debug!(
-                            "index slice: prepared {prepared_count}, committed {taken}, write lock held {held} ms, {pending_now} left",
-                            pending_now = session.pending_work()
-                        );
-                    }
+
                     // **All the work, not just the indexing queue.** A session that has read every file still has
                     // the files its open ones include to read *as a compiler reads them* (`Session::cook`), and this
                     // loop is what gives that work a caller: reading the queue alone would stop the pump one step
                     // before the declarations a reader asks about exist.
                     //
-                    // **And the materials for a slice of that work**, gathered here because this is the same short
-                    // window: a summary lookup, a unit out of the cache, and the text. The lex, the render and the
-                    // parse are the expensive part and are [`Session::render_them`], which takes `&self` — so they run
-                    // under a read lock below, beside whatever a person is typing.
-                    let taken_for_cooking = session.take_cooking_materials(COOK_A_SLICE);
-                    for materials in taken_for_cooking {
-                        cooking.push(Some(materials));
+                    // **And which files the next cooking slice is for**, which is a queue pop and nothing more: what
+                    // a cook needs is gathered, rendered and parsed under the read lock below, beside whatever a
+                    // person is typing ([`Session::materials_for`], [`Session::render_them`]).
+                    let claimed = session.claim_cooking(COOK_A_SLICE);
+
+                    let pending_now = session.pending_work();
+                    if taken > 0 || prepared_count > 0 || !drain.is_empty() || !claimed.is_empty() {
+                        log::debug!(
+                            "index slice: prepared {prepared_count}, committed {taken}, write lock held {held} ms, \
+                             {cooking} to cook, {pending_now} left",
+                            cooking = claimed.len()
+                        );
                     }
-                    session.pending_work()
+                    (pending_now, drain, claimed)
                 })
                 .await
             else {
@@ -376,25 +376,43 @@ async fn index_in_background(context: ServerContextSnapshot) {
                 return;
             };
 
-            // **The cooking slice's expensive half, under a read lock.** Measured, this is `own 9–269 ms` per file
-            // against the `unit 15–42 ms` gathered above — and it was the largest thing left inside the write lock,
-            // held for up to **1527 ms** for a slice that read *no* index files at all.
-            let rendered_cooks = context
+            // **The drain's and the cooking slice's expensive halves, under one read lock.** Measured, the second
+            // pass is `150 ms` per file, a rendering is `9–269 ms` and gathering a cook's materials is `15–42 ms` —
+            // and together they were the largest thing left inside the write lock, holding it for up to **572 ms** on
+            // a slice that committed *no* files at all. None of them changes anything, so none of them belongs under
+            // the lock a query waits for.
+            let (prepared_drain, rendered_cooks) = context
                 .analysis()
                 .with_snapshot(move |session| {
-                    session.render_them(cooking.into_iter().flatten().collect())
+                    let materials = session.materials_for(claimed);
+                    (
+                        session.prepare_the_drain(drain),
+                        session.render_them(materials),
+                    )
                 })
                 .unwrap_or_default();
 
-            // **And the insert, under the write lock** — one `insert_cooked` per file and nothing else.
-            if !rendered_cooks.is_empty() {
-                context
-                    .analysis()
-                    .update_session("index slice", |session| {
-                        session.commit_them(rendered_cooks);
-                    })
-                    .await;
-            }
+            // **And the insert, under the write lock** — one `insert` per re-read summary and one `insert_cooked` per
+            // cooked file, and nothing else. Both halves are timed, because the count is not the number a caller
+            // feels: what makes this product slow is a write lock held for long, and this line says which half did it.
+            context
+                .analysis()
+                .update_session("index slice", |session| {
+                    let started = std::time::Instant::now();
+                    let re_read = session.commit_the_drain(prepared_drain);
+                    let drained = started.elapsed().as_millis();
+                    let started = std::time::Instant::now();
+                    let cooked = session.commit_them(rendered_cooks).len();
+                    let inserted = started.elapsed().as_millis();
+                    if re_read > 0 || cooked > 0 {
+                        log::debug!(
+                            "index slice tail: re-read {re_read}, cooked {cooked}, write lock held {held} ms \
+                             (re-read {drained} ms, cooked {inserted} ms)",
+                            held = drained + inserted
+                        );
+                    }
+                })
+                .await;
 
             if pending > 0 {
                 context.status_bar().update_progress_task(

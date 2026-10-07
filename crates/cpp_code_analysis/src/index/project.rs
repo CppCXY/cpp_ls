@@ -544,6 +544,40 @@ pub struct ProjectIndex {
     /// whole closure state (`macros_at`) — and the same question is asked once per query and once per walk, over
     /// hundreds of edges. `std::sync::Mutex` rather than a `RefCell` so the index stays `Sync`: a language server
     /// holds one of these behind a lock, and a cache that cost that property would be a bad trade.
+    ///
+    /// # What clearing it whole costs a request, measured
+    ///
+    /// **This is the largest remaining term in a completion's latency, and it is the reason a keystroke is slow
+    /// exactly while the index is filling.** Every `insert` drops the whole memo, so the next query re-evaluates
+    /// every guarded include in its closure from scratch — and during indexing there is an insert every few
+    /// milliseconds, so *every* query pays it. Measured on the fixture `crates/cpp_ls/tests/latency.rs` uses, twelve
+    /// completions fired from `didOpen`:
+    ///
+    /// ```text
+    ///   the query's own work   #0 350 ms   #1 598 ms   #2 1270 ms   #3+ 2–5 ms
+    ///   (all of it here)       at 821 guarded edges, against 3 ms once the inserts stop
+    /// ```
+    ///
+    /// and the split says it is this memo and not the walk: `visible_declarations_upto`'s collection loop measures
+    /// **0–2 ms** and the materialisation of its 548 candidates **1–2 ms** on the same queries, while
+    /// `visible_files_with_modules` — which asks this memo for every guarded edge — measures 359–588 ms.
+    ///
+    /// # What the fix is, so the next round does not have to find it again
+    ///
+    /// The clear is *correct* and it is too wide. An answer for `(file, region)` can change only if the inserted
+    /// summary is one the file's closure contains — reachability is decided by the *includers'* edges, which do not
+    /// move when a summary arrives, so `ProjectIndex::dependents_of(inserted)` names exactly the files to invalidate.
+    /// Two pieces are needed and neither is written yet:
+    ///
+    /// * the memo needs to be removable **by file** rather than whole (a second map, `file → keys`, or a `retain`);
+    /// * the precise edge case: inserting `X` also makes `X`'s own includes reachable from everything that can see
+    ///   `X`, and those are inside `dependents_of(X)` already — but an edge `X → S` first becomes visible to the
+    ///   walk when **`X`** is inserted, so `X`'s insert has to invalidate the files that can see `X`, which is the
+    ///   same rule with `X` in the inserted role.
+    ///
+    /// The alternative — the one the `FactGuard::Region` arm's own comment names — is the incremental
+    /// `macros_at`/`macro_environment` state, one walk per file with conditions answered as they are reached,
+    /// which removes the per-edge cost instead of the invalidation.
     visibility_answers: std::sync::Mutex<HashMap<(String, u32), crate::Visibility>>,
 }
 
@@ -5773,7 +5807,6 @@ impl ProjectIndex {
         // by `#include` has no such restriction at all.
         let (visible_files, through_an_import) = self.visible_files_with_modules(visible_from);
         let files = self.visible_in_order_of(visible_files);
-
 
         let mut found = Vec::new();
 

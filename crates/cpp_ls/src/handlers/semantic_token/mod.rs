@@ -188,21 +188,17 @@ pub async fn on_semantic_tokens(
 
     if let Some(path) = uri_to_file_path(&uri) {
         context.analysis().prepare(&path).await;
+
+        // **And then the query, which no longer waits for the project's index to drain.**
+        //
+        // The wait was `AnalysisState::settle`, asking whether the *whole project's* indexing queue was empty —
+        // because a name a header declares is classified through the index, and before that header has been read the
+        // name has no classification. The question that matters is this file's own closure, and
+        // `AnalysisState::catch_up` is what reads it. See `docs/latency.md` §5.2 — and note that this handler still
+        // declines to answer while **its own** file's queue is not drained (see the refusal below), which is a
+        // statement about the answer rather than a wait for it.
+        context.analysis().catch_up(&path).await;
     }
-    // **And then wait for the analysis, because the answer is not in this file.**
-    //
-    // `prepare` reads *this* file and wants its cooked reading; the name being asked about is usually in a header,
-    // and a header's facts exist only once the pump has cooked the include closure. Measured on a live server for
-    // `std::endl` — the same gap this pattern was added to the hover handler for — the first three queries after an
-    // open answered **nothing at all** and the fourth answered correctly, which is a person's first glance being
-    // told the analysis knows nothing.
-    //
-    // The same short, cancellable budget the completion and inlay-hint handlers use: a settled session pays one lock
-    // acquisition, and a session still reading answers from what it has rather than never.
-    context
-    .analysis()
-    .settle(Some(&cancel_token), std::time::Duration::from_millis(2000))
-    .await;
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
@@ -370,6 +366,9 @@ mod tests {
             range: SourceRange::new(start, length),
             kind,
             declaration,
+            // Empty: this helper builds a name with **no modifier**, which is the shape the encoder's own tests ask
+            // about. The modifier half is checked by the tests that go through `Session::classified_names`.
+            modifiers: Vec::new(),
             provenance: cpp_code_analysis::semantic::Provenance::DeclaredHere,
         }
     }
