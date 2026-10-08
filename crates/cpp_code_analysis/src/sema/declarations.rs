@@ -1643,6 +1643,26 @@ pub fn parameter_list_at(root: &CppSyntaxNode, offset: usize) -> Option<String> 
     crate::inlay::parameter_list_text(&declarator)
 }
 
+/// **The parameter list as the file spells it, read from the shape table** — `"(int a, int b)"`.
+///
+/// [`parameter_list_at`] answers the same question from a root and an offset: it asks the tree for the token at the
+/// offset and walks the ancestor chain until it meets a `Declarator`. That is a walk per **declaration**, and the
+/// `Declarator` it is looking for is already recorded on the shape ([`Shape::declarator`], collected in the pass
+/// that builds the table) — so the walk is asking the tree a question the table has already answered.
+///
+/// Measured together with [`enclosing_namespaces_of`]: the two were **1576 ms of a 4562 ms `Facts` stage** over 126
+/// files of MSVC's standard library.
+fn declared_parameters_with(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
+    let mut found = None;
+    shapes.on_the_path(binding.name_range.start_offset, |shape| {
+        if let Some(declarator) = &shape.declarator {
+            found = Some(declarator.clone());
+        }
+    });
+
+    crate::inlay::parameter_list_text(&found?)
+}
+
 /// The names a class template declares its parameters with** — `["_Ty", "_Alloc"]` for `std::vector`.
 ///
 /// Empty for anything that is not a class template, which includes an ordinary class *and* a partial
@@ -1824,7 +1844,10 @@ fn fact_for(
     binding: &Binding,
     scope: Option<String>,
     local: bool,
-    scopes: &ScopeTree,
+    // **The namespaces the enclosing scope sits in** — see [`enclosing_namespaces_of`]. Passed in rather than asked
+    // here because **every binding of one scope has the same answer**, and asking per binding was a scan of every
+    // scope in the file per declaration.
+    in_namespace: Option<String>,
     declarations: &Declarations<'_>,
     // than the macro table, because the answer is the same for every declaration in the file and asking per
 ) -> Option<DeclFact> {
@@ -1878,29 +1901,25 @@ fn fact_for(
     let exported = shapes.exported_at(the_offset_to_descend_by(binding));
     // **What the function was declared with**, which is the one thing a reader picking a name out of a hundred
     // needs and a fact did not carry: `format` and `format_to` are two rows of a completion that used to read
-    // `string (…)` and `_OutputIt (…)`. Read from the tree at the name's own offset — see
-    // [`parameter_list_at`] for why the declarator is found that way rather than through the shapes.
+    // `string (…)` and `_OutputIt (…)`. Read out of the shape table, which recorded the declarator in the pass that
+    // already walked the file — see [`declared_parameters_with`] for what that replaced.
     let parameter_list = match binding.kind {
         BindingKind::Function
         | BindingKind::Constructor
         | BindingKind::Destructor
         | BindingKind::ConversionFunction
         | BindingKind::OperatorFunction
-        | BindingKind::LiteralOperator => parameter_list_at(root, binding.name_range.start_offset),
+        | BindingKind::LiteralOperator => declared_parameters_with(shapes, binding),
         _ => None,
     };
 
     // **Where a local sits, for the names it writes.** A declaration inside a body has no qualified name of
     // its own — see [`DeclFact::local`] — so the namespaces around it are the only place a type it writes can
-    // be looked up from. Asked here rather than reconstructed by a consumer because **this** is where the
-    // scopes were built with the closure's macro bodies in hand: a view's own scope tree has no macro evidence
-    // and cannot see a namespace a macro opened ([`crate::FileView::parse`]), which is exactly the case every
+    // be looked up from. Asked once per **scope** rather than once per declaration, and the scope tree is where the
+    // closure's macro bodies were in hand when it was built: a view's own scope tree has no macro evidence and
+    // cannot see a namespace a macro opened ([`crate::FileView::parse`]), which is exactly the case every
     // standard-library local is.
-    let in_namespace = if local {
-        enclosing_namespaces_of(scopes, binding.name_range.start_offset)
-    } else {
-        None
-    };
+    let in_namespace = if local { in_namespace } else { None };
 
     // **The class's name as the declaration wrote it, when that name carries a pattern.** See [`DeclFact::pattern`]
     // for the wrong answer this exists to remove — a partial specialization's member answering for an instantiation
@@ -2107,11 +2126,34 @@ fn written_class_pattern(declaration: &CppSyntaxNode) -> Option<String> {
 ///
 /// Measured: `void f() { _Basic_format_specs s; }` inside `std` is a type no lookup could place, and the
 /// namespace that would have placed it is two scopes out and spelled by no token in the file.
-fn enclosing_namespaces_of(scopes: &ScopeTree, at: usize) -> Option<String> {
-    let scope = scopes.scope_at(at)?;
-
+/// **The namespaces the scope `from` sits in, outermost first** — or `None` when only the file encloses it.
+///
+/// The answer a local declaration needs and [`ScopeTree::qualification_prefix_of`] cannot give: that function
+/// answers for the scope *itself*, and a local's namespaces are those of the scopes **around** it.
+///
+/// # What this used to be, and what it cost
+///
+/// It took an **offset** and asked [`ScopeTree::scope_at`] which scope contained it — and `scope_at` is a scan of
+/// every scope in the file:
+///
+/// ```text
+///   self.scopes.iter().enumerate().filter(… contains the offset …).min_by_key(… smallest range …)
+/// ```
+///
+/// It ran once per **local declaration**, so a file cost declarations × scopes, and MSVC's headers are mostly
+/// inline function bodies — both factors large. The caller already knows the scope: [`DeclarationFacts::build`] is
+/// iterating that scope's own bindings when it asks.
+///
+/// # Why the answer is the same one
+///
+/// `scope_at(offset)` is the **innermost** scope containing the binding's name; the scope being iterated is an
+/// ancestor-or-equal of it. The two can only disagree by the scopes strictly between them, and the question filters
+/// for `ScopeKind::Namespace` — which cannot be opened inside a class or a function, so no namespace can sit
+/// strictly between a binding's scope and a scope nested inside it. A `union`'s body, a lambda's, a `for`'s: none of
+/// them is a namespace, and the chain outward from either starting point meets the same ones.
+fn enclosing_namespaces_of(scopes: &ScopeTree, from: ScopeId) -> Option<String> {
     let mut segments: Vec<&str> = Vec::new();
-    for id in scopes.scope_chain(scope) {
+    for id in scopes.scope_chain(from) {
         let Some(data) = scopes.scope(id) else {
             continue;
         };
@@ -2308,6 +2350,13 @@ impl<'a> DeclarationFacts<'a> {
                 ),
             };
 
+            // **And the namespaces, once per scope rather than once per binding.** Every binding of one scope sits
+            // in the same namespaces, and asking per binding was a scan of every scope in the file each time — see
+            // [`enclosing_namespaces_of`]. `local` is already known here for the same reason.
+            let in_namespace = local
+                .then(|| enclosing_namespaces_of(scopes, id))
+                .flatten();
+
             for binding in &scope.bindings {
                 if let Some(fact) = fact_for(
                     root,
@@ -2315,7 +2364,7 @@ impl<'a> DeclarationFacts<'a> {
                     binding,
                     prefix.clone(),
                     local,
-                    scopes,
+                    in_namespace.clone(),
                     &declarations,
                 ) {
                     facts.push(fact);

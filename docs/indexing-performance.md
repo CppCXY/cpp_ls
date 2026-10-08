@@ -161,45 +161,70 @@ tests were green both before and after, and the only reason it was caught is tha
 compared by hand before the code was written.
 
 
-### 3.2 `parameter_list_at` and `enclosing_namespaces_of` — 1576 ms, diagnosed and **not yet done**
+### 3.2 `parameter_list_at` and `enclosing_namespaces_of` — done, and worth more than the ablation said
 
-Both are the same shape as §3.1 (a walk per declaration for an answer about the file), and one of them is worse than
-that. `enclosing_namespaces_of` — asked for every **local** declaration — begins:
+```text
+                        §3.1        §3.2
+  wall                  1409.3 ms   919.4 ms      −35%
+  sweep                 2818.2 ms   1172.5 ms     −58%
+    facts               2365.0 ms   709.7 ms      −70%
+```
+
+**Read the `facts` row rather than the wall row.** The ablation put these two at 1576 ms of `facts` and the observed
+drop is 1655 ms, so the attribution holds; the wall figures were taken on two runs whose fixture file differed by a
+few newlines, which I did not control for, so treat the 35% as indicative and the `facts` numbers as measured.
+
+`enclosing_namespaces_of` was worse than "a walk per declaration". It began:
 
 ```rust
 pub fn scope_at(&self, offset: usize) -> Option<ScopeId> {
-    self.scopes
-        .iter()
-        .enumerate()
+    self.scopes.iter().enumerate()
         .filter(|(_, scope)| scope.range.is_some_and(|range| {
             offset >= range.start_offset && offset <= range.end_offset()
         }))
-        // Smallest range wins: the innermost scope containing the offset.
         .min_by_key(|(_, scope)| scope.range.map(|range| range.length))
         .map(|(index, _)| ScopeId(index))
 }
 ```
 
-**A scan of every scope in the file, with a `min_by_key` over the matches — once per local declaration.** That is
-`declarations × scopes`, and MSVC headers are mostly inline function bodies, so both factors are large. It is followed
-by `scope_chain`, which allocates a `Vec` **and** a `HashSet` per call.
+— **a scan of every scope in the file, with a `min_by_key` over the matches, once per local declaration**, followed by
+a `scope_chain` that allocates a `Vec` and a `HashSet` per call. The caller already knew the scope; it was iterating
+that scope's own bindings. `parameter_list_at`'s walk up to a `Declarator` is now a read of `Shape::declarator`, which
+the pass that builds the table had already collected.
 
-The two fixes, both known and neither done:
+**The equivalence argument, since the substitution is the risk** — `scope_at(offset)` is the *innermost* scope
+containing the binding's name, and the scope being iterated is an ancestor-or-equal of it. The two can only disagree by
+the scopes strictly between them, and the question filters for `ScopeKind::Namespace`, which cannot be opened inside a
+class or a function. So no namespace can sit strictly between them, and the chain outward from either starting point
+meets the same ones. That is an argument and not a proof, which is why it is written here next to the numbers.
+
+### 3.3 Item 3 — measured, and **not done, because it is no longer worth its risk**
+
+Item 3 was "do not make facts for what a body declares". Ablated, it is worth almost nothing now:
 
 ```text
-parameter_list_at       the `Declarator` it walks up to is already on the `Shape`
-                        (`Shape::declarator`, collected in the one pass), so this is §3.1's move again
-enclosing_namespaces_of `build_facts` is iterating a scope when it asks this — the caller already knows the answer's
-                        scope, and `scope_at`'s scan exists only because the question is phrased as an offset
+                        facts       sweep       wall
+  locals kept           721.9 ms    1182.4 ms   830.0 ms
+  locals skipped        639.5 ms    1121.6 ms   848.1 ms
 ```
 
-**Why they are not in this round**: both change an *answer* if the substitution is wrong, and the wrongness is silent —
-`scope_at` answers "the innermost scope containing this offset", and the loop knows only "the scope whose bindings I am
-walking". Those are the same scope for every case anyone has thought of and that is not the same as a proof, and the
-test suite was green for §3.1 both before and after a kind-list difference that would have broken every union member.
-A change to an answer needs the equivalence argued or the difference measured, and neither was done here.
+**82 ms of `facts`, 61 ms of `sweep`, and no wall time at all** — against a real capability: find-references and rename
+inside an inline function body of a header nobody is editing. Items 1 and 2 removed the per-declaration walks, and the
+remaining `facts` cost is spread thinly enough that dropping a whole class of facts barely moves it.
 
-**Acceptance, unchanged**: `facts` under 400 ms with both done; measured ceiling from the ablation, wall 1634.7 ms.
+This is the second time in this document that a plan item was retired by measuring it rather than by doing it, and it is
+the cheaper of the two outcomes. **What it also does is change the shape of what is left**: with `facts` at 722 ms of a
+~2900 ms CPU total, the profile now reads:
+
+```text
+  parse     1138.7 ms   39%   ← the tree is BUILT here, and this is now the largest single stage
+  sweep     1182.4 ms   40%     of which facts 721.9
+```
+
+**`parse` went from 16% to 39% without changing**: it is the same work, and everything around it got smaller. The
+largest remaining lever is item 4 — not building subtrees for bodies — which is the only change that attacks `parse`
+and every walk at once.
+
 
 
 ### 3.3 What this costs, in the units that matter
