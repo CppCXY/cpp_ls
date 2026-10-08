@@ -466,6 +466,30 @@ impl PathInterner {
 /// is therefore attached to the root rather than treated as a segment, which is the one place this
 /// function is not purely mechanical.
 pub fn normalize_path(path: &Path, case_insensitive: bool) -> String {
+    // **A verbatim prefix is dropped before anything else.** `std::fs::canonicalize` returns one on Windows
+    // (`\\?\E:\…`), and it is not the path it names for the purposes this function serves: the rewritten form below
+    // keeps the prefix's own backslashes and joins everything after it with `/`, and the result is a path whose
+    // components Rust no longer matches against the plain spelling — `is_file` answers `false` for a file that is
+    // there.
+    //
+    // Measured on a real project, and it was the whole of one failure: every quoted include of
+    // `E:\EmmyLuaCodeStyle\CodeFormatServer\src\main.cpp` — `Session/StandardIOSession.h`, `LanguageServer.h` —
+    // resolved to nothing, so the closure of that file was **14 files instead of the program**, and every summary
+    // that recorded an unresolved include was refused by the disk cache (`1046 of 1729 files` in one index run).
+    // Both files are in the same directory as `main.cpp`; only the spelling of the path was wrong.
+    //
+    // `\\?\UNC\server\share` comes back as `\\server\share`, which is the same path in the spelling the rest of
+    // this crate compares.
+    let raw = path.to_string_lossy();
+    let stripped = raw
+        .strip_prefix(r"\\?\UNC\")
+        .map(|rest| format!(r"\\{rest}"))
+        .or_else(|| raw.strip_prefix(r"\\?\").map(str::to_string));
+    let path = match &stripped {
+        Some(stripped) => Path::new(stripped),
+        None => path,
+    };
+
     let mut parts: Vec<String> = Vec::new();
 
     for component in path.components() {

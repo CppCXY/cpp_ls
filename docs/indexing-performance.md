@@ -198,7 +198,69 @@ the scopes strictly between them, and the question filters for `ScopeKind::Names
 class or a function. So no namespace can sit strictly between them, and the chain outward from either starting point
 meets the same ones. That is an argument and not a proof, which is why it is written here next to the numbers.
 
-### 3.3 Item 3 — measured, and **not done, because it is no longer worth its risk**
+### 3.3 Item 4's ceiling, measured before writing any parser code
+
+```text
+cargo run --release -p cpp_code_analysis --example body_weight -- <dir>
+```
+
+Over the same 126-file closure:
+
+```text
+  internal nodes   754 604   inside a `CompoundStat`  486 103   64.4%
+  tokens         1 377 789   inside a `CompoundStat`  853 387   61.9%
+```
+
+**64.4% of the `descendants()` walk is inside a statement block**, so every walk in the crate — `build_scopes`,
+`build_facts`, `DeclarationShapes::of`, `preprocess`, the sweeps — shrinks by up to that much, and so does the
+node-building half of `parse`. What it does **not** shrink is those 853 387 tokens: a lossless tree keeps them whether
+or not anything is built over them, so the lexer's work is unchanged and the tree's memory falls by much less than its
+node count.
+
+The first run of this probe reported **98.6%** for the token column, which is impossible and was a bug in the probe —
+summing each block's own `descendants_with_tokens` counts a nested block once per enclosing block. The node column had
+used the ancestor test, so only the token number was wrong. Both columns use the same test now, and the wrong number is
+left in this note because a probe that reports an impossible answer is worth more as a warning than as a deletion.
+
+### 3.4 Item 4 — implemented, measured, and **not enabled**
+
+It was built: `ParserConfig::skip_bodies`, set by `with_skipped_bodies()`, consumed by `parse_compound_stat`, which
+counts braces over the same token stream the grammar would have been driven by and bumps the body's tokens flat into
+one `CompoundStat`. It works, and the ceiling was real — 64.4% of the internal nodes go.
+
+**And the index is no faster.**
+
+```text
+                          off         on
+  wall                  830.0 ms    821.0 ms
+  CPU (stages total)    ~2920 ms    2851.0 ms     within run-to-run noise
+    parse              1138.7 ms    951.7 ms      −16%
+    sweep              1182.4 ms   1299.8 ms      +10%
+    scopes              239.0 ms    285.2 ms
+    facts               721.9 ms    812.5 ms
+  tests                  594/594     592/594       3 failures, all of them real capability losses
+```
+
+The three failures are the capability, not a bug: *a local has no name entry in the index*, *another file's local is
+never the answer*, and *a check inside a body fires* — because with the bodies flattened there are no local
+declarations and nothing for a check to be about.
+
+**Why the ceiling did not become a win is the interesting part, and it is one number**: building nodes is about a
+**quarter of `parse`**. Removing 64% of the nodes therefore removes 16% of the stage — which is exactly what was
+measured — and the stages that dominate are per-**declaration**, not per-node: `sweep` and `facts` walk to each
+declaration and ask questions about it, and they do not care how deeply the statements around it were nested. `sweep`
+even went *up* 10%, which is either the tree's shape interacting with a walk or run-to-run variance, and is left
+unattributed rather than explained away.
+
+**So the lever this document called "the largest single win available" is worth nothing on this workload**, and the
+plan is wrong about it for a reason that only a measurement could give: *the cost is not proportional to the size of
+the tree, it is proportional to the number of declarations in it.* Every measurement in §3 agrees — items 1 and 2 were
+both per-declaration costs, and they were worth 36% and 35% of the wall clock between them.
+
+The mechanism is **left in the parser and not enabled**, with the table above in its documentation, because the next
+person to read "64% of the nodes are bodies" will reach for exactly this.
+
+### 3.5 Item 3 — measured, and **not done, because it is no longer worth its risk**
 
 Item 3 was "do not make facts for what a body declares". Ablated, it is worth almost nothing now:
 
@@ -227,7 +289,7 @@ and every walk at once.
 
 
 
-### 3.3 What this costs, in the units that matter
+### 3.6 This is what the cost is proportional to
 
 ```text
   today      126 files, 2207 ms wall, 6596 ms CPU  (~52 ms CPU per file)

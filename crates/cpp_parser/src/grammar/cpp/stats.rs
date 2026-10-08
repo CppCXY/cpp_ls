@@ -24,6 +24,36 @@ pub(crate) fn parse_compound_stat(p: &mut CppParser) -> ParseResult {
 
     if p.current_token() == CppTokenKind::LeftBrace {
         p.bump();
+
+        // **The skipped body** — see [`ParserConfig::skip_bodies`]. The `{` is already in; every token up to and
+        // including the matching `}` is bumped flat into the `CompoundStat` and nothing is built over them.
+        //
+        // Counting braces over **the same token stream the grammar would have been driven by** is what makes this
+        // sound rather than a guess: a `{` inside a string or a comment is one token and cannot be counted, a brace a
+        // macro expands to is not in this stream at all, and `#if` does not remove tokens from it, so a brace in a
+        // branch nobody takes is counted exactly as the unskipped parse would have counted it.
+        //
+        // What it gives up, and the reason only the indexer sets the flag: a body is where a `return` statement is,
+        // so `auto` loses its deduced type in a summary built this way, and a diagnostic written inside a body is not
+        // reported. Both are answers about a file while it is being **read**, not while it is being indexed.
+        if p.parse_config.skips_bodies() {
+            let mut depth = 1usize;
+            while depth > 0 {
+                match p.current_token() {
+                    // A missing `}` is the one case where the unskipped parse would have reported something and this
+                    // does not: there is no `parse_stats` to notice, and the block simply ends at the end of the
+                    // text. It is written here rather than left to be discovered — the indexer tolerates a file it
+                    // cannot finish, and a diagnostic is not what it is for.
+                    CppTokenKind::Eof => break,
+                    CppTokenKind::LeftBrace => depth += 1,
+                    CppTokenKind::RightBrace => depth -= 1,
+                    _ => {}
+                }
+                p.bump();
+            }
+            return Ok(m.complete(p));
+        }
+
         // A name declared inside a brace is not a type name outside it, so the table's scope follows the
         // braces. This is the approximation the table documents: it counts *parser* depth, which is enough to
         // keep a local class from being a type name for the next function.

@@ -28,6 +28,51 @@
 //! enable = true
 //! ```
 //!
+//! # Measured, on a project with no compile database at all
+//!
+//! `E:\EmmyLuaCodeStyle` — 198 C++ sources in nine CMake targets, plus a `3rd/` tree, **no
+//! `compile_commands.json`** because nobody had configured it with `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`. Its
+//! includes are written against each target's include directory (`#include "Session/StandardIOSession.h"` from
+//! `CodeFormatServer/src/`), which is what `target_include_directories` means and what a compile database would
+//! have said.
+//!
+//! ```text
+//!                                    without .cppls.toml   with [compile] args
+//!   include paths the resolver had   8                     21
+//!   summaries refused by the cache   1046 of 1729          235 of 1729
+//!   index time                       16.0 s                20.0 s
+//! ```
+//!
+//! The 13 `-I` flags are the project's own layout, written out once. **The time went up because the analysis is
+//! doing more**: an unresolved include refuses the whole summary (`has_unresolved_includes`), so before, the work
+//! was *skipped* rather than saved — 1046 files were read, found to be unmemorable, and would be read again next
+//! time.
+//!
+//! The 235 that remain are files reaching headers this machine genuinely does not have (MSVC's own
+//! `xmmintrin.h` asks for `xmm_func.h`). That is the honest floor without a database, and it is why a
+//! `compile_commands.json` is still the better answer when a project has one.
+//!
+//! # Where a guess sits, and where it must not
+//!
+//! **A person's file wins; discovery is a fallback; and no guess is load-bearing.** The order is:
+//!
+//! ```text
+//!   [compile] args          a person said exactly what the compiler is given — and it is used *instead of* the
+//!                           database's flags, so this is the override and not a hint
+//!   the compile database    the compiler's own answer, per file
+//!   toolchain discovery     the system's headers, from the compiler that was found
+//!   inferred layout         `include_roots_above` in `crate::include` — a *narrow* rule (an ancestor directory
+//!                           holding `include/`) so that the common single-target layout resolves before anyone has
+//!                           written a configuration file
+//! ```
+//!
+//! The last of those is the only guess, it is deliberately narrow, and **it does not cover the layout this project
+//! has**: its include roots are *siblings* (`CodeFormatCore/include`, `LuaParser/include`) and grandchildren
+//! (`3rd/asio-1.24.0/include`) of the file, not ancestors — so the rule finds nothing there and the configuration
+//! file is what resolves them. A rule broad enough to find those would be searching a checkout for any directory
+//! named `include`, which is the kind of guess that silently picks the wrong file. It is not written, and the
+//! table above is what it costs to write thirteen paths down instead.
+//!
 //! # Why the parse is section-by-section
 //!
 //! A file a person edits will eventually have a typo in it, and the useful answer to a typo is "the key `exlude` in

@@ -40,6 +40,57 @@ pub struct ParserConfig<'cache> {
     ///
     /// Empty for a parse of one file's own text, where there is no boundary to respect.
     file_boundaries: Vec<usize>,
+    /// **Consume a statement block's tokens without building anything over them** — the mode the indexer parses in.
+    ///
+    /// # Why a mode and not a rule
+    ///
+    /// A function body cannot declare anything another file can name, and all three tools this project compares
+    /// itself to refuse to build syntax for one while indexing: clangd sets `SkipFunctionBodies = true` for its
+    /// preamble, IntelliJ's `skipChildProcessingWhenBuildingStubs` exists to *"reduce the number of the AST nodes
+    /// the platform walks"*, and Visual Studio's own documentation says its browsing parser *"skips the content of
+    /// blocks … only records the location and parameters of a function, and ignores its contents"*.
+    ///
+    /// Measured over a 126-file MSVC standard-library closure (`examples/body_weight.rs`):
+    ///
+    /// ```text
+    ///   internal nodes   754 604   inside a CompoundStat  486 103   64.4%
+    ///   tokens         1 377 789   inside a CompoundStat  853 387   61.9%
+    /// ```
+    ///
+    /// **Two thirds of every `descendants()` walk in the analysis layer is inside a block**, and so is two thirds of
+    /// what the parser builds. The tokens stay — a lossless tree keeps every one of them, so this buys nothing from
+    /// the lexer and much less than 64% of the memory — but the *structure* over them is not built.
+    ///
+    /// # What it costs, and therefore who may set it
+    ///
+    /// A body is where a `return` statement is, and [`crate::sema::declarations::deduced_returns_of`] reads one to
+    /// answer `auto` — so a summary built in this mode records no deduced return type, and a diagnostic inside a
+    /// body is not reported by a parse in this mode.
+    ///
+    /// That is why it is a **mode** rather than the only behaviour: the indexer wants the summaries and nothing else,
+    /// and the two consumers that want bodies — the view a reader is looking at, and the parse of a **rendering**,
+    /// which is where the diagnostics of the file being edited come from — must not set it. `Session::view` and
+    /// `FileIndexer::index_rendering` are those two places, and they are named here because a flag that spreads is a
+    /// capability that disappears quietly.
+    ///
+    /// # And it was measured, and it is **not enabled**
+    ///
+    /// Enabling it for the summary parse of a 126-file closure made the index **no faster**:
+    ///
+    /// ```text
+    ///                          off        on
+    ///   wall                  830.0 ms   821.0 ms
+    ///   parse                1138.7 ms   951.7 ms     −16%
+    ///   sweep                1182.4 ms  1299.8 ms     +10%
+    ///   three tests           pass       FAIL           locals, another file's local, a check inside a body
+    /// ```
+    ///
+    /// **64% of the nodes go and 16% of `parse` goes with them**, which is the number that matters: building nodes is
+    /// about a quarter of parsing, so this removes a sixth of one stage. The walks that actually dominate — `sweep`,
+    /// and `facts` inside it — are per-**declaration** and do not care how deeply the statements around a declaration
+    /// were nested. The mechanism is kept because the next person to read "64% of the nodes are bodies" will reach
+    /// for it, and this paragraph is what should stop them.
+    skip_bodies: bool,
 }
 
 impl<'cache> ParserConfig<'cache> {
@@ -52,7 +103,20 @@ impl<'cache> ParserConfig<'cache> {
             symbol_table: None,
             macro_facts: None,
             file_boundaries: Vec::new(),
+            skip_bodies: false,
         }
+    }
+
+    /// **Parse so that a statement block is one node with its tokens flat under it** — see
+    /// [`ParserConfig::skip_bodies`] for the measurement, and for the two callers that must not ask for this.
+    pub fn with_skipped_bodies(mut self) -> Self {
+        self.skip_bodies = true;
+        self
+    }
+
+    /// Whether a statement block's structure is being built. See [`ParserConfig::skip_bodies`].
+    pub fn skips_bodies(&self) -> bool {
+        self.skip_bodies
     }
 
     /// **Tell the parser where one file's text ends and the next begins.**
@@ -164,6 +228,7 @@ impl Default for ParserConfig<'_> {
             symbol_table: None,
             macro_facts: None,
             file_boundaries: Vec::new(),
+            skip_bodies: false,
         }
     }
 }

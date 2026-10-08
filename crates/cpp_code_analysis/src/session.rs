@@ -529,6 +529,12 @@ pub struct Session<F: FileProvider = DiskFiles> {
     unit_from_memory: std::sync::atomic::AtomicUsize,
     unit_from_disk: std::sync::atomic::AtomicUsize,
     unit_walked: std::sync::atomic::AtomicUsize,
+    /// **How many times each root's timeline has been *walked*** — the diagnostic that answers "who keeps asking".
+    ///
+    /// `UnitStats::walked` is the total, and a total cannot tell one root walked two hundred times from two hundred
+    /// roots walked once. The difference is the whole of the next optimisation, and this is the measurement that
+    /// decides which one it is — see [`Session::walks_by_root`].
+    walks_by_root: std::sync::Mutex<std::collections::HashMap<String, u64>>,
 }
 
 impl Session<DiskFiles> {
@@ -871,6 +877,7 @@ impl<F: FileProvider + Clone> Session<F> {
             unit_from_memory: std::sync::atomic::AtomicUsize::new(0),
             unit_from_disk: std::sync::atomic::AtomicUsize::new(0),
             unit_walked: std::sync::atomic::AtomicUsize::new(0),
+            walks_by_root: std::sync::Mutex::new(std::collections::HashMap::new()),
         };
 
         // The scan is the queue's **seed**, not a list to consult later: opening a project is the caller saying
@@ -1942,12 +1949,28 @@ impl<F: FileProvider + Clone> Session<F> {
         &self,
         files: &[PathBuf],
     ) -> Vec<std::sync::Arc<crate::TranslationUnit>> {
+        // **The slice, and not the project.** This used to chain `self.project` in front of `files`, on the argument
+        // that a project file is a root whose closure is the whole program and therefore covers the most — and the
+        // argument was right about coverage and wrong about cost, because the units built here are a **local** vector
+        // while [`MAX_UNITS`] caps what survives the call. So every call walked a closure for essentially every
+        // project file, and threw them away.
+        //
+        // Measured on a real project (198 own sources + a vendored `3rd/`, 1216 project files, no compilation
+        // database): `walk` was **54.3 s of a 96.5 s index — 56%** — against `parse` 10.9 s and `sweep` 9.0 s. That
+        // is 19 `advance(64)` calls × 1216 candidates ≈ 23 000 closure walks to produce the environments of 1729
+        // files, and it made the whole index **serial**: wall 95.6 s against 96.5 s of CPU on sixteen cores.
+        //
+        // A file's own timeline is the closure of that file compiled standalone, which is the environment its own
+        // reading was built with — the thing the second pass is asking for. Where a project root would cover several
+        // files of one slice, the `environment_of` test below still skips them, and the walk is paid once for the
+        // file that needs it rather than once for every file in the project.
+        //
         // Asked by the **index's own spelling** of each path: a unit's frames are keyed by the normalized form, so
         // asking with `C:\…` about a frame spelled `c:/…` answers `None` — which would build a unit per file and
         // put the whole cost back where it was.
         let mut candidates: Vec<PathBuf> = Vec::new();
         let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-        for path in self.project.iter().chain(files.iter()) {
+        for path in files.iter() {
             let path = self
                 .store
                 .index()
@@ -1959,20 +1982,90 @@ impl<F: FileProvider + Clone> Session<F> {
             }
         }
 
+        // **Walked in parallel, and the dedup kept afterwards.** The walks are independent read-only work on `&self`
+        // — a timeline is a function of the closure's summaries and text — and the process was otherwise one core of
+        // sixteen: measured on a real project, **1188 walks × ~38 ms = 44.8 s of a 67 s index with CPU/wall ≈ 1.2**
+        // (`examples/project_index.rs`, and `Session::walks_by_root` for the count that said the walks are one per
+        // file rather than one file walked many times).
+        //
+        // The sequential loop this replaces skipped a candidate that an **earlier** unit already covered, so it did
+        // slightly fewer walks — 1188 of 1729 candidates, so about a third fewer. That saving is what the order
+        // below preserves and what running first does not: every candidate is walked, and then the **same** dedup
+        // runs in the **same** order over the results. The units handed to the second pass are therefore the ones the
+        // sequential version handed it, in the same order, and only the walking moved.
+        //
+        // Roughly 541 extra walks of ~38 ms is ~20 s of CPU, which is ~1.3 s of wall on this machine — against 44.8 s
+        // of serial walking. Any future change here should re-measure rather than reason: the count above is the
+        // instrument, and `CPU/wall` in the same probe says whether the cores are actually being used.
+        let walked = self.walk_the_timelines(candidates);
+
         let mut units: Vec<std::sync::Arc<crate::TranslationUnit>> = Vec::new();
-        for candidate in candidates {
+        for (candidate, unit) in walked {
             if units
                 .iter()
                 .any(|unit| unit.environment_of(&candidate).is_some())
             {
                 continue;
             }
-            if let Some(unit) = self.translation_unit_of(&candidate) {
+            if let Some(unit) = unit {
                 units.push(unit);
             }
         }
 
         units
+    }
+
+    /// **[`Session::translation_unit_of`] for many roots at once**, preserving the order of `roots`.
+    ///
+    /// One thread per core up to the number of roots, each taking a contiguous chunk; a chunk per thread rather than
+    /// a shared cursor because the results must come back **in order** and a contiguous split needs no reassembly.
+    /// The chunks are unequal in cost — a root whose closure is the whole program beside one whose closure is
+    /// itself — and that is the case a shared cursor would even out. It is not done here because the count says the
+    /// walks are one per file with an average of 38 ms, which is flat enough that the reassembly cost would not pay
+    /// for the balance; a project with a few enormous closures and many tiny ones is where this should be revisited.
+    fn walk_the_timelines(
+        &self,
+        roots: Vec<PathBuf>,
+    ) -> Vec<(PathBuf, Option<std::sync::Arc<crate::TranslationUnit>>)> {
+        if roots.len() < 2 {
+            return roots
+                .into_iter()
+                .map(|root| {
+                    let unit = self.translation_unit_of(&root);
+                    (root, unit)
+                })
+                .collect();
+        }
+
+        // The same shape [`crate::index::store`]'s own parallel map uses: one thread per core, and never more
+        // threads than there is work.
+        let threads = std::thread::available_parallelism()
+            .map_or(1, |cores| cores.get())
+            .min(roots.len())
+            .max(1);
+        let per_thread = roots.len().div_ceil(threads);
+        let chunks: Vec<Vec<PathBuf>> = roots.chunks(per_thread).map(<[PathBuf]>::to_vec).collect();
+
+        let walked: Vec<Vec<(PathBuf, Option<std::sync::Arc<crate::TranslationUnit>>)>> =
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = chunks
+                    .iter()
+                    .map(|chunk| {
+                        scope.spawn(|| {
+                            chunk
+                                .iter()
+                                .map(|root| (root.clone(), self.translation_unit_of(root)))
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().unwrap_or_default())
+                    .collect()
+            });
+
+        walked.into_iter().flatten().collect()
     }
 
     /// **Read one file, and queue what it includes.** One step of the work, as a function because there are now two
@@ -2877,6 +2970,10 @@ impl<F: FileProvider + Clone> Session<F> {
                 // was served off the disk reaches the other one. Counting after the match counts both, which is
                 // the mistake this line was written with.
                 self.note_a_unit(Which::Walked);
+                // …and counted **by root**, which the total above cannot say. See [`Session::walks_by_root`].
+                if let Ok(mut walks) = self.walks_by_root.lock() {
+                    *walks.entry(queue_key(path)).or_insert(0) += 1;
+                }
                 (unit, provisional)
             }
         };
@@ -2965,6 +3062,25 @@ impl<F: FileProvider + Clone> Session<F> {
             from_disk: self.unit_from_disk.load(Relaxed),
             walked: self.unit_walked.load(Relaxed),
         }
+    }
+
+    /// **How many times each root's timeline has been walked**, most-walked first — see [`Session::unit_stats`] for
+    /// the total this breaks down.
+    ///
+    /// The question it exists for: a total of two hundred walks is either one root walked two hundred times or two
+    /// hundred roots walked once, and those want opposite fixes. Measured on a real project
+    /// (`examples/project_index.rs`), opening one file took `walk` from 10.6 s to 45.8 s over the same 1729 files —
+    /// so the walks are not spread evenly, and this says which root is paying.
+    pub fn walks_by_root(&self) -> Vec<(PathBuf, u64)> {
+        let Ok(walks) = self.walks_by_root.lock() else {
+            return Vec::new();
+        };
+        let mut walked: Vec<(PathBuf, u64)> = walks
+            .iter()
+            .map(|(path, count)| (PathBuf::from(path), *count))
+            .collect();
+        walked.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        walked
     }
 
     /// **What a unit rooted at `path` is keyed on** — the file's preamble, when its text is in reach.

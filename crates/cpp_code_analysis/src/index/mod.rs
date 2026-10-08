@@ -274,11 +274,20 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // `_STD addressof(*p)` for one qualified name needs to know that `_STD` is `::std::`, and that body is in
         // a header. Without them the parse is the shape-only reading, which is what a buffer on its own
         // gets and all it can get.
-        // …and **no macro environment**, deliberately. The parse is of a file's own text and the grammar makes no
-        // reading turn on "is this name a macro": the text it is meant to read has been preprocessed, and the
-        // version that passed a positional environment here was answering a *stream* offset against a *file*
-        // timeline — see `MacroView::applies_here`, which records the trap. The environment is still built and
-        // still used, one layer down, by the scope walk (`sema::scopes::MacroBodies`).
+        // **`with_skipped_bodies()` is NOT set here, and it was measured rather than assumed.** The mode exists, is
+        // correct, and removes 64% of this crate's internal nodes (`examples/body_weight.rs`); enabling it for this
+        // parse made a 126-file closure **no faster** — wall 830 → 821 ms, CPU within run-to-run noise, `parse` down
+        // 16% and `sweep` *up* 10% — while costing three capabilities that three tests then failed on (a local has no
+        // name entry in the index, another file's local is not the answer, and a check inside a body does not fire).
+        //
+        // The reason is in the two numbers: node building is about a quarter of `parse`, so removing two thirds of
+        // the nodes removes a sixth of the stage; and the walks that dominate — `sweep`, and inside it `facts` — are
+        // per-**declaration** and do not care how deep the statements around a declaration were nested. See
+        // `docs/indexing-performance.md` §3.5.
+        //
+        // It is left in the parser rather than deleted because the measurement is the interesting object: the next
+        // person to read "64% of nodes are bodies" will reach for this, and the number that says it buys nothing
+        // should be in front of them. `ParserConfig::skip_bodies` carries the same figures.
         let config = ParserConfig::default().with_dialect(self.config.dialect());
 
         let tree = {

@@ -83,6 +83,40 @@ impl Resolution {
     }
 }
 
+/// **The `include` directories above a file, nearest first** — the `-I` a compilation database would have named, for
+/// a checkout that has none.
+///
+/// Climbs from `directory` to its ancestors and takes every one that has an `include` child. A file at
+/// `CodeFormatServer/src/main.cpp` gets `CodeFormatServer/include`; a file at
+/// `CodeFormatCore/src/Format/Analyzer/SpaceAnalyzer.cpp` gets `CodeFormatCore/include`.
+///
+/// **It does not stop at the first ancestor without one**, and the first attempt at this did — which found nothing
+/// at all for this project, because the file is in `src/` and `src/include` does not exist while the answer is one
+/// level up. There is no level at which the climb is "done", so the bound is what ends it.
+///
+/// Bounded, because the climb's length is a fact about where a checkout sits on disk — `E:\a\b\c\…` has no natural
+/// end — and a session may not spend an unbounded number of probes deciding what to look at.
+///
+/// The **provider** is asked, not `std::fs`, so that a session over a virtual filesystem — `MemoryFiles` in every
+/// test — behaves the same way, and so that a provider that caches its answers caches these too.
+fn include_roots_above<F: FileProvider>(directory: &Path, files: &F) -> Vec<PathBuf> {
+    /// How far up to look. Six covers `repo/<target>/src/<module>/<sub>`, which is as deep as this layout goes in
+    /// practice, and it is small enough that a checkout at the root of a drive cannot collect unrelated trees.
+    const LEVELS: usize = 6;
+
+    let mut roots = Vec::new();
+    let mut at = Some(directory);
+    for _ in 0..LEVELS {
+        let Some(current) = at else { break };
+        let candidate = current.join("include");
+        if files.exists(&candidate) {
+            roots.push(candidate);
+        }
+        at = current.parent();
+    }
+    roots
+}
+
 /// Resolves includes against a provider and a configuration.
 ///
 /// Holds a `&mut PathInterner` because resolving is the moment a file's identity is decided: the id has to
@@ -166,6 +200,29 @@ impl<'a, F: FileProvider> IncludeResolver<'a, F> {
         if include.form == IncludeForm::Quote && skip_through.is_none() {
             candidates.push((
                 join_normalized(including, name, self.case_insensitive()),
+                FoundIn::LocalDirectory,
+            ));
+        }
+
+        // **The `include` directories between this file and the top of its tree.**
+        //
+        // A compilation database names them (`-I CodeFormatServer/include`) and this project has none, which is the
+        // ordinary state of a checkout nobody has configured: measured on `E:\EmmyLuaCodeStyle`, a real CMake project
+        // laid out as `src/` + `include/` per target, **the closure of its `main.cpp` was 14 files instead of the
+        // whole program** — `#include "Session/StandardIOSession.h"` was searched for beside `main.cpp` and in
+        // MSVC's own directories, and the file is at `CodeFormatServer/include/Session/StandardIOSession.h`.
+        //
+        // `-I` is what the compile command would have said, and the layout that produces it is a convention rather
+        // than a guess: `include/` beside `src/` is what CMake projects have, and the climb stops at the first
+        // ancestor without one. A **quoted** include only, deliberately — an inferred directory must not be able to
+        // shadow `<vector>`, and an angle include in this project is a system header.
+        //
+        // A search that finds something is a file that exists at the spelling asked for, and the summary records
+        // which path won, so a wrong hit is a wrong file rather than a wrong answer about a right one — the same
+        // standing every `-I` has.
+        for root in include_roots_above(including, self.files) {
+            candidates.push((
+                join_normalized(&root, name, self.case_insensitive()),
                 FoundIn::LocalDirectory,
             ));
         }
