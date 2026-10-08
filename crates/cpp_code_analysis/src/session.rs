@@ -1523,7 +1523,18 @@ impl<F: FileProvider + Clone> Session<F> {
             // for the whole of a cold start.
             let key = queue_key(&path);
             let left = steps - taken;
-            if left > 1 && !self.prefetched.contains_key(&key) {
+            // **A file whose macro environment this session holds is left out of the wave.** The wave parses on the
+            // read path, where a summary is a pure function of the text — which is exactly what cannot place a scope
+            // a macro in **another** file opens. For the one file this session knows better about, the wave would
+            // build the wrong reading *and write it to the disk cache*, and then `index_one`'s own attempt would be
+            // served that entry as a hit: measured, dropping the wave's answer afterwards turned the step into
+            // `Reused` and left the environment unused, which is worse than either.
+            //
+            // So it is not a root of this wave, and its includes are prepared by the iteration that reads it.
+            // **This is what makes §5.2's steps 1–3 reachable at all**: they live at `index_one`'s `None` arm, and
+            // the pump's path always reached it with `Some`, so the mechanism was correct, tested, and dead.
+            let holds_the_environment = self.holds_an_environment_for(&path);
+            if left > 1 && !holds_the_environment && !self.prefetched.contains_key(&key) {
                 let mut wave = vec![path.clone()];
                 wave.extend(
                     self.queue
@@ -1549,6 +1560,9 @@ impl<F: FileProvider + Clone> Session<F> {
                 }
             }
 
+            // **Read here rather than out of the wave**, for the file the wave was told to leave alone: with no
+            // prepared entry, `index_one` builds the summary itself and can hand it the environment. Every other
+            // file still takes the wave's answer.
             let ready = self.prefetched.remove(&key);
             done.push(self.index_one(path, priority, depth, ready));
         }
@@ -2872,9 +2886,29 @@ impl<F: FileProvider + Clone> Session<F> {
         Some((unit, provisional))
     }
 
+    /// **Does this session hold a macro environment for `path` that is worth reading the file with?**
+    ///
+    /// Asked by [`Session::advance`] before it takes a file's summary out of the wave: a wave parses a file as a
+    /// pure function of its text, which cannot place a scope that a macro in **another** file opens, and this
+    /// session may already know better. See [`HeldUnit`] for why a provisional timeline does not count — it is
+    /// missing whatever the queue has not read, so reading a file with it and marking the result would suppress the
+    /// second pass for a reading that needs it.
+    ///
+    /// Asked by the index's own spelling of the path, because a unit's frames are keyed by the spelling the walk
+    /// used — the same trap [`Session::units_for_the_pass`] records from the other side.
+    fn holds_an_environment_for(&self, path: &Path) -> bool {
+        let spelled = self
+            .store
+            .index()
+            .summary(path)
+            .map(|summary| summary.path.clone())
+            .unwrap_or_else(|| path.to_path_buf());
+        let held = self.held_units().get(&queue_key(&spelled));
+        held.is_some_and(|(provisional, _)| !provisional)
+    }
+
     /// **Could this closure still grow?** — the question a timeline's cache entry has to answer, and the one the
     /// walk itself cannot.
-    ///
     /// # The two meanings of a file the closure does not hold
     ///
     /// [`crate::TranslationUnit::walk`] stops at a file the closure cannot offer, and its early return says why
@@ -5950,8 +5984,14 @@ mod tests {
         // `status.md` §6 records, and a red test with two possible causes is worse than a narrow green one.
         //
         // What *is* asserted is this change's own subject: which files the second pass is handed.
+        //
+        // **`advance(64)` and not `advance(1)`**, because that is the path where this used to be dead. With more
+        // than one step to take, `advance` prepares a *wave* on the read path and hands the file's summary back
+        // through `index_one`'s `Some` arm — where no environment is available and none is looked for. The
+        // mechanism was written, tested against `advance(1)`, and never once reached on the pump's path. See
+        // `Session::advance` for what now keeps such a file out of the wave.
         warm.did_change("/p/api.h", &typed);
-        warm.advance(1);
+        warm.advance(64);
 
         assert!(
             !second_pass_has(&warm),

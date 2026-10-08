@@ -331,6 +331,18 @@ struct Shape {
     /// A class-like definition's base **names** (the `NameExpr` inside each `BaseSpecifier`), in declaration
     /// order. The access keyword is deliberately not part of it: `public B` names `B`.
     bases: Vec<CppSyntaxNode>,
+    /// **A class-like definition's written name, when that name carries a template argument list** — `atomic<_Ty>`,
+    /// `vector<_Ty, _Alloc>` — and `None` for everything else, a plain `struct Widget` included.
+    ///
+    /// Recorded here rather than computed per declaration because it is a property of the **class**, and the class
+    /// has many members: [`crate::DeclFact::pattern`] asks for it once per member, and answering it per member meant
+    /// a descent from the root for every declaration in the file. Measured, that single call was **2245 ms of a
+    /// 4562 ms `Facts` stage** over 126 files of MSVC's standard library — half of it — and most of the declarations
+    /// it was asked about were not in a class at all, so the descent was spent discovering that.
+    ///
+    /// See [`written_class_pattern`] for what the spelling is and why it is read out of the head's text rather than
+    /// out of the tree.
+    pattern: Option<String>,
     /// The innermost shape containing this one — the chain [`DeclarationShapes::on_the_path`] walks.
     parent: Option<u32>,
     /// This shape's own children, as a run in [`DeclarationShapes::children`].
@@ -440,9 +452,18 @@ impl DeclarationShapes {
             }
 
             let parent = chain.last().copied();
+            // **The class's written pattern, read once for the class and not once per member.** See
+            // [`Shape::pattern`].
+            let pattern = match kind {
+                CppSyntaxKind::ClassDef | CppSyntaxKind::StructDef | CppSyntaxKind::UnionDef => {
+                    written_class_pattern(&node)
+                }
+                _ => None,
+            };
             shapes.push(Shape {
                 at,
                 kind,
+                pattern,
                 access: bodies.last().map(|(_, level)| *level),
                 exported: !exports.is_empty(),
                 specifiers: read.specifiers,
@@ -636,6 +657,11 @@ fn declares_a_shape(kind: CppSyntaxKind) -> bool {
             | CppSyntaxKind::TypedefDecl
             | CppSyntaxKind::ClassDef
             | CppSyntaxKind::StructDef
+            // **`UnionDef` is a shape too, and it was the one kind missing.** `enclosing_class_of` recognises it —
+            // it is a class-like declaration whose members have access levels and a scope — so a shape table without
+            // it is a table that cannot answer "what class is this member in" for a union, and the union's members
+            // were the only ones still paying a descent from the root.
+            | CppSyntaxKind::UnionDef
             | CppSyntaxKind::EnumDef
     )
 }
@@ -1879,7 +1905,7 @@ fn fact_for(
     // **The class's name as the declaration wrote it, when that name carries a pattern.** See [`DeclFact::pattern`]
     // for the wrong answer this exists to remove — a partial specialization's member answering for an instantiation
     // that does not match it.
-    let pattern = pattern_of(root, binding);
+    let pattern = pattern_of(&shapes, binding);
 
     // **Is the scope this declaration reports one the file's text could actually see?**
     //
@@ -1925,9 +1951,90 @@ fn fact_for(
 }
 
 
-fn pattern_of(root: &CppSyntaxNode, binding: &Binding) -> Option<String> {
-    let declaration = enclosing_class_of(root, binding)?;
-    let text = declaration.text().to_string();
+/// **A class declaration's own text, up to its body** — read child by child instead of from the node.
+///
+/// # What this replaces, and what it cost
+///
+/// It used to be `declaration.text().to_string()`: the whole class, body included. `pattern_of` asks for it once per
+/// **member**, so a class of M members and size S cost M × S. MSVC's `basic_string` has a couple of hundred members
+/// and a body of about a hundred kilobytes, which is tens of megabytes of string building **for one class** — and
+/// `xstring` has many classes.
+///
+/// That was the whole of the index's cost on a real project, and it was invisible because the timer covering it
+/// (`Stage::Facts`) covers five other questions too, and those five are the ones with names:
+///
+/// ```text
+///   indexes 126 files of MSVC's standard library closure, CPU time
+///     parse                          996.7 ms   11.2%
+///     sweep                         7293.1 ms   82.3%   ← the reading below is what was in it
+///       facts                       6845.0 ms
+///         type-of                      104.4            the five questions this function is *named* for
+///         returns                      117.0
+///         bases                          2.4
+///         template-params                5.6
+///         alias                          0.5
+///         …the rest, ~6.6 s              pattern_of, per member, materialising its class
+/// ```
+///
+/// # Why the head and not the whole text
+///
+/// The caller reads the head: the keyword that introduces the class, the name, and the template argument list —
+/// everything before the first `{` or `;`, which is exactly what the cut below keeps. So walking the children and
+/// stopping at the body is not an optimisation of a different answer; it is the same answer without the part the
+/// caller throws away.
+///
+/// A child that **starts** with a brace is the body, and its text is the one thing this function exists not to
+/// build. Every other child of a class declaration is a keyword, a name, a base clause or an attribute.
+fn class_head_of(declaration: &CppSyntaxNode) -> String {
+    let mut head = String::new();
+    for child in declaration.children_with_tokens() {
+        if let Some(token) = child.as_token() {
+            head.push_str(token.text());
+        } else if let Some(node) = child.as_node() {
+            if node
+                .first_token()
+                .is_some_and(|token| token.text() == "{")
+            {
+                break;
+            }
+            head.push_str(&node.text().to_string());
+        }
+        if head.contains(['{', ';']) {
+            break;
+        }
+    }
+    head
+}
+
+/// **The pattern the innermost class around this declaration was written with** — see [`Shape::pattern`].
+///
+/// Answered from the shape table, which recorded it once per class, instead of by descending from the root to the
+/// declaration. The two are the same question: the shapes an offset is inside are exactly the declarations it is
+/// inside, so the innermost class-like shape on that path **is** `enclosing_class_of`'s answer, and the pattern
+/// stored on it is what this returns — including when it is `None`, because a plain `struct Widget` is the answer
+/// for its members and the class *further out* is not.
+fn pattern_of(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
+    let mut found = None;
+    shapes.on_the_path(the_offset_to_descend_by(binding), |shape| {
+        if matches!(
+            shape.kind,
+            CppSyntaxKind::ClassDef | CppSyntaxKind::StructDef | CppSyntaxKind::UnionDef
+        ) {
+            found = shape.pattern.clone();
+        }
+    });
+    found
+}
+
+/// **A class-like definition's written name, up to its body, when it carries a template argument list.**
+///
+/// `Some("atomic<_Ty>")` for `template <class _Ty> struct atomic<_Ty> { … }`, `None` for `struct Widget { … }` —
+/// the `<` is the test, and it is the whole of what the field means: a partial specialization's members must not
+/// answer for an instantiation that does not match them.
+///
+/// `None` also for anything that is not a class-like definition, which the caller has already established.
+fn written_class_pattern(declaration: &CppSyntaxNode) -> Option<String> {
+    let text = class_head_of(declaration);
 
     // **The head only.** The declaration's text is the whole class — body included — and a body holds `class` and
     // `struct` keywords of its own (nested classes, `using` declarations). A walk that took the last one in the text
@@ -1970,44 +2077,26 @@ fn pattern_of(root: &CppSyntaxNode, binding: &Binding) -> Option<String> {
 
 /// **The innermost class-like declaration containing this binding**, when there is one.
 ///
-/// # Why this descends instead of filtering `descendants`
+/// # Why this used to descend, and why it no longer does
 ///
-/// The first version took `root.descendants()`, kept the class-like nodes whose range contains the offset, and
-/// took the smallest. It is correct and it is **quadratic**: `pattern_of` asks this once per declaration, so a file
-/// costs declarations × nodes. Measured on eight MSVC headers, the same probe went from about thirty seconds to
-/// **over ten minutes**, and a real workspace pays it on every file it indexes at startup — which is what made
-/// loading a project crawl.
+/// The first version took `root.descendants()`, kept the class-like nodes whose range contains the offset, and took
+/// the smallest. It is correct and it is **quadratic**: `pattern_of` asked this once per declaration, so a file cost
+/// declarations × nodes. Measured on eight MSVC headers, the same probe went from about thirty seconds to **over ten
+/// minutes**, and a real workspace pays it on every file it indexes at startup — which is what made loading a project
+/// crawl.
 ///
-/// What replaces it walks **down** from the root and keeps only the children that contain the offset. Children
-/// partition their parent's range, so at most one contains any given offset: the walk visits the path to the leaf
-/// and nothing else, which is the depth of the tree rather than its size.
-fn enclosing_class_of(root: &CppSyntaxNode, binding: &Binding) -> Option<CppSyntaxNode> {
-    let at = binding.name_range.start_offset;
-
-    let mut innermost = None;
-    let mut node = root.clone();
-    loop {
-        if matches!(
-            CppSyntaxKind::from(node.kind()),
-            CppSyntaxKind::ClassDef | CppSyntaxKind::StructDef | CppSyntaxKind::UnionDef
-        ) {
-            innermost = Some(node.clone());
-        }
-
-        let next = node.children().find(|child| {
-            let range = child.text_range();
-            usize::from(range.start()) <= at && at < usize::from(range.end())
-        });
-
-        match next {
-            Some(child) => node = child,
-            None => break,
-        }
-    }
-
-    innermost
-}
-
+/// The second version walked **down** from the root and kept only the children containing the offset. That fixed the
+/// quadratic term and was still, measured later, **2245 ms of a 4562 ms `Facts` stage** over 126 files: the descent
+/// costs `O(siblings)` at *every* level, it ran once per declaration, and the overwhelming majority of declarations
+/// are not in a class at all — so most of the work was spent discovering that.
+///
+/// It is now a **table lookup**: [`DeclarationShapes`] already records every declaration-like node and the chain it
+/// sits in, in one pass over the file, and [`Shape::pattern`] carries the class's own spelling because that is what
+/// the one caller wanted. What is left of this question is [`pattern_of`], five lines of it.
+///
+/// Kept as a note rather than as code: the function itself is gone, and the two measurements above are the reason
+/// nobody should reintroduce a per-declaration descent here.
+///
 /// **The namespaces enclosing `at`, outermost first** — or `None` when only the file does.
 ///
 /// The answer a local declaration needs and [`ScopeTree::qualification_prefix_of`] cannot give: that function
@@ -2200,13 +2289,24 @@ impl<'a> DeclarationFacts<'a> {
         // per declaration copies the whole file each time.
 
         for (index, scope) in scopes.scopes().iter().enumerate() {
-            // The prefix is what a declaration written *here* is qualified by, which is the scope's own name
-            // for a namespace or a class and nothing at all for a function body or a block — see
-            // [`ScopeTree::qualification_prefix_of`] for why the two questions have to be asked separately.
-            let prefix = scopes.qualification_prefix_of(ScopeId(index));
-            // …and the second thing the *scope* knows rather than the declaration: whether a name bound here can
-            // be reached from outside the body it sits in. See [`DeclFact::local`].
-            let local = scopes.declares_a_local(ScopeId(index));
+            let id = ScopeId(index);
+            // **A body answers both questions by itself**, and it is asked here rather than inside the two functions
+            // because most scopes in a header are bodies. `qualification_prefix_of`'s own match lists exactly these
+            // three kinds as `None` — a declaration written in a function body, a block or a lambda is qualified by
+            // nothing — and `declares_a_local` walks the chain and finds the scope's own kind, so a body is always
+            // local. Both walks were being paid for every `{` in every inline function of every header, and the
+            // answers could not have been anything else.
+            //
+            // This is the cheap half of what clangd gets by not parsing header bodies at all
+            // (`SkipFunctionBodies` during the preamble): the bodies are still parsed here, but the *index* stops
+            // asking questions about them whose answer is fixed.
+            let (prefix, local) = match scope.kind {
+                ScopeKind::Function | ScopeKind::Block | ScopeKind::Lambda => (None, true),
+                _ => (
+                    scopes.qualification_prefix_of(id),
+                    scopes.declares_a_local(id),
+                ),
+            };
 
             for binding in &scope.bindings {
                 if let Some(fact) = fact_for(

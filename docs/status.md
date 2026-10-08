@@ -239,6 +239,27 @@ measurement were reading old data. Clearing it is the first thing to try when a 
   workspace          zero warnings
 ```
 
+### Step 4 of the latency plan was measured and dropped
+
+The measurement it was waiting on is now in the repository
+(`cargo run --release -p cpp_code_analysis --example cook_value -- <entry.cpp>`), over a translation unit including
+`<string>`, `<vector>` and `<map>`, per file, as a set difference of declaration names:
+
+```text
+  file       raw   cooked   only cooked   only raw
+  xstring    163      511            353          5
+  vector     118      332            262         48
+  main.cpp    12       12              0          0   ← the file being edited
+```
+
+**The rendering adds nothing to the file being edited and hundreds of declarations to the headers** — so the plan's
+premise was right and its conclusion was not. The rendering of the edited file is not produced by an eager cook:
+`want_the_closure_cooked` has never marked the root, and `cpp_ls/src/context/analysis_state.rs:167-174` says in its
+own words that a file a request names gets its reading, every request. Removing the eager cook would therefore move
+the work onto the waiting request rather than remove it, and the alternative — making requests stop asking — is a
+change to what a client is promised (`isIncomplete`) and puts the *diagnostics* difference at risk, which is the one
+thing the probe above explicitly does not measure. `docs/incremental-edits.md` §8.7 has the argument.
+
 ### Two cache-invalidation bugs, and both were found by a test that already existed
 
 Five failures were carried as "not ours" for two rounds. Three of them are now fixed, and neither fix was about the
@@ -367,6 +388,24 @@ What is left of that list, after the two cache fixes and the four re-basings abo
 
 The `cpp_code_analysis` crate has no failures left at all, which is worth saying plainly because this file has
 carried a non-zero row in every revision of it.
+
+### And one mechanism was correct, covered by a green test, and never reached
+
+`docs/incremental-edits.md` §5.2's steps 1–3 put the macro environment into `Session::index_one`'s **`None`** arm —
+the arm that runs when a wave did not prepare the file. `Session::advance` prepares a wave whenever it has more than
+one step to take, and the pump asks for sixteen, so on every path a running server takes that arm was skipped:
+
+```text
+  Step::with_the_environment     never true on a real edit
+  the test that covers it        green — because it called `advance(1)`, which takes no wave
+```
+
+Found by asking **where the flag is ever set** rather than whether the code that sets it is right, which is the one
+question a passing test cannot answer about itself. The fix is a condition in `Session::advance`; the trap in it is
+recorded in §8.7 of the other document, and it is the same shape as everything else this round: the first version
+threw away the wave's *answer* instead of keeping the file out of the wave, and the wave had already written that
+answer to the disk cache — so the step came back `Reused` and the environment went unused anyway.
+
 
 ### The rest of this round's findings, kept as a list because they are all the same shape
 

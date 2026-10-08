@@ -389,11 +389,13 @@ So the order changes again, and for the third time it is a measurement that chan
 ```text
   done     the three failures about a cooked reading that does not carry what it should
            they were two cache-invalidation bugs, one layer apart — §8.5 and §8.6 — and neither was about the cook
-  now      step 4, with a measurement of raw-vs-rendered that means something
-  then     stage 3, stage 4
+  done     steps 1–3 above — which were **dead code** until §8.7 wired them to the path that actually runs
+  done     the measurement step 4 was waiting on — and it says step 4 is the wrong change. See §8.7.
+  now      stage 3, stage 4
 ```
 
-**What step 4 must not break, and it is a list, not a hope.**
+**What step 4 would have had to keep, and it is a list rather than a hope.** §8.7 is why it was not taken, and this
+is the list that would have had to be measured first:
 
 ```text
   cooked_declarations(path)          the queries that read a file through the index. They fall back to the raw
@@ -407,7 +409,7 @@ So the order changes again, and for the third time it is a measurement that chan
 ```
 
 Steps 1–3 are safe and independently verifiable; step 4 is a behaviour change and should ship behind the ability to
-measure that list. All four are **not done**, except the scan:
+measure that list. Steps 1–3 and the scan are **done** — and the scan is item 1 of the old plan:
 
 **Done: item 1 of the old plan — one scan, not two.** `SummaryStore::prepare` no longer runs the early include scan
 (`SummaryStore::prepare_inner`, with the scan optional), because the scan exists to feed a *wave*'s frontier
@@ -776,6 +778,91 @@ the level under a direct include is reached on purpose (`<string>` → `<xstring
 the digit and *strengthened* (the stitched test now also asserts neither macro's name survived); the policy ones gained
 a fourth fixture file so they pin **level 2 cooked, level 3 not**, distinguishing one more level than the versions that
 used to pass.
+
+### 8.7 Steps 1–3 were dead, and the measurement that made step 4 unnecessary
+
+#### The wiring bug: a mechanism that was correct, tested, and never reached
+
+§5.2's steps 1–3 put the environment into `index_one`'s **`None`** arm — the arm that runs when a file was not
+prepared by a wave. `Session::advance` prepares a wave whenever it has more than one step to take, and the pump asks
+for sixteen. So on every path a running server takes, `index_one` was reached with `Some`, the summary came from the
+wave, and the environment was never consulted:
+
+```text
+  the flag `Step::with_the_environment`   never once true on a real edit
+  the test that covers it                 passed, because it called `advance(1)`
+```
+
+That is the shape `status.md` §6's second rule describes — a criterion that bites the wrong shape — and it cost one
+line to fix, after being found by asking where the flag is set rather than whether the code is right:
+
+```rust
+// Session::advance — a file whose environment this session holds is left out of the wave
+let holds_the_environment = self.holds_an_environment_for(&path);
+if left > 1 && !holds_the_environment && !self.prefetched.contains_key(&key) { … }
+```
+
+**Leaving it out** rather than discarding its answer afterwards, and the difference is not cosmetic: the wave writes
+what it builds to the disk cache, so a session that threw the wave's answer away would then be served that entry as a
+**cache hit** — measured, the step reported `Reused` where the test expected `Built`, and the environment went unused
+anyway. Two tests caught it. The cost of the fix is one parse on the writer instead of on the readers, paid for one
+file: the one whose timeline is in hand, which is the one being typed into.
+
+#### The measurement
+
+```text
+  cargo run --release -p cpp_code_analysis --example cook_value -- target\cook-value\main.cpp
+```
+
+A translation unit including `<string>`, `<vector>` and `<map>` — 11 files cooked — then **typed into**, then measured
+per file as a set difference of qualified names:
+
+```text
+  file       raw   cooked   only cooked   only raw
+  xstring    163      511            353          5
+  vector     118      332            262         48
+  map        107      107              4          4
+  string      45       42              1          4
+  main.cpp    12       12              0          0   ← the file being edited
+```
+
+**For the file being edited the rendering adds exactly nothing**, which is the number step 4 was waiting for: 353 for
+`xstring`, 262 for `<vector>`, and **0** for the translation unit a person is typing into.
+
+#### …and the same measurement dissolves step 4
+
+Step 4 was written as *"the edited file must not be rendered at all, unless a question needs the rendering"*, on the
+model that the cook is eager and the question is rare. Two facts about where a cooked reading of the edited file
+actually comes from say otherwise, and both are one grep:
+
+```text
+  want_the_closure_cooked(root)      marks the **direct includes and the level under them** — it has never marked
+                                     the root. So the eager path does not cook the edited file.
+  cpp_ls/src/context/analysis_state.rs:167-174
+                                     "**A file a request is about gets its cooked reading** — and this is the only
+                                     place that knows which file a request named." Every request that names the file
+                                     asks for it, and the comment says why: `isIncomplete` is the client's signal to
+                                     come back for the compiler's reading.
+```
+
+So the rendering of the edited file is **request-driven already**. Removing the eager cook would not remove the work;
+it would move it from a background drain to the request that is waiting, which is the wrong direction. And making the
+request *stop* asking means changing `want_cooked_reading`/`is_ready_for_a_request_about` — which is not a latency
+change at all but a decision about what a client is promised, and the one capability it puts at risk is the one this
+document's own probe explicitly does not measure:
+
+> **Diagnostics.** `Session::diagnostics` answers from the cooked reading when one is held and from the file's own
+> text otherwise, and the two differ exactly where a branch nobody takes has an error in it. A client told
+> `isIncomplete` never becomes false for a file that will never be rendered.
+
+**So the honest end of stage 2 is here**: the scan is gone from the one-file path, the edited file is parsed once with
+its environment instead of twice, the timeline survives a body edit, and the render is measured to be worth nothing
+for the file being typed into — while the thing that decides whether to render it turns out to live in the shell, one
+layer above this document's subject, and to be a promise rather than a cost.
+
+What is left for latency is **stage 3** (the hot set: `Render` entries per drain is 1, not 65) and **stage 4** (the
+per-request parse in `Session::view_of_the_file`), and neither depends on this.
+
 
 
 
