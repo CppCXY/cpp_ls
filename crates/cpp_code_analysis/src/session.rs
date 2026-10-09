@@ -1996,10 +1996,20 @@ impl<F: FileProvider + Clone> Session<F> {
         // Roughly 541 extra walks of ~38 ms is ~20 s of CPU, which is ~1.3 s of wall on this machine — against 44.8 s
         // of serial walking. Any future change here should re-measure rather than reason: the count above is the
         // instrument, and `CPU/wall` in the same probe says whether the cores are actually being used.
-        let walked = self.walk_the_timelines(candidates);
-
+        // **Walked one at a time, and that is a measurement rather than a preference.** This was made parallel —
+        // one thread per core over contiguous chunks, with the dedup moved after the walks so that the units handed
+        // to the second pass stayed identical — on the argument that 1188 walks × ~38 ms is 44.8 s of a 67 s index
+        // with `CPU/wall ≈ 1.2`, so fifteen idle cores had to be worth something. It was never measured before
+        // being kept, and the first measurement afterwards is a **cold index of a real project going from 67.3 s to
+        // 142.7 s**. The shape of that regression is not mysterious in hindsight: `advance(64)` is called about
+        // twenty-seven times, each call spawning up to sixteen threads, and each thread's `translation_unit_of`
+        // contends for three mutexes (`held_units`, `walks_by_root`, `held_definitions`) — so what was added is
+        // thread creation plus lock contention over work that already does its own file I/O.
+        //
+        // The sequential loop is also the one that walks **fewer** timelines: it skips a candidate an earlier unit
+        // already covers, which is roughly 541 of 1729 on that project and is exactly what running first gives up.
         let mut units: Vec<std::sync::Arc<crate::TranslationUnit>> = Vec::new();
-        for (candidate, unit) in walked {
+        for (candidate, unit) in self.walk_the_timelines(candidates) {
             if units
                 .iter()
                 .any(|unit| unit.environment_of(&candidate).is_some())
@@ -2014,57 +2024,23 @@ impl<F: FileProvider + Clone> Session<F> {
         units
     }
 
-    /// **[`Session::translation_unit_of`] for many roots at once**, preserving the order of `roots`.
+    /// **[`Session::translation_unit_of`] for many roots at once**, **one at a time**, preserving the order of
+    /// `roots`.
     ///
-    /// One thread per core up to the number of roots, each taking a contiguous chunk; a chunk per thread rather than
-    /// a shared cursor because the results must come back **in order** and a contiguous split needs no reassembly.
-    /// The chunks are unequal in cost — a root whose closure is the whole program beside one whose closure is
-    /// itself — and that is the case a shared cursor would even out. It is not done here because the count says the
-    /// walks are one per file with an average of 38 ms, which is flat enough that the reassembly cost would not pay
-    /// for the balance; a project with a few enormous closures and many tiny ones is where this should be revisited.
+    /// Kept as a named function rather than folded into the caller because that is where the parallel version lived
+    /// and where the next attempt will go. **Do not parallelise it again without measuring the thing it is for**:
+    /// see the comment at the call site for what the last attempt cost and why its shape regressed.
     fn walk_the_timelines(
         &self,
         roots: Vec<PathBuf>,
     ) -> Vec<(PathBuf, Option<std::sync::Arc<crate::TranslationUnit>>)> {
-        if roots.len() < 2 {
-            return roots
-                .into_iter()
-                .map(|root| {
-                    let unit = self.translation_unit_of(&root);
-                    (root, unit)
-                })
-                .collect();
-        }
-
-        // The same shape [`crate::index::store`]'s own parallel map uses: one thread per core, and never more
-        // threads than there is work.
-        let threads = std::thread::available_parallelism()
-            .map_or(1, |cores| cores.get())
-            .min(roots.len())
-            .max(1);
-        let per_thread = roots.len().div_ceil(threads);
-        let chunks: Vec<Vec<PathBuf>> = roots.chunks(per_thread).map(<[PathBuf]>::to_vec).collect();
-
-        let walked: Vec<Vec<(PathBuf, Option<std::sync::Arc<crate::TranslationUnit>>)>> =
-            std::thread::scope(|scope| {
-                let handles: Vec<_> = chunks
-                    .iter()
-                    .map(|chunk| {
-                        scope.spawn(|| {
-                            chunk
-                                .iter()
-                                .map(|root| (root.clone(), self.translation_unit_of(root)))
-                                .collect::<Vec<_>>()
-                        })
-                    })
-                    .collect();
-                handles
-                    .into_iter()
-                    .map(|handle| handle.join().unwrap_or_default())
-                    .collect()
-            });
-
-        walked.into_iter().flatten().collect()
+        roots
+            .into_iter()
+            .map(|root| {
+                let unit = self.translation_unit_of(&root);
+                (root, unit)
+            })
+            .collect()
     }
 
     /// **Read one file, and queue what it includes.** One step of the work, as a function because there are now two

@@ -3710,9 +3710,132 @@ pub struct FileSummary {
     /// that writes its own braces has nothing to record here. It is stored because it is the one part of a summary
     /// whose evidence is in *another* file, and a consumer that can ask that file again must be able to.
     pub macro_readings: Vec<MacroScopeReading>,
+    /// **Every identifier name this file mentions, as a Bloom filter** — what turns a references query from "read
+    /// every file that can see the declaration" into "read the few that contain the name".
+    ///
+    /// # Why a filter and not the uses themselves
+    ///
+    /// `ProjectIndex::symbol_references` walks the declaring file and everything that transitively includes it, and
+    /// for each one it **reads the whole file** before it can ask the cheap question (`text.contains`). The read is
+    /// the cost an index removes, and the volume says what removing it costs
+    /// (`examples/use_index_cost.rs`, 126 files of MSVC's standard library):
+    ///
+    /// ```text
+    ///   identifier uses                                   299 143
+    ///   every use as (name id, offset)                   2 478 456 bytes   13.4% of the summaries
+    ///   this filter, 14 bits per distinct name per file    ~1%             and no offsets, names or order
+    /// ```
+    ///
+    /// Both answer *"might this file use this name"*. The filter is two orders of magnitude smaller because it is
+    /// allowed to be wrong in one direction — and it is: a **false positive** costs exactly what today's code costs
+    /// for that file, one read and one `contains`, and nothing more, while a **false negative is impossible**. That
+    /// asymmetry is what makes a filter the right shape here rather than an approximation of the right shape.
+    ///
+    /// **Empty means "no information" and is read that way** — a summary written before this field existed, or built
+    /// by a caller that did not fill it, filters nothing rather than filtering everything out. See
+    /// [`use_filter_might_contain`].
+    pub use_filter: Vec<u8>,
     /// **What this file declares about modules** — see [`ModuleReading`], and `plan-units.md` §35 for why the
     /// visibility walk needs it *in* the summary rather than in a lookup beside it.
     pub modules: ModuleReading,
+}
+
+/// **The bits per distinct name** in a [`FileSummary::use_filter`].
+///
+/// Fourteen is the textbook optimum for three probes at a one-percent false-positive rate, and the rate matters
+/// less than it looks — a false positive is one wasted read. What matters is the size, so the two bounds below keep
+/// a two-name file from paying for hashes it cannot use and an enormous generated file from adding thirty kilobytes
+/// to its own summary.
+const USE_FILTER_BITS_PER_NAME: usize = 14;
+
+/// The smallest filter worth writing: below this the probes cost more than the answer saves.
+const USE_FILTER_MIN_BYTES: usize = 64;
+
+/// The largest, so that one generated file cannot put a megabyte in the cache.
+const USE_FILTER_MAX_BYTES: usize = 32 * 1024;
+
+/// **Build the filter over the identifier names a file mentions.**
+///
+/// The names come from the **tree** and not from the text: a word inside a comment or a string literal is not a use
+/// of it, and the lexer has already made that distinction — which is also why this is not a scan for word-shaped
+/// substrings.
+pub fn use_filter_of(root: &cpp_parser::CppSyntaxNode) -> Vec<u8> {
+    use std::collections::HashSet;
+
+    // **Owned, because a token's text borrows the token.** The names are the distinct identifiers of one file — a
+    // few thousand at most, against the file's whole token stream — so the allocations are bounded by the answer
+    // and not by the input, and the alternative is a second lifetime threaded through the builder for nothing.
+    let mut names: HashSet<String> = HashSet::new();
+    for element in root.descendants_with_tokens() {
+        let Some(token) = element.as_token() else {
+            continue;
+        };
+        if cpp_parser::CppTokenKind::from(token.kind()) != cpp_parser::CppTokenKind::Identifier {
+            continue;
+        }
+        let name = token.text();
+        if !name.is_empty() {
+            names.insert(name.to_string());
+        }
+    }
+
+    let bits = names
+        .len()
+        .saturating_mul(USE_FILTER_BITS_PER_NAME)
+        .clamp(USE_FILTER_MIN_BYTES * 8, USE_FILTER_MAX_BYTES * 8);
+    let mut filter = vec![0u8; bits.div_ceil(8)];
+
+    for name in names {
+        for probe in use_filter_probes(&name) {
+            let bit = probe as usize % bits;
+            filter[bit / 8] |= 1 << (bit % 8);
+        }
+    }
+
+    filter
+}
+
+/// **Might this file mention `name`?** — `true` when there is no filter to ask, which is the safe direction.
+///
+/// A `false` is certain: the filter was built from every identifier the file contains, so a name that is not in it
+/// is a name not written there. A `true` means "read it and see", which is all a caller needs to skip the files that
+/// cannot possibly contain the name. See [`FileSummary::use_filter`].
+pub fn use_filter_might_contain(filter: &[u8], name: &str) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    let bits = filter.len() * 8;
+    use_filter_probes(name).iter().all(|probe| {
+        let bit = *probe as usize % bits;
+        filter[bit / 8] & (1 << (bit % 8)) != 0
+    })
+}
+
+/// **Three bit positions for a name**, from two FNV-1a hashes — the standard double-hashing trick, so that one pass
+/// over the bytes yields every probe.
+fn use_filter_probes(name: &str) -> [u64; 3] {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut first = OFFSET;
+    for byte in name.as_bytes() {
+        first ^= u64::from(*byte);
+        first = first.wrapping_mul(PRIME);
+    }
+    // A second, independent-looking hash; it only has to be **odd**, which makes the step coprime with any power of
+    // two and is what keeps three probes from collapsing onto one bit.
+    let mut second = OFFSET ^ 0x9e37_79b9_7f4a_7c15;
+    for byte in name.as_bytes().iter().rev() {
+        second ^= u64::from(*byte);
+        second = second.wrapping_mul(PRIME);
+    }
+    let step = second | 1;
+
+    [
+        first,
+        first.wrapping_add(step),
+        first.wrapping_add(step.wrapping_mul(2)),
+    ]
 }
 
 impl FileSummary {
@@ -3726,6 +3849,8 @@ impl FileSummary {
             includes: Vec::new(),
             guards: SummaryGuards::default(),
             macro_readings: Vec::new(),
+            // **Empty, and that is a real answer**: no filter is "ask the file", not "the file uses nothing".
+            use_filter: Vec::new(),
             modules: ModuleReading::default(),
         }
     }

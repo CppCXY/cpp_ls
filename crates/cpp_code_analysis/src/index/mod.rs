@@ -790,6 +790,10 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             // from the walk rather than recomputed: the walk is the only thing that asked, and asking again here
             // would be a second reader of the same evidence, free to disagree with the scopes it is describing.
             macro_readings: scopes.macro_readings,
+            // **Which names this file mentions**, so that a references query can skip it without reading it. Built
+            // from the tree the parse just produced — the identifiers are already there, and a filter built from the
+            // *text* would count the names inside comments and strings. See [`FileSummary::use_filter`].
+            use_filter: crate::summary::use_filter_of(&root),
             modules,
         }
     }

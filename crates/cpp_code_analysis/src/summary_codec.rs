@@ -214,7 +214,7 @@ const MAGIC: &[u8; 8] = b"CPPLSSUM";
 /// of a layout bug and not of a logic one.
 ///
 /// So the number moves, the old entries are dropped on sight, and the field is what the reader sees.
-pub const CODEC_VERSION: u32 = 27;
+pub const CODEC_VERSION: u32 = 28;
 
 /// Write a summary as bytes.
 ///
@@ -357,6 +357,13 @@ pub fn encode(summary: &FileSummary) -> Vec<u8> {
     for unit in &summary.modules.partitions {
         put_path(&mut out, unit);
     }
+
+    // **The use filter**, after everything else for the same reason the module reading is: a field written and read
+    // in two different places in the stream is a decoder that reads the next field's bytes. Raw bytes rather than a
+    // length-prefixed blob per bit — the length is the whole of what the reader needs. See
+    // [`crate::FileSummary::use_filter`].
+    put_u32(&mut out, summary.use_filter.len() as u32);
+    out.extend_from_slice(&summary.use_filter);
 
     out
 }
@@ -774,6 +781,17 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
         },
     };
 
+    // **The use filter**, last in and last out. Empty is a valid reading and means "ask the file" — see
+    // [`crate::FileSummary::use_filter`].
+    let use_filter = {
+        let length = reader.count()?;
+        let mut bytes = Vec::with_capacity(length.min(64 * 1024));
+        for _ in 0..length {
+            bytes.push(reader.u8()?);
+        }
+        bytes
+    };
+
     // Trailing bytes mean the file was written by something this decoder does not agree with — a newer producer,
     // or two records where one was expected. Ignoring them would be accepting a file whose *content* is not what
     // its own encoding says, which is the one thing a cache must not do.
@@ -789,6 +807,7 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
         includes,
         guards,
         macro_readings,
+        use_filter,
         modules,
     })
 }
@@ -1181,6 +1200,10 @@ mod tests {
         FileSummary {
             path: std::path::PathBuf::from("/project/src/widget.cpp"),
             key: SummaryKey::new(0x1111_2222_3333_4444, 0xaaaa_bbbb_cccc_dddd),
+            // **Both ends of the filter's range**, so that the round trip covers an empty one (which means "ask the
+            // file") and a populated one (which is allowed to say no). A field tested at one size is a field whose
+            // other size is untested, and the empty case is the one every summary written before this field has.
+            use_filter: vec![0x00, 0xff, 0x55, 0xaa, 0x01, 0x80],
             declarations: vec![
                 DeclFact {
                     name: "Widget".to_string(),

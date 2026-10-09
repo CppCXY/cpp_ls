@@ -28,7 +28,7 @@
 //! directives, keeping a stack of the regions currently open. The result is the same answer for a fraction of
 //! the work, and it is the reason this module rather than `summary` owns the walk.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::preprocess::directive::{Directive, DirectiveKind, SpannedDirective};
 use crate::preprocess::FilePreprocessing;
@@ -2047,6 +2047,177 @@ fn pattern_of(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
 
 /// **A class-like definition's written name, up to its body, when it carries a template argument list.**
 ///
+/// **One local declaration, and every identifier in the same file that resolves to it.**
+///
+/// # Why this is a fact about one file and nothing else
+///
+/// A local declaration cannot be named from another file — not by an `#include`, not by a qualified name, not by
+/// any path through the include graph. So every use of one is in the file that declares it, and a table keyed by
+/// the declaration's own offset is a **single-file fact**: it needs no closure, no macro environment and no
+/// timeline. That is the invariant IntelliJ's stub contract states (*"all information stored in the stub tree
+/// depends only on the contents of the file for which stubs are being built"*) and the one `docs/design-review.md`
+/// §3.2 records that our summary layer does not satisfy — so this is the first table in the index that does.
+///
+/// # Why the key is an offset and not a name
+///
+/// Two locals in one file share a spelling all the time — `for (auto& item : a)` beside `for (auto& item : b)` —
+/// and they are different declarations. `declared_at` is the declaration's own name, which is unique in a file, so
+/// the table cannot merge them; the spelling is recoverable from the declaration when a consumer needs it, and the
+/// identity is not recoverable from the spelling.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LocalReferences {
+    /// The declaration's own name, as an offset into the file — the key. `DeclFact::name_range.start_offset` of the
+    /// local declaration, so a consumer holding a fact finds its uses by one lookup.
+    pub declared_at: u32,
+    /// The offsets of every identifier that resolves to it, in document order.
+    pub uses: Vec<u32>,
+}
+
+/// **Resolve every identifier in a file to the local declaration it names**, when it names one.
+///
+/// # What "resolves" means, and what it deliberately does not
+///
+/// The rule is C++'s own lookup for a name written inside a function: from the innermost scope containing the
+/// identifier outward, the first scope declaring the name wins, and an outer declaration of the same spelling is
+/// **shadowed** rather than also counted. That is a resolution and not a spelling match — the difference between
+/// this and `ProjectIndex::symbol_references`'s identifier scan, where every same-spelled token in every candidate
+/// file is reported as a use.
+///
+/// It is deliberately not a full resolver, and the limits are the ones this crate states everywhere else:
+///
+/// * **locals only.** A name resolving to a class member, a namespace member or a template parameter is not in the
+///   table — those are the cross-file index's business and answering them needs the closure, which would make this
+///   a fact about the closure rather than about the file.
+/// * **no overload selection** (there is no overload resolution in this crate yet), so two declarations of one name
+///   in one scope resolve to the first.
+/// * a use inside a **lambda** resolves against the lambda's own scope, so a capture counts as a use of the
+///   enclosing local. That is the wanted answer for a rename, and it is stated rather than discovered.
+///
+/// # Cost
+///
+/// One descent per identifier plus one walk of the scope chain per identifier that has a binding, over a tree the
+/// parser has already produced — no closure walk, no macro environment, no text read. The descent is `O(siblings)`
+/// per level, the shape [`enclosing_class_of`] had before it became a table lookup, and it is paid per
+/// **identifier**; `examples/use_index_cost.rs` is where that volume is read.
+pub fn local_references_of(scopes: &ScopeTree, root: &CppSyntaxNode) -> Vec<LocalReferences> {
+    // The scope the file itself is: the only one with no parent, and the root of the descent below.
+    let Some(file_scope) = scopes
+        .scopes()
+        .iter()
+        .position(|scope| scope.parent.is_none())
+        .map(ScopeId)
+    else {
+        return Vec::new();
+    };
+
+    // A declaration's own name is not a use of it.
+    let mut declared: HashSet<usize> = HashSet::new();
+    for scope in scopes.scopes() {
+        for binding in &scope.bindings {
+            declared.insert(binding.name_range.start_offset);
+        }
+    }
+
+    let mut found: HashMap<u32, Vec<u32>> = HashMap::new();
+
+    // **A name index per scope, built once.** `Scope::bindings` is a `Vec` on purpose — a name may be declared twice
+    // — and that makes the lookup this pass needs a linear scan. Measured the other way: scanning it once per
+    // identifier cost **9.2 s over 126 files, 30.8 µs per identifier**, because the file scope's own binding list
+    // holds every top-level declaration in the file and every identifier walked it. The map is the same information
+    // arranged for the question being asked 299 143 times.
+    let mut by_name: HashMap<usize, HashMap<String, &Binding>> = HashMap::new();
+    for (index, scope) in scopes.scopes().iter().enumerate() {
+        let mut names: HashMap<String, &Binding> = HashMap::new();
+        for binding in &scope.bindings {
+            // First wins, which is the order the linear scan had. One `String` per **binding** — `Name::text`
+            // allocates, and that is affordable here and not per identifier.
+            names.entry(binding.name.text()).or_insert(binding);
+        }
+        by_name.insert(index, names);
+    }
+
+    for element in root.descendants_with_tokens() {
+        let Some(token) = element.as_token() else {
+            continue;
+        };
+        if cpp_parser::CppTokenKind::from(token.kind()) != cpp_parser::CppTokenKind::Identifier {
+            continue;
+        }
+        let at = usize::from(token.text_range().start());
+        if declared.contains(&at) {
+            continue;
+        }
+        let name = token.text();
+        if name.is_empty() {
+            continue;
+        }
+
+        let Some(binding) = binding_for(scopes, &by_name, file_scope, at, name) else {
+            continue;
+        };
+        if !matches!(
+            scopes
+                .scope(binding.scope)
+                .map(|scope| scope.kind)
+                .unwrap_or(ScopeKind::TranslationUnit),
+            ScopeKind::Function | ScopeKind::Block | ScopeKind::Lambda
+        ) {
+            continue;
+        }
+
+        found
+            .entry(binding.name_range.start_offset as u32)
+            .or_default()
+            .push(at as u32);
+    }
+
+    let mut references: Vec<LocalReferences> = found
+        .into_iter()
+        .map(|(declared_at, uses)| LocalReferences { declared_at, uses })
+        .collect();
+    references.sort_by_key(|entry| entry.declared_at);
+    references
+}
+
+/// **Which declaration the name written at `at` refers to**, by C++'s own rule: the innermost scope declaring it.
+///
+/// The descent to the innermost scope containing `at` and the walk back out along the chain, in one function,
+/// because they are one question — a caller holding the scope would not need this, and a caller with only an offset
+/// cannot ask anything cheaper.
+fn binding_for<'a>(
+    scopes: &'a ScopeTree,
+    by_name: &HashMap<usize, HashMap<String, &'a Binding>>,
+    file_scope: ScopeId,
+    at: usize,
+    name: &str,
+) -> Option<&'a Binding> {
+    let mut current = file_scope;
+    // Down to the innermost scope whose range holds the offset. Scopes' children partition their parent's range the
+    // way syntax children do, so at most one child contains `at` and the loop is the depth of the scope tree.
+    while let Some(child) = scopes.scope(current).and_then(|scope| {
+        scope.children.iter().copied().find(|child| {
+            scopes
+                .scope(*child)
+                .and_then(|scope| scope.range)
+                .is_some_and(|range| at >= range.start_offset && at < range.end_offset())
+        })
+    }) {
+        current = child;
+    }
+
+    // …and back out: the first scope on the chain that declares the name is the one the language binds it to.
+    let mut scope = Some(current);
+    while let Some(id) = scope {
+        let data = scopes.scope(id)?;
+        if let Some(binding) = by_name.get(&id.index()).and_then(|names| names.get(name)) {
+            return Some(binding);
+        }
+        scope = data.parent;
+    }
+
+    None
+}
+
 /// `Some("atomic<_Ty>")` for `template <class _Ty> struct atomic<_Ty> { … }`, `None` for `struct Widget { … }` —
 /// the `<` is the test, and it is the whole of what the field means: a partial specialization's members must not
 /// answer for an instantiation that does not match them.

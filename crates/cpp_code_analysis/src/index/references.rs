@@ -456,6 +456,25 @@ pub fn symbol_references<F: FileProvider>(
     };
 
     for path in symbol_candidates(index, symbol, budget, &mut answer) {
+        // **The filter first, and it is what the read was for.** A candidate is every file that can *see* the
+        // declaration — the declaring file and everything that transitively includes it — and the loop below reads
+        // each one whole before it can ask whether the name is even written there. The summary already carries a
+        // Bloom filter over the identifiers the file mentions ([`crate::FileSummary::use_filter`]), so a file that
+        // cannot contain the name is skipped without a read.
+        //
+        // **A `false` here is certain**: the filter was built from every identifier token in the file, so a name it
+        // does not contain is a name not written there. A `true` is "read it and see" — a false positive costs
+        // exactly the read this used to cost unconditionally, and there is no false negative to be wrong about.
+        //
+        // A summary with no filter (an entry written before the field existed, a file the index has not read) says
+        // `true`, which is the safe direction and the reason this can be added without invalidating anything.
+        if let Some(summary) = index.summary(&path)
+            && !crate::summary::use_filter_might_contain(&summary.use_filter, &symbol.last_segment)
+        {
+            answer.without_the_name += 1;
+            continue;
+        }
+
         let Some(text) = files.read(&path) else {
             answer.unreadable.push(path);
             continue;

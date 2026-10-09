@@ -1641,12 +1641,45 @@ fn words_mentioned_by(
     mentioned
 }
 
-/// Does this summary write an `#include` whose target was never found?
+/// Does this summary write an `#include` the compiler **certainly looks for** whose target was never found?
 ///
 /// The one question that has to be asked before a summary is stored, because the answer is a fact about the
 /// filesystem and the key cannot see it. See the module documentation.
+///
+/// # Only the unconditional ones, and the measurement that says why
+///
+/// An `#include` written inside a conditional is one the compilation **may not take**, and refusing to write a whole
+/// summary because such a target is missing is refusing it for a line the compiler never reads. MSVC's own
+/// `xmmintrin.h` is that case, and it is not exotic — `<intrin.h>` reaches it, and much of the Windows SDK includes
+/// that:
+///
+/// ```c
+/// #ifdef __ICL                  /* Intel's compiler, and only it */
+/// #ifdef _MM_FUNCTIONALITY
+/// #include "xmm_func.h"         /* absent from the whole MSVC tree, and never looked for */
+/// #endif
+/// ```
+///
+/// Measured before this rule was narrowed: a 126-file standard-library closure reported **1 file not stored**, and
+/// `E:\EmmyLuaCodeStyle` reported **235 of 1729** — every file that reaches that header, re-parsed on every run, for
+/// a line no compiler reads.
+///
+/// # Why narrowing does not weaken the guarantee
+///
+/// The hazard is "the file appears and the key does not notice", and it is covered on the **read** side by
+/// [`SummaryStore::resolution_still_holds`], which re-runs the search for *every* include — conditional or not — and
+/// refuses an entry whose answer has changed. A stored `None` that has become a `Some` is exactly that mismatch, so
+/// the entry is dropped the moment the header appears, whether or not this rule was willing to write it.
+///
+/// `FactGuard::Unconditional` is the guard of an include with no `#if` around it **and of one inside nothing but the
+/// file's own include guard**, which [`crate::index`] clears on purpose (`deguard_the_files_own_guard`): a guarded
+/// header's body is read by every inclusion that does anything. So a missing unconditional include — the case this
+/// rule has always been about, and the case its tests write — is still refused, and only a genuinely conditional one
+/// is let through.
 fn has_unresolved_includes(summary: &FileSummary) -> bool {
-    summary.includes.iter().any(|include| include.resolved.is_none())
+    summary.includes.iter().any(|include| {
+        include.resolved.is_none() && matches!(include.guard, crate::summary::FactGuard::Unconditional)
+    })
 }
 
 #[cfg(test)]
