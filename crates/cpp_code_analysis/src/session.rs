@@ -93,7 +93,6 @@ use crate::index::worklist::{Priority, Step, outcome_of};
 use crate::index::{
     FileIndexer, definition_across_files, definitions_across_files, macro_across_files,
     member_completions_at, members_of,
-    name_completions_at,
 };
 use crate::macros::MacroTable;
 use crate::cache::SummaryKey;
@@ -4003,7 +4002,7 @@ impl<F: FileProvider + Clone> Session<F> {
 
     /// What to offer at a cursor with no member access: the scope's names, then the index's.
     pub fn name_completions(&self, view: &FileView, offset: usize) -> Known<NameCompletions> {
-        name_completions_at(
+        crate::index::project::name_completions_traced(
             self.store.index(),
             &view.scopes,
             &view.root,

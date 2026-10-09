@@ -287,7 +287,13 @@ pub fn completion_at(
     offset: usize,
     headers: &HeaderIndex,
 ) -> CompletionSet {
-    match context_at(root, offset) {
+    // **The measurement window for one completion**, opened here because this is the entry point the feature has:
+    // everything below is the query's own work, and the server's log line splits only the outside of it
+    // (`view`/`completions`). Opt-in, on `CPPLS_TRACE_COMPLETION`, like this crate's other traces — see
+    // [`crate::index::query_trace`].
+    let window = crate::index::query_trace::for_one_completion();
+
+    let answer = match context_at(root, offset) {
         CompletionContext::Nothing => CompletionSet {
             replace: SourceRange::new(offset, 0),
             ..CompletionSet::default()
@@ -318,7 +324,10 @@ pub fn completion_at(
             range,
             ..
         } => headers_for(headers, &written, closed, range),
-    }
+    };
+
+    drop(window);
+    answer
 }
 
 /// **What the completion made of a cursor** — the one diagnosis this layer is worth logging.

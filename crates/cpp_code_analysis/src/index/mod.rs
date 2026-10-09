@@ -61,6 +61,10 @@ pub use store::{
 pub use watch::{ChangeBatch, EventKind, FileEvent, PathPattern, Response, WatchFilter};
 pub use worklist::{Priority, Step, StepOutcome, Worklist, outcome_of};
 
+// The completion query's own instrument. Re-exported from here as well as from the crate root, so that the module
+// which measures a query lives beside the query.
+pub use project::query_trace;
+
 use crate::cache::{SummaryKey, content_hash};
 use crate::include::config::CompilerConfig;
 use crate::file::paths::{FileProvider, PathInterner};

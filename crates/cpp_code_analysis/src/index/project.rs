@@ -47,6 +47,218 @@ use crate::summary::{DeclFact, DeclKind, FactGuard, FileSummary, MacroFact};
 use crate::preprocess::directive::IncludeForm;
 use crate::symbol::{Known, UnknownReason};
 
+/// **Where one completion query spent its time**, on `CPPLS_TRACE_COMPLETION=1`.
+///
+/// The completion path is one call from the caller's point of view, and the server's own log line already splits
+/// the *outside* of it (`completion: prepare … ms, catch up … ms, modules … ms` and `completion: view … ms,
+/// completions … ms`). What neither can say is which part of the query, and the parts are not variations of one
+/// cost — they are three different questions with three different fixes:
+///
+/// ```text
+///   VISIBLE_FILES   the reverse include walk: which files the cursor's file can see, and whether each edge's
+///                   condition holds. Answers about the *graph*, and the only part of a query that reads
+///                   every guarded `#include` in the closure.
+///   GUARD_ASK       one condition evaluated (`environment::visibility_at`), which builds the file's closure
+///                   state — the cost the memo in `visibility_answers` exists to avoid.
+///   GUARD_HITS      the memos that answered instead. A query whose misses dwarf its hits is a query paying for
+///                   an invalidation rather than for work, which is a different fix from a query that is large.
+/// ```
+///
+/// Always compiled in, like [`crate::stages`] and for the same reason: two `Instant::now()` calls on a path that
+/// runs once per query are nothing against a query measured in milliseconds, and a probe behind a feature flag is
+/// a probe nobody runs when it matters. The atomics are read by a caller rather than printed, because the
+/// question is a *difference between two queries* and only the caller knows which two.
+pub mod query_trace {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+
+    /// A region of the query that can be timed, and the counter it accumulates into.
+    ///
+    /// An enum rather than an index, so that a call site cannot name a region that does not exist and the compiler
+    /// checks the arithmetic that turns one into the other.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Region {
+        /// The reverse include walk: which files the cursor's file can see, and whether each edge's condition
+        /// holds. The only part of a query that reads every guarded `#include` in the closure.
+        VisibleFiles = 0,
+        /// One condition evaluated (`environment::visibility_at`), which builds the file's closure state — the
+        /// cost the memo in `visibility_answers` exists to avoid.
+        GuardAsk = 1,
+        /// Turning the walk''s `String` keys into the index''s sequence numbers, and sorting them.
+        VisibleInOrder = 2,
+        /// Reading every visible file''s declarations, filtering them, and deduplicating the cooked reading against
+        /// the raw one — everything in `ProjectIndex::visible_declarations_upto` after the walk.
+        CollectDeclarations = 3,
+        /// `certainly_in_the_translation_unit`: the include closure reached through unguarded edges only.
+        Certain = 5,
+        /// `macro_candidates` itself, when it is being used as the visibility walk.
+        Walk = 6,
+        /// The whole query, so that `completions N ms` in the server's line can be attributed: what is left after
+        /// the regions above are subtracted is work none of them names.
+        Query = 4,
+    }
+
+    /// What a memo in `visibility_answers` did: answered, or had to be evaluated.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Memo {
+        Hit = 0,
+        Miss = 1,
+    }
+
+    /// Nanoseconds in each timed region, and how many times each was entered.
+    static NANOS: [AtomicU64; 7] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+    static CALLS: [AtomicU64; 7] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+    /// How often the visibility memo answered, and how often a condition had to be evaluated anyway.
+    static MEMO: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+
+    /// A region, timed until it is dropped. `None` when the trace is off, so the cost when nobody is looking is
+    /// one `var_os` per call and a branch.
+    pub struct Timing(Option<(usize, Instant)>);
+
+    impl Drop for Timing {
+        fn drop(&mut self) {
+            if let Some((which, started)) = self.0 {
+                let nanos = started.elapsed().as_nanos() as u64;
+                NANOS[which].fetch_add(nanos, Ordering::Relaxed);
+                CALLS[which].fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn timing(which: Region) -> Timing {
+        Timing(on().then(|| (which as usize, Instant::now())))
+    }
+
+    /// **Open a window for one completion** and report it to the log when the guard is dropped.
+    ///
+    /// Different from [`timing`] in the two ways a whole-query measurement needs: it *resets* the counters, because
+    /// the question is about this query rather than about the process, and it logs unconditionally (at `debug`, so
+    /// the sink is the switch) rather than only when an environment variable is set — a server's log is the only
+    /// place this can be read, since the LSP shell owns `stderr`.
+    pub fn for_one_completion() -> CompletionWindow {
+        reset();
+        CompletionWindow
+    }
+
+    /// See [`for_one_completion`]. Dropping it is what reports.
+    pub struct CompletionWindow;
+
+    impl Drop for CompletionWindow {
+        fn drop(&mut self) {
+            summary();
+        }
+    }
+
+    pub fn count(which: Memo) {
+        if on() {
+            MEMO[which as usize].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Is the trace on? Read per call rather than memoised: a probe turns it on before the session is built, and
+    /// an `OnceLock` here would be a second thing to reason about for no measured cost.
+    fn on() -> bool {
+        std::env::var_os("CPPLS_TRACE_COMPLETION").is_some()
+    }
+
+    /// What one region cost, and how many times it ran.
+    pub fn region(which: Region) -> (Duration, u64) {
+        let at = which as usize;
+        (
+            Duration::from_nanos(NANOS[at].load(Ordering::Relaxed)),
+            CALLS[at].load(Ordering::Relaxed),
+        )
+    }
+
+    /// How often the memo answered, and how often a condition had to be evaluated anyway.
+    pub fn memo() -> (u64, u64) {
+        (
+            MEMO[Memo::Hit as usize].load(Ordering::Relaxed),
+            MEMO[Memo::Miss as usize].load(Ordering::Relaxed),
+        )
+    }
+
+    /// Start a fresh measurement window.
+    pub fn reset() {
+        for counter in NANOS.iter().chain(CALLS.iter()).chain(MEMO.iter()) {
+            counter.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// **The whole collection, told apart**, when `CPPLS_TRACE_COMPLETION` is on.
+    ///
+    /// The server's own log line splits a completion into `prepare`/`catch up`/`modules` and then `view`/`completions`;
+    /// this splits `completions`, which is the part a lock cannot explain. It goes to the [`log`] crate because that
+    /// is where a server's diagnostics go — the LSP shell owns `stderr` and a client may discard it.
+    pub fn note(what: &str) {
+        if on() {
+            log::debug!("completion query: {what} | {}", summary());
+        }
+    }
+
+    /// How many files one visibility walk ended up with, when the trace is on.
+    ///
+    /// On the [`log`] crate rather than on `stderr`, and that is not a detail: a language server's `stderr` is not
+    /// where its diagnostics go — the LSP shell owns that channel and a client may discard it — while every server
+    /// already has a log sink. A probe that needs the number can print [`report`] instead.
+    pub fn note_files(count: usize) {
+        if on() {
+            log::debug!("a visibility walk found {count} file(s)");
+        }
+    }
+
+    /// The window as one line, for a probe that has just run a query.
+    ///
+    /// On the [`log`] crate as well as in the returned text, so that a **server** can report it: a client owns the
+    /// server's `stderr` and may throw it away, while every server has a log sink.
+    pub fn report() -> String {
+        let line = summary();
+        if on() && std::env::var_os("CPPLS_TRACE_COMPLETION_STDERR").is_some() {
+            eprintln!("  query_trace: {line}");
+        }
+        line
+    }
+
+    /// The window as one line, always built — see [`report`].
+    ///
+    /// Logged at `debug` **unconditionally**, so that a server's own log carries the split without an environment
+    /// variable having to reach the process it spawned: `log::debug!` is off unless the sink says otherwise, which
+    /// is the switch a server already has (`--log-level`). The `report`/`reset` pair is for a probe that wants to
+    /// print one query's window itself.
+    pub fn summary() -> String {
+        let (collect, collect_calls) = region(Region::CollectDeclarations);
+        let (query, _) = region(Region::Query);
+        let line = format!(
+            "{} | query {} ms | collect {} ms ({} calls)",
+            regions(),
+            query.as_millis(),
+            collect.as_millis(),
+            collect_calls
+        );
+        log::debug!("query_trace: {line}");
+        line
+    }
+
+    /// The visibility walk and the conditions inside it — the inner split of a completion query.
+    pub fn regions() -> String {
+        let (visible, visible_calls) = region(Region::VisibleFiles);
+        let (guard, guard_calls) = region(Region::GuardAsk);
+        let (hits, misses) = memo();
+        format!(
+            "visible-files {} ms ({} calls) | certain {} ms | walk {} ms | guard ask {} ms ({} evaluations, \
+             {hits} memo hits, {misses} misses) | in-order {} ms",
+            visible.as_millis(),
+            visible_calls,
+            region(Region::Certain).0.as_millis(),
+            region(Region::Walk).0.as_millis(),
+            guard.as_millis(),
+            guard_calls,
+            region(Region::VisibleInOrder).0.as_millis(),
+        )
+    }
+}
+
+
 /// How many files a visibility walk will cross before giving up.
 ///
 /// A backstop rather than a policy: real include graphs are shallow (the walker's own limit is
@@ -537,6 +749,18 @@ pub struct ProjectIndex {
     /// **Sparse on purpose**: cooking needs the translation unit's environment, so a caller has this for the files
     /// it actually read rather than for the whole project, and a file with no entry here is one nobody cooked.
     cooked: HashMap<String, CookedFile>,
+    /// A visibility walk's answer, by the file it was asked about.
+    ///
+    /// **The whole-walk memo, beside the per-condition one**, and it exists for the reason the numbers say: the walk
+    /// builds the closure once (18 ms over 145 files of the MSVC standard library, measured by
+    /// `examples/completion_latency.rs`), and a completion asks the same question on every keystroke — a steady-state
+    /// query measured **4–5 ms** with the per-condition memo in place and **84–90 ms** without one. The two memos
+    /// share a lifetime and therefore a rule: whatever clears `visibility_answers` clears this, because both are
+    /// answers that can only change when what the index holds changes.
+    ///
+    /// Keyed by the root so that a server with several files open keeps at most one answer per file, and storing the
+    /// walk's own `Seen` rather than a copy of the pair because that is what the walk produces.
+    visibility: std::sync::Mutex<HashMap<String, std::sync::Arc<Seen>>>,
     /// What the **condition** on a guarded `#include` was last answered, by `(file, region)`.
     ///
     /// A memo, not a fact: it is cleared whenever a summary is inserted, because that is the only thing that can
@@ -888,6 +1112,47 @@ pub(crate) fn classes_the_cursor_is_in(
 /// * No conditional region. A member of a class in the buffer comes back with [`FactGuard::Unconditional`]
 ///   whatever `#if` it is really in — see `fact_from_binding`. A class from the index does carry its regions.
 pub fn members_of(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+) -> Known<MemberList> {
+    let listed = members_of_inner(index, scopes, root, path, class);
+    if std::env::var_os("CPPLS_TRACE_MEMBERS").is_some()
+        && let Known::Yes(list) = &listed
+    {
+        eprintln!(
+            "members_of({class}) -> {} member(s), unlisted {:?}",
+            list.members.len(),
+            list.unlisted
+                .iter()
+                .map(|base| format!("{} ({:?})", base.spelling, base.reason))
+                .collect::<Vec<_>>()
+        );
+        eprintln!(
+            "  first 24: {:?}",
+            list.members
+                .iter()
+                .take(24)
+                .map(|member| member.fact.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        // The names a reader of `std::ostream::` is actually looking for, and the depth they were found at —
+        // which is the difference between "the base walk worked" and "the list happens to be long".
+        for wanted in ["eof", "fail", "good", "bad", "clear", "rdbuf", "rdstate", "setstate", "width", "fill", "flags", "exceptions", "size", "empty", "c_str", "put"] {
+            if let Some(found) = list.members.iter().find(|member| member.fact.name == wanted) {
+                eprintln!(
+                    "    {wanted:<11} depth {} declared_in {:?}",
+                    found.depth, found.declared_in
+                );
+            }
+        }
+    }
+    listed
+}
+
+fn members_of_inner(
     index: &ProjectIndex,
     scopes: &crate::ScopeTree,
     root: &cpp_parser::CppSyntaxNode,
@@ -1442,6 +1707,8 @@ pub fn name_completions_at(
     path: &Path,
     offset: usize,
 ) -> Known<NameCompletions> {
+    let _whole = query_trace::timing(query_trace::Region::Query);
+
     let Some(position) = crate::sema::resolve::name_position_at(root, offset) else {
         return Known::Unknown(UnknownReason::UnparsableName);
     };
@@ -1475,6 +1742,25 @@ pub fn name_completions_at(
         prefix: position.written,
         name_range: position.range,
     })
+}
+
+/// **One completion query, with its own measurement reported to the log** — see [`query_trace`].
+///
+/// The server's log line splits a completion into `prepare`/`catch up`/`modules` and then `view`/`completions`;
+/// this is what goes inside `completions`, which is the half no lock can explain. A wrapper rather than a call to
+/// [`query_trace::reset`] inside the query, because the window has to start before the *first* question the query
+/// asks and the query has several ways to return early.
+pub fn name_completions_traced(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    offset: usize,
+) -> Known<NameCompletions> {
+    query_trace::reset();
+    let answer = name_completions_at(index, scopes, root, path, offset);
+    query_trace::note("name_completions_at");
+    answer
 }
 
 /// Every name visible from a cursor with no qualifier written: the scope chain, then the index.
@@ -1655,15 +1941,48 @@ fn names_in_a_scope(
             // declarations whose *scope* is that name — so a namespace qualifier sent down this path (`ns::`,
             // `std::`) silently took the member route, which has no budget and no dedup by hiding. A namespace is
             // [`DeclKind::Namespace`] and is answered below, where the collection budget applies.
-            let names_a_type = matches!(
-                index.definition(spelling, path),
-                Known::Yes(found) if found.fact.kind == crate::DeclKind::Type
-            );
+            // **Is the spelling a type?** — asked three ways, because one way is not enough for the standard library:
+            //
+            // ```text
+            //   `definition` says Yes(Type)          an ordinary class, declared once and visible
+            //   `definition` says Unknown(Ambiguous)  **the ordinary case for a class template**: `std::vector` is
+            //                                        forward-declared in `<iosfwd>` and defined in `<vector>`, so the
+            //                                        singular query declines. Every candidate being a Type is the
+            //                                        answer, and it is what `std::vector<int>::` needed — it offered
+            //                                        nothing while the definition query was the only test.
+            //   an alias in this index                 `std::string` is `using string = basic_string<char, …>;`, so
+            //                                        the name is an *alias* fact whose `scope` is `std` and whose
+            //                                        target is the class that has the members. Measured: without this
+            //                                        arm `std::string::` offered **0** items.
+            // ```
+            let names_a_type = match index.definition(spelling, path) {
+                Known::Yes(found) => found.fact.kind == crate::DeclKind::Type,
+                Known::Unknown(UnknownReason::Ambiguous(_)) => index
+                    .definitions(spelling, path)
+                    .value()
+                    .is_some_and(|found| {
+                        !found.found.is_empty()
+                            && found
+                                .found
+                                .iter()
+                                .all(|declaration| declaration.fact.kind == crate::DeclKind::Type)
+                    }),
+                Known::Unknown(_) | Known::No => false,
+            };
 
             if names_a_type {
-                match names_of_a_class(index, scopes, root, path, spelling) {
+                // **An alias is followed to the class that has the members.** `std::string` is
+                // `using string = basic_string<char, char_traits<char>, allocator<char>>;` — a fact whose `scope`
+                // is `std`, not `std::string` — so `members_of("std::string")` looks for a class by that name and
+                // finds nothing. Measured: `std::string::` offered **0** items, and it is the most-used class in
+                // the library. `resolve_aliases` is the same resolution `members_of` does for a member's own type,
+                // so the two cannot disagree about what the spelling names.
+                let named = resolve_aliases(index, scopes, root, path, spelling);
+                let named = named.as_ref();
+                match names_of_a_class(index, scopes, root, path, named) {
                     Known::Yes(members) => names.extend(offered(members, 0)),
-                    Known::Unknown(_) | Known::No => {}
+                    Known::Unknown(reason) => return Known::Unknown(reason),
+                    Known::No => {}
                 }
             } else {
                 let found = declarations_in(spelling, index, path, written);
@@ -4900,6 +5219,17 @@ fn bases_of(
     path: &Path,
     class: &str,
 ) -> Known<Vec<String>> {
+    let answer = bases_of_inner(index, scopes, root, path, class);
+    answer
+}
+
+fn bases_of_inner(
+    index: &ProjectIndex,
+    scopes: &crate::ScopeTree,
+    root: &cpp_parser::CppSyntaxNode,
+    path: &Path,
+    class: &str,
+) -> Known<Vec<String>> {
     // In this file: the class scope's parent holds the binding of the class's *name*, which is the declaration the
     // bases were written on. Asking the tree through that binding is the same walk the fact builder makes, so the
     // two cannot disagree about what a class inherits from.
@@ -4930,6 +5260,24 @@ fn bases_of(
     // declaration it picked is as likely to be the forward declaration, whose `bases` is empty, as the
     // definition. The plural [`ProjectIndex::definitions`] is the query that returns both, so the bases are
     // the union of what every declaration was written with, in the order the declarations came in.
+    //
+    // **And the declarations are looked for by their *bare* name as well as by the qualified one**, which is what
+    // makes MSVC's stream classes work at all. Measured, and it cost `std::ios::` every one of its members:
+    //
+    // ```text
+    //   std :: basic_ios  @ iosfwd:5011   bases []                 <- the forward declaration, qualified
+    //   <file scope> :: basic_ios @ ios:507 bases ["ios_base"]     <- the definition, filed at file scope
+    // ```
+    //
+    // `ios:507` is the definition and it is filed **unqualified**, because a raw reading of `<ios>` does not expand
+    // `_STD_BEGIN` — the macro that opens `namespace std` — so the class lands at file scope in that reading while
+    // the cooked reading of the same file places it in `std`. A lookup keyed on `std::basic_ios` therefore finds
+    // only the forward declaration, whose base clause is empty, and answers "this class has no bases": `fail`,
+    // `eof`, `good` and `rdbuf` vanish from `std::ios::` while `unlisted` stays empty, so the answer does not even
+    // claim to be incomplete.
+    //
+    // A **forward declaration can never contribute a base clause**, so taking the union over every declaration of
+    // the name cannot invent one — the same over-approximation, and the same direction, as [`lookup_names`] below.
     match index.definitions(class, path) {
         Known::Yes(found) => {
             let mut bases: Vec<String> = Vec::new();
@@ -4937,6 +5285,20 @@ fn bases_of(
                 for base in lookup_names(&declaration.fact.bases) {
                     if !bases.contains(&base) {
                         bases.push(base);
+                    }
+                }
+            }
+            if bases.is_empty()
+                && let Some(bare) = class.rsplit("::").next()
+            {
+                for (_, fact) in index.every_fact_named(bare) {
+                    if fact.kind != crate::DeclKind::Type {
+                        continue;
+                    }
+                    for base in lookup_names(&fact.bases) {
+                        if !bases.contains(&base) {
+                            bases.push(base);
+                        }
                     }
                 }
             }
@@ -5110,6 +5472,7 @@ impl ProjectIndex {
             // claims nothing: `Marked::default()` on its own would decide every `#ifdef` in every file as false.
             macros: Marked::default().incomplete(),
             visibility_answers: std::sync::Mutex::new(HashMap::new()),
+        visibility: std::sync::Mutex::new(HashMap::new()),
             ..ProjectIndex::default()
         }
     }
@@ -5173,10 +5536,14 @@ impl ProjectIndex {
     /// whose keys match have the same declarations, at the same offsets, with the same ranges, *and* the same
     /// resolved includes.
     pub fn insert_at(&mut self, path: &Path, summary: FileSummary) {
-        // A new summary can change any condition's answer, so the memo goes: it is cheap to lose and a wrong
-        // answer is not.
+        // A new summary can change any condition's answer, so the memos go — both of them, because both answer
+        // questions about conditions: the per-condition one and the whole-walk one. They are cheap to lose and a
+        // wrong answer is not. See [`ProjectIndex::visibility`].
         if let Ok(mut answers) = self.visibility_answers.lock() {
             answers.clear();
+        }
+        if let Ok(mut walks) = self.visibility.lock() {
+            walks.clear();
         }
         let mut summary = summary;
         summary.path = path.to_path_buf();
@@ -5351,6 +5718,10 @@ impl ProjectIndex {
         self.visibility_answers
             .lock()
             .expect("the visibility memo is not poisoned")
+            .clear();
+        self.visibility
+            .lock()
+            .expect("the visibility walk memo is not poisoned")
             .clear();
 
         if let Some(&sequence) = self.sequence.get(&path) {
@@ -5748,6 +6119,35 @@ impl ProjectIndex {
         self.visible_declarations_upto(visible_from, &accepts, MAX_COLLECTED_NAMES, Narrow::Nothing)
     }
 
+    /// Every fact in the index whose **bare** name is `name`, with the file it was written in.
+    ///
+    /// A diagnostic, for asking "is the declaration I am looking for in the index at all, and under which scope" —
+    /// the question that separates "the walk did not find it" from "it was never filed where the walk looks".
+    pub fn every_fact_named(&self, name: &str) -> Vec<(std::path::PathBuf, &DeclFact)> {
+        let mut found = Vec::new();
+        for posting in self.names.named(name) {
+            let Some(key) = self.order.get(&posting.file) else {
+                continue;
+            };
+            let Some(summary) = self.summaries.get(key) else {
+                continue;
+            };
+            if let Some(fact) = summary.declarations.get(posting.index())
+                && fact.name == name
+            {
+                found.push((summary.path.clone(), fact));
+                continue;
+            }
+            if let Some(cooked) = self.cooked.get(key)
+                && let Some(fact) = cooked.declarations.get(posting.index())
+                && fact.name == name
+            {
+                found.push((summary.path.clone(), fact));
+            }
+        }
+        found
+    }
+
     /// The declarations some predicate accepts, in the files `visible_from` can see.
     ///
     /// The one place the visibility walk is applied to the declaration list, so that a new query over facts
@@ -5807,6 +6207,12 @@ impl ProjectIndex {
         // by `#include` has no such restriction at all.
         let (visible_files, through_an_import) = self.visible_files_with_modules(visible_from);
         let files = self.visible_in_order_of(visible_files);
+        query_trace::note_files(files.len());
+        // Everything below this line is reading facts out of files that are already known to be visible: the
+        // filtering, the `DeclFact` clones, and the cooked-vs-raw deduplication. Timed apart from the walk because
+        // the two have nothing in common — the walk is a question about the graph and this is a question about the
+        // declarations — and because a completion that is slow with a *fast* walk is a different defect.
+        let _collecting = query_trace::timing(query_trace::Region::CollectDeclarations);
 
         let mut found = Vec::new();
 
@@ -5958,8 +6364,6 @@ impl ProjectIndex {
 
         found
     }
-
-    /// The files `from` can see, as `(sequence number, how)` in insertion order — the walk's answer put in the order
     /// every declaration query reports in.
     ///
     /// [`ProjectIndex::visible_in_order_of`] is the same thing for a caller that has **already walked**: the
@@ -5970,6 +6374,7 @@ impl ProjectIndex {
         &self,
         visible: Vec<(String, IncludeVisibility)>,
     ) -> Vec<(u32, IncludeVisibility)> {
+        let _order = query_trace::timing(query_trace::Region::VisibleInOrder);
         let mut files: Vec<(u32, IncludeVisibility)> = visible
             .into_iter()
             .filter_map(|(key, visibility)| Some((*self.sequence.get(&key)?, visibility)))
@@ -6049,6 +6454,210 @@ impl ProjectIndex {
         &self,
         from: &Path,
     ) -> (Vec<(String, IncludeVisibility)>, HashSet<String>) {
+        let _whole = query_trace::timing(query_trace::Region::VisibleFiles);
+        let from = normalize(from);
+
+        // **The walk's answer, remembered under the rule the per-condition memo uses.** A completion asks this
+        // question on every keystroke and the answer cannot change until the index does, which is exactly what
+        // `visibility` is cleared by. Measured on the latency fixture in release: **4–5 ms** with the memo and
+        // **84–90 ms** without it, against a 50 ms steady-state budget.
+        if let Some(known) = self
+            .visibility
+            .lock()
+            .ok()
+            .and_then(|walks| walks.get(&from).map(std::sync::Arc::clone))
+        {
+            let mut order: Vec<(String, IncludeVisibility)> =
+                Vec::with_capacity(known.visibility.len());
+            order.push((from.clone(), IncludeVisibility::Unconditional));
+            order.extend(
+                known
+                    .visibility
+                    .iter()
+                    .filter(|(path, _)| **path != from)
+                    .map(|(path, visibility)| (path.clone(), *visibility)),
+            );
+            return (order, known.through_an_import.clone());
+        }
+
+        // **One traversal, and the state it carries is what answers the conditions.** The version this replaced
+        // asked `environment::visibility_at` per guarded edge, and that call builds the file's whole closure state
+        // — one walk of the include graph *per condition in the closure*. Measured on the MSVC standard library at
+        // the latency fixture's cursor: 114 conditions, 1428 ms of a 1431 ms query, 12.5 ms each.
+        //
+        // `macro_candidates` is the same traversal that already answers "what is in force at this point", and it
+        // evaluates a guarded edge as it crosses it, against the state the route has built. So the question this
+        // function asks is not a second implementation of the walk — it is the same walk, told to report the files
+        // it enters. That is the rule the module keeps being bitten by: one question, one implementation.
+        let mut seen = Seen::new(&from);
+        let mut state = self.macros.clone();
+        let _certain = query_trace::timing(query_trace::Region::Certain);
+        let certain = self.certainly_in_the_translation_unit(Path::new(&from));
+        drop(_certain);
+
+        let _walk = query_trace::timing(query_trace::Region::Walk);
+        self.macro_candidates(
+            Path::new(&from),
+            &mut Vec::new(),
+            false,
+            &mut HashSet::new(),
+            &certain,
+            &mut Collecting::Visibility(&mut seen),
+            &mut state,
+            None,
+        );
+
+        // **And then the module frontier**, which is a different edge with a different rule: an `import` is not
+        // textual, so the walk above could not descend through one without putting another module's macros into a
+        // macro environment. What the *visibility* question still owes is everything behind those edges — the
+        // imported interface's own includes, its partitions, the partitions' includes — so this is a second walk,
+        // over the same summaries, that carries no macro state because nothing on this side of an `import` is a
+        // macro fact.
+        //
+        // It shares `visited`'s *purpose* and not its set: the walk above has already entered the include closure,
+        // and re-entering a file it reached would evaluate conditions with a state that has drifted. `module_seen`
+        // is what keeps this walk to the files the first one could not reach.
+        let mut module_seen: HashSet<String> = HashSet::new();
+        while let Some(reached) = seen.module_work.pop() {
+            if !module_seen.insert(reached.clone()) {
+                continue;
+            }
+
+            let mut state = self.macros.clone();
+            self.walk_the_module_edges(Path::new(&reached), &mut seen, &mut state, &mut module_seen);
+        }
+
+        // The order the per-edge version produced: the root first, then the walk's crossing order. Rebuilt from the
+        // map rather than recorded during the walk because a file can be crossed more than once and only the first
+        // *crossing* is its place in the answer — the better visibility may arrive later, from another route.
+        let mut order: Vec<(String, IncludeVisibility)> = Vec::with_capacity(seen.visibility.len());
+        order.push((from.clone(), IncludeVisibility::Unconditional));
+        order.extend(
+            seen.visibility
+                .iter()
+                .filter(|(path, _)| **path != from)
+                .map(|(path, visibility)| (path.clone(), *visibility)),
+        );
+
+        // Remembered before it is handed out, and `through_an_import` is cloned out of the shared copy: the caller
+        // owns its set, and the memo has to be immutable to be shared.
+        let through_an_import = seen.through_an_import.clone();
+        if let Ok(mut walks) = self.visibility.lock() {
+            walks.insert(from, std::sync::Arc::new(seen));
+        }
+
+        (order, through_an_import)
+    }
+
+    /// **Everything behind one module edge**: the target's includes, its own module edges, and theirs.
+    ///
+    /// The second half of [`ProjectIndex::visible_files_with_modules`], and a separate walk because the first one
+    /// carries a macro environment and a macro does not cross an `import`. What crosses is *visibility*: a header
+    /// a module's interface includes is visible to whoever imports the module — measured on the fixture where
+    /// `std.ixx` is `export module std;` plus two `#include`s and a file that writes `import std;` must be offered
+    /// `std::string`.
+    ///
+    /// The guards on the includes it crosses are evaluated against the compilation's own environment and the
+    /// target's facts, which is the same state the first walk starts from — a module unit's macros are its own, and
+    /// nothing outside it reaches them.
+    fn walk_the_module_edges(
+        &self,
+        path: &Path,
+        seen: &mut Seen,
+        state: &mut Marked,
+        module_seen: &mut HashSet<String>,
+    ) {
+        let path = normalize(path);
+        let Some(summary) = self.summaries.get(&path) else {
+            return;
+        };
+
+        let mut verdicts: HashMap<(u32, usize), Option<bool>> = HashMap::new();
+
+        for unit in &summary.modules.header_units {
+            let next = normalize(unit);
+            seen.visibility
+                .entry(next.clone())
+                .or_insert(IncludeVisibility::Unconditional);
+            if module_seen.insert(next.clone()) {
+                seen.module_work.push(next);
+            }
+        }
+        for unit in &summary.modules.partitions {
+            let next = normalize(unit);
+            seen.visibility
+                .entry(next.clone())
+                .or_insert(IncludeVisibility::Unconditional);
+            if module_seen.insert(next.clone()) {
+                self.walk_the_module_edges(Path::new(&next), seen, state, module_seen);
+            }
+        }
+        for imported in &summary.modules.imports {
+            let Some(interface) = self.module_interfaces.get(imported.as_ref()) else {
+                continue;
+            };
+            seen.visibility
+                .entry(interface.clone())
+                .or_insert(IncludeVisibility::Unconditional);
+            seen.through_an_import.insert(interface.clone());
+            if module_seen.insert(interface.clone()) {
+                self.walk_the_module_edges(Path::new(interface), seen, state, module_seen);
+            }
+        }
+
+        // The includes, each edge's own guard decided against the state the module unit reached it with.
+        for include in &summary.includes {
+            let visibility = self.include_visibility(
+                summary,
+                &mut verdicts,
+                state,
+                &mut Collecting::Visibility(&mut *seen),
+                include.guard,
+                include.range.start_offset,
+            );
+            if visibility == Visibility::Inactive {
+                continue;
+            }
+
+            let Some(target) = &include.resolved else {
+                continue;
+            };
+            let next = normalize(target);
+            let step = match visibility {
+                Visibility::Active => IncludeVisibility::Unconditional,
+                Visibility::Unknown => IncludeVisibility::Conditional,
+                Visibility::Inactive => continue,
+            };
+
+            match seen.visibility.get(&next) {
+                Some(known) if *known <= step => {}
+                _ => {
+                    seen.visibility.insert(next.clone(), step);
+                }
+            }
+            // An `#include` makes the whole file visible, however it was reached before.
+            seen.through_an_import.remove(&next);
+
+            if module_seen.insert(next.clone()) {
+                self.walk_the_module_edges(Path::new(&next), seen, state, module_seen);
+            }
+        }
+    }
+
+    /// [`ProjectIndex::visible_files`] the way this query computed it **before** the walk carried its state.
+    ///
+    /// Kept as the transition's other side, and for one reason: the visibility set is what a completion list is
+    /// built from, so a walk that produces a *different* set is a different answer rather than a slower one. The
+    /// cost is the thing being replaced — it asks `environment::visibility_at` per guarded edge, and that call
+    /// rebuilds the file's closure state from scratch. Measured on the latency fixture's cursor before the change:
+    /// **114 conditions, 1428 ms of a 1431 ms query, 12.5 ms each.**
+    ///
+    /// `examples/completion_latency.rs` prints both sets and their differences, which is how the replacement was
+    /// checked rather than argued for.
+    pub fn visible_files_by_asking_each_condition(
+        &self,
+        from: &Path,
+    ) -> Vec<(String, IncludeVisibility)> {
         let from = normalize(from);
 
         // The file itself is visible to itself, and unconditionally: a question asked in a file is about what
@@ -6171,8 +6780,13 @@ impl ProjectIndex {
                             .ok()
                             .and_then(|answers| answers.get(&key).copied())
                         {
-                            Some(answer) => answer,
+                            Some(answer) => {
+                                query_trace::count(query_trace::Memo::Hit);
+                                answer
+                            }
                             None => {
+                                query_trace::count(query_trace::Memo::Miss);
+                                let _ask = query_trace::timing(query_trace::Region::GuardAsk);
                                 let answer = crate::index::environment::visibility_at(
                                     self,
                                     Path::new(&current),
@@ -6230,7 +6844,7 @@ impl ProjectIndex {
             .filter_map(|path| best.get(&path).map(|visibility| (path.clone(), *visibility)))
             .collect();
 
-        (files, through_an_import)
+        files
     }
 
     /// Which declaration a name written in `visible_from` refers to, across the project.
@@ -6660,7 +7274,7 @@ impl ProjectIndex {
             false,
             &mut HashSet::new(),
             &certain,
-            Collecting::Name(name, &mut candidates),
+            &mut Collecting::Name(name, &mut candidates),
             &mut self.macros.clone(),
             None,
         );
@@ -6695,7 +7309,7 @@ impl ProjectIndex {
             false,
             &mut HashSet::new(),
             &certain,
-            Collecting::Nothing,
+            &mut Collecting::Nothing,
             &mut state,
             Some(offset),
         );
@@ -6796,7 +7410,7 @@ impl ProjectIndex {
         path_conditional: bool,
         visited: &mut HashSet<String>,
         certain: &HashSet<String>,
-        mut collecting: Collecting<'_>,
+        collecting: &mut Collecting<'_>,
         state: &mut Marked,
         upto: Option<usize>,
     ) {
@@ -6819,6 +7433,35 @@ impl ProjectIndex {
             state.mark_incomplete();
             return;
         };
+
+        // **The module edges, before the `#include`s and before the file's own text.** `import m;` is not an
+        // `#include` with another spelling: it is not textual (no macro travels along it) and it names a *module*
+        // rather than a file, so the file behind it is found through the module the project declares. All three
+        // paths — a header unit, a partition of this file's own module, and an imported module's interface — are
+        // `Unconditional`, which is the simplification `visible_files_by_asking_each_condition` documents: an
+        // `import` inside an `#if` is recorded like any other, so a module reached only through a condition the
+        // compilation does not satisfy is offered rather than hidden.
+        //
+        // **Recorded for a collector that is walking for visibility, and for no other one.** A module edge is not
+        // an `#include`: it brings declarations into view and carries no `#define`, so a walk whose job is a macro
+        // environment must not descend through one — which is what `crossed_a_module` says by queueing the target
+        // for a second pass rather than recursing. See [`Seen::module_work`].
+        for unit in &summary.modules.header_units {
+            collecting.crossed_a_module(&normalize(unit));
+        }
+        for unit in &summary.modules.partitions {
+            collecting.crossed_a_module(&normalize(unit));
+        }
+        for imported in &summary.modules.imports {
+            let Some(interface) = self.module_interfaces.get(imported.as_ref()) else {
+                // No file in this project declares it: `import std;` and prebuilt modules land here, and the
+                // honest reading is "unknown", never "nothing" — a name that cannot be seen is not a name that
+                // does not exist. Nothing is added, and nothing is claimed.
+                continue;
+            };
+            collecting.crossed(interface, IncludeVisibility::Unconditional, true);
+            collecting.crossed_a_module(&normalize(Path::new(interface)));
+        }
 
         // What this walk made of this file's regions, recorded the first time each is asked about. The answer is
         // the one the *condition's own point* gives, and the first fact or include inside a region is the first
@@ -6859,7 +7502,8 @@ impl ProjectIndex {
 
             if take_fact {
                 let fact = facts.next().expect("peeked");
-                let reach = self.fact_reach(summary, &mut verdicts, state, fact.guard, at);
+                let reach =
+                    self.fact_reach(summary, &mut verdicts, state, &mut *collecting, fact.guard, at);
                 if reach == FactReach::Inactive {
                     continue;
                 }
@@ -6876,7 +7520,14 @@ impl ProjectIndex {
 
             let include = includes.next().expect("peeked");
 
-            let visibility = self.include_visibility(summary, &mut verdicts, state, include.guard, at);
+            let visibility = self.include_visibility(
+                summary,
+                &mut verdicts,
+                state,
+                &mut *collecting,
+                include.guard,
+                at,
+            );
 
             if visibility == Visibility::Inactive {
                 continue;
@@ -6889,6 +7540,25 @@ impl ProjectIndex {
                 continue;
             };
 
+            // **The edge, recorded where it is crossed.** A collector that is walking for the *visibility* of the
+            // root's closure wants this and nothing else, and this is the only point at which the truth about how
+            // a file became visible is still available — see [`Collecting::crossed`]. Recorded *before* the
+            // descent, because a file the walk cannot read still became visible by being named here: the old walk
+            // recorded the edge and then failed to enter, and a conditional include of a header nobody indexed is
+            // exactly the `Conditional` a "there may be more" answer is about.
+            let step = match visibility {
+                Visibility::Active => IncludeVisibility::Unconditional,
+                Visibility::Unknown => IncludeVisibility::Conditional,
+                // Unreachable: the branch above skips an inactive edge, and dropping it is the rule that makes a
+                // decidable `#if` worth deciding at all.
+                Visibility::Inactive => continue,
+            };
+            collecting.crossed(&normalize_path(target, cfg!(windows)), step, false);
+            // **An `#include` makes the whole file visible**, however it was reached before: a file that is both
+            // included and imported is not subject to the narrower exported-only rule, because the wider one
+            // already grants what it would hide.
+            collecting.reached_by_include(&normalize_path(target, cfg!(windows)));
+
             chain.push(include.range.start_offset);
             self.macro_candidates(
                 target,
@@ -6896,7 +7566,7 @@ impl ProjectIndex {
                 path_conditional || visibility == Visibility::Unknown,
                 visited,
                 certain,
-                collecting.reborrow(),
+                &mut collecting.reborrow(),
                 state,
                 // An included file is pasted *at* the include, so all of it is read before the caller's next line.
                 None,
@@ -6912,10 +7582,13 @@ impl ProjectIndex {
         summary: &FileSummary,
         verdicts: &mut HashMap<(u32, usize), Option<bool>>,
         state: &Marked,
+        collecting: &mut Collecting<'_>,
         guard: FactGuard,
         offset: usize,
     ) -> FactReach {
-        match self.include_visibility(summary, verdicts, state, guard, offset) {
+        // A reborrow, so that the caller keeps its own use of `collecting` — a `&mut` is moved by default and the
+        // walk needs the collector again on the next line of the file.
+        match self.include_visibility(summary, verdicts, state, &mut *collecting, guard, offset) {
             Visibility::Active => FactReach::Active,
             Visibility::Inactive => FactReach::Inactive,
             Visibility::Unknown => FactReach::Unknown,
@@ -6929,6 +7602,7 @@ impl ProjectIndex {
         summary: &FileSummary,
         verdicts: &mut HashMap<(u32, usize), Option<bool>>,
         state: &Marked,
+        collecting: &mut Collecting<'_>,
         guard: FactGuard,
         offset: usize,
     ) -> Visibility {
@@ -6968,15 +7642,27 @@ impl ProjectIndex {
                 continue;
             };
 
+            // **The walk answering its own question answers it here**, which is the difference between one
+            // traversal of the closure and one per condition. `None` is every other collector, and then the state
+            // below is the one this walk was handed rather than the one it built.
             let holds = match verdicts.get(&(at.region, branch)) {
                 Some(recorded) => *recorded,
                 None => {
-                    let decided = summary.guards.region_at(at.region, offset).and_then(|region| {
-                        region.visibility(&crate::index::environment::MacrosHere::from_walk(
-                            state,
-                            at.condition_at,
-                        ))
-                    });
+                    let decided = match collecting.decided_at(
+                        summary,
+                        state,
+                        at.region,
+                        at.condition_at,
+                        offset,
+                    ) {
+                        Some(verdict) => verdict,
+                        None => summary.guards.region_at(at.region, offset).and_then(|region| {
+                            region.visibility(&crate::index::environment::MacrosHere::from_walk(
+                                state,
+                                at.condition_at,
+                            ))
+                        }),
+                    };
 
                     verdicts.insert((at.region, branch), decided);
                     decided
@@ -7029,15 +7715,54 @@ impl ProjectIndex {
     }
 }
 
-/// What a walk is collecting as it goes: the facts about one name, or nothing.
+/// What a walk is collecting as it goes: the facts about one name, the visibility of every file it enters, or
+/// nothing.
 ///
-/// The same walk answers both questions — "where is this name a macro" ([`ProjectIndex::macro_environment`]) and
-/// "what is in force at this point" ([`ProjectIndex::macros_at`]) — because they are the same traversal and the
-/// rules that make it right are the ones that must not be written twice. The second caller wants the *state* and
-/// no candidates, which is what `Nothing` says, rather than a name no macro has.
+/// The same walk answers all three questions — "where is this name a macro"
+/// ([`ProjectIndex::macro_environment`]), "what is in force at this point" ([`ProjectIndex::macros_at`]) and "what
+/// can this file see" ([`ProjectIndex::visible_files_with_modules`]) — because they are the same traversal and the
+/// rules that make it right are the ones that must not be written twice. The second caller wants the *state* and no
+/// candidates, which is what `Nothing` says, rather than a name no macro has.
 enum Collecting<'a> {
     Name(&'a str, &'a mut Vec<MacroCandidate>),
+    /// **Which files this root can see, and how** — filled in as the walk crosses each `#include`.
+    ///
+    /// This variant is the whole of why the visibility walk is affordable. Asking the same question per *edge* —
+    /// `visible_files_with_modules` as it was written — evaluates each guarded include against a state built for
+    /// that one file (`environment::visibility_at`, which is a closure walk), so a query over the standard library
+    /// pays one walk per condition in the closure. Carried this way the state is already in hand when the edge is
+    /// crossed, which is what [`crate::index::environment::MacrosHere::from_walk`] exists for.
+    Visibility(&'a mut Seen),
     Nothing,
+}
+
+/// The files one root can see, and which of them are in view only through an `import`.
+///
+/// Two outputs from one walk because the second is a property of *how* a file was reached, and a walk that has
+/// already crossed the edge is the only thing that knows. See [`ProjectIndex::visible_files_with_modules`].
+#[derive(Default, Debug)]
+struct Seen {
+    visibility: HashMap<String, IncludeVisibility>,
+    through_an_import: HashSet<String>,
+    /// **The files whose module edges still have to be followed.**
+    ///
+    /// A module edge is not an `#include`, and the difference is why this frontier exists rather than another
+    /// recursive descent: an `import` brings *declarations* into view and carries no `#define`, so
+    /// `macro_candidates` — whose whole job is a macro environment — must not walk through one. But the
+    /// *visibility* of a partition's declarations is asked the same question, so this collector keeps its own list
+    /// and works it after the walk. Measured: without it, `rectangle` and `square` — declared in the partition
+    /// `shapes.cppm` re-exports — answered `NotDeclaredHere`.
+    module_work: Vec<String>,
+}
+
+impl Seen {
+    fn new(root: &str) -> Seen {
+        Seen {
+            visibility: HashMap::from([(root.to_string(), IncludeVisibility::Unconditional)]),
+            through_an_import: HashSet::new(),
+            module_work: Vec::new(),
+        }
+    }
 }
 
 impl Collecting<'_> {
@@ -7074,8 +7799,115 @@ impl Collecting<'_> {
     fn reborrow(&mut self) -> Collecting<'_> {
         match self {
             Collecting::Name(name, out) => Collecting::Name(name, out),
+            Collecting::Visibility(seen) => Collecting::Visibility(seen),
             Collecting::Nothing => Collecting::Nothing,
         }
+    }
+
+    /// **A file has just become visible through an `#include`**, at the visibility the edge was given.
+    ///
+    /// Recorded at the *crossing* rather than when the file is entered, and the difference is a wrong answer
+    /// rather than a tidy one: `visited` enters a file once, so the second route to it never reaches its own
+    /// `enter`, and a file reached by a guarded include first and an unguarded one second would be filed
+    /// `Conditional` for the rest of the walk. The better of the two wins, which is what the per-edge version
+    /// computed and is the only reading that is true.
+    fn crossed(
+        &mut self,
+        target: &str,
+        visibility: IncludeVisibility,
+        through_an_import: bool,
+    ) {
+        let Collecting::Visibility(seen) = self else {
+            return;
+        };
+
+        match seen.visibility.get(target) {
+            // Already known, and no worse: unconditional is the strongest answer and nothing improves on it.
+            Some(known) if *known <= visibility => {}
+            _ => {
+                seen.visibility.insert(target.to_string(), visibility);
+            }
+        }
+
+        if through_an_import {
+            seen.through_an_import.insert(target.to_string());
+        }
+    }
+
+    /// An `#include` reaches `target`, so the exported-only rule stops applying to it.
+    ///
+    /// The order the two edges arrive in does not matter, and that is the point: a file imported first and
+    /// included later is include-visible, and one included first and imported later was already so.
+    fn reached_by_include(&mut self, target: &str) {
+        let Collecting::Visibility(seen) = self else {
+            return;
+        };
+
+        seen.through_an_import.remove(target);
+    }
+
+    /// **A module edge was crossed**, so the target's own module edges still have to be followed.
+    ///
+    /// Recorded for a second pass rather than descended, for the reason [`Seen::module_work`] gives: the walk this
+    /// collector rides on is building a macro environment, and a macro does not travel across an `import`.
+    ///
+    /// **Queued whether or not the file was already visible**, which is the difference between following the edges
+    /// of what this root reaches and following the edges of one arbitrary file: a partition's own `export import`
+    /// is reachable only through this queue, and a file that is already in the visibility map for another reason
+    /// still has them. Measured: gated on "not seen before", `rectangle` and `square` answered `NotDeclaredHere`.
+    fn crossed_a_module(&mut self, target: &str) {
+        let Collecting::Visibility(seen) = self else {
+            return;
+        };
+
+        seen.visibility
+            .entry(target.to_string())
+            .or_insert(IncludeVisibility::Unconditional);
+
+        if !seen.module_work.iter().any(|queued| queued == target) {
+            seen.module_work.push(target.to_string());
+        }
+    }
+
+    /// **One guarded edge**, and this walk is the one answering it.
+    ///
+    /// The sink [`ProjectIndex::include_visibility`] calls instead of building a closure state for the file: the
+    /// state is in hand, because this walk is already carrying it, and that is the difference between one traversal
+    /// and one traversal per condition. `state` is the walk's state **at the condition's own point**, which is what
+    /// the answer is a function of — a `#define` above the condition is in force and one below is not.
+    ///
+    /// The answer is **the raw verdict** — `Some(true)` the condition holds, `Some(false)` it does not, `None`
+    /// nobody can say — and deliberately not a [`Visibility`]: the two are not the same thing, because a guard's
+    /// `#else` is compiled exactly when its `#if` does *not* hold. `include_visibility` owns that inversion, and a
+    /// second copy of it here is how this function first read `Unknown` as `Inactive`.
+    ///
+    /// `None` means "not this walk's question", which is every other variant of [`Collecting`].
+    fn decided_at(
+        &mut self,
+        summary: &FileSummary,
+        state: &Marked,
+        region: u32,
+        condition_at: usize,
+        offset: usize,
+    ) -> Option<Option<bool>> {
+        let Collecting::Visibility(seen) = self else {
+            return None;
+        };
+        let _ = seen;
+
+        // **The file's own include guard is not a condition**, the same rule the branch above applies: by the time
+        // the walk reaches anything in the file the name has been defined by the line above it, so evaluating that
+        // region would say "not taken" and drop every include in the file. `true` is "the code behind it is
+        // compiled", which is what entering the file means.
+        if summary.guards.own_guard == Some(region) {
+            return Some(Some(true));
+        }
+
+        let asked = summary.guards.region_at(region, offset)?;
+        Some(asked.visibility(&crate::index::environment::MacrosHere::from_walk(
+            state,
+            condition_at,
+        )))
     }
 }
 
@@ -8227,6 +9059,48 @@ mod tests {
             2,
             "the twice-declared `(int)` is one entity; `(double)` is an overload: {found:?}"
         );
+    }
+
+    /// **The two visibility walks are the same answer**, which is the only thing the cheaper one had to prove.
+    ///
+    /// The walk that carries macro state replaced one that asked `environment::visibility_at` per guarded edge, and
+    /// the replacement is worth two orders of magnitude on a standard-library closure (114 closure walks → one
+    /// traversal; 1428 ms → 18 ms of a query measured on the latency fixture). What it must not be is a *different*
+    /// answer: the visibility set is what a completion list is built from, so a set that lost a file is a missing
+    /// name rather than a faster query.
+    ///
+    /// Four shapes, because they are the four ways the two can disagree — an unguarded edge, a guarded one nobody
+    /// can decide, one that is decided and false, and a file reached twice by routes of different visibility.
+    #[test]
+    fn the_walk_that_carries_the_state_sees_what_asking_each_condition_saw() {
+        let index = index(&[
+            ("/p/one.h", "#define ONE 1\n"),
+            ("/p/two.h", "int count;\n"),
+            ("/p/three.h", "int three;\n"),
+            (
+                "/p/main.cpp",
+                "#include \"one.h\"\n#ifdef FEATURE\n#include \"two.h\"\n#endif\n#include \"three.h\"\n",
+            ),
+            // …and a second route to `two.h`, unguarded, which is the case the crossing has to record rather than
+            // the entry: `visited` enters a file once, so the guarded route is the one that descends.
+            ("/p/four.h", "#include \"two.h\"\n"),
+            ("/p/other.cpp", "#include \"four.h\"\n"),
+        ]);
+
+        for root in ["/p/main.cpp", "/p/other.cpp"] {
+            let walked = index.visible_files(Path::new(root));
+            let asked = index.visible_files_by_asking_each_condition(Path::new(root));
+
+            let mut walked = walked.clone();
+            let mut asked = asked.clone();
+            walked.sort_by(|left, right| left.0.cmp(&right.0));
+            asked.sort_by(|left, right| left.0.cmp(&right.0));
+
+            assert_eq!(
+                walked, asked,
+                "the two walks disagree about {root}: the completion list is built from this set"
+            );
+        }
     }
 
     #[test]

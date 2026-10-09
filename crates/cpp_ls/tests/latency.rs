@@ -22,6 +22,20 @@
 //!   a lock held for 5.8 s            the request waits, and the request's own work is irrelevant
 //!   a lock held for 12 ms, request 2 s   the wait is inside the request, and no lock change will help
 //! ```
+//!
+//! # Run it with `--release`, or it is not measuring the product
+//!
+//! `env!("CARGO_BIN_EXE_cpp_ls")` is the **profile the test was built in**, so `cargo test` runs the server with no
+//! optimisations and every number below is 10–50× what a user sees. Measured, both files of each:
+//!
+//! ```text
+//!   cargo test           #0 4211 ms … #5–#11  902–1081 ms   the closure is walked unoptimised
+//!   cargo test --release #0  607 ms … #5–#11    4–5 ms      what the server actually does
+//! ```
+//!
+//! The budgets are chosen from the *release* numbers (`STEADY_BUDGET` is 50 ms, against a measured 4 ms), so a debug
+//! run fails on arithmetic rather than on behaviour and says nothing about a change. This is the same rule
+//! `tests/handshake.rs` states for its own `#[ignore]`d cases.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};

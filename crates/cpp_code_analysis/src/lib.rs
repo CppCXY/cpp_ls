@@ -165,6 +165,10 @@ pub use index::{
 };
 pub use macros::{MacroBody, MacroDef, MacroTable, Parameter, ParameterKind};
 pub use module_info::{ImportDeclaration, ImportTarget, ModuleInfo, ModuleUnit};
+// **The completion query's own instrument**, beside the index it measures: the server's log line splits the
+// *outside* of a query (`prepare`/`catch up`/`modules`, then `view`/`completions`) and this splits the inside,
+// which is where the parts have different fixes. See `index::project::query_trace` for why it is always compiled in.
+pub use index::query_trace;
 pub use summary::ModuleReading;
 pub use modules::{
     ImportEdge, ImportOutcome, MAX_IMPORT_DEPTH, ModuleGraph, ModuleScanner, ModuleUnitEntry,
