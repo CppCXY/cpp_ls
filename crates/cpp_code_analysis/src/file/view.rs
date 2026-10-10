@@ -199,6 +199,23 @@ impl FileView {
             .iter()
             .find(|span| span.reported.end_offset() > in_the_file)?;
 
+        // **A cursor in a gap is a question about the text that was deleted, and the answer is not the next token.**
+        //
+        // The spans do not tile the file: a comment, a `#define`, an `#include` line and the branch of an `#if`
+        // nobody takes all produce no tokens, so there are gaps between one span's *reported* end and the next one's
+        // start. Measured:
+        //
+        // ```text
+        //   file    "int f() { // a note\n    return 0;\n}\n"   (36 bytes)
+        //   reading "int f() { return 0; }"                      (21 bytes)
+        //   cursor 14, inside the comment  ->  Some(10), where the rendering has "return"
+        // ```
+        //
+        // The answer is the **start of the token the cursor is nearest**, which is what this mapping meant before the
+        // note above existed. `None` was tried for the gap and made the suite worse (13 passing → 12): a caller with
+        // no offset has no answer to give, while a caller at the token's start has one it can then refuse. Refusing
+        // at the *query* — "is this position in a comment" — is where that belongs, and it is already asked there.
+
         // **How far into the token the cursor is, carried across.** Returning the token's start loses it, and the
         // loss is not cosmetic: a cursor five bytes into `local_variable` arrives at the *first* byte of the token,
         // where a completion reads "nothing has been typed" and answers an unfiltered list. Measured on the
