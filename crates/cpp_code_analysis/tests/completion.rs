@@ -142,6 +142,26 @@ fn a_local_is_offered_while_it_is_being_typed() {
     let mut session = session_with_the_project();
     let view = cooked_view(&mut session, "/p/a.cpp");
 
+    if std::env::var_os("CPPLS_TRACE_COORDINATES").is_some() {
+        let reading = view.reading_offset_of(offset).expect("the cursor is in the rendering");
+        // **The token's own start in each text**, which is the anchor that settles this. The file's cursor sits on
+        // the `_` of `local_variable`; if the rendering's offset for that same cursor lands on the *start* of the
+        // token, then the two rulers differ by more than the whitespace the rendering collapsed — and the number to
+        // compare is the distance from the token's start in each text.
+        let in_file = SOURCE.find("local_variable + w").expect("the use") + 5;
+        let in_rendering = view.source.find("local_variable + w").expect("the use") + 5;
+        eprintln!(
+            "cursor: file {in_file} -> reading {reading} (the same spot is {in_rendering} in the rendering)\n  \
+             the token starts at {} in the file and {} in the rendering\n  \
+             the two cursors differ by {}; the two token starts differ by {}",
+            SOURCE.find("local_variable + w").expect("the use"),
+            view.source.find("local_variable + w").expect("the use"),
+            in_file as i64 - reading as i64,
+            SOURCE.find("local_variable + w").expect("the use") as i64
+                - view.source.find("local_variable + w").expect("the use") as i64
+        );
+    }
+
     let Known::Yes(found) = session.name_completions(&view, offset) else {
         panic!("a half-written name is answerable");
     };

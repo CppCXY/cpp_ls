@@ -494,7 +494,32 @@ pub fn name_position_at(root: &CppSyntaxNode, offset: usize) -> Option<NamePosit
                 // names, and `a; b` is two statements however the recovery grouped them.
                 if !previous_was_a_scope {
                     segments.clear();
-                    written.clear();
+                    // **And what the token already spells is the prefix, whatever the ruler says.**
+                    //
+                    // This clears `written` because a name nothing of which is written must not filter — but a
+                    // cursor that *reads* as being at a name's first byte is not always at one. The two coordinate
+                    // systems a request travels through do not agree byte for byte, and a position inside a token
+                    // can arrive as the token's start. Measured, on the completion fixture, with both texts printed:
+                    //
+                    // ```text
+                    //   cursor: file 112 -> reading 80   (the same spot is 85 in the rendering)
+                    //   the token starts at 107 in the file and 80 in the rendering
+                    //   the two cursors differ by 32; the two token starts differ by 27
+                    // ```
+                    //
+                    // The token's start maps correctly (107 → 80, a shift of 27) while the cursor lands **on** it
+                    // instead of five bytes into it, so `local|_variable` arrives as `|local_variable`: the list came
+                    // back with an empty prefix and five unfiltered names. A popup that looks full and is about the
+                    // wrong thing is the failure this function's notes already describe twice.
+                    //
+                    // Reading the token costs nothing and cannot be wrong: the text between the token's start and
+                    // the cursor is what the user has typed, in the token's own ruler. When the cursor really is at
+                    // the start, that text is empty and this is exactly the behaviour it replaced.
+                    written = token
+                        .text()
+                        .chars()
+                        .take(offset.saturating_sub(token_range.start_offset))
+                        .collect();
                     global = false;
                 }
             }
@@ -602,10 +627,19 @@ fn inside_a_comment_or_a_literal(token: &cpp_parser::CppSyntaxToken) -> bool {
 fn name_node_around(root: &CppSyntaxNode, offset: usize) -> Option<CppSyntaxNode> {
     let mut found = None;
     let mut node = root.clone();
+    let tracing = std::env::var_os("CPPLS_TRACE_COORDINATES").is_some();
 
     loop {
         let range = node.text_range();
         if !(usize::from(range.start()) <= offset && offset <= usize::from(range.end())) {
+            if tracing {
+                eprintln!(
+                    "  name_node_around({offset}): leaving {:?} {}..{} (does not contain)",
+                    CppSyntaxKind::from(node.kind()),
+                    usize::from(range.start()),
+                    usize::from(range.end())
+                );
+            }
             return found;
         }
 
@@ -616,11 +650,30 @@ fn name_node_around(root: &CppSyntaxNode, offset: usize) -> Option<CppSyntaxNode
             found = Some(node.clone());
         }
 
+        // **`find_map` over nodes, not `find` over elements.** The first version took the first *element* that
+        // contained or ended at the offset and then called `into_node()` on it — so a `Whitespace` token ending
+        // exactly at the cursor ended the walk and the answer was `None`. Measured, this is the whole of an empty
+        // completion prefix; the trace of one call:
+        //
+        // ```text
+        //   name_node_around(80): in ReturnStat 73..105, next Some("Token(Whitespace) 79..80")
+        // ```
+        //
+        // At offset 80 the `ReturnStat` has **two** children that match: that whitespace token, ending there, and
+        // the `BinaryExpr` at 80..103, starting there. `children_with_tokens` yields the token first, so the walk
+        // took it, `into_node` answered `None`, and the loop returned without ever seeing the expression — which is
+        // why `name_position_at` fell to its empty-prefix branch and the list came back unfiltered.
+        //
+        // Skipping tokens is the fix and not a workaround: this function's contract is to find a **node** (a
+        // `NameExpr` or an `IdentifierExpr`), the two predicates are about containment, and a token can never be one.
+        // A token that ends at the cursor is not a candidate at all, so it must not be able to win the search.
         let next = node
             .children_with_tokens()
-            .find(|element| contains_element(element, offset) || ends_at(element, offset));
+            .find_map(|element| (contains_element(&element, offset) || ends_at(&element, offset))
+                .then(|| element.into_node())
+                .flatten());
 
-        match next.and_then(|element| element.into_node()) {
+        match next {
             Some(child) => node = child,
             None => return found,
         }

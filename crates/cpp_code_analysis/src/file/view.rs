@@ -194,10 +194,43 @@ impl FileView {
         // The first span that **acts** at or after the offset asked about. A file offset a macro's expansion
         // stands for has several spans reporting it — every token of the replacement list — and the first is the
         // one the cursor is nearest, which is what an editor means by pointing there.
-        self.reading
+        let span = self
+            .reading
             .iter()
-            .find(|span| span.reported.end_offset() > in_the_file)
-            .map(|span| span.cooked.start_offset)
+            .find(|span| span.reported.end_offset() > in_the_file)?;
+
+        // **How far into the token the cursor is, carried across.** Returning the token's start loses it, and the
+        // loss is not cosmetic: a cursor five bytes into `local_variable` arrives at the *first* byte of the token,
+        // where a completion reads "nothing has been typed" and answers an unfiltered list. Measured on the
+        // completion fixture:
+        //
+        // ```text
+        //   cursor: file 112 -> reading 80   (the same spot is 85 in the rendering)
+        //   the token starts at 107 in the file and 80 in the rendering
+        //   the two cursors differ by 32; the two token starts differ by 27
+        // ```
+        //
+        // The token start mapped correctly (107 → 80) while the cursor inside it did not.
+        //
+        // The offset is only meaningful when the file **wrote** the token: then `written` and `cooked` cover the same
+        // spelling byte for byte, so a position inside one is the same distance inside the other. For a token a
+        // macro produced there is no such correspondence — `written` is `None` and the answer stays the token's
+        // start, which is where the expansion begins and where a cursor in that region belongs.
+        let inside = match span.written {
+            Some(written) if written.start_offset <= in_the_file => {
+                in_the_file - written.start_offset
+            }
+            _ => 0,
+        };
+        // **A position the rendering does not have is not a position.** The rendering is shorter than the file
+        // whenever a directive's text produced no tokens — a `#include` line is replaced by the header's, a `#define`
+        // by nothing — so a cursor near the file's end can map past the rendering's. Returning it anyway makes every
+        // caller walk a tree that does not reach there, which is a panic inside `rowan` rather than an answer:
+        // measured, `Bad offset: range 0..106 offset 126` on the completion fixture, where the cursor sits just past
+        // `w.` and the rendering is 106 bytes. `None` is this function's documented way of saying "no answer here".
+        let mapped = span.cooked.start_offset
+            + inside.min(span.cooked.end_offset() - span.cooked.start_offset);
+        (mapped <= self.source.len()).then_some(mapped)
     }
 
     /// The span whose spelling covers `in_the_reading`, by binary search.
