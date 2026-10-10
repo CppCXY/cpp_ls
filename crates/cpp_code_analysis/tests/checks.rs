@@ -54,13 +54,24 @@ fn ask_checks<T>(files: MemoryFiles, main: &str, ask: impl FnOnce(&Checks<'_>) -
         panic!("main.cpp must be indexed");
     };
 
+    // **The model a check is handed**, built here the way the session builds one. A fixture with no other file to
+    // read passes a resolver that answers `None` — the same closure the four `type_of_expression` call sites used to
+    // pass, now in one place where a test can say what it means.
+    let mut no_other_files = |_: &std::path::Path| None;
+    let model = cpp_code_analysis::sema::model::SemanticModel::new(
+        index,
+        &root,
+        &scopes,
+        main,
+        std::path::Path::new("/q/main.cpp"),
+        Box::new(&mut no_other_files),
+    );
+
     let checks = Checks {
         path: std::path::Path::new("/q/main.cpp"),
         summary,
-        index,
+        model,
         source: main,
-        tree: &root,
-        scopes: &scopes,
     };
     ask(&checks)
 }

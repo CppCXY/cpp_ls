@@ -69,7 +69,7 @@ pub fn an_argument_does_not_convert(checks: &Checks<'_>) -> Vec<Finding> {
     // **Every call in the file, found in one walk** — the lesson `an_initializer_does_not_convert` records: a walk
     // per candidate is quadratic in the size of the file, and this layer runs per keystroke.
     let calls: Vec<cpp_parser::CppSyntaxNode> = checks
-        .tree
+        .tree()
         .descendants()
         .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CallExpr)
         .collect();
@@ -96,7 +96,7 @@ pub fn an_argument_does_not_convert(checks: &Checks<'_>) -> Vec<Finding> {
             continue;
         }
 
-        let Known::Yes(candidates) = checks.index.definitions(written, checks.path) else {
+        let Known::Yes(candidates) = checks.index().definitions(written, checks.path) else {
             continue;
         };
 
@@ -142,15 +142,9 @@ pub fn an_argument_does_not_convert(checks: &Checks<'_>) -> Vec<Finding> {
             // no finding came out.
             let mut this_one_agrees = true;
             for (argument, parameter) in arguments.iter().zip(parameters.iter()) {
-                let known = crate::index::project::type_of_expression(
-                    checks.index,
-                    &mut |_: &std::path::Path| None,
-                    checks.scopes,
-                    checks.tree,
-                    checks.path,
-                    argument,
-                    0,
-                );
+                // Through the model, which can read the file a typedef is declared in — see
+                // [`super::Checks::model`] for what handing over `&mut |_| None` cost the sibling check.
+                let known = checks.type_of(argument);
                 // An argument whose type is not known might be anything, so this candidate is not refuted.
                 let Known::Yes((from, _)) = known else {
                     this_one_agrees = true;

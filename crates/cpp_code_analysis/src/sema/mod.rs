@@ -5,11 +5,13 @@
 //! [`declarations`] turns the tree into the **facts an index stores**, [`resolve`] is the first *query* over the
 //! tree rather than a producer of it, [`types`] is what a declaration's type *is* (a shape, not a spelling), and
 //! [`modules`] and [`module_info`] cover C++20 modules, the one part of a translation unit whose meaning is not
-//! local to it, and [`check`] is the third diagnostics channel: what is **wrong** rather than what was read.
+//! local to it, [`check`] is the third diagnostics channel: what is **wrong** rather than what was read, and
+//! [`model`] is the **query entry point** — one file's questions, remembered for as long as the request lasts.
 
 pub mod check;
 pub mod declarations;
 pub mod deduce;
+pub mod model;
 pub mod module_info;
 pub mod modules;
 pub mod parser_symbols;

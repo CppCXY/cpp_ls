@@ -2834,15 +2834,70 @@ impl<F: FileProvider + Clone> Session<F> {
             return Vec::new();
         };
 
+        // **The model is built here, and it is what the checks are handed.** One per `diagnostics` call, which is
+        // the lifetime that makes its memo need no invalidation rule — see [`Session::semantic_model`]. The view is
+        // already a parse this call paid for, so the model costs a `Box` and an empty `BTreeMap`.
+        //
+        // Owned by `Checks` rather than borrowed, because the model is a *view* — a handful of references and a memo
+        // — so moving it into the value that uses it costs nothing and removes a borrow that could not outlive this
+        // function's own frame.
+        let model = self.semantic_model(view);
+
         crate::sema::check::Checks {
             path: key,
             summary,
-            index,
+            model,
             source: &view.source,
-            tree: &view.root,
-            scopes: &view.scopes,
         }
         .run()
+    }
+
+    /// **The query entry point for one file** — a [`crate::sema::model::SemanticModel`] over `view`, with the
+    /// session as its resolver.
+    ///
+    /// This is the thing the four `type_of_expression` call sites were missing, and the difference is one closure:
+    ///
+    /// ```text
+    ///   before   type_of_expression(index, &mut |_: &Path| None, …)   inference gives up at the first header
+    ///   now      session.semantic_model(&view)                         inference can read that header's tree
+    /// ```
+    ///
+    /// # Why it takes only `&self`, and why the memo is still sound
+    ///
+    /// The resolver it installs *is* the session: the model may need another file's tree, and obtaining one is
+    /// [`Session::view_of_the_file`] — a read through the VFS, and a parse. That is a **read**, so the model borrows
+    /// the session shared, which is what lets a caller hold the model and still ask the session other questions
+    /// beside it. The first version took `&mut self` on the theory that a parse is a mutation; it is not — the VFS
+    /// is already behind its own lock — and the mutable borrow bought nothing while forbidding the model and its
+    /// session from being used together.
+    ///
+    /// The memo is sound for a different reason than the borrow: its answers are keyed by node ranges in `view`,
+    /// and `view` is the caller's — an edit replaces the view rather than mutating it, so a model cannot outlive the
+    /// text its answers are about. There is no invalidation rule to write because there is nothing to invalidate.
+    pub fn semantic_model<'s>(
+        &'s self,
+        view: &'s FileView,
+    ) -> crate::sema::model::SemanticModel<'s> {
+        // **The resolver: a path in, that file's own reading out.** `view_of_the_file` and not `view`, because a
+        // declaration's type is written in the file it was written in — this file's *rendering* is not that file's
+        // tree, and answering a question about `<vector>` with a rendering of the file being edited would answer in
+        // the wrong coordinates.
+        //
+        // The session is reached through a **shared** reborrow, and that is what lets the model hold both at once:
+        // the resolver only needs `&Session` (obtaining a file's tree is a read of the VFS and a parse, not a
+        // mutation of the analysis), so it does not conflict with the index reference taken beside it.
+        let session: &'s Session<F> = self;
+        let index: &'s crate::ProjectIndex = session.store.index();
+        let resolver = Box::new(move |path: &Path| -> Option<FileView> { session.view_of_the_file(path) });
+
+        crate::sema::model::SemanticModel::new(
+            index,
+            &view.root,
+            &view.scopes,
+            &view.source,
+            &view.path,
+            resolver,
+        )
     }
 
     /// The text the analysis reads for a path — the buffer when it is open, the file otherwise.

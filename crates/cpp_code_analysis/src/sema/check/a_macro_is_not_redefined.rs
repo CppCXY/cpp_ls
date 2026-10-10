@@ -59,7 +59,7 @@ pub const CHECK: &str = "a_macro_is_not_redefined";
 /// Answered from the file's **own** macro facts — a name defined in a header this file includes is not this
 /// file's redefinition, and a check that reported it would be reporting the header's business in the wrong file.
 pub fn no_name_is_defined_twice_with_a_different_body(checks: &Checks<'_>) -> Vec<Finding> {
-    let seed = checks.index.macros();
+    let seed = checks.index().macros();
 
     // **The definitions in force, in the order the file writes them** — condition 1 by the filter, condition 2
     // by the guard layer. Everything below reads this list and nothing else.

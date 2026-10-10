@@ -102,9 +102,21 @@ pub struct Checks<'a> {
     /// The file's summary: the facts its own text produced. A check that needs only this is a check that
     /// cannot be wrong about another file.
     pub summary: &'a FileSummary,
-    /// The index as it stands. Answers about *other* files are answers about whatever was indexed — which is
-    /// why a check may only report a definite `Known::No`, and never an absence of an answer.
-    pub index: &'a ProjectIndex,
+    /// **The file's questions, and the only way a check asks them.**
+    ///
+    /// This replaced three fields — `index`, `tree` and `scopes` handed over separately — and the replacement is
+    /// the point rather than a tidy-up. A check that could reach the index and the tree directly could ask
+    /// `type_of_expression` with a resolver of its own, and four call sites did exactly that:
+    ///
+    /// ```text
+    ///   type_of_expression(index, &mut |_: &Path| None, …)      inference gives up at the first header
+    /// ```
+    ///
+    /// Measured on MSVC's `<vector>`: **1491 calls, 47–54 ms each, 3537 ms of one request**, nearly all of them
+    /// asking about an initialiser whose type is written in a file the closure had already refused to open. Through
+    /// the model the same question can be answered — and, once answered, is remembered for the rest of the request.
+    /// A future check cannot repeat the mistake because there is nothing else to call.
+    pub model: crate::sema::model::SemanticModel<'a>,
     /// **The file's own text**, as the ranges in its summary are offsets into.
     ///
     /// Here because a fact stores a *range* rather than the text it covers — deliberately, since a summary is
@@ -113,26 +125,41 @@ pub struct Checks<'a> {
     /// loop: [`a_macro_is_not_redefined`] asks whether two `#define`s wrote the same replacement list, and the
     /// answer is in these bytes.
     pub source: &'a str,
-    /// **The file's own tree**, for the checks that have to find a construct rather than a fact.
-    ///
-    /// A summary stores what the analysis concluded — declarations, macros, includes, guards — and deliberately
-    /// not the things it had no conclusion about. `#error` is one of those: it declares nothing and expands to
-    /// nothing, so no fact mentions it, and the only place it exists is the tree that was parsed from the text.
-    ///
-    /// Handed over rather than re-derived, because finding a directive in the source text is a second
-    /// implementation of the lexer — the trap [`MacroFact::body_range`](crate::MacroFact) names in its own
-    /// documentation ("a search is a second implementation of the same rule, free to disagree with the one that
-    /// assigned the name"). The tree is the same one the rest of the analysis read.
-    pub tree: &'a cpp_parser::CppSyntaxNode,
-    /// **The scopes of the file's own text**, which is what turns a name in an expression into a declaration.
-    ///
-    /// Needed by a check that asks about a **type**: `type_of_expression` resolves a name through the scope tree, so
-    /// a check about types without it can only compare spellings. The same view the tree came from holds it, so
-    /// handing it over costs nothing — the alternative is a second parse, which is what this layer must not do.
-    pub scopes: &'a crate::ScopeTree,
 }
 
-impl Checks<'_> {
+impl<'a> Checks<'a> {
+    /// **The file's tree** — through the model, which is the only place it lives now.
+    ///
+    /// Kept as an accessor rather than a field so that the three questions a check asks (`tree`, `scopes`,
+    /// `index`) all come from one owner: a check cannot be handed a tree that disagrees with the scopes beside it.
+    ///
+    /// The returned reference is tied to `&self` rather than to `'a`, because the model now **owns** the borrow —
+    /// the tree lives as long as this value does, and a caller that outlived it would be holding a tree whose view
+    /// had been dropped.
+    pub fn tree(&self) -> &cpp_parser::CppSyntaxNode {
+        self.model.tree()
+    }
+
+    /// **The scopes of the file's own text**, which is what turns a name in an expression into a declaration.
+    pub fn scopes(&self) -> &crate::ScopeTree {
+        self.model.scopes()
+    }
+
+    /// The index as it stands. Answers about *other* files are answers about whatever was indexed — which is why a
+    /// check may only report a definite `Known::No`, and never an absence of an answer.
+    pub fn index(&self) -> &ProjectIndex {
+        self.model.index()
+    }
+
+    /// **The type of an expression** — the model's, remembered per node for as long as this request lasts.
+    ///
+    /// The one way a check asks this question. See [`Checks::model`] for what the alternative cost.
+    pub fn type_of(
+        &self,
+        expression: &cpp_parser::CppSyntaxNode,
+    ) -> crate::Known<(crate::sema::types::Type, std::path::PathBuf)> {
+        self.model.type_of(expression)
+    }
     /// Run every check, in the order a consumer should show them.
     ///
     /// **Sorted by position**, because the order checks happen to be listed in is an implementation detail and

@@ -46,7 +46,7 @@ pub fn an_initializer_does_not_convert(checks: &Checks<'_>) -> Vec<Finding> {
     //
     // The tree is the same either way, so walking it once costs what walking it once per fact cost once.
     let initializers: Vec<(cpp_parser::SourceRange, cpp_parser::CppSyntaxNode)> = checks
-        .tree
+        .tree()
         .descendants()
         .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Initializer)
         .map(|node| (cpp_parser::source_range(node.text_range()), node))
@@ -139,20 +139,11 @@ pub fn an_initializer_does_not_convert(checks: &Checks<'_>) -> Vec<Finding> {
         let Some(expression) = initializer.children().last() else {
             continue;
         };
-        // **The number that matters, and it is not the search.** Every variable that gets this far pays a
-        // `type_of_expression`, and that call is the check's cost — measured on MSVC's `<vector>`: with the search
-        // returning nothing the check is **2 ms**, and with it finding initialisers the check is **3537 ms**. The
-        // search is not what changed between those two runs; whether the inference runs at all is.
+        // **Through the model**, which can read another file's tree and remembers the answer. The version before it
+        // passed `&mut |_| None` as the resolver, so every initialiser whose type lives in a header — which in a
+        // standard-library header is nearly all of them — paid 47–54 ms to be told nothing.
         let inferring = std::time::Instant::now();
-        let typed = crate::index::project::type_of_expression(
-            checks.index,
-            &mut |_: &std::path::Path| None,
-            checks.scopes,
-            checks.tree,
-            checks.path,
-            &expression,
-            0,
-        );
+        let typed = checks.type_of(&expression);
         if std::env::var_os("CPPLS_TRACE_DIAGNOSTICS").is_some() {
             eprintln!(
                 "        infer {:?} : {} -> {} ms",

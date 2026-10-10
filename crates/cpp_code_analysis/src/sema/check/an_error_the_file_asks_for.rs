@@ -62,7 +62,7 @@ pub const CHECK: &str = "an_error_the_file_asks_for";
 
 /// Every `#error` the file writes in a branch that is compiled.
 pub fn an_error_the_file_asks_for_is_reported(checks: &Checks<'_>) -> Vec<Finding> {
-    let directives = directives_in(checks.tree);
+    let directives = directives_in(checks.tree());
 
     // **The gate** — see the module documentation. A summary with no conditionals for a file that has
     // conditionals is a summary that cannot answer this question, and the answer it must not give is the
@@ -91,7 +91,7 @@ pub fn an_error_the_file_asks_for_is_reported(checks: &Checks<'_>) -> Vec<Findin
 
         // **The whole point of the check.** `Unknown` — a condition nothing in the index can decide — is not
         // reported: a `#error` that *might* be compiled is not a claim this layer makes.
-        if visibility_at(checks.index, checks.path, guard, directive.range.start_offset)
+        if visibility_at(checks.index(), checks.path, guard, directive.range.start_offset)
             != Visibility::Active
         {
             continue;
