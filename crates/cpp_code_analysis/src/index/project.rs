@@ -1119,6 +1119,9 @@ pub fn members_of(
     class: &str,
 ) -> Known<MemberList> {
     let listed = members_of_inner(index, scopes, root, path, class);
+    // The diagnostic that found why `std::ios::` offered nothing: whether a member is *present* and at what depth,
+    // which is the difference between "the base walk worked" and "the list happens to be long". Off unless asked
+    // for, like this crate's other traces.
     if std::env::var_os("CPPLS_TRACE_MEMBERS").is_some()
         && let Known::Yes(list) = &listed
     {
@@ -1130,24 +1133,6 @@ pub fn members_of(
                 .map(|base| format!("{} ({:?})", base.spelling, base.reason))
                 .collect::<Vec<_>>()
         );
-        eprintln!(
-            "  first 24: {:?}",
-            list.members
-                .iter()
-                .take(24)
-                .map(|member| member.fact.name.as_str())
-                .collect::<Vec<_>>()
-        );
-        // The names a reader of `std::ostream::` is actually looking for, and the depth they were found at —
-        // which is the difference between "the base walk worked" and "the list happens to be long".
-        for wanted in ["eof", "fail", "good", "bad", "clear", "rdbuf", "rdstate", "setstate", "width", "fill", "flags", "exceptions", "size", "empty", "c_str", "put"] {
-            if let Some(found) = list.members.iter().find(|member| member.fact.name == wanted) {
-                eprintln!(
-                    "    {wanted:<11} depth {} declared_in {:?}",
-                    found.depth, found.declared_in
-                );
-            }
-        }
     }
     listed
 }
@@ -1969,6 +1954,84 @@ fn names_in_a_scope(
                     }),
                 Known::Unknown(_) | Known::No => false,
             };
+            if std::env::var_os("CPPLS_TRACE_MEMBERS").is_some() {
+                let bare = spelling.rsplit("::").next().unwrap_or(spelling);
+                let facts: Vec<String> = index
+                    .every_fact_named(bare)
+                    .into_iter()
+                    .map(|(file, fact)| {
+                        format!(
+                            "{:?} scope {:?} kind {:?} @ {}",
+                            fact.name,
+                            fact.scope,
+                            fact.kind,
+                            file.file_name().unwrap_or_default().to_string_lossy()
+                        )
+                    })
+                    .collect();
+                eprintln!(
+                    "    names_in_a_scope({spelling}): in the tree {}, names_a_type {names_a_type}, \
+                     definition {:?} | facts named {bare:?}: {facts:?}",
+                    in_the_tree.is_some(),
+                    match index.definition(spelling, path) {
+                        Known::Yes(found) =>
+                            format!("Yes({} {:?})", found.fact.qualified_name(), found.fact.kind),
+                        Known::Unknown(reason) => format!("Unknown({reason:?})"),
+                        Known::No => "No".to_string(),
+                    }
+                );
+                if spelling == "std::string" {
+                    let xstring = index.summaries_named_like("xstring");
+                    let string = index.summaries_named_like("string");
+                    eprintln!(
+                        "      index: {} summaries, {} distinct names | by_name: string {} basic_string {} \
+                         vector {} | by_scope: std::basic_string {} | files: xstring {} string-ish {}",
+                        index.len(),
+                        index.distinct_names(),
+                        index.name_postings("string"),
+                        index.name_postings("basic_string"),
+                        index.name_postings("vector"),
+                        index.scope_postings("std::basic_string"),
+                        xstring.len(),
+                        string.len(),
+                    );
+                    for path in string.iter().take(6) {
+                        eprintln!("        {}", path.display());
+                    }
+
+                    // **What the summary of `<xstring>` actually says**, which is the question that separates
+                    // "the class was never recorded" from "it was recorded under a name nothing asks for".
+                    // `basic_string` is written at `xstring:2344` as
+                    // `template <class _Elem, class _Traits, class _Alloc> class basic_string`, so a reading that
+                    // dropped it lost it in the *fact builder* rather than in any lookup.
+                    for (path, summary) in index.all_summaries() {
+                        let name = path.to_string_lossy();
+                        if !name.ends_with("xstring") && !name.ends_with("include/string") {
+                            continue;
+                        }
+                        let mut named: Vec<String> = summary
+                            .declarations
+                            .iter()
+                            .filter(|fact| fact.name.contains("basic"))
+                            .map(|fact| {
+                                format!(
+                                    "{:?} kind {:?} scope {:?} local {}",
+                                    fact.name, fact.kind, fact.scope, fact.local
+                                )
+                            })
+                            .collect();
+                        named.sort();
+                        named.dedup();
+                        eprintln!(
+                            "      {} has {} declaration(s); the {} named *basic*: {:?}",
+                            name,
+                            summary.declarations.len(),
+                            named.len(),
+                            named.iter().take(14).collect::<Vec<_>>()
+                        );
+                    }
+                }
+            }
 
             if names_a_type {
                 // **An alias is followed to the class that has the members.** `std::string` is
@@ -1979,7 +2042,9 @@ fn names_in_a_scope(
                 // so the two cannot disagree about what the spelling names.
                 let named = resolve_aliases(index, scopes, root, path, spelling);
                 let named = named.as_ref();
-                match names_of_a_class(index, scopes, root, path, named) {
+                if std::env::var_os("CPPLS_TRACE_MEMBERS").is_some() {
+                    eprintln!("    names_a_type({spelling}) -> alias resolved to {named:?}");
+                }                match names_of_a_class(index, scopes, root, path, named) {
                     Known::Yes(members) => names.extend(offered(members, 0)),
                     Known::Unknown(reason) => return Known::Unknown(reason),
                     Known::No => {}
@@ -6123,6 +6188,37 @@ impl ProjectIndex {
     ///
     /// A diagnostic, for asking "is the declaration I am looking for in the index at all, and under which scope" —
     /// the question that separates "the walk did not find it" from "it was never filed where the walk looks".
+    pub fn name_postings(&self, name: &str) -> usize {
+        self.names.named(name).len()
+    }
+
+    /// See [`ProjectIndex::name_postings`].
+    pub fn scope_postings(&self, scope: &str) -> usize {
+        self.names.scoped(scope).len()
+    }
+
+    /// See [`ProjectIndex::name_postings`].
+    pub fn all_summaries(&self) -> Vec<(std::path::PathBuf, &FileSummary)> {
+        self.summaries
+            .values()
+            .map(|summary| (summary.path.clone(), summary))
+            .collect()
+    }
+
+    /// See [`ProjectIndex::name_postings`].
+    pub fn summaries_named_like(&self, needle: &str) -> Vec<std::path::PathBuf> {
+        self.summaries
+            .values()
+            .map(|summary| summary.path.clone())
+            .filter(|path| {
+                path.to_string_lossy()
+                    .to_ascii_lowercase()
+                    .contains(&needle.to_ascii_lowercase())
+            })
+            .collect()
+    }
+
+    /// See [`ProjectIndex::name_postings`].
     pub fn every_fact_named(&self, name: &str) -> Vec<(std::path::PathBuf, &DeclFact)> {
         let mut found = Vec::new();
         for posting in self.names.named(name) {
