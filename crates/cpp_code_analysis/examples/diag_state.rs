@@ -1,27 +1,65 @@
-use cpp_code_analysis::{DiskFiles, OpenDocuments, Session, SessionFiles, WatchFilter};
-use std::path::PathBuf;
-fn main() {
-    let root = PathBuf::from(std::env::args().nth(1).expect("dir"));
-    let file = PathBuf::from(std::env::args().nth(2).expect("file"));
-    let mut session = Session::open(root.clone(), SessionFiles::new(OpenDocuments::new(), DiskFiles), WatchFilter::new(&root));
-    session.index_everything();
-    let Some(source) = std::fs::read_to_string(&file).ok() else { panic!("unreadable") };
-    session.did_open(&file, &source);
+//! **Where an error found in the rendering comes from, and where it goes.**
+//!
+//! ```text
+//! cargo run --release --example diag_state -p cpp_code_analysis
+//! ```
+//!
+//! We never parse the file's own text, so an error has to be *discovered* in the rendering and *placed* back in the
+//! file. This prints both halves for three shapes: an error in the file's own tokens, one inside a macro body, and
+//! one a token paste produced. The middle and last are the interesting ones — the text they are about exists in no
+//! file in the form the parser rejected.
+use cpp_code_analysis::{MemoryFiles, OpenDocuments, Session, SessionFiles, WatchFilter, CompilerConfig};
+
+fn probe(label: &str, files: &[(&str, &str)], main: &str) {
+    let mut memory = MemoryFiles::new();
+    for (path, text) in files {
+        memory = memory.with_file(*path, *text);
+    }
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
+    session.add_project_files([std::path::PathBuf::from("/p/main.cpp")]);
+    session.did_open("/p/main.cpp", main);
     session.index_everything();
 
-    println!("--- what a client would be shown for {} ---", file.file_name().unwrap_or_default().to_string_lossy());
-    match session.diagnostics(&file) {
+    println!("--- {label} ---");
+    println!("  the file writes: {main:?}");
+    for (path, text) in files {
+        println!("  {path} writes: {text:?}");
+    }
+    match session.diagnostics(std::path::Path::new("/p/main.cpp")) {
         Some(found) => {
-            println!("  diagnostics: reading {:?} | {} error(s), {} note(s), {} check(s), {} unplaced",
-                found.reading, found.errors.len(), found.notes.len(), found.checks.len(), found.unplaced);
-            for error in found.errors.iter().take(4) {
-                println!("      {}..{} {}", error.start, error.end, error.message);
+            println!(
+                "  published for main.cpp: reading {:?}, {} error(s), {} unplaced",
+                found.reading,
+                found.errors.len(),
+                found.unplaced
+            );
+            for error in &found.errors {
+                println!("      at {}..{} (a file offset): {}", error.start, error.end, error.message);
+                println!(
+                    "      the text there: {:?}",
+                    &main[error.start.min(main.len())..error.end.min(main.len())]
+                );
             }
         }
-        None => println!("  session.diagnostics answered NONE -- the client is shown an empty list"),
+        None => println!("  published: NONE"),
     }
-    // And the raw parse's own errors, which is what we would be hiding.
-    let tree = cpp_parser::CppParser::parse(&source, cpp_parser::ParserConfig::default());
-    let raw_errors = tree.get_errors().len();
-    println!("  the file's own text has {raw_errors} parse error(s) that a raw reading would have reported");
+}
+
+fn main() {
+    probe(
+        "an error in the file's own tokens",
+        &[],
+        "struct S { int a }\n",
+    );
+    probe(
+        "an error inside a macro body",
+        &[("/p/bad.h", "#define DECLARE struct S { int a }\n")],
+        "#include \"bad.h\"\nDECLARE;\n",
+    );
+    probe(
+        "an error a token paste produces",
+        &[("/p/paste.h", "#define CAT(a, b) a##b\n")],
+        "#include \"paste.h\"\nstruct S { int CAT(x, ;) };\n",
+    );
 }
