@@ -1626,20 +1626,22 @@ impl<F: FileProvider + Clone> Session<F> {
         }
         let drain = self.finish_a_slice(&done, units);
 
-        // **A file that has just been read is one a request can now be answered about — so queue it for cooking.**
+        // **A file this slice read is NOT queued for cooking, and three tests are why.**
         //
-        // This is the second half of the coverage hole the raw reading used to hide. `want_the_closure_cooked` (in
-        // the drain below) queues a file when something **asks** for it, and [`Session::view`] does ask — but `view`
-        // needs the file to be in the index before it can ask at all, and a file nothing has read is not. Measured
-        // on a fixture that loads one file and pumps: `indexed false, pending 0, backlog 0` — the ask had nothing to
-        // name, the file was never queued, and every later `view` answered `None` for ever.
+        // It was tried, and it is the third time this session that "queue more things to cook" has been the wrong
+        // answer:
         //
-        // So the step that **makes** a file answerable is the step that queues it. Not a project sweep (three tests
-        // assert the opposite, correctly: ten thousand cooks must not sit in front of the one file being looked at) —
-        // just the files this slice actually read, which is what any request about them must already have waited for.
-        for step in &done {
-            self.cooking.want(&step.path);
-        }
+        // ```text
+        //   a_file_nobody_looked_at_is_not_cooked_and_one_a_request_names_is   FAILED
+        //   a_header_the_user_never_opened_is_cooked_when_a_request_names_it   FAILED
+        //   a_unit_read_reads_the_whole_program_once                           FAILED
+        // ```
+        //
+        // They assert that **a request is what causes a cook**, and they are right: reading a file is not asking a
+        // question about it, and a project of ten thousand files must not be rendered because a scan walked past
+        // them. The coverage a caller needs for a specific file is [`Session::want_cooked_reading`] — one file, named
+        // by whoever wants it — which is what the completion fixtures now call before asking. The reader is what
+        // decides what is worth reading the way a compiler reads it; the pump is not.
 
         // **This path pays for its own drain, here.** `advance` is the non-pump entry point — a test, a batch caller —
         // and it holds no lock at all, so the split that exists to keep the pump's write lock short costs it one
