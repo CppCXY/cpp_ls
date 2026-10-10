@@ -333,8 +333,12 @@ fn ranked_session() -> Session<MemoryFiles> {
 }
 
 /// The labels `Session::completions` offers at an offset, in the order it produced them.
-fn labels_at(session: &Session<MemoryFiles>, path: &str, offset: usize) -> Vec<String> {
-    let view = session.view(path).expect("the file is held");
+///
+/// Takes `&mut Session` and goes through [`cooked_view`], because the reading a completion is answered from is
+/// built on request — a helper that read `session.view(path)` directly would be asking for a reading nothing had
+/// asked for, and would panic on the `None` the deferral contract returns.
+fn labels_at(session: &mut Session<MemoryFiles>, path: &str, offset: usize) -> Vec<String> {
+    let view = cooked_view(session, path);
 
     session
         .completions(&view, offset)
@@ -364,7 +368,7 @@ fn the_nearest_declaration_comes_first() {
     let mut session = ranked_session();
     let cursor = RANKED_CPP.find("return ").expect("the fixture") + "return ".len();
 
-    let labels = labels_at(&session, "/p/a.cpp", cursor);
+    let labels = labels_at(&mut session, "/p/a.cpp", cursor);
 
     let body = position(&labels, "in_the_body");
     let file = position(&labels, "at_file_scope");
@@ -405,7 +409,7 @@ fn typing_a_prefix_does_not_reorder_the_list() {
     let mut session = ranked_session();
     let cursor = RANKED_CPP.find("in_the_body + at").expect("the fixture") + "in_the_body + ".len();
 
-    let labels = labels_at(&session, "/p/a.cpp", cursor);
+    let labels = labels_at(&mut session, "/p/a.cpp", cursor);
     let preview: Vec<&String> = labels.iter().take(3).collect();
 
     assert!(
@@ -422,7 +426,7 @@ fn a_blank_line_in_a_body_offers_the_keywords_and_the_snippets() {
     let mut session = ranked_session();
     let cursor = RANKED_CPP.find("return ").expect("the fixture") + "return ".len();
 
-    let labels = labels_at(&session, "/p/a.cpp", cursor);
+    let labels = labels_at(&mut session, "/p/a.cpp", cursor);
     let view = cooked_view(&mut session, "/p/a.cpp");
     let offered = session.completions(&view, cursor);
 
@@ -461,7 +465,7 @@ fn a_keyword_sorts_between_the_files_names_and_the_headers() {
     let mut session = ranked_session();
     let cursor = RANKED_CPP.find("return ").expect("the fixture") + "return ".len();
 
-    let labels = labels_at(&session, "/p/a.cpp", cursor);
+    let labels = labels_at(&mut session, "/p/a.cpp", cursor);
     let file = position(&labels, "at_file_scope");
     let keyword = position(&labels, "while");
     let far = position(&labels, "from_the_far_header");
@@ -539,7 +543,7 @@ fn a_defines_argument_offers_names_rather_than_keywords() {
 
     let view = cooked_view(&mut session, "/p/a.cpp");
     let cursor = FIXTURE.find("#define ").expect("the fixture") + "#define ".len();
-    let labels = labels_at(&session, "/p/a.cpp", cursor);
+    let labels = labels_at(&mut session, "/p/a.cpp", cursor);
 
     assert_eq!(
         session.completions(&view, cursor).prefix,
@@ -944,7 +948,7 @@ int f() {
 
     // At the blank line **above** `int sum`, where a reader would type the declaration that uses it.
     let blank = FIXTURE.find("\n\n    int sum").expect("the fixture") + 1;
-    let labels = labels_at(&session, "/p/a.cpp", blank);
+    let labels = labels_at(&mut session, "/p/a.cpp", blank);
 
     assert!(
         labels.contains(&"above".to_string()) && labels.contains(&"also_above".to_string()),
@@ -958,7 +962,7 @@ int f() {
     // …and the same name **is** offered once the cursor is below its declaration, which is what keeps this from
     // being a filter that removes too much.
     let after = FIXTURE.find("return sum").expect("the fixture") + "return ".len();
-    let labels = labels_at(&session, "/p/a.cpp", after);
+    let labels = labels_at(&mut session, "/p/a.cpp", after);
     assert!(
         labels.contains(&"sum".to_string()),
         "below the declaration it is in scope: {labels:?}"
