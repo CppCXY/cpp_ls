@@ -2711,7 +2711,6 @@ impl<F: FileProvider + Clone> Session<F> {
 
     pub fn diagnostics(&self, path: impl AsRef<Path>) -> Option<FileDiagnostics> {
         let path = path.as_ref();
-        let whole = std::time::Instant::now();
         let _whole = DiagTrace::new("diagnostics");
 
         // The index's own spelling of the path, for the reason `cook` documents: a client's `C:\…` and the
