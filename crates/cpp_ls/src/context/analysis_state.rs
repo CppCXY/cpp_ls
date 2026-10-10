@@ -162,20 +162,37 @@ impl AnalysisState {
         }
 
         let path = path.to_path_buf();
-        self.update_session("prepare a file a request named", move |session| {
-            let loaded = session.load(&path).is_some();
-            // **A file a request is about gets its cooked reading** — and this is the only place that knows which
-            // file a request named. Not "cook it now": the query below answers from the reading that exists (its own
-            // text, when there is nothing else), and the *next* request gets the compiler's reading, which is what
-            // `isIncomplete` tells a client to come back for. The session's rule is that a reading is built when
-            // something looks at the file; this is the "something" for everything the editor did not open.
-            if loaded {
-                session.want_cooked_reading(&path);
-            }
-            loaded
-        })
-        .await
-        .unwrap_or(false)
+        let queued = self
+            .update_session("prepare a file a request named", move |session| {
+                let loaded = session.load(&path).is_some();
+                // **A file a request is about gets its cooked reading** — and this is the only place that knows which
+                // file a request named. Not "cook it now": the query below answers from the reading that exists, and
+                // the *next* request gets the compiler's reading, which is what `isIncomplete` tells a client to come
+                // back for. The session's rule is that a reading is built when something looks at the file; this is
+                // the "something" for everything the editor did not open.
+                if loaded {
+                    session.want_cooked_reading(&path);
+                }
+                loaded
+            })
+            .await
+            .unwrap_or(false);
+
+        // **And the consumer is woken, which it was not.**
+        //
+        // `want_cooked_reading` puts a file in the cooking queue; the queue is a value, and something has to *look*
+        // at it. The pump is woken by the notification paths (`didOpen`, `didChange`, a watched file) and by
+        // nothing else — so a file this function queued sat in the queue until the reader happened to type, and the
+        // request that was supposed to be answered "next time" was answered `None` for as long as nobody edited
+        // anything. The deferral's own contract is *"the next request gets the compiler's reading"*; without this
+        // wake there was no next event to get it on.
+        //
+        // Woken after the write above, not inside it: `wake` is a `Notify` and the queue is the message, so it
+        // carries no data and cannot be lost by arriving early — which is the arrangement that comment describes.
+        if queued {
+            self.wake();
+        }
+        queued
     }
 
     /// **Read the file a request is about in, if the analysis is behind it** — the request path's form of
