@@ -1859,6 +1859,27 @@ impl<F: FileProvider + Clone> Session<F> {
                 self.want_the_closure_cooked(&open);
             }
 
+            // **The project is NOT swept here, and three tests are why.**
+            //
+            // A project opened from disk with nothing open has no file queued, so every `view` in it answers `None`
+            // — a real coverage hole, and the raw reading used to *hide* it by answering (wrongly). The obvious fix
+            // is to queue the rest of the project once the reader's files are done, and it was tried:
+            //
+            // ```text
+            //   a_file_nobody_looked_at_is_not_cooked_and_one_a_request_names_is   FAILED
+            //   a_header_the_user_never_opened_is_cooked_when_a_request_names_it   FAILED
+            //   a_unit_read_reads_the_whole_program_once                           FAILED
+            // ```
+            //
+            // Those three assert the deliberate opposite — that a request is what causes a cook, and that the cost
+            // is paid by whoever asked. Sweeping the project at every idle drain contradicts them, and they are
+            // right: it would put ten thousand cooks in front of the one file the reader is looking at.
+            //
+            // So the hole is closed **on the asking side** instead: [`Session::view`] queues what it could not
+            // answer, and the pump cooks it. A caller gets `None` once and the reading after that, which is the
+            // contract the deferral was for. See `Session::is_ready_for_a_request_about` for the caller that wants
+            // to know which of the two it is holding.
+
             // **The cooking queue is *not* drained here**, and that is the fix for the latency the product had.
             //
             // This loop used to be `for path in self.cooking.take(COOK_SLICE) { self.cook(&path); }` — the whole of a
@@ -7565,18 +7586,36 @@ mod tests {
         let providers = SessionFiles::new(documents, DiskFiles);
         let mut session = Session::open(&project.root, providers.clone(), WatchFilter::new(&project.root));
 
-        // **Both files, because the closure of `main.cpp` is what the query walks — and the pump, because the
-        // question below is about what a macro means.** `advance` reads files and never cooks, so a view asked for
-        // after it alone would be a deferral; `macro_references` resolves a name through the closure, which is a
-        // claim about meaning and needs the rendering.
+        // **Both files, because the closure of `main.cpp` is what the query walks.**
         session.advance(64);
-        session.index_everything();
 
         let path = project.root.join("main.cpp");
         let source = std::fs::read_to_string(&path).expect("the fixture reads");
-        let cursor = source.find("FEATURE_ONLY x").expect("the use");
+        // **A client's cursor is an offset in the FILE; the view's offsets are the RENDERING's.** These are two
+        // coordinate systems and the difference is exactly the macro expansion — `FEATURE_ONLY x` is five characters
+        // longer after `FEATURE_ONLY` becomes `int`. The view is the way between them
+        // ([`FileView::reading_offset_of`]), and using the file's offset directly is the mistake this asserts
+        // against: measured, the query answered `Unknown(UnparsableName)` because the offset had landed inside a
+        // macro's replacement.
+        let cursor_in_the_file = source.find("FEATURE_ONLY x").expect("the use");
 
-        let view = session.view(&path).expect("the file was read");
+        // **The asking side, which is how a project nobody has opened gets read.**
+        //
+        // `advance` reads files into the index and never cooks, and nothing here is open — so no file was queued for
+        // cooking and the first ask has no rendering to answer from. That is the deferral, and this is what a real
+        // caller does with it: the ask **queues** the file, the pump cooks it, the next ask has it. Written as the
+        // two steps rather than one because the first answer is `None` by contract and a test that hid that would be
+        // asserting a behaviour the product does not have.
+        assert!(
+            session.view(&path).is_none(),
+            "nothing has read this file as a compiler reads it, and that is what the ask is for"
+        );
+        session.index_everything();
+
+        let view = session.view(&path).expect("the ask queued it and the pump cooked it");
+        let cursor = view
+            .reading_offset_of(cursor_in_the_file)
+            .expect("the use is in the rendering");
         let references = session.macro_references(&view, cursor);
 
         let Known::Yes(found) = references else {
