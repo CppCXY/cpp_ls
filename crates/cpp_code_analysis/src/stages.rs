@@ -368,6 +368,85 @@ static NANOS: [AtomicU64; STAGES.len()] = [const { AtomicU64::new(0) }; STAGES.l
 /// this says how it was spent, and a stage whose total exceeds its enclosing family's is only explicable with it.
 static ENTRIES: [AtomicU64; STAGES.len()] = [const { AtomicU64::new(0) }; STAGES.len()];
 
+/// **One check's own cost**, so that "diagnostics are slow" can be attributed to a check rather than assumed.
+///
+/// The five checks run together in `Checks::run`, and the one that cost 302 ms per file was found only because it
+/// was counted *on its own* (`check/mod.rs:156-173`): a total over the layer says nothing about which check is the
+/// price. Separate from [`StageTimes`] because that table's rule is that its stages **do not overlap**, and these
+/// run inside one call rather than beside each other.
+pub mod check_trace {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
+
+    /// The checks, in the order `Checks::run` calls them.
+    pub const NAMES: [&str; 5] = [
+        "an_include_is_found",
+        "a_macro_is_not_redefined",
+        "an_error_the_file_asks_for",
+        "an_initializer_does_not_convert",
+        "an_argument_does_not_convert",
+    ];
+
+    static NANOS: [AtomicU64; 5] = [
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+    ];
+    static CALLS: [AtomicU64; 5] = [
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+    ];
+
+    /// A check, timed until it is dropped. `None` when nobody is looking.
+    pub struct Timing(Option<(usize, Instant)>);
+
+    impl Drop for Timing {
+        fn drop(&mut self) {
+            if let Some((which, started)) = self.0 {
+                NANOS[which].fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                CALLS[which].fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Time one check by its index in [`NAMES`] — `let _t = check_trace::timing(3);`.
+    pub fn timing(which: usize) -> Timing {
+        Timing(on().then(|| (which, Instant::now())))
+    }
+
+    fn on() -> bool {
+        std::env::var_os("CPPLS_TRACE_DIAGNOSTICS").is_some()
+    }
+
+    pub fn reset() {
+        for counter in NANOS.iter().chain(CALLS.iter()) {
+            counter.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// One line per check that ran, so that a caller can print the attribution.
+    pub fn lines() -> Vec<String> {
+        NAMES
+            .iter()
+            .enumerate()
+            .filter_map(|(at, name)| {
+                let calls = CALLS[at].load(Ordering::Relaxed);
+                (calls > 0).then(|| {
+                    format!(
+                        "{name:<32} {:>7.2} ms over {calls} call(s)",
+                        NANOS[at].load(Ordering::Relaxed) as f64 / 1_000_000.0
+                    )
+                })
+            })
+            .collect()
+    }
+}
+
 /// A running timer for one stage: `let _timer = StageTimer::new(Stage::Parse);`
 ///
 /// RAII rather than a start/stop pair, because the region that returns early is exactly the region that would

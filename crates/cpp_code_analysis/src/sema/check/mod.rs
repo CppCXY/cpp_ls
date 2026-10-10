@@ -142,11 +142,23 @@ impl Checks<'_> {
     pub fn run(&self) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        findings.extend(an_include_is_found::the_file_it_names_is_not_there(self));
-        findings.extend(
+        // **Each check is timed on its own**, which is the rule this layer's own history earned: the 302 ms check
+        // was invisible in a total over the five and obvious when counted alone. Off unless `CPPLS_TRACE_DIAGNOSTICS`
+        // is set — see `crate::stages::check_trace`.
+        let mut timed = |which: usize, mut produced: Vec<Finding>| {
+            let _t = crate::stages::check_trace::timing(which);
+            findings.append(&mut produced);
+        };
+
+        timed(0, an_include_is_found::the_file_it_names_is_not_there(self));
+        timed(
+            1,
             a_macro_is_not_redefined::no_name_is_defined_twice_with_a_different_body(self),
         );
-        findings.extend(an_error_the_file_asks_for::an_error_the_file_asks_for_is_reported(self));
+        timed(
+            2,
+            an_error_the_file_asks_for::an_error_the_file_asks_for_is_reported(self),
+        );
         // **The first check about a type.** Everything above is about the reading — a file that is not there, a
         // macro written twice, a directive that asks to fail. This one asks whether the program means what it says
         // about a type, and it is one line of `run` rather than a check per pair of types because it asks
@@ -171,12 +183,12 @@ impl Checks<'_> {
         // It cost **302 ms per file** when first written, because it searched the whole tree once *per
         // declaration*; that is fixed (one walk, then a lookup), and over these headers the whole layer now costs
         // about 21 ms per file.
-        findings.extend(an_initializer_does_not_convert::an_initializer_does_not_convert(self));
+        timed(3, an_initializer_does_not_convert::an_initializer_does_not_convert(self));
         // **And the same relation at a call site.** The first version read `DeclFact::parameters`, which is the
         // *template* list, so every non-template function looked like it took nothing and the check reported 119
         // findings over 200 MSVC headers. It reads `parameter_list` — the list as written — and the corpus count is
         // the thing to check it by, per check and not in total.
-        findings.extend(an_argument_does_not_convert::an_argument_does_not_convert(self));
+        timed(4, an_argument_does_not_convert::an_argument_does_not_convert(self));
 
         findings.sort_by_key(|finding| finding.range.start_offset);
         findings
