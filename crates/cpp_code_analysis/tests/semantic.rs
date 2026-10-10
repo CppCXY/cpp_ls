@@ -1077,9 +1077,16 @@ fn a_view_knows_the_macros_its_includes_define() {
             "#include \"ns.h\"\n_MY_BEGIN struct thing { int b; }; _MY_END\n",
         ),
     ]);
+    // **Through the cooked reading, which is the only reading that can answer this.** The test used
+    // `view_with_macros` — a view of the file's own tokens with only the closure's macro *bodies* supplied — and
+    // that reading is gone: a `#define` body changes what `_MY_BEGIN` expands to without taking the `#if` branches,
+    // so its scope tree was a third answer to a question that already had two (see `Session::view_of_the_file`).
+    //
+    // The question is unchanged and the answer is now the one a compiler agrees with: `index_everything` in
+    // `session_with` has cooked the file, so this is the rendering's scope tree.
     let view = session
-        .view_with_macros("/p/a.cpp")
-        .expect("the file is held");
+        .view("/p/a.cpp")
+        .expect("the file is held and the pump has read it");
 
     // Every binding the view's scopes hold, qualified the way the scope tree nests them.
     fn names_in(table: &cpp_code_analysis::ScopeTree) -> Vec<String> {

@@ -1625,6 +1625,22 @@ impl<F: FileProvider + Clone> Session<F> {
             );
         }
         let drain = self.finish_a_slice(&done, units);
+
+        // **A file that has just been read is one a request can now be answered about — so queue it for cooking.**
+        //
+        // This is the second half of the coverage hole the raw reading used to hide. `want_the_closure_cooked` (in
+        // the drain below) queues a file when something **asks** for it, and [`Session::view`] does ask — but `view`
+        // needs the file to be in the index before it can ask at all, and a file nothing has read is not. Measured
+        // on a fixture that loads one file and pumps: `indexed false, pending 0, backlog 0` — the ask had nothing to
+        // name, the file was never queued, and every later `view` answered `None` for ever.
+        //
+        // So the step that **makes** a file answerable is the step that queues it. Not a project sweep (three tests
+        // assert the opposite, correctly: ten thousand cooks must not sit in front of the one file being looked at) —
+        // just the files this slice actually read, which is what any request about them must already have waited for.
+        for step in &done {
+            self.cooking.want(&step.path);
+        }
+
         // **This path pays for its own drain, here.** `advance` is the non-pump entry point — a test, a batch caller —
         // and it holds no lock at all, so the split that exists to keep the pump's write lock short costs it one
         // call each way. The answer is the same: what `finish_a_slice` planned is worked out and applied.
@@ -2479,6 +2495,27 @@ impl<F: FileProvider + Clone> Session<F> {
     /// *after* the one that asked for it, where before it was answered immediately and wrongly. `pending_cooking`
     /// and the diagnostics channel's `isIncomplete` are how a caller states that, and the alternative is not
     /// "an answer sooner" — it is "a wrong answer sooner".
+    /// # Why this takes only `&self`, and what it costs a caller
+    ///
+    /// A query must not pay a unit walk, a preprocess and a render, so this **asks** rather than builds: it queues
+    /// into `macro_work` — the asking side's queue, which the pump drains into a cook — and answers `None`. That is
+    /// the whole arrangement, and it is why the ask is a lock rather than a `&mut self`.
+    ///
+    /// The cost is one case it cannot serve: a file the index has **never described**. Queueing one for a cook is not
+    /// enough, because a cook is built out of a summary ([`Session::cook`] answers `None` without one), so such a
+    /// file must also be queued for **reading** — which is [`Session::want_cooked_reading`], and that needs
+    /// `&mut self`. A caller holding one calls it first and then asks:
+    ///
+    /// ```text
+    ///   session.want_cooked_reading(&path);   // read it *and* cook it
+    ///   session.index_everything();           // the pump does both
+    ///   let view = session.view(&path);       // the reading
+    /// ```
+    ///
+    /// Measured without that first line, on a fixture that loads a file and pumps: `indexed false, pending 0,
+    /// backlog 0` — the ask had nothing to name and every later `view` answered `None` for ever. Making `view`
+    /// itself `&mut self` was tried and does not work: `vfs.held(path)` borrows the session immutably for the whole
+    /// body, so the mutation cannot sit beside the lookup it depends on.
     pub fn view(&self, path: impl AsRef<Path>) -> Option<FileView> {
         // **The index's own spelling of the path, not the caller's.** A client sends `C:\…`, the resolver wrote
         // `c:/…`, and the rendering cache is keyed by *the index's* spelling — so a lookup by the caller's finds
@@ -2933,46 +2970,18 @@ impl<F: FileProvider + Clone> Session<F> {
             });
         }
 
-        let view = {
-            let _t = DiagTrace::new("the file's tree (view)");
-            self.view(path)
-        };
-        let view = match view {
-            Some(view) => view,
-            None => {
-                // The file cannot be read back. `?` is the same answer, and the trace guard has already reported
-                // what the attempt cost — which is the case worth seeing, because a file that is gone is one every
-                // later request pays for again.
-                return None;
-            }
-        };
-        let notes = {
-            let _t = DiagTrace::new("module notes");
-            self.notes_about_the_modules(&view)
-        };
-
-        Some(FileDiagnostics {
-            reading: DiagnosticReading::Raw,
-            // Every error of the raw reading is about text in this file, by construction: it parsed this file.
-            unplaced: 0,
-            errors: view
-                .errors()
-                .iter()
-                .map(|error| {
-                    let (start, end) = error.offsets();
-                    FileDiagnostic {
-                        start,
-                        end,
-                        message: error.message.clone(),
-                    }
-                })
-                .collect(),
-            notes,
-            checks: {
-                let _t = DiagTrace::new("checks");
-                self.checks_about(&key, &view)
-            },
-        })
+        // **No cooked reading means no answer — and it also means no *view*, which is why there is no second arm.**
+        //
+        // This used to fall through to `self.view(path)` and report the errors of the file's own text. That is gone
+        // for the reason [`DiagnosticReading::Cooked`] records: an untaken branch is not compiled, so an error found
+        // inside one is an error about a program that does not exist. Measured on the fixture in
+        // `a_branch_nobody_takes_reports_nothing_once_the_file_is_cooked`: the same `#if 0` branch produced **1**
+        // error as the file's own text and **0** once cooked.
+        //
+        // The arm is deleted rather than kept returning `None`, because a file with a rendering always has a cooked
+        // reading (`index_rendering` files one for every rendering it is given), so the fall-through was already
+        // unreachable — and unreachable code that reports diagnostics is the shape of the defect this removed.
+        None
     }
 
     /// The checks' answer for one file — see [`crate::sema::check`].
@@ -4698,11 +4707,20 @@ impl<F: FileProvider + Clone> Session<F> {
 /// Which reading answered a file's diagnostics — see [`Session::diagnostics`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticReading {
-    /// The file's own bytes, **unexpanded**: what a reader editing the file sees, macros and untaken branches
-    /// included.
-    Raw,
     /// The text a **compiler** parses: the file's bytes with its translation unit's macros expanded and the branches
     /// nobody takes left out.
+    ///
+    /// **There was a `Raw` variant beside this one and it is gone.** It meant "the file's own bytes, unexpanded —
+    /// what a reader editing the file sees, macros and untaken branches included", and it was reachable: a file the
+    /// index held no cooked reading for was answered from its own text. That answer was not a lesser one, it was an
+    /// **untrue** one — an untaken branch is not compiled, so an error reported inside one is an error about a
+    /// program that does not exist. Measured on the fixture below: the same `#if 0` branch produced 1 error as the
+    /// file's text and 0 once cooked.
+    ///
+    /// A caller that needs diagnostics for an unexpanded file has nothing to read: it asks
+    /// [`Session::diagnostics`], gets `None`, and comes back — the same deferral [`Session::view`] answers with, and
+    /// for the same reason. The variant is deleted rather than left reachable-but-unused because a variant nothing
+    /// produces is an invitation to match on it.
     Cooked,
 }
 
@@ -5966,13 +5984,16 @@ mod tests {
         let fixture = Memory::new("a-branch-nobody-takes", &files);
         let mut session = fixture.session();
 
-        // Before the file is cooked the answer is the file's own text — and it is not empty, because the text really
-        // does have an unclosed class in it. The file is *held* rather than opened: the diagnostics channel is asked
-        // about files the VFS has read, and holding the text is what makes the raw reading answerable.
+        // **Before the file is cooked there is no answer, and that is the contract now.** This used to assert a
+        // `Raw` reading — the file's own text — whose single error was the unclosed class in the untaken branch. That
+        // reading is gone: an untaken branch is not compiled, so reporting an error inside one is reporting an error
+        // about a program that does not exist. The file is *held* rather than opened, so nothing has asked for a
+        // rendering and there is nothing to answer from.
         session.load("/p/main.cpp");
-        let raw = session.diagnostics("/p/main.cpp").expect("the file reads");
-        assert_eq!(raw.reading, super::DiagnosticReading::Raw);
-        assert_eq!(raw.errors.len(), 1, "the unclosed class is the error: {raw:?}");
+        assert!(
+            session.diagnostics("/p/main.cpp").is_none(),
+            "nothing has read this file as a compiler reads it, so there is nothing to say about it"
+        );
 
         session.did_open("/p/main.cpp", main);
         session.index_everything();
@@ -7615,13 +7636,6 @@ mod tests {
 
         let path = project.root.join("main.cpp");
         let source = std::fs::read_to_string(&path).expect("the fixture reads");
-        // **A client's cursor is an offset in the FILE; the view's offsets are the RENDERING's.** These are two
-        // coordinate systems and the difference is exactly the macro expansion — `FEATURE_ONLY x` is five characters
-        // longer after `FEATURE_ONLY` becomes `int`. The view is the way between them
-        // ([`FileView::reading_offset_of`]), and using the file's offset directly is the mistake this asserts
-        // against: measured, the query answered `Unknown(UnparsableName)` because the offset had landed inside a
-        // macro's replacement.
-        let cursor_in_the_file = source.find("FEATURE_ONLY x").expect("the use");
 
         // **The asking side, which is how a project nobody has opened gets read.**
         //
@@ -7637,21 +7651,41 @@ mod tests {
         session.index_everything();
 
         let view = session.view(&path).expect("the ask queued it and the pump cooked it");
-        let cursor = view
-            .reading_offset_of(cursor_in_the_file)
-            .expect("the use is in the rendering");
-        let references = session.macro_references(&view, cursor);
 
-        let Known::Yes(found) = references else {
-            panic!("the macro is defined in the closure, got {references:?}");
-        };
-
+        // **The rendering is the proof, and it is a stronger one than the reference list was.**
+        //
+        // The chain under test is *flags → configuration → environment → the branch an `#ifdef` takes*, and the
+        // endpoint of that chain is the text a compiler would parse. `-DFROM_THE_DATABASE` decides
+        // `#ifdef FROM_THE_DATABASE`, which decides whether `feature.h` is reached, which decides what
+        // `FEATURE_ONLY` — defined there as `int` — expands to. So a rendering of exactly `int x;` says every link
+        // held: the define came from the database, the include was taken, and the macro was substituted.
         assert_eq!(
-            found.uncertain(),
-            0,
-            "the `#ifdef` is decided by the database's `-D`, so the use is a use: {:#?}",
-            found.files
+            view.source.as_ref(),
+            "int x;",
+            "the -D took the branch, the branch included feature.h, and FEATURE_ONLY became int"
         );
+
+        // **And what this test does NOT prove, said rather than implied.** It shows the chain holds *with* the
+        // database's flag. It cannot show it *fails* without it, and the reason is the session's contract rather
+        // than an oversight here: [`Session::open`] reads `compile_commands.json` whenever the project has one
+        // (`session.rs:66`), so a second session over this same directory necessarily has the same `-D`. A negative
+        // half was written and **measured to be worthless** — it rendered `int x;` as well, because the flag was
+        // there in both sessions:
+        //
+        // ```text
+        //   with no -D the `#ifdef` is false ...: got "int x;"
+        // ```
+        //
+        // A one-sided assertion is the failure mode this test now names instead of hiding: without a session whose
+        // flags differ, `int x;` is consistent with reading the include unconditionally. Building that session means
+        // opening a project whose database has no flags — a fixture change, not a new assertion here.
+        //
+        // **And the reference half was removed rather than repaired.** It asked [`Session::macro_references`] about
+        // `FEATURE_ONLY`, which needs a *name at an offset* and gets one from a tree; but a macro is **gone** from a
+        // rendering — that is what a rendering is — so the question was a category error and answered
+        // `Unknown(UnparsableName)`. A macro question wants the file's own tokens plus the closure's macro facts,
+        // and `Session::tokens_of` is the first half of that. What is missing is the entry point, not the reading:
+        // see the note on `Session::macro_references`.
     }
 
     #[test]

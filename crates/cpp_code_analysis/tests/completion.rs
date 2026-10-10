@@ -40,15 +40,57 @@ fn session_with_the_project() -> Session<MemoryFiles> {
         std::path::PathBuf::from("/p/a.cpp"),
         std::path::PathBuf::from("/p/b.h"),
     ]);
+
+    // **Two pumps, and the ask between them, because that is the contract now.**
+    //
+    // A completion is a question about **meaning**, so it is answered from a rendering — and a rendering is built
+    // because something asked for one. The first pump reads the files into the index; `view` is the ask (it answers
+    // `None` and queues what it could not answer, deliberately: a query must not pay a unit walk, a preprocess and a
+    // render); the second pump is what builds it. Every test in this file goes through this one helper, so the
+    // arrangement is stated once here rather than in fifty `expect` messages.
+    //
+    // This is not a test artefact. It is what a server does between two keystrokes, and what the deferral contract
+    // exists for: `None` now, the reading after the work the ask queued.
+    session.index_everything();
+    let _ = session.view("/p/a.cpp");
+    let _ = session.view("/p/b.h");
     session.index_everything();
 
     session
 }
 
+/// **A reading of `path` that a completion can be asked against** — the pump, the ask, the pump.
+///
+/// Owned rather than borrowed, which matters: `Session::view` takes `&self` and the query takes `&self` too, but the
+/// ask has to happen on a session nothing is borrowing yet, so a test that wrote
+/// `session.completions(&session.view(..)?, ..)` would have the borrow in the argument position. Returning the view
+/// by value is what lets the two calls sit on one line.
+///
+/// The three steps are the contract, not scaffolding: a completion is a question about **meaning**, meaning is
+/// answered from a rendering, a rendering is built because something asked, and `Session::view` answers `None` and
+/// queues when it has none. Every fixture in this file that builds its own session goes through here, so the
+/// arrangement is stated once.
+fn cooked_view(session: &mut Session<MemoryFiles>, path: &str) -> cpp_code_analysis::FileView {
+    // **The three steps, and the first is not optional for a file nothing has read.**
+    //
+    // A completion is a question about **meaning**, so it is answered from a rendering, and a rendering is built
+    // because something asked. `want_cooked_reading` is the ask that also queues *reading* — a cook is built out of
+    // a summary, so a file the index has never described needs both, and a fixture that merely `load`s a file has
+    // given it neither. Measured without this line: `indexed false, pending 0, backlog 0`, and every `view` `None`.
+    //
+    // This is the product's own contract, not scaffolding: it is what a server does between two keystrokes for a
+    // file it has not read yet.
+    session.want_cooked_reading(std::path::Path::new(path));
+    session.index_everything();
+    session
+        .view(path)
+        .unwrap_or_else(|| panic!("{path} asked to be read and cooked, and the pump did both"))
+}
+
 /// The names offered at an offset, in the order the query returned them.
 fn offered_at(offset: usize) -> Option<Vec<String>> {
-    let session = session_with_the_project();
-    let view = session.view("/p/a.cpp").expect("the file is held");
+    let mut session = session_with_the_project();
+    let view = cooked_view(&mut session, "/p/a.cpp");
 
     match session.name_completions(&view, offset) {
         Known::Yes(found) => Some(
@@ -97,8 +139,8 @@ fn a_blank_cursor_offers_the_locals_and_the_included_names() {
 #[test]
 fn a_local_is_offered_while_it_is_being_typed() {
     let offset = SOURCE.find("local_variable + w").expect("the fixture") + "local".len();
-    let session = session_with_the_project();
-    let view = session.view("/p/a.cpp").expect("the file is held");
+    let mut session = session_with_the_project();
+    let view = cooked_view(&mut session, "/p/a.cpp");
 
     let Known::Yes(found) = session.name_completions(&view, offset) else {
         panic!("a half-written name is answerable");
@@ -122,7 +164,7 @@ fn a_comment_and_a_literal_offer_nothing() {
     let mut session =
         Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
     session.load("/p/a.cpp");
-    let view = session.view("/p/a.cpp").expect("the file is held");
+    let view = cooked_view(&mut session, "/p/a.cpp");
 
     let inside_the_comment = commented.find("// a").expect("the fixture") + "// a".len();
     assert!(
@@ -139,8 +181,8 @@ fn a_comment_and_a_literal_offer_nothing() {
 #[test]
 fn a_member_position_is_not_a_name_position() {
     let offset = SOURCE.find("w.size").expect("the fixture") + 2;
-    let session = session_with_the_project();
-    let view = session.view("/p/a.cpp").expect("the file is held");
+    let mut session = session_with_the_project();
+    let view = cooked_view(&mut session, "/p/a.cpp");
 
     assert!(
         !matches!(session.name_completions(&view, offset), Known::Yes(_)),
@@ -184,7 +226,7 @@ int f() {
     let mut session =
         Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
     session.load("/p/a.cpp");
-    let view = session.view("/p/a.cpp").expect("the file is held");
+    let view = cooked_view(&mut session, "/p/a.cpp");
 
     // The **name** list, asked inside the body: the user's local is there, the reserved globals are not.
     let known = match session.name_completions(&view, FIXTURE.find("w.").expect("the fixture")) {
@@ -299,7 +341,7 @@ fn position(labels: &[String], wanted: &str) -> usize {
 /// file itself.
 #[test]
 fn the_nearest_declaration_comes_first() {
-    let session = ranked_session();
+    let mut session = ranked_session();
     let cursor = RANKED_CPP.find("return ").expect("the fixture") + "return ".len();
 
     let labels = labels_at(&session, "/p/a.cpp", cursor);
@@ -311,7 +353,7 @@ fn the_nearest_declaration_comes_first() {
 
     // The provenance is quoted in the message rather than asserted on directly: it is *why* the order is what it
     // is, and a failure of the order is the thing worth reading.
-    let view = session.view("/p/a.cpp").expect("the file is held");
+    let view = cooked_view(&mut session, "/p/a.cpp");
     let provenance: Vec<String> = match session.name_completions(&view, cursor) {
         Known::Yes(found) => found
             .names
@@ -340,7 +382,7 @@ fn the_nearest_declaration_comes_first() {
 /// what it was given and a filter cannot un-bury a name.
 #[test]
 fn typing_a_prefix_does_not_reorder_the_list() {
-    let session = ranked_session();
+    let mut session = ranked_session();
     let cursor = RANKED_CPP.find("in_the_body + at").expect("the fixture") + "in_the_body + ".len();
 
     let labels = labels_at(&session, "/p/a.cpp", cursor);
@@ -357,11 +399,11 @@ fn typing_a_prefix_does_not_reorder_the_list() {
 /// inside them) rather than as a bare keyword beside it.
 #[test]
 fn a_blank_line_in_a_body_offers_the_keywords_and_the_snippets() {
-    let session = ranked_session();
+    let mut session = ranked_session();
     let cursor = RANKED_CPP.find("return ").expect("the fixture") + "return ".len();
 
     let labels = labels_at(&session, "/p/a.cpp", cursor);
-    let view = session.view("/p/a.cpp").expect("the file is held");
+    let view = cooked_view(&mut session, "/p/a.cpp");
     let offered = session.completions(&view, cursor);
 
     assert!(labels.contains(&"while".to_string()), "{labels:?}");
@@ -396,7 +438,7 @@ fn a_blank_line_in_a_body_offers_the_keywords_and_the_snippets() {
 /// reader is about to write comes after their own variables and before a name from `<cstdio>`.
 #[test]
 fn a_keyword_sorts_between_the_files_names_and_the_headers() {
-    let session = ranked_session();
+    let mut session = ranked_session();
     let cursor = RANKED_CPP.find("return ").expect("the fixture") + "return ".len();
 
     let labels = labels_at(&session, "/p/a.cpp", cursor);
@@ -421,7 +463,7 @@ fn after_a_hash_the_directives_are_offered() {
         Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
     session.load("/p/a.cpp");
 
-    let view = session.view("/p/a.cpp").expect("the file is held");
+    let view = cooked_view(&mut session, "/p/a.cpp");
     let cursor = FIXTURE.find("inc").expect("the fixture") + "inc".len();
     let found = session.completions(&view, cursor);
 
@@ -455,7 +497,7 @@ fn a_directive_that_takes_no_argument_offers_nothing() {
         Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
     session.load("/p/a.cpp");
 
-    let view = session.view("/p/a.cpp").expect("the file is held");
+    let view = cooked_view(&mut session, "/p/a.cpp");
     let cursor = FIXTURE.find("#endif ").expect("the fixture") + "#endif ".len();
 
     assert!(
@@ -475,7 +517,7 @@ fn a_defines_argument_offers_names_rather_than_keywords() {
         Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
     session.load("/p/a.cpp");
 
-    let view = session.view("/p/a.cpp").expect("the file is held");
+    let view = cooked_view(&mut session, "/p/a.cpp");
     let cursor = FIXTURE.find("#define ").expect("the fixture") + "#define ".len();
     let labels = labels_at(&session, "/p/a.cpp", cursor);
 
@@ -512,7 +554,7 @@ fn an_include_offers_the_projects_headers() {
     ]);
     session.index_everything();
 
-    let view = session.view("/p/a.cpp").expect("the file is held");
+    let view = cooked_view(&mut session, "/p/a.cpp");
     let cursor = typed.find("near").expect("the fixture") + "near".len();
     let found = session.completions(&view, cursor);
 
@@ -543,7 +585,7 @@ fn a_comment_is_not_code() {
         Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
     session.load("/p/a.cpp");
 
-    let view = session.view("/p/a.cpp").expect("the file is held");
+    let view = cooked_view(&mut session, "/p/a.cpp");
     let inside = FIXTURE.find("note").expect("the fixture");
 
     assert!(
@@ -578,7 +620,7 @@ int f() {
         Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
     session.load("/p/a.cpp");
 
-    let view = session.view("/p/a.cpp").expect("the file is held");
+    let view = cooked_view(&mut session, "/p/a.cpp");
     let cursor = FIXTURE.find("w.").expect("the fixture") + 2;
     let found = session.completions(&view, cursor);
 
@@ -636,7 +678,7 @@ one::
         Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
     session.load("/p/a.cpp");
 
-    let view = session.view("/p/a.cpp").expect("the file is held");
+    let view = cooked_view(&mut session, "/p/a.cpp");
     let cursor = FIXTURE.find("one::").expect("the fixture") + "one::".len();
     let found = session.completions(&view, cursor);
 
@@ -667,7 +709,7 @@ int f() { Widget w; w.size; }
         Session::with_config("/p", providers, WatchFilter::new("/p"), CompilerConfig::default());
     session.load("/p/a.cpp");
 
-    let view = session.view("/p/a.cpp").expect("the file is held");
+    let view = cooked_view(&mut session, "/p/a.cpp");
     let at_the_member = FIXTURE.find("w.size").expect("the fixture");
     let cursor = at_the_member + 2 + "si".len();
     let found = session.completions(&view, cursor);
@@ -689,9 +731,9 @@ int f() { Widget w; w.size; }
 /// `isIncomplete` about a capped list would re-ask for an answer that cannot change.
 #[test]
 fn a_short_list_is_not_marked_truncated() {
-    let session = ranked_session();
+    let mut session = ranked_session();
     let cursor = RANKED_CPP.find("return ").expect("the fixture") + "return ".len();
-    let view = session.view("/p/a.cpp").expect("the file is held");
+    let view = cooked_view(&mut session, "/p/a.cpp");
 
     assert!(
         !session.completions(&view, cursor).truncated,
@@ -704,8 +746,8 @@ fn a_short_list_is_not_marked_truncated() {
 /// table all answer "nothing found" for a line whose whole purpose is to name a file.
 #[test]
 fn an_include_points_at_the_header_it_names() {
-    let session = ranked_session();
-    let view = session.view("/p/a.cpp").expect("the file is held");
+    let mut session = ranked_session();
+    let view = cooked_view(&mut session, "/p/a.cpp");
 
     // Inside the spelling: `#include "near.h"` — character 12 is the `e` of `near`.
     let cursor = RANKED_CPP.find("near.h").expect("the fixture");
@@ -760,7 +802,7 @@ fn an_include_that_resolves_to_nothing_says_so() {
     session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
     session.index_everything();
 
-    let view = session.view("/p/a.cpp").expect("the file is held");
+    let view = cooked_view(&mut session, "/p/a.cpp");
     let cursor = FIXTURE.find("nowhere").expect("the fixture");
 
     match session.header_at(&view, cursor) {
@@ -824,7 +866,7 @@ fn a_completion_after_an_edit_is_about_the_file_the_edit_wrote() {
     );
 
     let cursor = FRESHNESS_USES_HEADER.find("w.").expect("the fixture") + 2;
-    let view = session.view("/p/a.cpp").expect("the file is held");
+    let view = cooked_view(&mut session, "/p/a.cpp");
 
     // **Without the catch-up**: the header's summary is the old one, so `Widget` still has only `size`.
     let stale = session.completions(&view, cursor);
@@ -933,7 +975,7 @@ fn the_first_completion_of_a_session_finds_the_type_in_an_included_header() {
     session.catch_up(std::path::Path::new("/p/main.cpp"));
 
     let cursor = FRESHNESS_USES_HEADER.find("w.").expect("the fixture") + 2;
-    let view = session.view("/p/main.cpp").expect("the file is held");
+    let view = cooked_view(&mut session, "/p/main.cpp");
     let found = session.completions(&view, cursor);
 
     let labels: Vec<&str> = found.items.iter().map(|item| item.label.as_str()).collect();
@@ -1009,7 +1051,7 @@ int main() {
     ]);
     session.index_everything();
 
-    let view = session.view("/p/a.cpp").expect("the file is held");
+    let view = cooked_view(&mut session, "/p/a.cpp");
     let dot = FIXTURE.find("w.").expect("the fixture") + 1;
     assert_eq!(&FIXTURE[dot..dot + 1], ".", "the fixture's operator");
 
