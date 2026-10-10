@@ -2280,18 +2280,47 @@ impl<F: FileProvider + Clone> Session<F> {
     /// the end of the work there is.
     pub fn index_everything(&mut self) -> usize {
         let mut total = 0;
+        let tracing = std::env::var_os("CPPLS_TRACE_COOKING").is_some();
 
         loop {
             let read = self.advance(64).len();
             total += read;
 
+            // **Every stage of the cook is counted, because a file can be claimed and then lost.**
+            //
+            // `claim_cooking` pops, and the three stages after it each drop a file by answering `None` —
+            // `materials_for` when a file's unit is provisional or its summary is not in the index yet, `render_them`
+            // when the render itself declines, and `commit_them` when there is nothing to insert. A pop followed by a
+            // drop is a file that is **no longer queued and never cooked**, and the loop below reads that state as
+            // "nothing left to do": `read == 0 && cooked == 0` ends the work with a cooking backlog still standing.
+            // Measured on the completion fixture: `pending 0, cooking 22` on every round, for six rounds.
             let cooked = {
                 let claimed = self.claim_cooking(COOK_SLICE);
-                let rendered = self.render_them(self.materials_for(claimed));
-                self.commit_them(rendered).len()
+                if tracing && !claimed.is_empty() {
+                    eprintln!("cooking: claimed {} file(s) {:?}", claimed.len(), claimed);
+                }
+                let materials = self.materials_for(claimed);
+                let wanted = materials.len();
+                let rendered = self.render_them(materials);
+                let built = rendered.len();
+                let committed = self.commit_them(rendered).len();
+                if tracing && (built != wanted || committed != built) {
+                    eprintln!(
+                        "cooking: rendered {built} of {wanted} claimed, committed {committed} \
+                         (cooking backlog {})",
+                        self.pending_cooking()
+                    );
+                }
+                committed
             };
 
             if read == 0 && cooked == 0 {
+                if tracing {
+                    eprintln!(
+                        "cooking: stopping with read 0, cooked 0, backlog {}",
+                        self.pending_cooking()
+                    );
+                }
                 return total;
             }
         }
@@ -2409,6 +2438,18 @@ impl<F: FileProvider + Clone> Session<F> {
         match self.known_rendering_of(&file.path, &file.text) {
             Some(rendered) => Some(FileView::parse_rendering(file, &rendered)),
             None => {
+                if std::env::var_os("CPPLS_TRACE_COOKING").is_some() {
+                    // **The two halves of the lookup, printed.** The key is `(path, content_hash(text))`, and a
+                    // write and a read that disagree about either half are a miss that looks exactly like "this file
+                    // was never cooked". The count says whether the cache has anything at all.
+                    eprintln!(
+                        "view: no rendering for {} | hash {} | {} entr(ies) cached | open {}",
+                        file.path.display(),
+                        crate::cache::content_hash(&file.text),
+                        self.renderings.lock().map(|known| known.len()).unwrap_or(0),
+                        file.open
+                    );
+                }
                 if let Ok(mut work) = self.macro_work.lock() {
                     work.want(&file.path);
                 }
@@ -3833,7 +3874,27 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn materials_for(&self, paths: Vec<PathBuf>) -> Vec<CookingMaterials> {
         paths
             .into_iter()
-            .filter_map(|path| self.cooking_materials(&path))
+            .filter_map(|path| {
+                let built = self.cooking_materials(&path);
+                // **A claimed file that yields no materials is a file that is now neither queued nor cooked.**
+                // `claim_cooking` popped it and this answered `None`, so it is gone from both places and the loop
+                // that decides whether there is work left reads `cooked == 0` as "nothing to do". Naming the reason
+                // is what separates "the summary is not in the index yet" (a state) from "the unit is provisional"
+                // (also a state) from a defect.
+                if built.is_none() && std::env::var_os("CPPLS_TRACE_COOKING").is_some() {
+                    let indexed = self.store.index().summary(&path).is_some();
+                    let (unit, provisional) = match self.unit_and_state_of(&path) {
+                        Some((_, provisional)) => ("held", provisional),
+                        None => ("none", false),
+                    };
+                    eprintln!(
+                        "cooking: {} yields no materials | summary indexed {indexed} | unit {unit} \
+                         provisional {provisional}",
+                        path.display()
+                    );
+                }
+                built
+            })
             .collect()
     }
 
@@ -3842,9 +3903,19 @@ impl<F: FileProvider + Clone> Session<F> {
         &self,
         materials: Vec<CookingMaterials>,
     ) -> Vec<(crate::IndexedRendering, CookedReading)> {
+        let tracing = std::env::var_os("CPPLS_TRACE_COOKING").is_some();
         materials
             .into_iter()
-            .filter_map(|materials| self.render_a_cooked(&materials))
+            .filter_map(|materials| {
+                let path = materials.path.clone();
+                let built = self.render_a_cooked(&materials);
+                // **The last silent drop.** A claimed file whose render declines is gone from the queue and was
+                // never cooked, which the pump reads as "no work left".
+                if built.is_none() && tracing {
+                    eprintln!("cooking: {} did not render", path.display());
+                }
+                built
+            })
             .collect()
     }
 
