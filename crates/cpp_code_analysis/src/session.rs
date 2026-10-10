@@ -4314,6 +4314,22 @@ impl<F: FileProvider + Clone> Session<F> {
 
     /// What to offer at a cursor with no member access: the scope's names, then the index's.
     pub fn name_completions(&self, view: &FileView, offset: usize) -> Known<NameCompletions> {
+        // **The cursor is a FILE offset; the tree is the RENDERING's.** These two coincided while a view was a parse
+        // of the file's own text, so no caller had to know they were two things — and the moment `view` became the
+        // reading a compiler is handed they stopped coinciding, by exactly the macro expansion. Measured on the
+        // completion fixture: `Bad offset: range 0..6 offset 12`, where 6 is the rendering's length (`int x;`) and 12
+        // is a position in the 18-byte file.
+        //
+        // The translation belongs **here** rather than in each handler: every caller holds a view and a cursor, the
+        // pair is always the same pair, and a handler that forgot would get a wrong answer rather than an error —
+        // which is exactly what happened three times while this boundary went in. See [`FileView`]'s note on the two
+        // coordinate systems: an offset in the file goes in through `reading_offset_of`, and a range in the rendering
+        // comes back out through `file_offset_of`.
+        let Some(offset) = view.reading_offset_of(offset) else {
+            // The cursor is not in the rendering at all — in a region a macro replaced, or past its end. There is no
+            // name to offer, and `Unknown` says so rather than answering about the nearest thing that is.
+            return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from("")));
+        };
         crate::index::project::name_completions_traced(
             self.store.index(),
             &view.scopes,
@@ -4352,6 +4368,13 @@ impl<F: FileProvider + Clone> Session<F> {
     /// the latency fixture that clone measures **0 ms**, against 350–1270 ms for the query beside it while the index
     /// was filling. It is named here because it is the obvious suspect for a per-keystroke cost and it is not one.
     pub fn completions(&self, view: &FileView, offset: usize) -> crate::CompletionSet {
+        // **The cursor is a FILE offset; the tree is the RENDERING's** — see [`Session::name_completions`], where the
+        // full note is. A cursor that is not in the rendering has nothing to offer, and an empty set is the honest
+        // answer rather than a list computed from the nearest position that *is* in it.
+        let Some(offset) = view.reading_offset_of(offset) else {
+            return crate::CompletionSet::default();
+        };
+
         // The header index through its lock, and **an empty one on a poisoned lock**: a completion is a suggestion
         // list, and a thread that panicked while adding project files is no reason to fail the request — the
         // declarations below are the answer the reader came for.
