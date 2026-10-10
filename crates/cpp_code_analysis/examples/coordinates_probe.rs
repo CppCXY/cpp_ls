@@ -102,7 +102,7 @@ fn main() {
         let at_the_file = view
             .written_text()
             .unwrap_or(&view.source)
-            .get(in_the_file..)
+            .get(in_the_file.get()..)
             .map(|rest| rest.chars().take(28).collect::<String>())
             .unwrap_or_default();
 
@@ -110,7 +110,7 @@ fn main() {
             Some(in_the_reading) => {
                 let at_the_reading = view
                     .source
-                    .get(in_the_reading..)
+                    .get(in_the_reading.get()..)
                     .map(|rest| rest.chars().take(28).collect::<String>())
                     .unwrap_or_default();
                 println!(
@@ -121,7 +121,7 @@ fn main() {
                 // **What the analysis answers about that offset**, which is the number the report was really about:
                 // the mapping can be right and the *name* found there still be the wrong one, and the two failures
                 // look identical from a screenshot. `definition_at` is the same call the hover handler makes first.
-                let name = cpp_code_analysis::sema::resolve::name_at(&view.root, in_the_reading);
+                let name = cpp_code_analysis::sema::resolve::name_at(&view.root, in_the_reading.get());
                 println!("        name_at -> {name:?}");
                 match session.definition(&view, in_the_reading) {
                     cpp_code_analysis::Known::Yes(found) => {
@@ -189,3 +189,6 @@ fn main() {
         }
     }
 }
+
+
+

@@ -117,8 +117,8 @@ fn document_symbol(view: &FileView, symbol: &OutlineSymbol) -> DocumentSymbol {
 /// A source range as a place in the file, through the line index the view already holds.
 fn range_in_file(view: &FileView, range: cpp_parser::SourceRange) -> Option<Range> {
     Some(Range::new(
-        position_at_offset(view, range.start_offset)?,
-        position_at_offset(view, range.end_offset())?,
+        position_at_offset(view, cpp_code_analysis::file::coordinates::ReadingOffset::new(range.start_offset))?,
+        position_at_offset(view, cpp_code_analysis::file::coordinates::ReadingOffset::new(range.end_offset()))?,
     ))
 }
 
@@ -129,3 +129,5 @@ impl RegisterCapabilities for DocumentSymbolCapabilities {
         server_capabilities.document_symbol_provider = Some(OneOf::Left(true));
     }
 }
+
+

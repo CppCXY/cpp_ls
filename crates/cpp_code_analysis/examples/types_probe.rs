@@ -147,7 +147,7 @@ fn main() {
                 }
 
                 written_with_auto += 1;
-                let answer = session.type_at(&view, binding.name_range.start_offset);
+                let answer = session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(binding.name_range.start_offset));
                 let shown = match &answer {
                     cpp_code_analysis::Known::Yes(found) => {
                         let type_of = found.type_of.clone();

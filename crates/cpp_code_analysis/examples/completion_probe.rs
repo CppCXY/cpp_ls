@@ -108,7 +108,7 @@ fn main() {
             };
 
             let view = session.view(&probe).expect("the probe was opened");
-            let found = session.completions(&view, offset);
+            let found = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset));
 
             // **The headers a C++ reader actually writes**, asked by name rather than read off the first ten: a
             // list that begins well and omits `<vector>` is the failure this whole section exists to catch.
@@ -161,7 +161,7 @@ fn main() {
             continue;
         };
 
-        match session.header_at(&view, range.start_offset + 1) {
+        match session.header_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(range.start_offset + 1)) {
             Known::Yes(target) => println!(
                 "{:>5} | {:<28} -> {}",
                 line_of(&source, line_start_at) + 1,
@@ -184,7 +184,7 @@ fn main() {
         let after = at + found + 2;
         at = after;
 
-        let found = session.completions(&view, after);
+        let found = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(after));
         println!(
             "{:>5}:{:<4} scope {:<24} {:>4} items  {:?}",
             line_of(&source, after) + 1,
@@ -202,7 +202,7 @@ fn main() {
         let after = at + found + 1;
         at = after;
 
-        let completions = session.completions(&view, after);
+        let completions = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(after));
 
         // A **member** answer is the one whose items are members — a method, a field. A `.` in finished code
         // (`a.b`) asks the same question at a cursor that is not on the member, and the completion falls through
@@ -282,7 +282,7 @@ fn main() {
         }
 
         let offset = line_end(&source, number);
-        let found = session.completions(&view, offset);
+        let found = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset));
         if found.items.is_empty() {
             continue;
         }
@@ -334,7 +334,7 @@ fn main() {
     let mut items = 0usize;
     for offset in (0..source.len()).step_by(stride) {
         asked += 1;
-        let found = session.completions(&view, offset);
+        let found = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset));
         if !found.items.is_empty() {
             answered += 1;
             items += found.items.len();
@@ -347,7 +347,7 @@ fn main() {
     // apart so that the round which adds a cache can show what it bought.
     let warm = Instant::now();
     for offset in (0..source.len()).step_by(stride * 8) {
-        let _ = session.completions(&view, offset);
+        let _ = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset));
     }
     let warm = warm.elapsed();
 
@@ -383,11 +383,11 @@ fn main() {
         position += started.elapsed();
 
         let started = Instant::now();
-        let _ = session.name_completions(&view, offset);
+        let _ = session.name_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset));
         query += started.elapsed();
 
         let started = Instant::now();
-        let _ = session.completions(&view, offset);
+        let _ = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset));
         whole += started.elapsed();
     }
     println!(

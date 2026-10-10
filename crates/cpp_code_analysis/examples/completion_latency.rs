@@ -137,7 +137,7 @@ fn main() {
     let whole = time_completion(&session, &file, cursor);
     let bare = session.view_of_the_file(&file).map(|view| {
         let started = Instant::now();
-        let _ = session.completions(&view, 0);
+        let _ = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(0));
         started.elapsed()
     });
     println!("  the file's view (a parse)        {} ms", view.as_millis());
@@ -272,7 +272,7 @@ fn main() {
 
         let querying = Instant::now();
         let items = view
-            .map(|view| session.completions(&view, cursor).items.len())
+            .map(|view| session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor)).items.len())
             .unwrap_or(0);
         let queried = querying.elapsed();
 
@@ -332,7 +332,7 @@ fn main() {
         let cursor = at + marker;
 
         let asking = Instant::now();
-        let found = session.completions(&view, cursor);
+        let found = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor));
         let took = asking.elapsed();
 
         let labels: Vec<&str> = found.items.iter().map(|item| item.label.as_str()).collect();
@@ -346,7 +346,7 @@ fn main() {
 
         // Whether the answer moved session state, which is the difference between a first ask and a repeat.
         let again = Instant::now();
-        let second = session.completions(&view, cursor);
+        let second = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor));
         println!(
             "        again: {} ms, {} item(s)",
             again.elapsed().as_millis(),
@@ -368,7 +368,7 @@ fn regions_of_one_query(session: &Session<DiskFiles>, file: &Path, cursor: usize
         return "no view".to_string();
     };
     cpp_code_analysis::query_trace::reset();
-    let _ = session.completions(&view, cursor);
+    let _ = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor));
     cpp_code_analysis::query_trace::report()
 }
 
@@ -378,7 +378,7 @@ fn time_completion(session: &Session<DiskFiles>, file: &Path, offset: usize) -> 
     let Some(view) = session.view_of_the_file(file) else {
         return started.elapsed();
     };
-    let _ = session.completions(&view, offset);
+    let _ = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset));
     started.elapsed()
 }
 
@@ -404,3 +404,4 @@ fn position_of(source: &str, needle: &str) -> (u32, u32) {
         .unwrap_or(0) as u32;
     (line, character)
 }
+

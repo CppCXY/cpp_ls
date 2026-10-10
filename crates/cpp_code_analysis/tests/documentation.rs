@@ -33,7 +33,11 @@ fn session_with(files: &[(&str, &str)]) -> Session<MemoryFiles> {
 
 /// The documentation of the declaration at an offset in an open file, as the text a hover would render.
 fn documentation_in(source: &str, offset: usize) -> Option<String> {
-    let session = session_with(&[("/p/a.cpp", source)]);
+    let mut session = session_with(&[("/p/a.cpp", source)]);
+    // **The ask, and then the pump** - see `tests/completion.rs`'s `cooked_view`: a view is of the file's
+    // *cooked reading*, and a rendering is built because something asked for it.
+    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.index_everything();
     let view = session.view("/p/a.cpp").expect("the file is held");
 
     session
@@ -126,7 +130,9 @@ fn a_trailing_comment_documents_nothing_at_the_cursor() {
 #[test]
 fn a_plain_comment_is_found_but_is_not_documentation() {
     let source = "// A note.\nint x;\n";
-    let session = session_with(&[("/p/a.cpp", source)]);
+    let mut session = session_with(&[("/p/a.cpp", source)]);
+    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.index_everything();
     let view = session.view("/p/a.cpp").expect("the file is held");
     let found = session
         .documentation(
@@ -159,7 +165,9 @@ fn a_declaration_with_nothing_above_it_has_no_documentation() {
 fn the_declaring_file_answers_too() {
     let header = "/// A widget.\nstruct Widget {\n    int size;\n};\n";
     let source = "#include \"b.h\"\nint f(Widget& w) { return w.size; }\n";
-    let session = session_with(&[("/p/a.cpp", source), ("/p/b.h", header)]);
+    let mut session = session_with(&[("/p/a.cpp", source), ("/p/b.h", header)]);
+    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.index_everything();
     let view = session.view("/p/a.cpp").expect("the file is held");
 
     let found = session
@@ -177,7 +185,9 @@ fn the_declaring_file_answers_too() {
 /// available, which is the same answer as "it has none" and the only one that does not invent text.
 #[test]
 fn an_unreadable_file_has_no_documentation() {
-    let session = session_with(&[("/p/a.cpp", "int x;\n")]);
+    let mut session = session_with(&[("/p/a.cpp", "int x;\n")]);
+    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.index_everything();
     let view = session.view("/p/a.cpp").expect("the file is held");
 
     assert!(
@@ -250,3 +260,5 @@ fn a_directive_above_a_declaration_does_not_hide_a_comment() {
         source.find("int x").expect("the fixture")
     ));
 }
+
+

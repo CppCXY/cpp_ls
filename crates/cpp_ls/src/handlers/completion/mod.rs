@@ -58,7 +58,7 @@ use tokio_util::sync::CancellationToken;
 use super::RegisterCapabilities;
 use crate::handlers::hover::documentation_text;
 use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
-use crate::util::{offset_at_position, position_at_offset, uri_to_file_path};
+use crate::util::{file_offset_at_position, position_at_offset, uri_to_file_path};
 
 pub async fn on_completion(
     context: ServerContextSnapshot,
@@ -156,7 +156,7 @@ pub async fn on_completion(
         let viewing = std::time::Instant::now();
         let view = session.view_of_the_file(&path)?;
         let viewed = viewing.elapsed().as_millis();
-        let offset = offset_at_position(&view, position)?;
+        let offset = file_offset_at_position(&view, position)?;
 
         let finding = std::time::Instant::now();
         let found = session.completions(&view, offset);
@@ -173,7 +173,7 @@ pub async fn on_completion(
         log_a_member_that_produced_no_members(
             session,
             &view,
-            offset,
+            offset.get(),
             (position.line, position.character),
             &found.items,
         );
@@ -366,8 +366,8 @@ fn text_edit(
 
     Some(CompletionTextEdit::Edit(TextEdit {
         range: lsp_types::Range::new(
-            position_at_offset(view, replace.start_offset)?,
-            position_at_offset(view, replace.end_offset())?,
+            position_at_offset(view, cpp_code_analysis::file::coordinates::ReadingOffset::new(replace.start_offset))?,
+            position_at_offset(view, cpp_code_analysis::file::coordinates::ReadingOffset::new(replace.end_offset()))?,
         ),
         new_text: new_text.to_string(),
     }))
@@ -542,3 +542,10 @@ mod tests {
         assert_eq!(completion_kind(ItemKind::Header), CompletionItemKind::FILE);
     }
 }
+
+
+
+
+
+
+

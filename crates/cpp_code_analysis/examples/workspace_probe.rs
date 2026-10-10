@@ -328,7 +328,7 @@ fn main() {
         let line = line_of(offset) + 1;
         let text = source.lines().nth(line - 1).unwrap_or_default().trim_end().to_string();
 
-        match session.definition(&view, offset) {
+        match session.definition(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)) {
             Known::Yes(found) => {
                 let where_from = if found.file == file { "resolved here" } else { "resolved in a header" };
                 *outcomes.entry(where_from.to_string()).or_default() += 1;
@@ -358,7 +358,7 @@ fn main() {
         // **The same cursor through the plural query**, which is what a client that can show a list asks. This is
         // the measurement the list answer is judged by: a list of two is a redeclaration, seventeen is an overload
         // set, and the question is whether they are usable.
-        match session.definitions(&view, offset) {
+        match session.definitions(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)) {
             Known::Yes(found) if found.is_one() => {
                 *list_outcomes.entry("one declaration".to_string()).or_default() += 1;
             }
@@ -390,7 +390,7 @@ fn main() {
         // **The type of the name**, which is what a hover on a variable needs — and the half that was missing
         // while the standard library was unreachable: `std::string line;` has a type only if `std::string` is in
         // the index to be read.
-        match session.type_at(&view, offset) {
+        match session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)) {
             Known::Yes(found) => {
                 *type_outcomes.entry("a type".to_string()).or_default() += 1;
                 let entry = format!("{name} : {}", found.type_of);
@@ -596,7 +596,7 @@ fn main() {
         let cursor = after + source[after..].bytes().take_while(|byte| *byte == b' ').count();
         let line = line_of(cursor) + 1;
         let text = source.lines().nth(line - 1).unwrap_or_default().trim_end().to_string();
-        match session.name_completions(&view, cursor) {
+        match session.name_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor)) {
             Known::Yes(completions) => println!(
                 "{:>4}:{:<4} scope {:<28} {} names, e.g. {:?}",
                 line,
@@ -623,10 +623,10 @@ fn main() {
     let mut refused: Vec<usize> = Vec::new();
     let mut offered_at_all = 0usize;
     for offset in 0..source.len() {
-        match session.name_completions(&view, offset) {
+        match session.name_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset)) {
             Known::Yes(_) => offered_at_all += 1,
             _ => {
-                if session.member_completions(&view, offset).value().is_none() {
+                if session.member_completions(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)).value().is_none() {
                     refused.push(offset);
                 }
             }

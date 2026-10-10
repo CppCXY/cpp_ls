@@ -36,6 +36,7 @@ use std::sync::Arc;
 
 use cpp_parser::{CppDocComment, CppParseError, CppSyntaxNode, CppSyntaxTree, LineIndex};
 
+use crate::file::coordinates::{FileOffset, ReadingOffset};
 use crate::file::paths::FileId;
 use crate::file::vfs::VfsFile;
 use crate::symbol::ScopeTree;
@@ -76,7 +77,8 @@ pub struct TokensOf {
 impl TokensOf {
     /// The token containing an offset, if one does. Whitespace and newlines are tokens too, so this answers for any
     /// offset inside the file.
-    pub fn token_at(&self, offset: usize) -> Option<&cpp_parser::CppTokenData> {
+    pub fn token_at(&self, offset: ReadingOffset) -> Option<&cpp_parser::CppTokenData> {
+        let offset = offset.get();
         self.tokens
             .iter()
             .find(|token| token.range.start_offset <= offset && offset < token.range.end_offset())
@@ -99,10 +101,10 @@ impl TokensOf {
     ///
     /// A lookup in the index the VFS already built: no scan, and no way for the answer to be about a different text
     /// than the one it was built from.
-    pub fn offset_at(&self, line: usize, column: usize) -> Option<usize> {
+    pub fn offset_at(&self, line: usize, column: usize) -> Option<ReadingOffset> {
         self.line_index
             .get_offset(line, column, &self.source)
-            .map(usize::from)
+            .map(|at| ReadingOffset::new(usize::from(at)))
     }
 
     /// A byte offset back to a **line and column** — the inverse of [`TokensOf::offset_at`], and the direction a
@@ -110,7 +112,8 @@ impl TokensOf {
     ///
     /// A position past the end of the text answers `None` rather than clamping: an offset that is not in the file is
     /// a caller's mistake, and a range built from a clamped one would point at the wrong code.
-    pub fn position_at(&self, offset: usize) -> Option<(usize, usize)> {
+    pub fn position_at(&self, offset: ReadingOffset) -> Option<(usize, usize)> {
+        let offset = offset.get();
         self.line_index.position_of(offset, &self.source)
     }
 
@@ -174,11 +177,12 @@ impl FileView {
     /// means by "here": a token a macro produced was *written* in the header that defines the macro and *acts*
     /// where the macro was invoked, and a client shown the header would be shown a place its own buffer does not
     /// contain.
-    pub fn file_offset_of(&self, in_the_reading: usize) -> Option<usize> {
+    pub fn file_offset_of(&self, in_the_reading: ReadingOffset) -> Option<FileOffset> {
+        let in_the_reading = in_the_reading.get();
         if self.written.is_none() {
-            return Some(in_the_reading);
+            return Some(FileOffset::new(in_the_reading));
         }
-        Some(self.span_at(in_the_reading)?.reported.start_offset)
+        Some(FileOffset::new(self.span_at(in_the_reading)?.reported.start_offset))
     }
 
     /// **Where in the rendering the file's own offset `in_the_file` is acted on.**
@@ -187,9 +191,10 @@ impl FileView {
     /// and every layer below this struct speaks the reading. `None` when the offset is in a region the rendering
     /// does not contain — a `#if` branch nobody takes, a comment — which a caller must read as "no answer here"
     /// rather than as an offset of zero.
-    pub fn reading_offset_of(&self, in_the_file: usize) -> Option<usize> {
+    pub fn reading_offset_of(&self, in_the_file: FileOffset) -> Option<ReadingOffset> {
+        let in_the_file = in_the_file.get();
         if self.written.is_none() {
-            return Some(in_the_file);
+            return Some(ReadingOffset::new(in_the_file));
         }
         // The first span that **acts** at or after the offset asked about. A file offset a macro's expansion
         // stands for has several spans reporting it — every token of the replacement list — and the first is the
@@ -247,7 +252,7 @@ impl FileView {
         // `w.` and the rendering is 106 bytes. `None` is this function's documented way of saying "no answer here".
         let mapped = span.cooked.start_offset
             + inside.min(span.cooked.end_offset() - span.cooked.start_offset);
-        (mapped <= self.source.len()).then_some(mapped)
+        (mapped <= self.source.len()).then(|| ReadingOffset::new(mapped))
     }
 
     /// The span whose spelling covers `in_the_reading`, by binary search.
@@ -291,11 +296,13 @@ impl FileView {
     /// line number from a different document — a wrong answer rather than a missing one. The column is in
     /// **characters**, not bytes and not UTF-16; the conversion from the protocol's unit is the caller's, and
     /// `crate::util::position` is where it happens.
-    pub fn file_offset_at(&self, line: usize, column: usize) -> Option<usize> {
+    pub fn file_offset_at(&self, line: usize, column: usize) -> Option<FileOffset> {
         match (&self.written, &self.written_lines) {
-            (Some(text), Some(index)) => index.get_offset(line, column, text).map(usize::from),
+            (Some(text), Some(index)) => index
+                .get_offset(line, column, text)
+                .map(|at| FileOffset::new(usize::from(at))),
             // The ordinary case: one text and one index, and it is already the file's.
-            _ => self.offset_at(line, column),
+            _ => self.offset_at(line, column).map(|at| FileOffset::new(at.get())),
         }
     }
 }
@@ -543,7 +550,8 @@ impl FileView {
     ///
     /// A cursor in whitespace starts the chain at the enclosing node rather than with the whitespace token: there is
     /// no word under the cursor to select, and the next useful thing is what surrounds it.
-    pub fn selection_chain(&self, offset: usize) -> Vec<cpp_parser::SourceRange> {
+    pub fn selection_chain(&self, offset: ReadingOffset) -> Vec<cpp_parser::SourceRange> {
+        let offset = offset.get();
         let mut chain: Vec<cpp_parser::SourceRange> = Vec::new();
         let add = |range: cpp_parser::SourceRange, chain: &mut Vec<cpp_parser::SourceRange>| {
             if range.length == 0 {
@@ -601,10 +609,10 @@ impl FileView {
     ///
     /// A lookup in the index the view already holds: no scan, and no way for the answer to be about a different
     /// text than the one parsed.
-    pub fn offset_at(&self, line: usize, column: usize) -> Option<usize> {
+    pub fn offset_at(&self, line: usize, column: usize) -> Option<ReadingOffset> {
         self.line_index
             .get_offset(line, column, &self.source)
-            .map(usize::from)
+            .map(|at| ReadingOffset::new(usize::from(at)))
     }
 
     /// A byte offset back to a **line and column**, both counted from zero — the inverse of
@@ -613,7 +621,8 @@ impl FileView {
     ///
     /// A position past the end of the text answers `None` rather than clamping: an offset that is not in the file
     /// is a caller's mistake, and a range built from a clamped one would point at the wrong code.
-    pub fn position_at(&self, offset: usize) -> Option<(usize, usize)> {
+    pub fn position_at(&self, offset: ReadingOffset) -> Option<(usize, usize)> {
+        let offset = offset.get();
         self.line_index.position_of(offset, &self.source)
     }
 
@@ -657,8 +666,8 @@ mod tests {
         );
         assert!(Arc::ptr_eq(&tokens.source, &file.text));
 
-        assert_eq!(tokens.offset_at(2, 4), Some(18));
-        assert_eq!(tokens.position_at(18), Some((2, 4)));
+        assert_eq!(tokens.offset_at(2, 4), Some(ReadingOffset::new(18)));
+        assert_eq!(tokens.position_at(ReadingOffset::new(18)), Some((2, 4)));
         assert_eq!(tokens.offset_at(9, 0), None);
 
         // **And the tokens really are the file.** The stream covers the text byte for byte, which is what makes a
@@ -675,7 +684,7 @@ mod tests {
         let (before, _) = tokens(&mut vfs, "/p/a.cpp");
         assert_eq!(
             before.offset_at(1, 0),
-            Some(7),
+            Some(ReadingOffset::new(7)),
             "a text that ends in a newline has an empty last line, at its end"
         );
         assert_eq!(before.offset_at(2, 0), None, "and no line after that");
@@ -684,13 +693,16 @@ mod tests {
         let (after, _) = tokens(&mut vfs, "/p/a.cpp");
 
         assert!(after.open, "and the reading says the text is a buffer");
-        assert_eq!(after.offset_at(1, 4), Some(11), "`b` of the new second line");
+        assert_eq!(after.offset_at(1, 4), Some(ReadingOffset::new(11)), "`b` of the new second line");
         assert_eq!(
             before.offset_at(1, 4),
-            Some(7),
+            Some(ReadingOffset::new(7)),
             "the older generation's line 1 was the empty line after the final newline, so column 4 clamps to its \
              start — the end of the text"
         );
     }
 }
+
+
+
 

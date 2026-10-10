@@ -53,7 +53,7 @@ fn main() {
     // is the one thing three hand-guesses could not settle.
     if let Some(access) = cpp_code_analysis::sema::resolve::member_access_at(&view.root, offset) {
         println!("  object: {:?}", access.object.text().to_string().trim());
-        match session.type_at(&view, usize::from(access.object.text_range().start())) {
+        match session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(usize::from(access.object.text_range().start()))) {
             cpp_code_analysis::Known::Yes(found) => println!("  object type -> {}", found.type_of),
             cpp_code_analysis::Known::No => println!("  object type -> NO"),
             cpp_code_analysis::Known::Unknown(reason) => {

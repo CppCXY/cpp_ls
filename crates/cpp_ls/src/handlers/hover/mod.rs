@@ -129,7 +129,7 @@ pub async fn on_hover(
 ///
 /// `None` is the answer for punctuation, for whitespace, and for a name the analysis cannot place: a client shows
 /// nothing, and "there is nothing to say here" is true, where an empty popup would not be.
-pub fn hover(session: &Session<DiskFiles>, view: &FileView, offset: usize) -> Option<Hover> {
+pub fn hover(session: &Session<DiskFiles>, view: &FileView, offset: cpp_code_analysis::file::coordinates::ReadingOffset) -> Option<Hover> {
     // A project can turn the popup off (`hover.enable = false` in `.cppls.toml`), which is a preference about the
     // editor rather than about the analysis — so it is checked here, at the edge, and the queries below do not know
     // it exists.
@@ -409,7 +409,7 @@ pub(crate) fn documentation_text(comment: &CppDocComment) -> Option<String> {
 fn expression_markdown(
     session: &Session<DiskFiles>,
     view: &FileView,
-    offset: usize,
+    offset: cpp_code_analysis::file::coordinates::ReadingOffset,
 ) -> Option<String> {
     let Known::Yes(found) = session.type_at(view, offset) else {
         return None;
@@ -549,7 +549,7 @@ fn declaration_text(
             // The file's own bindings carry no `type_of` at all, and the offset to ask at is the fact's own name —
             // which is in this view's coordinates exactly when the fact is about this file.
             None if view.is_some_and(|view| is_the_viewed_file(view, file)) => {
-                match session.type_at(view.expect("established above"), fact.name_range.start_offset) {
+                match session.type_at(view.expect("established above"), cpp_code_analysis::file::coordinates::ReadingOffset::new(fact.name_range.start_offset)) {
                     Known::Yes(type_of) => Some(type_of.type_of.clone()),
                     _ => None,
                 }
@@ -682,7 +682,7 @@ fn where_clause(
     // different document: measured, a class on line 6 of a file with five `#include`s above it was announced as
     // `main.cpp:1:7` — the column right and the line five short.
     let asked = match view {
-        Some(view) if is_the_viewed_file(view, file) => crate::util::position_at_offset(view, offset),
+        Some(view) if is_the_viewed_file(view, file) => crate::util::position_at_offset(view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)),
         _ => session
             .files()
             .held(file)
@@ -784,6 +784,13 @@ mod tests {
         assert_eq!(code_block(""), "");
     }
 }
+
+
+
+
+
+
+
 
 
 

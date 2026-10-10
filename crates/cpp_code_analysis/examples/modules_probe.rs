@@ -257,7 +257,7 @@ fn main() {
             continue;
         };
 
-        let found = session.completions(&view, at);
+        let found = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(at));
         println!(
             "   completion after `{scope}` → {} item(s){}{}",
             found.items.len(),

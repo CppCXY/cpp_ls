@@ -21,6 +21,7 @@
 //! start — a client should never send one, and rounding down keeps the answer inside the line rather than
 //! inventing a position between two halves of one character.
 
+use cpp_code_analysis::file::coordinates::{FileOffset, ReadingOffset};
 use cpp_code_analysis::{FileView, VfsFile};
 use cpp_parser::LineIndex;
 use lsp_types::Position;
@@ -38,7 +39,7 @@ use lsp_types::Position;
 /// rendering's, because a macro that expands to twenty tokens moves everything after it. The line and the column
 /// are therefore resolved against the file's own text and index first, and only then translated into the reading,
 /// which is the whole of what makes a view of a rendering usable by an editor.
-pub fn offset_at_position(view: &FileView, position: Position) -> Option<usize> {
+pub fn offset_at_position(view: &FileView, position: Position) -> Option<ReadingOffset> {
     let line = position.line as usize;
     // **The text the client is looking at**, which is the file's — not `view.source`, which is the rendering when
     // there is one. Reaching for `source` here is the mistake this module exists to prevent: the two have different
@@ -53,6 +54,15 @@ pub fn offset_at_position(view: &FileView, position: Position) -> Option<usize> 
 }
 
 
+/// **A client's position as a byte offset in the file it is showing** - [offset_at_position] stopped on the near
+/// side of the seam, and the one the completion pair wants because those two queries cross it themselves.
+pub fn file_offset_at_position(view: &FileView, position: Position) -> Option<FileOffset> {
+    let line = position.line as usize;
+    let written = view.written_text().unwrap_or(&view.source);
+    let body = line_body(written, line)?;
+    let column = character_column(body, position.character as usize);
+    view.file_offset_at(line, column)
+}
 /// **A client's position for a byte offset in a view's reading** — the other half of the seam
 /// [`offset_at_position`] documents.
 ///
@@ -60,8 +70,8 @@ pub fn offset_at_position(view: &FileView, position: Position) -> Option<usize> 
 /// rendering's. A client is showing the file, so the offset goes back through [`FileView::file_offset_of`] first —
 /// and a token a macro produced reports **where the macro was invoked** rather than where its body is written, which
 /// is the place the reader can actually see and the only one their buffer contains.
-pub fn position_at_offset(view: &FileView, offset: usize) -> Option<Position> {
-    let in_the_file = view.file_offset_of(offset)?;
+pub fn position_at_offset(view: &FileView, offset: ReadingOffset) -> Option<Position> {
+    let in_the_file = view.file_offset_of(offset)?.get();
     position_in(
         view.written_text().unwrap_or(&view.source),
         view.written_lines(),
@@ -212,7 +222,7 @@ mod tests {
             Position::new(2, 4),
             "the emoji is on the line above and shifts nothing"
         );
-        assert_eq!(offset_at_position(&view, position), Some(at));
+        assert_eq!(offset_at_position(&view, position), Some(ReadingOffset::new(at)));
 
         // A position on the emoji's own line: column 4 is the character *after* two UTF-16 units of it.
         let emoji = view.source.find('😀').expect("the emoji is in the text");
@@ -220,6 +230,9 @@ mod tests {
             position_in(&view.source, &view.line_index, emoji),
             Some(Position::new(1, 3))
         );
-        assert_eq!(offset_at_position(&view, Position::new(1, 5)), Some(emoji + 4));
+        assert_eq!(offset_at_position(&view, Position::new(1, 5)), Some(ReadingOffset::new(emoji + 4)));
     }
 }
+
+
+

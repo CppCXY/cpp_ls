@@ -73,7 +73,7 @@ fn main() {
                 continue;
             }
             let offset = token.range.start_offset;
-            let reason = match session.definition(&view, offset) {
+            let reason = match session.definition(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)) {
                 Known::Yes(found) if found.file == file => "resolved here".to_string(),
                 Known::Yes(_) => "resolved in a header".to_string(),
                 Known::Unknown(UnknownReason::NotDeclaredHere(_)) => "the index has no such name".to_string(),

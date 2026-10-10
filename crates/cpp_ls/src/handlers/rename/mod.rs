@@ -113,7 +113,7 @@ pub async fn on_rename(
 pub fn workspace_edit_of_renaming_a_macro<F: cpp_code_analysis::FileProvider + Clone>(
     session: &Session<F>,
     view: &cpp_code_analysis::FileView,
-    offset: usize,
+    offset: cpp_code_analysis::file::coordinates::ReadingOffset,
     new_name: &str,
 ) -> Option<WorkspaceEdit> {
     // (1) A macro's name, or nothing.
@@ -287,13 +287,13 @@ mod tests {
 
         assert!(session.pending() > 0, "the fixture is the refused state");
         assert!(
-            workspace_edit_of_renaming_a_macro(&session, &view, on_the_use, "MAX_ENTRIES").is_none(),
+            workspace_edit_of_renaming_a_macro(&session, &view, cpp_code_analysis::file::coordinates::ReadingOffset::new(on_the_use), "MAX_ENTRIES").is_none(),
             "a rename now would edit the uses the index knows and skip the ones it has not read"
         );
 
         session.index_everything();
         let view = session.view("/p/items.cpp").expect("the file is held");
-        let edit = workspace_edit_of_renaming_a_macro(&session, &view, on_the_use, "MAX_ENTRIES")
+        let edit = workspace_edit_of_renaming_a_macro(&session, &view, cpp_code_analysis::file::coordinates::ReadingOffset::new(on_the_use), "MAX_ENTRIES")
             .expect("the index is complete now");
         let changes = edit.changes.expect("a change map");
         assert_eq!(changes.len(), 2, "the definer and the user: {changes:?}");
@@ -305,3 +305,6 @@ mod tests {
         );
     }
 }
+
+
+

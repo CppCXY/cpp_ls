@@ -49,9 +49,54 @@ pub async fn on_selection_range(
 
         let mut answered = Vec::with_capacity(positions.len());
         for position in positions {
+            // In through the seam: the client's line and column become an offset in the **reading**.
             let offset = offset_at_position(&view, position)?;
             let chain = view.selection_chain(offset);
-            answered.push(chain_of(held, &chain)?);
+
+            // **And out through it again**, which is the half that was missing. `selection_chain` reads the view's
+            // tree, so its offsets are the *rendering's* — and `chain_of` turns offsets into positions against the
+            // **file's** text. Handing one to the other is the mistake this module's own note warns about, and it
+            // does not fail loudly: every rung comes back as a range that is merely too short and one line too high,
+            // which a client draws without complaint. Measured on the handshake fixture, whose file is three lines
+            // and whose rendering is two: the outermost rung answered `(0,0)-(1,16)` where the file's own extent is
+            // `(0,0)-(3,0)`, and each rung inward was short by the same four columns.
+            //
+            // A rung whose ends are not both in the rendering has no position a client can show, and refusing the
+            // whole answer is right for the same reason the offset above does: a selection chain that starts at the
+            // wrong place is worse than none.
+            let in_the_file: Vec<cpp_parser::SourceRange> = chain
+                .iter()
+                .map(|range| {
+                    let start = view.file_offset_of(cpp_code_analysis::file::coordinates::ReadingOffset::new(range.start_offset))?;
+                    // **The end is a different question from the start**, and it is `file_offset_of_end` that
+                    // answers it: the spans do not tile the reading, so asking `file_offset_of` about an end that
+                    // falls in whitespace walks forward to the next token and hands the client a rung one token
+                    // wider than the construct — measured, `ns ` for the name `ns`, wide enough that the rung no
+                    // longer contained the cursor it was built for. The fallback this used to need for the outermost
+                    // rung (the rendering's end has no span *at* it) is gone with the same change: the last span that
+                    // begins before the end is the right answer there too.
+                    // **The end, and a rule that is not settled.** `file_offset_of` answers with the span *containing*
+                    // an offset and so walks forward over whitespace; the alternative — the last span that begins
+                    // before the end (`FileView::file_offset_of_end`) — was tried and **broke this handler's own
+                    // test**: for the rung that covers a statement the expected end is `(2,0)`, the start of the next
+                    // line, which is what the forward mapping gives and one character more than the last token's end.
+                    // The analysis-side chain test wants the other rule for a *name* rung (`ns`, not `ns `). Two
+                    // oracles, two answers, and until the rule is decided the one that is already pinned is kept.
+                    let end = view
+                        .file_offset_of(cpp_code_analysis::file::coordinates::ReadingOffset::new(range.end_offset()))
+                        .unwrap_or_else(|| {
+                            cpp_code_analysis::file::coordinates::FileOffset::new(
+                                view.written_text().map_or(view.source.len(), str::len),
+                            )
+                        });
+                    Some(cpp_parser::SourceRange::new(
+                        start.get(),
+                        end.get().saturating_sub(start.get()),
+                    ))
+                })
+                .collect::<Option<Vec<_>>>()?;
+
+            answered.push(chain_of(held, &in_the_file)?);
         }
 
         Some(answered)
@@ -131,7 +176,7 @@ mod tests {
         let view = session.view("/p/a.cpp").expect("the file is held");
         let file = session.files().held("/p/a.cpp").expect("held");
 
-        let chain = view.selection_chain(source.find('1').expect("the fixture has one"));
+        let chain = view.selection_chain(cpp_code_analysis::file::coordinates::ReadingOffset::new(source.find('1').expect("the fixture has one")));
         assert!(chain.len() >= 3, "the fixture has several rungs: {chain:?}");
 
         let nested = chain_of(file, &chain).expect("every rung is a place in the file");

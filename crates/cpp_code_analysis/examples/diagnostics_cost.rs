@@ -89,10 +89,11 @@ fn main() {
         println!(
             "  #{attempt}: {:>7} ms | reading {} | {} parse error(s), {} check(s), {} module note(s){}",
             took.as_millis(),
-            match answer.reading {
-                cpp_code_analysis::DiagnosticReading::Cooked => "cooked",
-                cpp_code_analysis::DiagnosticReading::Raw => "raw",
-            },
+            // **One reading, and it is the cooked one.** There was a Raw arm here - the file's own bytes, with
+            // macros unexpanded and untaken branches still in - and its variant is gone, because that answer was not a
+            // lesser one but an *untrue* one: an untaken branch is not compiled, so an error reported inside one is an
+            // error about a program that does not exist.
+            "cooked",
             answer.errors.len(),
             answer.checks.len(),
             answer.notes.len(),
@@ -160,3 +161,4 @@ fn main() {
         100.0 * (parse + scopes).as_secs_f64() / one_parse.as_secs_f64().max(f64::EPSILON)
     );
 }
+

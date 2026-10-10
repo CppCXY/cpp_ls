@@ -142,7 +142,7 @@ pub async fn on_references(
 pub fn locations<F: cpp_code_analysis::FileProvider + Clone>(
     session: &Session<F>,
     view: &cpp_code_analysis::FileView,
-    offset: usize,
+    offset: cpp_code_analysis::file::coordinates::ReadingOffset,
     include_declaration: bool,
 ) -> Option<Vec<Location>> {
     if session.pending() > 0 {
@@ -219,10 +219,10 @@ pub fn locations<F: cpp_code_analysis::FileProvider + Clone>(
 pub(super) fn macro_at<F: cpp_code_analysis::FileProvider + Clone>(
     session: &Session<F>,
     view: &cpp_code_analysis::FileView,
-    offset: usize,
+    offset: cpp_code_analysis::file::coordinates::ReadingOffset,
 ) -> Option<(String, cpp_parser::SourceRange)> {
     let (name, range) =
-        cpp_code_analysis::sema::resolve::name_at_including_directives(&view.root, offset)?;
+        cpp_code_analysis::sema::resolve::name_at_including_directives(&view.root, offset.get())?;
 
     match session.macro_definition(view, offset) {
         Known::Yes(_) => Some((name, range)),
@@ -286,7 +286,7 @@ mod tests {
 
         assert!(session.pending() > 0, "the fixture is the refused state");
         assert_eq!(
-            locations(&session, &view, on_the_use, true),
+            locations(&session, &view, cpp_code_analysis::file::coordinates::ReadingOffset::new(on_the_use), true),
             None,
             "an answer now would be missing whatever the queued files use"
         );
@@ -296,7 +296,7 @@ mod tests {
 
         // The view is re-made, because indexing is what gives the file its summary — and the query reads the index.
         let view = session.view("/p/items.cpp").expect("the file is held");
-        let found = locations(&session, &view, on_the_use, true).expect("the index is complete now");
+        let found = locations(&session, &view, cpp_code_analysis::file::coordinates::ReadingOffset::new(on_the_use), true).expect("the index is complete now");
         assert_eq!(
             found.len(),
             2,
@@ -309,7 +309,7 @@ mod tests {
             "including the file that defines it: {found:?}"
         );
         assert_eq!(
-            locations(&session, &view, on_the_use, false)
+            locations(&session, &view, cpp_code_analysis::file::coordinates::ReadingOffset::new(on_the_use), false)
                 .expect("complete")
                 .len(),
             1,
@@ -317,3 +317,10 @@ mod tests {
         );
     }
 }
+
+
+
+
+
+
+

@@ -264,7 +264,7 @@ fn main() {
             let inside_the_object = usize::from(access.object.text_range().end()).saturating_sub(1);
 
             // **The shipping path**: the type query the hover and the member query both stand on.
-            match session.type_at(&view, inside_the_object) {
+            match session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(inside_the_object)) {
                 Known::Yes(found) => {
                     typed += 1;
                     let class = class_of(&found.type_of);

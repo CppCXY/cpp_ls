@@ -22,7 +22,7 @@ fn chain_at(source: &str, offset: usize) -> Vec<(usize, String)> {
     session.load("/p/a.cpp");
     let view = session.view("/p/a.cpp").expect("the file is held");
 
-    view.selection_chain(offset)
+    view.selection_chain(cpp_code_analysis::file::coordinates::ReadingOffset::new(offset))
         .into_iter()
         .map(|range| {
             (
@@ -137,3 +137,4 @@ fn a_cursor_in_whitespace_starts_at_the_enclosing_construct() {
         "it is the declaration the blank line is between or the class that holds them: {chain:?}"
     );
 }
+

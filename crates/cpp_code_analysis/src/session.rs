@@ -76,6 +76,7 @@ use std::sync::{Arc, RwLock};
 use crate::include::config::{
     CompileCommands, CompilerConfig, project_config_from_flags,
 };
+use crate::file::coordinates::{FileOffset, ReadingOffset};
 use crate::file::paths::{DiskFiles, FileProvider, OverlayFiles, normalize_path};
 use crate::include::toolchain::{self, DiskCommands, Environment, Toolchain};
 use crate::file::view::{FileView, TokensOf};
@@ -4175,14 +4176,14 @@ impl<F: FileProvider + Clone> Session<F> {
     /// The *one* projection of [`Session::definitions`]: `Yes` only when the answer is a single declaration, so a
     /// consumer that can show only one location gets nothing rather than an arbitrary one. A client that can show a
     /// list — `textDocument/definition` — should ask that instead.
-    pub fn definition(&self, view: &FileView, offset: usize) -> Known<ProjectDefinition> {
+    pub fn definition(&self, view: &FileView, offset: ReadingOffset) -> Known<ProjectDefinition> {
         definition_across_files(
             self.store.index(),
             &mut |path| self.view(path),
             &view.scopes,
             &view.root,
             &view.path,
-            offset,
+            offset.get(),
         )
     }
 
@@ -4191,14 +4192,14 @@ impl<F: FileProvider + Clone> Session<F> {
     /// See [`crate::ProjectIndex::definitions`] for what the list means and why one namespace collapses to one
     /// entry. This is the query behind `textDocument/definition`: measured on one real file, **46** identifiers
     /// answered `Ambiguous` through the single-answer form, and every one of them had a usable list behind it.
-    pub fn definitions(&self, view: &FileView, offset: usize) -> Known<ProjectDefinitions> {
+    pub fn definitions(&self, view: &FileView, offset: ReadingOffset) -> Known<ProjectDefinitions> {
         definitions_across_files(
             self.store.index(),
             &mut |path| self.view(path),
             &view.scopes,
             &view.root,
             &view.path,
-            offset,
+            offset.get(),
         )
     }
 
@@ -4219,13 +4220,13 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn symbol_references(
         &self,
         view: &FileView,
-        offset: usize,
+        offset: ReadingOffset,
         budget: crate::ReferenceBudget,
     ) -> Known<crate::SymbolReferences> {
         let Known::Yes(found) = self.definitions(view, offset) else {
             // **Which name the cursor is on**, for the refusal's message: a caller that gets `NotDeclaredHere("")`
             // learns nothing, and the name is what a person would look up next.
-            let written = crate::sema::resolve::name_position_at(&view.root, offset)
+            let written = crate::sema::resolve::name_position_at(&view.root, offset.get())
                 .map(|name| name.written.clone())
                 .unwrap_or_default();
             return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from(written)));
@@ -4249,8 +4250,8 @@ impl<F: FileProvider + Clone> Session<F> {
     }
 
     /// Which `#define` or `#undef` settles the macro name at `offset`.
-    pub fn macro_definition(&self, view: &FileView, offset: usize) -> Known<ProjectMacro> {
-        macro_across_files(self.store.index(), &view.root, &view.path, offset)
+    pub fn macro_definition(&self, view: &FileView, offset: ReadingOffset) -> Known<ProjectMacro> {
+        macro_across_files(self.store.index(), &view.root, &view.path, offset.get())
     }
 
     /// **Where the `#include` under the cursor points** — the fourth answer a jump can give.
@@ -4264,8 +4265,8 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// The answer is the resolved path, from the same summary field the resolver wrote when the file was read, so
     /// this is a lookup rather than a second implementation of the search: see [`crate::header_at`].
-    pub fn header_at(&self, view: &FileView, offset: usize) -> Known<crate::HeaderTarget> {
-        crate::header_at(self.store.index(), &view.root, &view.path, offset)
+    pub fn header_at(&self, view: &FileView, offset: ReadingOffset) -> Known<crate::HeaderTarget> {
+        crate::header_at(self.store.index(), &view.root, &view.path, offset.get())
     }
 
     /// Everywhere the macro name written at `offset` is used, across the project — the query a rename starts from.
@@ -4284,11 +4285,11 @@ impl<F: FileProvider + Clone> Session<F> {
     /// A cursor on an ordinary identifier — a variable, a function — answers `Unknown(NotDeclaredHere)`, which says
     /// exactly what is true: nothing defines that name as a macro. This query is about macros, and references of a
     /// *name* need the scope of every candidate file, which is a parse per candidate rather than a lex.
-    pub fn macro_references(&self, view: &FileView, offset: usize) -> Known<MacroReferences> {
+    pub fn macro_references(&self, view: &FileView, offset: ReadingOffset) -> Known<MacroReferences> {
         // `name_at_including_directives` rather than `name_at`: the place a user asks this question is the name
         // itself, and half the time that name is written in a `#define` — which is tokens in a directive, not a
         // name node the scope walker sees.
-        let Some((name, _)) = crate::sema::resolve::name_at_including_directives(&view.root, offset) else {
+        let Some((name, _)) = crate::sema::resolve::name_at_including_directives(&view.root, offset.get()) else {
             return Known::Unknown(UnknownReason::UnparsableName);
         };
 
@@ -4301,19 +4302,19 @@ impl<F: FileProvider + Clone> Session<F> {
     }
 
     /// What to offer after a member access at `offset`: the object's type, its members, and the edit.
-    pub fn member_completions(&self, view: &FileView, offset: usize) -> Known<MemberCompletions> {
+    pub fn member_completions(&self, view: &FileView, offset: ReadingOffset) -> Known<MemberCompletions> {
         member_completions_at(
             self.store.index(),
             &mut |path| self.view(path),
             &view.scopes,
             &view.root,
             &view.path,
-            offset,
+            offset.get(),
         )
     }
 
     /// What to offer at a cursor with no member access: the scope's names, then the index's.
-    pub fn name_completions(&self, view: &FileView, offset: usize) -> Known<NameCompletions> {
+    pub fn name_completions(&self, view: &FileView, offset: FileOffset) -> Known<NameCompletions> {
         // **The cursor is a FILE offset; the tree is the RENDERING's.** These two coincided while a view was a parse
         // of the file's own text, so no caller had to know they were two things — and the moment `view` became the
         // reading a compiler is handed they stopped coinciding, by exactly the macro expansion. Measured on the
@@ -4335,7 +4336,7 @@ impl<F: FileProvider + Clone> Session<F> {
             &view.scopes,
             &view.root,
             &view.path,
-            offset,
+            offset.get(),
         )
     }
 
@@ -4367,7 +4368,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// The header index is **cloned** rather than borrowed — see [`Session::headers`] — and on a project the size of
     /// the latency fixture that clone measures **0 ms**, against 350–1270 ms for the query beside it while the index
     /// was filling. It is named here because it is the obvious suspect for a per-keystroke cost and it is not one.
-    pub fn completions(&self, view: &FileView, offset: usize) -> crate::CompletionSet {
+    pub fn completions(&self, view: &FileView, offset: FileOffset) -> crate::CompletionSet {
         // **The cursor is a FILE offset; the tree is the RENDERING's** — see [`Session::name_completions`], where the
         // full note is. A cursor that is not in the rendering has nothing to offer, and an empty set is the honest
         // answer rather than a list computed from the nearest position that *is* in it.
@@ -4389,7 +4390,7 @@ impl<F: FileProvider + Clone> Session<F> {
             &view.scopes,
             &view.root,
             &view.path,
-            offset,
+            offset.get(),
             &headers,
         )
     }
@@ -4430,7 +4431,27 @@ impl<F: FileProvider + Clone> Session<F> {
         offset: usize,
     ) -> Option<cpp_parser::CppDocComment> {
         if file == view.path {
-            return crate::file::view::documentation_at(&view.root, offset);
+            // **The file's own text, for exactly the reason the branch below parses another file's.**
+            //
+            // A rendering is what a compiler reads, and a compiler reads no comments: they are removed before the
+            // parse, so a `DocComment` node cannot exist in `view.root` and this lookup could only ever answer
+            // `None` for a documented declaration. Measured: `Bad offset: range 0..6 offset 9` on
+            // `"/// Doc.\nint x;\n"`, whose rendering is the six bytes of `int x;` — the comment *and* its line are
+            // gone, so the offset a caller has (the file's) is past the tree as well as beside the comment.
+            //
+            // The other file's branch already accepts this price — "a parse per question is the honest price of not
+            // caching a tree per file" — and the current file is the one a person is most likely to hover, so the
+            // same price is paid here rather than a different answer being given for it. `might_be_documented` is
+            // asked first for the same reason it is asked there: a declaration with nothing above it costs no parse.
+            let Some(written) = view.written_text() else {
+                // No rendering: this view *is* a parse of the file's own text, and its comments are its own nodes.
+                return crate::file::view::documentation_at(&view.root, offset);
+            };
+            if !crate::file::view::might_be_documented(written, offset) {
+                return None;
+            }
+            let tree = cpp_parser::CppParser::parse(written, cpp_parser::ParserConfig::default());
+            return crate::file::view::documentation_at(&tree.get_red_root(), offset);
         }
 
         let declared_in = self.vfs.held(file)?;
@@ -4462,8 +4483,8 @@ impl<F: FileProvider + Clone> Session<F> {
     /// The **innermost** one containing the offset ([`crate::sema::resolve::expression_at`]), so a cursor on
     /// `this` in `this->size` asks about `this`. A cursor in whitespace inside a statement is in no expression, and
     /// that is also the honest answer.
-    pub fn type_at(&self, view: &FileView, offset: usize) -> Known<ExpressionType> {
-        let Some(expression) = crate::sema::resolve::expression_at(&view.root, offset) else {
+    pub fn type_at(&self, view: &FileView, offset: ReadingOffset) -> Known<ExpressionType> {
+        let Some(expression) = crate::sema::resolve::expression_at(&view.root, offset.get()) else {
             return Known::No;
         };
 
@@ -4533,7 +4554,26 @@ impl<F: FileProvider + Clone> Session<F> {
     /// and a declaration in a branch nobody takes is a region like any other. Nothing here consults the index, the
     /// cooked reading, or any other file — a fold is a fact about this text.
     pub fn folding_ranges(&self, view: &FileView) -> Vec<crate::folding::Fold> {
-        crate::folding::folding_ranges(&view.source, view.tree.get_tokens())
+        // **The file in front of the reader, which is not the text this view parses any more.**
+        //
+        // The promise above — "the buffer's own tokens and directives" — was free while a view *was* the file's own
+        // text: `view.source` and the written text were one string. They stopped being one when the raw parse was
+        // deleted and a view became the compiler's reading, and this function was left reading the wrong one. A
+        // rendering has no `#include` line, no comment and no `#if` region in it — those are what a preprocessor
+        // removes — and it usually has fewer line breaks, so any fold it could still see is thrown away by the rule
+        // that a region on one line hides nothing. Measured over the wire: `textDocument/foldingRange` on a
+        // four-region fixture answered **`[]`**.
+        //
+        // Folding is a question about *layout* rather than about meaning — where the braces are, which lines a
+        // comment covers, where an `#if` closes — so reading the file's own text is not the "semantic view of
+        // unexpanded C++" that was deliberately removed; it is the only text those regions exist in. The lexer runs
+        // here rather than being kept because only this query wants these tokens, and only when a client asks.
+        let Some(written) = view.written_text() else {
+            // No rendering: this view *is* the file's own text, and its tokens are already the right ones.
+            return crate::folding::folding_ranges(&view.source, view.tree.get_tokens());
+        };
+        let (tokens, _) = cpp_parser::lex(written, &cpp_parser::LexerConfig::default());
+        crate::folding::folding_ranges(written, &tokens)
     }
 
     /// **The signatures of the call the cursor is inside** — see [`crate::signature`].
@@ -4551,10 +4591,14 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn signatures_at(
         &self,
         view: &FileView,
-        offset: usize,
+        offset: ReadingOffset,
     ) -> Vec<crate::signature::CallSignature> {
-        let mut signatures =
-            crate::signature::signatures_at(self.store.index(), view, offset, |path| self.view(path));
+        let mut signatures = crate::signature::signatures_at(
+            self.store.index(),
+            view,
+            offset.get(),
+            |path| self.view(path),
+        );
 
         for signature in &mut signatures {
             signature.documentation =
@@ -5417,10 +5461,11 @@ mod tests {
     use super::{OpenDocuments, Session, SessionFiles, queue_key};
     use crate::include::config::{CommandLineMacro, CompilerConfig};
     use crate::include::toolchain::{Toolchain, ToolchainSource};
-    use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
+    use crate::file::coordinates::{FileOffset, ReadingOffset};
+use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
     use crate::index::watch::{FileEvent, WatchFilter};
     use crate::index::{Priority, StepOutcome};
-    use crate::symbol::{Known, UnknownReason};
+    use crate::symbol::Known;
     use std::path::{Path, PathBuf};
 
     /// A project in memory: the files, the buffers in front of them, and the providers that join the two.
@@ -6624,7 +6669,7 @@ mod tests {
         let view = session.view("/p/main.cpp").expect("the file reads");
         let at = view.source.find("Widget w").expect("the use is in the text");
 
-        match session.definition(&view, at) {
+        match session.definition(&view, ReadingOffset::new(at)) {
             Known::Yes(found) => {
                 assert_eq!(found.file, Path::new("/p/widget.h"));
                 assert_eq!(found.fact.name, "Widget");
@@ -6668,7 +6713,7 @@ mod tests {
         let view = session.view("/p/main.cpp").expect("the file reads");
         let at = view.source.find("Widget w").expect("the use is in the text");
         assert!(
-            matches!(session.definition(&view, at), Known::Yes(found) if found.file == Path::new("/p/widget.h")),
+            matches!(session.definition(&view, ReadingOffset::new(at)), Known::Yes(found) if found.file == Path::new("/p/widget.h")),
             "a buffer no file has answers as the declaration's file"
         );
     }
@@ -7013,7 +7058,7 @@ mod tests {
 
         assert!(session.is_idle());
         assert!(
-            matches!(session.definition(&view, at), Known::Yes(found) if found.file == Path::new("/p/widget.h")),
+            matches!(session.definition(&view, ReadingOffset::new(at)), Known::Yes(found) if found.file == Path::new("/p/widget.h")),
             "the same question, answered once the file has been read"
         );
     }
@@ -7039,7 +7084,7 @@ mod tests {
             .expect("the use is in the text");
         assert_eq!(
             tokens.offset_at(1, 11),
-            Some(at),
+            Some(ReadingOffset::new(at)),
             "line 1, column 11 is where `in_buffer` is written on the second line"
         );
         assert_eq!(tokens.offset_at(99, 0), None, "a line past the end is not an offset");
@@ -7053,7 +7098,7 @@ mod tests {
 
         // And the file's own scope answers the query, with no index involved at all.
         assert!(
-            matches!(session.definition(&view, at), Known::Yes(found) if found.file == Path::new("/p/a.cpp")),
+            matches!(session.definition(&view, ReadingOffset::new(at)), Known::Yes(found) if found.file == Path::new("/p/a.cpp")),
             "a local declaration is resolved by the file's scopes"
         );
 
@@ -7083,18 +7128,18 @@ mod tests {
         let view = session.tokens_of("/p/a.cpp").expect("the file reads");
         let at = view.source.find("x = 1").expect("the statement is in the text");
         assert_eq!(
-            view.position_at(at),
+            view.position_at(ReadingOffset::new(at)),
             Some((1, 4)),
             "the offset of `x` is line 1, column 4"
         );
 
         // The round trip in both directions, on the line with the two-byte character.
-        let (line, column) = view.position_at(at).expect("the offset is in the file");
-        assert_eq!(view.offset_at(line, column), Some(at));
+        let (line, column) = view.position_at(ReadingOffset::new(at)).expect("the offset is in the file");
+        assert_eq!(view.offset_at(line, column), Some(ReadingOffset::new(at)));
 
         let comment = view.source.find('é').expect("the character is in the text");
         assert_eq!(
-            view.position_at(comment),
+            view.position_at(ReadingOffset::new(comment)),
             Some((0, 3)),
             "a character counts as one column, whatever it costs in bytes"
         );
@@ -7102,15 +7147,15 @@ mod tests {
         // And a CRLF file is one line break, not two: the `\r` is part of line 0, so line 1 starts after it.
         let crlf = session.tokens_of("/p/crlf.cpp").expect("the file reads");
         let second = crlf.source.find("int b").expect("the second line is in the text");
-        assert_eq!(crlf.position_at(second), Some((1, 0)));
+        assert_eq!(crlf.position_at(ReadingOffset::new(second)), Some((1, 0)));
         assert_eq!(
-            crlf.position_at(crlf.source.len()),
+            crlf.position_at(ReadingOffset::new(crlf.source.len())),
             Some((2, 0)),
             "the end of the text is a position: it is where a range at EOF sits"
         );
 
         assert_eq!(
-            crlf.position_at(crlf.source.len() + 1),
+            crlf.position_at(ReadingOffset::new(crlf.source.len() + 1)),
             None,
             "an offset past the end is not a position"
         );
@@ -7660,7 +7705,7 @@ mod tests {
         session.advance(64);
 
         let path = project.root.join("main.cpp");
-        let source = std::fs::read_to_string(&path).expect("the fixture reads");
+        let _source = std::fs::read_to_string(&path).expect("the fixture reads");
 
         // **The asking side, which is how a project nobody has opened gets read.**
         //
@@ -7752,6 +7797,19 @@ mod tests {
         );
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

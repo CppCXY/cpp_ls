@@ -128,10 +128,10 @@ fn visible_range(
     range: lsp_types::Range,
 ) -> Option<cpp_parser::SourceRange> {
     let len = view.source.len();
-    let start = offset_at_position(view, range.start).unwrap_or(len);
-    let end = offset_at_position(view, range.end).unwrap_or(len);
+    let start = offset_at_position(view, range.start).unwrap_or(cpp_code_analysis::file::coordinates::ReadingOffset::new(len));
+    let end = offset_at_position(view, range.end).unwrap_or(cpp_code_analysis::file::coordinates::ReadingOffset::new(len));
 
-    (start <= end).then(|| cpp_parser::SourceRange::new(start, end - start))
+    (start <= end).then(|| cpp_parser::SourceRange::new(start.get(), end.get() - start.get()))
 }
 
 /// One hint, as the protocol's position and label — or `None` when the position cannot be placed.
@@ -236,3 +236,5 @@ mod tests {
         );
     }
 }
+
+

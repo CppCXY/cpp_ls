@@ -188,5 +188,9 @@ impl FileAnalysis {
 // `token` is the token of the *expanded* stream — the one that knows which macro produced it.
 pub mod paths;
 pub mod token;
+pub mod coordinates;
 pub mod view;
 pub mod vfs;
+
+
+

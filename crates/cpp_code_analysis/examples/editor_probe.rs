@@ -175,10 +175,9 @@ fn main() {
         session.advance(4);
         let built = session.view(&file).map(|view| count(&view));
 
-        // **The eager reading, for the comparison that says whether the environment does anything at all.** If
-        // this equals `built`, the difference between the two readings is not the *timing* of the environment —
-        // it is that the environment changes no scope, and the reason has to be looked for somewhere else.
-        let eager = session.view_with_macros(&file).map(|view| count(&view));
+        // **There was an eager reading here and there is not one any more**: a view of the file's own tokens with
+        // only the closure's macro bodies supplied, which went with the raw parse - see `Session::view_of_the_file`.
+        // A probe that kept measuring it would print numbers that look comparable and are not.
 
         // **Why the numbers above are what they are**, when they are the same number twice. The three facts that
         // decide it are not visible from outside, and reading them out is cheaper than reasoning about which of
@@ -196,7 +195,6 @@ fn main() {
         };
         show("asked", asked);
         show("built", built);
-        show("eager", eager);
         // **The raw reading's own parse errors**, which is the diagnostic this section was missing: the numbers
         // above say *that* a reading stopped early, and only the errors say **where** and **on what**. A file whose
         // cooked reading is clean can still have a raw reading that gives up at line 279 of 6000, and the two are
@@ -756,12 +754,12 @@ fn main() {
         // file pays the walk over its closure, and every query after it should pay a lookup. An average says
         // neither — it read `21.75 ms` here, which is neither the walk nor the lookup but the two divided by five.
         let cold = std::time::Instant::now();
-        let _ = session.view_with_macros(&file);
+        let _ = session.view(&file);
         let cold = cold.elapsed();
 
         let warm = std::time::Instant::now();
         for _ in 0..rounds {
-            let _ = session.view_with_macros(&file);
+            let _ = session.view(&file);
         }
         let warm = warm.elapsed() / rounds;
 
@@ -853,7 +851,7 @@ fn main() {
             println!("{what:<14} (the probe's own line is not in the file)");
             continue;
         };
-        let found = session.completions(&view, offset);
+        let found = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset));
         let labels: Vec<&str> = found.items.iter().map(|item| item.label.as_str()).collect();
         println!(
             "{what:<14} scope {:?} | {} item(s), truncated {}",
@@ -902,7 +900,7 @@ fn main() {
     if let Some(view) = prefixed.view(&file)
         && let Some(offset) = typed.find("std::str").map(|at| at + "std::str".len())
     {
-        let found = prefixed.completions(&view, offset);
+        let found = prefixed.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset));
         let labels: Vec<&str> = found.items.iter().map(|item| item.label.as_str()).collect();
         println!(
             "std::str      scope {:?} prefix {:?} | {} item(s), truncated {}",
@@ -937,7 +935,7 @@ fn main() {
         ("`size_type` in `std::string::size_type`", "std::string::size_type", "std::string::".len()),
     ] {
         let Some(offset) = after(needle, skip) else { continue };
-        let answer = session.type_at(&view, offset);
+        let answer = session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset));
         println!("{what:<40} {answer:?}");
     }
 
@@ -952,7 +950,7 @@ fn main() {
     // the work.
     // ---------------------------------------------------------------------------------------------
     if let Some(back) = after("auto y = x.back", "auto y = x.".len())
-        && let Known::Yes(declaring) = session.type_at(&view, back)
+        && let Known::Yes(declaring) = session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(back))
     {
         println!("\n--- after cooking {} ---", declaring.file.display());
         session.want_cooked_reading(&declaring.file);
@@ -963,9 +961,9 @@ fn main() {
         }
 
         if let Some(y) = after("auto y", "auto ".len()) {
-            println!("the `y` of `auto y`   {:?}", session.type_at(&view, y));
+            println!("the `y` of `auto y`   {:?}", session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(y)));
         }
-        println!("`back` in the call    {:?}", session.type_at(&view, back));
+        println!("`back` in the call    {:?}", session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(back)));
 
         // **What the two readings of that header say about `back`**, because "the cook did not change the answer"
         // has two causes: the cooked reading does not exist (the cook did not run), or it exists and spells the
@@ -999,9 +997,9 @@ fn main() {
     if let Some(offset) = after("std::format(\"{}\"", "std::".len()) {
         println!(
             "definition(std::format) = {:?}",
-            session.definition(&view, offset).value().map(|found| found.fact.qualified_name())
+            session.definition(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)).value().map(|found| found.fact.qualified_name())
         );
-        match session.definitions(&view, offset) {
+        match session.definitions(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)) {
             Known::Yes(found) => {
                 println!("definitions: {} declaration(s)", found.found.len());
                 for declaration in &found.found {
@@ -1024,7 +1022,7 @@ fn main() {
     // ---------------------------------------------------------------------------------------------
     println!("\n--- signature ---");
     if let Some(offset) = after("std::format(\"{}\"", "std::format(".len() + 1) {
-        let signatures = session.signatures_at(&view, offset);
+        let signatures = session.signatures_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset));
         if signatures.is_empty() {
             println!("**no signature** for a call inside `std::format(...)`");
         }
@@ -1042,10 +1040,15 @@ fn main() {
     // …and the same question about a **member** call: `s.append(` is where an overload set is the difference between
     // a popup that lists what the reader can write and one that shows whichever overload happened to be picked.
     if let Some(offset) = after("s.append(\"x\"", "s.append(".len() + 1) {
-        let signatures = session.signatures_at(&view, offset);
+        let signatures = session.signatures_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset));
         println!("s.append( → {} signature(s)", signatures.len());
         for signature in signatures.iter().take(12) {
             println!("   {}", signature.label);
         }
     }
 }
+
+
+
+
+

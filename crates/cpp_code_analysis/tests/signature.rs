@@ -23,7 +23,12 @@ fn session_with(files: &[(&str, &str)]) -> Session<MemoryFiles> {
         CompilerConfig::default(),
     );
     session.add_project_files(files.iter().map(|(path, _)| std::path::PathBuf::from(*path)));
-    session.index_everything();
+
+    // **The ask, and then the pump** - see `tests/completion.rs`'s `cooked_view`. A view is of the file's *cooked
+    // reading*, and a rendering is built because something asked for it.
+    for (path, _) in files {
+        session.want_cooked_reading(std::path::Path::new(path));
+    }    session.index_everything();
 
     session
 }
@@ -43,7 +48,7 @@ fn signature_where_marked(source: &str) -> (String, Option<CallSignature>) {
     let session = session_with(&[("/p/a.cpp", &without_marker)]);
     let view = session.view("/p/a.cpp").expect("the file is held");
 
-    (without_marker, session.signatures_at(&view, offset).into_iter().next())
+    (without_marker, session.signatures_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)).into_iter().next())
 }
 
 /// The label at the cursor, and the text each declared span points at.
@@ -138,7 +143,7 @@ fn a_callee_in_another_file_reports_its_signature() {
     let session = session_with(&[("/p/a.cpp", &without_marker), ("/p/b.h", header)]);
     let view = session.view("/p/a.cpp").expect("the file is held");
     let signature = session
-        .signatures_at(&view, offset)
+        .signatures_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset))
         .into_iter()
         .next()
         .expect("the header declares the callee");
@@ -166,7 +171,7 @@ int f() { return scale(1, |); }
 
     let session = session_with(&[("/p/a.cpp", &without_marker)]);
     let view = session.view("/p/a.cpp").expect("the file is held");
-    let signatures = session.signatures_at(&view, offset);
+    let signatures = session.signatures_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset));
 
     let labels: Vec<&str> = signatures.iter().map(|found| found.label.as_str()).collect();
     assert_eq!(
@@ -206,7 +211,7 @@ int f(Widget& w) { return w.scaled(|); }
 
     let session = session_with(&[("/p/a.cpp", &without_marker)]);
     let view = session.view("/p/a.cpp").expect("the file is held");
-    let signatures = session.signatures_at(&view, offset);
+    let signatures = session.signatures_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset));
 
     let labels: Vec<&str> = signatures.iter().map(|found| found.label.as_str()).collect();
     assert_eq!(
@@ -229,7 +234,7 @@ int f(Widget& w) { return w.scaled(|); }
 
     let session = session_with(&[("/p/a.cpp", &without_marker)]);
     let view = session.view("/p/a.cpp").expect("the file is held");
-    let signatures = session.signatures_at(&view, offset);
+    let signatures = session.signatures_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset));
 
     assert_eq!(
         signatures.iter().map(|found| found.label.as_str()).collect::<Vec<_>>(),
@@ -267,7 +272,7 @@ fn overloads_in_one_header_are_read_from_it_once() {
 
     let session = session_with(&[("/p/a.cpp", &without_marker), ("/p/b.h", header)]);
     let view = session.view("/p/a.cpp").expect("the file is held");
-    let signatures = session.signatures_at(&view, offset);
+    let signatures = session.signatures_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset));
 
     assert_eq!(signatures.len(), 2);
     assert!(
@@ -321,3 +326,6 @@ fn an_empty_argument_list_is_answered() {
     assert_eq!(label, "make(int count)");
     assert_eq!(active, Some(0));
 }
+
+
+

@@ -25,7 +25,12 @@ fn session_with(files: &[(&str, &str)]) -> Session<MemoryFiles> {
         CompilerConfig::default(),
     );
     session.add_project_files(files.iter().map(|(path, _)| std::path::PathBuf::from(*path)));
-    session.index_everything();
+
+    // **The ask, and then the pump** - see `tests/completion.rs`'s `cooked_view`. A view is of the file's *cooked
+    // reading*, and a rendering is built because something asked for it.
+    for (path, _) in files {
+        session.want_cooked_reading(std::path::Path::new(path));
+    }    session.index_everything();
 
     session
 }
@@ -947,7 +952,7 @@ fn a_template_parameter_takes_the_type_of_the_argument() {
             .find(|fact| fact.name == name && fact.type_of.as_deref() == Some("auto"))
             .unwrap_or_else(|| panic!("`{name}` is an `auto` the file writes"));
         let offset = fact.name_range.start_offset;
-        match session.type_at(&view, offset) {
+        match session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)) {
             cpp_code_analysis::Known::Yes(type_of) => type_of.type_of.clone(),
             other => panic!("`{name}` has a type the file gives: {other:?}"),
         }
@@ -1353,16 +1358,16 @@ fn a_view_of_the_rendering_has_no_macros_left_to_guess_about() {
         .find("struct thing")
         .expect("the rendering has the declaration");
     let in_the_file = view
-        .file_offset_of(at_struct)
+        .file_offset_of(cpp_code_analysis::file::coordinates::ReadingOffset::new(at_struct))
         .expect("a position in the rendering is a position in the file");
 
     let written = view
         .written_text()
         .expect("a view of a rendering holds the file's own text");
     assert!(
-        written[in_the_file..].starts_with("struct thing"),
+        written[in_the_file.get()..].starts_with("struct thing"),
         "the mapping points at the same spelling: file offset {in_the_file} is `{}`",
-        &written[in_the_file..(in_the_file + 12).min(written.len())]
+        &written[in_the_file.get()..(in_the_file.get() + 12).min(written.len())]
     );
     assert!(
         written.contains("_MY_BEGIN"),
@@ -1487,7 +1492,7 @@ fn a_conditional_has_the_type_its_arms_agree_on() {
             .iter()
             .find(|fact| fact.name == name && fact.type_of.as_deref() == Some("auto"))
             .unwrap_or_else(|| panic!("`{name}` is an `auto` the file writes"));
-        match session.type_at(&view, fact.name_range.start_offset) {
+        match session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(fact.name_range.start_offset)) {
             cpp_code_analysis::Known::Yes(type_of) => type_of.type_of.clone(),
             other => panic!("`{name}` has a type the file gives: {other:?}"),
         }
@@ -1502,7 +1507,7 @@ fn a_conditional_has_the_type_its_arms_agree_on() {
         .expect("`from_mixed` is an `auto` the file writes");
     assert!(
         !matches!(
-            session.type_at(&view, mixed.name_range.start_offset),
+            session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(mixed.name_range.start_offset)),
             cpp_code_analysis::Known::Yes(_)
         ),
         "the arms disagree, so the conversion decides — and this layer does not rank conversions"
@@ -1553,3 +1558,7 @@ fn a_modifier_is_read_from_the_declarations_own_specifiers() {
         "a type is not readonly and not static — a modifier that cannot be true is a visible wrong claim"
     );
 }
+
+
+
+

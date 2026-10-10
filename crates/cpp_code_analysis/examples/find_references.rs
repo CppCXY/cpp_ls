@@ -272,7 +272,7 @@ fn main() {
     let view = session.view(&main_file).expect("the buffer is the text");
     let at = view.source.find("WIDGET_API").expect("the use is there");
 
-    match session.macro_references(&view, at) {
+    match session.macro_references(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(at)) {
         Known::Yes(found) => println!(
             "\ncursor on `WIDGET_API` — the project's own macro, in a buffer that was never saved:\n  {} \
              references in {} files: {} defines, {} uses, {} uncertain; a rename edits {} places\n  {}",
@@ -292,7 +292,7 @@ fn main() {
 
     println!(
         "  the same question with the cursor on the `#define` in widget.h: {}",
-        match session.macro_references(&header, definition) {
+        match session.macro_references(&header, cpp_code_analysis::file::coordinates::ReadingOffset::new(definition)) {
             Known::Yes(found) => format!("{} references", found.total()),
             other => format!("{other:?}"),
         }

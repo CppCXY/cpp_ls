@@ -1239,7 +1239,7 @@ fn a_names_imported_from_the_standard_module_are_offered_after_the_scope() {
     // when the popup appears. The offset is found from the text rather than written as a number, because a fixture
     // edited above must not silently move the question.
     let after_the_scope = main.find("std::").expect("the fixture writes `std::`") + "std::".len();
-    let found = session.completions(&view, after_the_scope);
+    let found = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(after_the_scope));
 
     let labels: Vec<&str> = found.items.iter().map(|item| item.label.as_str()).collect();
 

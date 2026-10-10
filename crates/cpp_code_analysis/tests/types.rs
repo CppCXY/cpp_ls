@@ -24,7 +24,12 @@ fn session_with(files: &[(&str, &str)]) -> Session<MemoryFiles> {
         CompilerConfig::default(),
     );
     session.add_project_files(files.iter().map(|(path, _)| std::path::PathBuf::from(*path)));
-    session.index_everything();
+
+    // **The ask, and then the pump** - see `tests/completion.rs`'s `cooked_view`. A view is of the file's *cooked
+    // reading*, and a rendering is built because something asked for it.
+    for (path, _) in files {
+        session.want_cooked_reading(std::path::Path::new(path));
+    }    session.index_everything();
 
     session
 }
@@ -39,7 +44,7 @@ fn type_of_use(source: &str, spelling: &str) -> Option<String> {
     let view = session.view("/p/a.cpp").expect("the file is held");
     let offset = last_word(source, spelling);
 
-    match session.type_at(&view, offset) {
+    match session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)) {
         cpp_code_analysis::Known::Yes(found) => Some(found.type_of),
         _ => None,
     }
@@ -281,7 +286,7 @@ fn an_auto_declaration_in_another_file_is_refused() {
     let view = session.view("/p/a.cpp").expect("the file is held");
     let offset = last_word(source, "measured");
 
-    match session.type_at(&view, offset) {
+    match session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)) {
         cpp_code_analysis::Known::Yes(found) => assert_ne!(
             found.type_of, "auto",
             "the placeholder is never reported as a type"
@@ -307,7 +312,7 @@ int f() {
     let view = session.view("/p/a.cpp").expect("the file is held");
     let offset = source.rfind("w.").expect("the fixture writes the access") + 2;
 
-    match session.member_completions(&view, offset) {
+    match session.member_completions(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)) {
         cpp_code_analysis::Known::Yes(found) => {
             let names: Vec<String> = found
                 .members
@@ -409,7 +414,7 @@ fn type_of_use_in(session: &Session<MemoryFiles>, path: &str, source: &str, spel
     let view = session.view(path).expect("the file is held");
     let offset = last_word(source, spelling) + spelling.len() - 1;
 
-    match session.type_at(&view, offset) {
+    match session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)) {
         cpp_code_analysis::Known::Yes(found) => Some(found.type_of),
         _ => None,
     }
@@ -762,3 +767,4 @@ int f() { return 0; }
         "the innermost template is the one that introduces the class"
     );
 }
+

@@ -25,7 +25,12 @@ fn session_with(files: &[(&str, &str)]) -> Session<MemoryFiles> {
         CompilerConfig::default(),
     );
     session.add_project_files(files.iter().map(|(path, _)| std::path::PathBuf::from(*path)));
-    session.index_everything();
+
+    // **The ask, and then the pump** - see `tests/completion.rs`'s `cooked_view`. A view is of the file's *cooked
+    // reading*, and a rendering is built because something asked for it.
+    for (path, _) in files {
+        session.want_cooked_reading(std::path::Path::new(path));
+    }    session.index_everything();
 
     session
 }
@@ -287,7 +292,7 @@ fn a_declaration_the_scope_model_does_not_bind_is_not_hinted() {
 
     assert!(
         matches!(
-            session.definition(&view, source.rfind("f(1)").expect("the call")),
+            session.definition(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(source.rfind("f(1)").expect("the call"))),
             cpp_code_analysis::Known::Unknown(_)
         ),
         "this declaration shape is not bound, so nothing resolves the call"
@@ -320,3 +325,4 @@ void h(int (*cb)(int a)) {
 fn a_call_with_no_arguments_has_no_hints() {
     assert!(hints_of("int f();\nint g() { return f(); }\n").is_empty());
 }
+
