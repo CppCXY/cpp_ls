@@ -2435,7 +2435,19 @@ impl<F: FileProvider + Clone> Session<F> {
     /// and the diagnostics channel's `isIncomplete` are how a caller states that, and the alternative is not
     /// "an answer sooner" — it is "a wrong answer sooner".
     pub fn view(&self, path: impl AsRef<Path>) -> Option<FileView> {
-        let file = self.vfs.held(path)?;
+        // **The index's own spelling of the path, not the caller's.** A client sends `C:\…`, the resolver wrote
+        // `c:/…`, and the rendering cache is keyed by *the index's* spelling — so a lookup by the caller's finds
+        // nothing, and the miss is indistinguishable from "this file was never cooked". The same rule
+        // [`Session::diagnostics`] and [`Session::cook`] already apply, for the same reason; it was missing here,
+        // which is why a view could answer `None` for a file whose rendering was in the cache.
+        let requested = path.as_ref();
+        let key = self
+            .store
+            .index()
+            .summary(requested)
+            .map(|summary| summary.path.clone())
+            .unwrap_or_else(|| requested.to_path_buf());
+        let file = self.vfs.held(&key)?;
 
         // **The rendering, or a request for it — never the file's own tokens.**
         //
@@ -2503,7 +2515,11 @@ impl<F: FileProvider + Clone> Session<F> {
     /// read it as "no such file" — [`Session::is_indexed`] and [`Session::pending_cooking`] are how those are told
     /// apart.
     pub fn view_of_the_file(&self, path: impl AsRef<Path>) -> Option<FileView> {
-        let file = self.vfs.held(path)?;
+        // **Held the way the VFS holds it, and asked for it the same way.** The VFS normalizes a path on the way in
+        // and on the way out, so a lookup by a caller's spelling finds the file; the *queue* is keyed the same, so
+        // the request below names the file the session will actually cook.
+        let requested = path.as_ref();
+        let file = self.vfs.held(requested)?;
         // Queue it exactly as `view` does, so that asking twice is a request rather than a wait.
         if let Ok(mut work) = self.macro_work.lock() {
             work.want(&file.path);
@@ -6596,6 +6612,11 @@ mod tests {
             "the summary was dropped, so this is a parse and not a cache hit"
         );
 
+        // **The pump to the end, because the question is semantic.** `advance` reads files into the index and
+        // `Pending` returned here is a *cook* — so a view needs the loop that runs the cook as well, and
+        // `advance` alone never takes it. The assertions above are about the queue and stay about the queue; this
+        // one is about the members a class has, which is a claim about meaning and needs a rendering.
+        session.index_everything();
         let view = session.view("/p/widget.h").expect("the file reads");
         match session.members_of(&view, "Widget") {
             Known::Yes(members) => {
@@ -6882,21 +6903,22 @@ mod tests {
 
         session.add_project_files([PathBuf::from("/p/main.cpp")]);
 
-        // The file is loaded but **not indexed**: a view is of the text the session holds, while the *index* is what
-        // this test is about — reading it would take the queue step it goes on to assert.
+        // The file is loaded but **not indexed**: the *index* is what this test is about, and reading it would take
+        // the queue step it goes on to assert.
         session.load("/p/main.cpp");
 
-        let view = session.view("/p/main.cpp").expect("the file reads");
-        let at = view.source.find("Widget w").expect("the use is in the text");
-
-        assert_eq!(
-            session.definition(&view, at),
-            Known::Unknown(UnknownReason::NotDeclaredHere(Box::from("Widget")))
+        // **And there is no view yet, which is now a state a caller has to handle rather than an implementation
+        // detail.** The file has been read neither by the index nor as a compiler would, so a semantic question has
+        // no reading to be answered from — and the two ways of saying "not yet" are both here: `view` answers
+        // `None` and does not queue, because nothing has asked for a rendering of it.
+        assert!(
+            session.view("/p/main.cpp").is_none(),
+            "a file nothing has read as a compiler reads it has no semantic view"
         );
-        assert!(!session.is_indexed("/p/widget.h"));
-        assert_eq!(session.pending(), 1, "and the queue is why the answer is what it is");
 
         session.index_everything();
+        let view = session.view("/p/main.cpp").expect("the pump has read it");
+        let at = view.source.find("Widget w").expect("the use is in the text");
 
         assert!(session.is_idle());
         assert!(
@@ -6907,29 +6929,36 @@ mod tests {
 
     #[test]
     fn a_view_is_the_buffer_parsed_and_maps_a_position_onto_an_offset() {
-        // What a request needs from a session before it can ask anything: the file's own scopes, from the buffer,
-        // and a mapping from the line and column a client sends to the byte offset a query takes.
+        // **Two questions that used to share one answer, and no longer do.** A position is a question about bytes
+        // and a definition is a question about meaning; the first is available as soon as the file is held, and the
+        // second needs the file read the way a compiler reads it. This test is the pair, side by side.
         let files = MemoryFiles::new().with_file("/p/a.cpp", "int on_disk;\nvoid f() { on_disk = 1; }\n");
         let fixture = Memory::new("view", &files);
         let mut session = fixture.session();
 
         session.did_open("/p/a.cpp", "int in_buffer;\nvoid f() { in_buffer = 1; }\n");
 
-        let view = session.view("/p/a.cpp").expect("the buffer is the text");
-        assert!(view.open, "the view says which of the two texts it read");
-        assert!(view.errors().is_empty());
-
-        let at = view.source.find("in_buffer = 1").expect("the use is in the text");
+        // **The position, with no reading at all.** `tokens_of` is of the buffer — `load` was not needed and no cook
+        // was waited for — and it says which of the two texts it read, which is what a client's offsets are in.
+        let tokens = session.tokens_of("/p/a.cpp").expect("the buffer is held");
+        assert!(tokens.open, "the reading says which of the two texts it read");
+        let at = tokens
+            .source
+            .find("in_buffer = 1")
+            .expect("the use is in the text");
         assert_eq!(
-            view.offset_at(1, 11),
+            tokens.offset_at(1, 11),
             Some(at),
             "line 1, column 11 is where `in_buffer` is written on the second line"
         );
-        assert_eq!(
-            view.offset_at(99, 0),
-            None,
-            "a line past the end is not an offset"
-        );
+        assert_eq!(tokens.offset_at(99, 0), None, "a line past the end is not an offset");
+
+        // **The meaning, after a cook, and it is the buffer's.** The file's own scope answers the query with no index
+        // involved at all — and it answers about `in_buffer`, which exists only in the buffer.
+        session.index_everything();
+        let view = session.view("/p/a.cpp").expect("the pump has read it");
+        assert!(view.source.contains("in_buffer"), "the reading is the buffer's");
+        let at = view.source.find("in_buffer = 1").expect("the use is in the text");
 
         // And the file's own scope answers the query, with no index involved at all.
         assert!(
@@ -7536,8 +7565,12 @@ mod tests {
         let providers = SessionFiles::new(documents, DiskFiles);
         let mut session = Session::open(&project.root, providers.clone(), WatchFilter::new(&project.root));
 
-        // Both files, because the closure of `main.cpp` is what the query walks.
+        // **Both files, because the closure of `main.cpp` is what the query walks — and the pump, because the
+        // question below is about what a macro means.** `advance` reads files and never cooks, so a view asked for
+        // after it alone would be a deferral; `macro_references` resolves a name through the closure, which is a
+        // claim about meaning and needs the rendering.
         session.advance(64);
+        session.index_everything();
 
         let path = project.root.join("main.cpp");
         let source = std::fs::read_to_string(&path).expect("the fixture reads");
