@@ -4097,6 +4097,16 @@ pub struct CookedDiagnostic {
 pub struct IndexedRendering {
     /// The file's facts **as a compiler reads them**, with every range mapped back into the file.
     pub summary: FileSummary,
+    /// **The rendering this was read from** — the macro-expanded text, kept rather than dropped.
+    ///
+    /// It used to be thrown away: `cook` rendered a file, parsed the rendering, kept the declarations, and discarded
+    /// the text. That is why a query could not find one — [`crate::Session::view`] answers from a rendering or not at
+    /// all, so a file whose rendering had just been built and parsed was still answered `None` on the next request,
+    /// and the request after that, until something happened to ask for it again through a path that remembered.
+    ///
+    /// Keeping it costs one `Arc` clone: the renderer already holds the text in an `Arc`, so this is a pointer and
+    /// not a copy of a header. It is what makes "the reading exists" and "the reading is available" the same state.
+    pub rendered: std::sync::Arc<crate::preprocess::cooked::RenderedCooked>,
     /// How the mapping went: ranges placed, ranges that landed nowhere.
     pub mapped: MapReport,
     /// The parse errors of the rendering, placed in the file.

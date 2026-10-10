@@ -78,7 +78,7 @@ use crate::include::config::{
 };
 use crate::file::paths::{DiskFiles, FileProvider, OverlayFiles, normalize_path};
 use crate::include::toolchain::{self, DiskCommands, Environment, Toolchain};
-use crate::file::view::FileView;
+use crate::file::view::{FileView, TokensOf};
 use crate::index::project::{
     MemberCompletions, MemberList, NameCompletions, ProjectDefinition, ProjectDefinitions,
     ProjectIndex, ProjectMacro,
@@ -2346,6 +2346,28 @@ impl<F: FileProvider + Clone> Session<F> {
     // The questions
     // ---------------------------------------------------------------------------------------------
 
+    /// **The file's own tokens — the reading that means nothing and is for positions.**
+    ///
+    /// For a caller whose question is about the **text**: a fold, a selection range, a bracket, a highlight, the span
+    /// of a diagnostic, the bytes a rename would edit. None of those needs a declaration to mean anything, and that
+    /// is exactly why this is a different function from [`Session::view`] rather than a fallback inside it.
+    ///
+    /// Returns the file's text, its line index and its **tokens** — and deliberately **no tree and no scopes**: a
+    /// caller that had those would eventually ask them what a name means, and the answer would be about unexpanded
+    /// text. A caller that needs meaning calls [`Session::view`] and **defers** when it answers `None`.
+    ///
+    /// `None` only when the file is neither open nor readable.
+    pub fn tokens_of(&self, path: impl AsRef<Path>) -> Option<TokensOf> {
+        let file = self.vfs.held(path)?;
+        Some(TokensOf {
+            path: file.path.clone(),
+            source: file.text.clone(),
+            line_index: file.line_index.clone(),
+            open: file.open,
+            tokens: cpp_parser::lex(&file.text, &cpp_parser::LexerConfig::default()).0,
+        })
+    }
+
     /// The file as the cursor is in it: the buffer when it is open, the disk otherwise.
     ///
     /// `None` when there is neither — a path that is not open and cannot be read. Everything below takes a view,
@@ -2354,28 +2376,43 @@ impl<F: FileProvider + Clone> Session<F> {
     /// The view is **of the session's VFS**: the text and its line index come from the file the VFS is holding, and
     /// the view shares both rather than copying either. What is done here is the parse and the scopes, which are
     /// the two things a position needs and a summary cannot hold.
+    /// # Why a file with no rendering answers `None`, which is the whole point
+    ///
+    /// It used to answer from the file's own tokens — a parse of unexpanded text. That is not a lesser answer, it is
+    /// an **untrue** one: C++ source with its macros unexpanded is not a program, and a tree built from it is shaped
+    /// like a syntax tree and meaningless as one (measured on MSVC's headers: `<xutility>` 84 error nodes raw
+    /// against 0 cooked, `<xstring>` 17 against 0 — see `examples/cooked_parse.rs`).
+    ///
+    /// So the answer is deferred instead. The work is queued exactly as before, and the caller is told **nothing**
+    /// rather than told something false — which is this crate's own rule for an answer it does not have
+    /// (`Known::Unknown` over a guess), applied to the reading rather than to a name. A caller that needs a
+    /// *position*, a token or a fold does not want this function at all: see [`Session::tokens_of`].
+    ///
+    /// **The cost of this is real and has to be watched**: a file with no rendering is now answered on the request
+    /// *after* the one that asked for it, where before it was answered immediately and wrongly. `pending_cooking`
+    /// and the diagnostics channel's `isIncomplete` are how a caller states that, and the alternative is not
+    /// "an answer sooner" — it is "a wrong answer sooner".
     pub fn view(&self, path: impl AsRef<Path>) -> Option<FileView> {
         let file = self.vfs.held(path)?;
 
-        // **The rendering if it is already read, and a request for it if it is not.**
+        // **The rendering, or a request for it — never the file's own tokens.**
         //
         // A rendering is what a compiler's parser is handed: the file with its macros replaced, so `_STD` is
         // `::std::` and `_STD_BEGIN` is `namespace std {`, and nothing in the text is an invocation any more. That
-        // is the reading this view is **of**, and it is why `Session::view` no longer hands the grammar a file full
-        // of macros and a family of rules for guessing which identifier is one.
+        // is the reading this view is **of**.
         //
         // Nothing here builds it. A rendering is a unit walk, a preprocess and a render — measured at 65–190 ms for
         // a standard-library header on an indexed project, and far more on a cold one — and a query must not pay
-        // that. So a file with no rendering yet is answered from **its own tokens**, put in the work loop's hands,
-        // and the next query about it finds the rendering built. The same "not now, next time" the diagnostics
-        // channel states through `isIncomplete`.
+        // that. So a file with no rendering yet is put in the work loop's hands and this call answers `None`; the
+        // next query about it finds the rendering built. The same "not now, next time" the diagnostics channel
+        // states through `isIncomplete`.
         match self.known_rendering_of(&file.path, &file.text) {
             Some(rendered) => Some(FileView::parse_rendering(file, &rendered)),
             None => {
                 if let Ok(mut work) = self.macro_work.lock() {
                     work.want(&file.path);
                 }
-                Some(FileView::parse(file))
+                None
             }
         }
     }
@@ -2398,25 +2435,26 @@ impl<F: FileProvider + Clone> Session<F> {
     /// The two agree on the file's lines wherever no macro expanded, which is most of most files — and where they
     /// disagree, that is exactly the region a macro wrote, so a caller that needs the file's own positions wants
     /// this one regardless.
-    pub fn view_of_the_file(&self, path: impl AsRef<Path>) -> Option<FileView> {
-        Some(FileView::parse(self.vfs.held(path)?))
-    }
-
-    /// **The view of what the file itself writes, with the macros its includes define.**
+    /// # Why this answers `None`, and what replaced it
     ///
-    /// [`Session::view_of_the_file`] plus the closure's macro bodies, which is what makes a *namespace-opening*
-    /// macro readable without a full render: `_STD_BEGIN` becomes `namespace std {` in the scope tree, so a
-    /// declaration is filed where a compiler files it. Cheaper than a rendering and less complete — the tokens are
-    /// still the file's own — and it is the fallback for a caller that asked for a rendering before one was built.
-    pub fn view_of_the_file_with_macros(&self, path: impl AsRef<Path>) -> Option<FileView> {
+    /// It used to build a `FileView` by parsing the file's own bytes, and that is the defect this whole layer has
+    /// been paying for: **C++ source with its macros unexpanded is not a program.** A rendering has the macro
+    /// already replaced, so `#define API …` and every `API` written below it are gone from it — which is why a
+    /// question about **a macro** is a question about the buffer. But a question about a macro is a question about a
+    /// **spelling**, and a spelling needs no tree: [`Session::tokens_of`] answers it with the lexer's own tokens, and
+    /// a caller that needs a *position* or a *fold* wants that too.
+    ///
+    /// What is left is the honest answer, and it is the same one [`Session::view`] gives: a caller that needs
+    /// **meaning** waits for the rendering. `None` therefore means "not now" for this file, and a caller must not
+    /// read it as "no such file" — [`Session::is_indexed`] and [`Session::pending_cooking`] are how those are told
+    /// apart.
+    pub fn view_of_the_file(&self, path: impl AsRef<Path>) -> Option<FileView> {
         let file = self.vfs.held(path)?;
-        match self.known_rendering_of(&file.path, &file.text) {
-            Some(rendered) => Some(FileView::parse_rendering(file, &rendered)),
-            None => match self.known_macros_of(&file.path, &file.text) {
-                Some(macros) => Some(FileView::parse_with(file, &macros)),
-                None => Some(FileView::parse(file)),
-            },
+        // Queue it exactly as `view` does, so that asking twice is a request rather than a wait.
+        if let Ok(mut work) = self.macro_work.lock() {
+            work.want(&file.path);
         }
+        None
     }
 
     /// **The view of a file that a compiler's parser would see**, built if it has to be.
@@ -2495,14 +2533,17 @@ impl<F: FileProvider + Clone> Session<F> {
     /// view without it. Warm, from [`Session::macro_environments`], it is **186.6 µs** — 1.14× — which is what
     /// makes [`Session::view`]'s arrangement worth having: the walk is paid once, by the work loop, and every query
     /// after it pays a hash and a lookup.
-    pub fn view_with_macros(&self, path: impl AsRef<Path>) -> Option<FileView> {
-        let file = self.vfs.held(path)?;
-        match self.the_macros_of(&file.path, &file.text) {
-            Some(macros) => Some(FileView::parse_with(file, &macros)),
-            None => Some(FileView::parse(file)),
-        }
-    }
-
+    /// # Removed, and why it is not coming back
+    ///
+    /// This returned a `FileView` built from the file's own tokens with only the closure's **macro bodies** supplied.
+    /// It was the third reading, and it had **zero product call sites** while its documentation elsewhere described
+    /// it as the second — `FileIndexer::macro_facts` claimed its parse used `ParserConfig::with_macros_from_includes`
+    /// and never did. A reading whose own documentation is wrong and which nothing calls is not a fallback, it is a
+    /// trap for the next caller: supplying `#define` bodies changes what `_STD_BEGIN` expands to without taking the
+    /// `#if` branches, so its scope tree was a third answer to a question that already had two.
+    ///
+    /// Deleted rather than kept as a fourth `None`. A caller that wants meaning has [`Session::view`] and waits; a
+    /// caller that wants a spelling has [`Session::tokens_of`] and does not need a tree at all.
     /// The environment for `text`, **if it is already read** — a hash and a lookup, and nothing else.
     fn known_macros_of(
         &self,
@@ -3748,6 +3789,22 @@ impl<F: FileProvider + Clone> Session<F> {
     pub fn commit_a_cooked(&mut self, reading: (crate::IndexedRendering, CookedReading)) -> CookedReading {
         let (indexed, reading) = reading;
         let path = indexed.summary.path.clone();
+        // **The rendering is remembered, not dropped.** This is the half that was missing, and its absence is why
+        // `Session::view` could answer `None` for a file whose rendering had *just* been built and parsed: the facts
+        // went into the index and the tree went in the bin, so nothing could reconstruct the reading until some
+        // other path happened to remember one. With this, "the file has been read the way a compiler reads it" and
+        // "the reading is available to a query" are the same state — which is what the rest of this layer assumes.
+        //
+        // Keyed by content hash exactly as `commit_the_drain` keys it, so the two writers of this cache cannot
+        // disagree about what a cache entry means.
+        if let Some(text) = self.text(&path)
+            && let Ok(mut known) = self.renderings.lock()
+        {
+            known.insert(
+                (path.clone(), crate::cache::content_hash(&text)),
+                std::sync::Arc::clone(&indexed.rendered),
+            );
+        }
         {
             let _insert = crate::stages::StageTimer::new(crate::stages::Stage::Insert);
             self.store.index_mut().insert_cooked(&path, indexed.into());

@@ -431,6 +431,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
 
         crate::IndexedRendering {
             summary,
+            rendered: std::sync::Arc::new(rendered.clone()),
             mapped: report,
             diagnostics,
             unplaced,

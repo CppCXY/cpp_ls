@@ -40,7 +40,85 @@ use crate::file::paths::FileId;
 use crate::file::vfs::VfsFile;
 use crate::symbol::ScopeTree;
 
-/// A file in the VFS, parsed, with its scopes.
+/// **A file's own text, lexed — and deliberately not parsed.**
+///
+/// This is what a question about the **text** is answered from: a fold, a selection range, a bracket, a highlight,
+/// the span of a diagnostic, the bytes a rename would edit. Returned by [`crate::Session::tokens_of`].
+///
+/// # Why it has no tree
+///
+/// Because C++ source with its macros unexpanded **is not a program**. The tree a grammar builds from it is shaped
+/// like a syntax tree and means nothing as one — measured on MSVC's headers, `<xutility>` has 84 error nodes read as
+/// written and **0** read after preprocessing, `<xstring>` 17 against 0 (`examples/cooked_parse.rs`). A struct that
+/// carried that tree would be handed to a caller that would eventually ask it what a name means.
+///
+/// So the type is the boundary: **tokens and positions, no declarations and no scopes.** A caller that needs
+/// meaning has one route — [`crate::Session::view`], which answers from a rendering, and answers `None` while there
+/// is none so that the caller defers instead of guessing.
+///
+/// The lexer is the parser's own ([`cpp_parser::lex`]), so a token here begins and ends exactly where the parser's
+/// does; there is one token stream in this crate and this is not a second one.
+#[derive(Debug, Clone)]
+pub struct TokensOf {
+    /// The file this is about.
+    pub path: PathBuf,
+    /// The file's own text. Every offset in this struct is an offset into this.
+    pub source: Arc<str>,
+    /// The line index of [`TokensOf::source`], shared with the VFS rather than rebuilt.
+    pub line_index: Arc<LineIndex>,
+    /// Did the text come from an open buffer rather than from the file?
+    pub open: bool,
+    /// Every token of the text, in order. They cover the file byte for byte, so concatenating their text reproduces
+    /// `source` — which is what makes a range built from two of them a range in this file.
+    pub tokens: Vec<cpp_parser::CppTokenData>,
+}
+
+impl TokensOf {
+    /// The token containing an offset, if one does. Whitespace and newlines are tokens too, so this answers for any
+    /// offset inside the file.
+    pub fn token_at(&self, offset: usize) -> Option<&cpp_parser::CppTokenData> {
+        self.tokens
+            .iter()
+            .find(|token| token.range.start_offset <= offset && offset < token.range.end_offset())
+    }
+
+    /// The text of a range, and `None` when it is not inside this file.
+    ///
+    /// A convenience over indexing `source`, because that is what every lexical caller does with a range and the
+    /// bounds check is the part that gets forgotten.
+    pub fn text_of(&self, range: cpp_parser::SourceRange) -> Option<&str> {
+        self.source.get(range.start_offset..range.end_offset())
+    }
+
+    /// A **line and column** to a byte offset, both counted from zero.
+    ///
+    /// The mapping a client's positions need, and the one place LSP's own rule is *not* implemented: the columns this
+    /// counts are characters, while the protocol counts UTF-16 code units, and the two differ on a line with an emoji
+    /// or any character outside the basic plane. That conversion is the protocol layer's — doing it here would put a
+    /// rule about a wire format in the crate that has no wire format.
+    ///
+    /// A lookup in the index the VFS already built: no scan, and no way for the answer to be about a different text
+    /// than the one it was built from.
+    pub fn offset_at(&self, line: usize, column: usize) -> Option<usize> {
+        self.line_index
+            .get_offset(line, column, &self.source)
+            .map(usize::from)
+    }
+
+    /// A byte offset back to a **line and column** — the inverse of [`TokensOf::offset_at`], and the direction a
+    /// diagnostic needs: a position is what a client is told.
+    ///
+    /// A position past the end of the text answers `None` rather than clamping: an offset that is not in the file is
+    /// a caller's mistake, and a range built from a clamped one would point at the wrong code.
+    pub fn position_at(&self, offset: usize) -> Option<(usize, usize)> {
+        self.line_index.position_of(offset, &self.source)
+    }
+
+    /// The text, for a caller that wants a `&str` rather than the shared handle.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+}/// A file in the VFS, parsed, with its scopes.
 #[derive(Debug, Clone)]
 pub struct FileView {
     /// The file's identity inside the VFS — stable across spellings of its path, and what the view is *of*.
@@ -251,35 +329,31 @@ impl FileView {
     /// reading [`crate::build_scopes`] produced before the evidence parameter existed. Declarations reached
     /// *through* a query come from their own files' summaries, where the reading was made with the closure in hand,
     /// so `std::vector` still resolves from a buffer that never mentions `std`.
-    pub fn parse(file: &VfsFile) -> FileView {
-        let source = file.text.clone();
-        // **The two halves are timed apart**, and neither is cached. Measured on MSVC's `<vector>`:
-        // `Session::diagnostics` costs **3.8 s on every request** — the sixth ask as slow as the first — and the
-        // checks are 0.00 ms of it, so the whole of that number is here. Which of the two it is decides the fix,
-        // so it is measured rather than assumed: see `examples/diagnostics_cost.rs`.
-        let tree = {
-            let _parse = crate::stages::StageTimer::new(crate::stages::Stage::Parse);
-            cpp_parser::CppParser::parse(&source, cpp_parser::ParserConfig::default())
-        };
-        let root = tree.get_red_root();
-        let scopes = {
-            let _scopes = crate::stages::StageTimer::new(crate::stages::Stage::Scopes);
-            crate::sema::scopes::build_scopes(&root, &crate::sema::scopes::NoMacroBodies)
-        };
-
-        FileView {
-            file: file.id,
-            path: file.path.clone(),
-            source,
-            line_index: file.line_index.clone(),
-            tree,
-            root,
-            scopes,
-            open: file.open,
-            written: None,
-            written_lines: None,
-            reading: Arc::from(Vec::new()),
-        }
+    /// **`None`, by design — see the module note. There is no view of unexpanded text.**
+    ///
+    /// This used to build a tree and a scope tree by parsing the file's own bytes, and it was wrong at the root:
+    /// C++ source with its macros unexpanded **is not a program**, so what came out was a tree shaped like a
+    /// syntax tree and meaningless as one. Measured, `examples/cooked_parse.rs`, MSVC's headers:
+    ///
+    /// ```text
+    ///   <xutility>     raw 84 error node(s)   cooked 0     (1 095 871 bytes, 77 files stitched)
+    ///   <memory>       raw  8                 cooked 0
+    ///   <xstring>      raw 17                 cooked 0
+    ///   <utility>      raw 12                 cooked 0
+    /// ```
+    ///
+    /// A caller that needs to **mean** something about a name must have a rendering
+    /// ([`FileView::parse_rendering`], reached through [`crate::Session::view`]) — and a caller that has no rendering
+    /// must **defer its answer**, not answer from this. A caller that needs a *position*, a token, a fold or a
+    /// bracket wants [`crate::Session::tokens_of`], which is lexical and makes no claim about meaning.
+    ///
+    /// Kept as a function that answers `None` rather than deleted, so that the boundary is a place in the code with
+    /// an explanation attached instead of a constructor that a future caller finds and uses.
+    #[deprecated(note = "there is no semantic view of unexpanded text; use Session::view for meaning \
+                         (and defer when it answers None) or Session::tokens_of for positions")]
+    pub fn parse(file: &VfsFile) -> Option<FileView> {
+        let _ = file;
+        None
     }
 
     /// **The same reading, with the macros the file's includes define.**
@@ -505,32 +579,50 @@ mod tests {
     use crate::file::paths::MemoryFiles;
     use crate::file::vfs::Vfs;
 
+    /// **The lexical reading, built where a view used to be.** These two tests used `FileView::parse`, which is gone
+    /// because a parse of unexpanded text is not a reading of anything. What they were actually about is a position
+    /// mapping, and that is [`TokensOf`] — so they moved rather than being deleted, and the property they check is
+    /// unchanged: the text a request maps positions in is the text the user is typing, and its line index is the same
+    /// generation of that text.
+    fn tokens(vfs: &mut Vfs<MemoryFiles>, path: &str) -> (TokensOf, VfsFile) {
+        let file = vfs.file(path).expect("the file reads");
+        let tokens = TokensOf {
+            path: file.path.clone(),
+            source: file.text.clone(),
+            line_index: file.line_index.clone(),
+            open: file.open,
+            tokens: cpp_parser::lex(&file.text, &cpp_parser::LexerConfig::default()).0,
+        };
+        (tokens, file)
+    }
+
     #[test]
     fn a_view_maps_positions_through_the_index_the_vfs_built() {
         let mut vfs = Vfs::new(MemoryFiles::new().with_file("/p/a.cpp", "int a;\nint b;\nint c;\n"));
-        let file = vfs.file("/p/a.cpp").expect("the file reads");
+        let (tokens, file) = tokens(&mut vfs, "/p/a.cpp");
 
-        let view = FileView::parse(&file);
-
-        assert_eq!(view.file, file.id, "the view is *of* a file in the VFS");
         assert!(
-            Arc::ptr_eq(&view.line_index, &file.line_index),
+            Arc::ptr_eq(&tokens.line_index, &file.line_index),
             "and it shares that file's index rather than making one"
         );
-        assert!(Arc::ptr_eq(&view.source, &file.text));
+        assert!(Arc::ptr_eq(&tokens.source, &file.text));
 
-        assert_eq!(view.offset_at(2, 4), Some(18));
-        assert_eq!(view.position_at(18), Some((2, 4)));
-        assert_eq!(view.offset_at(9, 0), None);
-        assert!(view.errors().is_empty());
+        assert_eq!(tokens.offset_at(2, 4), Some(18));
+        assert_eq!(tokens.position_at(18), Some((2, 4)));
+        assert_eq!(tokens.offset_at(9, 0), None);
+
+        // **And the tokens really are the file.** The stream covers the text byte for byte, which is what makes a
+        // range built from two tokens a range in this file — the property everything lexical rests on.
+        let covered: String = tokens.tokens.iter().map(|t| &tokens.source[t.range.start_offset..t.range.end_offset()]).collect();
+        assert_eq!(covered, tokens.source(), "the tokens cover the file byte for byte");
     }
 
     #[test]
     fn a_view_of_an_edited_buffer_maps_positions_in_the_edited_text() {
-        // The property a language server depends on: the text a view maps positions in is the text the user is
+        // The property a language server depends on: the text a reading maps positions in is the text the user is
         // typing, and its line index is the *same* generation of that text.
         let mut vfs = Vfs::new(MemoryFiles::new().with_file("/p/a.cpp", "int a;\n"));
-        let before = FileView::parse(&vfs.file("/p/a.cpp").expect("the file reads"));
+        let (before, _) = tokens(&mut vfs, "/p/a.cpp");
         assert_eq!(
             before.offset_at(1, 0),
             Some(7),
@@ -539,9 +631,9 @@ mod tests {
         assert_eq!(before.offset_at(2, 0), None, "and no line after that");
 
         vfs.insert("/p/a.cpp", "int a;\nint b;\n", true);
-        let after = FileView::parse(&vfs.file("/p/a.cpp").expect("the edit is held"));
+        let (after, _) = tokens(&mut vfs, "/p/a.cpp");
 
-        assert!(after.open, "and the view says the text is a buffer");
+        assert!(after.open, "and the reading says the text is a buffer");
         assert_eq!(after.offset_at(1, 4), Some(11), "`b` of the new second line");
         assert_eq!(
             before.offset_at(1, 4),
