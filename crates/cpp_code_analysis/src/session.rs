@@ -2316,8 +2316,21 @@ impl<F: FileProvider + Clone> Session<F> {
 
             if read == 0 && cooked == 0 {
                 if tracing {
+                    // **The cache as the pump leaves it.** If this is non-zero and a request still misses, the key
+                    // the writer used and the key the reader computes are two different keys — which is the one
+                    // failure a count cannot show and the two hashes beside it can.
+                    let cached: Vec<String> = self
+                        .renderings
+                        .lock()
+                        .map(|known| {
+                            known
+                                .keys()
+                                .map(|(path, hash)| format!("{}#{hash}", path.display()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     eprintln!(
-                        "cooking: stopping with read 0, cooked 0, backlog {}",
+                        "cooking: stopping with read 0, cooked 0, backlog {} | cache {cached:?}",
                         self.pending_cooking()
                     );
                 }
@@ -3841,9 +3854,26 @@ impl<F: FileProvider + Clone> Session<F> {
         if let Some(text) = self.text(&path)
             && let Ok(mut known) = self.renderings.lock()
         {
-            known.insert(
-                (path.clone(), crate::cache::content_hash(&text)),
-                std::sync::Arc::clone(&indexed.rendered),
+            let key = (path.clone(), crate::cache::content_hash(&text));
+            let before = known.len();
+            known.insert(key, std::sync::Arc::clone(&indexed.rendered));
+            if std::env::var_os("CPPLS_TRACE_COOKING").is_some() {
+                eprintln!(
+                    "commit_a_cooked: inserted {} | cache {} -> {}",
+                    path.display(),
+                    before,
+                    known.len()
+                );
+            }
+        } else if std::env::var_os("CPPLS_TRACE_COOKING").is_some() {
+            // **The other way this can silently not happen**: `self.text` answers `None` (the file is no longer
+            // readable) or the lock is poisoned, and both leave the cache exactly as it was while the facts go into
+            // the index — "read" and "available" apart again, which is the state this whole change is about.
+            eprintln!(
+                "commit_a_cooked: NOT inserted {} | readable {} | lock {}",
+                path.display(),
+                self.text(&path).is_some(),
+                self.renderings.lock().is_ok()
             );
         }
         {
@@ -6599,7 +6629,21 @@ mod tests {
             "the user has stopped looking at it, so it is not urgent"
         );
 
-        let view = session.view("/p/widget.h").expect("the file reads");
+        // **The two requests told apart, which is the contract this change introduced.** Closing dropped the buffer
+        // and with it the rendering that was made *of the buffer*, so this first request gets no semantic reading and
+        // must not be handed one: `None` here means "not this time", and the `advance` above is what has just queued
+        // the work that answers it. A caller that could not tell `None` from "no such file" would report a missing
+        // file; [`Session::is_indexed`] and [`Session::pending_work`] are how it tells them apart, and both are
+        // asserted above.
+        assert!(
+            session.view("/p/widget.h").is_none(),
+            "a buffer's rendering was made of the buffer, and the buffer is closed"
+        );
+
+        // Ask again after the work the close queued, and the reading is the disk's — which is the point of the
+        // test: a closed document is the filesystem's again, and the analysis must agree.
+        session.index_everything();
+        let view = session.view("/p/widget.h").expect("the file has been read again");
         match session.members_of(&view, "Widget") {
             Known::Yes(members) => {
                 let names: Vec<&str> = members.own().map(|member| member.fact.name.as_str()).collect();
@@ -6912,7 +6956,11 @@ mod tests {
         session.load("/p/a.cpp");
         session.load("/p/crlf.cpp");
 
-        let view = session.view("/p/a.cpp").expect("the file reads");
+        // **Through `tokens_of`, because this is a question about the text.** It needs a line index and a length and
+        // nothing a declaration means, so it does not wait for a cook: positions are available the moment the file is
+        // held, which is what a fold, a selection and a diagnostic span all rely on. Asking `view` here would now
+        // mean asking a semantic question to get an answer about bytes.
+        let view = session.tokens_of("/p/a.cpp").expect("the file reads");
         let at = view.source.find("x = 1").expect("the statement is in the text");
         assert_eq!(
             view.position_at(at),
@@ -6932,7 +6980,7 @@ mod tests {
         );
 
         // And a CRLF file is one line break, not two: the `\r` is part of line 0, so line 1 starts after it.
-        let crlf = session.view("/p/crlf.cpp").expect("the file reads");
+        let crlf = session.tokens_of("/p/crlf.cpp").expect("the file reads");
         let second = crlf.source.find("int b").expect("the second line is in the text");
         assert_eq!(crlf.position_at(second), Some((1, 0)));
         assert_eq!(
