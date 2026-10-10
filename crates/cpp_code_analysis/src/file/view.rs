@@ -253,10 +253,19 @@ impl FileView {
     /// so `std::vector` still resolves from a buffer that never mentions `std`.
     pub fn parse(file: &VfsFile) -> FileView {
         let source = file.text.clone();
-        let tree = cpp_parser::CppParser::parse(&source, cpp_parser::ParserConfig::default());
+        // **The two halves are timed apart**, and neither is cached. Measured on MSVC's `<vector>`:
+        // `Session::diagnostics` costs **3.8 s on every request** — the sixth ask as slow as the first — and the
+        // checks are 0.00 ms of it, so the whole of that number is here. Which of the two it is decides the fix,
+        // so it is measured rather than assumed: see `examples/diagnostics_cost.rs`.
+        let tree = {
+            let _parse = crate::stages::StageTimer::new(crate::stages::Stage::Parse);
+            cpp_parser::CppParser::parse(&source, cpp_parser::ParserConfig::default())
+        };
         let root = tree.get_red_root();
-        let scopes =
-            crate::sema::scopes::build_scopes(&root, &crate::sema::scopes::NoMacroBodies);
+        let scopes = {
+            let _scopes = crate::stages::StageTimer::new(crate::stages::Stage::Scopes);
+            crate::sema::scopes::build_scopes(&root, &crate::sema::scopes::NoMacroBodies)
+        };
 
         FileView {
             file: file.id,

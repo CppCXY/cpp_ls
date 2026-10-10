@@ -134,4 +134,29 @@ fn main() {
         findings
     );
     let _ = Path::new("");
+
+    // ---------------------------------------------------------------------------------------------
+    // What the tree costs, stage by stage
+    // ---------------------------------------------------------------------------------------------
+    //
+    // `FileView::parse` is the whole of the number above and it does exactly two things: the grammar, and the
+    // scope walk. `stages::StageTimes` already has a timer on each (`crate::stages::Stage::Parse` and `::Scopes`),
+    // so the split is the crate's own accounting rather than a subtraction done here.
+    println!("\n--- the tree, stage by stage (one more parse) ---");
+    cpp_code_analysis::stages::StageTimes::reset();
+    let reparsing = Instant::now();
+    let _ = session.view(&file);
+    let one_parse = reparsing.elapsed();
+    let stages = cpp_code_analysis::stages::StageTimes::read();
+    let parse = stages.of(cpp_code_analysis::stages::Stage::Parse);
+    let scopes = stages.of(cpp_code_analysis::stages::Stage::Scopes);
+
+    println!("  one parse, wall clock           {:>7} ms", one_parse.as_millis());
+    println!("    the grammar                   {:>7} ms", parse.as_millis());
+    println!("    the scope walk                {:>7} ms", scopes.as_millis());
+    println!(
+        "    accounted for                 {:>7} ms ({:.0}% of the wall clock)",
+        (parse + scopes).as_millis(),
+        100.0 * (parse + scopes).as_secs_f64() / one_parse.as_secs_f64().max(f64::EPSILON)
+    );
 }

@@ -89,8 +89,7 @@ use crate::index::store::{StoreStats, SummaryStore};
 use crate::index::worklist::StepOutcome;
 use crate::summary::{OutlineSymbol, UnitReading};
 use crate::index::watch::{ChangeBatch, FileEvent, Response, WatchFilter};
-use crate::index::worklist::{Priority, Step, outcome_of};
-use crate::index::{
+use crate::index::worklist::{Priority, Step, outcome_of};use crate::index::{
     FileIndexer, definition_across_files, definitions_across_files, macro_across_files,
     member_completions_at, members_of,
 };
@@ -113,6 +112,32 @@ use crate::PathInterner;
 // rather than of a language server: one file is a render and a parse of it, measured at 9–269 ms on MSVC's headers.
 #[allow(dead_code)]
 const COOK_SLICE: usize = 4;
+
+/// **Where one `diagnostics` call spent its time**, on `CPPLS_TRACE_DIAGNOSTICS=1`.
+///
+/// The call has four parts and they have four different fixes: the **cooked lookup** (a hash), the **view** (the
+/// file's own tree — a parse), the **module notes**, and the **checks**. Measured on MSVC's `<vector>`: the whole
+/// call is **3.5 s on every request**, and the tree alone is 21 ms — so the split is not what the code around it
+/// suggests, which is the whole reason this exists. Nested timings are printed as they end, one line each.
+pub struct DiagTrace(Option<(&'static str, std::time::Instant)>);
+
+impl DiagTrace {
+    pub fn new(what: &'static str) -> DiagTrace {
+        DiagTrace(
+            std::env::var_os("CPPLS_TRACE_DIAGNOSTICS")
+                .is_some()
+                .then(|| (what, std::time::Instant::now())),
+        )
+    }
+}
+
+impl Drop for DiagTrace {
+    fn drop(&mut self) {
+        if let Some((what, started)) = self.0 {
+            eprintln!("      [diagnostics] {what:<28} {:>7} ms", started.elapsed().as_millis());
+        }
+    }
+}
 
 /// **How many files one drain re-reads**, once the closure is in hand.
 ///
@@ -2686,6 +2711,8 @@ impl<F: FileProvider + Clone> Session<F> {
 
     pub fn diagnostics(&self, path: impl AsRef<Path>) -> Option<FileDiagnostics> {
         let path = path.as_ref();
+        let whole = std::time::Instant::now();
+        let _whole = DiagTrace::new("diagnostics");
 
         // The index's own spelling of the path, for the reason `cook` documents: a client's `C:\…` and the
         // resolver's `c:/…` are the same file, and a lookup by the client's spelling finds nothing.
@@ -2718,12 +2745,19 @@ impl<F: FileProvider + Clone> Session<F> {
             // The **checks** read it too, and for the same reason: they are asked of the file's facts and its tree,
             // and both come from this one view. A file that cannot be read back is a file with no checks, which is
             // the same answer as a file no check had anything to say about.
-            let view = self.view(path);
+            let view = {
+                let _t = DiagTrace::new("the file's tree (view)");
+                self.view(path)
+            };
             if let Some(view) = &view {
+                let _t = DiagTrace::new("module notes");
                 notes = self.notes_about_the_modules(view);
             }
             let checks = match &view {
-                Some(view) => self.checks_about(&key, view),
+                Some(view) => {
+                    let _t = DiagTrace::new("checks");
+                    self.checks_about(&key, view)
+                }
                 None => Vec::new(),
             };
 
@@ -2744,8 +2778,23 @@ impl<F: FileProvider + Clone> Session<F> {
             });
         }
 
-        let view = self.view(path)?;
-        let notes = self.notes_about_the_modules(&view);
+        let view = {
+            let _t = DiagTrace::new("the file's tree (view)");
+            self.view(path)
+        };
+        let view = match view {
+            Some(view) => view,
+            None => {
+                // The file cannot be read back. `?` is the same answer, and the trace guard has already reported
+                // what the attempt cost — which is the case worth seeing, because a file that is gone is one every
+                // later request pays for again.
+                return None;
+            }
+        };
+        let notes = {
+            let _t = DiagTrace::new("module notes");
+            self.notes_about_the_modules(&view)
+        };
 
         Some(FileDiagnostics {
             reading: DiagnosticReading::Raw,
@@ -2764,7 +2813,10 @@ impl<F: FileProvider + Clone> Session<F> {
                 })
                 .collect(),
             notes,
-            checks: self.checks_about(&key, &view),
+            checks: {
+                let _t = DiagTrace::new("checks");
+                self.checks_about(&key, &view)
+            },
         })
     }
 
