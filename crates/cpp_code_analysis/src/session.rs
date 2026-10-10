@@ -1898,6 +1898,30 @@ impl<F: FileProvider + Clone> Session<F> {
             // What stays is the queueing: a file a reader has open, and the includes it names, are what has to be
             // cooked first, and that order is what `want_the_closure_cooked` writes into the queue.
 
+            // **…and what a query asked for on its own, which is a *cook* rather than an environment.**
+            //
+            // `macro_work` is the asking side's queue: a request holds `&self` and cannot touch `cooking` (which
+            // needs `&mut self`), so it asks through that lock — exactly as the note on the field says. The pump is
+            // the `&mut self` half, and what it owes those requests is a **cooked reading**, because that is what
+            // `Session::view` could not answer from: it queues here precisely when `known_rendering_of` missed.
+            //
+            // Measured before this: a request for a file in a project nobody had opened queued **only** here, this
+            // loop handed it to `drain.environments`, and `cooking` stayed empty — so `claim_cooking` returned
+            // nothing, no rendering was ever built, and every later request got `None` again. The trace that named
+            // it: `cooking: stopping with read 0, cooked 0, backlog 0 | cache []`, with the file's path printed by
+            // `view` as the thing it had just asked for.
+            //
+            // Moved rather than copied: `cooking.want` is idempotent (`Cooking::want` returns false on a repeat), and
+            // draining the asking queue is what stops the same file being moved on every pass for ever.
+            while let Some(path) = self
+                .macro_work
+                .lock()
+                .ok()
+                .and_then(|mut work| work.take(1).into_iter().next())
+            {
+                self.cooking.want(&path);
+            }
+
             // **…and the macro environments a query asked for**, once each per pass.
             //
             // One per drain rather than four, and the difference from `COOK_SLICE` is measured rather than chosen:
