@@ -280,7 +280,9 @@ fn log_a_member_that_produced_no_members(
             &view.scopes,
             &view.root,
             &view.path,
-            offset
+            // `offset` is the rendering's throughout this report — the lines above slice `view.source` with it — and
+            // the query reads `view.root`, so it is the same number in the same numbering.
+            cpp_code_analysis::file::coordinates::ReadingOffset::new(offset),
         )
     );
 }

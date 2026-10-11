@@ -4658,9 +4658,29 @@ impl<F: FileProvider + Clone> Session<F> {
     /// and the parameter list could no longer be read. The refresh the pump sends then asks the client to ask again —
     /// and the second answer was the same broken one, which is why the hints did not come back.
     pub fn inlay_hints(&self, view: &FileView, range: cpp_parser::SourceRange) -> Vec<ParameterHint> {
-        crate::inlay::parameter_hints(self.store.index(), view, range, |path| {
+        let mut hints = crate::inlay::parameter_hints(self.store.index(), view, range, |path| {
             self.view_of_the_file(path)
-        })
+        });
+
+        // **The range going in is the rendering's; the offsets coming out are the file's.**
+        //
+        // That asymmetry is not an accident and it is worth stating, because it is the shape of this seam: the walk
+        // has to read a **tree**, so the range it is given is an offset in the rendering, while a hint is drawn in the
+        // reader's own buffer — and the handler places it with `position_in_file(file, hint.offset)`, the *file's* line
+        // index, as does `tests/inlay.rs`. Moving the offset here rather than in the handler is the same choice
+        // `Session::classified_names` makes one function up, and for the same measured reason: the two consumers
+        // agreeing is the contract, and a hint placed at an offset the cook shifted is a hint on **another line**.
+        //
+        // A hint the file cannot place is dropped, exactly as the handler drops one it cannot place ("a position the
+        // file cannot place produces no hint rather than one at a guessed place").
+        for hint in &mut hints {
+            let Some(placed) = view.file_offset_of(ReadingOffset::new(hint.offset)) else {
+                continue;
+            };
+            hint.offset = placed.get();
+        }
+
+        hints
     }
 
     /// **What each name in this file is** — the classification a semantic highlighter draws colours from.

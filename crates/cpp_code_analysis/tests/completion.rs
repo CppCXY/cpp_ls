@@ -890,7 +890,14 @@ fn a_completion_after_an_edit_is_about_the_file_the_edit_wrote() {
     );
 
     let cursor = FRESHNESS_USES_HEADER.find("w.").expect("the fixture") + 2;
-    let view = cooked_view(&mut session, "/p/a.cpp");
+    // **A view without a pump, because the state under test is the un-pumped one.** `cooked_view` asks for the reading
+    // *and drains the queue* — which is exactly the catch-up whose **absence** this half of the test measures: with it
+    // the header's summary was already rebuilt and the first assertion read `["extra", "size"]` instead of the stale
+    // list. `FileView::parse_with` builds the file's own view from what the VFS holds and touches no queue, so the
+    // window stays open until `catch_up` below closes it.
+    let held = session.files().held("/p/a.cpp").expect("the file is held");
+    let view =
+        cpp_code_analysis::FileView::parse_with(&held, &cpp_parser::MacroEnvironment::default());
 
     // **Without the catch-up**: the header's summary is the old one, so `Widget` still has only `size`.
     let stale = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor));
@@ -1093,13 +1100,18 @@ int main() {
         );
 
         // The sentence a failure is diagnosed with comes from the same reading as the list, so an empty list is
-        // always explained by the step that emptied it.
+        // always explained by the step that emptied it — and `why_no_members` is handed a **tree**, so its offset is
+        // the rendering's. Passing the fixture's own offset here was `Bad offset: range 0..27 offset 52` inside
+        // `rowan`: the file is 52 bytes and its rendering (the header inlined, the directive gone) is 27.
+        let in_the_reading = view
+            .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(offset))
+            .expect("the cursor is in the rendering");
         let why = cpp_code_analysis::why_no_members(
             session.index(),
             &view.scopes,
             &view.root,
             &view.path,
-            offset,
+            in_the_reading,
         );
         assert!(
             why.contains("the member query answered"),

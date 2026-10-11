@@ -373,8 +373,13 @@ pub fn why_no_members(
     scopes: &ScopeTree,
     root: &CppSyntaxNode,
     path: &Path,
-    offset: usize,
+    // **A typed offset, because an untyped one let a caller pass the file's** — and the failure was a panic inside
+    // `rowan` rather than a wrong answer: `"Bad offset: range 0..27 offset 52"`, where 52 is a position in the file
+    // (the header inlined, the directive gone) and 27 is the length of its rendering. This function reads `root`, so
+    // its offset is the rendering's.
+    offset: crate::file::coordinates::ReadingOffset,
 ) -> String {
+    let offset = offset.get();
     match context_at(root, offset) {
         CompletionContext::Member(access) => members(index, scopes, root, path, &access, offset).why,
         other => format!("the cursor is not a member access at all: {other:?}"),
