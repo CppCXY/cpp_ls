@@ -53,9 +53,10 @@ struct Callee {
 /// Every node of one kind, in one walk — the shape the sibling check's documentation gives a measurement for: a
 /// file with a hundred calls reads the tree once, not once per call.
 fn nodes_of_kind(context: &CheckContext<'_>, kind: CppSyntaxKind) -> Vec<CppSyntaxNode> {
+    // **This file's own nodes** - see CheckContext::own_syntax_nodes, which prunes the inlined headers a
+    // rendering splices in. The kind stays a parameter because this helper is called for two of them.
     context
-        .tree()
-        .descendants()
+        .own_syntax_nodes()
         .filter(|node| CppSyntaxKind::from(node.kind()) == kind)
         .collect()
 }
@@ -177,5 +178,6 @@ fn at_most(name: &str, written: usize) -> String {
 fn at_least(name: &str, required: usize) -> String {
     format!("`{name}` needs {required} argument(s) and this call passes fewer")
 }
+
 
 

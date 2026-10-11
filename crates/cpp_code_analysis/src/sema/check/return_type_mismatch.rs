@@ -37,10 +37,11 @@ impl Check for ReturnTypeMismatch {
     const CODES: &'static [DiagnosticCode] = &[DiagnosticCode::ReturnTypeMismatch];
 
     fn check(context: &mut CheckContext<'_>) {
+        // **This file's own functions** - see CheckContext::own_syntax_nodes.
         for function in context
-            .tree()
-            .descendants()
+            .own_syntax_nodes()
             .filter(|node| super::is_a_function_definition(node))
+            .collect::<Vec<_>>()
         {
             let Some(declared) = return_type_of(&function) else {
                 continue;
@@ -138,5 +139,6 @@ fn return_type_of(function: &CppSyntaxNode) -> Option<String> {
     }
     Some(head.to_string())
 }
+
 
 

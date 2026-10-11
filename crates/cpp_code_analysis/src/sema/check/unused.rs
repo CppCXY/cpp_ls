@@ -74,16 +74,18 @@ impl Check for Unused {
         // header. Measured on MSVC's `<vector>`: 20 247 nodes, and the per-declaration form was the whole cost of
         // the layer.
         let mut written: HashMap<&str, usize> = HashMap::new();
-        for token in context.tree().descendants_with_tokens() {
-            let Some(token) = token.into_token() else {
-                continue;
-            };
-            if token.kind() != CppTokenKind::Identifier.into() {
+        // **This file's own tokens**, not the rendering's: a token inside an inlined header is another file's
+        // spelling, and counting it would make this rule answer about a name in `<string>`. See `CheckContext::own`.
+        for token in context.own_tokens() {
+            if token.kind != CppTokenKind::Identifier {
                 continue;
             }
-            *written
-                .entry(context.source[token.text_range().start().into()..token.text_range().end().into()].trim())
-                .or_default() += 1;
+            let text = context
+                .source
+                .get(token.range.start_offset..token.range.end_offset())
+                .unwrap_or_default()
+                .trim();
+            *written.entry(text).or_default() += 1;
         }
 
         for fact in &context.summary.declarations {

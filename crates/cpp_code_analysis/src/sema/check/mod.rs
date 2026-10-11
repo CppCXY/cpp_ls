@@ -172,25 +172,37 @@ pub struct CheckContext<'a> {
     pub summary: &'a FileSummary,
     /// **The file's questions, and the only way a check asks them.**
     pub model: crate::sema::model::SemanticModel<'a>,
-    /// **The text a range from the *tree* is an offset into** — the view's own reading, which for an indexed file
-    /// is the **rendering**: macros expanded, directives resolved.
+    /// **The text a range from the *tree* is an offset into** — which, in the wiring this layer is called through,
+    /// is the **file's own text**: [`Session::diagnostics`](crate::Session::diagnostics) hands
+    /// [`checks_about`](crate::Session) `Session::view(path)`, the view of the file's own tokens, and **not** a
+    /// rendering. Macros are not expanded and headers are not inlined in what a check sees.
+    ///
+    /// Measured, because half of one round's reasoning assumed the opposite: a file including a header of three
+    /// hundred declarations parses to the same **19 nodes** as the same file with the `#include` line deleted
+    /// (`tests/checks.rs`, `a_check_is_handed_this_files_own_view_and_not_a_rendering`). A rendering is a separate
+    /// artifact with its own accessor ([`Session::rendering_of`](crate::Session::rendering_of)), megabytes for a
+    /// header, and it is what a *client-facing* expanded view would use.
+    ///
+    /// So this layer's scope is the file, by construction rather than by policy — and the two texts below are the
+    /// same text whenever this layer is called the way it is called today.
     pub source: &'a str,
     /// **The text a range from the *summary* is an offset into** — the file as the reader wrote it.
     ///
-    /// Two texts, because this layer reads ranges from two places and they are in two coordinate systems:
+    /// Two fields, because a range from the tree and a range from the summary could be in two coordinate systems if
+    /// a **rendering** were ever handed in:
     ///
     /// ```text
-    ///   a range from `context.tree()`     -> context.source    the rendering
+    ///   a range from `context.tree()`     -> context.source    the reading this view is of
     ///   a range from `context.summary`    -> context.written   the file
     /// ```
     ///
-    /// Measured, and it is what this field was added for: `macro_redefined` compared two `#define` bodies through
-    /// the *rendering* while the ranges came from the summary — so it read a fragment of the expanded function
-    /// against nothing at all, and reported a macro as a redefinition of itself.
+    /// Today they hold the same text (see [`CheckContext::source`]), so this is a distinction kept for a caller that
+    /// answers from a rendering — the case [`CheckContext::own_syntax_nodes`] and
+    /// [`CheckContext::member_accesses`] are written to survive. It was added when `macro_redefined` compared two
+    /// `#define` bodies through the wrong text and reported a macro as a redefinition of itself.
     ///
-    /// What a finding is *published in* is a third thing and it is the file's coordinates, because the server
-    /// places a range with the VFS line index. That crossing belongs where a finding is added — see
-    /// [`CheckContext::add`] — so that no check has to do it.
+    /// What a finding is *published in* is the file's coordinates either way, because the server places a range with
+    /// the VFS line index. That crossing belongs where a finding is added — see [`CheckContext::add`].
     pub written: &'a str,
     /// **The parse errors of the reading this run is about**, which is what the `syntax-error` check publishes.
     ///
@@ -250,8 +262,9 @@ impl<'a> CheckContext<'a> {
         name: impl Into<String>,
         message: impl Into<String>,
     ) {
+        let in_the_reading = range;
         let range = self.in_the_file(range);
-        self.push(code, range, name, message);
+        self.push(code, range, Some(in_the_reading), name, message);
     }
 
     /// **Report a finding whose range is already in the file** — for the checks that read the *summary*, whose
@@ -266,7 +279,7 @@ impl<'a> CheckContext<'a> {
         name: impl Into<String>,
         message: impl Into<String>,
     ) {
-        self.push(code, range, name, message);
+        self.push(code, range, None, name, message);
     }
 
     /// **A range read from the tree, said in the file's coordinates.**
@@ -308,11 +321,24 @@ impl<'a> CheckContext<'a> {
         &mut self,
         code: DiagnosticCode,
         range: SourceRange,
+        in_the_reading: Option<SourceRange>,
         name: impl Into<String>,
         message: impl Into<String>,
     ) {
         if !self.config.is_enabled(code) {
             return;
+        }
+
+        // **A finding has to be about this file's own text.** A rendering has a header inlined where its `#include`
+        // was, so a node a check finds may belong to **another file** — and its range, mapped back through the span
+        // table, lands on the `#include` line. That is the coordinate defect a reader sees as a diagnostic drawn
+        // over the wrong line, and the cook already answers the question per token: `RenderedSpan::written` is `None`
+        // exactly where the text came from somewhere else. Asking it here is the same lesson as the AST layer — the
+        // machinery existed, and this layer was re-deriving a worse version of it by comparing texts.
+        if let Some(in_the_reading) = in_the_reading {
+            if !self.view.was_written_here(in_the_reading) {
+                return;
+            }
         }
         self.findings.push(Finding {
             range,
@@ -338,12 +364,139 @@ impl<'a> CheckContext<'a> {
         self.model.index()
     }
 
+    /// **The typed root of this file's tree** — where every check should start.
+    ///
+    /// The crate has a typed AST (`CppTranslationUnit`, `CppIfStat`, `CppClassDef`, `CppParamList`, …) and this
+    /// layer was written without it: every check compared `CppSyntaxKind`s and re-implemented, by hand, the
+    /// accessors the typed layer already has. The cost is not only verbosity - a hand-written kind comparison is a
+    /// decision made by the check about a shape the parser owns, and when the shape moves the check goes quiet
+    /// (measured twice: `int f() { }` is not a `FunctionDef`, and `struct` is a `StructDef` rather than a
+    /// `ClassDef`) instead of failing to compile.
+    ///
+    /// The cast is cheap - the rowan node is handed back, not rebuilt - and `None` only for a tree that is not a
+    /// translation unit, which is a state this analysis cannot be handed.
+    pub fn root(&self) -> Option<cpp_parser::CppTranslationUnit> {
+        // The trait has to be in scope for `cast`, which is where the typed layer puts it.
+        use cpp_parser::CppAstNode;
+        cpp_parser::CppTranslationUnit::cast(self.tree().clone())
+    }
     /// **The type of an expression** — the model's, remembered per node for as long as this request lasts.
     pub fn type_of(
         &self,
         expression: &cpp_parser::CppSyntaxNode,
     ) -> crate::Known<(crate::sema::types::Type, std::path::PathBuf)> {
         self.model.type_of(expression)
+    }
+
+    /// **Every node of this file's own text** — the one traversal a check should walk.
+    ///
+    /// It exists because `self.tree().descendants()`, which is what every check in this layer used, is the wrong
+    /// question in two ways — one of them real today and one of them a guard:
+    ///
+    /// ```text
+    ///   the scope     in a rendering, a header is inlined where its `#include` was, so a full walk visits every
+    ///                 node of `<string>` — and a node from another file is not a fact about this one. **Today
+    ///                 the checks are handed the file's own view** (`Session::view`, measured: 19 nodes with a
+    ///                 three-hundred-declaration header included and 19 without it), so this prunes nothing; it is
+    ///                 what makes the layer correct if a caller ever answers from a rendering, which is a case the
+    ///                 session documents a separate accessor for
+    ///   the shape     a walk that asks for `CppSyntaxKind` by hand is this layer guessing at a shape the parser
+    ///                 owns — see `CheckContext::own`, which asks the typed layer instead
+    /// ```
+    ///
+    /// Both are answered by the same observation: in a rendering, the text of an inlined header is spliced in where
+    /// the directive was, so it arrives as **top-level children** of the translation unit. The cook marks exactly
+    /// that per token (`RenderedSpan::written`), so pruning the children that were not written here removes the whole
+    /// header at the cost of one question per child — and everything below a kept child is this file's own text.
+    ///
+    /// (A child that is only *partly* this file's — a declaration whose first tokens come from a macro defined
+    /// elsewhere — is pruned whole, which is the safe direction: not reporting is a missed finding, reporting on
+    /// another file's text is a wrong one.)
+    /// **The top-level pieces of this file's own text** — what the two iterators below are built on.
+    ///
+    /// Kept separate because a token walk has to start here and not from every node: taking
+    /// `descendants_with_tokens()` of each node of a tree yields every token once per ancestor, which inflated
+    /// `unused`'s spelling counts until the rule never fired — measured, two of its tests went red.
+    fn own_top_level_nodes(&self) -> Vec<cpp_parser::CppSyntaxNode> {
+        let root = self.tree().clone();
+        let mut kept = Vec::new();
+        for child in root.children() {
+            let range = cpp_parser::source_range(child.text_range());
+            if self.view.was_written_here(range) {
+                kept.push(child);
+            }
+        }
+        kept
+    }
+
+    /// **Every node of this file's own text**, once each, in document order.
+    pub fn own_syntax_nodes(&self) -> impl Iterator<Item = cpp_parser::CppSyntaxNode> + '_ {
+        self.own_top_level_nodes()
+            .into_iter()
+            .flat_map(|child| std::iter::once(child.clone()).chain(child.descendants()))
+    }
+
+    /// **Every node of this file's own text, of one type** — what a check actually asks for.
+    ///
+    /// ```ignore
+    ///   for statement in context.own::<CppIfStat>() { … }         // not: filter(|node| CppSyntaxKind::from(…))
+    /// ```
+    ///
+    /// The typed layer is what makes this possible: `CppAstNode::cast` is the parser's own answer to "is this node
+    /// that", and a check that asks it cannot be wrong about a shape the parser owns. The hand-written kind
+    /// comparisons this replaces went quiet twice — a definition is not a `FunctionDef`, and `struct` is a
+    /// `StructDef` — while compiling and looking correct.
+    pub fn own<T: cpp_parser::CppAstNode + 'static>(&self) -> impl Iterator<Item = T> + '_ {
+        self.own_syntax_nodes().filter_map(T::cast)
+    }
+
+    /// **Every member access in this file's own text** — `a.b`, `a->b`, by the definition the sema layer owns.
+    ///
+    /// The definition is [`crate::sema::resolve::member_access_of`] and not a node kind, because the two disagree
+    /// and the sema layer is the one that is right: measured with `cpp_dump`, `w.secret` parses as
+    ///
+    /// ```text
+    ///   Syntax(IndexExpr)
+    ///     Syntax(IdentifierExpr) "w"    Token(Dot) "."    Token(Identifier) "secret"
+    /// ```
+    ///
+    /// — an **`IndexExpr`**, exactly as `arr[0]` is, which is what `member_access_of` says in its own documentation
+    /// (*"`arr[0]` is the same node kind with brackets instead of a dot"*). The typed layer's `CppMemberExpr` accepts
+    /// `MemberExpr | ArrowExpr`, kinds this grammar does not appear to produce for a dot, so a check filtering on it
+    /// finds **nothing at all** — measured: `access_invisible` counted 38 own nodes and **0** member expressions, and
+    /// `undefined-field` has been blind to `.` for as long as it has existed.
+    ///
+    /// The kinds are still used as a cheap filter before the shape is read, so the cost is one kind test per node
+    /// rather than a child list per node.
+    pub fn member_accesses(&self) -> Vec<(cpp_parser::CppSyntaxNode, crate::sema::resolve::MemberAccess)> {
+        use cpp_parser::CppSyntaxKind;
+        self.own_syntax_nodes()
+            .filter(|node| {
+                matches!(
+                    CppSyntaxKind::from(node.kind()),
+                    CppSyntaxKind::IndexExpr | CppSyntaxKind::MemberExpr | CppSyntaxKind::ArrowExpr
+                )
+            })
+            .filter_map(|node| {
+                crate::sema::resolve::member_access_of(&node).map(|access| (node, access))
+            })
+            .collect()
+    }
+
+    /// **Every token of this file's own text, once each** — for the checks that count spellings rather than read
+    /// structure.
+    ///
+    /// Pruned the same way as [`CheckContext::own_syntax_nodes`] and for the same reason: a token inside an inlined
+    /// header is another file's spelling, and counting it would make `unused` answer about a name in `<string>`.
+    pub fn own_tokens(&self) -> impl Iterator<Item = cpp_parser::CppTokenData> + '_ {
+        self.own_top_level_nodes()
+            .into_iter()
+            .flat_map(|child| child.descendants_with_tokens().collect::<Vec<_>>())
+            .filter_map(|element| element.into_token())
+            .map(|token| cpp_parser::CppTokenData {
+                kind: token.kind().into(),
+                range: cpp_parser::source_range(token.text_range()),
+            })
     }
 
     /// Take the findings, sorted the way a list reads — see [`run`].
@@ -377,51 +530,56 @@ pub fn condition_of(statement: &cpp_parser::CppSyntaxNode) -> Option<cpp_parser:
         .find(|child| cpp_parser::CppSyntaxKind::from(child.kind()) != cpp_parser::CppSyntaxKind::CompoundStat)
 }
 
-/// **The one word a condition is, when it is a bare literal** - `true`, `false`.
+/// **The one word a condition is, when it is a bare literal** — `true`, `false`.
 ///
-/// Decided from the **tokens**: the parentheses and the whitespace are dropped, and what is left has to be exactly
-/// one token whose text is one of the two words. A string literal is one token as well, so `if ("true")` cannot be
-/// read as the keyword, and neither can a name that happens to be spelled that way only in a comment.
+/// Decided from the **tokens**, through the typed layer's own vocabulary: the parentheses and the whitespace are
+/// dropped by kind, and what is left has to be exactly one token that is the keyword. A string literal is a
+/// different kind, so `if ("true")` cannot be read as the keyword.
+///
+/// Getting the kind out of a token is `CppTokenKind::from(CppKind::from(token.kind()))` and **not** a flat match on
+/// the wrapper: this crate's rowan kind is [`CppKind`], which is `Node(CppSyntaxKind)` or `Token(CppTokenKind)`, and
+/// a version of this function that matched `CppTokenKind::LeftParen` against the wrapper compiled, ran, and matched
+/// nothing — which took two checks quiet for a round before the printer in `examples/token_kinds.rs` showed what a
+/// token's kind really is.
 pub fn literal_condition_of(condition: &cpp_parser::CppSyntaxNode) -> Option<String> {
-    use cpp_parser::CppTokenKind;
+    use cpp_parser::{CppKind, CppTokenKind};
 
-    let words: Vec<String> = condition
+    let mut words = Vec::new();
+    for token in condition
         .descendants_with_tokens()
         .filter_map(|element| element.into_token())
-        .filter(|token| {
-            !matches!(
-                CppTokenKind::from(token.kind()),
-                CppTokenKind::LeftParen
-                    | CppTokenKind::RightParen
-                    | CppTokenKind::Whitespace
-                    | CppTokenKind::Newline
-            )
-        })
-        .map(|token| token.text().to_string())
-        .collect();
+    {
+        match CppTokenKind::from(CppKind::from(token.kind())) {
+            CppTokenKind::LeftParen
+            | CppTokenKind::RightParen
+            | CppTokenKind::Whitespace
+            | CppTokenKind::Newline => {}
+            CppTokenKind::TrueKeyword => words.push("true".to_string()),
+            CppTokenKind::FalseKeyword => words.push("false".to_string()),
+            // Anything else — a name, a literal, an operator — means the condition is not a bare literal.
+            _ => return None,
+        }
+    }
 
     match words.as_slice() {
-        [word] if word == "true" || word == "false" => Some(word.clone()),
+        [word] => Some(word.clone()),
         _ => None,
     }
 }
-/// **Is this node a class-like *definition*?** - `class`, `struct` or `union`.
+/// **Is this node a class-like *definition*?** — `class`, `struct` or `union`.
 ///
-/// Three node kinds, one question, and the reason this predicate exists rather than each check naming a kind:
-/// measured, `struct MyString { int size; };` is a **`StructDef`** while `class Widget { … };` is a **`ClassDef`**,
-/// and only the body (`ClassBody`) is shared. A check that filtered on `ClassDef` therefore worked on every `class`
-/// and on **no `struct` at all** — which is what `std::string` and the user's own type are. It cost a round: the
-/// probe printed ``not found among the ClassDef nodes`` while the definition was inlined into the rendering.
+/// Delegated to the typed layer, which already answers exactly this: `CppClassDef::can_cast` accepts `ClassDef`,
+/// `StructDef` **and** `UnionDef`, and it carries `get_name_text`, `is_struct` and `is_union` with it.
 ///
-/// `EnumDef` is deliberately not here: an enumeration has no access specifiers and no constructors, which are the
-/// two questions this predicate is asked for.
+/// This function used to compare `CppSyntaxKind::ClassDef` by hand, which is the defect the whole round is about: it
+/// worked on every `class` and on **no `struct` at all** — and `struct` is what `std::string` and the user's own
+/// types are. Measured with `cpp_dump`: `struct MyString { … }` is a **`StructDef`**. The typed layer had known that
+/// all along; this layer was re-deriving a worse answer from a node kind.
 pub fn is_a_class_definition(node: &cpp_parser::CppSyntaxNode) -> bool {
-    use cpp_parser::CppSyntaxKind;
-    matches!(
-        CppSyntaxKind::from(node.kind()),
-        CppSyntaxKind::ClassDef | CppSyntaxKind::StructDef | CppSyntaxKind::UnionDef
-    )
+    use cpp_parser::CppAstNode;
+    cpp_parser::CppClassDef::cast(node.clone()).is_some()
 }
+
 /// **Is this node a function definition?** See [`function_definitions`] for why the question is about shape.
 pub fn is_a_function_definition(node: &cpp_parser::CppSyntaxNode) -> bool {
     use cpp_parser::CppSyntaxKind;
@@ -440,28 +598,29 @@ pub fn is_a_function_definition(node: &cpp_parser::CppSyntaxNode) -> bool {
     // **And the parameters come before the body.** Asked by position rather than by depth, so that a node wrapping
     // a whole function — a namespace, a class, the translation unit — cannot claim to be one: what is looked for is
     // a parameter list in this node's *head*, and those wrappers have their bodies after it or not at all.
-    node.descendants()
-        .any(|child| {
-            CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList
-                && child.text_range().start() < body.text_range().start()
-        })
+    node.descendants().any(|child| {
+        CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList
+            && child.text_range().start() < body.text_range().start()
+    })
 }
 
+/// **Every function *definition* in this file's own text.**
+///
+/// ```text
+///   reported by  missing-return, param-type-check, return-type-mismatch
+/// ```
+///
+/// It walks [`CheckContext::own_syntax_nodes`] — this file's own text, with the inlined headers pruned — and asks
+/// [`is_a_function_definition`], which is the **one** place that question is answered.
+///
+/// It used to answer it here as well, with a second copy of the shape test that asked for the parameter list *and*
+/// the body to be direct children. That copy was the broken one, the predicate beside it had already been fixed, and
+/// the three checks that call this function therefore reported nothing on any file while looking correct — measured,
+/// and the reason their positive tests were still ignored.
 pub fn function_definitions(context: &CheckContext<'_>) -> Vec<cpp_parser::CppSyntaxNode> {
     context
-        .tree()
-        .descendants()
-        .filter(|node| {
-            cpp_parser::CppSyntaxKind::from(node.kind()) != cpp_parser::CppSyntaxKind::ParameterList
-                && node.children().any(|child| {
-                    cpp_parser::CppSyntaxKind::from(child.kind())
-                        == cpp_parser::CppSyntaxKind::ParameterList
-                })
-                && node.children().any(|child| {
-                    cpp_parser::CppSyntaxKind::from(child.kind())
-                        == cpp_parser::CppSyntaxKind::CompoundStat
-                })
-        })
+        .own_syntax_nodes()
+        .filter(is_a_function_definition)
         .collect()
 }
 /// **The return type a function definition writes**, as the text before its name.
@@ -580,6 +739,14 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
 
     context.into_findings()
 }
+
+
+
+
+
+
+
+
 
 
 

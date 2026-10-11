@@ -201,8 +201,49 @@ impl FileView {
         if in_the_reading == 0 {
             return Some(FileOffset::new(0));
         }
-        let span = self.span_at(in_the_reading - 1)?;
-        Some(FileOffset::new(span.reported.end_offset()))
+
+        // **Position-preserving inside the span, not "the span's end".** A span's reported range covers the trivia
+        // that rides with the text it stands for, so answering with its end made a range one byte too long: measured
+        // on `if (x = 1) { … }`, the condition's end mapped from 35 to 36 and a finding about `"(x = 1) "` came out
+        // quoting `"(x = 1) {"` — which is the "the range covers the whole line" a reader sees, and the reason the
+        // guard that checks a finding is about this file's own text was dropping every finding of this check.
+        //
+        // The end of a range is the position just past its last byte, so the answer is the span's start plus however
+        // far into the span that last byte is: exact for a span that maps one byte to one byte, and for a span that
+        // maps a macro's expansion it lands one byte past the invoked token, which is where the reader sees it.
+        let last = self.span_at(in_the_reading - 1)?;
+        let into_the_span = (in_the_reading - 1).saturating_sub(last.cooked.start_offset);
+        Some(FileOffset::new(
+            last.reported.start_offset + into_the_span + 1,
+        ))
+    }
+
+    /// **Was this range of the reading written in this file?**
+    ///
+    /// The cook already knows, per token: [`RenderedSpan::written`] is `Some` where the file wrote the spelling and
+    /// `None` where it came from a macro body belonging to another file. A check runs over a **rendering** — a header
+    /// inlined where its `#include` was — so a node it finds may belong to another file entirely, and a finding about
+    /// it would be drawn where the reader cannot see the text: measured, on the `#include` line itself.
+    ///
+    /// A range that no span covers answers `false`: the spans tile the rendering, so a range between them is text
+    /// the cook produced rather than text the file wrote, and "not this file's" is the honest answer for it.
+    pub fn was_written_here(&self, in_the_reading: cpp_parser::SourceRange) -> bool {
+        if self.written.is_none() {
+            return true;
+        }
+        let mut covering = self
+            .reading
+            .iter()
+            .skip_while(|span| span.cooked.end_offset() <= in_the_reading.start_offset)
+            .take_while(|span| span.cooked.start_offset < in_the_reading.end_offset());
+        let mut any = false;
+        for span in covering.by_ref() {
+            any = true;
+            if span.written.is_none() {
+                return false;
+            }
+        }
+        any
     }
     /// **Where in the rendering the file's own offset `in_the_file` is acted on.**
     ///
@@ -806,6 +847,7 @@ mod tests {
         );
     }
 }
+
 
 
 

@@ -30,7 +30,6 @@
 //! member list from the model. A chain like `a.b.c` therefore asks about `a.b` first, and is only judged when that
 //! answer is a type whose member list was read.
 
-use cpp_parser::CppSyntaxKind;
 
 use super::{Check, CheckContext, DiagnosticCode};
 
@@ -41,14 +40,11 @@ impl Check for UndefinedField {
     const CODES: &'static [DiagnosticCode] = &[DiagnosticCode::UndefinedField];
 
     fn check(context: &mut CheckContext<'_>) {
-        for node in context
-            .tree()
-            .descendants()
-            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::MemberExpr)
-        {
-            let Some(access) = crate::sema::resolve::member_access_of(&node) else {
-                continue;
-            };
+        // **Every member access in this file's own text**, by the sema layer's definition — see
+        // `CheckContext::member_accesses`. This check used to filter on `MemberExpr`, a kind this grammar does not
+        // produce for a dot: measured with `cpp_dump`, `w.secret` is an `IndexExpr`. It had therefore never reported
+        // anything about `a.b` since it was written, while compiling and looking correct.
+        for (_node, access) in context.member_accesses() {
             // **Nothing after the operator** is a file being typed at — the completion path's business, not this
             // layer's: there is no name to have an opinion about yet.
             if access.member.is_empty() {
@@ -87,3 +83,6 @@ impl Check for UndefinedField {
         }
     }
 }
+
+
+

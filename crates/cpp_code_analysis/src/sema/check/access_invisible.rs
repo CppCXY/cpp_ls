@@ -70,14 +70,10 @@ impl Check for AccessInvisible {
     const CODES: &'static [DiagnosticCode] = &[DiagnosticCode::AccessInvisible];
 
     fn check(context: &mut CheckContext<'_>) {
-        for node in context
-            .tree()
-            .descendants()
-            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::MemberExpr)
-        {
-            let Some(access) = crate::sema::resolve::member_access_of(&node) else {
-                continue;
-            };
+        // **Every member access in this file's own text**, by the sema layer's definition — see
+        // `CheckContext::member_accesses` for why the node kind cannot be trusted for this question, and why this
+        // check found nothing at all until it stopped filtering on `MemberExpr`.
+        for (node, access) in context.member_accesses() {
             if access.member.is_empty() {
                 continue;
             }
@@ -99,8 +95,12 @@ impl Check for AccessInvisible {
             };
 
             // **The declaration of that member, in this file** — found by the range the member list reports, which
-            // is the name's. A member declared in another file is not here, and this check does not judge it.
-            let Some(declaration) = node_at(context.tree(), member.fact.range.start_offset) else {
+            // is the name's. A member declared in another file is not here, and this check does not judge it, so the
+            // search runs over this file's own nodes rather than over the whole rendering.
+            let Some(declaration) = context
+                .own_syntax_nodes()
+                .find(|node| usize::from(node.text_range().start()) == member.fact.range.start_offset)
+            else {
                 continue;
             };
             let Some(class) = enclosing_definition(&declaration) else {
@@ -132,13 +132,7 @@ impl Check for AccessInvisible {
     }
 }
 
-/// The innermost node whose range **starts** at this offset, which is what turns a member's name range into the
-/// declaration that holds it.
-fn node_at(root: &CppSyntaxNode, offset: usize) -> Option<CppSyntaxNode> {
-    root.descendants()
-        .filter(|node| usize::from(node.text_range().start()) == offset)
-        .last()
-}
+
 
 /// The nearest ancestor that is a **class definition** — `class`, `struct`, `union`.
 ///
@@ -225,6 +219,10 @@ fn default_access_of(class: &CppSyntaxNode) -> Access {
         _ => Access::Public,
     }
 }
+
+
+
+
 
 
 

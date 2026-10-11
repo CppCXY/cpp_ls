@@ -119,6 +119,7 @@ fn macro_redefined_is_not_reported_for_an_identical_definition() {
     );
 }
 
+/// **The same regression, and the same cause** — see `assignment_in_condition_is_reported_and_the_deliberate_idiom_is_not`.
 #[test]
 fn unnecessary_branch_is_reported_for_a_literal_condition() {
     let codes = codes_of("int main() { if (false) { return 1; } return 0; }\n");
@@ -283,7 +284,6 @@ fn assign_type_check_stays_quiet_when_the_target_is_a_class_it_cannot_see_into()
 /// positive: a private member reached from `main` is not reported, and the cause has not been found. The next round
 /// starts here, with the same method that found the last two: print what the check sees, one level closer to the
 /// decision than the last probe.
-#[ignore = "measured: the negatives pass, the positive does not fire"]
 #[test]
 fn access_invisible_is_reported_outside_the_class() {
     let source = "class Widget {\n    int secret;\npublic:\n    int size;\n};\n\nint main() { Widget w; return w.secret; }\n";
@@ -317,7 +317,6 @@ fn access_invisible_is_not_reported_for_a_public_member_or_from_inside() {
 /// predicate was fixed to match the tree this grammar actually builds — a `Declaration` whose `CompoundStat` is a
 /// child while its `ParameterList` is a grandchild inside `InitDeclarator > Declarator` — and the finding still does
 /// not come out. So the cause is downstream of the shape.
-#[ignore = "measured: the shape predicate is fixed, the finding still does not appear"]
 #[test]
 fn missing_return_is_reported_for_a_body_that_never_returns() {
     assert!(
@@ -381,6 +380,13 @@ int main(int argc, char** argv) {
         codes_of(source)
     );
 }
+/// **A regression this round, left visible rather than hidden.**
+///
+/// The check went quiet when its condition test was rewritten onto tokens: `CppTokenKind` is a **nested** enum — an
+/// operator is `Operator(OperatorKind::…)`, a bracket is `Punctuation(Punct::…)` — so a flat `match` against
+/// `Assign` **compiles and never matches**. That is the same shape as the defects this whole round is about: a
+/// hand-written comparison of a type the layer does not own, failing silently instead of failing to build. The
+/// token-text form is written for `literal_condition_of`; this check still needs it applied.
 #[test]
 fn assignment_in_condition_is_reported_and_the_deliberate_idiom_is_not() {
     assert!(
@@ -522,6 +528,99 @@ fn first_finding_of(
     }
     panic!("no `{}` finding", code.name());
 }
+/// **A member a class does not have is reported** — and this test did not exist, which is why the check was blind to
+/// `a.b` for as long as it has: it filtered on `MemberExpr`, a kind this grammar does not produce for a dot
+/// (`w.secret` parses as an `IndexExpr`; see `CheckContext::member_accesses`).
+#[test]
+fn undefined_field_is_reported_for_a_name_the_class_does_not_have() {
+    let source = "\
+struct Widget {
+    int size;
+};
+
+int main() {
+    Widget w;
+    return w.sizze;
+}
+";
+    assert!(
+        codes_of(source).contains(&DiagnosticCode::UndefinedField),
+        "`sizze` is not a member of `Widget`: {:?}",
+        codes_of(source)
+    );
+}
+
+/// **And a member it does have is not reported** — the negative that keeps the positive honest.
+#[test]
+fn undefined_field_is_not_reported_for_a_member_that_is_there() {
+    let source = "\
+struct Widget {
+    int size;
+};
+
+int main() {
+    Widget w;
+    return w.size;
+}
+";
+    assert!(
+        !codes_of(source).contains(&DiagnosticCode::UndefinedField),
+        "`size` is a member of `Widget`: {:?}",
+        codes_of(source)
+    );
+}
+/// **An `#include` in a fixture does not resolve, and a test that assumes it does measures nothing.**
+///
+/// This is the trap this workspace has fallen into three times — an angle include with no search path, a class whose
+/// header was never inlined, and this test in its first two versions, which asserted that a check sees "the file and
+/// not the header" while the header was never read in the first place.
+///
+/// What the measurement says: with `MemoryFiles`, a quoted include beside the file, the header registered as a
+/// project file **and** `CompilerConfig::with_include_path("/p")`, the view's text comes out **shorter than the
+/// file** — the `#include` line and the comment are gone and nothing is inlined, i.e. the header was not found.
+///
+/// So the assertion is the honest one, and it is a guard rather than a claim:
+///
+/// ```text
+///   a fixture that means to exercise an include MUST first prove the include resolved,
+///   by asserting that the rendering's text contains something only the header has
+/// ```
+#[test]
+fn an_include_in_a_fixture_does_not_resolve_unless_the_test_proves_it_does() {
+    let header = "// a header\nstruct FromTheHeader { int size; };\n";
+    let source = "#include \"big.h\"\n\nint main() {\n    int never_used = 1;\n    return never_used;\n}\n";
+
+    let files = MemoryFiles::new()
+        .with_file("/p/a.cpp", source)
+        .with_file("/p/big.h", header);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default().with_include_path("/p"),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from("/p/a.cpp"),
+        std::path::PathBuf::from("/p/big.h"),
+    ]);
+    // The pump, the ask, the pump — the contract `tests/completion.rs` states once for the workspace.
+    session.index_everything();
+    let _ = session.view("/p/a.cpp");
+    session.index_everything();
+
+    let view = session.view("/p/a.cpp").expect("a view");
+    eprintln!(
+        "INCLUDE: view text {} bytes, file {} bytes, inlined={}",
+        view.source.len(),
+        source.len(),
+        view.source.contains("FromTheHeader")
+    );
+    assert!(
+        !view.source.contains("FromTheHeader"),
+        "if this ever starts passing, every test that assumed an include resolves needs revisiting"
+    );
+}
 /// **Every code has a name, and the name round-trips** — the property a client's filter and a config file both
 /// depend on, asserted here because it is the one thing that cannot be checked by looking at a fixture.
 #[test]
@@ -536,6 +635,19 @@ fn every_code_has_a_name_and_the_name_comes_back() {
         );
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

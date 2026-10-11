@@ -45,10 +45,11 @@ impl Check for ParamTypeCheck {
         // skips those names without asking anything else.
         let mut by_name: std::collections::HashMap<String, Option<Vec<String>>> =
             std::collections::HashMap::new();
+        // **This file's own functions** - see CheckContext::own_syntax_nodes.
         for function in context
-            .tree()
-            .descendants()
+            .own_syntax_nodes()
             .filter(|node| super::is_a_function_definition(node))
+            .collect::<Vec<_>>()
         {
             let Some(name) = super::name_declared_by(&function) else {
                 continue;
@@ -110,6 +111,7 @@ impl Check for ParamTypeCheck {
         }
     }
 }
+
 
 
 

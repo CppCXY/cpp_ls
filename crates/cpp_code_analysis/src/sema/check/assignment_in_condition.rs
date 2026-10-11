@@ -25,7 +25,7 @@
 //! and a condition with a mismatched parenthesis is exactly where the grammar recovers hardest. The text is what
 //! the reader wrote, and the question is about what they wrote.
 
-use cpp_parser::CppSyntaxKind;
+use cpp_parser::CppAstNode;
 
 use super::{Check, CheckContext, DiagnosticCode};
 
@@ -42,24 +42,34 @@ pub struct AssignmentInCondition;
 /// A node's child is what the parser decided the condition is, and this takes **the one expression before the
 /// body**: no scanning, no ambiguity. A condition written as `(x = y)` arrives as a parenthesised expression, whose
 /// text is then trimmed — the trimming is safe because the node is already the whole condition.
+#[allow(dead_code)]
 fn condition_of(node: &cpp_parser::CppSyntaxNode) -> Option<cpp_parser::CppSyntaxNode> {
     // The body is the one child that is never the condition, and it is the only one that has to be named: the
     // keywords are **tokens**, so `children()` does not offer them at all.
-    node.children()
-        .find(|child| CppSyntaxKind::from(child.kind()) != CppSyntaxKind::CompoundStat)
+    node.children().find(|child| {
+        cpp_parser::CppSyntaxKind::from(child.kind()) != cpp_parser::CppSyntaxKind::CompoundStat
+    })
 }
 
 impl Check for AssignmentInCondition {
     const CODES: &'static [DiagnosticCode] = &[DiagnosticCode::AssignmentInCondition];
 
     fn check(context: &mut CheckContext<'_>) {
-        for node in context.tree().descendants().filter(|node| {
-            matches!(
-                CppSyntaxKind::from(node.kind()),
-                CppSyntaxKind::IfStat | CppSyntaxKind::WhileStat
-            )
-        }) {
-            let Some(condition) = condition_of(&node) else {
+        // **One walk of this file's own nodes**, dispatched by the sum type rather than by two kind comparisons: the
+        // two statements this check is about both hold their condition in a `CppParenExpr`, and asking for that is
+        // the parser's answer rather than this layer's guess. Collected before the loop because a finding needs
+        // `&mut context` while the iterator holds `&context`.
+        for node in context.own::<cpp_parser::CppAst>().collect::<Vec<_>>() {
+            let parenthesised = match &node {
+                cpp_parser::CppAst::Stat(cpp_parser::CppStat::IfStat(statement)) => {
+                    statement.children::<cpp_parser::CppParenExpr>().next()
+                }
+                cpp_parser::CppAst::Stat(cpp_parser::CppStat::WhileStat(statement)) => {
+                    statement.children::<cpp_parser::CppParenExpr>().next()
+                }
+                _ => None,
+            };
+            let Some(condition) = parenthesised.map(|p| p.syntax().clone()) else {
                 continue;
             };
             if !is_an_assignment(&condition) {
@@ -109,5 +119,7 @@ fn is_an_assignment(condition: &cpp_parser::CppSyntaxNode) -> bool {
     }
     assigns
 }
+
+
 
 

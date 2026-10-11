@@ -36,7 +36,8 @@
 //! runs — while `if (true) { … }` is a claim about the **condition**, which is a decision already made. The two
 //! messages say which one the reader is looking at.
 
-use cpp_parser::CppSyntaxKind;
+
+use cpp_parser::CppAstNode;
 
 use super::{Check, CheckContext, DiagnosticCode};
 
@@ -47,30 +48,31 @@ impl Check for UnnecessaryBranch {
     const CODES: &'static [DiagnosticCode] = &[DiagnosticCode::UnnecessaryBranch];
 
     fn check(context: &mut CheckContext<'_>) {
-        for statement in context
-            .tree()
-            .descendants()
-            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::IfStat)
-        {
-            // **The condition from the node, and the literal from its tokens.** This was a text scan for the first
-            // `(` and its match — the same reading that put a finding on a line whose condition is two comparisons
-            // (see `assignment_in_condition`), plus a comparison of the *whole condition text* against `"true"`,
-            // which cannot tell `if (true)` from a condition that happens to spell the word inside a comment.
-            let Some(condition) = super::condition_of(&statement) else {
+        // **This file's own nodes, of the one type this check is about** — see `CheckContext::own`, which prunes the
+        // inlined headers a rendering splices in and asks the typed layer what a node is. The walk is collected
+        // before the loop because a finding needs `&mut context` while the iterator holds `&context`; a `Vec` of node
+        // handles is a few words each, not a copy of the tree.
+        for statement in context.own::<cpp_parser::CppIfStat>().collect::<Vec<_>>() {
+            // The condition from the **typed** layer: the parser decides what a condition is, and this asks for it.
+            let Some(condition) = statement
+                .children::<cpp_parser::CppParenExpr>()
+                .next()
+                .map(|parenthesised| parenthesised.syntax().clone())
+            else {
                 continue;
             };
             let Some(decided) = super::literal_condition_of(&condition) else {
                 continue;
             };
             let decided = decided == "true";
-            let condition = condition.text().to_string();
+            let condition = super::spelling_of(&condition).unwrap_or_default();
             let condition = condition.trim();
 
             // **The whole statement when the branch cannot run, the condition when it always does** — see the module
             // documentation for why the message is about a different place in each of the two cases.
             let (range, message) = if decided {
                 (
-                    cpp_parser::source_range(statement.text_range()),
+                    cpp_parser::source_range(statement.get_range()),
                     format!(
                         "this branch always runs: the condition `{condition}` is a literal true, so the `if` \
                          decides nothing"
@@ -78,7 +80,7 @@ impl Check for UnnecessaryBranch {
                 )
             } else {
                 (
-                    cpp_parser::source_range(statement.text_range()),
+                    cpp_parser::source_range(statement.get_range()),
                     format!(
                         "this branch cannot run: the condition `{condition}` is a literal false"
                     ),
@@ -94,3 +96,7 @@ impl Check for UnnecessaryBranch {
         }
     }
 }
+
+
+
+

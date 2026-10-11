@@ -43,7 +43,7 @@
 
 use std::collections::HashMap;
 
-use cpp_parser::CppSyntaxKind;
+use cpp_parser::{CppAstNode, CppSyntaxKind};
 
 use super::{Check, CheckContext, DiagnosticCode};
 
@@ -78,10 +78,11 @@ impl Check for AssignTypeCheck {
 
         // **The declarations**: `T x = expr;`. The value is the initialiser's own expression, and the name is the
         // declarator written beside it.
+        // **This file's own initialisers** - see CheckContext::own_syntax_nodes.
         for initializer in context
-            .tree()
-            .descendants()
-            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Initializer)
+            .own::<cpp_parser::CppInitializer>()
+            .map(|initializer| initializer.syntax().clone())
+            .collect::<Vec<_>>()
         {
             // The punctuation is not the expression: `= expr`, `{expr}` and `(expr)` each leave one child that is
             // the value.
@@ -347,6 +348,8 @@ fn last_identifier_of(text: &str) -> Option<String> {
     }
     last
 }
+
+
 
 
 
