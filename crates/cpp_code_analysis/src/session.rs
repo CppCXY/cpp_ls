@@ -4724,6 +4724,44 @@ impl<F: FileProvider + Clone> Session<F> {
         }
         names = placed;
 
+        // **And the identifiers only the file's own text has.**
+        //
+        // The walk iterates `view.tree.get_tokens()` — the **rendering's** tokens — so a name the cook removed is not
+        // in it at all: an identifier in an untaken `#if` branch, or in the body of a function-like macro. Those are
+        // names the reader is looking at, and the module's own words are that this reads "the file's own bindings and
+        // macro directives". `a_macro_in_an_untaken_branch_is_still_a_macro` is the test that says so, and it answered
+        // `None` against `Some(Macro)`.
+        //
+        // A parse of the file's own text sees them, **in the file's coordinates already** — so nothing here is
+        // translated, and the two passes meet in one numbering. Deduplicated by where the name starts, with the
+        // rendering's answer winning: it is the one that carries the macro and binding facts.
+        //
+        // The guard is "the two readings differ", because a file the cook did not change needs no second pass — and
+        // the cost when they do differ is a second walk, which the `Classify` stage timer in
+        // `examples/semantic_probe.rs` measures.
+        if view.written_text().is_some_and(|written| written != &*view.source)
+            && let Some(own) = self.view_of_the_file(&view.path)
+        {
+            // **Where the two passes disagree about one name, the file's own text wins.** Measured both ways: keeping
+            // the rendering's answer for a shared start lost `(Parameter, false)` — a use the cook rewrote — and
+            // keeping *both* broke `the_classifications_are_sorted_and_disjoint`. A colour is drawn on the reader's
+            // text, so for two answers about one offset the one read from that text is the one to draw.
+            let mut at_offset: std::collections::HashMap<usize, usize> = names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| (name.range.start_offset, index))
+                .collect();
+            for name in crate::semantic::classified_names(self.store.index(), &own) {
+                match at_offset.get(&name.range.start_offset) {
+                    Some(&index) => names[index] = name,
+                    None => {
+                        at_offset.insert(name.range.start_offset, names.len());
+                        names.push(name);
+                    }
+                }
+            }
+        }
+
         // **And re-sorted, because the crossing is not order-preserving.** The walk answers in the rendering's order,
         // and a token a macro produced maps back to *where the macro was invoked* — which can be before a name that
         // preceded it in the rendering. The consumer builds a **delta walk** (`SemanticTokens`, where every token is
@@ -5679,7 +5717,7 @@ mod tests {
     use super::{OpenDocuments, Session, SessionFiles, queue_key};
     use crate::include::config::{CommandLineMacro, CompilerConfig};
     use crate::include::toolchain::{Toolchain, ToolchainSource};
-    use crate::file::coordinates::{FileOffset, ReadingOffset};
+    use crate::file::coordinates::ReadingOffset;
 use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
     use crate::index::watch::{FileEvent, WatchFilter};
     use crate::index::{Priority, StepOutcome};

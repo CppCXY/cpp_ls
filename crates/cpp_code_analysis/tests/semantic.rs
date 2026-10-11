@@ -533,9 +533,16 @@ fn a_local_fact_carries_a_namespace_the_file_only_opens_with_a_macro() {
     // qualified one, so it finds `app::Widget` from a context that never mentions `app` — correctly, and
     // whatever namespace is passed. What the field changes is what the scope tree can supply, so that is what
     // is asked.
+    // **The view opens `app` too, and that is a change this test had to be told about.** Its premise used to be
+    // that "a parse of this file" cannot know `BEGIN_APP`'s replacement list, because it lives in `ns.h` and
+    // "nothing in a view has read" it — which was true while `Session::view_of_the_file` queued the work and answered
+    // `None`. That method now builds the file's own view with the macros **already read for its content**
+    // (`known_macros_of`, a hash and a lookup), so the parse in the view expands `BEGIN_APP` and the `app` scope is
+    // there to walk from. The fact's answer is still what the type question uses — see below — but the view is no
+    // longer the layer that cannot say it.
     assert!(
-        view.scopes.scope_with_qualified_name("app").is_none(),
-        "the macro that opens `app` is in another file, so the view has no such scope to walk from"
+        view.scopes.scope_with_qualified_name("app").is_some(),
+        "the view is parsed with the closure's macros in hand, so `BEGIN_APP` opens `app` here too"
     );
 
     // …and with the fact's answer in hand the same name resolves.
@@ -1183,12 +1190,17 @@ fn a_view_gets_its_macros_one_query_later() {
         out
     }
 
-    // **The first query asks and answers plainly.** Nothing has built the environment, so the declaration the
-    // macro heads is still at file scope — and the query did not stop to build it.
+    // **The first query already has them, and this assertion is what changed.** The premise used to be "nothing has
+    // built the environment yet", which was true while the work loop had no reader for the queue it drained — the
+    // queue was filled and the environments were never built (`known_macros_of` and `the_macros_of` were dead code).
+    // The loop builds them now, one per drain, so a session that has pumped holds the closure's macros and this parse
+    // expands `_MY_BEGIN` — which is the arrangement `macro_environments` describes, measured end to end. The second
+    // half below still asks the same question after an explicit `advance`; it is no longer a *change* the pump makes,
+    // and it is kept because a caller reading this file should see what a drain does rather than what it once did.
     let first = names_in(&session.view("/p/a.cpp").expect("held").scopes);
     assert!(
-        !first.iter().any(|name| name == "mine::thing"),
-        "the first query cannot have the macros — nothing has built them yet: {first:?}"
+        first.iter().any(|name| name == "mine::thing"),
+        "the pump builds the closure's macros, so the declaration the macro heads is inside `mine`: {first:?}"
     );
 
     // **The work loop builds it** — one per drain, and one drain is enough for one file.
