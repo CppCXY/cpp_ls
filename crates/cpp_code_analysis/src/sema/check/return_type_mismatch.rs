@@ -40,7 +40,7 @@ impl Check for ReturnTypeMismatch {
         for function in context
             .tree()
             .descendants()
-            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::FunctionDef)
+            .filter(|node| super::is_a_function_definition(node))
         {
             let Some(declared) = return_type_of(&function) else {
                 continue;
@@ -138,3 +138,5 @@ fn return_type_of(function: &CppSyntaxNode) -> Option<String> {
     }
     Some(head.to_string())
 }
+
+

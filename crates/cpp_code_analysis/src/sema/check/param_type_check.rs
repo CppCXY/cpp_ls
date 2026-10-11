@@ -48,7 +48,7 @@ impl Check for ParamTypeCheck {
         for function in context
             .tree()
             .descendants()
-            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::FunctionDef)
+            .filter(|node| super::is_a_function_definition(node))
         {
             let Some(name) = super::name_declared_by(&function) else {
                 continue;
@@ -110,5 +110,7 @@ impl Check for ParamTypeCheck {
         }
     }
 }
+
+
 
 

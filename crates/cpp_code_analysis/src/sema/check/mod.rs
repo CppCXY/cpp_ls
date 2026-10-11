@@ -74,7 +74,9 @@ use cpp_parser::SourceRange;
 use crate::file::view::FileView;
 use crate::{FileSummary, ProjectIndex};
 
+pub mod access_invisible;
 pub mod argument_count;
+pub mod assignment_in_condition;
 pub mod assign_type_check;
 // pub mod assign_type_check;
 pub mod config;
@@ -85,6 +87,7 @@ pub mod diagnostic_code;
 // the ported versions have to preserve.
 pub mod include_not_found;
 pub mod macro_redefined;
+pub mod missing_return;
 pub mod param_type_check;
 pub mod return_type_mismatch;
 pub mod syntax_error;
@@ -329,6 +332,80 @@ impl<'a> CheckContext<'a> {
     }
 }
 
+/// **Every function *definition* in this file** - a node with both a parameter list and a body.
+///
+/// Recognised by **shape** rather than by node kind, and that is not tidiness: measured, `int count() { }` at file
+/// scope is **not** a `FunctionDef` in this grammar - the dump shows a `NameExpr`, a `ParameterList` and a
+/// `CompoundStat` with no function node around them - so every check that filtered on that kind reported nothing,
+/// on every file, while looking correct. A definition is what has a parameter list and a body; which node the
+/// grammar wrapped them in is its business.
+/// **Is this node a function definition?** See [`function_definitions`] for why the question is about shape.
+pub fn is_a_function_definition(node: &cpp_parser::CppSyntaxNode) -> bool {
+    use cpp_parser::CppSyntaxKind;
+
+    // **The body is a direct child and the parameters are not**, which is the asymmetry that made this predicate
+    // wrong the first time and silent for three checks: measured, `int count() { }` is a `Declaration` whose
+    // `CompoundStat` is a child while its `ParameterList` is a grandchild, inside `InitDeclarator > Declarator`. A
+    // predicate asking for both as children matched nothing at all.
+    let Some(body) = node
+        .children()
+        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
+    else {
+        return false;
+    };
+
+    // **And the parameters come before the body.** Asked by position rather than by depth, so that a node wrapping
+    // a whole function — a namespace, a class, the translation unit — cannot claim to be one: what is looked for is
+    // a parameter list in this node's *head*, and those wrappers have their bodies after it or not at all.
+    node.descendants()
+        .any(|child| {
+            CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList
+                && child.text_range().start() < body.text_range().start()
+        })
+}
+
+pub fn function_definitions(context: &CheckContext<'_>) -> Vec<cpp_parser::CppSyntaxNode> {
+    context
+        .tree()
+        .descendants()
+        .filter(|node| {
+            cpp_parser::CppSyntaxKind::from(node.kind()) != cpp_parser::CppSyntaxKind::ParameterList
+                && node.children().any(|child| {
+                    cpp_parser::CppSyntaxKind::from(child.kind())
+                        == cpp_parser::CppSyntaxKind::ParameterList
+                })
+                && node.children().any(|child| {
+                    cpp_parser::CppSyntaxKind::from(child.kind())
+                        == cpp_parser::CppSyntaxKind::CompoundStat
+                })
+        })
+        .collect()
+}
+/// **The return type a function definition writes**, as the text before its name.
+///
+/// Read as **text** rather than as nodes, because the recovery the grammar performs around a declarator is what
+/// makes a node-shaped answer unreliable here: `int* f()`, `const std::string& f()` and `auto f()` each have to come
+/// out as the spelling the reader wrote.
+///
+/// `None` for a definition with nothing before its name — a constructor — and for a head this cannot read.
+pub fn return_type_written_by(function: &cpp_parser::CppSyntaxNode) -> Option<String> {
+    let parameters = function
+        .children()
+        .find(|child| cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::ParameterList)?;
+    let name = function.children().take_while(|child| child != &parameters).last()?;
+
+    let whole = function.text().to_string();
+    let start: usize = function.text_range().start().into();
+    let before_the_name: usize = name.text_range().start().into();
+    let head = whole.get(..before_the_name.checked_sub(start)?)?.trim();
+
+    // A pointer or reference written against the name - `int *f()` - belongs to the type.
+    let head = head.trim_end_matches(['*', '&']).trim_end();
+    if head.is_empty() {
+        return None;
+    }
+    Some(head.to_string())
+}
 /// **The last identifier written inside a node** — the name a call would spell, the name a declaration declares.
 ///
 /// Shared by the two checks that pair a call with a declaration, because both need the same answer to "which name
@@ -383,6 +460,9 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     run_check::<include_not_found::IncludeNotFound>(&mut context);
     run_check::<macro_redefined::MacroRedefined>(&mut context);
     run_check::<unused::Unused>(&mut context);
+    run_check::<access_invisible::AccessInvisible>(&mut context);
+    run_check::<missing_return::MissingReturn>(&mut context);
+    run_check::<assignment_in_condition::AssignmentInCondition>(&mut context);
     run_check::<unnecessary_branch::UnnecessaryBranch>(&mut context);
     run_check::<undefined_field::UndefinedField>(&mut context);
     run_check::<argument_count::ArgumentCount>(&mut context);
@@ -393,6 +473,10 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
 
     context.into_findings()
 }
+
+
+
+
 
 
 

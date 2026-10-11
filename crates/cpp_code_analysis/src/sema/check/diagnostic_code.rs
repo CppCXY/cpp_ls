@@ -65,6 +65,12 @@ pub enum DiagnosticCode {
     /// Separate from [`DiagnosticCode::SyntaxError`] for the reason a reader needs it separate: the file parses
     /// perfectly, and what is missing is a file it named.
     IncludeNotFound,
+    /// A member reached from somewhere that may not reach it - see [`super::access_invisible`].
+    AccessInvisible,
+    /// A function declared to return something whose body never returns - see [`super::missing_return`].
+    MissingReturn,
+    /// `=` where the reader almost certainly meant `==` - see [`super::assignment_in_condition`].
+    AssignmentInCondition,
     /// **A note about a module import**, which the analysis knows rather than complains about — see
     /// [`Session::notes_about_the_modules`](crate::Session::notes_about_the_modules).
     ///
@@ -80,7 +86,7 @@ impl DiagnosticCode {
     /// what it says about types, then what it says about a whole body, then the two that are about the reading
     /// rather than the program. A consumer that shows a settings screen, or a test that asserts every rule has a
     /// name and a module, iterates this.
-    pub const ALL: [DiagnosticCode; 11] = [
+    pub const ALL: [DiagnosticCode; 14] = [
         DiagnosticCode::SyntaxError,
         DiagnosticCode::ParamTypeCheck,
         DiagnosticCode::AssignTypeCheck,
@@ -91,6 +97,9 @@ impl DiagnosticCode {
         DiagnosticCode::ReturnTypeMismatch,
         DiagnosticCode::MacroRedefined,
         DiagnosticCode::IncludeNotFound,
+        DiagnosticCode::AccessInvisible,
+        DiagnosticCode::MissingReturn,
+        DiagnosticCode::AssignmentInCondition,
         DiagnosticCode::ModuleNote,
     ];
 
@@ -111,6 +120,9 @@ impl DiagnosticCode {
             DiagnosticCode::ReturnTypeMismatch => "return-type-mismatch",
             DiagnosticCode::MacroRedefined => "macro-redefined",
             DiagnosticCode::IncludeNotFound => "include-not-found",
+            DiagnosticCode::AccessInvisible => "access-invisible",
+            DiagnosticCode::MissingReturn => "missing-return",
+            DiagnosticCode::AssignmentInCondition => "assignment-in-condition",
             DiagnosticCode::ModuleNote => "module-note",
         }
     }
@@ -150,6 +162,12 @@ impl DiagnosticCode {
             // all in several others. "Nothing reads this name" is the least urgent claim this analysis makes: the
             // program builds, runs, and may be exactly what the author meant while they were writing it.
             DiagnosticCode::Unused => RuleSeverity::Hint,
+            // **A member another class may not reach, and a body that never returns what it promises**: both are
+            // complaints about a program that will not build.
+            DiagnosticCode::AccessInvisible => RuleSeverity::Error,
+            DiagnosticCode::MissingReturn => RuleSeverity::Error,
+            // A judgement rather than a law: an assignment in a condition is deliberate in a great deal of code.
+            DiagnosticCode::AssignmentInCondition => RuleSeverity::Warning,
             DiagnosticCode::ModuleNote => RuleSeverity::Information,
         }
     }
@@ -198,5 +216,7 @@ pub enum RuleSeverity {
     /// Not a complaint at all — a fact about where a file is.
     Information,
 }
+
+
 
 
