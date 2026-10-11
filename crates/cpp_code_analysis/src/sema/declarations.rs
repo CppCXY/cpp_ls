@@ -2055,7 +2055,7 @@ fn pattern_of(shapes: &DeclarationShapes, binding: &Binding) -> Option<String> {
 /// any path through the include graph. So every use of one is in the file that declares it, and a table keyed by
 /// the declaration's own offset is a **single-file fact**: it needs no closure, no macro environment and no
 /// timeline. That is the invariant IntelliJ's stub contract states (*"all information stored in the stub tree
-/// depends only on the contents of the file for which stubs are being built"*) and the one `docs/design-review.md`
+/// depends only on the contents of the file for which stubs are being built"*) and the one `docs/status.md`
 /// §3.2 records that our summary layer does not satisfy — so this is the first table in the index that does.
 ///
 /// # Why the key is an offset and not a name
@@ -4023,6 +4023,7 @@ int Box<int>::Inner::deep = 0;
         assert_eq!(of("plain").returns.as_deref(), Some("void"));
     }
 }
+
 
 
 

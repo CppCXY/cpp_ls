@@ -14,8 +14,8 @@
 //! ```
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let Some(dir) = args.first() else {
-        eprintln!("usage: checks_probe <include-dir> [--limit N]");
+    let (Some(dir), Some(root)) = (args.first(), args.get(1)) else {
+        eprintln!("usage: checks_probe <include-dir> <root file> [--limit N]");
         std::process::exit(2);
     };
     let limit: usize = args
@@ -33,6 +33,31 @@ fn main() {
         ),
         cpp_code_analysis::WatchFilter::new(std::path::Path::new(".")),
     );
+    // **The ask before the pump, and the pump again** — the contract `tests/completion.rs` states once for the
+    // workspace, and the defect this probe shared with `one_check`: `Session::diagnostics` answers from the **cooked
+    // reading**, a rendering is built because something asked for one, and without the ask every file answered
+    // `None`. A probe that silently checks nothing is worse than no probe — it prints a count of zero, which is the
+    // *good* answer, for a corpus nothing was ever checked on.
+    let wanted: Vec<std::path::PathBuf> = session
+        .index()
+        .summaries()
+        .map(|summary| summary.path.clone())
+        .collect();
+
+    // **And the files have to be the project's before anything can be cooked.** A rendering is built against a
+    // file's **closure** — what its `#include`s resolve to — so a session that was never told which files are the
+    // project's has no closure to walk, `diagnostics` answers `None` for every path, and the probe prints a count of
+    // zero: the *good* answer, for a corpus nothing was ever checked on. Measured, in `one_check`, whose defect this
+    // was too — with the ask but no project files, `syntax-error` reported zero on a file that does not parse.
+    // **And the file itself has to be opened**, which is what puts it — and the files its `#include`s reach — into
+    // the index at all: `summaries()` is empty without it, so the loop below had nothing to ask about. Measured, and
+    // it is the same shape `one_check` needed.
+    let root_path = std::path::PathBuf::from(root);
+    session.did_open(&root_path, &std::fs::read_to_string(&root_path).unwrap_or_default());
+    session.add_project_files(wanted.clone());
+    for path in &wanted {
+        session.want_cooked_reading(path);
+    }
     session.index_everything();
 
     let mut checked = 0usize;
@@ -76,4 +101,7 @@ fn main() {
         println!("    {count:>5}  {check}");
     }
 }
+
+
+
 

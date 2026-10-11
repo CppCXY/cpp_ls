@@ -462,7 +462,7 @@ impl<F: FileProvider> SummaryStore<F> {
         // ([`SummaryStore::prepare_closure`]), and a caller preparing one file has no frontier to feed. The
         // includes come out of the parse either way — `summary.includes` is the same answer — so the only thing
         // this gives up is being told about them a moment sooner, and what it saves is measured per keystroke,
-        // because a rebuilt summary is exactly what an edit produces. See `docs/incremental-edits.md` §5.2.
+        // because a rebuilt summary is exactly what an edit produces. See `docs/status.md` §5.2.
         self.prepare_inner(path, None, None)
     }
 
@@ -2880,6 +2880,7 @@ mod tests {
         );
     }
 }
+
 
 
 

@@ -82,7 +82,7 @@ pub async fn on_goto_definition_handler(
         //
         // The question that matters is about this file's own closure, and `read_the_modules` above is what answers it:
         // it catches this file's summary up and reads the files it reaches that nobody has read. See
-        // `docs/latency.md` §5.2.
+        // `docs/status.md` §5.2.
     }
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
@@ -196,6 +196,7 @@ impl RegisterCapabilities for DefinitionCapabilities {
         server_capabilities.definition_provider = Some(OneOf::Left(true));
     }
 }
+
 
 
 

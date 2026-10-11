@@ -1,6 +1,6 @@
 //! **What one keystroke costs, in passes.**
 //!
-//! `docs/incremental-edits.md` §1 counts the passes a single character causes — three parses, three lexes, a line
+//! `docs/status.md` §1 counts the passes a single character causes — three parses, three lexes, a line
 //! index, and a walk of the include closure — and §5.2's acceptance is stated as a count rather than a duration:
 //! *one* `Parse` entry for the edited file. This is the probe that reads the counts, and it is written as an
 //! example rather than a test because the counters in [`cpp_code_analysis::stages`] are **process-global**: a test
@@ -163,3 +163,4 @@ fn fixture() -> MemoryFiles {
             "#include \"api.h\"\nint main() { Api a; return a.c.w; }\n",
         )
 }
+

@@ -33,7 +33,7 @@
 //! could be formed. Erring that way is the direction to err in: a default that cannot be used is the compiler's
 //! complaint, and this layer's job is to be quiet when it is not sure.
 
-use cpp_parser::{CppSyntaxKind, CppSyntaxNode};
+use cpp_parser::CppAstNode;
 
 use super::{Check, CheckContext, DiagnosticCode};
 
@@ -44,65 +44,69 @@ pub struct ArgumentCount;
 struct Callee {
     /// The parameters that have no default — a call below this many is missing arguments.
     required: usize,
-    /// How many the declaration writes.
+    /// How many parameters are written, defaults included — a call above this many passes too many.
     written: usize,
-    /// Whether the list ends in `...`.
+    /// The declaration ends in `...`, so any number of arguments above `required` is allowed.
     variadic: bool,
 }
 
-/// Every node of one kind, in one walk — the shape the sibling check's documentation gives a measurement for: a
-/// file with a hundred calls reads the tree once, not once per call.
-fn nodes_of_kind(context: &CheckContext<'_>, kind: CppSyntaxKind) -> Vec<CppSyntaxNode> {
-    // **This file's own nodes** - see CheckContext::own_syntax_nodes, which prunes the inlined headers a
-    // rendering splices in. The kind stays a parameter because this helper is called for two of them.
-    context
-        .own_syntax_nodes()
-        .filter(|node| CppSyntaxKind::from(node.kind()) == kind)
-        .collect()
-}
 impl Check for ArgumentCount {
     const CODES: &'static [DiagnosticCode] = &[DiagnosticCode::ArgumentCount];
 
     fn check(context: &mut CheckContext<'_>) {
         let callees = callees_in_this_file(context);
-        if callees.is_empty() {
-            return;
-        }
 
-        for call in nodes_of_kind(context, CppSyntaxKind::CallExpr) {
-            // The child before the argument list is the callee — `scale` in `scale(1)`, `w.scale` in `w.scale(1)`,
-            // and the whole expression in `(make())(1)`. The **last name written** is what a declaration can be
-            // found by, which is what `spelling_of` answers.
-            let Some(callee) = call.children().next() else {
+        // **The typed layer's own call node**, with its own accessors: `get_callee` and `get_args`. Both were being
+        // guessed at before, and both guesses were wrong for this grammar — measured with `cpp_dump`, `scale(1, 2, 3)`
+        // is
+        //
+        // ```text
+        //   CallExpr   IdentifierExpr "scale"   "("   LiteralExpr 1   ","   LiteralExpr 2   ","   LiteralExpr 3   ")"
+        // ```
+        //
+        // — there is **no `ArgumentList` node** for a simple call, so `children().find(kind == ArgumentList)` never
+        // matched and this check reported nothing at all, in any file, for as long as it has existed.
+        for call in context.own::<cpp_parser::CppCallExpr>().collect::<Vec<_>>() {
+            let Some(callee) = call.get_callee() else {
                 continue;
             };
-            let Some(name) = super::spelling_of(&callee) else {
+            // The **last name written** is what a declaration can be found by: `scale` in `scale(1)`, `scale` in
+            // `w.scale(1)`, and the last of them in `ns::scale(1)`.
+            let Some(name) = super::spelling_of(callee.syntax()) else {
                 continue;
             };
-            let Some(declared) = callees.get(name.as_str()) else {
-                // Declared in another file: not judged — see the module documentation.
-                continue;
+            // **This file first, the index second.** A callee declared here is read from the tree, which is where its
+            // defaults and its `...` are; one declared in another file is a **fact** the cook already produced —
+            // `DeclFact::parameter_list`, the field whose own documentation says it is stored *"because a query holds
+            // one file and the parameters are written in another"*.
+            let declared = match callees.get(name.as_str()) {
+                Some(declared) => Callee {
+                    required: declared.required,
+                    written: declared.written,
+                    variadic: declared.variadic,
+                },
+                None => match callee_from_the_index(context, &name) {
+                    Some(declared) => declared,
+                    // Overloaded, or not a function this index can see: not judged, which is the direction to be
+                    // wrong in. See the module documentation.
+                    None => continue,
+                },
             };
 
-            let Some(arguments) = call
-                .children()
-                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ArgumentList)
-            else {
-                continue;
-            };
-            let passed = arguments.children().count();
+            // The arguments as the typed layer counts them — for `scale(1, 2, 3)`, three.
+            let passed = call.get_args().len();
 
             if !declared.variadic && passed > declared.written {
                 context.add(
                     DiagnosticCode::ArgumentCount,
-                    cpp_parser::source_range(call.text_range()),
+                    cpp_parser::source_range(call.get_range()),
                     name.clone(),
                     at_most(&name, declared.written),
                 );
             } else if passed < declared.required {
                 context.add(
                     DiagnosticCode::ArgumentCount,
-                    cpp_parser::source_range(call.text_range()),
+                    cpp_parser::source_range(call.get_range()),
                     name.clone(),
                     at_least(&name, declared.required),
                 );
@@ -118,13 +122,15 @@ impl Check for ArgumentCount {
 fn callees_in_this_file(context: &CheckContext<'_>) -> std::collections::HashMap<String, Callee> {
     let mut callees = std::collections::HashMap::new();
 
-    for node in nodes_of_kind(context, CppSyntaxKind::FunctionDef)
-        .into_iter()
-        .chain(nodes_of_kind(context, CppSyntaxKind::Declaration))
-    {
-        let Some(parameters) = node
-            .children()
-            .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList)
+    // **The shared predicate**, and the parameters through the typed layer: measured, a file-scope definition is a
+    // `Declaration` whose parameter list is a **grandchild** (`InitDeclarator > Declarator > ParameterList`), so a
+    // filter on `FunctionDef` found nothing and a `children()` lookup for the parameter list found nothing either.
+    // This check had therefore never judged a function of the file it was checking — the same defect shape as the
+    // three before it, and the reason `super::function_definitions` exists.
+    for node in super::function_definitions(context) {
+        let Some(parameters) = cpp_parser::CppDeclaration::cast(node.clone())
+            .and_then(|declaration| declaration.descendants::<cpp_parser::CppParamList>().next())
+            .map(|parameters| parameters.syntax().clone())
         else {
             continue;
         };
@@ -175,9 +181,88 @@ fn at_most(name: &str, written: usize) -> String {
     format!("`{name}` takes {written} argument(s) and this call passes more")
 }
 
+/// **A callee the index knows** — its declaration is in another file, and its parameter list is a **fact**.
+///
+/// `DeclFact::parameter_list` is `(_Ty* _First, size_type _Count)`: parentheses, defaults, `...` and all, and it is
+/// stored rather than read when wanted *"because a query holds one file and the parameters are written in
+/// another"* — the sentence this function is an implementation of.
+///
+/// **One declaration or nothing.** Two declarations of one name are an overload set, and which of them a call
+/// resolves to is overload resolution: picking one would report an arity against the wrong signature, so this
+/// answers `None` for the whole set — the same rule [`super::a_class_can_be_built_from`] follows for constructors.
+///
+/// `None` as well for a declaration that is not a function, for one whose parameter list the reading could not
+/// reach, and for a name the index does not hold at all.
+fn callee_from_the_index(context: &CheckContext<'_>, name: &str) -> Option<Callee> {
+    let crate::Known::Yes(definitions) = context.index().definitions(name, context.path) else {
+        return None;
+    };
+    // A class's constructor and a free function may share a spelling; only the functions are this rule's question.
+    let functions: Vec<&crate::DeclFact> = definitions
+        .found
+        .iter()
+        .map(|definition| &definition.fact)
+        .filter(|fact| fact.kind == crate::DeclKind::Function)
+        .collect();
+    let [only] = functions.as_slice() else {
+        return None;
+    };
+
+    let parameters = only.parameter_list.as_deref()?;
+    // **The parameters, split where the language splits them**: a comma at depth zero. `std::pair<int, int>` is one
+    // parameter, and splitting on every comma would count it as two.
+    let inner = parameters.trim().trim_start_matches('(').trim_end_matches(')');
+    let mut depth = 0i32;
+    let mut written = 0usize;
+    let mut required = 0usize;
+    let mut variadic = false;
+    let mut current = String::new();
+    let take = |parameter: &str, written: &mut usize, required: &mut usize, variadic: &mut bool| {
+        let parameter = parameter.trim();
+        if parameter.is_empty() {
+            return;
+        }
+        if parameter == "..." || parameter.ends_with("...") {
+            *variadic = true;
+            return;
+        }
+        *written += 1;
+        // A default is the `=` the declaration writes.
+        if !parameter.contains('=') {
+            *required += 1;
+        }
+    };
+    for character in inner.chars() {
+        match character {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                take(&current, &mut written, &mut required, &mut variadic);
+                current.clear();
+                continue;
+            }
+            _ => {}
+        }
+        current.push(character);
+    }
+    take(&current, &mut written, &mut required, &mut variadic);
+
+    Some(Callee {
+        required,
+        written,
+        variadic,
+    })
+}
+
 fn at_least(name: &str, required: usize) -> String {
     format!("`{name}` needs {required} argument(s) and this call passes fewer")
 }
+
+
+
+
+
+
 
 
 

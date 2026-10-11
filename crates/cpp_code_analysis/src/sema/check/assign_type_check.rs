@@ -166,110 +166,28 @@ fn report_if_it_does_not_convert(
     name: &str,
     how: &str,
 ) {
-    let crate::Known::Yes((from, _)) = context.type_of(expression) else {
+    let known_from = context.type_of(expression);
+    let target = crate::sema::types::parse_type_spelling(written);
+    let crate::Known::Yes((from, _)) = known_from else {
         return;
     };
-    let target = crate::sema::types::parse_type_spelling(written);
     if from.convertible_to(&target).is_definitely_absent() {
         report(context, expression, name, how, written);
         return;
     }
 
     // **The class case, which the conversion relation cannot answer.** `convertible_to` lives in the type engine and
-    // cannot see a declaration, so for any class target it answers `Unknown` — which is the honest answer to "can
-    // this convert", and the *wrong* answer to "does this class have a constructor that could take this". Measured:
-    // with the header indexed and `MyString` a known class with only a default constructor,
-    // `MyString line = 1231;` produced nothing at all.
+    // cannot see a declaration, so a class target always answers `Unknown` — the honest answer to "can this convert",
+    // and the *wrong* answer to "does this class have a constructor that could take this".
     //
-    // So the question is asked where the class's **definition** is readable: in this file's own tree, which is the
-    // scope this analysis checks. A class from a header is left alone — its constructors are in another file, and a
-    // constructor's parameter list is not in the member list this layer can see (see `parameter_spellings_of` for
-    // what that field really is).
-    if a_class_in_this_file_cannot_be_built_from(context, &target, &from, expression) {
+    // The question therefore goes to the **index**: `a_class_can_be_built_from` reads the class's member facts, whose
+    // `parameter_list` is the parameter list as the declaring file spells it. That field exists for exactly this — a
+    // query holds one file and the parameters are written in another — so the answer is a fact the cook already
+    // produced rather than a walk over a rendered header. A class from `<string>` is as answerable as one written two
+    // lines up, which is the point: **the finding is about this file, the knowledge is the project's.**
+    if super::a_class_can_be_built_from(context, &target.class_name().unwrap_or_default(), &from) == Some(false) {
         report(context, expression, name, how, written);
     }
-}
-
-/// **Does this file define the class, and can nothing in it build the class from this value?**
-///
-/// The narrow question the conversion relation cannot answer, restricted three ways so that it can only fire when
-/// the answer is in front of it:
-///
-/// ```text
-///   the target is a class **defined in this file**   a header's class has its constructors elsewhere
-///   it declares **no constructor at all**            any constructor might take the value, and deciding which is
-///                                                    overload resolution rather than a walk over a tree
-///   it declares **no conversion operator**           `operator int()` is a way to build one that has no parameter
-///                                                    list to compare against
-///   the value is a **literal or an arithmetic type** a class-to-class initialisation is a question about two
-///                                                    declarations, and only one of them is here
-/// ```
-fn a_class_in_this_file_cannot_be_built_from(
-    context: &CheckContext<'_>,
-    target: &crate::sema::types::Type,
-    from: &crate::sema::types::Type,
-    expression: &cpp_parser::CppSyntaxNode,
-) -> bool {
-    let Some(class) = target.class_name() else {
-        return false;
-    };
-    // The value has to be a literal or an arithmetic type — see the list above.
-    let text = expression.text().to_string();
-    let text = text.trim();
-    let a_literal = text.starts_with('"') || text.starts_with('\'') || text.starts_with(|c: char| c.is_ascii_digit());
-    if !from.is_arithmetic() && !a_literal {
-        return false;
-    }
-
-    // The class's definition **in this file**.
-    let Some(definition) = definition_of_a_class(context, class) else {
-        return false;
-    };
-
-    // **A constructor is a member named after its class; a conversion operator is one whose name begins with
-    // `operator`.** Either of them answers "can this class be built from this value" in a way this walk cannot
-    // decide, so either of them is enough for the rule to have nothing to say. Asked of the tree — this was a text
-    // test that looked for a `{` and a name in a node's text, and the layer's own rule is that a decision comes
-    // from nodes.
-    let has_one = definition
-        .descendants()
-        .filter(|node| {
-            CppSyntaxKind::from(node.kind()) != CppSyntaxKind::ParameterList
-                && (super::is_a_function_definition(node)
-                    || node.children().any(|child| {
-                        CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList
-                    }))
-        })
-        .any(|node| {
-            super::name_declared_by(&node)
-                .is_some_and(|name| name == class || name.starts_with("operator"))
-        });
-
-    !has_one
-}
-
-/// **The definition of the class with this name, when this file holds one.**
-///
-/// A `CppClassDef` — which the typed layer already answers for `class`, `struct` **and** `union` alike, with
-/// `get_name_text` beside it — found over this file's own text, so a class from an inlined header is not a candidate.
-///
-/// This was a text test: *does the text start with `class `, hold a `{`, and contain the name* — and it returned
-/// `None` on `struct MyString { MyString(); int size; };`, whose definition is right there. Measured at the time:
-/// the probe printed ``no definition in this file`` while the class was in the file, which is what sent the search
-/// back to the tree — and then to the typed layer, where the three kinds were already one type.
-fn definition_of_a_class(
-    context: &CheckContext<'_>,
-    class: &str,
-) -> Option<cpp_parser::CppSyntaxNode> {
-    context
-        .own::<cpp_parser::CppClassDef>()
-        .find(|definition| {
-            definition
-                .get_name_text()
-                .map(|name| name.trim().to_string())
-                .is_some_and(|name| name == class || name.ends_with(&format!("::{class}")))
-        })
-        .map(|definition| definition.syntax().clone())
 }
 
 /// Put the finding where every other one goes.
@@ -295,9 +213,8 @@ fn is_punctuation(text: &str) -> bool {
 
 /// The last identifier written in a piece of text.
 ///
-/// Text rather than a node walk on purpose: what has to be found is "the name this expression is about", and a name
-/// written as `count` is one `Identifier` token — the typed layer's `CppNameExpr` would be the node around it, and
-/// this is asked of a snippet of text the caller already has.
+/// Text rather than a node walk on purpose: a name written as `count` is one `Identifier` token, and the callers
+/// here already have the snippet the name is in.
 fn last_identifier_of(text: &str) -> Option<String> {
     let mut last: Option<String> = None;
     let mut current = String::new();
@@ -319,3 +236,4 @@ fn last_identifier_of(text: &str) -> Option<String> {
     }
     last
 }
+

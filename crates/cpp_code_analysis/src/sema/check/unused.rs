@@ -88,10 +88,38 @@ impl Check for Unused {
             *written.entry(text).or_default() += 1;
         }
 
+        // **The function bodies of this file**, which is where a local can be: the rule's own scope, checked in the
+        // tree rather than trusted from `DeclFact::local`. Measured, and it is why this is here: on MSVC's `<string>`
+        // the summary records `sprintf_s` as an **`Variable`** marked `local` — a macro ate its parameter list, so
+        // `kind=Variable type=Some("_CSTD")`, and `xstring`'s `addressof` came out with `type=Some("_STD(_STD,
+        // _Right)")`, the parameters inside the type. Four such facts were reported as "declared here and never used"
+        // on a corpus that is known good, which is the one measurement this layer has to pass.
+        let bodies: Vec<cpp_parser::CppSyntaxNode> = super::function_definitions(context)
+            .into_iter()
+            .filter_map(|function| super::body_of(&function))
+            .collect();
+
         for fact in &context.summary.declarations {
-            // **A local variable of a source file**, which is the only shape this rule claims — see the module
-            // documentation for the reasoning behind each of the three conditions.
+            // **A local variable inside a function body**, which is the only shape this rule claims — see the module
+            // documentation for the reasoning behind each condition.
             if !fact.local || fact.kind != crate::DeclKind::Variable {
+                continue;
+            }
+            // **The comparison happens in the rendering's coordinates**, because the two sides come from different
+            // places: `fact.range` is the file's — see `CheckContext::written` — while a body's range is the tree's,
+            // which is the rendering. Asking without the crossing is how this guard first went wrong: a fixture whose
+            // comment the cook removes shifted every offset by 28 bytes, and a local inside `main` read as outside it.
+            let Some(at) = context
+                .view
+                .reading_offset_of(crate::file::coordinates::FileOffset::new(fact.range.start_offset))
+            else {
+                continue;
+            };
+            let inside_a_body = bodies.iter().any(|body| {
+                usize::from(body.text_range().start()) < at.get()
+                    && at.get() < usize::from(body.text_range().end())
+            });
+            if !inside_a_body {
                 continue;
             }
             if is_deliberately_unused(&fact.name) || !is_a_candidate(&fact.name) {
@@ -115,4 +143,5 @@ impl Check for Unused {
         }
     }
 }
+
 

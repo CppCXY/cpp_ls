@@ -194,7 +194,7 @@ pub async fn on_semantic_tokens(
         // The wait was `AnalysisState::settle`, asking whether the *whole project's* indexing queue was empty —
         // because a name a header declares is classified through the index, and before that header has been read the
         // name has no classification. The question that matters is this file's own closure, and
-        // `AnalysisState::catch_up` is what reads it. See `docs/latency.md` §5.2 — and note that this handler still
+        // `AnalysisState::catch_up` is what reads it. See `docs/status.md` §5.2 — and note that this handler still
         // declines to answer while **its own** file's queue is not drained (see the refusal below), which is a
         // statement about the answer rather than a wait for it.
         context.analysis().catch_up(&path).await;
@@ -533,3 +533,4 @@ mod tests {
         legend_entry(kind).expect("the kind is in the legend").index
     }
 }
+

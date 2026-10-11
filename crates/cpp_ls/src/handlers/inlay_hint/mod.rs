@@ -75,7 +75,7 @@ pub async fn on_inlay_hint(
     //
     // The question that matters is about this file, and it is answered above: `prepare` puts the file's text in
     // reach, `catch_up` puts its declarations in the index, `read_the_modules` reads what it imports. See
-    // `docs/incremental-edits.md` §1 for the argument and [`AnalysisState::catch_up`] for what replaced the wait.
+    // `docs/status.md` §1 for the argument and [`AnalysisState::catch_up`] for what replaced the wait.
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
         let path = uri_to_file_path(&uri)?;
@@ -236,5 +236,6 @@ mod tests {
         );
     }
 }
+
 
 

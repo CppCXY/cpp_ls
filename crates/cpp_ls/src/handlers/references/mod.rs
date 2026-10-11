@@ -54,7 +54,7 @@ pub async fn on_references(
         // indexing queue was empty — a question about the project standing in for a question about this file.
         //
         // A query about a name needs this file's summary and the files it includes, and that is what
-        // `AnalysisState::catch_up` reads. See `docs/latency.md` §5.2.
+        // `AnalysisState::catch_up` reads. See `docs/status.md` §5.2.
         context.analysis().catch_up(&path).await;
     }
 
@@ -329,6 +329,7 @@ mod tests {
         );
     }
 }
+
 
 
 

@@ -334,7 +334,7 @@ impl FileProvider for OpenDocuments {
 ///   walked        the whole closure read and a timeline built    — and written for the next run
 /// ```
 ///
-/// `walked` is the number `docs/incremental-edits.md` stage 1 is judged by: typing in a file's **body** must not
+/// `walked` is the number `docs/status.md` stage 1 is judged by: typing in a file's **body** must not
 /// make it move, because the body is not an input to the file's own timeline. Before the root of a unit was keyed
 /// on its preamble it moved on every keystroke, and no other number in this crate would have shown it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -3350,7 +3350,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// **What this session's translation units have cost it.** See [`UnitStats`].
     ///
     /// The number to watch is `walked`: it is a closure read and a timeline built, and the design in
-    /// `docs/incremental-edits.md` says a keystroke in a file's **body** must leave it where it was.
+    /// `docs/status.md` says a keystroke in a file's **body** must leave it where it was.
     pub fn unit_stats(&self) -> UnitStats {
         use std::sync::atomic::Ordering::Relaxed;
 
@@ -6586,7 +6586,7 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
 
     /// **Typing in a file's body does not cost the walk of its closure, and typing above the body does.**
     ///
-    /// This is the acceptance of `docs/incremental-edits.md` stage 1, and it is written as a *count* rather than a
+    /// This is the acceptance of `docs/status.md` stage 1, and it is written as a *count* rather than a
     /// duration because the design is about what gets recomputed. The numbers are [`Session::unit_stats`]'s:
     /// `walked` is a closure read and a timeline built, `from_disk` is the entry that replaces it.
     ///
@@ -6694,7 +6694,7 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
     /// **A file this session already has a unit for is read *with* that unit's environment, and the second pass is
     /// not paid for it.**
     ///
-    /// This is `docs/incremental-edits.md` §5.2 steps 1–3, and it is the enabling half of stage 2 rather than a
+    /// This is `docs/status.md` §5.2 steps 1–3, and it is the enabling half of stage 2 rather than a
     /// saving of its own: measured with `examples/keystroke.rs`, there is **no second parse to remove** for the
     /// ordinary edit, because the second pass's filter only selects a file whose scopes could depend on a macro
     /// body. What it buys is that the *first* parse is the right one — which is the thing that has to be true
@@ -6809,7 +6809,7 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
     /// did — nearly every keystroke is in a body, and re-walking the closure for each of them was most of what a
     /// keystroke cost.
     ///
-    /// **The second half is `docs/incremental-edits.md` stage 1.** Dropping the whole table was the first version of
+    /// **The second half is `docs/status.md` stage 1.** Dropping the whole table was the first version of
     /// this rule and it invalidated up to `MAX_UNITS` units to invalidate one — including, on the next keystroke,
     /// the one the file needed. A file that merely *includes* the edited one has a timeline of its own, and it is
     /// still the same directives at the same offsets: `ns.h` knows nothing about `api.h`.
@@ -8069,6 +8069,7 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         );
     }
 }
+
 
 
 

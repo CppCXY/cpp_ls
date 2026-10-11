@@ -65,7 +65,7 @@ pub async fn on_prepare_rename(
         // The wait was `AnalysisState::settle`, asking whether the *whole project's* indexing queue was empty —
         // because `prepare` reads *this* file while the name being renamed is usually declared in a header whose
         // facts arrive later. The question that matters is this file's own closure, and `AnalysisState::catch_up` is
-        // what reads it. See `docs/latency.md` §5.2.
+        // what reads it. See `docs/status.md` §5.2.
         context.analysis().catch_up(&path).await;
     }
 
@@ -317,6 +317,7 @@ mod tests {
         );
     }
 }
+
 
 
 

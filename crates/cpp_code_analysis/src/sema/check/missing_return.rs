@@ -30,7 +30,7 @@
 //!
 //! A function's body is in the file being checked, so this is a question about one file by construction.
 
-use cpp_parser::{CppSyntaxKind, CppSyntaxNode};
+use cpp_parser::CppSyntaxKind;
 
 use super::{Check, CheckContext, DiagnosticCode};
 
@@ -44,10 +44,7 @@ impl Check for MissingReturn {
         // **This file's own functions**, typed - see `CheckContext::own_syntax_nodes`, which prunes the inlined
         // headers a rendering splices in. Collected before the loop because a finding needs `&mut context`.
         for function in super::function_definitions(context) {
-            let Some(body) = function
-                .children()
-                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
-            else {
+            let Some(body) = super::body_of(&function) else {
                 continue;
             };
 
@@ -96,12 +93,10 @@ impl Check for MissingReturn {
     }
 }
 
-/// The body of a function definition, if it has one — for a caller that has the node and not the check.
-pub fn body_of(function: &CppSyntaxNode) -> Option<CppSyntaxNode> {
-    function
-        .children()
-        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
-}
+
+
+
+
 
 
 

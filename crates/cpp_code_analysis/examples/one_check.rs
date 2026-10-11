@@ -22,7 +22,11 @@ fn main() {
         .and_then(|value| value.parse().ok())
         .unwrap_or(usize::MAX);
 
-    let root_path = std::path::PathBuf::from(dir).join(root);
+    // **The root is the file, exactly as given; the directory is only the search path.** Joining the two was the
+    // defect that made this probe report `0 finding(s)` for every check on every input: a path passed as
+    // `target\\x\\f.cpp` became `target\\x\\target\\x\\f.cpp`, the open found nothing, the rendering was the empty
+    // string, and every diagnostic call answered `None`. Three rounds of measurements were thrown away on it.
+    let root_path = std::path::PathBuf::from(root);
     let mut session = cpp_code_analysis::Session::open(
         std::path::PathBuf::from(dir),
         cpp_code_analysis::SessionFiles::new(
@@ -38,15 +42,32 @@ fn main() {
     // something asked for it. Without the ask every file answered `None`, the loop below skipped all of them, and
     // the probe printed `0 finding(s)` for every check on every input - including `syntax-error` on a file that does
     // not parse. A probe that cannot find a parse error is worse than no probe: it was believed twice.
+    // **The project's files, and only then the ask.** `want_cooked_reading` alone was not enough, and the reason is
+    // the unit: a rendering is built against the file's **closure** — what its `#include`s resolve to — and a session
+    // that was never told which files are the project's has no closure to walk. Measured, and it is the defect this
+    // probe has now had twice: with the ask but no project files, `diagnostics` still answered `None` for every path
+    // and the probe printed `0 finding(s)` **including for `syntax-error` on a file that does not parse**.
     let wanted: Vec<std::path::PathBuf> = session
         .index()
         .summaries()
         .map(|summary| summary.path.clone())
         .collect();
+    session.add_project_files(wanted.clone());
     for path in &wanted {
         session.want_cooked_reading(path);
     }
     session.index_everything();
+
+    if std::env::var_os("CPPLS_TRACE_CHECKS").is_some() {
+        let root = std::path::PathBuf::from(root);
+        let rendered = session.rendered_text_of(&root).map(|text| text.len());
+        eprintln!(
+            "one_check: summaries {}, project files added, rendering of {} = {:?}",
+            session.index().summaries().count(),
+            root.display(),
+            rendered
+        );
+    }
 
     let paths: Vec<std::path::PathBuf> = session
         .index()
@@ -96,6 +117,9 @@ fn main() {
 
     println!("\n  {total} finding(s) from `{check}` over {} file(s)", paths.len());
 }
+
+
+
 
 
 

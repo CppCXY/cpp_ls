@@ -609,6 +609,17 @@ pub fn is_a_function_definition(node: &cpp_parser::CppSyntaxNode) -> bool {
         .any(|parameters| parameters.get_range().start() < body.get_range().start())
 }
 
+/// **The body of a function definition**, when it has one.
+///
+/// Asked of the typed layer: a body is a `CppCompoundStat`, and where the parser put it is the parser's business —
+/// which is the lesson of the two defects this layer has already had from hand-rolled shape tests.
+pub fn body_of(function: &cpp_parser::CppSyntaxNode) -> Option<cpp_parser::CppSyntaxNode> {
+    use cpp_parser::{CppAstNode, CppCompoundStat, CppDeclaration};
+    CppDeclaration::cast(function.clone())?
+        .children::<CppCompoundStat>()
+        .next()
+        .map(|body| body.syntax().clone())
+}
 /// **Every function *definition* in this file's own text.**
 ///
 /// ```text
@@ -726,6 +737,223 @@ pub fn parameter_spellings_of(function: &cpp_parser::CppSyntaxNode) -> Vec<Strin
         .filter(|spelling| !spelling.is_empty())
         .collect()
 }
+/// **Can a value of this type build an object of that class?** — asked of the **index**, never of a tree.
+///
+/// ```text
+///   Some(true)    a constructor could take it: the class has a constructor whose parameter could accept this type
+///   Some(false)   nothing in the class can: it has constructors and none of them could, or it has none at all
+///   None          not this layer's question: the class is not in the index, or a parameter is written in a way
+///                 that decides nothing (`_Ty`, a template parameter, a type from a header nobody indexed)
+/// ```
+///
+/// # Why the facts and not the tree
+///
+/// `CppMember` carries the class's own [`DeclFact`], and a function's `DeclFact::parameter_list` is **the parameter
+/// list as its file spells it** — stored, in the index's own words, *"because a query holds one file and the
+/// parameters are written in another… re-parsing that header per member query is the cost this field exists to
+/// avoid"*. That is exactly this question: `std::string x = 123;` is asked from a `.cpp` whose `<string>` is not its
+/// own text, and the answer is a fact about `<string>` that the index already holds.
+///
+/// A check that instead walked the **rendering** for the class would be doing the work this field exists to prevent
+/// — and would find nothing at all when the class comes from a header, which is the case that matters.
+///
+/// # The rule, and why it is this narrow
+///
+/// A value whose type is arithmetic (or a literal) is compatible with a parameter that is arithmetic, `bool`,
+/// `char`-like, or a **template parameter** — anything a template could instantiate to. It is **not** compatible
+/// with a pointer or reference to a non-arithmetic type: `MyString(const char*)` cannot be built from `1231`, which
+/// is the whole of the `std::string x = 123;` case. Everything else — a class parameter, a name this cannot classify
+/// — answers `None`, because a conversion this layer cannot see is not a conversion the program does not have.
+pub fn a_class_can_be_built_from(
+    context: &CheckContext<'_>,
+    class: &str,
+    value: &crate::sema::types::Type,
+) -> Option<bool> {
+    let crate::Known::Yes(members) = context.model.members_of(class) else {
+        return None;
+    };
+
+    // **An empty member list is not "no constructors".** `members_of` answers from this file's scopes and the index,
+    // so a class it knows of but has no members recorded for — a forward declaration, a class whose defining file the
+    // index has not read — comes back **empty**, and reading that as "nothing can build it" is how this rule reported
+    // a class that has exactly the constructor its value needs: measured, `Widget(int size)` in a second project file
+    // produced `0 members []` and a finding. `unlisted` is the field that says whether a list is complete, and it is
+    // what makes "unknown" distinguishable from "nothing".
+    if members.members.is_empty() {
+        return None;
+    }
+
+    // **The members declared in the class itself**: an inherited constructor is not this class's, and `depth` is
+    // what says so — the same field a completion groups by.
+    let mut constructors = 0usize;
+    for member in members.own() {
+        let name = member.fact.name.as_str();
+        let is_a_constructor = name == class.rsplit("::").next().unwrap_or(class);
+        // **A conversion operator is a way to build the class that has no parameter list to compare against** —
+        // `operator Widget()` — so its presence means this question is not decided here.
+        if name.starts_with("operator") {
+            return None;
+        }
+        if !is_a_constructor {
+            continue;
+        }
+        let Some(parameters) = member.fact.parameter_list.as_deref() else {
+            continue;
+        };
+        constructors += 1;
+
+        match parameters_that_could_accept(parameters, value) {
+            // One constructor that could take the value is enough for this rule to have nothing to say.
+            Some(true) => return Some(true),
+            // A parameter written in a way that decides nothing: the class may still be buildable.
+            None => return None,
+            Some(false) => {}
+        }
+    }
+
+    // **No constructor at all is a class no value can build.** A class with no constructor is an aggregate, and an
+    // aggregate cannot be initialised from a single value: `struct S { int size; }; S s = 1231;` does not compile.
+    // (A braced list of matching members is a different rule and a different shape - `S s{1231}`.)
+    let _ = constructors;
+    Some(false)
+}
+
+/// **Whether one written parameter list holds a parameter that could accept this value** — see
+/// [`a_class_can_be_built_from`] for the rule and why it is this narrow.
+fn parameters_that_could_accept(
+    written: &str,
+    value: &crate::sema::types::Type,
+) -> Option<bool> {
+    // The value has to be something this can classify. A class-to-class conversion is a question about two
+    // declarations, and this is asked with one of them in hand.
+    if !value.is_arithmetic() {
+        return None;
+    }
+
+    let inner = written.trim().trim_start_matches('(').trim_end_matches(')');
+    let mut depth = 0i32;
+    let mut parameters: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for character in inner.chars() {
+        match character {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth -= 1,
+            // **A comma at depth zero separates parameters** — the whole reason this is counted rather than split:
+            // `std::pair<int, int>` is one parameter with a comma in it.
+            ',' if depth == 0 => {
+                parameters.push(std::mem::take(&mut current));
+                continue;
+            }
+            _ => {}
+        }
+        current.push(character);
+    }
+    parameters.push(current);
+
+    let mut any = false;
+    for parameter in parameters {
+        let Some(classified) = could_take_an_arithmetic_value(&parameter) else {
+            // A parameter this cannot classify decides nothing — a template parameter, an unknown name.
+            return None;
+        };
+        any = true;
+        if classified {
+            return Some(true);
+        }
+    }
+    any.then_some(false)
+}
+
+/// **Could a parameter written like this accept an arithmetic value?**
+///
+/// `None` for a parameter that decides nothing: a template parameter (`_Ty`, `T`, `class _Elem`), an `auto`, or a
+/// name that is neither an arithmetic type nor a pointer to one.
+fn could_take_an_arithmetic_value(parameter: &str) -> Option<bool> {
+    let mut written = parameter.trim();
+
+    // Drop a default argument: `int n = 0` is an `int`, and the `=` and everything after it is not the type.
+    if let Some(at) = written.find('=') {
+        written = written[..at].trim();
+    }
+    if written.is_empty() || written == "..." || written.ends_with("...") {
+        // `...` takes anything, which is a parameter that could accept the value.
+        return Some(written == "..." || written.ends_with("..."));
+    }
+
+    // The type is everything before the name: `const Widget& w` and `const Widget&` are the same type.
+    let words: Vec<&str> = written.split_whitespace().collect();
+    let (type_words, _name) = match words.as_slice() {
+        [] => return None,
+        [only] => (vec![*only], ""),
+        [rest @ .., last] => (rest.to_vec(), *last),
+    };
+    let type_written = type_words.join(" ");
+
+    let arithmetic = |word: &str| {
+        let word = word.trim_start_matches("const").trim();
+        matches!(
+            word,
+            "int"
+                | "long"
+                | "short"
+                | "char"
+                | "signed"
+                | "unsigned"
+                | "float"
+                | "double"
+                | "bool"
+                | "wchar_t"
+                | "char8_t"
+                | "char16_t"
+                | "char32_t"
+                | "size_t"
+                | "std::size_t"
+                | "ptrdiff_t"
+                | "int64_t"
+                | "uint64_t"
+                | "int32_t"
+                | "uint32_t"
+                | "std::int64_t"
+                | "std::uint64_t"
+        )
+    };
+
+    // A pointer or reference **to something that is not arithmetic** cannot be built from a number:
+    // `MyString(const char*)` is the constructor `std::string` has and `1231` does not fit it.
+    let behind_the_operator = type_written
+        .split(['*', '&'])
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .trim_start_matches("const")
+        .trim();
+    let is_a_pointer_or_reference = type_written.contains('*') || type_written.contains('&');
+
+    if is_a_pointer_or_reference {
+        // `const int&` takes an `int`; `const char*` does not.
+        return Some(arithmetic(behind_the_operator));
+    }
+
+    let bare = type_written.trim_start_matches("const").trim();
+    if arithmetic(bare) {
+        return Some(true);
+    }
+
+    // **A template parameter takes whatever it is instantiated with** — `_Ty`, `_Elem`, `class _Ty`, `typename T`.
+    let looks_like_a_template_parameter = bare.starts_with('_')
+        || bare == "T"
+        || bare.len() == 1
+        || bare.starts_with("class ")
+        || bare.starts_with("typename ");
+    if looks_like_a_template_parameter {
+        return None;
+    }
+
+    // **A name with no `*` or `&` and no `(` is a class by value** — `MyString(Widget)` cannot take a number.
+    Some(false)
+}
+
+
 /// **Run every check, in the order a consumer should show them**, and answer what they found.
 ///
 /// The list is the registry: a check that is not here does not run. See the module documentation for why these are
@@ -746,10 +974,15 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     run_check::<param_type_check::ParamTypeCheck>(&mut context);
     run_check::<assign_type_check::AssignTypeCheck>(&mut context);
     run_check::<return_type_mismatch::ReturnTypeMismatch>(&mut context);
-    // macro_redefined and include_not_found are being ported — see the note above their declarations.
 
     context.into_findings()
 }
+
+
+
+
+
+
 
 
 

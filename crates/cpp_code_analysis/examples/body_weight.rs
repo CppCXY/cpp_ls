@@ -1,4 +1,4 @@
-//! **How much of a header is function bodies** — the ceiling for `docs/indexing-performance.md` item 4.
+//! **How much of a header is function bodies** — the ceiling for `docs/status.md` item 4.
 //!
 //! ```text
 //! cargo run --release -p cpp_code_analysis --example body_weight -- <dir>
@@ -102,3 +102,4 @@ fn main() {
     );
     let _ = Path::new("");
 }
+

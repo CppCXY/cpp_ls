@@ -1,5 +1,5 @@
 //! **What the rendering buys a file that already has its closure's macro bodies** — the measurement
-//! `docs/incremental-edits.md` §5.2 step 4 is waiting on.
+//! `docs/status.md` §5.2 step 4 is waiting on.
 //!
 //! ```text
 //! cargo run --release -p cpp_code_analysis --example cook_value -- <root file>
@@ -115,3 +115,4 @@ fn main() {
         rows.iter().find(|row| row.0 == root).map(|row| row.3).unwrap_or(0),
     );
 }
+

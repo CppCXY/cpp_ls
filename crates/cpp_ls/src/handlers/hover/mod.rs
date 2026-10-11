@@ -85,7 +85,7 @@ pub async fn on_hover(
         //
         // What the answer actually needs is this file, and it is read in above: `prepare` puts the file's text in
         // reach, `read_the_modules` catches the summary up and reads what it imports. The global question was never a
-        // prerequisite for either. See `docs/latency.md` §5.2.
+        // prerequisite for either. See `docs/status.md` §5.2.
     }
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
@@ -785,6 +785,7 @@ mod tests {
         assert_eq!(code_block(""), "");
     }
 }
+
 
 
 

@@ -78,7 +78,7 @@ const COMPLETION_BUDGET: Duration = Duration::from_millis(2500);
 
 /// **The bound a completion takes once the index has settled**, in milliseconds.
 ///
-/// The doc's own keystroke budget, and the number `docs/latency.md` §1 records for the tenth request: *"steady
+/// The doc's own keystroke budget, and the number `docs/status.md` §1 records for the tenth request: *"steady
 /// state, tenth request — 9 ms"*. It is asserted separately from `COMPLETION_BUDGET` because the two fail for
 /// different reasons and a single loose bound cannot tell them apart — a regression that made every completion a
 /// hundred milliseconds would pass a 2500 ms bound and must not.
@@ -219,7 +219,7 @@ fn a_completion_asked_while_the_index_fills_comes_back_within_the_budget() {
         .collect();
     assert!(
         slow_steady.is_empty(),
-        "once the index has settled a completion must come back inside {budget} ms — that is `docs/latency.md`'s \
+        "once the index has settled a completion must come back inside {budget} ms — that is `docs/status.md`'s \
          own steady-state number (\"steady state, tenth request: 9 ms\") and the one a keystroke is budgeted \
          against:\n{list}\n(every attempt was: {every})",
         budget = STEADY_BUDGET.as_millis(),
@@ -458,3 +458,4 @@ fn read_messages(stdout: ChildStdout, tx: Sender<Value>) {
 /// `Read` is needed by `read_exact` above and is not otherwise named.
 #[allow(unused_imports)]
 use std::io::Read as _;
+

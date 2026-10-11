@@ -60,7 +60,7 @@ pub async fn on_signature_help(
         // The wait was `AnalysisState::settle`, asking whether the *whole project's* indexing queue was empty —
         // because the callee's declaration is usually in a header whose facts arrive later. What the answer needs is
         // this file's own closure, and `read_the_modules` above is what reads it (it catches the summary up first).
-        // See `docs/latency.md` §5.2.
+        // See `docs/status.md` §5.2.
     }
 
     snapshot_query(context.analysis(), cancel_token, move |session| {
@@ -236,3 +236,4 @@ mod tests {
         assert_eq!(help.active_parameter, Some(1), "and the first is the active one");
     }
 }
+

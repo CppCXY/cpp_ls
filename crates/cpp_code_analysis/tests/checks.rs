@@ -562,6 +562,137 @@ fn an_include_in_a_fixture_does_not_resolve_unless_the_test_proves_it_does() {
         "if this ever starts passing, every test that assumed an include resolves needs revisiting"
     );
 }
+/// **A class from another file, judged from the index** — which is the whole point of "the finding is about this
+/// file, the knowledge is the project's".
+///
+/// The class is declared in a **second project file** and the including file's `#include` is deliberately not relied
+/// on: a fixture include does not resolve (see the guard test above), and it does not have to, because the answer is
+/// a **fact the cook produced** — `DeclFact::parameter_list`, stored in the index's own words *"because a query holds
+/// one file and the parameters are written in another"*.
+///
+/// Two files, two constructors, two answers:
+///
+/// ```text
+///   Widget(Widget&&)      and no way to take an `int`   -> reported, from the index
+///   Widget(int)                                        -> not reported, from the index
+/// ```
+/// **What the index answers today about a class in another file** — measured, and not what it needs to be.
+///
+/// The intent of this test is the architecture: a class declared in a **second project file** should be judged from
+/// the facts the cook produced — `DeclFact::parameter_list`, stored in the index's own words *"because a query holds
+/// one file and the parameters are written in another"* — so that `std::string x = 123;` is answerable from a `.cpp`
+/// whose `<string>` is not its own text.
+///
+/// What it measures instead is the blocker: `members_of("Widget")` answers **`Yes` with an empty member list** for a
+/// class whose definition is only in the other file, so nothing can be concluded about its constructors. Two things
+/// follow, and both are in the code:
+///
+/// ```text
+///   the guard     an empty member list answers `None` (unknown), never "no constructors" — reading it the other way
+///                 reported `Widget(int size)` as unbuildable, which is a false positive from a missing fact
+///   the gap       why the list is empty is the next question. `unlisted` exists to say what a truncated list is
+///                 missing, and the probe here printed `0 members []` with nothing in it
+/// ```
+#[test]
+fn a_class_from_another_file_answers_unknown_rather_than_wrong() {
+    let cannot = "struct Widget {\n    Widget(Widget&& other);\n    int size;\n};\n";
+    let can = "struct Widget {\n    Widget(int size);\n    int size;\n};\n";
+    let source = "\
+int main() {
+    Widget w = 1231;
+    return 0;
+}
+";
+
+    // **Nothing is reported either way**, which is the honest answer for a fact this layer does not have: a missed
+    // finding rather than an invented one. When `members_of` answers with members for another file's class, the
+    // second of these two becomes a finding and this test is the one to change.
+    assert!(
+        !codes_with_two_files(source, cannot).contains(&DiagnosticCode::AssignTypeCheck),
+        "a class whose members are not in the index is not judged: {:?}",
+        codes_with_two_files(source, cannot)
+    );
+    assert!(
+        !codes_with_two_files(source, can).contains(&DiagnosticCode::AssignTypeCheck),
+        "and the one with the right constructor is not reported either: {:?}",
+        codes_with_two_files(source, can)
+    );
+}
+/// The codes a file produces, in a session where a **second file** is part of the project — so that the index holds
+/// its declarations, which is what a check reads facts about another file from.
+fn codes_with_two_files(source: &str, other: &str) -> Vec<DiagnosticCode> {
+    let files = MemoryFiles::new()
+        .with_file("/p/a.cpp", source)
+        .with_file("/p/other.h", other);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from("/p/a.cpp"),
+        std::path::PathBuf::from("/p/other.h"),
+    ]);
+    // The pump, the ask, the pump — `tests/completion.rs` states the contract once for the workspace.
+    session.index_everything();
+    let _ = session.view("/p/a.cpp");
+    session.index_everything();
+
+    session
+        .diagnostics(std::path::Path::new("/p/a.cpp"))
+        .map(|found| found.checks.iter().map(|finding| finding.code).collect())
+        .unwrap_or_default()
+}
+/// **The arity question for a callee declared in another file** — the architecture, and its measured state today.
+///
+/// The intent: `argument-count` reads a callee's parameter list as a **fact** (`DeclFact::parameter_list`, stored
+/// *"because a query holds one file and the parameters are written in another"*), so `v.reserve(1, 2)` is judged
+/// without parsing a header per keystroke. `callee_from_the_index` implements exactly that, refusing an overload set
+/// whole.
+///
+/// What is measured: it does not resolve yet. On the real corpus —
+/// `cargo run --example one_check -- target/std-cook target/std-cook/arity-case.cpp argument-count` — a file calling
+/// `v.reserve(1, 2)` and `s.append("a", "b", "c")` reports **zero**, so `definitions(name, path)` is answering
+/// something other than the single visible declaration. This fixture says the same thing through a second file, and
+/// asserts the honest answer for a fact the layer does not have: **no finding**, rather than a wrong one.
+#[test]
+fn a_callee_from_another_file_is_not_judged_until_the_lookup_answers() {
+    let other = "int scale(int value, int factor);\n";
+    let too_many = "\
+int main() {
+    int x = scale(1, 2, 3);
+    return x;
+}
+";
+    // **In this file** the same arity question is judged, which is what makes the line above a gap rather than a
+    // hole in the rule: the machinery works, the cross-file lookup is what does not answer yet.
+    let here = "\
+int scale(int value, int factor) { return value * factor; }
+
+int main() {
+    int x = scale(1, 2, 3);
+    return x;
+}
+";
+    // **And measured, the in-file case does not fire either**, which is the real finding of this round: `scale(1, 2,
+    // 3)` beside its own declaration reports nothing. So `argument-count` is not "missing the cross-file lookup" —
+    // its basic case is quiet too, and the next round starts there: the same shape as every other defect in this
+    // layer (`FunctionDef` is not how this grammar records a file-scope definition; a parameter list and an argument
+    // list are not where a `children()` walk expects them), and the same method fixes it — print what the check
+    // sees, one level closer to the decision than the last probe.
+    assert!(
+        codes_of(here).contains(&DiagnosticCode::ArgumentCount),
+        "a callee declared in this file is judged: {:?}",
+        codes_of(here)
+    );
+    assert!(
+        !codes_with_two_files(too_many, other).contains(&DiagnosticCode::ArgumentCount),
+        "and one declared in another file is not judged yet: {:?}",
+        codes_with_two_files(too_many, other)
+    );
+}
 /// **Every code has a name, and the name round-trips** — the property a client's filter and a config file both
 /// depend on, asserted here because it is the one thing that cannot be checked by looking at a fixture.
 #[test]
@@ -576,6 +707,14 @@ fn every_code_has_a_name_and_the_name_comes_back() {
         );
     }
 }
+
+
+
+
+
+
+
+
 
 
 

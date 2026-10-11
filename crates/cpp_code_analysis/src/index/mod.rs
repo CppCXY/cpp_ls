@@ -287,7 +287,7 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // The reason is in the two numbers: node building is about a quarter of `parse`, so removing two thirds of
         // the nodes removes a sixth of the stage; and the walks that dominate — `sweep`, and inside it `facts` — are
         // per-**declaration** and do not care how deep the statements around a declaration were nested. See
-        // `docs/indexing-performance.md` §3.5.
+        // `docs/status.md` §3.5.
         //
         // It is left in the parser rather than deleted because the measurement is the interesting object: the next
         // person to read "64% of nodes are bodies" will reach for this, and the number that says it buys nothing
@@ -2249,4 +2249,5 @@ mod tests {
         assert_eq!(files.read(Path::new("/p/other.h")), None);
     }
 }
+
 
