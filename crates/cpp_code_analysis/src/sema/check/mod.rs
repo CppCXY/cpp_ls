@@ -71,6 +71,7 @@ use std::path::Path;
 
 use cpp_parser::SourceRange;
 
+use crate::file::view::FileView;
 use crate::{FileSummary, ProjectIndex};
 
 pub mod argument_count;
@@ -92,7 +93,7 @@ pub mod unnecessary_branch;
 pub mod unused;
 
 pub use config::CheckConfig;
-pub use diagnostic_code::{DiagnosticCode, RuleSeverity};
+pub use diagnostic_code::{DiagnosticCode, RuleSeverity, RuleTag};
 
 /// **What a check found**, in the form a diagnostics channel shows it.
 ///
@@ -171,6 +172,11 @@ pub struct CheckContext<'a> {
     /// Passed in rather than asked for: the errors belong to the **tree**, and this context deliberately holds a
     /// *model* over it — a check that could reach the tree would be a check that could re-parse.
     pub errors: &'a [cpp_parser::CppParseError],
+    /// **The view this run is about**, which is what turns a range from the tree into a range in the file.
+    ///
+    /// Held for that one crossing and nothing else: a check that reached through it could parse, which is the
+    /// thing [`CheckContext`]'s own documentation says this layer must not be able to do.
+    pub view: &'a FileView,
     /// Which codes may be reported — see [`CheckConfig`].
     pub config: &'a CheckConfig,
     findings: Vec<Finding>,
@@ -185,6 +191,7 @@ impl<'a> CheckContext<'a> {
         source: &'a str,
         written: &'a str,
         errors: &'a [cpp_parser::CppParseError],
+        view: &'a FileView,
         config: &'a CheckConfig,
     ) -> Self {
         CheckContext {
@@ -195,17 +202,80 @@ impl<'a> CheckContext<'a> {
             written,
             errors,
             config,
+            view,
             findings: Vec::new(),
         }
     }
 
-    /// **Report a finding** — and the one place a code is filtered.
+    /// **Report a finding whose range is in the *tree*.**
     ///
-    /// A check says what it found and does not ask whether anyone wants to hear it: the filter belongs here
-    /// because there are eleven checks and the twelfth would forget. This is also where a per-line suppression
-    /// will go (a comment naming a code on the line the finding is on), for the same reason — one place, so that no
-    /// check has to know it was suppressed.
+    /// The ordinary entry point, because most checks read the tree — and the range they have is therefore in the
+    /// **rendering**, which is not the text a client is showing. The crossing happens here: see
+    /// [`CheckContext::in_the_file`], and use [`CheckContext::add_in_the_file`] for a finding whose range already
+    /// came from the summary.
+    ///
+    /// A check says what it found and does not ask whether anyone wants to hear it: the filter belongs here because
+    /// there are eleven checks and the twelfth would forget. This is also where a per-line suppression will go (a
+    /// comment naming a code on the line the finding is on), for the same reason — one place, so that no check has
+    /// to know it was suppressed.
     pub fn add(
+        &mut self,
+        code: DiagnosticCode,
+        range: SourceRange,
+        name: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        let range = self.in_the_file(range);
+        self.push(code, range, name, message);
+    }
+
+    /// **Report a finding whose range is already in the file** — for the checks that read the *summary*, whose
+    /// every range is a file offset (see [`CheckContext::written`]).
+    ///
+    /// A second method rather than a flag, because the difference is which text the range came from and a check
+    /// that got it wrong would put a squiggle on another line rather than fail to compile.
+    pub fn add_in_the_file(
+        &mut self,
+        code: DiagnosticCode,
+        range: SourceRange,
+        name: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        self.push(code, range, name, message);
+    }
+
+    /// **A range read from the tree, said in the file's coordinates.**
+    ///
+    /// The outbound half of the crossing this crate makes everywhere else: a range in the rendering is an offset
+    /// into text the cook produced — macros expanded, a header inlined, a directive resolved away — and a client is
+    /// showing the **file**. `file_offset_of` maps both ends, and a token a macro produced reports *where the macro
+    /// was invoked*, which is the place the reader can see.
+    ///
+    /// An end that cannot be placed keeps the start, so a half-mappable range is a short one rather than a lost
+    /// finding; a **start** that cannot be placed leaves the range alone, which is the only honest thing left to do
+    /// and is also what the checks did before this crossing existed. Measured before it did: on a file with a
+    /// header inlined, `unused`'s finding for a local after the `#include` was published **on the line the header
+    /// occupied** — the same offset in a shorter text.
+    fn in_the_file(&self, range: SourceRange) -> SourceRange {
+        let Some(start) = self
+            .view
+            .file_offset_of(crate::file::coordinates::ReadingOffset::new(
+                range.start_offset,
+            ))
+        else {
+            return range;
+        };
+        let end = self
+            .view
+            .file_offset_of(crate::file::coordinates::ReadingOffset::new(
+                range.end_offset(),
+            ))
+            .map_or(start, |end| end);
+        SourceRange::new(start.get(), end.get().saturating_sub(start.get()))
+    }
+
+    /// The one place a finding becomes a [`Finding`] — see [`CheckContext::add`].
+    fn push(
         &mut self,
         code: DiagnosticCode,
         range: SourceRange,
@@ -323,6 +393,8 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
 
     context.into_findings()
 }
+
+
 
 
 

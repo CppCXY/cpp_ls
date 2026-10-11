@@ -80,7 +80,8 @@ impl Check for MacroRedefined {
                 continue;
             }
 
-            context.add(
+            // **Already in the file''s coordinates**: this range came from the summary - see `CheckContext::written`.
+            context.add_in_the_file(
                 DiagnosticCode::MacroRedefined,
                 fact.range,
                 fact.name.clone(),
@@ -118,5 +119,6 @@ fn bodies_are_equal(context: &CheckContext<'_>, first: &MacroFact, second: &Macr
 
     text(first) == text(second)
 }
+
 
 

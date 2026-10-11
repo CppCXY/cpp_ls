@@ -3062,6 +3062,7 @@ impl<F: FileProvider + Clone> Session<F> {
             // file), and mixing the two is a measured defect - see `CheckContext::written`.
             view.written_text().unwrap_or(&view.source),
             view.tree.get_errors(),
+            view,
             &config,
         ))
     }

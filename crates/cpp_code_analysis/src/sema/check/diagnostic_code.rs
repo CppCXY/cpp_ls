@@ -130,8 +130,43 @@ impl DiagnosticCode {
     /// does not speak LSP anywhere else: the analysis is usable by a batch tool that has no protocol at all.
     pub fn severity(self) -> RuleSeverity {
         match self {
+            // **A parse error stops everything.** The file does not mean anything until it is fixed, and no other
+            // rule's finding can be trusted while the text does not parse.
+            DiagnosticCode::SyntaxError => RuleSeverity::Error,
+            // **A name that is not there, a call that cannot be made, a type that does not fit.** These are the
+            // language's own complaints: the program will not build.
+            DiagnosticCode::IncludeNotFound => RuleSeverity::Error,
+            DiagnosticCode::ParamTypeCheck => RuleSeverity::Error,
+            DiagnosticCode::AssignTypeCheck => RuleSeverity::Error,
+            DiagnosticCode::UndefinedField => RuleSeverity::Error,
+            DiagnosticCode::ArgumentCount => RuleSeverity::Error,
+            DiagnosticCode::ReturnTypeMismatch => RuleSeverity::Error,
+            // **A judgement rather than a law.** A macro redefined with a different body is legal in some
+            // translation units and a bug in most; a branch that cannot run is dead code rather than a mistake.
+            // Both draw attention without claiming the program is broken.
+            DiagnosticCode::MacroRedefined => RuleSeverity::Warning,
+            DiagnosticCode::UnnecessaryBranch => RuleSeverity::Warning,
+            // **A hint, which is the quietest thing a client can draw** — a dotted underline in VS Code, nothing at
+            // all in several others. "Nothing reads this name" is the least urgent claim this analysis makes: the
+            // program builds, runs, and may be exactly what the author meant while they were writing it.
+            DiagnosticCode::Unused => RuleSeverity::Hint,
             DiagnosticCode::ModuleNote => RuleSeverity::Information,
-            _ => RuleSeverity::Error,
+        }
+    }
+
+    /// **What a client may grey out** — the protocol's `DiagnosticTag`, as this crate's own vocabulary.
+    ///
+    /// A tag is not a severity: a warning can be tagged `Unnecessary` and so can a hint. It says *why* the reader
+    /// is being told, which is what a client needs to render the code as struck through rather than merely
+    /// underlined — the difference between "look at this" and "this does nothing".
+    ///
+    /// Per **code** rather than per finding, for the same reason severity is: "nothing uses this name" is what the
+    /// rule says, and it says it about every finding it produces.
+    pub fn tags(self) -> &'static [RuleTag] {
+        match self {
+            DiagnosticCode::Unused => &[RuleTag::Unnecessary],
+            DiagnosticCode::UnnecessaryBranch => &[RuleTag::Unnecessary],
+            _ => &[],
         }
     }
 
@@ -144,11 +179,24 @@ impl DiagnosticCode {
     }
 }
 
+/// **What a client may grey out** — the protocol calls these tags, and this is the crate's own vocabulary for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RuleTag {
+    /// The code does nothing: an unused name, a branch that cannot run.
+    Unnecessary,
+}
+
 /// **How a diagnostic is drawn**, in this crate's own vocabulary — see [`DiagnosticCode::severity`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RuleSeverity {
+    /// The program will not build, or the text does not parse.
     Error,
+    /// Something is wrong in a way the language permits — dead code, a redefinition.
     Warning,
+    /// The quietest level: a suggestion a client may draw as a dotted underline.
+    Hint,
+    /// Not a complaint at all — a fact about where a file is.
     Information,
 }
+
 

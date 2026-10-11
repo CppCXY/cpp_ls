@@ -29,7 +29,7 @@ use std::path::Path;
 use cpp_code_analysis::{DiskFiles, Session};
 use lsp_types::{
     ClientCapabilities, Diagnostic, DiagnosticOptions, DiagnosticServerCapabilities,
-    DiagnosticSeverity, ServerCapabilities, Uri,
+    DiagnosticSeverity, DiagnosticTag, ServerCapabilities, Uri,
 };
 
 use super::RegisterCapabilities;
@@ -131,6 +131,7 @@ fn check_findings<'a>(
         Some(Diagnostic {
             range: lsp_types::Range::new(start, end),
             severity: Some(severity_of(finding.code)),
+            tags: tags_of(finding.code),
             source: Some("cpp_ls".to_string()),
             code: Some(lsp_types::NumberOrString::String(
                 finding.code.name().to_string(),
@@ -146,8 +147,24 @@ fn severity_of(code: cpp_code_analysis::DiagnosticCode) -> DiagnosticSeverity {
     match code.severity() {
         cpp_code_analysis::sema::check::RuleSeverity::Error => DiagnosticSeverity::ERROR,
         cpp_code_analysis::sema::check::RuleSeverity::Warning => DiagnosticSeverity::WARNING,
+        cpp_code_analysis::sema::check::RuleSeverity::Hint => DiagnosticSeverity::HINT,
         cpp_code_analysis::sema::check::RuleSeverity::Information => DiagnosticSeverity::INFORMATION,
     }
+}
+
+/// **What a client may grey out**, from the rule's own tags — see `DiagnosticCode::tags`.
+///
+/// `None` rather than an empty list when there are none: the protocol distinguishes "no tags" from "an empty set
+/// of tags", and a client that reads the second as the first is not a client this layer should be guessing about.
+fn tags_of(code: cpp_code_analysis::DiagnosticCode) -> Option<Vec<DiagnosticTag>> {
+    let tags: Vec<DiagnosticTag> = code
+        .tags()
+        .iter()
+        .map(|tag| match tag {
+            cpp_code_analysis::sema::check::RuleTag::Unnecessary => DiagnosticTag::UNNECESSARY,
+        })
+        .collect();
+    (!tags.is_empty()).then_some(tags)
 }
 /// **The `import`s whose module this project does not contain** — as `INFORMATION` on the line that wrote them.
 ///
@@ -300,6 +317,7 @@ session.want_cooked_reading(&file);
         let _ = std::fs::remove_dir_all(path.parent().expect("the scratch root"));
     }
 }
+
 
 
 

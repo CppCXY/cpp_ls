@@ -60,7 +60,8 @@ impl Check for IncludeNotFound {
                 // error here instead of a silently wrong message.
                 IncludeForm::Macro => unreachable!("a macro target is not reported — see the module note"),
             };
-            context.add(
+            // **Already in the file''s coordinates**: this range came from the summary - see `CheckContext::written`.
+            context.add_in_the_file(
                 DiagnosticCode::IncludeNotFound,
                 include.range,
                 include.spelling.clone(),
@@ -69,3 +70,4 @@ impl Check for IncludeNotFound {
         }
     }
 }
+

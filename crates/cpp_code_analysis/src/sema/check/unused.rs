@@ -103,7 +103,8 @@ impl Check for Unused {
                 continue;
             }
 
-            context.add(
+            // **Already in the file''s coordinates**: this range came from the summary - see `CheckContext::written`.
+            context.add_in_the_file(
                 DiagnosticCode::Unused,
                 fact.range,
                 fact.name.as_str(),
@@ -112,3 +113,4 @@ impl Check for Unused {
         }
     }
 }
+
