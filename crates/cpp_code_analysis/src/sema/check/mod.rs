@@ -73,15 +73,39 @@ use cpp_parser::SourceRange;
 
 use crate::{FileSummary, ProjectIndex};
 
+// **Written, and not yet declared**: the bodies are in the tree, their calls into the model are still written
+// against APIs this crate does not have (Type::spelling, MemberAccess::name, Known::is_yes), so they are
+// kept out of the compile until that is settled rather than left as a red build.
+// pub mod argument_count;
+// **Written, and not yet declared**: the bodies are in the tree, their calls into the model are still written
+// against APIs this crate does not have (Type::spelling, MemberAccess::name, Known::is_yes), so they are
+// kept out of the compile until that is settled rather than left as a red build.
+// pub mod assign_type_check;
 pub mod config;
 pub mod diagnostic_code;
 // **Being ported to the Check trait**: git mv'd to their new names, still written against the old
 // Checks/Finding { check: … } shape, so they are declared again the moment their bodies are rewritten. Kept in
 // the tree rather than deleted, because their reasoning (and the measured 119-findings defect they record) is what
 // the ported versions have to preserve.
-// pub mod include_not_found;
-// pub mod macro_redefined;
+pub mod include_not_found;
+pub mod macro_redefined;
+// **Written, and not yet declared**: the bodies are in the tree, their calls into the model are still written
+// against APIs this crate does not have (Type::spelling, MemberAccess::name, Known::is_yes), so they are
+// kept out of the compile until that is settled rather than left as a red build.
+// pub mod param_type_check;
+// **Written, and not yet declared**: the bodies are in the tree, their calls into the model are still written
+// against APIs this crate does not have (Type::spelling, MemberAccess::name, Known::is_yes), so they are
+// kept out of the compile until that is settled rather than left as a red build.
+// pub mod return_type_mismatch;
 pub mod syntax_error;
+// **Written, and not yet declared**: the bodies are in the tree, their calls into the model are still written
+// against APIs this crate does not have (Type::spelling, MemberAccess::name, Known::is_yes), so they are
+// kept out of the compile until that is settled rather than left as a red build.
+// pub mod undefined_field;
+// **Written, and not yet declared**: the bodies are in the tree, their calls into the model are still written
+// against APIs this crate does not have (Type::spelling, MemberAccess::name, Known::is_yes), so they are
+// kept out of the compile until that is settled rather than left as a red build.
+// pub mod unnecessary_branch;
 pub mod unused;
 
 pub use config::CheckConfig;
@@ -232,6 +256,49 @@ impl<'a> CheckContext<'a> {
     }
 }
 
+/// **The last identifier written inside a node** — the name a call would spell, the name a declaration declares.
+///
+/// Shared by the two checks that pair a call with a declaration, because both need the same answer to "which name
+/// is this": the *last* one written, so that a return type (`int scale(…)`), a scope (`w.scale(…)`) and a template
+/// head (`vector<int>::push_back(…)`) all end at the name and not at something before it.
+pub fn spelling_of(node: &cpp_parser::CppSyntaxNode) -> Option<String> {
+    node.descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .filter(|token| token.kind() == cpp_parser::CppTokenKind::Identifier.into())
+        .last()
+        .map(|token| token.text().to_string())
+}
+
+/// **The name a function declares** — the last declarator in its head, before the parameter list.
+pub fn name_declared_by(function: &cpp_parser::CppSyntaxNode) -> Option<String> {
+    let parameters = function
+        .children()
+        .find(|child| cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::ParameterList)?;
+    let head: Vec<cpp_parser::CppSyntaxNode> = function
+        .children()
+        .take_while(|child| child != &parameters)
+        .collect();
+    spelling_of(head.last()?)
+}
+
+/// **A function's parameters as the declaration spells them** — `int count`, `const Widget& w`, `...`.
+///
+/// Read from the **tree** and never from [`DeclFact::parameters`](crate::DeclFact::parameters), which is the
+/// template parameter list: the check this one replaces read that field and reported 119 findings on 200 MSVC
+/// headers, every one of them a function whose real parameters were in the tree all along.
+pub fn parameter_spellings_of(function: &cpp_parser::CppSyntaxNode) -> Vec<String> {
+    let Some(parameters) = function
+        .children()
+        .find(|child| cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::ParameterList)
+    else {
+        return Vec::new();
+    };
+    parameters
+        .children()
+        .map(|parameter| parameter.text().to_string().trim().to_string())
+        .filter(|spelling| !spelling.is_empty())
+        .collect()
+}
 /// **Run every check, in the order a consumer should show them**, and answer what they found.
 ///
 /// The list is the registry: a check that is not here does not run. See the module documentation for why these are
@@ -240,10 +307,14 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     let mut context = context;
 
     run_check::<syntax_error::SyntaxError>(&mut context);
+    run_check::<include_not_found::IncludeNotFound>(&mut context);
+    run_check::<macro_redefined::MacroRedefined>(&mut context);
     run_check::<unused::Unused>(&mut context);
     // macro_redefined and include_not_found are being ported — see the note above their declarations.
 
     context.into_findings()
 }
+
+
 
 
