@@ -382,16 +382,40 @@ pub fn might_be_documented(text: &str, offset: usize) -> bool {
         return true;
     }
 
-    // **A cursor inside a declaration is a case this filter and the reader disagree about, and the reader has to be
-    // fixed with it.** A cursor at the `n` of `int x;` reads the line it is *on* — `"i"` — and this answers `false`,
-    // which its own contract forbids (`false` is final, `true` means the parse decides). Dropping the partial line
-    // fixes that and **breaks two other tests**, because `documentation_at`'s walk out of the ancestors then finds a
-    // comment the declaration does not own: `a_member_is_not_documented_by_the_classs_comment` and
-    // `a_member_documented_by_a_nested_comment_is_found_too` both went from passing to failing when this was tried,
-    // and `the_check_never_rejects_a_comment_the_parser_finds` with them. Measured: 11 passed / 1 failed became
-    // 9 passed / 3 failed. The pair has to move together, and that is the next change here rather than this one.
+    // **The offset's own line is not evidence — unless it *is* the evidence.** The walk below reads the last line
+    // before the offset; inside a declaration that line is the declaration's own text, so a comment above it is never
+    // reached: `"/// Doc.\nint x;\n"` asked at the `n` of `int` reads `"i"` and answers `false`, which this filter's
+    // contract forbids (`false` is final). Dropping the partial line is the repair — **and only when it is code**: a
+    // cursor at the indentation of a commented member (`    /// The n.\n    int n;` asked at the `n` of `int`) has the
+    // *comment itself* as its last line, and dropping that line walks past the comment and answers `false` for a
+    // declaration that is documented.
+    //
+    // Measured, and it is the whole of a net loss that stood for two rounds: dropping unconditionally fixed
+    // `every_offset_of_the_declaration_reports_it` and `the_declarations_documentation_travels_with_the_signature`
+    // and lost `a_member_is_not_documented_by_the_classs_comment`,
+    // `a_member_documented_by_a_nested_comment_is_found_too` and `the_check_never_rejects_a_comment_the_parser_finds`
+    // (25 passing assertions against 24). The three ask at offsets whose last line is `    /// The n.` — the trace
+    // this was found with reads:
+    //
+    // ```text
+    // GUARD text_len 55 offset 15 at_line_start true  last_line "/// The class."
+    // GUARD text_len 55 offset 45 at_line_start false last_line "    /// The n."
+    // ```
+    let at_a_line_start = offset == 0 || text.as_bytes().get(offset - 1) == Some(&b'\n');
+    let last_line = before.lines().last().unwrap_or_default().trim();
+    let the_last_line_is_evidence =
+        at_a_line_start || last_line.starts_with("//") || last_line.contains("*/");
+    let before = if the_last_line_is_evidence {
+        before
+    } else {
+        match before.rfind('\n') {
+            Some(newline) => before[..newline].trim_end(),
+            // No line above at all: nothing to drop, and the walk below still has a question to answer — a comment
+            // at the *end* of this very line (`int x; ///< The x.`) is one it finds.
+            None => before,
+        }
+    };
 
-    // Otherwise the comment is above, with only blank lines and directives in between.
     let mut rest = before;
     loop {
         let line = match rest.rfind('\n') {
@@ -763,6 +787,8 @@ mod tests {
         );
     }
 }
+
+
 
 
 

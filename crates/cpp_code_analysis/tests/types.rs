@@ -44,12 +44,25 @@ fn type_of_use(source: &str, spelling: &str) -> Option<String> {
     let view = session.view("/p/a.cpp").expect("the file is held");
     let offset = last_word(source, spelling);
 
-    match session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)) {
+    match session.type_at(&view, as_reading(&view, offset)) {
         cpp_code_analysis::Known::Yes(found) => Some(found.type_of),
         _ => None,
     }
 }
 
+/// **A file offset in the rendering's coordinates**, for the queries that read `view.root`.
+///
+/// The same crossing `tests/signature.rs`'s `signature_where_marked` makes, and the same mistake this file made at
+/// three call sites: a rendering has its **line breaks collapsed** and its comments removed, so a position computed
+/// against the fixture's own text is not a position in it. Measured: thirteen tests in this suite answered `None`
+/// where a type was expected, every one of them through this offset.
+fn as_reading(
+    view: &cpp_code_analysis::FileView,
+    offset: usize,
+) -> cpp_code_analysis::file::coordinates::ReadingOffset {
+    view.reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(offset))
+        .expect("the cursor is in the rendering")
+}
 /// The offset of the last **whole-word** occurrence of a spelling.
 fn last_word(source: &str, spelling: &str) -> usize {
     let is_word = |character: char| character.is_alphanumeric() || character == '_';
@@ -286,7 +299,7 @@ fn an_auto_declaration_in_another_file_is_refused() {
     let view = session.view("/p/a.cpp").expect("the file is held");
     let offset = last_word(source, "measured");
 
-    match session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)) {
+    match session.type_at(&view, as_reading(&view, offset)) {
         cpp_code_analysis::Known::Yes(found) => assert_ne!(
             found.type_of, "auto",
             "the placeholder is never reported as a type"
@@ -414,7 +427,7 @@ fn type_of_use_in(session: &Session<MemoryFiles>, path: &str, source: &str, spel
     let view = session.view(path).expect("the file is held");
     let offset = last_word(source, spelling) + spelling.len() - 1;
 
-    match session.type_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)) {
+    match session.type_at(&view, as_reading(&view, offset)) {
         cpp_code_analysis::Known::Yes(found) => Some(found.type_of),
         _ => None,
     }
@@ -767,5 +780,6 @@ int f() { return 0; }
         "the innermost template is the one that introduces the class"
     );
 }
+
 
 

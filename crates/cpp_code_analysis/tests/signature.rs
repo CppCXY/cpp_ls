@@ -156,8 +156,11 @@ fn a_callee_in_another_file_reports_its_signature() {
 
     let session = session_with(&[("/p/a.cpp", &without_marker), ("/p/b.h", header)]);
     let view = session.view("/p/a.cpp").expect("the file is held");
+    let in_the_reading = view
+        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(offset))
+        .expect("the cursor is in the rendering");
     let signature = session
-        .signatures_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset))
+        .signatures_at(&view, in_the_reading)
         .into_iter()
         .next()
         .expect("the header declares the callee");
@@ -185,7 +188,12 @@ int f() { return scale(1, |); }
 
     let session = session_with(&[("/p/a.cpp", &without_marker)]);
     let view = session.view("/p/a.cpp").expect("the file is held");
-    let signatures = session.signatures_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset));
+    // **The fixture's cursor is the file's; `signatures_at` reads the rendering** — see `signature_where_marked`:
+    // a comment is removed before the parse, so the two offsets differ by everything the cook deleted.
+    let in_the_reading = view
+        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(offset))
+        .expect("the cursor is in the rendering");
+    let signatures = session.signatures_at(&view, in_the_reading);
 
     let labels: Vec<&str> = signatures.iter().map(|found| found.label.as_str()).collect();
     assert_eq!(
@@ -225,7 +233,12 @@ int f(Widget& w) { return w.scaled(|); }
 
     let session = session_with(&[("/p/a.cpp", &without_marker)]);
     let view = session.view("/p/a.cpp").expect("the file is held");
-    let signatures = session.signatures_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset));
+    // **The fixture's cursor is the file's; `signatures_at` reads the rendering** — see `signature_where_marked`:
+    // a comment is removed before the parse, so the two offsets differ by everything the cook deleted.
+    let in_the_reading = view
+        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(offset))
+        .expect("the cursor is in the rendering");
+    let signatures = session.signatures_at(&view, in_the_reading);
 
     let labels: Vec<&str> = signatures.iter().map(|found| found.label.as_str()).collect();
     assert_eq!(
@@ -248,7 +261,12 @@ int f(Widget& w) { return w.scaled(|); }
 
     let session = session_with(&[("/p/a.cpp", &without_marker)]);
     let view = session.view("/p/a.cpp").expect("the file is held");
-    let signatures = session.signatures_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset));
+    // **The fixture's cursor is the file's; `signatures_at` reads the rendering** — see `signature_where_marked`:
+    // a comment is removed before the parse, so the two offsets differ by everything the cook deleted.
+    let in_the_reading = view
+        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(offset))
+        .expect("the cursor is in the rendering");
+    let signatures = session.signatures_at(&view, in_the_reading);
 
     assert_eq!(
         signatures.iter().map(|found| found.label.as_str()).collect::<Vec<_>>(),
@@ -286,7 +304,12 @@ fn overloads_in_one_header_are_read_from_it_once() {
 
     let session = session_with(&[("/p/a.cpp", &without_marker), ("/p/b.h", header)]);
     let view = session.view("/p/a.cpp").expect("the file is held");
-    let signatures = session.signatures_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset));
+    // **The fixture's cursor is the file's; `signatures_at` reads the rendering** — see `signature_where_marked`:
+    // a comment is removed before the parse, so the two offsets differ by everything the cook deleted.
+    let in_the_reading = view
+        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(offset))
+        .expect("the cursor is in the rendering");
+    let signatures = session.signatures_at(&view, in_the_reading);
 
     assert_eq!(signatures.len(), 2);
     assert!(
@@ -340,6 +363,7 @@ fn an_empty_argument_list_is_answered() {
     assert_eq!(label, "make(int count)");
     assert_eq!(active, Some(0));
 }
+
 
 
 

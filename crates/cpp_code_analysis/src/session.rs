@@ -2850,7 +2850,24 @@ impl<F: FileProvider + Clone> Session<F> {
         let mut notes = Vec::new();
 
         for declaration in &info.imports {
-            let range = (declaration.range.start_offset, declaration.range.end_offset());
+            // **The note's range is a fact about the file the reader wrote, not about the rendering.** Its consumer is
+            // the diagnostics channel, which turns it into a position with `position_in_file(held, note.start)` — the
+            // *file's* text — so a range in the rendering's coordinates lands on the wrong line: measured,
+            // `an_import_nothing_declares_gets_a_note_on_the_line_that_wrote_it` read `left: 0, right: 46`, the note
+            // having started at the top of a rendering whose comments, blank lines and includes are gone. This is the
+            // outbound half of the same crossing every other query makes at the seam, and a note that cannot be placed
+            // in the file is dropped rather than shown somewhere wrong.
+            // **Each end falls back on its own**, rather than the note being dropped when one of them has no span in
+            // the rendering: a note is worth showing even if only one end can be placed, and dropping it turned a
+            // wrong-line note into no note at all (measured: `a_partition_the_project_does_not_have_gets_a_note_about_its_module`
+            // read `left: 0, right: 1`).
+            let start = view
+                .file_offset_of(ReadingOffset::new(declaration.range.start_offset))
+                .map_or(declaration.range.start_offset, |at| at.get());
+            let end = view
+                .file_offset_of(ReadingOffset::new(declaration.range.end_offset()))
+                .map_or(declaration.range.end_offset(), |at| at.get());
+            let range = (start, end);
 
             // A partition of this file's own module: a file has to declare the module, and the project has to be
             // missing the partition's file, for there to be anything to say.
@@ -4658,7 +4675,44 @@ impl<F: FileProvider + Clone> Session<F> {
     /// with different ones. A caller that publishes these should therefore publish them again once
     /// [`Session::pending`] reaches zero.
     pub fn classified_names(&self, view: &FileView) -> Vec<crate::semantic::Name> {
-        crate::semantic::classified_names(self.store.index(), view)
+        let mut names = crate::semantic::classified_names(self.store.index(), view);
+
+        // **The ranges are moved out of the rendering and into the file, because that is what both consumers read.**
+        //
+        // The walk reads `view.root`, so every range it answers is an offset in the **rendering** — and the two
+        // consumers of this query take it for an offset in the **file**: the semantic-tokens handler computes the
+        // client's line and column with `position_in_file(file, name.range.start_offset)` and measures the token with
+        // `&file.text[range]`, and `tests/semantic.rs` slices the fixture's own text the same way. Two independent
+        // consumers agreeing is the contract; the query was the side that was wrong, and it is user-visible: a colour
+        // drawn at an offset the cook shifted is a colour on **another word**.
+        //
+        // Measured on the suite: `the_header's_class` read `[("l", Function), ("de \"b.", Type), ("\n", Parameter)]`
+        // — the tokens of a rendering sliced out of the file. A name whose start the file cannot place is **dropped**,
+        // which is the same choice the handler makes one layer up ("dropping one token is the only option that keeps
+        // the walk valid"): a name in a region the rendering does not cover — an untaken `#if` branch, the body of a
+        // macro — has no file position at all, and keeping it would put a token at an offset that means something else.
+        let mut placed = Vec::with_capacity(names.len());
+        for mut name in names {
+            let Some(start) = view.file_offset_of(ReadingOffset::new(name.range.start_offset)) else {
+                continue;
+            };
+            let end = view
+                .file_offset_of(ReadingOffset::new(name.range.end_offset()))
+                .map_or(start, |end| end);
+            name.range = cpp_parser::SourceRange::new(start.get(), end.get().saturating_sub(start.get()));
+            placed.push(name);
+        }
+        names = placed;
+
+        // **And re-sorted, because the crossing is not order-preserving.** The walk answers in the rendering's order,
+        // and a token a macro produced maps back to *where the macro was invoked* — which can be before a name that
+        // preceded it in the rendering. The consumer builds a **delta walk** (`SemanticTokens`, where every token is
+        // relative to the one before it), so an out-of-order list does not merely look odd: the deltas would be
+        // negative. Sorted here rather than by the caller, because this is where the order stopped being the
+        // rendering's.
+        names.sort_by_key(|name| (name.range.start_offset, name.range.end_offset()));
+
+        names
     }
 
     /// **The ranges to select at a cursor, in the file's own coordinates** — the third fact that belongs to the text
@@ -4739,7 +4793,6 @@ impl<F: FileProvider + Clone> Session<F> {
             // **The declaration's offset is the *index's*, and the index reads the cooked rendering.** So
             // `declared_at` is a **reading** offset, while `Session::documentation` looks for the comment in the text
             // the reader **wrote** - and the two differ by exactly what the cook removed, which for a documented
-            // declaration is its documentation. Translated through the **declaring** file's own view.
             let declared = self.view(&signature.declared_in);
             let Some(in_the_file) = declared.as_ref().and_then(|declared| {
                 declared.file_offset_of(ReadingOffset::new(signature.declared_at))

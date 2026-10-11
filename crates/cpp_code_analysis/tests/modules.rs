@@ -1225,6 +1225,7 @@ fn a_names_imported_from_the_standard_module_are_offered_after_the_scope() {
     let providers = SessionFiles::new(OpenDocuments::new(), files);
     let mut session = Session::with_config(".", providers, WatchFilter::new("."), config);
     session.add_project_files([std::path::PathBuf::from("src/main.cpp")]);
+    session.want_cooked_reading(std::path::Path::new("src/main.cpp"));
     session.index_everything();
 
     // The read is the step under test, so it is asked for by name rather than left to a handler.
@@ -1282,6 +1283,9 @@ fn an_import_nothing_declares_gets_a_note_on_the_line_that_wrote_it() {
         CompilerConfig::new(),
     );
     session.add_project_files([std::path::PathBuf::from("src/main.cpp")]);
+    // **The ask, and then the pump**: `Session::view` is a request for the cooked reading and answers `None` until
+    // something has asked for it — the pair every other fixture in this workspace uses.
+    session.want_cooked_reading(std::path::Path::new("src/main.cpp"));
     session.index_everything();
 
     let view = session.view("src/main.cpp").expect("the file is held");
@@ -1335,6 +1339,8 @@ fn an_import_nothing_declares_gets_a_note_on_the_line_that_wrote_it() {
         std::path::PathBuf::from("src/main.cpp"),
         std::path::PathBuf::from("src/mylib.ixx"),
     ]);
+    // **The ask, and then the pump** — see the note on the fixture above.
+    session.want_cooked_reading(std::path::Path::new("src/main.cpp"));
     session.index_everything();
 
     let view = session.view("src/main.cpp").expect("the file is held");
@@ -1440,6 +1446,8 @@ fn a_partition_the_project_does_not_have_gets_a_note_about_its_module() {
         CompilerConfig::new(),
     );
     session.add_project_files([std::path::PathBuf::from("src/shapes.cppm")]);
+    // **The ask, and then the pump** — see the note on the fixture above.
+    session.want_cooked_reading(std::path::Path::new("src/shapes.cppm"));
     session.index_everything();
 
     let view = session.view("src/shapes.cppm").expect("the file is held");
@@ -1475,6 +1483,7 @@ fn a_partition_the_project_does_not_have_gets_a_note_about_its_module() {
         std::path::PathBuf::from("src/shapes.cppm"),
         std::path::PathBuf::from("src/shapes-area.cppm"),
     ]);
+    session.want_cooked_reading(std::path::Path::new("src/shapes.cppm"));
     session.index_everything();
 
     let view = session.view("src/shapes.cppm").expect("the file is held");
@@ -1525,4 +1534,5 @@ fn an_import_makes_the_modules_names_visible() {
 
     let _ = DiskFiles;
 }
+
 
