@@ -135,16 +135,24 @@ fn callees_in_this_file(context: &CheckContext<'_>) -> std::collections::HashMap
         let mut required = 0usize;
         let mut variadic = false;
         for parameter in parameters.children() {
-            let text = parameter.text().to_string();
-            let text = text.trim();
-            if text == "..." || text.ends_with("...") {
+            // **Read from the tokens**, not from the parameter's text: a `...` is a token, an `=` is a different
+            // token, and a default value that happens to hold an `=` — `int n = a == b` — is a string of tokens
+            // rather than a substring to search. Counting text is how this layer produced its one false positive,
+            // and the fix everywhere has been the same.
+            let kinds: Vec<cpp_parser::CppTokenKind> = parameter
+                .descendants_with_tokens()
+                .filter_map(|element| element.into_token())
+                .map(|token| token.kind().into())
+                .collect();
+
+            if kinds.contains(&cpp_parser::CppTokenKind::Ellipsis) {
                 variadic = true;
                 continue;
             }
             written += 1;
             // **A default is the `=` the declaration writes** — see the module documentation for why nothing more
             // is asked of it.
-            if !text.contains('=') {
+            if !kinds.contains(&cpp_parser::CppTokenKind::Assign) {
                 required += 1;
             }
         }

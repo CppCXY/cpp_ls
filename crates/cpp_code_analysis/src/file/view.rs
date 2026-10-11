@@ -185,6 +185,25 @@ impl FileView {
         Some(FileOffset::new(self.span_at(in_the_reading)?.reported.start_offset))
     }
 
+    /// **Where in the file a *range's end* is** — the outbound mapping for the far end of a range.
+    ///
+    /// [`FileView::file_offset_of`] answers with the span **containing** an offset, so an end that falls in
+    /// whitespace walks forward to the next token: a finding about the value `123` in `std::string x = 123;` came
+    /// out covering the rest of the line, because the end of the expression is followed by a `;` and a newline that
+    /// the *next* span owns. A range's end is the end of the **last byte the range covers**, which is what this
+    /// asks for — and it is a separate method rather than a flag because the two ends of a range are two different
+    /// questions, which is the lesson this crate keeps relearning.
+    pub fn file_offset_of_end(&self, in_the_reading: ReadingOffset) -> Option<FileOffset> {
+        let in_the_reading = in_the_reading.get();
+        if self.written.is_none() {
+            return Some(FileOffset::new(in_the_reading));
+        }
+        if in_the_reading == 0 {
+            return Some(FileOffset::new(0));
+        }
+        let span = self.span_at(in_the_reading - 1)?;
+        Some(FileOffset::new(span.reported.end_offset()))
+    }
     /// **Where in the rendering the file's own offset `in_the_file` is acted on.**
     ///
     /// The other direction, and the one a client's position needs: an editor sends a line and a column in the file,
@@ -787,6 +806,7 @@ mod tests {
         );
     }
 }
+
 
 
 

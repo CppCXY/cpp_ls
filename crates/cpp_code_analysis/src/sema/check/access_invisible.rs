@@ -140,21 +140,16 @@ fn node_at(root: &CppSyntaxNode, offset: usize) -> Option<CppSyntaxNode> {
         .last()
 }
 
-/// The nearest ancestor that is a **definition** — a class, a struct or a union body.
+/// The nearest ancestor that is a **class definition** — `class`, `struct`, `union`.
 ///
-/// Recognised by the text of its own head rather than by a node kind, because the grammar's names for these are an
-/// implementation detail and the question ("is this inside a class definition") is not.
+/// Asked of the tree, which has a node for it: `Declaration > DeclSpecifierSeq > ClassDef`, with a `ClassKeyword`
+/// or `StructKeyword` token inside. This was a text test — *does the text start with `class ` and hold a `{`* — and
+/// that is a decision made by reading punctuation, which is how the check layer produced its one false positive so
+/// far (see `assignment_in_condition`).
 fn enclosing_definition(node: &CppSyntaxNode) -> Option<CppSyntaxNode> {
     let mut current = node.parent();
     while let Some(ancestor) = current {
-        let text = ancestor.text().to_string();
-        let head = text.trim_start();
-        if (head.starts_with("class ")
-            || head.starts_with("struct ")
-            || head.starts_with("union ")
-            || head.starts_with("enum "))
-            && text.contains('{')
-        {
+        if super::is_a_class_definition(&ancestor) {
             return Some(ancestor);
         }
         current = ancestor.parent();
@@ -168,42 +163,68 @@ fn same_node(left: &CppSyntaxNode, right: &CppSyntaxNode) -> bool {
     left.text_range() == right.text_range() && left.kind() == right.kind()
 }
 
-/// **Which label is in force at an offset inside a class body**, read from the body's text in order.
+/// **Which label is in force at an offset inside a class definition.**
+///
+/// Two facts, both from the tree:
+///
+/// ```text
+///   the default    the `ClassKeyword`/`StructKeyword` token of the definition: `class` starts private,
+///                  `struct` and `union` start public
+///   the last label the last `PublicAccess`/`ProtectedAccess`/`PrivateAccess` node written **before** the member,
+///                  in the order the class body holds its children
+/// ```
+///
+/// This was a scan of the body's text for `:` and the word before it, which is a decision made by reading
+/// punctuation — and the one the check layer's own rule forbids, for the reason the rule exists: a `:` inside a
+/// string literal in a default argument is not a label, and text cannot tell.
 fn visibility_of(class: &CppSyntaxNode, offset: usize) -> Access {
-    let text = class.text().to_string();
-    let start: usize = class.text_range().start().into();
-    let Some(up_to_the_member) = text.get(..offset.saturating_sub(start)) else {
-        return Access::Public;
+    let mut in_force = default_access_of(class);
+
+    let Some(body) = class
+        .children()
+        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ClassBody)
+    else {
+        return in_force;
     };
 
-    // `class` starts private and `struct`/`union` start public — the language's own defaults, and the reason the
-    // keyword is looked at rather than assumed.
-    let head = up_to_the_member.trim_start();
-    let mut in_force = if head.starts_with("class ") {
-        Access::Private
-    } else {
-        Access::Public
-    };
-
-    // The last label written before the member wins. Searched from the front so that a `private:` in a member
-    // function's *body* — a label inside a nested class, say — is still read in the order it appears, which is the
-    // order the compiler reads them in as well.
-    for (at, _) in up_to_the_member.match_indices(':') {
-        let before = up_to_the_member[..at].trim_end();
-        let word = before
-            .rsplit(|character: char| !character.is_alphabetic())
-            .next()
-            .unwrap_or_default();
-        match word {
-            // Only a *label* counts: `xpublic: y` is not one, and neither is a word in a string — which this
-            // reading cannot tell apart, and which is why the answer is only used to report the two labels that
-            // restrict access rather than to report everything that is not `public`.
-            "public" => in_force = Access::Public,
-            "protected" => in_force = Access::Protected,
-            "private" => in_force = Access::Private,
-            _ => {}
+    for child in body.children() {
+        // Nothing after the member is in force *at* the member.
+        if usize::from(child.text_range().start()) >= offset {
+            break;
         }
+        in_force = match CppSyntaxKind::from(child.kind()) {
+            CppSyntaxKind::PublicAccess => Access::Public,
+            CppSyntaxKind::ProtectedAccess => Access::Protected,
+            CppSyntaxKind::PrivateAccess => Access::Private,
+            // A member or anything else: the label in force is unchanged.
+            _ => in_force,
+        };
     }
 
     in_force
 }
+
+/// **The access a class definition starts with**, read from its own keyword.
+///
+/// `class` is private and `struct`/`union` are public — the language's rule, and the reason the keyword is a token
+/// this asks for rather than a word compared against a header's spelling.
+fn default_access_of(class: &CppSyntaxNode) -> Access {
+    let keyword = class
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .find(|token| {
+            // **One token's word, not a scan of the class's text.** The boundary is the lexer's - this is the first
+            // token of the definition - and the comparison is against one of the three words the language gives that
+            // position. Comparing the token's own text is what a token is for; the difference from the scan this
+            // replaced is that a `class` inside a string or a comment is not a token, so it cannot be found here.
+            matches!(token.text().to_string().as_str(), "class" | "struct" | "union")
+        });
+
+    match keyword.map(|token| token.text().to_string()) {
+        Some(word) if word == "class" => Access::Private,
+        _ => Access::Public,
+    }
+}
+
+
+

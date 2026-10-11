@@ -43,31 +43,6 @@ use super::{Check, CheckContext, DiagnosticCode};
 /// **`unnecessary-branch`** — see the module documentation.
 pub struct UnnecessaryBranch;
 
-/// The condition **as written**, when the statement is an `if` with a parenthesised one.
-///
-/// `None` for anything else: an `if` without a condition is a file being typed at, and the recovery around it is
-/// the parser's business rather than this check's.
-fn condition_written(statement: &cpp_parser::CppSyntaxNode) -> Option<String> {
-    let text = statement.text().to_string();
-    let text = text.trim();
-    let open = text.find('(')?;
-    // The matching `)`: counted rather than searched from the end, so that `if (f(1))` answers with `f(1)`.
-    let mut depth = 0usize;
-    for (at, character) in text[open..].char_indices() {
-        match character {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(text[open + 1..open + at].trim().to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 impl Check for UnnecessaryBranch {
     const CODES: &'static [DiagnosticCode] = &[DiagnosticCode::UnnecessaryBranch];
 
@@ -77,16 +52,19 @@ impl Check for UnnecessaryBranch {
             .descendants()
             .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::IfStat)
         {
-            let Some(condition) = condition_written(&statement) else {
+            // **The condition from the node, and the literal from its tokens.** This was a text scan for the first
+            // `(` and its match — the same reading that put a finding on a line whose condition is two comparisons
+            // (see `assignment_in_condition`), plus a comparison of the *whole condition text* against `"true"`,
+            // which cannot tell `if (true)` from a condition that happens to spell the word inside a comment.
+            let Some(condition) = super::condition_of(&statement) else {
                 continue;
             };
-            // Parentheses are stepped through — `if ((true))` is the same condition — and nothing else is.
-            let bare = condition.trim_matches(['(', ')']).trim();
-            let decided = match bare {
-                "true" | "1" => true,
-                "false" | "0" => false,
-                _ => continue,
+            let Some(decided) = super::literal_condition_of(&condition) else {
+                continue;
             };
+            let decided = decided == "true";
+            let condition = condition.text().to_string();
+            let condition = condition.trim();
 
             // **The whole statement when the branch cannot run, the condition when it always does** — see the module
             // documentation for why the message is about a different place in each of the two cases.

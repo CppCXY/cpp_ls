@@ -32,6 +32,20 @@ fn main() {
         cpp_code_analysis::WatchFilter::new(std::path::Path::new(".")),
     );
     session.did_open(&root_path, &std::fs::read_to_string(&root_path).unwrap_or_default());
+
+    // **The ask, and then the pump** - the same pair every test in this workspace uses, and the one this probe was
+    // missing: `Session::diagnostics` answers from the **cooked reading**, and a rendering is built because
+    // something asked for it. Without the ask every file answered `None`, the loop below skipped all of them, and
+    // the probe printed `0 finding(s)` for every check on every input - including `syntax-error` on a file that does
+    // not parse. A probe that cannot find a parse error is worse than no probe: it was believed twice.
+    let wanted: Vec<std::path::PathBuf> = session
+        .index()
+        .summaries()
+        .map(|summary| summary.path.clone())
+        .collect();
+    for path in &wanted {
+        session.want_cooked_reading(path);
+    }
     session.index_everything();
 
     let paths: Vec<std::path::PathBuf> = session
@@ -82,4 +96,6 @@ fn main() {
 
     println!("\n  {total} finding(s) from `{check}` over {} file(s)", paths.len());
 }
+
+
 

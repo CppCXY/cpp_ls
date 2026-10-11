@@ -29,6 +29,28 @@
 //! a [`CheckContext`] that collects findings and filters them through a [`CheckConfig`], and a `run` that is a flat
 //! list of typed calls.
 //!
+//! # A decision comes from the tree; text is for messages
+//!
+//! The crate has a **lossless tree** and a **lexer**, and every question a check asks has a node or a token for its
+//! answer: an access label is a `PublicAccess` node beside a `ClassBody`, a `class` is a `ClassKeyword` token on a
+//! `ClassDef`, a declarator is a `Declarator` node, a condition is a `ParenExpr` node. Reaching past those for the
+//! text is how this layer produced its first user-visible false positive: `assignment_in_condition` looked for the
+//! first `(` and its match **in the text** of an `if`, counted a `<` in `i + 1 < argc` as an opening bracket, ran on
+//! into the body, found an `=` in the first statement there, and reported *`=` in a condition is almost always a
+//! `==`* on a line whose condition is two comparisons.
+//!
+//! So:
+//!
+//! ```text
+//!   to decide    walk nodes (`children`, `descendants`) and tokens (`descendants_with_tokens`)
+//!   to say       text: the message, and `source[range]` to quote what the reader wrote
+//! ```
+//!
+//! A text comparison is allowed where the token **is** the answer - a keyword token compared against `"class"` has
+//! the lexer's boundary around it, which is the whole difference from a substring search. Where a check still reads
+//! text, the reason belongs in a comment beside it, and the honest reasons are narrow: a question about *layout*
+//! (a directive's own line), or a conservative approximation of a control-flow question that a tree walk over one
+//! file cannot answer.
 //! # Why `run` is a list of `run_check::<T>` and not a list of closures
 //!
 //! It was the other shape — `timed(0, &|| …)`, `timed(1, &|| …)` — and the index was the defect: a check's name
@@ -268,9 +290,13 @@ impl<'a> CheckContext<'a> {
         else {
             return range;
         };
+        // **The end is a different question from the start** - see `FileView::file_offset_of_end`: asking
+        // `file_offset_of` about an end that falls in whitespace walks forward to the next token, which is how a
+        // finding about the value `123` came out covering the rest of the line. Measured on the user's own code:
+        // `std::string x = 123;` underlined from `123` to the end of the statement.
         let end = self
             .view
-            .file_offset_of(crate::file::coordinates::ReadingOffset::new(
+            .file_offset_of_end(crate::file::coordinates::ReadingOffset::new(
                 range.end_offset(),
             ))
             .map_or(start, |end| end);
@@ -339,6 +365,63 @@ impl<'a> CheckContext<'a> {
 /// `CompoundStat` with no function node around them - so every check that filtered on that kind reported nothing,
 /// on every file, while looking correct. A definition is what has a parameter list and a body; which node the
 /// grammar wrapped them in is its business.
+
+/// **The condition of an `if`/`while`/`switch`, taken from the node and never from its text.**
+///
+/// A node's child is what the parser decided the condition is. This was a text scan in two checks at once - the
+/// first `(` and its match - and counting parentheses through text means deciding what a `<` is, which is how a
+/// condition holding `i + 1 < argc` was read past its own `)` and into the body.
+pub fn condition_of(statement: &cpp_parser::CppSyntaxNode) -> Option<cpp_parser::CppSyntaxNode> {
+    statement
+        .children()
+        .find(|child| cpp_parser::CppSyntaxKind::from(child.kind()) != cpp_parser::CppSyntaxKind::CompoundStat)
+}
+
+/// **The one word a condition is, when it is a bare literal** - `true`, `false`.
+///
+/// Decided from the **tokens**: the parentheses and the whitespace are dropped, and what is left has to be exactly
+/// one token whose text is one of the two words. A string literal is one token as well, so `if ("true")` cannot be
+/// read as the keyword, and neither can a name that happens to be spelled that way only in a comment.
+pub fn literal_condition_of(condition: &cpp_parser::CppSyntaxNode) -> Option<String> {
+    use cpp_parser::CppTokenKind;
+
+    let words: Vec<String> = condition
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .filter(|token| {
+            !matches!(
+                CppTokenKind::from(token.kind()),
+                CppTokenKind::LeftParen
+                    | CppTokenKind::RightParen
+                    | CppTokenKind::Whitespace
+                    | CppTokenKind::Newline
+            )
+        })
+        .map(|token| token.text().to_string())
+        .collect();
+
+    match words.as_slice() {
+        [word] if word == "true" || word == "false" => Some(word.clone()),
+        _ => None,
+    }
+}
+/// **Is this node a class-like *definition*?** - `class`, `struct` or `union`.
+///
+/// Three node kinds, one question, and the reason this predicate exists rather than each check naming a kind:
+/// measured, `struct MyString { int size; };` is a **`StructDef`** while `class Widget { … };` is a **`ClassDef`**,
+/// and only the body (`ClassBody`) is shared. A check that filtered on `ClassDef` therefore worked on every `class`
+/// and on **no `struct` at all** — which is what `std::string` and the user's own type are. It cost a round: the
+/// probe printed ``not found among the ClassDef nodes`` while the definition was inlined into the rendering.
+///
+/// `EnumDef` is deliberately not here: an enumeration has no access specifiers and no constructors, which are the
+/// two questions this predicate is asked for.
+pub fn is_a_class_definition(node: &cpp_parser::CppSyntaxNode) -> bool {
+    use cpp_parser::CppSyntaxKind;
+    matches!(
+        CppSyntaxKind::from(node.kind()),
+        CppSyntaxKind::ClassDef | CppSyntaxKind::StructDef | CppSyntaxKind::UnionDef
+    )
+}
 /// **Is this node a function definition?** See [`function_definitions`] for why the question is about shape.
 pub fn is_a_function_definition(node: &cpp_parser::CppSyntaxNode) -> bool {
     use cpp_parser::CppSyntaxKind;
@@ -389,22 +472,46 @@ pub fn function_definitions(context: &CheckContext<'_>) -> Vec<cpp_parser::CppSy
 ///
 /// `None` for a definition with nothing before its name — a constructor — and for a head this cannot read.
 pub fn return_type_written_by(function: &cpp_parser::CppSyntaxNode) -> Option<String> {
-    let parameters = function
+    use cpp_parser::CppSyntaxKind;
+
+    // **The type specifiers are a node**: a definition holds a `DeclSpecifierSeq` before its declarator, which is
+    // where `int`, `const std::string` and `auto` live. This was the text before the name, which is the same
+    // characters in most cases and the wrong ones in the cases that matter - a comment, a `[[nodiscard]]`, a
+    // `virtual` keyword.
+    let specifiers = function
         .children()
-        .find(|child| cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::ParameterList)?;
-    let name = function.children().take_while(|child| child != &parameters).last()?;
+        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq)?;
+    let mut written = specifiers.text().to_string().trim().to_string();
 
-    let whole = function.text().to_string();
-    let start: usize = function.text_range().start().into();
-    let before_the_name: usize = name.text_range().start().into();
-    let head = whole.get(..before_the_name.checked_sub(start)?)?.trim();
+    // **And the pointer or reference belongs to the type while sitting outside that node**: `int* f()` writes its
+    // `*` against the declarator, so the spelling this answers with has to put it back or `int*` reads as `int`.
+    if let Some(declarator) = function.descendants().find(|node| {
+        CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declarator
+            && node
+                .descendants()
+                .any(|inner| CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::ParameterList)
+    }) {
+        for token in declarator
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+        {
+            if CppSyntaxKind::from(token.kind()) == CppSyntaxKind::NameExpr {
+                break;
+            }
+            match token.text().to_string().as_str() {
+                "*" | "&" | "&&" => {
+                    // Written against the type or against the name - the same type either way.
+                    written.push_str(token.text().to_string().as_str());
+                }
+                _ => {}
+            }
+        }
+    }
 
-    // A pointer or reference written against the name - `int *f()` - belongs to the type.
-    let head = head.trim_end_matches(['*', '&']).trim_end();
-    if head.is_empty() {
+    if written.is_empty() {
         return None;
     }
-    Some(head.to_string())
+    Some(written)
 }
 /// **The last identifier written inside a node** — the name a call would spell, the name a declaration declares.
 ///
@@ -473,6 +580,14 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
 
     context.into_findings()
 }
+
+
+
+
+
+
+
+
 
 
 
