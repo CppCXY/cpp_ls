@@ -89,6 +89,13 @@ pub fn diagnose_file(session: &Session<DiskFiles>, path: &Path) -> Option<(Uri, 
                 range,
                 severity: Some(DiagnosticSeverity::ERROR),
                 source: Some("cpp_ls".to_string()),
+                // **The rule, in the field the protocol keeps for it.** A client shows this beside the message and
+                // an editor lets the reader turn one rule off by it — which is why it is the analysis's enum rather
+                // than anything this layer invents: `cpp_code_analysis::sema::check::Diagnostic::code` is the one
+                // spelling a settings file and this wire format both agree on.
+                code: Some(lsp_types::NumberOrString::String(
+                    error.code.name().to_string(),
+                )),
                 message: error.message.clone(),
                 ..Diagnostic::default()
             }
@@ -130,6 +137,13 @@ fn module_notes<'a>(
             range,
             severity: Some(DiagnosticSeverity::INFORMATION),
             source: Some("cpp_ls".to_string()),
+            // A note is a diagnostic a client shows, so it has a code like everything else — see
+            // `cpp_code_analysis::sema::check::DiagnosticCode::ModuleNote`.
+            code: Some(lsp_types::NumberOrString::String(
+                cpp_code_analysis::sema::check::DiagnosticCode::ModuleNote
+                    .name()
+                    .to_string(),
+            )),
             message: note.message.clone(),
             ..Diagnostic::default()
         }
@@ -243,5 +257,6 @@ session.want_cooked_reading(&file);
         let _ = std::fs::remove_dir_all(path.parent().expect("the scratch root"));
     }
 }
+
 
 

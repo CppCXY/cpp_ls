@@ -2988,10 +2988,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 notes = self.notes_about_the_modules(view);
             }
             let checks = match &view {
-                Some(view) => {
-                    let _t = DiagTrace::new("checks");
-                    self.checks_about(&key, view)
-                }
+                Some(view) => self.checks_about(&key, view),
                 None => Vec::new(),
             };
 
@@ -3005,6 +3002,9 @@ impl<F: FileProvider + Clone> Session<F> {
                         start: error.range.start_offset,
                         end: error.range.end_offset(),
                         message: error.message.clone(),
+                        // **Every diagnostic carries its rule.** These came from the parser, so the rule is
+                        // `syntax-error` — stated here rather than left for the client to guess from the message.
+                        code: crate::sema::check::DiagnosticCode::SyntaxError,
                     })
                     .collect(),
                 notes,
@@ -3049,13 +3049,18 @@ impl<F: FileProvider + Clone> Session<F> {
         // function's own frame.
         let model = self.semantic_model(view);
 
-        crate::sema::check::Checks {
-            path: key,
+        // **The config, and the run.** A session with no configuration runs every rule - see
+        // `CheckConfig::default` - and the filtering itself lives in `CheckContext::add`, so that no check has to
+        // know a rule was switched off.
+        let config = crate::sema::check::CheckConfig::default();
+        crate::sema::check::run(crate::sema::check::CheckContext::new(
+            key,
             summary,
             model,
-            source: &view.source,
-        }
-        .run()
+            &view.source,
+            view.tree.get_errors(),
+            &config,
+        ))
     }
 
     /// **The query entry point for one file** — a [`crate::sema::model::SemanticModel`] over `view`, with the
@@ -5074,6 +5079,13 @@ pub struct FileDiagnostic {
     pub start: usize,
     pub end: usize,
     pub message: String,
+    /// **Which rule produced this**, as the enum the analysis defines — see
+    /// [`crate::sema::check::DiagnosticCode`].
+    ///
+    /// Carried rather than derived from the message, because a client needs a *stable* name: `Diagnostic::code`
+    /// is what an editor shows and what a settings file turns a rule off by, and a consumer that parsed the
+    /// sentence would be reading prose as an identifier.
+    pub code: crate::sema::check::DiagnosticCode,
 }
 
 /// **Something the analysis knows that is not an error** — see [`Session::notes_about_the_modules`].
@@ -8053,6 +8065,9 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         );
     }
 }
+
+
+
 
 
 

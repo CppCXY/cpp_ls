@@ -52,7 +52,7 @@ fn main() {
         };
         checked += 1;
         for finding in &found.checks {
-            *by_check.entry(finding.check).or_default() += 1;
+            *by_check.entry(finding.code.name()).or_default() += 1;
             if shown < 40 {
                 shown += 1;
                 println!(
@@ -61,7 +61,7 @@ fn main() {
                         .map(|name| name.to_string_lossy().to_string())
                         .unwrap_or_default(),
                     finding.range.start_offset,
-                    finding.check,
+                    finding.code.name(),
                     finding.message
                 );
             }
@@ -76,3 +76,4 @@ fn main() {
         println!("    {count:>5}  {check}");
     }
 }
+

@@ -331,7 +331,7 @@ fn main() {
             for finding in &diagnostics.checks {
                 println!(
                     "   [{}] {}..{} {} — {}",
-                    finding.check,
+                    finding.code.name(),
                     finding.range.start_offset,
                     finding.range.end_offset(),
                     finding.name,
@@ -1047,6 +1047,7 @@ fn main() {
         }
     }
 }
+
 
 
 

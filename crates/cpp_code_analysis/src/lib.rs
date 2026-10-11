@@ -96,7 +96,7 @@ pub use preprocess::{condition, cooked, directive, expand, guards, macros};
 pub use cooked::{FileMacros, Over, ParsedDefinitions, configuration_from_environment_and};
 pub use macros::{MacroBindings, UnitSources};
 pub use sema::declarations::{build_facts, by_name, declared_type_of, scope_of};
-pub use sema::check::{Checks, Finding};
+pub use sema::check::{CheckConfig, CheckContext, DiagnosticCode, Finding};
 pub use sema::{check, module_info, modules, parser_symbols, scopes, symbol};
 mod tu_cache;
 
@@ -212,4 +212,6 @@ pub use symbol::{
     QualifiedName, Scope, ScopeId, ScopeKind, ScopeTree, UnknownReason,
 };
 pub use token::Token;
+
+
 

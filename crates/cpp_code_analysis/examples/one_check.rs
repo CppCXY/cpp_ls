@@ -46,7 +46,7 @@ fn main() {
         let Some(found) = session.diagnostics(path) else {
             continue;
         };
-        for finding in found.checks.iter().filter(|finding| finding.check == check) {
+        for finding in found.checks.iter().filter(|finding| finding.code.name() == check) {
             total += 1;
             let name = path
                 .file_name()
@@ -82,3 +82,4 @@ fn main() {
 
     println!("\n  {total} finding(s) from `{check}` over {} file(s)", paths.len());
 }
+
