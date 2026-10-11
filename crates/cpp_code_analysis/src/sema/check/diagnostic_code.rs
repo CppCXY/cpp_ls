@@ -128,10 +128,10 @@ impl DiagnosticCode {
     ///
     /// This crate does not speak LSP — the severities are its own, and the server maps them — for the reason it
     /// does not speak LSP anywhere else: the analysis is usable by a batch tool that has no protocol at all.
-    pub fn severity(self) -> Severity {
+    pub fn severity(self) -> RuleSeverity {
         match self {
-            DiagnosticCode::ModuleNote => Severity::Information,
-            _ => Severity::Error,
+            DiagnosticCode::ModuleNote => RuleSeverity::Information,
+            _ => RuleSeverity::Error,
         }
     }
 
@@ -146,8 +146,9 @@ impl DiagnosticCode {
 
 /// **How a diagnostic is drawn**, in this crate's own vocabulary — see [`DiagnosticCode::severity`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Severity {
+pub enum RuleSeverity {
     Error,
     Warning,
     Information,
 }
+

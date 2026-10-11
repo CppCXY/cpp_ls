@@ -101,11 +101,54 @@ pub fn diagnose_file(session: &Session<DiskFiles>, path: &Path) -> Option<(Uri, 
             }
         })
         .chain(module_notes(&found.notes, held))
+        // **And what the checks found**, which is the third channel of `FileDiagnostics` — see `check_findings`.
+        .chain(check_findings(&found.checks, held))
         .collect();
 
     Some((uri, diagnostics))
 }
 
+/// **What the semantic checks found** — one diagnostic per finding, with the rule's own code and severity.
+///
+/// The third channel, and the one that was missing: `FileDiagnostics::checks` has been filled by the analysis since
+/// the layer was written and **nothing published it**, so every check ran on every keystroke and no user ever saw a
+/// finding. This is the wire half of that.
+///
+/// `severity` comes from the **code** rather than from the finding — see [`DiagnosticCode::severity`] — because the
+/// kind of claim belongs to the rule: "this name is not used" and "this file does not parse" are different things
+/// to say, and the difference does not vary between two findings of one rule.
+///
+/// A range the file cannot place is **dropped** rather than pointed at the top of the file, which is the opposite
+/// of what the errors above do: a parse error the reader cannot locate is still worth its message, while a check's
+/// finding is *about a place* and one that cannot be placed is one this layer has nothing to say about.
+fn check_findings<'a>(
+    findings: &'a [cpp_code_analysis::Finding],
+    held: &'a cpp_code_analysis::VfsFile,
+) -> impl Iterator<Item = Diagnostic> + 'a {
+    findings.iter().filter_map(move |finding| {
+        let start = position_in_file(held, finding.range.start_offset)?;
+        let end = position_in_file(held, finding.range.end_offset()).unwrap_or(start);
+        Some(Diagnostic {
+            range: lsp_types::Range::new(start, end),
+            severity: Some(severity_of(finding.code)),
+            source: Some("cpp_ls".to_string()),
+            code: Some(lsp_types::NumberOrString::String(
+                finding.code.name().to_string(),
+            )),
+            message: finding.message.clone(),
+            ..Diagnostic::default()
+        })
+    })
+}
+
+/// The protocol's severity for one of this analysis's codes.
+fn severity_of(code: cpp_code_analysis::DiagnosticCode) -> DiagnosticSeverity {
+    match code.severity() {
+        cpp_code_analysis::sema::check::RuleSeverity::Error => DiagnosticSeverity::ERROR,
+        cpp_code_analysis::sema::check::RuleSeverity::Warning => DiagnosticSeverity::WARNING,
+        cpp_code_analysis::sema::check::RuleSeverity::Information => DiagnosticSeverity::INFORMATION,
+    }
+}
 /// **The `import`s whose module this project does not contain** — as `INFORMATION` on the line that wrote them.
 ///
 /// `import std;` in a project whose compiler ships the standard module's *source* is not a mistake, and a reader who
@@ -257,6 +300,7 @@ session.want_cooked_reading(&file);
         let _ = std::fs::remove_dir_all(path.parent().expect("the scratch root"));
     }
 }
+
 
 
 

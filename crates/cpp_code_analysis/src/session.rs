@@ -3058,6 +3058,9 @@ impl<F: FileProvider + Clone> Session<F> {
             summary,
             model,
             &view.source,
+            // **Both texts**: the checks read ranges from the tree (the rendering) and from the summary (the
+            // file), and mixing the two is a measured defect - see `CheckContext::written`.
+            view.written_text().unwrap_or(&view.source),
             view.tree.get_errors(),
             &config,
         ))
@@ -8065,6 +8068,7 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         );
     }
 }
+
 
 
 

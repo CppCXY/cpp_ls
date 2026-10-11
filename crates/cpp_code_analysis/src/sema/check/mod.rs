@@ -73,13 +73,8 @@ use cpp_parser::SourceRange;
 
 use crate::{FileSummary, ProjectIndex};
 
-// **Written, and not yet declared**: the bodies are in the tree, their calls into the model are still written
-// against APIs this crate does not have (Type::spelling, MemberAccess::name, Known::is_yes), so they are
-// kept out of the compile until that is settled rather than left as a red build.
-// pub mod argument_count;
-// **Written, and not yet declared**: the bodies are in the tree, their calls into the model are still written
-// against APIs this crate does not have (Type::spelling, MemberAccess::name, Known::is_yes), so they are
-// kept out of the compile until that is settled rather than left as a red build.
+pub mod argument_count;
+pub mod assign_type_check;
 // pub mod assign_type_check;
 pub mod config;
 pub mod diagnostic_code;
@@ -89,27 +84,15 @@ pub mod diagnostic_code;
 // the ported versions have to preserve.
 pub mod include_not_found;
 pub mod macro_redefined;
-// **Written, and not yet declared**: the bodies are in the tree, their calls into the model are still written
-// against APIs this crate does not have (Type::spelling, MemberAccess::name, Known::is_yes), so they are
-// kept out of the compile until that is settled rather than left as a red build.
-// pub mod param_type_check;
-// **Written, and not yet declared**: the bodies are in the tree, their calls into the model are still written
-// against APIs this crate does not have (Type::spelling, MemberAccess::name, Known::is_yes), so they are
-// kept out of the compile until that is settled rather than left as a red build.
-// pub mod return_type_mismatch;
+pub mod param_type_check;
+pub mod return_type_mismatch;
 pub mod syntax_error;
-// **Written, and not yet declared**: the bodies are in the tree, their calls into the model are still written
-// against APIs this crate does not have (Type::spelling, MemberAccess::name, Known::is_yes), so they are
-// kept out of the compile until that is settled rather than left as a red build.
-// pub mod undefined_field;
-// **Written, and not yet declared**: the bodies are in the tree, their calls into the model are still written
-// against APIs this crate does not have (Type::spelling, MemberAccess::name, Known::is_yes), so they are
-// kept out of the compile until that is settled rather than left as a red build.
-// pub mod unnecessary_branch;
+pub mod undefined_field;
+pub mod unnecessary_branch;
 pub mod unused;
 
 pub use config::CheckConfig;
-pub use diagnostic_code::{DiagnosticCode, Severity};
+pub use diagnostic_code::{DiagnosticCode, RuleSeverity};
 
 /// **What a check found**, in the form a diagnostics channel shows it.
 ///
@@ -163,8 +146,26 @@ pub struct CheckContext<'a> {
     pub summary: &'a FileSummary,
     /// **The file's questions, and the only way a check asks them.**
     pub model: crate::sema::model::SemanticModel<'a>,
-    /// **The file's own text**, as the ranges in its summary are offsets into.
+    /// **The text a range from the *tree* is an offset into** — the view's own reading, which for an indexed file
+    /// is the **rendering**: macros expanded, directives resolved.
     pub source: &'a str,
+    /// **The text a range from the *summary* is an offset into** — the file as the reader wrote it.
+    ///
+    /// Two texts, because this layer reads ranges from two places and they are in two coordinate systems:
+    ///
+    /// ```text
+    ///   a range from `context.tree()`     -> context.source    the rendering
+    ///   a range from `context.summary`    -> context.written   the file
+    /// ```
+    ///
+    /// Measured, and it is what this field was added for: `macro_redefined` compared two `#define` bodies through
+    /// the *rendering* while the ranges came from the summary — so it read a fragment of the expanded function
+    /// against nothing at all, and reported a macro as a redefinition of itself.
+    ///
+    /// What a finding is *published in* is a third thing and it is the file's coordinates, because the server
+    /// places a range with the VFS line index. That crossing belongs where a finding is added — see
+    /// [`CheckContext::add`] — so that no check has to do it.
+    pub written: &'a str,
     /// **The parse errors of the reading this run is about**, which is what the `syntax-error` check publishes.
     ///
     /// Passed in rather than asked for: the errors belong to the **tree**, and this context deliberately holds a
@@ -182,6 +183,7 @@ impl<'a> CheckContext<'a> {
         summary: &'a FileSummary,
         model: crate::sema::model::SemanticModel<'a>,
         source: &'a str,
+        written: &'a str,
         errors: &'a [cpp_parser::CppParseError],
         config: &'a CheckConfig,
     ) -> Self {
@@ -190,6 +192,7 @@ impl<'a> CheckContext<'a> {
             summary,
             model,
             source,
+            written,
             errors,
             config,
             findings: Vec::new(),
@@ -310,10 +313,17 @@ pub fn run(context: CheckContext<'_>) -> Vec<Finding> {
     run_check::<include_not_found::IncludeNotFound>(&mut context);
     run_check::<macro_redefined::MacroRedefined>(&mut context);
     run_check::<unused::Unused>(&mut context);
+    run_check::<unnecessary_branch::UnnecessaryBranch>(&mut context);
+    run_check::<undefined_field::UndefinedField>(&mut context);
+    run_check::<argument_count::ArgumentCount>(&mut context);
+    run_check::<param_type_check::ParamTypeCheck>(&mut context);
+    run_check::<assign_type_check::AssignTypeCheck>(&mut context);
+    run_check::<return_type_mismatch::ReturnTypeMismatch>(&mut context);
     // macro_redefined and include_not_found are being ported — see the note above their declarations.
 
     context.into_findings()
 }
+
 
 
 

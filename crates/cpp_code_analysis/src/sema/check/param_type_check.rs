@@ -100,11 +100,15 @@ impl Check for ParamTypeCheck {
                     name.clone(),
                     format!(
                         "this passes `{}` where `{parameter}` is declared for `{name}`",
-                        from.spelling()
+                        context.source
+                            .get(argument.text_range().start().into()..argument.text_range().end().into())
+                            .unwrap_or_default()
+                            .trim()
                     ),
                 );
             }
         }
     }
 }
+
 

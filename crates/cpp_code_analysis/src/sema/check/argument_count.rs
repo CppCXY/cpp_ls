@@ -50,6 +50,15 @@ struct Callee {
     variadic: bool,
 }
 
+/// Every node of one kind, in one walk — the shape the sibling check's documentation gives a measurement for: a
+/// file with a hundred calls reads the tree once, not once per call.
+fn nodes_of_kind(context: &CheckContext<'_>, kind: CppSyntaxKind) -> Vec<CppSyntaxNode> {
+    context
+        .tree()
+        .descendants()
+        .filter(|node| CppSyntaxKind::from(node.kind()) == kind)
+        .collect()
+}
 impl Check for ArgumentCount {
     const CODES: &'static [DiagnosticCode] = &[DiagnosticCode::ArgumentCount];
 
@@ -66,7 +75,7 @@ impl Check for ArgumentCount {
             let Some(callee) = call.children().next() else {
                 continue;
             };
-            let Some(name) = spelling_of(&callee) else {
+            let Some(name) = super::spelling_of(&callee) else {
                 continue;
             };
             let Some(declared) = callees.get(name.as_str()) else {
@@ -118,7 +127,7 @@ fn callees_in_this_file(context: &CheckContext<'_>) -> std::collections::HashMap
         else {
             continue;
         };
-        let Some(name) = name_declared_by(&node) else {
+        let Some(name) = super::name_declared_by(&node) else {
             continue;
         };
 
@@ -150,35 +159,8 @@ fn callees_in_this_file(context: &CheckContext<'_>) -> std::collections::HashMap
     callees
 }
 
-/// The name a call writes for this declaration — the last identifier in the head, so a return type does not win.
-fn name_declared_by(node: &CppSyntaxNode) -> Option<String> {
-    let head = node
-        .children()
-        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList)?;
-    let before: Vec<CppSyntaxNode> = node
-        .children()
-        .take_while(|child| child != &head)
-        .collect();
-    spelling_of(&before.last()?.clone())
-}
 
-/// The last identifier written inside a node, which is the name a call would spell.
-fn spelling_of(node: &CppSyntaxNode) -> Option<String> {
-    node.descendants_with_tokens()
-        .filter_map(|element| element.into_token())
-        .filter(|token| token.kind() == cpp_parser::CppTokenKind::Identifier.into())
-        .last()
-        .map(|token| token.text().to_string())
-}
 
-/// Every node of one kind, in one walk — the shape the sibling check's documentation gives a measurement for.
-fn nodes_of_kind(context: &CheckContext<'_>, kind: CppSyntaxKind) -> Vec<CppSyntaxNode> {
-    context
-        .tree()
-        .descendants()
-        .filter(|node| CppSyntaxKind::from(node.kind()) == kind)
-        .collect()
-}
 
 fn at_most(name: &str, written: usize) -> String {
     format!("`{name}` takes {written} argument(s) and this call passes more")
@@ -187,3 +169,5 @@ fn at_most(name: &str, written: usize) -> String {
 fn at_least(name: &str, required: usize) -> String {
     format!("`{name}` needs {required} argument(s) and this call passes fewer")
 }
+
+

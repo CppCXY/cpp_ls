@@ -76,8 +76,6 @@ impl Check for MacroRedefined {
                 continue;
             }
 
-            // **Condition 4**: an identical redefinition is legal, and it is what a header that includes another
-            // header's `#define` twice produces.
             if first.function_like == fact.function_like && bodies_are_equal(context, first, fact) {
                 continue;
             }
@@ -108,9 +106,17 @@ impl Check for MacroRedefined {
 fn bodies_are_equal(context: &CheckContext<'_>, first: &MacroFact, second: &MacroFact) -> bool {
     let text = |fact: &MacroFact| {
         fact.body_range
-            .and_then(|range| context.source.get(range.start_offset..range.end_offset()))
+            .and_then(|range| context.written.get(range.start_offset..range.end_offset()))
+            // **Trimmed**, because the ranges do not end where the replacement lists do: a `#define` at the end of a
+            // file has a body range that reaches the newline after it, and one in the middle does not — so two
+            // identical definitions compared untrimmed are `"10"` against `"10\n"` and the check reported a
+            // redefinition of a macro with itself. Measured: `macro_redefined_is_not_reported_for_an_identical_definition`
+            // failed on exactly that pair.
             .unwrap_or("")
+            .trim()
     };
 
     text(first) == text(second)
 }
+
+
