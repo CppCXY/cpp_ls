@@ -165,15 +165,55 @@ fn member_access_from_the_text(
 /// typed is not a directive the grammar recognises: `#inc` is a `#` followed by an identifier the parser has no
 /// rule for, and a reading built on the parsed shape would answer nothing at the one keystroke that asks. The text
 /// from the `#` to the cursor is what a preprocessor would see, so that is what this splits.
+///
+/// # The node is not required, and requiring it was the defect
+///
+/// This used to start with `node_ancestor_of_kind(root, offset, PreprocessorDirective)?` — **the one node the
+/// sentence above says is missing at the keystroke being answered**. The result was that `#inc` fell through to the
+/// ordinary name position, the list came back as the vocabulary (which happens to hold a *snippet* named `include`,
+/// from `table.rs`), and the assertion that caught it read
+/// `the edit starts at the i of inc: left: 0, right: 1` — the replacement range came from the snippet's own
+/// insertion point at offset 0 rather than from the directive's name.
+///
+/// So the node is used when the grammar made one — a complete `#include <vector>` is a directive the parser knows —
+/// and the **line's own text** is used when it did not. Both give the same two things: the text of the directive and
+/// where it starts in the tree's coordinates.
+/// **A `#` line taken from the text**, for the keystroke where the grammar has not made a directive node — see
+/// [`directive_at`].
+///
+/// Answers the line's own span and text: from its first character to the end of the line. `None` when the offset is
+/// not on a line whose first non-space character is a `#`, which is what keeps this from claiming ordinary code.
+fn directive_line(root: &CppSyntaxNode, offset: usize) -> Option<(String, usize, usize)> {
+    let text = root.text().to_string();
+    let line_start = text[..offset.min(text.len())].rfind('\n').map_or(0, |at| at + 1);
+    let line_end = text[line_start..]
+        .find('\n')
+        .map_or(text.len(), |at| line_start + at);
+
+    let line = &text[line_start..line_end];
+    // A `#` after optional spaces is a directive; anything else on the line before it is code.
+    let hash = line_start + line.len() - line.trim_start().len();
+    if text[hash..].starts_with('#') {
+        Some((text[line_start..line_end].to_string(), line_start, line_end))
+    } else {
+        None
+    }
+}
 fn directive_at(root: &CppSyntaxNode, offset: usize) -> Option<CompletionContext> {
-    let node = node_ancestor_of_kind(root, offset, CppSyntaxKind::PreprocessorDirective)?;
-    let range = node.text_range();
-    let start = usize::from(range.start());
-    let end = usize::from(range.end());
+    let (text, start, end) = match node_ancestor_of_kind(root, offset, CppSyntaxKind::PreprocessorDirective) {
+        Some(node) => {
+            let range = node.text_range();
+            (
+                node.text().to_string(),
+                usize::from(range.start()),
+                usize::from(range.end()),
+            )
+        }
+        None => directive_line(root, offset)?,
+    };
 
     // The text from the `#` to the cursor. `get` rather than a slice, so a cursor that is not on a character
     // boundary (possible in a directive holding a non-ASCII identifier) answers `Nothing` instead of panicking.
-    let text = node.text().to_string();
     let cut = offset.clamp(start, end).saturating_sub(start);
     let Some(before) = text.get(..cut) else {
         return Some(CompletionContext::Nothing);
@@ -555,3 +595,4 @@ mod tests {
         }
     }
 }
+

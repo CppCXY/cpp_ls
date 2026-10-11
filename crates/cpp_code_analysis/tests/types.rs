@@ -312,7 +312,7 @@ int f() {
     let view = session.view("/p/a.cpp").expect("the file is held");
     let offset = source.rfind("w.").expect("the fixture writes the access") + 2;
 
-    match session.member_completions(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)) {
+    match session.member_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset)) {
         cpp_code_analysis::Known::Yes(found) => {
             let names: Vec<String> = found
                 .members
@@ -767,4 +767,5 @@ int f() { return 0; }
         "the innermost template is the one that introduces the class"
     );
 }
+
 

@@ -52,7 +52,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::RegisterCapabilities;
 use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
-use crate::util::{offset_at_position, path_to_uri, position_in_file, uri_to_file_path};
+use crate::util::{file_offset_at_position, offset_at_position, path_to_uri, position_in_file, uri_to_file_path};
 
 pub async fn on_goto_definition_handler(
     context: ServerContextSnapshot,
@@ -101,6 +101,10 @@ pub async fn on_goto_definition_handler(
         // exactly that resolved the same client position to offset 53 before an edit and 26 after it.
         let view = session.view_of_the_file(&path)?;
         let offset = offset_at_position(&view, position)?;
+        // **The file's own offset for the one query that lives in the file's text**: a header name is a
+        // directive's argument, and `Session::header_at` parses the written text to find it. Everything below
+        // works in the rendering, which is why both offsets are held and each is named.
+        let in_the_file = file_offset_at_position(&view, position)?;
 
         // **A header name before a declaration**, because the two cannot both be here and only one of them can
         // answer: `#include <vector>` declares nothing, so the declaration question below would answer "nothing
@@ -112,7 +116,7 @@ pub async fn on_goto_definition_handler(
         // `#include` line is gone from it, because what it stood for is written out in its place. So the one
         // position a reader most obviously wants to jump from — the header they wrote — is not in the reading the
         // rest of this handler works in, and asking there finds nothing.
-        if let Known::Yes(header) = session.header_at(&view, offset) {
+        if let Known::Yes(header) = session.header_at(&view, in_the_file) {
             // A header this session cannot hold — the file is on disk but the VFS refused it — answers
             // `None` rather than a location with no range, which is the same "nothing to go to" the reader
             // had before.
@@ -192,6 +196,8 @@ impl RegisterCapabilities for DefinitionCapabilities {
         server_capabilities.definition_provider = Some(OneOf::Left(true));
     }
 }
+
+
 
 
 

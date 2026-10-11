@@ -2003,6 +2003,13 @@ impl<F: FileProvider + Clone> Session<F> {
             let Some(text) = self.text(&path) else {
                 continue;
             };
+            // **And the macro environment for the file's own view** - the other half of what a query asked for here.
+            // ``Session::view_of_the_file`` reads the text the reader is typing with the macros **in force** for it,
+            // and the environment it reads is the one this builds: without this call the map was never written, so
+            // every such view was parsed with an *empty* environment and a macro from a header was a name it could
+            // not expand. Outside the writer, like the rendering below, and for the same measured reason: building an
+            // environment walks the file's whole closure and copies every file's text (103.7 ms on MSVC's headers).
+            let _ = self.the_macros_of(&path, &text);
             rendered.push((
                 (path, crate::cache::content_hash(&text)),
                 std::sync::Arc::new(reading),
@@ -2609,7 +2616,22 @@ impl<F: FileProvider + Clone> Session<F> {
         if let Ok(mut work) = self.macro_work.lock() {
             work.want(&file.path);
         }
-        None
+
+        // **And the plain view, which this used to leave out - the whole of the answer.**
+        //
+        // The arrangement `macro_environments` describes is *"a query cannot pay the 103.7 ms walk, so it asks for the
+        // environment and reads the **plain view**, and the work loop builds what is missing"* - and this function is
+        // the "reads the plain view" half, which was never written. It queued the work and returned `None`, so every
+        // caller that wanted the text the reader is typing got nothing. Measured, on the handshake suite: the
+        // completion handler's one call answered `None` on **every** attempt, the query logged `(answer missing)`, and
+        // the server wrote `{"result":null}` to a client that re-asked for thirty seconds.
+        //
+        // The environment is the one **already read** for this content - `known_macros_of` is a hash and a lookup -
+        // and an empty one otherwise, which is the honest answer for a file whose include closure has not been walked.
+        let macros = self
+            .known_macros_of(&file.path, &file.text)
+            .unwrap_or_default();
+        Some(FileView::parse_with(&file, macros.as_ref()))
     }
 
     /// **The view of a file that a compiler's parser would see**, built if it has to be.
@@ -4265,8 +4287,21 @@ impl<F: FileProvider + Clone> Session<F> {
     ///
     /// The answer is the resolved path, from the same summary field the resolver wrote when the file was read, so
     /// this is a lookup rather than a second implementation of the search: see [`crate::header_at`].
-    pub fn header_at(&self, view: &FileView, offset: ReadingOffset) -> Known<crate::HeaderTarget> {
-        crate::header_at(self.store.index(), &view.root, &view.path, offset.get())
+    /// # The offset is the **file's**, because a header name is a directive's argument
+    ///
+    /// `#include "near.h"` is a fact about the text the reader wrote, and a rendering has the *included file's*
+    /// content where that line was — so neither the directive nor the name exists in the tree a `FileView` of a
+    /// rendering parses. This query therefore takes a `FileOffset` and parses the written text, exactly as
+    /// `Session::documentation` does for comments, `Session::selection_chain` for selections and
+    /// `Session::folding_ranges` for folds.
+    pub fn header_at(&self, view: &FileView, offset: FileOffset) -> Known<crate::HeaderTarget> {
+        let index = self.store.index();
+        let Some(written) = view.written_text() else {
+            // No rendering: this view *is* a parse of the file's own text, so its offsets are already the file's.
+            return crate::header_at(index, &view.root, &view.path, offset.get());
+        };
+        let tree = cpp_parser::CppParser::parse(written, cpp_parser::ParserConfig::default());
+        crate::header_at(index, &tree.get_red_root(), &view.path, offset.get())
     }
 
     /// Everywhere the macro name written at `offset` is used, across the project — the query a rename starts from.
@@ -4302,7 +4337,14 @@ impl<F: FileProvider + Clone> Session<F> {
     }
 
     /// What to offer after a member access at `offset`: the object's type, its members, and the edit.
-    pub fn member_completions(&self, view: &FileView, offset: ReadingOffset) -> Known<MemberCompletions> {
+    /// **The cursor is a FILE offset**, as it is for `Session::completions` and `Session::name_completions`: the three
+    /// completion queries speak the coordinates a client sends and each crosses the seam itself. This one did not, and
+    /// the cost was a panic rather than a wrong list — `rowan` was handed a file offset for a rendering tree.
+    pub fn member_completions(&self, view: &FileView, offset: FileOffset) -> Known<MemberCompletions> {
+        let Some(offset) = view.reading_offset_of(offset) else {
+            // A cursor the rendering does not have - in a region a macro replaced, or past its end.
+            return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from("")));
+        };
         member_completions_at(
             self.store.index(),
             &mut |path| self.view(path),
@@ -4326,6 +4368,16 @@ impl<F: FileProvider + Clone> Session<F> {
         // which is exactly what happened three times while this boundary went in. See [`FileView`]'s note on the two
         // coordinate systems: an offset in the file goes in through `reading_offset_of`, and a range in the rendering
         // comes back out through `file_offset_of`.
+        // **Prose first, and asked of the file's own text.** A comment and a literal are things a rendering has none
+        // of, so a cursor in one arrives at the scope walk as an ordinary position and the answer is the file's names,
+        // offered into a sentence. Measured: `a_comment_and_a_literal_offer_nothing` failed against this query while
+        // `completions` was already refusing.
+        if let Some(written) = view.written_text() {
+            if crate::file::view::in_prose(written, offset.get()) {
+                return Known::Unknown(UnknownReason::NotDeclaredHere(Box::from("")));
+            }
+        }
+
         let Some(offset) = view.reading_offset_of(offset) else {
             // The cursor is not in the rendering at all — in a region a macro replaced, or past its end. There is no
             // name to offer, and `Unknown` says so rather than answering about the nearest thing that is.
@@ -4372,6 +4424,68 @@ impl<F: FileProvider + Clone> Session<F> {
         // **The cursor is a FILE offset; the tree is the RENDERING's** — see [`Session::name_completions`], where the
         // full note is. A cursor that is not in the rendering has nothing to offer, and an empty set is the honest
         // answer rather than a list computed from the nearest position that *is* in it.
+        // **The shapes that live in the file''s own text, decided before anything crosses the seam.**
+        //
+        // A rendering has none of them in it: a `#include` line is replaced by what it includes, a `#define` by
+        // nothing, a comment is removed before the parse. So a cursor in one arrives at the context reader as whatever
+        // the renderer put in that place - measured, `#inc` reached the tree at offset 0, so the replacement range for
+        // `include` came back at the **start of the file**.
+        //
+        // Their answers need nothing from the reading either, which is why this is a shortcut rather than a special
+        // case: directive names are a constant table, a header name comes from the search path, prose has no
+        // suggestion to make, and a `#define`''s argument is the program''s names. The offset handed over is the
+        // **file''s**, so the replacement range a client edits is in the buffer it is showing.
+        //
+        // **`offset` here is still the parameter**: one statement lower it is the *reading''s*, and for `"#inc\nint
+        // x;\n"` the cursor at file offset 4 maps into the rendering at 0 - the directive is gone - so the written
+        // text was asked at 0, before the `#`, and the list came from the vocabulary''s `include` *snippet*.
+        if let Some(written) = view.written_text() {
+            if crate::file::view::in_prose(written, offset.get()) {
+                return crate::CompletionSet::default();
+            }
+            let tree = cpp_parser::CppParser::parse(written, cpp_parser::ParserConfig::default());
+            let written_root = tree.get_red_root();
+            let context = crate::completion::context_at(&written_root, offset.get());
+            match context {
+                // **The program is in the rendering; the buffer is in the file.** The `replace` range is carried by
+                // the context (read from the written text) and the *lookup* needs a reading offset - the one the
+                // cursor maps to, or the rendering''s end when it maps nowhere (measured: `one::` at the end of a
+                // file has no position in the rendering at all, and the answer was an empty set).
+                crate::completion::CompletionContext::DirectiveArgument { .. }
+                | crate::completion::CompletionContext::Qualified(_) => {
+                    let in_the_reading = view
+                        .reading_offset_of(offset)
+                        .map_or(view.source.len(), |at| at.get());
+                    return crate::completion::completion_with(
+                        self.store.index(),
+                        &view.scopes,
+                        &view.root,
+                        &view.path,
+                        in_the_reading,
+                        &self.headers.read().map(|headers| headers.clone()).unwrap_or_default(),
+                        context,
+                    );
+                }
+                context @ (crate::completion::CompletionContext::DirectiveName { .. }
+                | crate::completion::CompletionContext::Include { .. }) => {
+                    return crate::completion::completion_with(
+                        self.store.index(),
+                        &view.scopes,
+                        &view.root,
+                        &view.path,
+                        offset.get(),
+                        &self.headers.read().map(|headers| headers.clone()).unwrap_or_default(),
+                        context,
+                    );
+                }
+                // **`Nothing` is an answer, not a miss**: prose, and a directive that takes no argument (`#endif `).
+                crate::completion::CompletionContext::Nothing => {
+                    return crate::CompletionSet::default();
+                }
+                _ => {}
+            }
+        }
+
         let Some(offset) = view.reading_offset_of(offset) else {
             return crate::CompletionSet::default();
         };
@@ -4547,6 +4661,27 @@ impl<F: FileProvider + Clone> Session<F> {
         crate::semantic::classified_names(self.store.index(), view)
     }
 
+    /// **The ranges to select at a cursor, in the file's own coordinates** — the third fact that belongs to the text
+    /// the *reader* is looking at rather than to the text the compiler reads.
+    ///
+    /// A chain answers in the coordinates of the tree it walks, and every view this session holds is of a
+    /// **rendering**. Translating in and out does not repair that: a cursor in whitespace maps *forward* to the next
+    /// token — right for a cursor — so a walk of the rendering begins at a token that starts **after** the cursor and
+    /// builds a rung that does not contain the position it was built for. Measured: the cursor at file offset 9 in
+    /// `namespace ns` produced a chain whose innermost rung began at 10.
+    ///
+    /// Folding answers the same question the same way for the same reason, and so does documentation for comments.
+    /// **Three facts, one rule**: a selection, a fold and a doc comment are things the reader sees in their buffer,
+    /// so they are asked of the buffer.
+    pub fn selection_chain(&self, view: &FileView, offset: FileOffset) -> Vec<cpp_parser::SourceRange> {
+        let Some(written) = view.written_text() else {
+            // No rendering: this view *is* a parse of the file's own text, so its offsets are already the file's.
+            return view.selection_chain(ReadingOffset::new(offset.get()));
+        };
+        let tree = cpp_parser::CppParser::parse(written, cpp_parser::ParserConfig::default());
+        crate::file::view::selection_chain_of(&tree.get_red_root(), offset.get())
+    }
+
     /// **The file's foldable regions** — see [`crate::folding`].
     ///
     /// Read from the **buffer's own tokens and directives**, which is the same source the outline uses and for the
@@ -4601,8 +4736,18 @@ impl<F: FileProvider + Clone> Session<F> {
         );
 
         for signature in &mut signatures {
+            // **The declaration's offset is the *index's*, and the index reads the cooked rendering.** So
+            // `declared_at` is a **reading** offset, while `Session::documentation` looks for the comment in the text
+            // the reader **wrote** - and the two differ by exactly what the cook removed, which for a documented
+            // declaration is its documentation. Translated through the **declaring** file's own view.
+            let declared = self.view(&signature.declared_in);
+            let Some(in_the_file) = declared.as_ref().and_then(|declared| {
+                declared.file_offset_of(ReadingOffset::new(signature.declared_at))
+            }) else {
+                continue;
+            };
             signature.documentation =
-                self.documentation(view, &signature.declared_in, signature.declared_at);
+                self.documentation(view, &signature.declared_in, in_the_file.get());
         }
 
         signatures
@@ -7797,6 +7942,10 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         );
     }
 }
+
+
+
+
 
 
 

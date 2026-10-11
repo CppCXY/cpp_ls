@@ -281,7 +281,13 @@ mod tests {
     #[test]
     fn a_reference_list_is_refused_while_the_index_has_work() {
         let mut session = session_with_an_unread_project();
-        let view = session.view("/p/items.cpp").expect("the file is held");
+        // **A view of the file the session holds, not of its rendering.** This test is about the state where the
+        // index still has work to do, so it deliberately does not pump — and `Session::view` is a *request* for the
+        // rendering that answers `None` until that work is done ("a caller that needs meaning waits"). Asking it here
+        // was the test contradicting itself: the fixture is "unread on purpose" and the view needs a read.
+        // `FileView::parse_with` is the constructor for exactly this: the file's own text, parsed, no cooking.
+        let held = session.files().held("/p/items.cpp").expect("the file is held");
+        let view = cpp_code_analysis::FileView::parse_with(&held, &cpp_parser::MacroEnvironment::default());
         let on_the_use = ITEMS_CPP.find("MAX_ITEMS").expect("the fixture uses the macro");
 
         assert!(session.pending() > 0, "the fixture is the refused state");
@@ -295,7 +301,13 @@ mod tests {
         assert_eq!(session.pending(), 0);
 
         // The view is re-made, because indexing is what gives the file its summary — and the query reads the index.
-        let view = session.view("/p/items.cpp").expect("the file is held");
+        // **A view of the file the session holds, not of its rendering.** This test is about the state where the
+        // index still has work to do, so it deliberately does not pump — and `Session::view` is a *request* for the
+        // rendering that answers `None` until that work is done ("a caller that needs meaning waits"). Asking it here
+        // was the test contradicting itself: the fixture is "unread on purpose" and the view needs a read.
+        // `FileView::parse_with` is the constructor for exactly this: the file's own text, parsed, no cooking.
+        let held = session.files().held("/p/items.cpp").expect("the file is held");
+        let view = cpp_code_analysis::FileView::parse_with(&held, &cpp_parser::MacroEnvironment::default());
         let found = locations(&session, &view, cpp_code_analysis::file::coordinates::ReadingOffset::new(on_the_use), true).expect("the index is complete now");
         assert_eq!(
             found.len(),
@@ -317,6 +329,7 @@ mod tests {
         );
     }
 }
+
 
 
 

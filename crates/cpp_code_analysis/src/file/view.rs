@@ -341,6 +341,36 @@ pub fn documentation_at(root: &CppSyntaxNode, offset: usize) -> Option<CppDocCom
 /// line that starts a line comment or that holds the end of a block comment. A `////` banner, a string literal
 /// containing `*/`, a comment that turns out to document something else: each costs one parse, and the other
 /// mistake is not symmetric — a `false` where a comment is would lose the documentation silently.
+/// **Is the offset inside a comment or a literal in this text?** — a question about the file the reader sees, because
+/// a rendering has none of them: a comment is removed before the parse and a literal's spelling can differ.
+///
+/// A lexer pass rather than a parse: the answer is a token kind, and the tokens of the written text are the only
+/// thing needed to say what a cursor is sitting in.
+pub fn in_prose(text: &str, offset: usize) -> bool {
+    let (tokens, _) = cpp_parser::lex(text, &cpp_parser::LexerConfig::default());
+    // **The token the cursor is in, or the one it sits just after.** A client's cursor is *between* two bytes, so a
+    // cursor at the end of `// a note` — exactly where it lands after typing one — is not inside the comment by
+    // `start <= at < end`; that test finds the token *after* it, which is the newline, and the answer was "not prose".
+    // Measured: `a_comment_and_a_literal_offer_nothing` still offered the file's names.
+    let at = tokens
+        .iter()
+        .find(|token| token.range.start_offset <= offset && offset < token.range.end_offset())
+        .or_else(|| {
+            tokens
+                .iter()
+                .find(|token| token.range.end_offset() == offset)
+        });
+    at.is_some_and(|token| {
+        matches!(
+            cpp_parser::CppTokenKind::from(token.kind),
+            cpp_parser::CppTokenKind::LineComment
+                | cpp_parser::CppTokenKind::BlockComment
+                | cpp_parser::CppTokenKind::StringLiteral
+                | cpp_parser::CppTokenKind::CharLiteral
+        )
+    })
+}
+
 pub fn might_be_documented(text: &str, offset: usize) -> bool {
     let before = text
         .get(..offset.min(text.len()))
@@ -351,6 +381,15 @@ pub fn might_be_documented(text: &str, offset: usize) -> bool {
     if before.ends_with("*/") {
         return true;
     }
+
+    // **A cursor inside a declaration is a case this filter and the reader disagree about, and the reader has to be
+    // fixed with it.** A cursor at the `n` of `int x;` reads the line it is *on* — `"i"` — and this answers `false`,
+    // which its own contract forbids (`false` is final, `true` means the parse decides). Dropping the partial line
+    // fixes that and **breaks two other tests**, because `documentation_at`'s walk out of the ancestors then finds a
+    // comment the declaration does not own: `a_member_is_not_documented_by_the_classs_comment` and
+    // `a_member_documented_by_a_nested_comment_is_found_too` both went from passing to failing when this was tried,
+    // and `the_check_never_rejects_a_comment_the_parser_finds` with them. Measured: 11 passed / 1 failed became
+    // 9 passed / 3 failed. The pair has to move together, and that is the next change here rather than this one.
 
     // Otherwise the comment is above, with only blank lines and directives in between.
     let mut rest = before;
@@ -550,55 +589,77 @@ impl FileView {
     ///
     /// A cursor in whitespace starts the chain at the enclosing node rather than with the whitespace token: there is
     /// no word under the cursor to select, and the next useful thing is what surrounds it.
+    ///
+    /// # Which text this is asked of is the **caller's** decision, and it is the file's
+    ///
+    /// The chain is answered in the coordinates of the tree it walks, so this method is the wrong door for a client:
+    /// a selection is what the **reader** is about to see highlighted, which makes it a fact about the file's own
+    /// text — the same family `folding_ranges` belongs to and `Session::documentation` joined — and
+    /// [`Session::selection_chain`](crate::Session::selection_chain) is the query that asks it of the right text.
+    ///
+    /// Asking a *rendering* cannot be repaired by translating the cursor in and the rungs out, and that is measured
+    /// rather than argued: a cursor in whitespace maps **forward** to the next token (which is right for a cursor, and
+    /// is what [`FileView::reading_offset_of`] documents), so the walk begins at a token that starts *after* the
+    /// cursor, and the first rung does not contain the position it was built for. On the fixture that found this, the
+    /// cursor at file offset 9 — the space in `namespace ns` — produced a chain whose innermost rung began at 10.
     pub fn selection_chain(&self, offset: ReadingOffset) -> Vec<cpp_parser::SourceRange> {
-        let offset = offset.get();
-        let mut chain: Vec<cpp_parser::SourceRange> = Vec::new();
-        let add = |range: cpp_parser::SourceRange, chain: &mut Vec<cpp_parser::SourceRange>| {
-            if range.length == 0 {
-                return;
-            }
-            // Inside the cursor, and strictly inside the previous range — see the note above.
-            if offset < range.start_offset || offset >= range.end_offset() {
-                return;
-            }
-            // Strictly inside the previous range — see the note above. A range that merely *equals* the previous
-            // one adds nothing: expanding the selection to the same text twice is a keystroke that does nothing.
-            let already_covered = chain.last().is_some_and(|previous| {
-                range.start_offset >= previous.start_offset
-                    && range.end_offset() <= previous.end_offset()
-            });
-            if !already_covered {
-                chain.push(range);
-            }
-        };
-
-        let token = cpp_parser::token_at(&self.root, offset);
-
-        let ancestors = match &token {
-            Some(token) => {
-                if !cpp_parser::is_trivia(token.kind().into()) {
-                    add(cpp_parser::source_range(token.text_range()), &mut chain);
-                }
-                token
-                    .parent_ancestors()
-                    .map(|node| cpp_parser::source_range(node.text_range()))
-                    .collect::<Vec<_>>()
-            }
-            // No token at that offset (past the end of the file): the node walk still answers, and the root is
-            // always a range.
-            None => self
-                .root
-                .ancestors()
-                .map(|node| cpp_parser::source_range(node.text_range()))
-                .collect(),
-        };
-
-        for range in ancestors {
-            add(range, &mut chain);
-        }
-
-        chain
+        selection_chain_of(&self.root, offset.get())
     }
+}
+
+/// **The walk behind [`FileView::selection_chain`]**, over a tree the caller owns.
+///
+/// Free rather than a method because two callers need it and they hold different trees: a view walks the tree it
+/// parsed, and [`Session::selection_chain`](crate::Session::selection_chain) walks a parse of the file's **own** text
+/// — which is a tree no `FileView` in this crate holds, because every view is of a rendering. One walk, two trees.
+pub(crate) fn selection_chain_of(root: &CppSyntaxNode, offset: usize) -> Vec<cpp_parser::SourceRange> {
+    let mut chain: Vec<cpp_parser::SourceRange> = Vec::new();
+    let add = |range: cpp_parser::SourceRange, chain: &mut Vec<cpp_parser::SourceRange>| {
+        if range.length == 0 {
+            return;
+        }
+        // Inside the cursor, and strictly inside the previous range — see the note on the method.
+        if offset < range.start_offset || offset >= range.end_offset() {
+            return;
+        }
+        // Strictly inside the previous range — see the note on the method. A range that merely *equals* the previous
+        // one adds nothing: expanding the selection to the same text twice is a keystroke that does nothing.
+        let already_covered = chain.last().is_some_and(|previous| {
+            range.start_offset >= previous.start_offset && range.end_offset() <= previous.end_offset()
+        });
+        if !already_covered {
+            chain.push(range);
+        }
+    };
+
+    let token = cpp_parser::token_at(root, offset);
+
+    let ancestors = match &token {
+        Some(token) => {
+            if !cpp_parser::is_trivia(token.kind().into()) {
+                add(cpp_parser::source_range(token.text_range()), &mut chain);
+            }
+            token
+                .parent_ancestors()
+                .map(|node| cpp_parser::source_range(node.text_range()))
+                .collect::<Vec<_>>()
+        }
+        // No token at that offset (past the end of the file): the node walk still answers, and the root is always a
+        // range.
+        None => root
+            .ancestors()
+            .map(|node| cpp_parser::source_range(node.text_range()))
+            .collect(),
+    };
+
+    for range in ancestors {
+        add(range, &mut chain);
+    }
+
+    chain
+}
+
+impl FileView {
 
     /// A byte offset from a **line and column**, both counted from zero.
     ///
@@ -702,6 +763,9 @@ mod tests {
         );
     }
 }
+
+
+
 
 
 

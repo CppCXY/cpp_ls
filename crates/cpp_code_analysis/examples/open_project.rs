@@ -173,7 +173,7 @@ fn main() {
         // therefore an upper bound: the answer arrived somewhere inside the chunk that found it.
         read += session.advance(16).len();
 
-        if let Known::Yes(found) = session.member_completions(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(cursor))
+        if let Known::Yes(found) = session.member_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor))
             && let Some(member) = found
                 .members
                 .members
@@ -197,7 +197,7 @@ fn main() {
             // "unknown" from a member completion can mean either.
             println!(
                 "  never (the whole project was read) — at the cursor: {}",
-                match session.member_completions(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(cursor)) {
+                match session.member_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor)) {
                     Known::Yes(found) => format!("the type is `{}`, with no `size`", found.class),
                     Known::Unknown(reason) => format!("unknown: {}", reason.describe()),
                     Known::No => "no".to_string(),
@@ -248,7 +248,7 @@ fn main() {
     while !warm.is_idle() {
         warm_read += warm.advance(16).len();
 
-        if let Known::Yes(found) = warm.member_completions(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(cursor))
+        if let Known::Yes(found) = warm.member_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor))
             && found.members.own().any(|member| member.fact.name == "size")
         {
             warm_answer = Some(warm_read);
@@ -314,7 +314,7 @@ fn main() {
             continue;
         };
 
-        match session.member_completions(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)) {
+        match session.member_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset)) {
             Known::Yes(found) => {
                 // **Every** member the query offers, not only the ones written in the class itself: what a
                 // completion after `m.` must list includes the inherited ones, and on MSVC's STL that is the
@@ -421,4 +421,5 @@ fn names(paths: &[PathBuf]) -> String {
         .collect::<Vec<_>>()
         .join(", ")
 }
+
 

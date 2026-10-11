@@ -161,7 +161,7 @@ fn main() {
             continue;
         };
 
-        match session.header_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(range.start_offset + 1)) {
+        match session.header_at(&view, cpp_code_analysis::file::coordinates::FileOffset::new(range.start_offset + 1)) {
             Known::Yes(target) => println!(
                 "{:>5} | {:<28} -> {}",
                 line_of(&source, line_start_at) + 1,
@@ -447,3 +447,4 @@ fn line_end(source: &str, line: usize) -> usize {
 
     source[at..].find('\n').map_or(source.len(), |end| at + end)
 }
+

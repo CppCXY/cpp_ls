@@ -191,6 +191,11 @@ mod tests {
         );
 
         session.add_project_files([file.clone()]);
+        // **The rendering is asked for before the pump**, because Session::view answers None until it has been:
+        // this fixture indexed the file and then asked diagnose_file for a view, which is the same missing step
+        // the rest of this workspace's tests had. Measured: 	he file is held panicked here.
+        
+session.want_cooked_reading(&file);
         session.index_everything();
 
         (session, file)

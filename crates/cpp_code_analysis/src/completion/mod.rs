@@ -287,13 +287,35 @@ pub fn completion_at(
     offset: usize,
     headers: &HeaderIndex,
 ) -> CompletionSet {
+    // The context is this function's first question and the only one read from a tree; a caller that has already read
+    // it — `Session::completions`, for the two contexts that live in the **file's** own text rather than in the
+    // rendering — hands it over instead of having it asked again of the wrong tree.
+    let asked = context_at(root, offset);
+    completion_with(index, scopes, root, path, offset, headers, asked)
+}
+
+/// **The same dispatch with the context already decided**, and the entry point for a caller whose context came from
+/// another tree — see `Session::completions`.
+///
+/// `offset` is in the coordinates of **the tree the context was read from**: the reading's for a context asked of
+/// `root`, and the **file's** for one asked of a parse of the written text. The `replace` range a context carries is
+/// built from it, and a range a client is to edit has to be the file's.
+pub fn completion_with(
+    index: &ProjectIndex,
+    scopes: &ScopeTree,
+    root: &CppSyntaxNode,
+    path: &Path,
+    offset: usize,
+    headers: &HeaderIndex,
+    context: CompletionContext,
+) -> CompletionSet {
     // **The measurement window for one completion**, opened here because this is the entry point the feature has:
     // everything below is the query's own work, and the server's log line splits only the outside of it
     // (`view`/`completions`). Opt-in, on `CPPLS_TRACE_COMPLETION`, like this crate's other traces — see
     // [`crate::index::query_trace`].
     let window = crate::index::query_trace::for_one_completion();
 
-    let answer = match context_at(root, offset) {
+    let answer = match context {
         CompletionContext::Nothing => CompletionSet {
             replace: SourceRange::new(offset, 0),
             ..CompletionSet::default()
@@ -1011,4 +1033,6 @@ mod tests {
         assert_eq!(detail_of(&fact(None, None)), None, "nothing to say");
     }
 }
+
+
 

@@ -211,26 +211,51 @@ mod tests {
             CompilerConfig::default(),
         );
         session.load("/p/a.cpp");
+        // **The rendering is asked for and then waited for**: `Session::view` is a request and answers `None` until
+        // the cook has run — the `want_cooked_reading` + pump pair the rest of this workspace's tests use. Measured:
+        // this line panicked with `the file reads`, before any assertion ran.
+        session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+        session.index_everything();
         let view = session.view("/p/a.cpp").expect("the file reads");
 
-        let at = view.source.find("y = 2").expect("the statement is in the text");
-        let position =
-            position_in(&view.source, &view.line_index, at).expect("the offset maps");
+        // **The two texts, and which one each assertion belongs to.** A client's position is a fact about the file it
+        // is showing, so the text on the left of these assertions is the **written** one and so is the line index
+        // (`written_lines`) — while the offset on the right of them is the **reading's**, because that is what a
+        // query hands back. This test used `view.source` and `view.line_index` for both and was measuring the
+        // rendering against a file expectation: measured, the rendering of this fixture is
+        // `"int x = 1; int y = 2;"` — the comment is gone and the line breaks are collapsed — so the position of
+        // `y = 2` in it is `(0, 15)` where the file's is `(2, 4)`.
+        let written = view.written_text().expect("the fixture has a rendering");
+        let at = written.find("y = 2").expect("the statement is in the text");
+        let position = position_in(written, view.written_lines(), at).expect("the offset maps");
 
         assert_eq!(
             position,
             Position::new(2, 4),
             "the emoji is on the line above and shifts nothing"
         );
-        assert_eq!(offset_at_position(&view, position), Some(ReadingOffset::new(at)));
-
-        // A position on the emoji's own line: column 4 is the character *after* two UTF-16 units of it.
-        let emoji = view.source.find('😀').expect("the emoji is in the text");
+        // …and the client's position maps back to the reading, which is where the statement is in the rendering.
         assert_eq!(
-            position_in(&view.source, &view.line_index, emoji),
+            offset_at_position(&view, position),
+            Some(ReadingOffset::new(
+                view.source.find("y = 2").expect("the statement is in the reading")
+            ))
+        );
+
+        // A position on the emoji's own line: column 4 is the character *after* two UTF-16 units of it. The emoji is
+        // in a comment, so it exists in the **file** and not in the reading — which is why the position is measured
+        // against the written text and the offset it maps to is the reading offset of what follows.
+        let emoji = written.find('😀').expect("the emoji is in the text");
+        assert_eq!(
+            position_in(written, view.written_lines(), emoji),
             Some(Position::new(1, 3))
         );
-        assert_eq!(offset_at_position(&view, Position::new(1, 5)), Some(ReadingOffset::new(emoji + 4)));
+        assert_eq!(
+            offset_at_position(&view, Position::new(1, 5)),
+            Some(ReadingOffset::new(
+                view.source.find("int y").expect("the statement follows the comment in the reading")
+            ))
+        );
     }
 }
 

@@ -154,12 +154,14 @@ impl AnalysisState {
         //
         // `false` from the snapshot (no workspace open) falls through to the write, which answers `Missing` the same
         // way it always did.
-        if self
-            .with_snapshot(|session| session.is_ready_for_a_request_about(path))
-            .unwrap_or(false)
-        {
-            return true;
-        }
+        //
+        // **A hypothesis tried here and withdrawn, with its measurement.** The shortcut's condition is "the file is
+        // held and its summary is current", which is *not* the same as "its rendering exists" — so it looked like the
+        // reason a file the client opened never got cooked, and that in turn looked like the reason several handshake
+        // tests report `"result":null` on every retry for thirty seconds. Adding `&& session.view(path).is_some()` to
+        // the condition changed the handshake result **not at all** (6 passed, 17 failed, before and after), so the
+        // hypothesis is wrong — and the condition costs a `view()` call on the hot path the shortcut exists for.
+        // Withdrawn rather than kept as a plausible-looking change that nothing measured.
 
         let path = path.to_path_buf();
         let queued = self
@@ -531,7 +533,11 @@ mod tests {
         assert!(state.prepare(std::path::Path::new("/p/main.cpp")).await);
 
         let text = state
-            .with_snapshot(|session| session.view("/p/main.cpp").map(|view| view.source.clone()))
+        // **The text the analysis reads, asked of the file table rather than of the rendering.** `Session::view` is a
+        // request for the *cooked* reading and answers `None` until that work has run — a different claim ("the
+        // rendering is ready") from this test's ("the buffer is the text the session holds"). Measured: the assertion
+        // read `None` against `Some("int from_the_handle;\n")`.
+            .with_snapshot(|session| session.files().held("/p/main.cpp").map(|file| file.text.clone()))
             .flatten();
         assert_eq!(text.as_deref(), Some(buffer));
     }
@@ -551,7 +557,11 @@ mod tests {
         assert!(state.prepare(std::path::Path::new("/p/main.cpp")).await);
 
         let text = state
-            .with_snapshot(|session| session.view("/p/main.cpp").map(|view| view.source.clone()))
+        // **The text the analysis reads, asked of the file table rather than of the rendering.** `Session::view` is a
+        // request for the *cooked* reading and answers `None` until that work has run — a different claim ("the
+        // rendering is ready") from this test's ("the buffer is the text the session holds"). Measured: the assertion
+        // read `None` against `Some("int from_the_handle;\n")`.
+            .with_snapshot(|session| session.files().held("/p/main.cpp").map(|file| file.text.clone()))
             .flatten();
         assert_eq!(
             text.as_deref(),

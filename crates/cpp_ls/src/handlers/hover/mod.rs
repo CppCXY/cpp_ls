@@ -44,7 +44,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::RegisterCapabilities;
 use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
-use crate::util::{offset_at_position, uri_to_file_path};
+use crate::util::{file_offset_at_position, offset_at_position, uri_to_file_path};
 
 /// How much of a declaration's text is shown before it is elided.
 ///
@@ -100,27 +100,23 @@ pub async fn on_hover(
         // Asked of the rendering, both answer "nothing to say" — the reader sees an empty popup on the two things
         // they most obviously want a popup for.
         //
-        // So the file's own view answers them, and the rendering answers the rest. Neither is a fallback: each is
-        // the only reading that has the thing being asked about.
-        let written = session.view_of_the_file(&path)?;
-        let in_the_file = offset_at_position(&written, position)?;
-        if let Known::Yes(header) = session.header_at(&written, in_the_file) {
-            return Some(markdown(header_markdown(&header)));
-        }
-        if let Known::Yes(found) = session.macro_definition(&written, in_the_file) {
-            return Some(markdown(macro_markdown(session, &written, &found)));
-        }
-
-        // **Both readings, each for the questions only it can answer.** See the note above: the file answers a header
-        // name and a macro's name because a rendering has *resolved* both, and the rendering answers everything else
-        // because it is the reading whose includes are **expanded** — asking the file's own view for `std` fails, and
-        // measured, it fails exactly there: `std::cout` and `std::endl` live in headers the file only names.
+        // So the answers to those two are asked of the **file's own text** — which is what `Session::header_at` and
+        // `Session::macro_definition` do by parsing the written text themselves — and the rendering answers the rest.
+        // Neither is a fallback: each is the only reading that has the thing being asked about.
         //
-        // What is measured and **not** explained by that split: `void f() {}` declared in the file itself has no
-        // hover at all, on either reading. That is the question the logging below is for.
+        // **The block this replaces was dead**, and it is worth naming why: it began
+        // `let written = session.view_of_the_file(&path)?;`, and `view_of_the_file` is an **ask** — it queues the
+        // work and answers `None` ("a caller that needs meaning waits for the rendering"). So the `?` returned from
+        // the whole handler and *every* hover answered `null`; the two queries below it never ran. What is left is one
+        // reading and two of its offsets: the **file's** for the two text-shaped questions, the **rendering's** for
+        // everything else.
         let view = session.view(&path)?;
         let offset = offset_at_position(&view, position)?;
-        hover(session, &view, offset)
+        let in_the_file = file_offset_at_position(&view, position)?;
+        if let Known::Yes(header) = session.header_at(&view, in_the_file) {
+            return Some(markdown(header_markdown(&header)));
+        }
+        hover(session, &view, offset, in_the_file)
     })
     .await
 }
@@ -129,7 +125,12 @@ pub async fn on_hover(
 ///
 /// `None` is the answer for punctuation, for whitespace, and for a name the analysis cannot place: a client shows
 /// nothing, and "there is nothing to say here" is true, where an empty popup would not be.
-pub fn hover(session: &Session<DiskFiles>, view: &FileView, offset: cpp_code_analysis::file::coordinates::ReadingOffset) -> Option<Hover> {
+pub fn hover(
+    session: &Session<DiskFiles>,
+    view: &FileView,
+    offset: cpp_code_analysis::file::coordinates::ReadingOffset,
+    in_the_file: cpp_code_analysis::file::coordinates::FileOffset,
+) -> Option<Hover> {
     // A project can turn the popup off (`hover.enable = false` in `.cppls.toml`), which is a preference about the
     // editor rather than about the analysis — so it is checked here, at the edge, and the queries below do not know
     // it exists.
@@ -142,7 +143,7 @@ pub fn hover(session: &Session<DiskFiles>, view: &FileView, offset: cpp_code_ana
     // popup is the resolved path, which is the one thing a reader cannot see from the line they wrote — the header
     // is found by a search, and *which* of the four thousand files on this machine's search path it found is the
     // answer to the question the line asks.
-    if let Known::Yes(header) = session.header_at(view, offset) {
+    if let Known::Yes(header) = session.header_at(view, in_the_file) {
         return Some(markdown(header_markdown(&header)));
     }
 
@@ -784,6 +785,8 @@ mod tests {
         assert_eq!(code_block(""), "");
     }
 }
+
+
 
 
 

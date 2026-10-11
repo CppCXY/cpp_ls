@@ -48,7 +48,21 @@ fn signature_where_marked(source: &str) -> (String, Option<CallSignature>) {
     let session = session_with(&[("/p/a.cpp", &without_marker)]);
     let view = session.view("/p/a.cpp").expect("the file is held");
 
-    (without_marker, session.signatures_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)).into_iter().next())
+    let signature = {
+        // **The cursor the fixture marks is the file's; `signatures_at` reads the rendering.** A comment is removed
+        // before the parse, so the two offsets differ by everything the cook deleted — 46 bytes on the fixture below,
+        // which put the cursor in the middle of the *declaration* and made every signature answer `None`. Measured:
+        // this one helper is the reason all five of this suite's failures were about a call that resolves.
+        let in_the_reading = view
+            .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(offset))
+            .expect("the cursor is in the rendering");
+        session
+            .signatures_at(&view, in_the_reading)
+            .into_iter()
+            .next()
+    };
+
+    (without_marker, signature)
 }
 
 /// The label at the cursor, and the text each declared span points at.

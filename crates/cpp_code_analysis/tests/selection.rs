@@ -20,14 +20,30 @@ fn chain_at(source: &str, offset: usize) -> Vec<(usize, String)> {
         CompilerConfig::default(),
     );
     session.load("/p/a.cpp");
+    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.index_everything();
     let view = session.view("/p/a.cpp").expect("the file is held");
 
-    view.selection_chain(cpp_code_analysis::file::coordinates::ReadingOffset::new(offset))
+    // **No crossing, because the session asks the chain of the right text.** `Session::selection_chain` parses the
+    // file's **own** text and walks that, so the cursor a test writes against the fixture is the cursor the query
+    // takes and the rungs come back as ranges in that same text. The two mappings this used to need were the symptom
+    // of a chain built in the rendering: mapping the cursor in moved it forward over whitespace the rendering
+    // collapsed — a gap maps to the next token, which is right for a *cursor* — and the rung that followed then
+    // started after the cursor it was built for. Measured, the cursor at offset 9 in `namespace ns` produced a chain
+    // whose innermost rung began at 10.
+    session
+        .selection_chain(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(offset),
+        )
         .into_iter()
         .map(|range| {
             (
                 range.start_offset,
-                source[range.start_offset..range.end_offset()].to_string(),
+                source
+                    .get(range.start_offset..range.end_offset())
+                    .unwrap_or_default()
+                    .to_string(),
             )
         })
         .collect()
@@ -137,4 +153,7 @@ fn a_cursor_in_whitespace_starts_at_the_enclosing_construct() {
         "it is the declaration the blank line is between or the class that holds them: {chain:?}"
     );
 }
+
+
+
 

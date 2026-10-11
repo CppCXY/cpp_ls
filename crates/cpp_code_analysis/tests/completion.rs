@@ -209,7 +209,7 @@ fn a_member_position_is_not_a_name_position() {
         "the member query owns this position"
     );
 
-    let Known::Yes(members) = session.member_completions(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)) else {
+    let Known::Yes(members) = session.member_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset)) else {
         panic!("the member query answers it");
     };
     assert!(
@@ -273,7 +273,7 @@ int f() {
     // rule still takes MSVC's `_Alty`/`_ALLOC_MASK` off a `std::string`.
     let Known::Yes(members) = session.member_completions(
         &view,
-        cpp_code_analysis::file::coordinates::ReadingOffset::new(FIXTURE.find("w.").expect("the fixture") + 2),
+        cpp_code_analysis::file::coordinates::FileOffset::new(FIXTURE.find("w.").expect("the fixture") + 2),
     ) else {
         panic!("a member access is answerable");
     };
@@ -775,7 +775,7 @@ fn an_include_points_at_the_header_it_names() {
 
     // Inside the spelling: `#include "near.h"` — character 12 is the `e` of `near`.
     let cursor = RANKED_CPP.find("near.h").expect("the fixture");
-    let Known::Yes(found) = session.header_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(cursor)) else {
+    let Known::Yes(found) = session.header_at(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor)) else {
         panic!("the cursor is on a header name");
     };
 
@@ -794,7 +794,7 @@ fn an_include_points_at_the_header_it_names() {
     // the boundary being where it is documented to be rather than about a user-visible difference.
     assert!(
         !matches!(
-            session.header_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(RANKED_CPP.find("#include").expect("the fixture"))),
+            session.header_at(&view, cpp_code_analysis::file::coordinates::FileOffset::new(RANKED_CPP.find("#include").expect("the fixture"))),
             Known::Yes(_)
         ),
         "the `#` is not the header's name"
@@ -803,7 +803,7 @@ fn an_include_points_at_the_header_it_names() {
     // A name that is not a header is **not** this query's business — and the answer says so rather than saying
     // "nothing found", which is what keeps it from swallowing a jump that has a real declaration behind it.
     let on_a_declaration = RANKED_CPP.find("at_file_scope").expect("the fixture");
-    match session.header_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(on_a_declaration)) {
+    match session.header_at(&view, cpp_code_analysis::file::coordinates::FileOffset::new(on_a_declaration)) {
         Known::Unknown(reason) => assert_eq!(
             reason.describe(),
             UnknownReason::UnparsableName.describe(),
@@ -829,7 +829,7 @@ fn an_include_that_resolves_to_nothing_says_so() {
     let view = cooked_view(&mut session, "/p/a.cpp");
     let cursor = FIXTURE.find("nowhere").expect("the fixture");
 
-    match session.header_at(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(cursor)) {
+    match session.header_at(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor)) {
         Known::Unknown(reason) => assert!(
             reason.describe().contains("nowhere.h"),
             "the reason names the header nobody could find: {}",
@@ -1107,6 +1107,11 @@ int main() {
         );
     }
 }
+
+
+
+
+
 
 
 

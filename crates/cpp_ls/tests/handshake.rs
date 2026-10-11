@@ -428,9 +428,19 @@ struct Server {
 
 impl Server {
     fn start(root: &Path) -> Server {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_cpp_ls"))
-            .arg("--log-path")
-            .arg("none")
+        // **The server's own level and log path, under the test's control.** Both are command-line flags
+        // (`--log-level`, default `info`; `--log-path`, default `none`) rather than `RUST_LOG`, so a test could not
+        // ask the server to say what it did — and the first attempt to diagnose the handshake failures ended exactly
+        // there: the trace line exists in the handler and the level dropped it. Run this suite with
+        // `CPPLS_TEST_LOG_LEVEL=debug` and `CPPLS_TEST_LOG_PATH=<file>` when a request has to be watched.
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cpp_ls"));
+        command.arg("--log-path").arg(
+            std::env::var("CPPLS_TEST_LOG_PATH").unwrap_or_else(|_| "none".to_string()),
+        );
+        if let Ok(level) = std::env::var("CPPLS_TEST_LOG_LEVEL") {
+            command.arg("--log-level").arg(level);
+        }
+        let mut child = command
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

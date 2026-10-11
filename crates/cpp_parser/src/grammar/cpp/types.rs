@@ -455,15 +455,38 @@ fn a_builtin_type_spelled_as_a_name(name: &str) -> bool {
 }
 
 /// An empty bound is legal (`int[]`) and so is a run of them (`int[2][3]`).
+///
+/// # An empty bound is a type whoever stands in front of it
+///
+/// `the_type_is_known` is evidence from a **linear** scan — a name this file has *already* declared — and a file may
+/// perfectly well declare a type **below** the function that uses it. `X[]` is where that shows: it is not an
+/// expression at all, because an empty subscript is not legal C++, so the question the flag answers does not arise
+/// for it, and asking it anyway cost the declaration reading of every forward-referenced type.
+///
+/// Measured, and it was the **last parse error in the standard library's cook** (184 files, every other one clean):
+/// MSVC's `chrono` writes
+///
+/// ```cpp
+/// unique_ptr<__std_tzdb_leap_info[], _Tzdb_deleter<__std_tzdb_leap_info[]>> _Reg_ls_data{ … };
+/// ```
+///
+/// in a function that stands *above* `struct __std_tzdb_leap_info`. The array suffix was refused, the type-id ended
+/// at the name, the declaration reading failed, the statement fell back to an expression — `unique_ptr <
+/// __std_tzdb_leap_info [] …` — and the `[]` became an empty subscript: `expected primary expression` at the `]`.
+/// Reduced to seven lines with the struct moved below the function, which is the repro that found it.
+///
+/// A **non-empty** bound keeps the old rule: `a[0]` really is an index far more often than it is a type, and that is
+/// the direction the flag exists for.
 fn read_array_suffixes_of_a_type_id(p: &mut CppParser, the_type_is_known: bool) -> ParseResult {
-    if !the_type_is_known {
-        return Ok(CompleteMarker::empty());
-    }
-
     while p.current_token() == CppTokenKind::LeftBracket
         // `[[` is an attribute, not a bound — the declarator's own loop asks the same question.
         && p.peek_next_token() != CppTokenKind::LeftBracket
     {
+        let empty_bound = p.peek_next_token() == CppTokenKind::RightBracket;
+        if !the_type_is_known && !empty_bound {
+            return Ok(CompleteMarker::empty());
+        }
+
         let array = p.mark(CppSyntaxKind::ArrayType);
         p.bump(); // `[`
 

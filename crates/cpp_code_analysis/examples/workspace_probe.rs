@@ -626,7 +626,7 @@ fn main() {
         match session.name_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset)) {
             Known::Yes(_) => offered_at_all += 1,
             _ => {
-                if session.member_completions(&view, cpp_code_analysis::file::coordinates::ReadingOffset::new(offset)).value().is_none() {
+                if session.member_completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(offset)).value().is_none() {
                     refused.push(offset);
                 }
             }
@@ -831,3 +831,4 @@ fn main() {
         }
     }
 }
+
