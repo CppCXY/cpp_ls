@@ -172,37 +172,32 @@ pub struct CheckContext<'a> {
     pub summary: &'a FileSummary,
     /// **The file's questions, and the only way a check asks them.**
     pub model: crate::sema::model::SemanticModel<'a>,
-    /// **The text a range from the *tree* is an offset into** — which, in the wiring this layer is called through,
-    /// is the **file's own text**: [`Session::diagnostics`](crate::Session::diagnostics) hands
-    /// [`checks_about`](crate::Session) `Session::view(path)`, the view of the file's own tokens, and **not** a
-    /// rendering. Macros are not expanded and headers are not inlined in what a check sees.
+    /// **The text a range from the *tree* is an offset into** — the view's own reading, which is the **rendering**:
+    /// macros expanded, directives resolved, headers inlined where their `#include` was.
     ///
-    /// Measured, because half of one round's reasoning assumed the opposite: a file including a header of three
-    /// hundred declarations parses to the same **19 nodes** as the same file with the `#include` line deleted
-    /// (`tests/checks.rs`, `a_check_is_handed_this_files_own_view_and_not_a_rendering`). A rendering is a separate
-    /// artifact with its own accessor ([`Session::rendering_of`](crate::Session::rendering_of)), megabytes for a
-    /// header, and it is what a *client-facing* expanded view would use.
+    /// Settled by reading [`Session::view`](crate::Session::view) rather than by experiment, after a test of mine
+    /// concluded the opposite from a fixture whose include had silently failed: its first line is *"The rendering, or
+    /// a request for it — **never the file's own tokens**"*. A rendering is a unit walk, a preprocess and a render —
+    /// 65–190 ms for a standard-library header, and megabytes of text — which is why it is built on request and why
+    /// [`CheckContext::own_syntax_nodes`] prunes what it produces.
     ///
-    /// So this layer's scope is the file, by construction rather than by policy — and the two texts below are the
-    /// same text whenever this layer is called the way it is called today.
+    /// So this text is **not** the file the reader is looking at; that one is [`CheckContext::written`].
     pub source: &'a str,
     /// **The text a range from the *summary* is an offset into** — the file as the reader wrote it.
     ///
-    /// Two fields, because a range from the tree and a range from the summary could be in two coordinate systems if
-    /// a **rendering** were ever handed in:
+    /// Two texts, because this layer reads ranges from two places and they are in two coordinate systems:
     ///
     /// ```text
-    ///   a range from `context.tree()`     -> context.source    the reading this view is of
+    ///   a range from `context.tree()`     -> context.source    the rendering
     ///   a range from `context.summary`    -> context.written   the file
     /// ```
     ///
-    /// Today they hold the same text (see [`CheckContext::source`]), so this is a distinction kept for a caller that
-    /// answers from a rendering — the case [`CheckContext::own_syntax_nodes`] and
-    /// [`CheckContext::member_accesses`] are written to survive. It was added when `macro_redefined` compared two
-    /// `#define` bodies through the wrong text and reported a macro as a redefinition of itself.
+    /// Measured, and it is what this field was added for: `macro_redefined` compared two `#define` bodies through
+    /// the *rendering* while the ranges came from the summary — so it read a fragment of the expanded function
+    /// against nothing at all, and reported a macro as a redefinition of itself.
     ///
-    /// What a finding is *published in* is the file's coordinates either way, because the server places a range with
-    /// the VFS line index. That crossing belongs where a finding is added — see [`CheckContext::add`].
+    /// What a finding is *published in* is the file's coordinates, because the server places a range with the VFS
+    /// line index. That crossing belongs where a finding is added — see [`CheckContext::add`].
     pub written: &'a str,
     /// **The parse errors of the reading this run is about**, which is what the `syntax-error` check publishes.
     ///
@@ -391,17 +386,16 @@ impl<'a> CheckContext<'a> {
     /// **Every node of this file's own text** — the one traversal a check should walk.
     ///
     /// It exists because `self.tree().descendants()`, which is what every check in this layer used, is the wrong
-    /// question in two ways — one of them real today and one of them a guard:
+    /// question twice over:
     ///
     /// ```text
-    ///   the scope     in a rendering, a header is inlined where its `#include` was, so a full walk visits every
-    ///                 node of `<string>` — and a node from another file is not a fact about this one. **Today
-    ///                 the checks are handed the file's own view** (`Session::view`, measured: 19 nodes with a
-    ///                 three-hundred-declaration header included and 19 without it), so this prunes nothing; it is
-    ///                 what makes the layer correct if a caller ever answers from a rendering, which is a case the
-    ///                 session documents a separate accessor for
-    ///   the shape     a walk that asks for `CppSyntaxKind` by hand is this layer guessing at a shape the parser
-    ///                 owns — see `CheckContext::own`, which asks the typed layer instead
+    ///   the scope     the tree is a **rendering** — see `CheckContext::source` — so a full walk visits every node
+    ///                 of every inlined header, and a node from another file is not a fact about this one. In a
+    ///                 rendering the inlined text arrives as **top-level children** of the translation unit, and the
+    ///                 cook marks exactly that per token (`RenderedSpan::written`), so pruning the children that were
+    ///                 not written here removes a whole header for the cost of one question per child
+    ///   the shape     a walk that compares `CppSyntaxKind` by hand is this layer guessing at a shape the parser owns
+    ///                 — see `CheckContext::own`, which asks the typed layer instead
     /// ```
     ///
     /// Both are answered by the same observation: in a rendering, the text of an inlined header is spliced in where
@@ -467,12 +461,16 @@ impl<'a> CheckContext<'a> {
     /// `undefined-field` has been blind to `.` for as long as it has existed.
     ///
     /// The kinds are still used as a cheap filter before the shape is read, so the cost is one kind test per node
-    /// rather than a child list per node.
+    /// rather than a child list per node — `CppIndexExpr`/`CppMemberExpr` would be two casts per node, and this is
+    /// the hot path of four checks.
     pub fn member_accesses(&self) -> Vec<(cpp_parser::CppSyntaxNode, crate::sema::resolve::MemberAccess)> {
         use cpp_parser::CppSyntaxKind;
         self.own_syntax_nodes()
             .filter(|node| {
                 matches!(
+                    // **The kind here is a filter over *shapes*, not a claim about what a node means** — the claim
+                    // is `member_access_of`'s, and it reads the operator to make it. That distinction is what makes
+                    // this use legitimate: `.` arrives as `IndexExpr`, which the typed layer would call an index.
                     CppSyntaxKind::from(node.kind()),
                     CppSyntaxKind::IndexExpr | CppSyntaxKind::MemberExpr | CppSyntaxKind::ArrowExpr
                 )
@@ -525,9 +523,17 @@ impl<'a> CheckContext<'a> {
 /// first `(` and its match - and counting parentheses through text means deciding what a `<` is, which is how a
 /// condition holding `i + 1 < argc` was read past its own `)` and into the body.
 pub fn condition_of(statement: &cpp_parser::CppSyntaxNode) -> Option<cpp_parser::CppSyntaxNode> {
-    statement
-        .children()
-        .find(|child| cpp_parser::CppSyntaxKind::from(child.kind()) != cpp_parser::CppSyntaxKind::CompoundStat)
+    // **The typed layer's node for a parenthesised condition**, rather than "the first child that is not the body":
+    // `CppParenExpr` is the parser's own answer, and `a < b` inside it cannot be mistaken for a bracket.
+    use cpp_parser::CppAstNode;
+    cpp_parser::CppParenExpr::cast(statement.clone())
+        .is_some()
+        .then(|| statement.clone())
+        .or_else(|| {
+            statement
+                .children()
+                .find_map(|child| cpp_parser::CppParenExpr::cast(child).map(|p| p.syntax().clone()))
+        })
 }
 
 /// **The one word a condition is, when it is a bare literal** — `true`, `false`.
@@ -536,11 +542,10 @@ pub fn condition_of(statement: &cpp_parser::CppSyntaxNode) -> Option<cpp_parser:
 /// dropped by kind, and what is left has to be exactly one token that is the keyword. A string literal is a
 /// different kind, so `if ("true")` cannot be read as the keyword.
 ///
-/// Getting the kind out of a token is `CppTokenKind::from(CppKind::from(token.kind()))` and **not** a flat match on
-/// the wrapper: this crate's rowan kind is [`CppKind`], which is `Node(CppSyntaxKind)` or `Token(CppTokenKind)`, and
-/// a version of this function that matched `CppTokenKind::LeftParen` against the wrapper compiled, ran, and matched
-/// nothing — which took two checks quiet for a round before the printer in `examples/token_kinds.rs` showed what a
-/// token's kind really is.
+/// The kind comes out as `CppTokenKind::from(CppKind::from(token.kind()))`, and the shape of that expression is the
+/// point: this crate's rowan kind is [`CppKind`], the wrapper around `Node(CppSyntaxKind)` and `Token(CppTokenKind)`,
+/// so a token's kind is only usable once unwrapped. `examples/token_kinds.rs` prints both halves for any source,
+/// which is how a round spent believing the wrong thing about this API was settled.
 pub fn literal_condition_of(condition: &cpp_parser::CppSyntaxNode) -> Option<String> {
     use cpp_parser::{CppKind, CppTokenKind};
 
@@ -582,26 +587,26 @@ pub fn is_a_class_definition(node: &cpp_parser::CppSyntaxNode) -> bool {
 
 /// **Is this node a function definition?** See [`function_definitions`] for why the question is about shape.
 pub fn is_a_function_definition(node: &cpp_parser::CppSyntaxNode) -> bool {
-    use cpp_parser::CppSyntaxKind;
+    use cpp_parser::{CppAstNode, CppCompoundStat, CppDeclaration, CppParamList};
 
     // **The body is a direct child and the parameters are not**, which is the asymmetry that made this predicate
     // wrong the first time and silent for three checks: measured, `int count() { }` is a `Declaration` whose
-    // `CompoundStat` is a child while its `ParameterList` is a grandchild, inside `InitDeclarator > Declarator`. A
-    // predicate asking for both as children matched nothing at all.
-    let Some(body) = node
-        .children()
-        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
-    else {
+    // `CompoundStat` is a child while its `ParameterList` is a grandchild, inside `InitDeclarator > Declarator`. The
+    // predicate is now written with the typed layer, where that asymmetry is the difference between `children` and
+    // `descendants` rather than a fact a reader has to remember.
+    let Some(declaration) = CppDeclaration::cast(node.clone()) else {
+        return false;
+    };
+    let Some(body) = declaration.children::<CppCompoundStat>().next() else {
         return false;
     };
 
     // **And the parameters come before the body.** Asked by position rather than by depth, so that a node wrapping
     // a whole function — a namespace, a class, the translation unit — cannot claim to be one: what is looked for is
     // a parameter list in this node's *head*, and those wrappers have their bodies after it or not at all.
-    node.descendants().any(|child| {
-        CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ParameterList
-            && child.text_range().start() < body.text_range().start()
-    })
+    declaration
+        .descendants::<CppParamList>()
+        .any(|parameters| parameters.get_range().start() < body.get_range().start())
 }
 
 /// **Every function *definition* in this file's own text.**
@@ -631,37 +636,39 @@ pub fn function_definitions(context: &CheckContext<'_>) -> Vec<cpp_parser::CppSy
 ///
 /// `None` for a definition with nothing before its name — a constructor — and for a head this cannot read.
 pub fn return_type_written_by(function: &cpp_parser::CppSyntaxNode) -> Option<String> {
-    use cpp_parser::CppSyntaxKind;
+    use cpp_parser::{CppAstNode, CppDeclSpecifierSeq, CppDeclarator, CppParamList, CppTokenKind};
 
-    // **The type specifiers are a node**: a definition holds a `DeclSpecifierSeq` before its declarator, which is
-    // where `int`, `const std::string` and `auto` live. This was the text before the name, which is the same
-    // characters in most cases and the wrong ones in the cases that matter - a comment, a `[[nodiscard]]`, a
-    // `virtual` keyword.
-    let specifiers = function
-        .children()
-        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq)?;
+    // **The type specifiers are a node**: a definition holds a `DeclSpecifierSeq` **child**, which is where `int`,
+    // `const std::string` and `auto` live. (Casting the declaration *itself* as a specifier sequence — the first
+    // version of this rewrite — returns `None` for every function, which is how `missing-return` went quiet.)
+    let specifiers = cpp_parser::CppDeclaration::cast(function.clone())?
+        .children::<CppDeclSpecifierSeq>()
+        .next()?
+        .syntax()
+        .clone();
     let mut written = specifiers.text().to_string().trim().to_string();
 
     // **And the pointer or reference belongs to the type while sitting outside that node**: `int* f()` writes its
-    // `*` against the declarator, so the spelling this answers with has to put it back or `int*` reads as `int`.
-    if let Some(declarator) = function.descendants().find(|node| {
-        CppSyntaxKind::from(node.kind()) == CppSyntaxKind::Declarator
-            && node
-                .descendants()
-                .any(|inner| CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::ParameterList)
-    }) {
+    // `*` against the declarator, so the spelling has to put it back or `int*` reads as `int`. The declarator is the
+    // one **that holds the parameter list**, which is what tells a function's declarator from a parameter's.
+    let declarator = function
+        .descendants()
+        .find_map(|node| CppDeclarator::cast(node).filter(|d| d.descendants::<CppParamList>().next().is_some()));
+    if let Some(declarator) = declarator {
         for token in declarator
+            .syntax()
             .descendants_with_tokens()
             .filter_map(|element| element.into_token())
         {
-            if CppSyntaxKind::from(token.kind()) == CppSyntaxKind::NameExpr {
+            // **Stop at the name**, and at a token rather than a node: the `NameExpr` around the identifier is a
+            // node, so asking a *token* for it never matches and the loop would read the whole declarator — which is
+            // how an `&` in `int f(int& x)` would have been appended to the return type.
+            if CppTokenKind::from(cpp_parser::CppKind::from(token.kind())) == CppTokenKind::Identifier {
                 break;
             }
             match token.text().to_string().as_str() {
-                "*" | "&" | "&&" => {
-                    // Written against the type or against the name - the same type either way.
-                    written.push_str(token.text().to_string().as_str());
-                }
+                // Written against the type or against the name — the same type either way.
+                "*" | "&" | "&&" => written.push_str(token.text().to_string().as_str()),
                 _ => {}
             }
         }
@@ -687,12 +694,16 @@ pub fn spelling_of(node: &cpp_parser::CppSyntaxNode) -> Option<String> {
 
 /// **The name a function declares** — the last declarator in its head, before the parameter list.
 pub fn name_declared_by(function: &cpp_parser::CppSyntaxNode) -> Option<String> {
-    let parameters = function
-        .children()
-        .find(|child| cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::ParameterList)?;
+    use cpp_parser::{CppAstNode, CppDeclaration, CppParamList};
+    // **`descendants`, not `children`, and that asymmetry is the one this layer has now been caught by twice**: the
+    // parameter list sits inside `InitDeclarator > Declarator`, so it is a *grandchild* of the declaration while the
+    // body is a child. The head is then every child that ends before the parameter list starts.
+    let parameters = CppDeclaration::cast(function.clone())?
+        .descendants::<CppParamList>()
+        .next()?;
     let head: Vec<cpp_parser::CppSyntaxNode> = function
         .children()
-        .take_while(|child| child != &parameters)
+        .take_while(|child| child.text_range().end() <= parameters.get_range().start())
         .collect();
     spelling_of(head.last()?)
 }
@@ -703,15 +714,15 @@ pub fn name_declared_by(function: &cpp_parser::CppSyntaxNode) -> Option<String> 
 /// template parameter list: the check this one replaces read that field and reported 119 findings on 200 MSVC
 /// headers, every one of them a function whose real parameters were in the tree all along.
 pub fn parameter_spellings_of(function: &cpp_parser::CppSyntaxNode) -> Vec<String> {
-    let Some(parameters) = function
-        .children()
-        .find(|child| cpp_parser::CppSyntaxKind::from(child.kind()) == cpp_parser::CppSyntaxKind::ParameterList)
+    use cpp_parser::{CppAstNode, CppDeclaration, CppParam, CppParamList};
+    let Some(parameters) = CppDeclaration::cast(function.clone())
+        .and_then(|declaration| declaration.descendants::<CppParamList>().next())
     else {
         return Vec::new();
     };
     parameters
-        .children()
-        .map(|parameter| parameter.text().to_string().trim().to_string())
+        .children::<CppParam>()
+        .map(|parameter| parameter.syntax().text().to_string().trim().to_string())
         .filter(|spelling| !spelling.is_empty())
         .collect()
 }

@@ -40,7 +40,7 @@
 //! grammar recovered around, and because the question — "which of the three labels is above this line" — is a
 //! question about lines.
 
-use cpp_parser::{CppSyntaxKind, CppSyntaxNode};
+use cpp_parser::CppSyntaxNode;
 
 use super::{Check, CheckContext, DiagnosticCode};
 
@@ -159,38 +159,44 @@ fn same_node(left: &CppSyntaxNode, right: &CppSyntaxNode) -> bool {
 
 /// **Which label is in force at an offset inside a class definition.**
 ///
-/// Two facts, both from the tree:
+/// Two facts, both from the typed layer:
 ///
 /// ```text
-///   the default    the `ClassKeyword`/`StructKeyword` token of the definition: `class` starts private,
-///                  `struct` and `union` start public
-///   the last label the last `PublicAccess`/`ProtectedAccess`/`PrivateAccess` node written **before** the member,
-///                  in the order the class body holds its children
+///   the default    the definition's own keyword token: `class` starts private, `struct`/`union` start public
+///   the last label the last `CppAccessSpecifier` node written **before** the member, in the order the class body
+///                  holds its children — read through `get_keyword`, so the three labels are one type
 /// ```
 ///
 /// This was a scan of the body's text for `:` and the word before it, which is a decision made by reading
 /// punctuation — and the one the check layer's own rule forbids, for the reason the rule exists: a `:` inside a
 /// string literal in a default argument is not a label, and text cannot tell.
 fn visibility_of(class: &CppSyntaxNode, offset: usize) -> Access {
+    use cpp_parser::{CppAccessSpecifier, CppAstNode, CppAstToken, CppClassBody};
+
     let mut in_force = default_access_of(class);
 
-    let Some(body) = class
-        .children()
-        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ClassBody)
+    let Some(body) = cpp_parser::CppClassDef::cast(class.clone())
+        .and_then(|definition| definition.children::<CppClassBody>().next())
     else {
         return in_force;
     };
 
-    for child in body.children() {
+    for child in body.syntax().children() {
         // Nothing after the member is in force *at* the member.
         if usize::from(child.text_range().start()) >= offset {
             break;
         }
-        in_force = match CppSyntaxKind::from(child.kind()) {
-            CppSyntaxKind::PublicAccess => Access::Public,
-            CppSyntaxKind::ProtectedAccess => Access::Protected,
-            CppSyntaxKind::PrivateAccess => Access::Private,
+        let Some(specifier) = CppAccessSpecifier::cast(child) else {
             // A member or anything else: the label in force is unchanged.
+            continue;
+        };
+        in_force = match specifier
+            .get_keyword()
+            .map(|keyword| cpp_parser::CppTokenKind::from(cpp_parser::CppKind::from(keyword.syntax().kind())))
+        {
+            Some(cpp_parser::CppTokenKind::PublicKeyword) => Access::Public,
+            Some(cpp_parser::CppTokenKind::ProtectedKeyword) => Access::Protected,
+            Some(cpp_parser::CppTokenKind::PrivateKeyword) => Access::Private,
             _ => in_force,
         };
     }
@@ -203,22 +209,34 @@ fn visibility_of(class: &CppSyntaxNode, offset: usize) -> Access {
 /// `class` is private and `struct`/`union` are public — the language's rule, and the reason the keyword is a token
 /// this asks for rather than a word compared against a header's spelling.
 fn default_access_of(class: &CppSyntaxNode) -> Access {
-    let keyword = class
-        .descendants_with_tokens()
-        .filter_map(|element| element.into_token())
-        .find(|token| {
-            // **One token's word, not a scan of the class's text.** The boundary is the lexer's - this is the first
-            // token of the definition - and the comparison is against one of the three words the language gives that
-            // position. Comparing the token's own text is what a token is for; the difference from the scan this
-            // replaced is that a `class` inside a string or a comment is not a token, so it cannot be found here.
-            matches!(token.text().to_string().as_str(), "class" | "struct" | "union")
-        });
+    use cpp_parser::{CppAstNode, CppClassDef, CppKind, CppTokenKind};
 
-    match keyword.map(|token| token.text().to_string()) {
-        Some(word) if word == "class" => Access::Private,
+    // **By token kind, not by the token's word.** This crate's rowan kind is `CppKind` — the wrapper around
+    // `Node(CppSyntaxKind)` and `Token(CppTokenKind)` — so a token's kind has to be unwrapped before it means
+    // anything, and `examples/token_kinds.rs` prints both halves for any source when that is in doubt.
+    let keyword = CppClassDef::cast(class.clone()).and_then(|definition| {
+        definition
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .find(|token| {
+                matches!(
+                    CppTokenKind::from(CppKind::from(token.kind())),
+                    CppTokenKind::ClassKeyword
+                        | CppTokenKind::StructKeyword
+                        | CppTokenKind::UnionKeyword
+                )
+            })
+    });
+
+    match keyword.map(|token| CppTokenKind::from(CppKind::from(token.kind()))) {
+        Some(CppTokenKind::ClassKeyword) => Access::Private,
         _ => Access::Public,
     }
 }
+
+
+
 
 
 

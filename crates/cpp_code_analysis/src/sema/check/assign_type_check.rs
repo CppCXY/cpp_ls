@@ -123,18 +123,22 @@ impl Check for AssignTypeCheck {
         // **And the assignments**: `x = expr;`. Which object it is comes from the left-hand side being **a name and
         // nothing else** — `a[i] = …` and `w.field = …` are questions about those expressions rather than about a
         // declaration this check can name.
-        for assignment in context.tree().descendants().filter(|node| {
-            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::BinaryExpr && has_an_equals_operator(node)
-        }) {
-            let sides: Vec<cpp_parser::CppSyntaxNode> = assignment
-                .children()
-                .filter(|child| is_not_the_operator(&child.text().to_string()))
-                .collect();
-            let [left, right] = sides.as_slice() else {
+        //
+        // **Typed, over this file's own text**, and read through the typed layer's own accessors: `get_lhs`, `get_rhs`
+        // and `get_operator_text` are what `CppBinaryExpr` is for.
+        //
+        // The version before this one took the operands from `children()` and came out with **none**: measured, for
+        // `count = "four"` the probe printed `equals=true sides=[]`, because a simple operand is a *token* in this
+        // tree rather than a node. A hand-rolled shape reader was wrong again; the accessor was right all along.
+        for assignment in context.own::<cpp_parser::CppBinaryExpr>().collect::<Vec<_>>() {
+            if assignment.get_operator_text().as_deref() != Some("=") {
+                continue;
+            }
+            let (Some(left), Some(right)) = (assignment.get_lhs(), assignment.get_rhs()) else {
                 continue;
             };
 
-            let left_text = left.text().to_string();
+            let left_text = left.syntax().text().to_string();
             let left_text = left_text.trim();
             let Some(name) = last_identifier_of(left_text) else {
                 continue;
@@ -146,7 +150,7 @@ impl Check for AssignTypeCheck {
                 continue;
             };
 
-            report_if_it_does_not_convert(context, right, written, &name, "assigned");
+            report_if_it_does_not_convert(context, right.syntax(), written, &name, "assigned");
         }
     }
 }
@@ -246,27 +250,26 @@ fn a_class_in_this_file_cannot_be_built_from(
 
 /// **The definition of the class with this name, when this file holds one.**
 ///
-/// A `ClassDef` node — that is what the grammar builds for `class`, `struct` and `union` alike, with the keyword as
-/// a token inside it — whose own `NameExpr` spells the name asked about.
+/// A `CppClassDef` — which the typed layer already answers for `class`, `struct` **and** `union` alike, with
+/// `get_name_text` beside it — found over this file's own text, so a class from an inlined header is not a candidate.
 ///
 /// This was a text test: *does the text start with `class `, hold a `{`, and contain the name* — and it returned
 /// `None` on `struct MyString { MyString(); int size; };`, whose definition is right there. Measured at the time:
 /// the probe printed ``no definition in this file`` while the class was in the file, which is what sent the search
-/// back to the tree.
+/// back to the tree — and then to the typed layer, where the three kinds were already one type.
 fn definition_of_a_class(
     context: &CheckContext<'_>,
     class: &str,
 ) -> Option<cpp_parser::CppSyntaxNode> {
     context
-        .tree()
-        .descendants()
-        .filter(super::is_a_class_definition)
-        .find(|node| {
-            node.children()
-                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::NameExpr)
-                .and_then(|name| super::spelling_of(&name))
+        .own::<cpp_parser::CppClassDef>()
+        .find(|definition| {
+            definition
+                .get_name_text()
+                .map(|name| name.trim().to_string())
                 .is_some_and(|name| name == class || name.ends_with(&format!("::{class}")))
         })
+        .map(|definition| definition.syntax().clone())
 }
 
 /// Put the finding where every other one goes.
@@ -285,29 +288,6 @@ fn report(
     );
 }
 
-/// **Is this `=` or `+=` or `-=` …?** Asked of the **tokens**, because the operator is a token rather than a node:
-/// `node.children()` yields nodes only, so an `=` written directly between two operands is invisible to it — which
-/// is why the assignment half of this check reported nothing at all while the declaration half worked. Measured:
-/// `assign_type_check_reports_both_places_a_value_is_assigned` read an empty list for the assignment.
-fn has_an_equals_operator(node: &cpp_parser::CppSyntaxNode) -> bool {
-    node.descendants_with_tokens()
-        .filter_map(|element| element.into_token())
-        .any(|token| {
-            // **`=` or a compound assignment**, and not a comparison: `==`, `!=`, `<=` and `>=` all end in `=` and
-            // none of them assigns. The plain `=` is the one this line started out excluding, because the exclusion
-            // was written as "does not start with `=`" — which is true of `+=` and false of the operator this check
-            // is about. Measured: the assignment half reported nothing while the declaration half worked.
-            let text = token.text().to_string();
-            text == "=" || (text.len() > 1 && text.ends_with('=') && !matches!(text.as_str(), "==" | "!=" | "<=" | ">="))
-        })
-}
-
-/// Is this the text of the operator rather than one of its operands?
-fn is_not_the_operator(text: &str) -> bool {
-    let text = text.trim();
-    !text.is_empty() && text.chars().all(|character| character == '=' || character == '+' || character == '-' || character == '*' || character == '/' || character == '%' || character == '&' || character == '|' || character == '^' || character == '<' || character == '>')
-}
-
 /// Is this the punctuation an initialiser is written with rather than the value?
 fn is_punctuation(text: &str) -> bool {
     matches!(text.trim(), "=" | "{" | "}" | "(" | ")" | ",")
@@ -315,9 +295,9 @@ fn is_punctuation(text: &str) -> bool {
 
 /// The last identifier written in a piece of text.
 ///
-/// Text rather than a node walk on purpose: what has to be found is "the declarator this initialiser belongs to",
-/// and the declarator is whatever identifier the reader last wrote before the `=`. A node walk would have to decide
-/// which recovered node that is, and the recovery around a declarator is the least reliable shape in the tree.
+/// Text rather than a node walk on purpose: what has to be found is "the name this expression is about", and a name
+/// written as `count` is one `Identifier` token — the typed layer's `CppNameExpr` would be the node around it, and
+/// this is asked of a snippet of text the caller already has.
 fn last_identifier_of(text: &str) -> Option<String> {
     let mut last: Option<String> = None;
     let mut current = String::new();
@@ -327,30 +307,15 @@ fn last_identifier_of(text: &str) -> Option<String> {
             continue;
         }
         if !current.is_empty() {
-            if !current
-                .chars()
-                .next()
-                .is_some_and(|first| first.is_ascii_digit())
-            {
+            if !current.chars().next().is_some_and(|first| first.is_ascii_digit()) {
                 last = Some(std::mem::take(&mut current));
             } else {
                 current.clear();
             }
         }
     }
-    if !current.is_empty()
-        && !current
-            .chars()
-            .next()
-            .is_some_and(|first| first.is_ascii_digit())
-    {
+    if !current.is_empty() && !current.chars().next().is_some_and(|first| first.is_ascii_digit()) {
         last = Some(current);
     }
     last
 }
-
-
-
-
-
-

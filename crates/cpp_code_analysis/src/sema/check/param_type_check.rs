@@ -28,7 +28,7 @@
 //! constructor, a template, a type from a header nobody read all answer `Unknown`, and **`Unknown` reports
 //! nothing**. A conversion this layer cannot see is not a conversion the program does not have.
 
-use cpp_parser::CppSyntaxKind;
+use cpp_parser::CppAstNode;
 
 use super::{Check, CheckContext, DiagnosticCode};
 
@@ -64,11 +64,10 @@ impl Check for ParamTypeCheck {
             }
         }
 
-        for call in context
-            .tree()
-            .descendants()
-            .filter(|node| CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CallExpr)
-        {
+        // **This file's own calls**, typed, over this file's own text — see `CheckContext::own`. Collected before
+        // the loop because a finding needs `&mut context` while the iterator holds `&context`.
+        for call in context.own::<cpp_parser::CppCallExpr>().collect::<Vec<_>>() {
+            let call = call.syntax().clone();
             let Some(callee) = call.children().next() else {
                 continue;
             };
@@ -79,12 +78,12 @@ impl Check for ParamTypeCheck {
             let Some(Some(parameters)) = by_name.get(name.as_str()) else {
                 continue;
             };
-            let Some(arguments) = call
-                .children()
-                .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ArgumentList)
+            let Some(arguments) = cpp_parser::CppCallExpr::cast(call.clone())
+                .and_then(|call| call.children::<cpp_parser::CppArgList>().next())
             else {
                 continue;
             };
+            let arguments = arguments.syntax().clone();
 
             for (argument, parameter) in arguments.children().zip(parameters.iter()) {
                 let crate::Known::Yes((from, _)) = context.type_of(&argument) else {
@@ -111,6 +110,8 @@ impl Check for ParamTypeCheck {
         }
     }
 }
+
+
 
 
 

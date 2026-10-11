@@ -41,11 +41,9 @@ impl Check for MissingReturn {
     const CODES: &'static [DiagnosticCode] = &[DiagnosticCode::MissingReturn];
 
     fn check(context: &mut CheckContext<'_>) {
-        for function in context
-            .tree()
-            .descendants()
-            .filter(|node| super::is_a_function_definition(node))
-        {
+        // **This file's own functions**, typed - see `CheckContext::own_syntax_nodes`, which prunes the inlined
+        // headers a rendering splices in. Collected before the loop because a finding needs `&mut context`.
+        for function in super::function_definitions(context) {
             let Some(body) = function
                 .children()
                 .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
@@ -104,5 +102,6 @@ pub fn body_of(function: &CppSyntaxNode) -> Option<CppSyntaxNode> {
         .children()
         .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat)
 }
+
 
 

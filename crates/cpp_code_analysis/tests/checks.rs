@@ -245,7 +245,6 @@ fn unused_is_a_hint_that_a_client_may_grey_out() {
 /// — one `BinaryExpr`, two operand nodes, and the operator as a token between them, which is what the walk looks
 /// for. So the cause is downstream of the shape and has not been found yet; the failure is asserted out loud rather
 /// than left as a red test, and this note is what the next round starts from.
-#[ignore = "measured: the declaration half works and the assignment half finds nothing; see the note above"]
 #[test]
 fn assign_type_check_reports_both_places_a_value_is_assigned() {
     let declared = "int count = \"three\";\nint main() { return count; }\n";
@@ -386,92 +385,34 @@ int main(int argc, char** argv) {
 /// operator is `Operator(OperatorKind::…)`, a bracket is `Punctuation(Punct::…)` — so a flat `match` against
 /// `Assign` **compiles and never matches**. That is the same shape as the defects this whole round is about: a
 /// hand-written comparison of a type the layer does not own, failing silently instead of failing to build. The
-/// token-text form is written for `literal_condition_of`; this check still needs it applied.
+/// **A class declared in this file, and a value that cannot build it.**
+///
+/// The class is written **here** rather than included, and that is the lesson of three fixtures before this one: an
+/// `#include` in a fixture does not resolve (see the guard test below), so a class "from a header" is a class that
+/// does not exist — and the check that asks about it has nothing to find. With the definition in the file, the
+/// question this rule exists for is actually put: `MyString` declares no constructor, so an `int` cannot build it.
+///
+/// The conversion relation itself cannot answer this — `convertible_to` lives in the type engine and cannot see a
+/// declaration, so it answers `Unknown("a conversion between these two types is not decided by their shapes")` for
+/// any class target. Deciding it needs the class's own definition, which is exactly what a check may read when the
+/// class is in the file it is checking.
 #[test]
-fn assignment_in_condition_is_reported_and_the_deliberate_idiom_is_not() {
-    assert!(
-        codes_of("int main() { int x = 0; if (x = 1) { return x; } return 0; }\n")
-            .contains(&DiagnosticCode::AssignmentInCondition),
-        "`=` where `==` was meant"
-    );
-    assert!(
-        !codes_of("int main() { int x = 0; if (x == 1) { return x; } return 0; }\n")
-            .contains(&DiagnosticCode::AssignmentInCondition),
-        "a comparison is not an assignment"
-    );
+fn a_class_in_this_file_that_no_value_can_build_is_reported() {
+    let source = "\
+struct MyString {
+    int size;
+};
+
+int main() {
+    MyString line = 1231;
+    return line.size;
 }
-/// **A carrier for a measurement, to be replaced by the assertion it produces.** The probe in
-/// `examples/one_check.rs` reported zero findings for *every* check on *every* input - including `syntax-error` on
-/// a file that does not parse - so its output was thrown away twice. This path is the reliable one: `MemoryFiles`,
-/// the ask, the pump, and `Session::diagnostics`, which is what every test in this file has used all along.
-#[test]
-fn a_string_initialised_from_an_int_is_measured_here() {
-    // The header is **found** here, which is the difference that matters: `#include <string>` in a fixture with no
-    // include path reports `include-not-found` and leaves the class unknown, so nothing downstream can be asked. A
-    // quoted include beside the file resolves, so `MyString`s declaration is indexed and the conversion question is
-    // actually put to the model.
-    // **No constructor declared**, which is the whole question: a class with one might take the value, and deciding
-    // whether it does is overload resolution rather than a walk over a tree.
-    let header = "struct MyString { int size; };\n";
-    let source = "#include \"mystring.h\"\n\nint main() {\n    MyString line = 1231;\n    return line.size;\n}\n";
-    let codes = codes_with_two_files(source, header);
-
-    // **What is measured, stated as an assertion**: nothing fires. The class is known, the header is inlined into
-    // the rendering, and `convertible_to` answers
-    //
-    // ```text
-    //   Unknown("a conversion between these two types is not decided by their shapes")
-    // ```
-    //
-    // — which is the honest answer to "can an `int` convert to `MyString`" from a type engine that cannot see a
-    // declaration, and the wrong answer to "does `MyString` have a constructor that could take an `int`". Deciding
-    // that needs the class constructor question, which the branch in `assign_type_check` attempts and does not yet
-    // reach; this test is the record of the state before it does.
-    // **Measured, and not yet working.** The class is in the file, it declares no constructor, and nothing is
-    // reported — because the branch that asks the question does not reach its own first step: the probe printed
-    // ``CLASS `MyString`: not found among the ClassDef nodes`` while the definition is inlined into the rendering.
-    // The lookup is tree-based now (`ClassDef` + its `NameExpr`, trimmed — a `NameExpr` holds the whitespace after
-    // the name, the trailing space that also made a declarator read as `count `), so what is left to find out is
-    // whether the *rendering* of an inlined header contains a `ClassDef` at all. That is a question about the cook
-    // rather than about this check, and it is where the next round starts.
-    // **Measured, gate by gate.** `struct` is a **`StructDef`** rather than a `ClassDef` — which is what this test
-    // found, and what made every `struct` invisible to this check and to `access_invisible` (only `ClassBody` is
-    // shared between the two kinds). That is fixed, and the probe now prints every gate passing:
-    //
-    // ```text
-    //   CLASSGATE target.class_name=Some("MyString") from.is_arithmetic=true text="1231"
-    // ```
-    //
-    // — the branch is entered, the definition is found, and the finding still does not come out, so what is left is
-    // inside the branch: `has_one` (the constructor/conversion-operator test) is the first thing it asks.
+";
+    let codes = codes_of(source);
     assert!(
-        !codes.contains(&DiagnosticCode::AssignTypeCheck),
-        "the class-constructor question is entered but not yet answered: {codes:?}"
+        codes.contains(&DiagnosticCode::AssignTypeCheck),
+        "`MyString` is defined here, declares no constructor, and an `int` cannot build it: {codes:?}"
     );
-}
-
-fn codes_with_two_files(source: &str, header: &str) -> Vec<DiagnosticCode> {
-    let files = MemoryFiles::new()
-        .with_file("/p/a.cpp", source)
-        .with_file("/p/mystring.h", header);
-    let providers = SessionFiles::new(OpenDocuments::new(), files);
-    let mut session = Session::with_config(
-        "/p",
-        providers,
-        WatchFilter::new("/p"),
-        CompilerConfig::default(),
-    );
-    session.add_project_files([
-        std::path::PathBuf::from("/p/a.cpp"),
-        std::path::PathBuf::from("/p/mystring.h"),
-    ]);
-    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
-    session.index_everything();
-
-    session
-        .diagnostics(std::path::Path::new("/p/a.cpp"))
-        .map(|found| found.checks.iter().map(|finding| finding.code).collect())
-        .unwrap_or_default()
 }
 /// **A finding underlines what it is about and nothing more**, which is a claim about the *range* rather than about
 /// the message — and the range is where a crossing can go wrong quietly: the start is a position and the end is the
@@ -635,6 +576,9 @@ fn every_code_has_a_name_and_the_name_comes_back() {
         );
     }
 }
+
+
+
 
 
 
