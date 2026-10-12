@@ -397,9 +397,103 @@ cargo run --release -p cpp_code_analysis --example one_check -- target/std-cook 
 # 一个 token 的真实 kind（这一层的 API 之一，曾被误判两次）
 cargo run --release -p cpp_parser --example token_kinds
 ```
+## 九、加载为什么慢 —— 量出来的结论（2024，`E:\EmmyLuaCodeStyle`）
 
+用工程自己的 CMake 生成 CDB 之后再加载，`CPPLS_TRACE_DIAGNOSTICS=1` 给出的分阶段表：
 
+```text
+session opened in 215 ms                                    ✓ 打开本身很快
+stages account for 81412 ms of the 81364 ms of indexing+cooking
+[indexing]      4580.4     5.6%
+parse             13.9     0.0%
+index-insert       0.2     0.0%
+walk           65001.7    79.8%   ← 就是这里
+closure         1656.1     2.0%
+```
 
+`walk` 是 `TranslationUnit::walk` —— 构建一个文件的翻译单元时间线。它慢**不是因为缓存没做**（
+`MacroDefinitions` 已经是 session 级、按 `(文件, 偏移)` 键、每定义只解析一次），而是因为**重复**：
 
+```text
+walks: 1388               索引里每个文件都走一次自己的单元
+file-walks: 83,697
+guard evaluations: 10,792,034      ← 1079 万次条件求值，65 秒 ÷ 这个数 ≈ 每次 6 µs
+最大的闭包：~370 个文件 / ~15,000 个守卫，被 ~296 次 walk 反复走到
+            （101-1000 文件这一档：296 次 walk、60,652 file-walks ＝ 全部 file-walks 的 72%）
+```
 
+也就是说：**同一批标准库头文件、同一个宏环境，被几百个源文件各走了一遍**，其中 90% 以上是重算。
+（另一次用工程里手写的 `.cppls.toml` ＋ MinGW 标准库的测量是 **301 秒 / 1387 个文件** —— 闭包规模是第二个乘数。）
 
+### 三个修法方向（按收益/风险排序）
+
+```text
+① 并行     1388 次 walk 彼此独立，是最容易拿到的近线性收益（stages.rs 的文档里本就预留了线程池的写法）
+② 共享     闭包与宏环境相同的单元，头部文件的帧是同一条时间线，只有根帧不同 —— 理论上最大的收益，改动最深
+③ 便宜化   每次守卫求值 6 µs 偏高；同一 (文件, 偏移, 环境) 的结果可以缓存
+```
+
+### 同时量到的两件事（都不是性能问题，但都影响它）
+
+* **CDB 的响应文件**：cmake 生成的 108 条命令**每一条**都把 `-I` 写在 `@CMakeFiles/<target>.dir/includes_CXX.rsp`
+  里；不展开就等于"零个 include 路径"。**已修**（`expand_response_files` ＋ 按文件的工具链路径 ＋ 3 条测试）。
+* **cooked 事实没落索引**：cook 完 `<string>`（1004 条声明）之后 `index.definition("std::string") = None`，
+  `std` 下 0 条声明。这既让跨文件问题答不出来，也很可能是重复劳动的成因之一。
+
+### 方法上的一处自纠
+
+我第一次的计时子探针把 `Drop` 守卫写在了 `if` 块**里面**，于是每个单元都报 0 ms —— 分文件计数是可信的，
+那些毫秒数不是。凡"这次测得准不准"的问题，都要先给测量本身一个对照。
+## 十、共享：先学 clangd，再试，然后发现自己做错了粒度（2024）
+
+用户指出"共享才是正道，去看看 clangd/CLion/VS 怎么做"——这是对的。clangd 的做法（[`clangd/Preamble.h`](https://clang.llvm.org/extra/doxygen/Preamble_8h_source.html)）：
+
+```text
+"The vast majority of code in a typical translation unit is in the headers included at the top of the file.
+ The preamble optimization says that we can parse this code once, and reuse the result multiple times.
+ The preamble is invalidated by changes to the code in the preamble region, to the compile command,
+ or to files on disk."
+```
+
+三件套：**preamble bounds**（主文件里第一个声明之前的那一段 ＝ 全部头文件）、
+**`isPreambleCompatible`**（preamble 字节 ＋ 编译命令 ＋ 每个被包含文件的磁盘状态）、
+**`PreamblePatch`**（只改了宏/包含时注入补丁，而不是重建整个 preamble）。
+CLion/VS 是同一思路：头文件的 AST 索引一次，每个 TU 只重放宏状态。
+
+**关键在粒度**：clangd 复用的是**整整一段（preamble）**，不是单个条件。
+
+### 第一次尝试：做在了"每次条件求值"这一层 —— 实测是退步，已回退
+
+想法：条件求值是 `(哪个 #if, 进入时的宏状态)` 的纯函数，于是把结果按
+`(文件, 偏移, 定义集合的摘要)` 缓存进 session 级的 `MacroDefinitions`。同一工程实测：
+
+| | wall | stages 合计 | walk |
+|---|---|---|---|
+| 改动前 | 81 s | 81.4 s | 65.0 s |
+| 改动后 | **138 s** ✗ | **191.2 s** ✗ | —— |
+
+**为什么错**：
+
+* 键里 `path.to_path_buf()` **每次查询分配一次** —— 1080 万次求值就是 1080 万次分配；
+* 摘要要**每遇一个 `#define` 维护一次**（SipHash），而它**每次都变** → 命中率低、开销却是恒定的；
+* 于是"共享"变成了纯开销。用 `git checkout` 整文件回退，回到 51 绿 / 2 既有失败。
+
+### 修正后的设计（下一步要做的，仍是共享，只是粒度对了）
+
+```text
+按 clangd 的粒度共享：一个**文件的帧子树**，而不是一次条件求值
+  键： (文件, 进入时的宏环境摘要)          —— 与 clangd 的 (preamble 字节, 编译命令, 磁盘状态) 同构
+  值： 该文件在这次环境下产生的 timeline 子树（事件 + 帧）
+  命中：把子树**重新挂到新父帧上**（帧是扁平的 Vec，父索引与 from_in_parent 偏移可平移）
+  失效： MacroDefinitions::forget(path) 已经按路径失效，键与值一起丢
+```
+
+同一条 clangd 规则我们已经有了一半：`MacroDefinitions`（定义解析一次，session 级、按路径失效）
+就是"preamble 里的宏状态"那一半；缺的是**帧子树的复用**那一半。
+另外 clangd 把"磁盘状态"也算进兼容性，对应我们的 `forget(path)` ＋ 每文件 context —— 这一点我们已经是对的。
+
+### 方法上的教训（第二次同类的错）
+
+上一次是"计时探针的 Drop 守卫写在 if 里"；这一次是"把缓存做在了会变的东西上"。
+两次都说明同一件事：**先量命中率，再谈优化** —— 缓存键会因为每一次 `#define` 而变化这件事，
+在写代码时看一眼就该发现。

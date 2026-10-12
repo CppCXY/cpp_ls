@@ -624,10 +624,17 @@ impl BuildStatement<'_> {
     ///
     /// The database first, because it is per file: a project with one C++17 target and one C++20 target is what a
     /// compile database exists to describe, and a single statement in `.cppls.toml` cannot express it.
-    fn standard_for(&self, for_file: &Path) -> Option<String> {
+    ///
+    /// `read` is the file provider, because the command may name a **response file** — see
+    /// [`CompileCommand::to_config_with`] — and CMake writes every target's flags that way.
+    fn standard_for(
+        &self,
+        for_file: &Path,
+        read: &mut dyn FnMut(&Path) -> Option<String>,
+    ) -> Option<String> {
         self.commands
             .and_then(|commands| commands.command_for(for_file))
-            .and_then(|command| command.to_config().standard)
+            .and_then(|command| command.to_config_with(read).standard)
             .map(|standard| standard.to_string())
             .or_else(|| self.standard.map(str::to_string))
     }
@@ -727,7 +734,7 @@ pub fn discover_with(
     // **The standard the compiler is asked about**: what the project says this file is built as, or — when nobody
     // says — the newest the compiler takes. See [`Toolchain::standard`] for why the answer travels back, and
     // [`ASSUMED_STANDARD_MSVC`] for why the last case is not left to the compiler's own default.
-    let standard = statement.standard_for(for_file);
+    let standard = statement.standard_for(for_file, &mut |path| files.read(path));
 
     // 1. The project's own answers.
     for (name, source) in named {
@@ -2336,5 +2343,6 @@ End of search list.
         let _ = std::fs::remove_dir_all(&scratch);
     }
 }
+
 
 

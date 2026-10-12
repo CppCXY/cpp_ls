@@ -265,6 +265,72 @@ impl CompileCommand {
     pub fn to_config(&self) -> CompilerConfig {
         config_from_arguments(&self.arguments, self.directory.clone())
     }
+
+    /// The same, with the command's **response files read** — which is what a build system's own command line means,
+    /// and what CMake's database needs.
+    ///
+    /// CMake does not write its include paths into the arguments: it writes
+    /// `@CMakeFiles/<target>.dir/includes_CXX.rsp` and puts the `-I` flags in that file, for the Makefile and Ninja
+    /// generators alike. Measured on a real CMake project: **every** entry of its `compile_commands.json` was of that
+    /// shape, so a reader that does not follow the indirection sees a project with no include paths at all — its own
+    /// headers stop resolving, and the file list stops being the build's.
+    ///
+    /// `read` is the caller's, because this crate reads through a provider rather than the filesystem: the server has
+    /// to answer for a buffer nobody has saved, and a test has to be able to say what a file holds.
+    pub fn to_config_with(&self, read: &mut dyn FnMut(&Path) -> Option<String>) -> CompilerConfig {
+        let arguments = expand_response_files(&self.arguments, self.directory.as_deref(), read);
+
+        config_from_arguments(&arguments, self.directory.clone())
+    }
+}
+
+/// **The arguments a command really has, once the response files it names have been read.**
+///
+/// An argument beginning `@` names a file whose contents are arguments — the form CMake uses for the include paths of
+/// every target it generates a Makefile or Ninja build for. A relative name is relative to the command's **working
+/// directory**, which is what the compiler resolves it against, and the expansion is recursive because a response
+/// file may name another. A file that cannot be read is **left as it stands** rather than dropped: the argument is
+/// what the build wrote, and an argument this layer cannot interpret is not one it may silently delete.
+pub fn expand_response_files(
+    arguments: &[String],
+    working_directory: Option<&Path>,
+    read: &mut dyn FnMut(&Path) -> Option<String>,
+) -> Vec<String> {
+    /// How deep a chain of response files may go before the rest is left alone. A build system writes one level; the
+    /// bound is here so that a file naming itself terminates rather than hanging the analysis.
+    const DEEPEST: usize = 8;
+
+    let mut expanded = Vec::with_capacity(arguments.len());
+    let mut pending: Vec<(String, usize)> = arguments
+        .iter()
+        .rev()
+        .map(|argument| (argument.clone(), 0usize))
+        .collect();
+
+    while let Some((argument, depth)) = pending.pop() {
+        let Some(name) = argument.strip_prefix('@').filter(|name| !name.is_empty()) else {
+            expanded.push(argument);
+            continue;
+        };
+
+        let named = Path::new(name);
+        let resolved = match (named.is_absolute(), working_directory) {
+            (true, _) | (false, None) => named.to_path_buf(),
+            (false, Some(directory)) => directory.join(named),
+        };
+
+        let Some(text) = read(&resolved).filter(|_| depth < DEEPEST) else {
+            expanded.push(argument);
+            continue;
+        };
+
+        // Reversed, because the stack pops from the end: the file's own arguments keep their order.
+        for inner in split_command_line(&text).into_iter().rev() {
+            pending.push((inner, depth + 1));
+        }
+    }
+
+    expanded
 }
 
 /// Read a compiler configuration out of a list of arguments.
@@ -957,3 +1023,4 @@ mod tests {
         assert!(names("wasm32-unknown-unknown").is_empty());
     }
 }
+
