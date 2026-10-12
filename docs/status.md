@@ -94,6 +94,19 @@ cargo test --release --workspace                    全绿
 ④ 测试夹具里的 #include 不解析
    因此任何想借夹具模拟"类/函数来自头文件"的测试都必须先证明包含确实生效，
    否则测的是空气。tests/checks.rs 里有一条守卫测试专门守着这件事。
+
+⑤ 限定名定义把作用域读进了返回类型
+   `int S::value() { }` 的 missing-return 消息说 "declared to return `int S::value`"，
+   而返回类型是 `int`。原因：return_type_written_by 读的是 DeclSpecifierSeq 的**文本**，
+   而限定名定义把 `S::value` 也放进了那个序列。
+   修法：从序列里减掉名字本身（name_token_of 已经知道名字在哪），或改读节点而不是文本。
+
+⑥ operator 函数的名字范围越界
+   `int operator+(int other) { }` 被下划线到下一位（"int operator+(int other) { }\n}"）。
+   name_token_of 取形参表之前**最后一个 Identifier token**，而 `operator+` 的最后一个
+   Identifier 在形参表**里面**（`other`），于是截断失效、范围回退到整个定义。
+   修法：operator 的名字按 operator 规则读（`operator` 关键字 + 符号），
+   而不是"最后一个标识符"。
 ```
 
 ## 五、写这一层时反复踩到的两类坑（值得继续防）

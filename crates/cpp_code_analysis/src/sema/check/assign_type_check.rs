@@ -85,10 +85,11 @@ impl Check for AssignTypeCheck {
             .collect::<Vec<_>>()
         {
             // The punctuation is not the expression: `= expr`, `{expr}` and `(expr)` each leave one child that is
-            // the value.
+            // the value — and which kind of expression it is, is the parser's answer rather than a comparison of the
+            // child's text against a list of punctuation marks. See [`cpp_parser::CppExpr`], which is that answer.
             let Some(expression) = initializer
                 .children()
-                .find(|child| !is_punctuation(&child.text().to_string()))
+                .find(|child| cpp_parser::CppExpr::cast(child.clone()).is_some())
             else {
                 continue;
             };
@@ -134,18 +135,28 @@ impl Check for AssignTypeCheck {
             if assignment.get_operator_text().as_deref() != Some("=") {
                 continue;
             }
-            let (Some(left), Some(right)) = (assignment.get_lhs(), assignment.get_rhs()) else {
+            let Some(right) = assignment.get_rhs() else {
                 continue;
             };
 
-            let left_text = left.syntax().text().to_string();
-            let left_text = left_text.trim();
-            let Some(name) = last_identifier_of(left_text) else {
+            // **The left side is a bare name, asked of the AST and not of the text.**
+            //
+            // This was `last_identifier_of(left_text)` plus `left_text != name` — a hand-written scanner for
+            // identifiers, in a crate that has a lexer, and a comparison of characters to decide a question about
+            // **shape**: *is the left operand a plain name rather than `a[i]` or `s.f`?* Text cannot answer that
+            // reliably. `arr[i]` trims to `arr[i]`, which is not an identifier, so it happened to be excluded — but
+            // `a.b` and `(a)` and `a ` are all questions the characters answer differently from the grammar, and the
+            // scan itself is the thing `MacroFact::body_range`'s note names: *"a search is a second implementation of
+            // the same rule, free to disagree with the one that assigned the name"*.
+            //
+            // The typed layer answers it directly: a plain name is a [`CppExpr::NameExpr`]. The name is then the
+            // token the parser put there, not a substring this layer carved out.
+            let Some(cpp_parser::CppExpr::NameExpr(named)) = assignment.get_lhs() else {
                 continue;
             };
-            if left_text != name {
+            let Some(name) = super::spelling_of(named.syntax()) else {
                 continue;
-            }
+            };
             let Some(written) = declared.get(name.as_str()).copied() else {
                 continue;
             };
@@ -204,36 +215,5 @@ fn report(
         name.to_string(),
         format!("`{name}` is {how} with a value that does not convert to `{written}`"),
     );
-}
-
-/// Is this the punctuation an initialiser is written with rather than the value?
-fn is_punctuation(text: &str) -> bool {
-    matches!(text.trim(), "=" | "{" | "}" | "(" | ")" | ",")
-}
-
-/// The last identifier written in a piece of text.
-///
-/// Text rather than a node walk on purpose: a name written as `count` is one `Identifier` token, and the callers
-/// here already have the snippet the name is in.
-fn last_identifier_of(text: &str) -> Option<String> {
-    let mut last: Option<String> = None;
-    let mut current = String::new();
-    for character in text.chars() {
-        if character.is_alphanumeric() || character == '_' {
-            current.push(character);
-            continue;
-        }
-        if !current.is_empty() {
-            if !current.chars().next().is_some_and(|first| first.is_ascii_digit()) {
-                last = Some(std::mem::take(&mut current));
-            } else {
-                current.clear();
-            }
-        }
-    }
-    if !current.is_empty() && !current.chars().next().is_some_and(|first| first.is_ascii_digit()) {
-        last = Some(current);
-    }
-    last
 }
 

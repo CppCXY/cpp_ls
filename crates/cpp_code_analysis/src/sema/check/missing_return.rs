@@ -89,44 +89,19 @@ fn declares_the_enclosing_class(function: &cpp_parser::CppSyntaxNode) -> bool {
     false
 }
 
-/// **The range of the name a definition declares**, when it can be located.
+/// **The range of the name a definition declares**, or `None` when it cannot be located.
 ///
-/// The **last non-trivia token before the parameter list's `(`** — where a function's name is written in every
-/// spelling this check sees: `int f()`, `void C::f()`, `Name::~Name()`.
+/// One line over [`super::name_token_of`], because *where* the name is and *what* it is are one question asked of one
+/// anchor — a function's name is written immediately before its parameter list's `(`. This function used to answer it
+/// a second way, and both ways were wrong before the shared one existed: see that function's note.
 ///
-/// # Why not the helpers that answer *what* the name is
-///
-/// `super::name_declared_by` and `super::spelling_of` read the declaration's *head* as the children before the
-/// parameter list. That is the right question for a **declaration** and it is empty for a **definition**, because
-/// there the parameter list sits inside the declarator: measured on `int unfinished() { }`,
-/// `name_declared_by -> None` while `return_type_written_by -> Some("int")`.
-///
-/// So a name-shaped range taken from them is `None` for every function body — and the first version of this helper
-/// did worse than that: it scanned for the first identifier *spelled like* the (empty) name, matched the return type
-/// `int`, and produced a range running from `int` to the end of the file.
+/// A `None` here is not a lost finding: the caller keeps the whole definition as the range, which is worse to read
+/// than a name and far better than nothing.
 fn range_of_the_name(function: &cpp_parser::CppSyntaxNode) -> Option<cpp_parser::SourceRange> {
-    use cpp_parser::{CppAstNode, CppParamList};
-
-    // **The typed AST, not a kind comparison.** The node kind is `ParameterList`; an earlier version of this helper
-    // compared against `CppSyntaxKind::ParamList`, which does not exist as a kind this grammar produces — so the
-    // guard answered `None` for every function and the range fell back to the whole definition. `status.md` §5 names
-    // this exact trap: *"判断用强类型 AST（`cast`），而不是手写 `CppSyntaxKind` 比较"*. Measured, the node is
-    // `ParameterList at 14..17 "() "` and `CppParamList::cast` accepts it.
-    let parameters = function
-        .descendants()
-        .find_map(CppParamList::cast)?;
-    let open = usize::from(parameters.syntax().text_range().start());
-
-    function
-        .descendants_with_tokens()
-        .filter_map(|element| element.into_token())
-        .filter(|token| usize::from(token.text_range().end()) <= open)
-        .filter(|token| !cpp_parser::is_trivia(cpp_parser::CppTokenKind::from(token.kind())))
-        .filter(|token| token.kind() == cpp_parser::CppTokenKind::Identifier.into())
-        .last()
-        .map(|token| cpp_parser::source_range(token.text_range()))
+    Some(cpp_parser::source_range(
+        super::name_token_of(function)?.text_range(),
+    ))
 }
-
 /// **`missing-return`** — see the module documentation.
 pub struct MissingReturn;
 

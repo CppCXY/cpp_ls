@@ -717,20 +717,52 @@ pub fn spelling_of(node: &cpp_parser::CppSyntaxNode) -> Option<String> {
         .map(|token| token.text().to_string())
 }
 
-/// **The name a function declares** — the last declarator in its head, before the parameter list.
+/// **The name token a declaration or definition writes** — the last non-trivia token before its parameter list.
+///
+/// This is the one place that answers *where the name is*, and everything that needs the name comes through it:
+/// [`name_declared_by`] takes its text and a diagnostic takes its range. One question, one implementation — the
+/// alternative is what this replaced, which was two readers of the same fact that disagreed.
+///
+/// # Why the parameter list is the anchor
+///
+/// Because a function's name is written immediately before its `(`, in every spelling this layer sees: `int f()`,
+/// `void C::f()`, `Name::~Name()`, `operator int()`, `int (S::*p)()`. A reader that anchored on anything else had to
+/// decide which of the tokens before the list is *the* name, and both earlier attempts got that wrong in a different
+/// way:
+///
+/// ```text
+///   "the last child ending before the parameter list starts"
+///       `take_while` stops at the FIRST child that ends after it — and the first child of
+///       `int unfinished() { }` is `DeclSpecifierSeq \"int \"`, which does not. So the head was
+///       empty and name_declared_by answered None for every definition. Measured.
+///   "the first identifier spelled like the name"
+///       matched the return type, and produced a range from `int` to the end of the file. Measured.
+/// ```
+///
+/// The list is found through the **typed** AST ([`CppParamList`](cpp_parser::CppParamList)) rather than by comparing
+/// node kinds: the kind is `ParameterList`, a kind this grammar does not have under that name, so a kind comparison
+/// silently matched nothing — which is the trap `status.md` §5 records and the reason its rule is to use `cast`.
+///
+/// The **token** is returned rather than its text, because the two callers want different halves of it and both are
+/// cheaper from here: [`name_declared_by`] takes the spelling, and a diagnostic takes the range.
+pub fn name_token_of(function: &cpp_parser::CppSyntaxNode) -> Option<cpp_parser::CppSyntaxToken> {
+    use cpp_parser::{CppAstNode, CppParamList};
+
+    let parameters = function.descendants().find_map(CppParamList::cast)?;
+    let open = usize::from(parameters.syntax().text_range().start());
+
+    function
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .filter(|token| usize::from(token.text_range().end()) <= open)
+        .filter(|token| !cpp_parser::is_trivia(cpp_parser::CppTokenKind::from(token.kind())))
+        .filter(|token| token.kind() == cpp_parser::CppTokenKind::Identifier.into())
+        .last()
+}
+
+/// **The name a function declares** — see [`name_token_of`] for the anchor and for the two ways this went wrong.
 pub fn name_declared_by(function: &cpp_parser::CppSyntaxNode) -> Option<String> {
-    use cpp_parser::{CppAstNode, CppDeclaration, CppParamList};
-    // **`descendants`, not `children`, and that asymmetry is the one this layer has now been caught by twice**: the
-    // parameter list sits inside `InitDeclarator > Declarator`, so it is a *grandchild* of the declaration while the
-    // body is a child. The head is then every child that ends before the parameter list starts.
-    let parameters = CppDeclaration::cast(function.clone())?
-        .descendants::<CppParamList>()
-        .next()?;
-    let head: Vec<cpp_parser::CppSyntaxNode> = function
-        .children()
-        .take_while(|child| child.text_range().end() <= parameters.get_range().start())
-        .collect();
-    spelling_of(head.last()?)
+    Some(name_token_of(function)?.text().to_string())
 }
 
 /// **A function's parameters as the declaration spells them** — `int count`, `const Widget& w`, `...`.
