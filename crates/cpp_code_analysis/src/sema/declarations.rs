@@ -222,9 +222,25 @@ fn declared_type_of_with(shapes: &DeclarationShapes, binding: &Binding) -> Optio
         if let Some(node) = &shape.specifiers {
             specifiers = Some(node.clone());
         }
+        // **The declarator that reaches the name — and for a parameter, the inner one.**
+        //
+        // A parameter's name is reached through *two* declarators: `int f(int op)` writes
+        // `Declarator "f(int op)"` around `Declarator "op"`, and this walk sees the outer one first. Taking it read
+        // the parameter as a **function declarator**, so `int f(Fn op)` produced a fact whose type was `Fn(Fn)` and
+        // `int f(W op)` one whose type was `W(W)` — measured, for every named parameter of every function.
+        //
+        // What separates the two is **whether the name is inside a parameter list**: a parameter's is, and nothing
+        // else's is. Not "the declarator holds a parameter list" — `typedef void (*F)(int)` holds one and its type is
+        // the whole `void (*)(int)`, which the test `a_function_pointer_typedef_records_the_whole_type` pins. A
+        // version that used the looser test broke exactly that, and this test is what said so.
+        let name_is_a_parameter = shapes.names_a_parameter(binding.name_range.start_offset);
         if declarator.is_none()
             && let Some(node) = &shape.declarator
             && reaches_the_name(node, binding.name_range)
+            && !(name_is_a_parameter
+                && node
+                    .descendants()
+                    .any(|inner| CppSyntaxKind::from(inner.kind()) == CppSyntaxKind::ParameterList))
         {
             declarator = Some(node.clone());
         }
@@ -300,6 +316,12 @@ pub struct DeclarationShapes {
     /// from the parent chain: `template <…>` and the class it introduces are *siblings*, and the specifier sequence
     /// between them is not itself a shape.
     templates: Vec<(cpp_parser::SourceRange, CppSyntaxNode)>,
+    /// **The tree these shapes were read from**, kept for the one question that is about an offset's *ancestry*
+    /// rather than about a shape: whether a name stands inside a parameter list — see
+    /// [`DeclarationShapes::names_a_parameter`].
+    ///
+    /// A reference to a node the caller already owns, so this costs a clone of a handle rather than a walk.
+    root: CppSyntaxNode,
 }
 
 /// One node a question is answered at, and how it is reached.
@@ -506,7 +528,27 @@ impl DeclarationShapes {
             roots: runs[0],
             children,
             templates,
+            root: root.clone(),
         }
+    }
+
+    /// **Does the name at this offset stand inside a parameter list?**
+    ///
+    /// The one question this type answers from the *tree* rather than from a shape, and it is asked because a
+    /// parameter's name is reached through two declarators — `int f(int op)` writes `Declarator "f(int op)"` around
+    /// `Declarator "op"` — so the shape walk sees the function's declarator first and read the parameter as a
+    /// function. Measured: `int f(Fn op)` produced a fact whose type was `Fn(Fn)`.
+    ///
+    /// Answered by walking **up** from the token at the offset, which is what makes it about the name's place in the
+    /// tree rather than about any node's contents: `typedef void (*F)(int)` also holds a parameter list, and its name
+    /// is not inside it, so its type stays the whole `void (*)(int)`.
+    pub fn names_a_parameter(&self, offset: usize) -> bool {
+        let Some(token) = cpp_parser::token_at(&self.root, offset) else {
+            return false;
+        };
+        token.parent_ancestors().any(|node| {
+            CppSyntaxKind::from(node.kind()) == CppSyntaxKind::ParameterList
+        })
     }
 
     /// How many shapes the file has — what a caller prints when it wants to know whether the walk was worth it.
