@@ -1147,13 +1147,36 @@ impl ScopeWalker<'_> {
                     if !is_friend {
                         self.class_like(&child, outer, inner, BindingKind::Class);
                     }
-                    return SpecifierName::Bound;
+                    // **The declaration may declare something else as well**, and this used to return before the
+                    // caller could look: `struct S { int n; } s;` and `enum E { A } e;` write a declarator *inside
+                    // the same declaration as the definition*, so `s` and `e` were never bound and never appeared as
+                    // facts. Measured on the four spellings:
+                    //
+                    // ```text
+                    //   struct S { int n; } s;   ->  Type:S, Variable:n          (no `s`)
+                    //   struct { int a; } x;     ->  Variable:a                  (no `x`)
+                    //   enum E { A } e;          ->  Type:E, Variable:A          (no `e`)
+                    //   class C {} c;            ->  Type:C                      (no `c`)
+                    // ```
+                    //
+                    // So the definition is bound here and the **search continues**: the loop has nothing else to say
+                    // about a definition, and the caller's declarator branch is what binds `s`. Returning `None`
+                    // rather than `Bound` is what lets it — `Bound` means "this declaration named its entity in the
+                    // specifiers", which is true only when no declarator follows.
+                    if declarators(node).is_empty() {
+                        return SpecifierName::Bound;
+                    }
                 }
                 CppSyntaxKind::EnumDef | CppSyntaxKind::EnumClassDef => {
                     if !is_friend {
                         self.enum_like(&child, outer, inner);
                     }
-                    return SpecifierName::Bound;
+                    // **And a declarator may follow here too** — `enum E { A } e;` declares `e` in the same
+                    // declaration as the definition, exactly as `struct S { … } s;` does. See the note on the
+                    // class-like arm above; measured, `e` had no fact at all.
+                    if declarators(node).is_empty() {
+                        return SpecifierName::Bound;
+                    }
                 }
                 // The bare-keyword forms, which is what the grammar produces for `class Widget;` and for
                 // `enum class Color { ... }` alike.
