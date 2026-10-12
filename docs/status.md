@@ -115,11 +115,42 @@ cargo test --release --workspace                    全绿
    对 operator 不成立（它不是标识符拼的，最后一个标识符在形参表**里面**）。现在按
    `operator` 关键字读到 `(`。
 
-⑦ union 的析构函数在**无外层函数**时找不到定义
-   `union U { ~U() {} };` 在 namespace 作用域下 `is_a_function_definition` 不认（实测
-   ctor_probe 打印 "(no definition found)"）；而同一个 union 写在函数体里时是认的
-   （报告里 line 51 的形状就是这样，所以它已被 ⑤⑥ 修好）。
-   下一步：查这两种作用域下节点形状的差别。
+⑦ union 的析构函数在**无外层函数**时找不到定义 —— **已修(而且根因更大)**
+   根因不是 union，是 `is_a_function_definition`：它问"这个声明里**某个**形参表是否在 body 之前"，
+   而 `struct S { … };` 是 `Declaration > DeclSpecifierSeq > StructDef`，所以它的 `CompoundStat`
+   孩子**就是类体**，而方法自己的形参表在它之前。于是**每个含已定义成员函数的类都被当成了
+   函数定义**，缺 return 之类的检查于是去问那个类。实测：`struct S { ~S() {} };` 被读成一个
+   返回类型是整段 `struct S { … }` 文本的"函数"。
+   修法：形参表必须属于该声明**自己的** `InitDeclarator`（一个定义只有一个），
+   外加"body 不在形参表内部"（`void f(int g(void))` 是表里套表）。
+
+### ⑧ 每个函数形参都产生一条幽灵 Variable 事实
+
+```cpp
+int f(int op) { return 0; }
+```
+产出：
+```text
+    Function "f"
+    Variable "op" type Some("int(int)") local true     ← 幽灵
+```
+形参**不是**局部变量，而且那个类型是**函数类型**（把 `int op` 的声明符当成了函数声明）。
+对每个带具名形参的函数都成立，模板与非模板都一样。后果：
+- 索引里多出一条不存在的名字（跨文件查询会答它）；
+- `unused` 的候选集里多出一个"从未使用"的形参型局部；
+- 形参的名字以 `Variable` 出现在任何按 `DeclKind` 分类的消费者面前。
+下一步：`build_facts` 里产生这条事实的路径 —— 它的 `local` 来自形参的 binding，而
+"局部"这个判断对形参不成立。
+
+### ⑨ 伪析构调用 `x.~int()` 解析失败
+
+```cpp
+void f(int& x) { x.~int(); }   // 合法 C++（Pseudo-destructor call）
+```
+报 `expected ';' after expression`，位置在 `int`。`x.~T()`（模板参数）与 `x.~S()`
+（类类型）都正常，只有**标量类型的伪析构**失败。标准里的规则是：`~` 后面可以是一个
+`type-name`，而 `int` 是 builtin type 不是标识符，所以按"标识符"读就断了。
+
 ```
 
 ## 五、写这一层时反复踩到的两类坑（值得继续防）
