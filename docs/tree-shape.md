@@ -181,8 +181,74 @@ struct String;             ->  expected a type specifier at ";"
 (`struct S { … } s;` 的 `s` 就是第一个证据 —— 它现在被读成了表达式语句 `s;`)。
 
 结论:**这不是"把节点挪出去"的问题,是声明解析器与 specifier 序列之间的分工要一起改。**
-两步都回退了,没有留下半成品。下一步应该先查 `parse_declaration` 是从哪里、
-以什么为界找那个 `StructDef` 的,而不是继续动 specifier 序列。
+
+================================================================================
+4b. 入口已经找到:`parse_declaration_here` 与那个类定义的三处接缝
+================================================================================
+
+`crates/cpp_parser/src/grammar/cpp/decls.rs`,函数 `parse_declaration_here`(645),类定义那一段:
+
+```text
+1027   let specifiers_from = p.current_event_count();
+1029   parse_decl_specifier_seq(p)                       <- 这一个调用吃掉了关键字**和整个类体**
+…
+1073   if p.current_token() == LeftBrace
+1074       && (declaration_opens_a_body(p)
+1074           || declaration_wrote_a_class_head(p, specifiers_from))
+1076       parse_class_body(p)                            <- body 规则
+1101       if Semicolon { p.bump() }                      <- 类定义的那个 `;`
+1103       else if a_declaration_cannot_follow(p) { … "expected `;` after a class definition" }
+1110       return Ok(m.complete(p));
+```
+
+**`parse_decl_specifier_seq` 返回时,光标已经在整个 `struct S { … }` 之后了。**
+类定义是那一次调用里的一个 specifier(`parse_one_decl_specifier` 的
+`is_class_like_keyword(kind) && a_body_follows_the_class_head(p) => parse_class_like_head(p)`),
+所以 `DeclSpecifierSeq` 的 span 必然覆盖它 —— **不是节点放错了位置,是它由一次调用产生**。
+
+三处接缝,每一处都是"这个节点必须在那里面"的理由:
+
+```text
+① declaration_defined_a_class(p, specifiers_from)      decls.rs:1199
+     events_contain_any(specifiers_from, &[ClassBody, CompoundStat])
+     —— 用来判断"`;` 属于这个声明(`class Foo {};`)还是跟在后面的空语句"。
+     判据是**事件**,不是节点归属,所以定义挪出去这个判据仍然成立。
+
+② declaration_wrote_a_class_head(p, specifiers_from)   decls.rs:1212
+     events_contain_any(specifiers_from, &[ClassDef, StructDef, UnionDef, EnumDef, EnumClassDef])
+     —— 用在 1073:`{` 是否是这个声明里那个头的 body(为 `#if` 把头和 body 分到两边而写)。
+     同上,也是事件判据。
+
+③ 因此真正的冲突只有一处:
+     `parse_one_decl_specifier` 的**成功**表示"一个 specifier 读完了",而类定义那一次
+     既读完了 specifier(struct),又把 body 一起读掉了。外层循环的 `specifiers` 计数器
+     和 `DeclSpecifierSeq` 的 mark 都假设"一次调用 = 一个 specifier 节点"。
+```
+
+**所以"边界外移"要成功,必须让那个类定义不再是一次 specifier 调用的产物的同时,
+仍然让 ①② 看得见它** —— 它们是事件判据,这一点是有利的;要改的是
+`parse_class_like_head` 的调用点:类定义应当由 `parse_declaration_here` 在
+`parse_decl_specifier_seq` **之外**读,而不是由 specifier 循环读。
+
+**下一步的具体形状**(还没做):
+
+```text
+1. `parse_one_decl_specifier` 遇到 `is_class_like_keyword && a_body_follows_the_class_head` 时
+   **不再**调用 `parse_class_like_head`,只消费关键字并返回一个"轮到这个声明去读类定义"的信号。
+2. `parse_decl_specifier_seq` 收到信号后立即结束(它已经是一个完整的 decl-specifier-seq:
+   `struct`),把信号交给 `parse_declaration_here`。
+3. `parse_declaration_here` 在 1073 那一段之前先读类定义(它已经会读 body —— 1076),
+   再走既有的 `;` / declarator 分支。
+4. `struct S { … } s;` 的 `s` 走 1116 的 init-declarator 循环,这也是它现在应该走的路
+   (失败尝试里它被读成了 `ExpressionStat`)。
+```
+
+**为什么前两次失败在这里能解释清楚:** 两次都只动了 specifier 一侧(关掉 mark、
+重开后 `continue`),而 ①② 之后的那段代码仍然在等"specifier 序列自己吃掉了类定义"
+这个前提 —— 第 3 步没做,于是声明那一侧拿到的是一个光标停在 `;`、却没有任何节点
+代表类定义的序列。第一次的报错是计数器没跟着走(已量出),第二次的 `ErrorNode` 坍塌
+是第 3 步缺失的表现。
+
 
 
 For (3), the fix is the access-specifier pattern applied where it matters: close the node before its
