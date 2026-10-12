@@ -660,49 +660,268 @@ pub fn function_definitions(context: &CheckContext<'_>) -> Vec<cpp_parser::CppSy
 /// out as the spelling the reader wrote.
 ///
 /// `None` for a definition with nothing before its name — a constructor — and for a head this cannot read.
+/// **The specifier keywords that are not a return type.**
+///
+/// A declaration's specifier sequence holds the *declaration specifiers* — and several of them say how a function is
+/// built rather than what it returns. `static int f()` puts `static` in that sequence, `constexpr ~S()` puts
+/// `constexpr` there and **no type at all**, and both were being read out as the return type:
+///
+/// ```text
+///   constexpr ~S() {}                return_type_written_by -> Some("constexpr")   should be None
+///   static int f() {}                return_type_written_by -> Some("static int")  should be "int"
+///   virtual int f() {}               return_type_written_by -> Some("virtual int") should be "int"
+///   explicit S(int a) {}             return_type_written_by -> Some("explicit S")  should be None
+/// ```
+///
+/// A list of spellings is the **weakest** form this rule can take, and it is chosen deliberately: the specifier
+/// sequence is read as text (see [`return_type_written_by`] for why), and the alternative — a second reader of the
+/// same sequence that decides by token kind — is the defect this whole function exists to remove. The list is
+/// C++'s own set of decl-specifiers that cannot be part of a type, and a spelling that is missing from it shows up as
+/// a wrong message rather than as a wrong finding, which is the direction to be wrong in.
+const NOT_A_TYPE: &[&str] = &[
+    "constexpr",
+    "consteval",
+    "constinit",
+    "static",
+    "inline",
+    "virtual",
+    "explicit",
+    "friend",
+    "extern",
+    "mutable",
+    "register",
+    "thread_local",
+    "typedef",
+];
+
+/// **The three parts of a function's head, read once**: what it returns, what it is called, and where that name is.
+///
+/// One function rather than three, because the three are answers about **one** span of text and three readers of it
+/// disagreed — each in its own way, and each silently:
+///
+/// ```text
+///   return_type_written_by read the whole head as the type   -> "explicit S", "int S::f", "static int"
+///   name_declared_by       read the last child ending before
+///                          the parameter list                 -> None for every definition
+///   range_of_the_name      compared a node kind that does not exist -> None for every function
+/// ```
+///
+/// Splitting the head once means a constructor cannot be given a return type by one reader while another reader
+/// fails to see it is a constructor.
+pub struct FunctionHead {
+    /// What the definition writes before its name, with the specifiers above removed. `None` for a constructor, a
+    /// destructor and an `operator` — the three shapes that write no return type.
+    pub returns: Option<String>,
+    /// The name as written: `f`, `~S`, `S`, `operator+`.
+    pub name: String,
+    /// Where that name is, for a diagnostic. The whole span for an `operator`, which is not one token.
+    pub name_range: cpp_parser::SourceRange,
+}
+
+/// **The return type a function definition writes**, as [`function_head`] reads it.
+///
+/// Kept as a named function because it is the question three checks ask; it is one line over the head reader so that
+/// the type, the name and the name's range cannot come from three readers that disagree.
 pub fn return_type_written_by(function: &cpp_parser::CppSyntaxNode) -> Option<String> {
-    use cpp_parser::{CppAstNode, CppDeclSpecifierSeq, CppDeclarator, CppParamList, CppTokenKind};
+    function_head(function)?.returns
+}
 
-    // **The type specifiers are a node**: a definition holds a `DeclSpecifierSeq` **child**, which is where `int`,
-    // `const std::string` and `auto` live. (Casting the declaration *itself* as a specifier sequence — the first
-    // version of this rewrite — returns `None` for every function, which is how `missing-return` went quiet.)
-    let specifiers = cpp_parser::CppDeclaration::cast(function.clone())?
-        .children::<CppDeclSpecifierSeq>()
-        .next()?
-        .syntax()
-        .clone();
-    let mut written = specifiers.text().to_string().trim().to_string();
+/// Read a function's head — see [`FunctionHead`].
+pub fn function_head(function: &cpp_parser::CppSyntaxNode) -> Option<FunctionHead> {
+    use cpp_parser::{CppAstNode, CppParamList};
 
-    // **And the pointer or reference belongs to the type while sitting outside that node**: `int* f()` writes its
-    // `*` against the declarator, so the spelling has to put it back or `int*` reads as `int`. The declarator is the
-    // one **that holds the parameter list**, which is what tells a function's declarator from a parameter's.
-    let declarator = function
-        .descendants()
-        .find_map(|node| CppDeclarator::cast(node).filter(|d| d.descendants::<CppParamList>().next().is_some()));
-    if let Some(declarator) = declarator {
-        for token in declarator
-            .syntax()
-            .descendants_with_tokens()
-            .filter_map(|element| element.into_token())
-        {
-            // **Stop at the name**, and at a token rather than a node: the `NameExpr` around the identifier is a
-            // node, so asking a *token* for it never matches and the loop would read the whole declarator — which is
-            // how an `&` in `int f(int& x)` would have been appended to the return type.
-            if CppTokenKind::from(cpp_parser::CppKind::from(token.kind())) == CppTokenKind::Identifier {
-                break;
+    // **Anchored on the parameter list**, found through the typed AST: a function's name is written immediately
+    // before its `(`, in every spelling. `CppParamList::cast` rather than a kind comparison, because the node is
+    // `ParameterList` — a kind this grammar does not have under that name, so a kind comparison matched nothing.
+    let parameters = function.descendants().find_map(CppParamList::cast)?;
+    let open = usize::from(parameters.syntax().text_range().start());
+
+    // Every non-trivia token of the head, in order: everything before the `(`.
+    let head: Vec<cpp_parser::CppSyntaxToken> = function
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .filter(|token| usize::from(token.text_range().end()) <= open)
+        .filter(|token| !cpp_parser::is_trivia(cpp_parser::CppTokenKind::from(token.kind())))
+        .collect();
+
+    // **The name.** An `operator` is spelled `operator` plus a symbol and is not an identifier at all; a destructor
+    // is `~` plus the class name; everything else ends at its last identifier.
+    // **The name, and where it starts — which is also where the return type ends.**
+    //
+    // An `operator` is spelled `operator` plus a symbol and is not an identifier at all; a destructor is `~` plus the
+    // class name; everything else ends at its last identifier. In all three the name **begins** at the token this
+    // finds, and the head the return type is read from is what comes before that.
+    let (name, name_range, name_starts_at) = match head.iter().position(|token| token.text() == "operator") {
+        Some(at) => {
+            let last = head.last()?;
+            (
+                head[at..].iter().map(|token| token.text().to_string()).collect::<String>(),
+                cpp_parser::source_range(head[at].text_range().cover(last.text_range())),
+                at,
+            )
+        }
+        None => {
+            let at = head
+                .iter()
+                .rposition(|token| token.kind() == cpp_parser::CppTokenKind::Identifier.into())?;
+            // A leading `~` belongs to the name: `~S` is a destructor, and a caller comparing the name with the
+            // enclosing class has to see the same spelling the reader wrote.
+            let start = if at > 0 && head[at - 1].text() == "~" { at - 1 } else { at };
+            (
+                head[start..=at].iter().map(|token| token.text().to_string()).collect::<String>(),
+                cpp_parser::source_range(head[start].text_range().cover(head[at].text_range())),
+                start,
+            )
+        }
+    };
+    let before_the_name = &head[..name_starts_at];
+
+    // What is left before the name, minus the specifiers that are not a type.
+    //
+    // **Rebuilt from the tokens with the separation the SOURCE has, not the rendering.** The rendering collapses
+    // whitespace, so its text for `int S::f() { }` is `int S::f() { }` — the type `int` and the *name's* scope `S::`
+    // standing next to each other with nothing between them, which no reading of that text can tell apart. Measured,
+    // every attempt to slice it gave `Some("int S::")`.
+    //
+    // The token stream keeps what the file wrote: `int` and `S` are two tokens with a space between them in the
+    // source, and a `::` is a token of its own. Reading each token's own text and inserting the **source's** gap
+    // between neighbours reconstructs the head as the reader wrote it, which is what a message has to show.
+    let mut returns = String::new();
+    let mut previous_end: Option<usize> = None;
+    let own_text = function.text().to_string();
+    let function_starts = usize::from(function.text_range().start());
+    for token in before_the_name {
+        let range = token.text_range();
+        let (start, end) = (usize::from(range.start()), usize::from(range.end()));
+        if let Some(previous_end) = previous_end {
+            let gap = source_between(&own_text, function_starts, previous_end, start);
+            returns.push_str(gap);
+        }
+        returns.push_str(&token.text().to_string());
+        previous_end = Some(end);
+    }
+    for specifier in NOT_A_TYPE {
+        // Whole words only: `static_cast` is not a storage class, and neither is a type whose name contains one of
+        // these spellings.
+        returns = returns
+            .split(' ')
+            .filter(|word| word.trim() != *specifier)
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+    let returns = returns.trim().to_string();
+
+    // **A qualified definition writes its scope, and the scope is not the type.** `int S::f()` writes `S::` in the
+    // head between the return type and the name, and a reader that took "everything before the name" collected it:
+    // measured, `Some("int S::")`.
+    //
+    // The head this reads **ends at the name**, so the scope of the declared name is simply a `::` that the head ends
+    // with, and what precedes it is the type. What must not be cut is the scope *within* a type: `const std::string&
+    // f()` puts `const std::string&` here, and it does not end with a `::` at all.
+    //
+    // This is the second judgement written for it. The first asked whether the text after the `::` started with the
+    // name — which is empty here by construction, so it matched nothing and `int S::f()` kept its `S::`; the second
+    // asked whether the text before it ended with the name, which compares the *scope's* name (`S`) against the
+    // *function's* (`f`) and so also matched nothing. Both were answers to a question this reader had already
+    // answered by cutting the name off.
+    let mut returns = returns.trim().to_string();
+    if returns.ends_with("::") {
+        returns = strip_trailing_scopes(&returns);
+    }
+    // `int*` and `int *` are one type; the `*` run is kept as written, so `int *` is the spelling given back.
+    let returns = returns.trim().to_string();
+
+    // **The three shapes C++ gives no return type to.** `~S` and `operator*` are spelled that way and no scope
+    // table would name them; a constructor is an *ordinary identifier* whose name is the class's, which is why it
+    // is the one case this cannot decide from the name alone and asks the enclosing class instead.
+    let returns = if returns.is_empty()
+        || name.starts_with('~')
+        || name.starts_with("operator")
+        || declares_the_enclosing_class_named(function, &name)
+    {
+        None
+    } else {
+        Some(returns)
+    };
+
+    Some(FunctionHead {
+        returns,
+        name,
+        name_range,
+    })
+}
+
+/// **The gap the source has between two offsets**, or a single space when it cannot be read.
+///
+/// Used by [`function_head`] to put the separation back between tokens: the rendering removes whitespace, so its text
+/// has `int` and `S` adjacent where the file wrote a space, and `int S::f()` is unreadable from that text alone.
+/// Plain bytes rather than a comment-aware scan, because what stands between two tokens of one function's head is
+/// whitespace — anything else would be a token, and a token is one of the two ends.
+fn source_between(function_text: &str, function_starts: usize, from: usize, to: usize) -> &str {
+    let (from, to) = (
+        from.saturating_sub(function_starts),
+        to.saturating_sub(function_starts),
+    );
+    function_text.get(from..to).unwrap_or(" ")
+}
+
+/// **Drop every scope name a head ends with** — `int a::b::` becomes `int`.
+///
+/// The head a definition writes ends at the name it declares, so a qualified definition leaves the scopes it reached
+/// the name through: `int S::f()` reads as `int S::`, and `int a::b::c()` as `int a::b::`. Each `word::` at the end is
+/// one of those scopes and none of them is a type.
+///
+/// A **loop** rather than one pass, because a namespace nests: measured, one pass left `int a:` from `int a::b::c()`
+/// — the first scope went and the second stayed, and the answer named a type that does not exist.
+fn strip_trailing_scopes(head: &str) -> String {
+    let mut head = head.trim_end().to_string();
+    while head.ends_with("::") {
+        head.truncate(head.len() - 2);
+        head = head.trim_end().to_string();
+        // The scope's own name goes with it — the last identifier-shaped word, removed as a whole.
+        //
+        // Splitting on "not alphanumeric or `_`" is what went wrong twice here: measured, `int a::b::` left `int a:`
+        // and then `int a`, because the split ran on the *colons* and on the space instead of on the word boundary.
+        // The word is what has to go, so the boundary is what it is found by.
+        let word_starts = head
+            .rfind(|character: char| !(character.is_alphanumeric() || character == '_'))
+            .map(|at| at + 1)
+            .unwrap_or(0);
+        head.truncate(word_starts);
+        head = head.trim_end().to_string();
+    }
+    head
+}
+
+/// See [`missing_return::declares_the_enclosing_class`]'s rule, applied to a name that has already been read.
+///
+/// Here rather than in the caller because the head reader is what has the name and the node, and a second walk of
+/// the ancestors from outside would be a second answer to the same question.
+fn declares_the_enclosing_class_named(function: &cpp_parser::CppSyntaxNode, name: &str) -> bool {
+    use cpp_parser::CppSyntaxKind;
+
+    for ancestor in function.ancestors().skip(1) {
+        match CppSyntaxKind::from(ancestor.kind()) {
+            CppSyntaxKind::StructDef | CppSyntaxKind::ClassDef | CppSyntaxKind::UnionDef => {
+                let declared = ancestor
+                    .children()
+                    .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::ClassBody)
+                    .and_then(|body| {
+                        ancestor
+                            .descendants_with_tokens()
+                            .filter_map(|element| element.into_token())
+                            .take_while(|token| token.text_range().end() <= body.text_range().start())
+                            .filter(|token| token.kind() == cpp_parser::CppTokenKind::Identifier.into())
+                            .last()
+                            .map(|token| token.text().to_string())
+                    });
+                return declared.as_deref() == Some(name.trim_start_matches('~'));
             }
-            match token.text().to_string().as_str() {
-                // Written against the type or against the name — the same type either way.
-                "*" | "&" | "&&" => written.push_str(token.text().to_string().as_str()),
-                _ => {}
-            }
+            CppSyntaxKind::CompoundStat => return false,
+            _ => {}
         }
     }
-
-    if written.is_empty() {
-        return None;
-    }
-    Some(written)
+    false
 }
 /// **The last identifier written inside a node** — the name a call would spell, the name a declaration declares.
 ///
@@ -760,9 +979,10 @@ pub fn name_token_of(function: &cpp_parser::CppSyntaxNode) -> Option<cpp_parser:
         .last()
 }
 
-/// **The name a function declares** — see [`name_token_of`] for the anchor and for the two ways this went wrong.
+/// **The name a function declares** — see [`function_head`], which reads it together with the return type and
+/// therefore cannot disagree with it about which name it found.
 pub fn name_declared_by(function: &cpp_parser::CppSyntaxNode) -> Option<String> {
-    Some(name_token_of(function)?.text().to_string())
+    Some(function_head(function)?.name)
 }
 
 /// **A function's parameters as the declaration spells them** — `int count`, `const Widget& w`, `...`.
