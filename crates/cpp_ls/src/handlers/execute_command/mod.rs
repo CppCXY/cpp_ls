@@ -25,6 +25,7 @@
 //! only outcome is a log line is a command nobody can tell worked.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use lsp_types::{
     ClientCapabilities, ExecuteCommandOptions, ExecuteCommandParams, ServerCapabilities,
@@ -34,6 +35,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::RegisterCapabilities;
 use crate::context::{RequestOutcome, ServerContextSnapshot};
+use crate::util::time_cancel_token;
 use cpp_code_analysis::project::cmake::{ConfigureCommand, ConfigureReason};
 
 /// The command a client invokes to have this project's compile database written.
@@ -238,6 +240,175 @@ pub fn database_path(proposal: &ConfigureCommand) -> PathBuf {
     proposal.database.clone()
 }
 
+/// The button a user pressed on the offer, as a value rather than as a string compared in two places.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Consent {
+    /// Run it.
+    Run,
+    /// Run it, and stop offering — for this session.
+    RunAndDoNotAsk,
+    /// Do not run it now.
+    NotNow,
+    /// The question was dismissed, or the client answered nothing.
+    Dismissed,
+}
+
+impl Consent {
+    /// The title a client shows for each button.
+    ///
+    /// "Don't ask again" rather than "Always": the setting is not written back — a server cannot write a client's
+    /// settings — so what the button buys is silence for the rest of the session, and the offer says which setting
+    /// makes it permanent. A button that promised "always" and delivered a session is a lie a user would only
+    /// discover the next time they opened the project.
+    pub const RUN: &'static str = "Run cmake";
+    pub const RUN_AND_DO_NOT_ASK: &'static str = "Run and don't ask again";
+    pub const NOT_NOW: &'static str = "Not now";
+
+    /// Read back which one a client returned.
+    pub fn from_title(title: &str) -> Consent {
+        match title {
+            t if t == Consent::RUN => Consent::Run,
+            t if t == Consent::RUN_AND_DO_NOT_ASK => Consent::RunAndDoNotAsk,
+            t if t == Consent::NOT_NOW => Consent::NotNow,
+            _ => Consent::Dismissed,
+        }
+    }
+
+    /// Should the configure be run?
+    pub fn runs_it(self) -> bool {
+        matches!(self, Consent::Run | Consent::RunAndDoNotAsk)
+    }
+}
+
+/// **Offer to configure the project, once, and do what the user says.**
+///
+/// Called after the workspace is first indexed, because the offer is about a *project* and discovery is what knows
+/// whether this one has a proposal at all. Three things decide whether a question is asked:
+///
+/// ```text
+/// the setting       cppls.configureCmake = ask | auto | never        never -> nothing; auto -> no question
+/// discovery         is there a command that would write a database?  none  -> nothing
+/// already offered   has this session asked about this workspace?     yes   -> nothing
+/// ```
+///
+/// # Why the answer is not written back
+///
+/// Because a server cannot write a client's settings: LSP has `workspace/configuration` for reading them and
+/// nothing for changing them. So "don't ask again" is remembered for the session, and the offer names the setting
+/// that makes it permanent — a worse offer than a button that just did it, and an honest one.
+///
+/// # Why it is a question at all
+///
+/// Because the configure runs the project's own code. A `CMakeLists.txt` may invoke anything, and `auto` exists for
+/// a user who has decided they trust their own project; `ask` is the default for everyone else.
+pub async fn offer_configure(context: &ServerContextSnapshot) {
+    let (may_offer, have_asked, configured_automatically) = {
+        let workspace_manager = context.workspace_manager().lock().await;
+        let client_config = workspace_manager.client_config();
+        (
+            client_config.configure_cmake.may_offer(),
+            workspace_manager.was_configure_offered(),
+            client_config.configure_cmake.configures_without_asking(),
+        )
+    };
+    if !may_offer || have_asked {
+        return;
+    }
+
+    let Some((proposal, root)) = context
+        .analysis()
+        .with_snapshot(|session| Some((proposal(session)?, session.root().to_path_buf())))
+        .flatten()
+    else {
+        // Nothing to propose, and nothing to remember either: a project that needs no configure today may need one
+        // after an edit, and marking it "asked" would silence a question that was never asked.
+        return;
+    };
+
+    if configured_automatically {
+        log::info!(
+            "configuring {} without asking: cppls.configureCmake is `auto`",
+            root.display()
+        );
+        run_and_report(context, &proposal);
+        return;
+    }
+
+    // Recorded before the question is shown rather than after the answer: a client that never answers must not be
+    // asked again on every reload, and this record is what says so.
+    context.workspace_manager().lock().await.note_configure_offered();
+
+    let params = lsp_types::ShowMessageRequestParams {
+        typ: lsp_types::MessageType::INFO,
+        message: offer_a_configure(&proposal),
+        actions: Some(
+            [
+                Consent::RUN,
+                Consent::RUN_AND_DO_NOT_ASK,
+                Consent::NOT_NOW,
+            ]
+            .into_iter()
+            .map(|title| lsp_types::MessageActionItem {
+                title: title.to_string(),
+                properties: Default::default(),
+            })
+            .collect(),
+        ),
+    };
+    let Some(answer) = context
+        .client()
+        .show_message_request(params, time_cancel_token(Duration::from_secs(120)))
+        .await
+    else {
+        log::info!("the offer to configure {} was dismissed", root.display());
+        return;
+    };
+
+    let consent = Consent::from_title(&answer.title);
+    log::info!(
+        "the offer to configure {} was answered {consent:?}",
+        root.display()
+    );
+    if consent.runs_it() {
+        run_and_report(context, &proposal);
+    }
+}
+
+/// Run a proposal and report it, on the analysis's blocking pool: reading the cache goes through the session's
+/// providers and a configure takes as long as it takes, so neither may hold the message loop.
+///
+/// Spawned rather than awaited, because its caller is the startup sequence and a configure that takes a minute must
+/// not be a minute of `initialized` not returning.
+fn run_and_report(context: &ServerContextSnapshot, proposal: &ConfigureCommand) {
+    let context_for_work = context.clone();
+    let proposal = proposal.clone();
+    tokio::task::spawn(async move {
+        // Two handles for one context: the closure needs one to wake the analysis after a database appears, and the
+        // message afterwards needs one. Cloning rather than sharing the borrow, because the closure is `'static`.
+        let context_for_message = context_for_work.clone();
+        let context_for_waking = context_for_work.clone();
+        let report = context_for_work
+            .analysis()
+            .run_blocking(move |session| {
+                Some(run_a_proposal(&context_for_waking, session, proposal))
+            })
+            .await;
+        let Some(report) = report else {
+            return;
+        };
+        context_for_message
+            .client()
+            .show_message(lsp_types::ShowMessageParams {
+                typ: if report.started {
+                    lsp_types::MessageType::INFO
+                } else {
+                    lsp_types::MessageType::WARNING
+                },
+                message: report.message,
+            });
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,5 +523,30 @@ mod tests {
         // Both say a cache was read and the database is one flag away, which is the useful part of the message.
         assert!(reason_to_mention(&ConfigureReason::TheCacheSaysOff).is_some());
         assert!(reason_to_mention(&ConfigureReason::NoDatabaseWasWritten).is_some());
+    }
+
+    #[test]
+    fn each_button_reads_back_as_the_answer_it_names() {
+        // The titles are the contract with the client: a client returns the *title* of the button that was pressed,
+        // so the reading and the offering cannot be allowed to drift apart.
+        assert_eq!(Consent::from_title(Consent::RUN), Consent::Run);
+        assert_eq!(
+            Consent::from_title(Consent::RUN_AND_DO_NOT_ASK),
+            Consent::RunAndDoNotAsk
+        );
+        assert_eq!(Consent::from_title(Consent::NOT_NOW), Consent::NotNow);
+    }
+
+    #[test]
+    fn a_dismissed_question_is_not_a_yes() {
+        // A client that shows a close box answers `null`, and a client that answers something unrecognised is a
+        // client whose answer this server does not understand. Neither may be read as consent to run a build script,
+        // which is the whole reason the two are matched by name rather than by position.
+        assert_eq!(Consent::from_title("something else"), Consent::Dismissed);
+        assert_eq!(Consent::from_title(""), Consent::Dismissed);
+        assert!(!Consent::Dismissed.runs_it());
+        assert!(!Consent::NotNow.runs_it());
+        assert!(Consent::Run.runs_it());
+        assert!(Consent::RunAndDoNotAsk.runs_it());
     }
 }

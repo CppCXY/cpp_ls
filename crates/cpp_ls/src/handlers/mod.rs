@@ -26,6 +26,7 @@ mod definition;
 mod diagnostic;
 mod document_symbol;
 mod execute_command;
+pub use execute_command::offer_configure;
 mod folding_range;
 mod hover;
 mod inlay_hint;

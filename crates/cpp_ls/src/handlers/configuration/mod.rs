@@ -72,6 +72,9 @@ mod tests {
         let one = crate::handlers::ClientConfig {
             client_id: ClientId::Other,
             exclude: vec!["**/build/**".to_string()],
+            // The rest by default, which is what `..` is for here: this test is about the comparison covering every
+            // field, so a field added later is included the day it is added rather than needing an edit here.
+            ..Default::default()
         };
         let other = one.clone();
         assert_eq!(one, other);
