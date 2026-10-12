@@ -141,6 +141,34 @@ definition out of its parent is therefore a change to how the scope builder sees
 project, and the suite that would catch a mistake is the corpus that must stay at zero false
 positives.
 
+### 试过并**回退**的一次(边界外移),以及它量出来的东西
+
+做法:在类体之前关闭 `DeclSpecifierSeq`、之后重开,让定义成为兄弟。**不成立**,实测:
+
+```text
+LOOP token StructKeyword text "struct" specifiers 0
+LOOP token IntKeyword    text "int"    specifiers 0     <- 类体内部,内层循环
+LOOP token Identifier    text "n"      specifiers 1     <- 内层成员声明
+LOOP token Identifier    text "n"      specifiers 0
+LOOP token Semicolon     text ";"      specifiers 1     <- 内层的 `;`
+LOOP token Semicolon     text ";"      specifiers 1
+errors: 1
+```
+
+**`specifiers` 是外层循环的局部变量,而类体里的声明解析会重入同一个函数。** 边界外移后,
+内层成员把外层的 `specifiers` 推到了 1,于是外层遇到 `;` 时 `if specifiers == 0 { break }`
+不再成立,错误被 `return Err` 出去,整个声明失败:
+
+```text
+struct S { int n; };   ->  expected a type specifier at ";"
+struct String;         ->  expected a type specifier at ";"
+enum E { A };          ->  expected a type specifier at ";"
+```
+
+所以**真正的障碍不是"节点归属",而是这个函数不可重入** —— 内层解析会改外层的状态。
+读代码看不出这一点:两次"看代码推断"都指向"在 mark 上做文章就够了",
+而打印出来的计数器说明不是。要改边界,先要让每次调用拥有自己的状态。
+
 For (3), the fix is the access-specifier pattern applied where it matters: close the node before its
 trailing trivia, for the nodes whose span is read as *text* — the specifier sequence and the type
 nodes — rather than everywhere.
