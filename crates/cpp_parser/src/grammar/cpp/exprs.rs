@@ -1814,20 +1814,46 @@ fn parse_postfix_suffixes(
                         }
                     }
                 } else if p.current_token() == CppTokenKind::Tilde {
-                    // A **pseudo-destructor call**: `p->~T()`, `x.~basic_string()`. `~name` is how a destructor is
-                    // spelled, in an expression as much as in a declaration, and what follows the name may be
-                    // qualified or a template-id (`x.~A<T>()`) — so the name is read by the expression's own name
-                    // reader, which already knows all three spellings.
+                    // A **pseudo-destructor call**: `p->~T()`, `x.~basic_string()`, `x.~int()`.
+                    //
+                    // `~name` is how a destructor is spelled, in an expression as much as in a declaration, and what
+                    // follows may be a name, a qualified name, a template-id — or, the case that was missing, a
+                    // **builtin type**. The standard's rule is that after `~` stands a `type-name`, and `int` is one
+                    // while being no identifier at all. Measured before this: `x.~int()` stopped at the `int` with
+                    // `expected ';' after expression`, while `x.~T()` and `x.~S()` parsed — the branch below accepted
+                    // only `Identifier | Scope`, so it matched nothing, left an empty `NameExpr` behind, and the
+                    // statement layer then had a `~` with no name.
                     p.bump(); // `~`
                     if p.current_token() == CppTokenKind::Identifier
                         || p.current_token() == CppTokenKind::Scope
+                        || starter_of_a_builtin_type(p.current_token())
                     {
                         let name = p.mark(CppSyntaxKind::NameExpr);
                         if p.current_token() == CppTokenKind::Scope {
                             p.bump();
                         }
+                        // **A builtin type is the whole name.** `~unsigned` is one type-name and not a name with
+                        // something after it, so there is nothing for the loop below to walk — taking its token and
+                        // completing is the same shape the identifier path ends in.
+                        if starter_of_a_builtin_type(p.current_token()) {
+                            p.bump();
+                            name.complete(p);
+                            continue;
+                        }
                         while p.current_token() == CppTokenKind::Identifier {
                             p.bump();
+                            // **The name's template arguments**, the same `<` ambiguity the identifier branch above
+                            // resolves the same way: read them and keep them only if what follows can follow a
+                            // template-id. Without this the `<` of `x.~A<int>()` was left standing, the expression
+                            // rule read it as a comparison, and `int` became an operand with no primary expression —
+                            // measured, `expected primary expression` at the `int`.
+                            if super::types::could_start_template_arguments(p) {
+                                let before_the_arguments = p.checkpoint();
+                                let read = super::types::parse_template_argument_list(p);
+                                if read.is_err() || starts_an_operand(p, 0) {
+                                    p.rollback(before_the_arguments);
+                                }
+                            }
                             if p.current_token() == CppTokenKind::Scope {
                                 p.bump();
                                 continue;
@@ -2744,6 +2770,25 @@ fn starts_a_requires_expression(p: &CppParser) -> bool {
 }
 
 /// Parse a requires-expression: `requires (params) { requirement... }`.
+fn starter_of_a_builtin_type(kind: CppTokenKind) -> bool {
+    matches!(
+        kind,
+        // `bool` is a `BoolLiteral` in this lexer rather than a keyword of its own — measured, the keyword table says
+        // `"bool" => CppTokenKind::BoolLiteral` — so the type and the literal share a kind and both belong here.
+        CppTokenKind::BoolLiteral
+            | CppTokenKind::CharKeyword
+            | CppTokenKind::ShortKeyword
+            | CppTokenKind::IntKeyword
+            | CppTokenKind::LongKeyword
+            | CppTokenKind::SignedKeyword
+            | CppTokenKind::UnsignedKeyword
+            | CppTokenKind::FloatKeyword
+            | CppTokenKind::DoubleKeyword
+            | CppTokenKind::VoidKeyword
+            | CppTokenKind::DecltypeKeyword
+    )
+}
+
 fn parse_requires_expression(p: &mut CppParser) -> ParseResult {
     let base = p.open_marks();
     let m = p.mark(CppSyntaxKind::RequiresExpr);

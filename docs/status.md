@@ -142,14 +142,30 @@ int f(int op) { return 0; }
 下一步：`build_facts` 里产生这条事实的路径 —— 它的 `local` 来自形参的 binding，而
 "局部"这个判断对形参不成立。
 
-### ⑨ 伪析构调用 `x.~int()` 解析失败
+### ⑨ 伪析构调用 `x.~int()` 解析失败 —— **已修**
 
 ```cpp
 void f(int& x) { x.~int(); }   // 合法 C++（Pseudo-destructor call）
 ```
-报 `expected ';' after expression`，位置在 `int`。`x.~T()`（模板参数）与 `x.~S()`
-（类类型）都正常，只有**标量类型的伪析构**失败。标准里的规则是：`~` 后面可以是一个
-`type-name`，而 `int` 是 builtin type 不是标识符，所以按"标识符"读就断了。
+曾报 `expected ';' after expression`，位置在 `int`。**两个**独立的缺口：
+
+```text
+一、`~` 之后只接受 Identifier | Scope
+    而标准允许一个 type-name，`int` 是 builtin type 不是标识符
+    → 分支匹配不到，留下一个空的 NameExpr
+    修法：starter_of_a_builtin_type(那一串关键字；`bool` 在本词法器里是
+          BoolLiteral，所以类型和字面量共用一个 kind)
+
+二、`~A<int>` 的模板实参完全没被读过
+    `<` 于是被表达式规则当成比较，`int` 成了没有 primary expression 的操作数
+    → 报 "expected primary expression"
+    修法：照同一分支上面的写法，用 could_start_template_arguments +
+          parse_template_argument_list，失败就回滚
+```
+
+现在 `x.~int()` / `x.~char()` / `x.~unsigned()` / `x.~double()` / `x.~bool()` /
+`x.~decltype(a)()` / `x.~T()` / `x.~S()` / `x.~A<int>()` / `x.~Outer::Inner()` /
+`x.~A<int>::B()` / `p->~T()` 全部零错误，而 `a.b < c > d`（比较）仍然零错误。
 
 ```
 
