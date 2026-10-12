@@ -141,33 +141,49 @@ definition out of its parent is therefore a change to how the scope builder sees
 project, and the suite that would catch a mistake is the corpus that must stay at zero false
 positives.
 
-### 试过并**回退**的一次(边界外移),以及它量出来的东西
+### 试过并**回退**的两次,以及它们量出来的东西
 
-做法:在类体之前关闭 `DeclSpecifierSeq`、之后重开,让定义成为兄弟。**不成立**,实测:
-
-```text
-LOOP token StructKeyword text "struct" specifiers 0
-LOOP token IntKeyword    text "int"    specifiers 0     <- 类体内部,内层循环
-LOOP token Identifier    text "n"      specifiers 1     <- 内层成员声明
-LOOP token Identifier    text "n"      specifiers 0
-LOOP token Semicolon     text ";"      specifiers 1     <- 内层的 `;`
-LOOP token Semicolon     text ";"      specifiers 1
-errors: 1
-```
-
-**`specifiers` 是外层循环的局部变量,而类体里的声明解析会重入同一个函数。** 边界外移后,
-内层成员把外层的 `specifiers` 推到了 1,于是外层遇到 `;` 时 `if specifiers == 0 { break }`
-不再成立,错误被 `return Err` 出去,整个声明失败:
+**第一次(边界外移,计数器没跟着走)。** 在类体之前关闭 `DeclSpecifierSeq`、之后重开。
+实测:
 
 ```text
-struct S { int n; };   ->  expected a type specifier at ";"
-struct String;         ->  expected a type specifier at ";"
-enum E { A };          ->  expected a type specifier at ";"
+LOOP enter call=0x…f08 specifiers=0 token=StructKeyword text="struct"
+LOOP enter call=0x…9a8 specifiers=0 token=IntKeyword    text="int"      <- 类体内部
+LOOP enter call=0x…9a8 specifiers=1 token=Identifier    text="n"
+LOOP err   specifiers=1 -> expected a declarator name
+LOOP enter call=0x…9a8 specifiers=0 token=Identifier    text="n"
+LOOP enter call=0x…9a8 specifiers=1 token=Semicolon     text=";"        <- 内层的 `;`
+LOOP err   specifiers=1 -> expected a type specifier
+LOOP reopened at specifiers=0
+LOOP enter call=0x…f08 specifiers=1 token=Semicolon     text=";"        <- 外层 +1 了
+LOOP err   specifiers=1 -> expected a type specifier
+TOTAL errors: 1
 ```
 
-所以**真正的障碍不是"节点归属",而是这个函数不可重入** —— 内层解析会改外层的状态。
-读代码看不出这一点:两次"看代码推断"都指向"在 mark 上做文章就够了",
-而打印出来的计数器说明不是。要改边界,先要让每次调用拥有自己的状态。
+根因**不是**重入:每次调用有自己的 `specifiers`。是**外层循环在重开之后仍然执行了
+`specifiers += 1`**,于是外层的 `;` 看到 1,`if specifiers == 0 { break }` 不成立,
+错误被返回而不是结束序列。改成重开后 `continue`(那个 specifier 已经在刚关闭的序列里记过了),
+外层就正确地在 `;` 处 break。
+
+**第二次(计数器修对之后,树更糟)。** 同一个探针:
+
+```text
+struct S { int n; };       ->  expected a type specifier at ";"   TranslationUnit > ErrorNode "}" / EmptyStat ";"
+struct S { int n; } s;     ->  expected a declarator name at "s"  ErrorNode "} " / ExpressionStat "s;"
+struct { int a; } x;       ->  expected a declarator name at "x"  同上
+template <class T> struct V { T x; };  -> ErrorNode "}" / EmptyStat ";"
+struct String;             ->  expected a type specifier at ";"
+```
+
+**整个声明塌成了 `ErrorNode` + `EmptyStat`** —— 类定义没有被认成声明的一部分。
+也就是说:**声明解析器依赖那个 `StructDef` 在 `DeclSpecifierSeq` 里面。** 只知道"定义应该
+是兄弟"是不够的:声明那一侧必须同时学会在 specifier 序列**之外**接住一个类定义
+(`struct S { … } s;` 的 `s` 就是第一个证据 —— 它现在被读成了表达式语句 `s;`)。
+
+结论:**这不是"把节点挪出去"的问题,是声明解析器与 specifier 序列之间的分工要一起改。**
+两步都回退了,没有留下半成品。下一步应该先查 `parse_declaration` 是从哪里、
+以什么为界找那个 `StructDef` 的,而不是继续动 specifier 序列。
+
 
 For (3), the fix is the access-specifier pattern applied where it matters: close the node before its
 trailing trivia, for the nodes whose span is read as *text* — the specifier sequence and the type
