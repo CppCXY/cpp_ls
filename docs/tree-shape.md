@@ -318,6 +318,69 @@ Declaration > StructDef "struct S { int n; }"
 **三次尝试的共同教训**(值得写下来):三次都是**在解析完成之后再调整节点归属**,
 而事件流是只追加的,事后调整只能"包住后面",包不住前面。**正确的层次是前瞻 + 提前开节点。**
 
+================================================================================
+4d. 第四次尝试:前瞻 + 提前开节点 —— 树做对了,但 `DeclSpecifierSeq` 仍在内层
+================================================================================
+
+按 4c 的结论做:在 `parse_decl_specifier_seq` **之前**前瞻(`is_class_like_keyword` +
+`a_body_follows_the_class_head`),开一个 `CppSyntaxKind::Definition` 占位节点,读完 specifier
+后用 `Marker::set_kind` 改成真实 kind(`class_like_definition_kind` 从 specifier 自己产生的节点读)。
+
+**这一步成立了** —— 树第一次出现正确的包装次序:
+
+```text
+struct S { int n; };     0 errors
+  Declaration > StructDef "struct S { int n; };"      <- 包装在最外,提前开的
+                  DeclSpecifierSeq "struct S { int n; }"
+struct S { int n; } s;
+  Declaration > StructDef "struct S { int n; } s;"
+                  DeclSpecifierSeq "struct S { int n; } "
+                  InitDeclarator "s"                   <- `s` 是 declarator
+```
+
+`EnumDef` / `UnionDef` 也一样被正确命名(占位 kind 换名生效)。
+
+**但 `DeclSpecifierSeq` 仍然覆盖整个定义** —— 因为 `parse_class_like_head` 在**序列内部**读 body,
+而它是序列的子节点,所以序列的 span 必然包含它。要修就得让 specifier 不读 body
+(`read_the_body: false`)并把 body 交给声明读进那个外层包装 —— 那正是 4c 里做过的第三步,
+而它在"序列先于包装关闭"的前提下不成立,现在前提反过来了,理论上可行。
+
+**这一步没有继续做**:它需要同时改动 specifier 的返回值、序列循环的 `specifiers` 计数、
+以及声明侧的 body 分支,而每次改动都要重跑 46 个套件。**已回退**,没有留下半成品。
+
+================================================================================
+4e. 与此同时修掉的一半:类型事实的 range 把尾随 trivia 也算进去了
+================================================================================
+
+查 ① 的过程里查清了实测里那个"范围过大"的**另一个**来源,它独立于 `DeclSpecifierSeq`:
+
+```text
+struct String;       Type "String" range = "struct String;\n"     <- 含换行
+struct S { int n; }  Type "S"      range = "struct S { int n; }"
+```
+
+第一个是错的,第二个是对的。原因在 `sema/scopes.rs` 的 `bind`:它用
+`cpp_parser::source_range(node.text_range())` 作为 binding 的 `range`,而**节点会吸收尾随
+trivia**(见第 3 节,那是有文档的行为),所以 `struct String;` 的 span 一直延伸到换行之后。
+
+修法:新增 `without_trailing_trivia(node)`,从节点最后一个 token 往回走、吃掉 trivia
+(注释也是 trivia,所以 `struct S { int n; };  // done` 的注释同样不再算进去)。
+**不**改成"只用名字的 range":`DeclFact::range` 的文档是 *"the whole declaration, for a
+go-to-definition highlight"*,那是调用者要的答案,只是不该含 trivia。
+
+修完实测:
+
+```text
+struct String;                    -> "struct String;"
+struct S { int n; };              -> "struct S { int n; }"
+struct S { int n; };  // done     -> "struct S { int n; }"     (注释被排除)
+int x;                            -> "x"
+int f() { return 1; }             -> "f() "
+```
+
+`cpp_parser` 89 + `cpp_code_analysis` 595 lib + 24 套件全绿。
+
+
 
 
 

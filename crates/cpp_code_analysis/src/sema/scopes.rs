@@ -1534,13 +1534,65 @@ impl ScopeWalker<'_> {
             Binding {
                 name,
                 kind,
-                range: cpp_parser::source_range(node.text_range()),
+                // **The declaration, without the trivia written after it.**
+                //
+                // A node absorbs the whitespace that follows its last token — see the grammar's note on
+                // `parse_access_specifier` for why that is usually what you want — so `node.text_range()` for
+                // `struct String;` runs through the newline, and the field stops being "the whole declaration" and
+                // becomes "the declaration and whatever was written after it". Measured from a fact:
+                //
+                // ```text
+                //   struct String;       Type "String" range 0..15 = "struct String;\n"
+                //   struct S { int n; }  Type "S"      range 0..19 = "struct S { int n; }"
+                // ```
+                //
+                // The second is right; the first included a newline that belongs to the file. Trimmed here rather
+                // than narrowed to the name, because [`crate::DeclFact::range`] is documented as *"the whole
+                // declaration, for a go-to-definition highlight"* — that is the answer callers want, minus the trivia.
+                range: without_trailing_trivia(node),
                 name_range,
                 scope,
                 origin: None,
             },
         );
     }
+}
+
+/// **A node's span, backed up over the trivia it absorbed** — see the note where this is called.
+///
+/// Walks the node's *last* tokens backwards while they are trivia, which is at most the whitespace and comments the
+/// tree builder attached after the final real token. A node whose every token is trivia keeps its own span, since
+/// there is then nothing to trim to.
+fn without_trailing_trivia(node: &CppSyntaxNode) -> cpp_parser::SourceRange {
+    let range = cpp_parser::source_range(node.text_range());
+    let mut end = range.end_offset();
+    for element in node.children_with_tokens().collect::<Vec<_>>().into_iter().rev() {
+        // A **node** is trivia only if everything in it is; the case that matters is a comment, which is a leaf, and
+        // anything holding a real token is part of the declaration. `rowan` is not a dependency of this crate, so the
+        // two are told apart by asking for the token — the idiom the walks above use.
+        let (starts, trivia) = match element.clone().into_token() {
+            Some(token) => (
+                cpp_parser::source_range(token.text_range()).start_offset,
+                cpp_parser::is_trivia(cpp_parser::CppTokenKind::from(token.kind())),
+            ),
+            None => {
+                let node = element.into_node().expect("a node-or-token is one of the two");
+                (
+                    cpp_parser::source_range(node.text_range()).start_offset,
+                    node.descendants_with_tokens()
+                        .all(|inner| cpp_parser::is_trivia(cpp_parser::CppTokenKind::from(inner.kind()))),
+                )
+            }
+        };
+        if !trivia {
+            break;
+        }
+        end = starts;
+    }
+    cpp_parser::SourceRange::new(
+        range.start_offset,
+        end.max(range.start_offset) - range.start_offset,
+    )
 }
 
 /// Where the name of a class-like declaration was written.
