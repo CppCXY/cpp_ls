@@ -379,6 +379,31 @@ pub enum CppSyntaxKind {
     /// e.g.: std::vector<int>, MyTemplate<T>
     TemplateType,
 
+    /// **A named type that is not a template instantiation** — a class, alias or typedef written as a name.
+    ///
+    /// e.g.: `String` in `struct String;`, `Widget` in `Widget w;`, `std::string` in `std::string s;`
+    ///
+    /// # Why this exists rather than a bare `NameExpr`
+    ///
+    /// [`CppDeclSpecifierSeq::get_type_name`] used to say *"a plain name is a `NameExpr` child, while a template-id
+    /// is wrapped in a `TemplateType`"* — and the implementation wrapped **both**, which is why `String` in
+    /// `struct String;` read as a template instantiation with no `<` anywhere.
+    ///
+    /// Unwrapping the plain case is not enough, and the tests say why: `TemplateType`'s presence is **load-bearing
+    /// inside the parser**, not only for readers. `parse_decl_specifier_seq_with` asks
+    /// `events_contain_any(specifiers_from, &[TemplateType])` to answer *"has a type name been written yet?"* — the
+    /// question that decides whether the second name in
+    /// `extern "C++" __PURE_APPDOMAIN_GLOBAL _CRTDATA2_IMPORT istream cin;` joins the type or declares `cin`. A
+    /// version that removed the wrapper for plain names failed
+    /// `the_last_name_in_a_specifier_sequence_is_the_type`, `a_forward_declaration_declares_the_name`,
+    /// `a_member_whose_type_is_preceded_by_macros_is_named_by_its_declarator` and
+    /// `a_word_in_a_body_that_expands_to_nothing_does_not_stop_the_reading` — four contracts, all from one node
+    /// kind no longer being there.
+    ///
+    /// So the name still gets a node of its own, and that node says what it is instead of overstating it. Every
+    /// place that asked for `TemplateType` to mean "a type name was written" now asks for both.
+    NamedType,
+
     /// auto type (C++11)
     /// e.g.: auto x = 5;
     AutoType,

@@ -1224,7 +1224,7 @@ fn parse_decl_specifier_seq_with(
         // above `a_further_name_may_join` in [`name_joins_the_type`]), and `MY_API Widget *p` still joins
         // `Widget` — an ordinary name — through the second condition.
         let a_further_name_may_join = allow_second_name
-            && (p.events_contain_any(specifiers_from, &[CppSyntaxKind::TemplateType])
+            && (p.events_contain_any(specifiers_from, &[CppSyntaxKind::TemplateType, CppSyntaxKind::NamedType])
                 || (has_type_specifier && written_like_a_macro(p.current_token_text())));
         // …and the same question one context along, where there is **no declarator at all**: a **type-id**.
         //
@@ -1799,10 +1799,39 @@ fn parse_one_decl_specifier_inner(
             // be recorded under the name a *lookup* would use: `std::string` is the type `string`, qualified.
             p.note_declaration_type_name(super::decls::type_name_at(p, type_start));
 
-            let m = p.mark(CppSyntaxKind::TemplateType);
+            // **A plain name is a `NamedType`; a template-id is a `TemplateType`.**
+            //
+            // This is what `CppDeclSpecifierSeq::get_type_name`'s own note describes — *"a plain name is a `NameExpr`
+            // child, while a template-id (`std::vector<int>`) is wrapped in a `TemplateType` node with the `NameExpr`
+            // inside it"* — and the implementation wrapped **both** in `TemplateType`. That is why `String` in
+            // `struct String;` came out as a template instantiation with no `<` anywhere: measured from the tree the
+            // report started with,
+            //
+            // ```text
+            //   struct String;
+            //     DeclSpecifierSeq > BuiltinType "struct " > TemplateType "String" > NameExpr "String"
+            // ```
+            //
+            // The kind was answering "is this a template instantiation?" with *yes* for every named type in a
+            // specifier sequence — a claim a reader matching on kind would believe, and one `status.md` §5 records
+            // the cost of four times over.
+            //
+            // **A name still gets a node**, and that is not a detail: leaving it a bare `NameExpr` failed four tests
+            // at once, because the parser itself asks whether a *type name* has been written by looking for
+            // [`CppSyntaxKind::TemplateType`] among the events — see `a_further_name_may_join`. So the plain case gets
+            // [`CppSyntaxKind::NamedType`], and the two questions stay separate: "is a type named here" and "is it a
+            // template-id".
+            //
+            // Which of the two it is comes from what `parse_name` produced, not from looking ahead: it consumes the
+            // `<…>` when there is one.
+            let events_before = p.current_event_count();
+            let mut m = p.mark(CppSyntaxKind::TemplateType);
             if let Err(err) = parse_name(p) {
                 p.close_marks_above(base);
                 return Err(err);
+            }
+            if !p.events_contain_any(events_before, &[CppSyntaxKind::TemplateArgumentList]) {
+                m.set_kind(p, CppSyntaxKind::NamedType);
             }
             return Ok(m.complete(p));
         }

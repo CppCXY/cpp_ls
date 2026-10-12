@@ -2035,6 +2035,7 @@ fn name_node_along_declarator(node: &CppSyntaxNode) -> Option<CppSyntaxNode> {
         | CppSyntaxKind::TemplateParameter
         | CppSyntaxKind::TypenameType
         | CppSyntaxKind::TemplateType
+        | CppSyntaxKind::NamedType
         | CppSyntaxKind::QualifiedType
         | CppSyntaxKind::PointerType
         | CppSyntaxKind::ReferenceType
@@ -2181,9 +2182,14 @@ fn elaborated_type_name(node: &CppSyntaxNode) -> Option<(Name, cpp_parser::Sourc
         return None;
     }
 
-    let name_node = specifiers
-        .children()
-        .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TemplateType)?;
+    // Either wrapper: this reader wants the name a type was written with, and whether it carried template
+    // arguments is a different question — see [`CppSyntaxKind::NamedType`] for why there are two kinds.
+    let name_node = specifiers.children().find(|child| {
+        matches!(
+            CppSyntaxKind::from(child.kind()),
+            CppSyntaxKind::TemplateType | CppSyntaxKind::NamedType
+        )
+    })?;
 
     let token = first_identifier_in_name(&name_node)?;
     let name = name_from_text(token.text(), node)?;

@@ -1222,8 +1222,12 @@ pub(crate) fn read_specifiers(specifiers: &CppSyntaxNode) -> Type {
                     builtin.push(word);
                 }
             }
-            // A name: `Widget`, `std::vector<int>`, `T`, and the dependent form `typename T::value_type`.
-            CppSyntaxKind::TemplateType | CppSyntaxKind::TypenameType | CppSyntaxKind::QualifiedType => {
+            // A name: `Widget`, `std::vector<int>`, `T`, and the dependent form `typename T::value_type`. A plain
+            // name is a `NamedType` and a template-id a `TemplateType` — see [`CppSyntaxKind::NamedType`].
+            CppSyntaxKind::NamedType
+            | CppSyntaxKind::TemplateType
+            | CppSyntaxKind::TypenameType
+            | CppSyntaxKind::QualifiedType => {
                 if let Some(found) = read_named(&node) {
                     named = Some(found);
                 }
@@ -1395,7 +1399,9 @@ fn read_argument(node: &CppSyntaxNode) -> Type {
         };
 
         match CppSyntaxKind::from(inner.kind()) {
-            CppSyntaxKind::TemplateType => {
+            // Both wrappers: a written type name is what this arm is for, and a plain name is a `NamedType` while a
+            // template-id is a `TemplateType`.
+            CppSyntaxKind::TemplateType | CppSyntaxKind::NamedType => {
                 if let Some(found) = read_named(&inner) {
                     return found;
                 }

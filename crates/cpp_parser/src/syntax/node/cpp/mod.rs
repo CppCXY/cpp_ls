@@ -316,19 +316,20 @@ impl CppDeclSpecifierSeq {
 
     /// The user-written type name, if the type is a name (`Foo`, `std::vector<int>`).
     ///
-    /// Two spellings reach here: a plain name is a `NameExpr` child, while a template-id
-    /// (`std::vector<int>`) is wrapped in a `TemplateType` node with the `NameExpr` inside it. Both
-    /// are "the name the user wrote", so both are accepted.
+    /// Two spellings reach here: a **plain** name is a `NameExpr` child, while a **template-id**
+    /// (`std::vector<int>`) is wrapped — in a `NamedType` when it is a plain name and a `TemplateType` when it
+    /// carries template arguments. Both are "the name the user wrote", so both are accepted, and the wrapper is
+    /// read for either kind: this reader's question is the name, not whether the type was a template-id.
     pub fn get_type_name(&self) -> Option<CppNameExpr> {
         if let Some(name) = self.child::<CppNameExpr>() {
             return Some(name);
         }
 
-        let template = crate::syntax::node::traits::first_child_of_kind(
+        let wrapped = crate::syntax::node::traits::first_child_of_kind(
             self.syntax(),
-            &[CppSyntaxKind::TemplateType],
+            &[CppSyntaxKind::TemplateType, CppSyntaxKind::NamedType],
         )?;
-        template.children().find_map(CppNameExpr::cast)
+        wrapped.children().find_map(CppNameExpr::cast)
     }
 
     /// The class-like definition this specifier sequence defines, if any.

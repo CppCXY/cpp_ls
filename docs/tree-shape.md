@@ -43,7 +43,7 @@ template *parameter* is filed as a `Type` whose range is `class T`. The first is
 a member cannot be attributed, and the second is spurious on its face.
 
 ================================================================================
-2. THE SYMPTOM: `TemplateType` for a name that has no template arguments
+2. THE SYMPTOM: `TemplateType` for a name that has no template arguments — **已修**
 ================================================================================
 
   struct String;
@@ -52,10 +52,50 @@ a member cannot be attributed, and the second is spurious on its face.
       TemplateType       "String"        <- no `<` anywhere
         NameExpr "String"
 
-`TemplateType` is what the parser produces for a comp-something type name, and a bare
-`struct String` is not one. It is downstream of (1) in the sense that the same specifier reader
-produces it, and it matters to anything matching on node kind — which is the trap `status.md` §5
-already records, and the reason its rule is to ask the typed AST.
+`TemplateType` is what the parser produced for **every** named type in a specifier sequence, so a bare
+`struct String` read as a template instantiation. The parser's own note on
+`CppDeclSpecifierSeq::get_type_name` described the right shape — *"a plain name is a `NameExpr` child, while a
+template-id (`std::vector<int>`) is wrapped in a `TemplateType`"* — and the implementation wrapped both.
+
+### 修法与它的两次失败
+
+**第一次尝试(错):** 去掉包装,让普通名做裸 `NameExpr`。四个测试当场否掉:
+
+```text
+the_last_name_in_a_specifier_sequence_is_the_type
+a_forward_declaration_declares_the_name
+a_member_whose_type_is_preceded_by_macros_is_named_by_its_declarator
+a_word_in_a_body_that_expands_to_nothing_does_not_stop_the_reading
+```
+
+**原因是量出来的,不是猜的:`TemplateType` 在解析器内部是承重的。**
+`parse_decl_specifier_seq_with` 用 `events_contain_any(specifiers_from, &[TemplateType])` 回答
+**"类型名写了没有"** —— 这个答案决定 MSVC 那行
+
+```cpp
+extern "C++" __PURE_APPDOMAIN_GLOBAL _CRTDATA2_IMPORT istream cin;
+```
+
+里第二个名字是并进类型还是声明 `cin`。拆掉节点 = 拆掉这个判据。
+
+**第二次(对):** 给"具名但非模板"自己的 kind —— `CppSyntaxKind::NamedType`,两个问题就分开了:
+
+```text
+"这里命名了一个类型吗"   → TemplateType | NamedType
+"它是模板 id 吗"         → TemplateType
+```
+
+七处读者随之接受两种 kind:`a_further_name_may_join`、`get_type_name`、`scopes.rs` 两处、
+`sema/types.rs` 两处、`sema/scopes.rs` 的 wrapper 匹配。修完:
+
+```text
+struct String;                DeclSpecifierSeq > BuiltinType "struct " > NamedType "String"
+std::vector<int> v;           DeclSpecifierSeq > TemplateType "std::vector<int>"
+Widget w;                     DeclSpecifierSeq > NamedType "Widget "
+```
+
+595 lib + 全部 24 个集成套件 + `cpp_parser` 89 全绿,四个曾被否掉的契约全部恢复。
+
 
 ================================================================================
 3. TRAILING TRIVIA, and why the fix is not "stop absorbing it"
