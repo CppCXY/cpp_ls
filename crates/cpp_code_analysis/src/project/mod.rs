@@ -34,12 +34,16 @@
 //! unresolved — rather than inventing a configuration that makes the numbers look better.
 
 pub mod build;
+pub mod cmake;
 pub mod config;
 pub mod discovery;
 
 pub use build::{
     CmakeCache, COMPILE_DATABASE_FILE, CMAKE_CACHE_FILE, Database, DatabaseOrigin, find_cmake_cache,
     find_database, parse_cmake_cache,
+};
+pub use cmake::{
+    CMAKE_SOURCE_FILE, ConfigureCommand, ConfigureReason, configure_command, run_configure,
 };
 pub use config::{
     CompileSection, ConfigProblem, ConfigReport, DiagnosticsSection, HoverSection, IndexSection,
