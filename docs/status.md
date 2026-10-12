@@ -95,18 +95,31 @@ cargo test --release --workspace                    全绿
    因此任何想借夹具模拟"类/函数来自头文件"的测试都必须先证明包含确实生效，
    否则测的是空气。tests/checks.rs 里有一条守卫测试专门守着这件事。
 
-⑤ 限定名定义把作用域读进了返回类型
-   `int S::value() { }` 的 missing-return 消息说 "declared to return `int S::value`"，
-   而返回类型是 `int`。原因：return_type_written_by 读的是 DeclSpecifierSeq 的**文本**，
-   而限定名定义把 `S::value` 也放进了那个序列。
-   修法：从序列里减掉名字本身（name_token_of 已经知道名字在哪），或改读节点而不是文本。
+⑤ 限定名定义把作用域读进了返回类型 —— **已修**
+   `int S::f() { }` 的消息曾写 "declared to return `int S::f`"，`const std::string& f()` 曾把
+   `std::` 当类型的一部分（`const std`）。现在 `function_head` **一次**读出 head 的三部分
+   （返回类型 / 名字 / 名字范围），所以它们不可能互相矛盾 —— 而这正是先前的问题：
+   `return_type_written_by` 和 `name_declared_by` 是同一个 span 的两个读者，各自错在不同处。
 
-⑥ operator 函数的名字范围越界
-   `int operator+(int other) { }` 被下划线到下一位（"int operator+(int other) { }\n}"）。
-   name_token_of 取形参表之前**最后一个 Identifier token**，而 `operator+` 的最后一个
-   Identifier 在形参表**里面**（`other`），于是截断失效、范围回退到整个定义。
-   修法：operator 的名字按 operator 规则读（`operator` 关键字 + 符号），
-   而不是"最后一个标识符"。
+   这条链上的每一处判据都是量出来的，不是选的：形参表用 `CppParamList::cast`（节点 kind 是
+   `ParameterList`，手写比较匹配不到）；名字在 `(` 之前最后一个标识符，`operator` 不是标识符，
+   `~` 属于名字；head 由 token **带源码间隔**重建（渲染删了空白，`int S::f` 的文本里
+   `int` 和 `S` 相邻，无法区分类型与名字的作用域）；以 `::` 结尾的 head 说明末尾是名字的作用域，
+   逐个剥掉（**循环**，因为命名空间会嵌套：`int a::b::c()`）。
+
+   三十二种拼写的答案见
+   `cargo run --release --example ctor_probe -p cpp_code_analysis` —— **改动这个区域前先跑它**。
+
+⑥ operator 函数的名字范围越界 —— **已修**
+   `int operator+(int other) { }` 曾下划线到下一位。根因是"名字是形参表之前最后一个标识符"
+   对 operator 不成立（它不是标识符拼的，最后一个标识符在形参表**里面**）。现在按
+   `operator` 关键字读到 `(`。
+
+⑦ union 的析构函数在**无外层函数**时找不到定义
+   `union U { ~U() {} };` 在 namespace 作用域下 `is_a_function_definition` 不认（实测
+   ctor_probe 打印 "(no definition found)"）；而同一个 union 写在函数体里时是认的
+   （报告里 line 51 的形状就是这样，所以它已被 ⑤⑥ 修好）。
+   下一步：查这两种作用域下节点形状的差别。
 ```
 
 ## 五、写这一层时反复踩到的两类坑（值得继续防）
