@@ -246,8 +246,78 @@ struct String;             ->  expected a type specifier at ";"
 **为什么前两次失败在这里能解释清楚:** 两次都只动了 specifier 一侧(关掉 mark、
 重开后 `continue`),而 ①② 之后的那段代码仍然在等"specifier 序列自己吃掉了类定义"
 这个前提 —— 第 3 步没做,于是声明那一侧拿到的是一个光标停在 `;`、却没有任何节点
-代表类定义的序列。第一次的报错是计数器没跟着走(已量出),第二次的 `ErrorNode` 坍塌
-是第 3 步缺失的表现。
+代表类定义的序列。
+
+================================================================================
+4c. 第三次尝试:按 4b 的地图做,走通了两步,卡在第三步,已回退
+================================================================================
+
+这一次是照着图做的,不是猜的。做了 4b 列的第 1、2、3 步:
+
+```text
+1. parse_one_decl_specifier 的类定义分支不再调 parse_class_like_head(p, true),
+   改为 parse_class_like_head(p, false) —— 只读 head,把 body 留给声明
+2. parse_class_like_head 在 !read_the_body && 当前是 `{` 时提前返回
+3. parse_declaration_here 新增一个分支:take_class_body_belongs_to() 拿到那个类节点,
+   读 body,再 complete 它
+```
+
+**成功了一半,而且是可以量的:**
+
+```text
+struct S { int n; };     0 errors
+  Declaration > DeclSpecifierSeq "struct S { int n; }"
+                  StructDef "struct S "            <- 头!(原来整个定义都是它)
+                  ClassBody "{ int n; }"           <- body 和头是分开的节点
+
+struct S { int n; } s;   0 errors
+  Declaration > DeclSpecifierSeq
+                  StructDef "struct S "
+                  ClassBody "{ int n; } "
+                InitDeclarator "s"                 <- `s` 是 declarator 了!(原来是 ExpressionStat)
+```
+
+也就是说 4b 里第 3 步的判断是对的:`s` 确实回到了 init-declarator 循环。
+
+**但第一步没成:`DeclSpecifierSeq` 仍然覆盖一切,而且变成了两层。**
+
+```text
+struct S { int n; };
+  Declaration > DeclSpecifierSeq "struct S { int n; };"      <- 外层,还是全包
+                  StructDef "struct S "                       <- 我新开的那个
+                  DeclSpecifierSeq "{ int n; }"               <- 内层,重开的那个
+```
+
+原因是事件顺序,而且**这个顺序在现有 API 下解决不了**:
+
+```text
+DeclSpecifierSeq 的 NodeStart  在 StructDef 的 NodeStart **之前**
+→ 后关闭的节点包住先关闭的,所以我在类定义分支里"先关序列、后开定义",
+  得到的定义是开在序列**内部**的,而不是外面
+```
+
+要让它成立,`StructDef` 的 `NodeStart` 必须出现在 `DeclSpecifierSeq` 的**前面** ——
+也就是**在知道这是不是一个类定义之前**就要开好那个节点。事件只能追加,
+现有的 `precede` 是把节点塞进一个已完成节点**内部**(`CompleteMarker::precede`),
+方向正好相反;没有"在位置 i 插入一个 NodeStart"的 API。
+
+**所以真正的结论是:** 要拿到
+
+```text
+Declaration > StructDef "struct S { int n; }"
+                DeclSpecifierSeq "struct "      <- 只含 specifier
+                ClassBody "{ int n; }"
+```
+
+就必须在 `parse_decl_specifier_seq` **之前**判断"这是一个类定义",替它开好 `StructDef`。
+那要求 `parse_declaration_here` 有一个**前瞻**("类关键字 + 后面有 body"),而这个前瞻
+正是 `a_body_follows_the_class_head(p)` 已经在做的事 —— 它是可行的,只是要把它提到
+声明层,并且给"类定义"一个统一的包装节点(现在有 `StructDef`/`ClassDef`/`UnionDef`/
+`EnumDef` 四个 kind,前瞻时还不知道是哪个 —— 除非先用一个通用 kind 再 `set_kind`)。
+
+**三次尝试的共同教训**(值得写下来):三次都是**在解析完成之后再调整节点归属**,
+而事件流是只追加的,事后调整只能"包住后面",包不住前面。**正确的层次是前瞻 + 提前开节点。**
+
 
 
 
