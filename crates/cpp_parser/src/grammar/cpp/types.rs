@@ -2742,6 +2742,15 @@ fn parse_class_like_head(p: &mut CppParser) -> ParseResult {
     // `Widget w(1, 2);` never mentions `ns`.
     if let Some(name) = declared_name {
         p.declare_type_name(&name);
+        // **And what the class body being opened is called**, because a constructor's name *is* its class's name and
+        // nothing in the body says so: `Widget(int);` and `Other(int);` are the same three tokens. The body's own
+        // doc (see `parse_constructor_declaration`) records what was read without it — a member function whose
+        // return type was written in another branch of an `#if` was reached as an identifier followed by `(`, and a
+        // rule keyed on that shape renamed the member.
+        //
+        // Recorded here rather than at the body's `{`, because the name is known here and the body may be opened
+        // from a dozen places (a macro between the head and the brace is one of them).
+        p.note_class_head_name(&name);
     }
 
     // Attributes on the class head: `class C [[deprecated]] { ... }`. They may also be written before
@@ -6140,4 +6149,5 @@ pub(super) fn parse_an_implementation_keyword(p: &mut CppParser) -> CompleteMark
         }
     }
 }
+
 

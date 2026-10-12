@@ -322,6 +322,16 @@ pub struct CppParser<'a> {
     /// `for (auto &v: vec)` in a header's inline member was read as a bit-field of width `vec`, and a label
     /// (`again:`) was read as one too.
     open_bodies: Vec<BodyKind>,
+    /// **The name of each class body currently open**, innermost last — pushed and popped with
+    /// [CppParser::open_bodies], because a constructor's name *is* its class's name and nothing else can say so.
+    ///
+    /// A constructor cannot be recognised by its shape — \Widget(\ and \(\ are the same two tokens — and the
+    /// grammar's own doc records what the missing distinction cost: a member function whose return type was written
+    /// in another \#if\ branch was read as a constructor.
+    open_class_names: Vec<Box<str>>,
+    /// **The name the class head just declared**, waiting for its body to open — see
+    /// [`CppParser::note_class_head_name`] and [`CppParser::current_class_name`].
+    class_head_name: Option<Box<str>>,
     /// Did the specifier sequence just parsed finish a whole declaration, `;` and all?
     ///
     /// Exactly one specifier does: `friend`, whose payload *is* the declaration that follows it. The flag lets
@@ -471,6 +481,8 @@ impl<'a> CppParser<'a> {
             previous_declaration_type_name: None,
             declaration_type_is_qualified: false,
             open_bodies: Vec::new(),
+        open_class_names: Vec::new(),
+        class_head_name: None,
             declaration_ended_inside_specifiers: false,
             terminator_came_from_a_branch: false,
             open_conditionals: 0,
@@ -1311,6 +1323,12 @@ impl<'a> CppParser<'a> {
     /// than a guess.
     pub fn enter_class_body(&mut self) {
         self.open_bodies.push(BodyKind::Class);
+        // The declaration's own type name is the class being defined: \class Widget {\ noted \Widget\ while the
+        // specifiers were read. A body with no name in front of it — an anonymous struct, a lambda — pushes an empty
+        // name, which no constructor can match.
+
+        self.open_class_names
+            .push(self.class_head_name.take().unwrap_or_default());
     }
 
     /// Enter a **statement or declaration block** — a function body, a nested `{ … }`, an `extern "C" { … }`.
@@ -1386,6 +1404,7 @@ impl<'a> CppParser<'a> {
     /// Leave a class body.
     pub fn leave_class_body(&mut self) {
         self.open_bodies.pop();
+        self.open_class_names.pop();
     }
 
     /// Leave a statement or declaration block.
@@ -1412,6 +1431,23 @@ impl<'a> CppParser<'a> {
     /// The declaration's leading type name, when it has one.
     pub fn declaration_type_name(&self) -> Option<&str> {
         self.declaration_type_name.as_deref()
+    }
+
+    /// **The name of the class body the cursor is in**, when it is in one and that class has a name.
+    ///
+    /// What a constructor's name has to equal: \Widget(int);\ inside \class Widget\ is a constructor, and the same
+    /// two tokens inside \class Other\ are a member function whose return type was written somewhere the parser
+    /// could not see it (an \#if\ branch, a macro). Measured: without this the second shape was read as the first.
+    /// **Record the name a class head declared**, for the body that follows it.
+    pub fn note_class_head_name(&mut self, name: &str) {
+        self.class_head_name = Some(name.into());
+    }
+
+    pub fn current_class_name(&self) -> Option<&str> {
+        self.open_class_names
+            .last()
+            .map(|name| name.as_ref())
+            .filter(|name| !name.is_empty())
     }
 
     /// Has a name been recorded in type position for the declaration being parsed?
@@ -2143,3 +2179,7 @@ mod tests {
         assert_eq!(parser.current_token_index(), 0, "and so did the cursor");
     }
 }
+
+
+
+

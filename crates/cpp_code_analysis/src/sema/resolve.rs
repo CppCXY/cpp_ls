@@ -246,6 +246,24 @@ pub fn name_ending_before_an_operator(root: &CppSyntaxNode, offset: usize) -> Op
 
         let token = cpp_parser::token_at(root, at)?;
 
+        // **`this` is an object, and it is not a name.** The refusal below is right for `x + full.` — anything that is
+        // neither an operator nor trivia ends the walk — and wrong for the plainest member access there is:
+        // `this->` inside a member function stopped at the `this` token, so the object was lost and the completion
+        // answered `Unknown(UnparsableName)` instead of the class's members. Measured in
+        // `tests/completion.rs::a_member_function_defined_in_another_file_sees_its_class`.
+        //
+        // The node handed back is the keyword's own — `ThisExpr`, whose text is exactly `this` — because the object is
+        // read by its *spelling*: `type_of_expression` types `"this"` as the enclosing class, and a node holding the
+        // operator as well would spell something else.
+        if cpp_parser::CppTokenKind::from(token.kind()) == cpp_parser::CppTokenKind::ThisKeyword {
+            return token
+                .parent_ancestors()
+                .find(|node| {
+                    cpp_parser::CppSyntaxKind::from(node.kind()) == cpp_parser::CppSyntaxKind::ThisExpr
+                })
+                .or_else(|| token.parent_ancestors().next());
+        }
+
         // **The operator itself is stepped over**, because that is where the walk starts: the byte before the
         // operator is *inside* it, and what lies beyond is either trivia or the name being looked for.
         if matches!(token.text(), "." | "->") {

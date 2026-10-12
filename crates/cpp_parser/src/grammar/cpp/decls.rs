@@ -714,6 +714,47 @@ fn parse_declaration_here(p: &mut CppParser) -> ParseResult {
         // is `operator` can only be a conversion.
         CppTokenKind::OperatorKeyword => return parse_conversion_operator_declaration(p),
 
+        // A **constructor** — `Widget();`, `Widget(int size);`, `Widget(int) : base(1) {}`.
+        //
+        // The third declaration whose name is written first, and the one that cannot be recognised by its *first*
+        // token alone: the name is also the type, so the general rule below reads it as a specifier and then sees the
+        // `(` as the start of a declarator — a **nameless** function declarator. Measured, `Widget(int size);` inside
+        // a class body came out as
+        //
+        // ```text
+        //   Declaration
+        //     DeclSpecifierSeq > NamedType > NameExpr "Widget"   <- the name, read as the TYPE
+        //     InitDeclarator > Declarator > ParameterList        <- and a declarator with no name of its own
+        // ```
+        //
+        // so there was **no constructor declaration in the tree at all**. What that cost, measured: signature help
+        // offered nothing for `Widget(|)` — there was no declaration to render a parameter list from — and MSVC's
+        // `sprintf_s` arrived in the index as a `Variable` of type `_CSTD`, because the `extern "C"` block its header
+        // opens with a macro has exactly this shape and every declaration in it was read the same wrong way.
+        //
+        // Claimed only where it cannot be anything else: at a **class body's own member level**, at an identifier the
+        // declaration could only be naming, followed directly by `(`. The other shape that begins this way is a
+        // parameter list starting with `*` or `&` — `Widget (*fp)(int);` declares a member — and it is left to the
+        // general rule.
+        CppTokenKind::Identifier
+            if p.is_at_class_member_level()
+                // **The name has to be the class's own.** Shape alone cannot decide: `Widget(` and `f(` are the same
+                // two tokens, and the difference that matters is written in the *enclosing* declaration. The test
+                // that made this necessary is `a_split_member_head_may_name_its_type_in_the_else_branch`: a member
+                // function whose return type is written in the other branch of an `#if` reaches this point as an
+                // identifier followed by `(`, and reading it as a constructor renamed the member.
+                && p.current_class_name().is_some_and(|class| class == p.current_token_text())
+                && p.peek_next_token() == CppTokenKind::LeftParen
+                // A parameter list that starts with `*` or `&` belongs to the other shape that begins this way:
+                // `Widget (*fp)(int);` declares a member.
+                && !matches!(
+                    p.peek_token_kind_at(2..3).first(),
+                    Some(CppTokenKind::Star | CppTokenKind::Ampersand)
+                ) =>
+        {
+            return parse_constructor_declaration(p);
+        }
+
         // `export` heads a module declaration, an export block, or one exported declaration.
         CppTokenKind::ExportKeyword => {
             if p.peek_token_kind_at(1..2)[0] == CppTokenKind::LeftBrace {
@@ -4729,6 +4770,41 @@ fn parse_conversion_operator_declaration(p: &mut CppParser) -> ParseResult {
     })
 }
 
+/// Parse a **constructor** declaration: `Widget();`, `Widget(int size);`, `Widget(int) : base(1) {}`.
+///
+/// The third of the three declarations whose name begins the declaration, and the same shape as the other two: the
+/// **name** first (which here is also the type), then the declarator's function suffixes — the parameter list, the
+/// cv-qualifiers, the ref-qualifier. `parse_declarator` cannot be used for the name for the same reason the
+/// conversion operator gives: it would try to read a *declarator* at a token that is the name, and there is no type
+/// in front of it for a declarator to follow.
+///
+/// What this exists to fix is measured in the dispatch that calls it: a constructor used to be read as a declaration
+/// of a nameless declarator, so the tree held no constructor at all.
+fn parse_constructor_declaration(p: &mut CppParser) -> ParseResult {
+    parse_declaration_starting_at_a_name(p, |p| {
+        let name = p.mark(CppSyntaxKind::Declarator);
+        if let Err(err) = parse_name(p) {
+            name.undo(p);
+            return Err(err);
+        }
+        // **The suffixes are completed *inside* the declarator**, which is what makes the node the same shape a
+        // destructor's is — `Declarator > NameExpr + ParameterList`. Completing it before them left the parameter
+        // list as the declarator's *sibling*, and `parameter_list_of` (token → innermost `Declarator` → its
+        // `ParameterList` child) then answered `None` for every constructor. Measured: `SOURCE at 23: None`, with the
+        // constructor's own name at 23.
+        let declarator = super::types::parse_declarator_function_suffixes(p, p.current_event_count());
+        name.complete(p);
+
+        // **A member-initializer list belongs to the constructor**, and nothing else may see a `:` here: it comes
+        // between the parameter list and the body (`Widget(int size) : size_(size) {}`), which is a position no other
+        // declaration has. Read after the suffixes and before the body, which is where the language puts it.
+        if declarator.is_ok() && p.current_token() == CppTokenKind::Colon {
+            return parse_member_initializer_list(p).map(|_| CompleteMarker::empty());
+        }
+        declarator
+    })
+}
+
 /// The tail every declaration shares: one init-declarator, then a body, then a `;`.
 ///
 /// Factored out for exactly two callers — a destructor and a conversion operator — which are the two
@@ -5514,5 +5590,8 @@ fn parse_linkage_specification(p: &mut CppParser) -> ParseResult {
 
     Ok(m.complete(p))
 }
+
+
+
 
 

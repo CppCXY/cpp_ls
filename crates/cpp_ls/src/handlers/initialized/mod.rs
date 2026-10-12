@@ -251,9 +251,6 @@ fn report_project_configuration(context: &ServerContextSnapshot) {
                 database.commands.len()
             );
         }
-        if let Some(cmake) = &discovery.cmake {
-            log::info!("CMake cache: {}", cmake.path.display());
-        }
     }
 
     let errors: Vec<String> = report
@@ -446,19 +443,6 @@ async fn index_in_background(context: ServerContextSnapshot) {
                 );
 
                 publish_workspace_diagnostics(&context).await;
-
-                // **The one moment the offer to configure can be made**, and the reason it is here: the offer is
-                // about a *project*, and discovery is what knows whether this one has a database and whether a
-                // command would write one. Before the first pass finishes, that question has no answer.
-                //
-                // Spawned rather than awaited, because it may put a question to the user and `initialized` must not
-                // be waiting on somebody reading a dialogue box.
-                {
-                    let context = context.clone();
-                    tokio::task::spawn(async move {
-                        crate::handlers::offer_configure(&context).await;
-                    });
-                }
             } else if was_pending {
                 // **The queue drained, and that is when the answers change.** A file's cooked reading is built from
                 // the environment of a complete translation unit, and it is dropped the moment the file or anything
@@ -566,3 +550,4 @@ pub fn workspace_roots(params: &InitializeParams) -> Vec<PathBuf> {
 
     roots
 }
+

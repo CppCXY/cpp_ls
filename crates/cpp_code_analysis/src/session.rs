@@ -364,7 +364,7 @@ pub struct Session<F: FileProvider = DiskFiles> {
     /// 's measurements.
     toolchain: Option<Toolchain>,
     /// **What this analysis thinks the project is**: the configuration file, the compile database and where it was
-    /// found, CMake's cache, and every problem. Kept whole rather than reduced to the parts the analysis uses,
+    /// found, and every problem. Kept whole rather than reduced to the parts the analysis uses,
     /// because the first question anybody asks about a wrong answer is "what did it think this project was" — and
     /// the sections a language server reads ([`crate::DiagnosticsSection`], [`crate::HoverSection`]) live in the
     /// same struct, since one file is parsed once, in one place.
@@ -600,7 +600,7 @@ impl Session<DiskFiles> {
         filter: WatchFilter,
         config_file: Option<&Path>,
     ) -> Session<DiskFiles> {
-        // **What the project is** — its own file, its build system, CMake's cache — worked out before anything is
+        // **What the project is** — its own file and its build — worked out before anything is
         // asked of a compiler, because the first half decides *which* compiler gets asked (`named_compilers`) and
         // what flags it is asked about.
         let discovery = crate::project::discover(&files, &root, config_file);
@@ -615,8 +615,8 @@ impl Session<DiskFiles> {
             .unwrap_or_else(|| root.clone());
 
         // **Which flags won, and then what the project does to them.** `[compile].args` is the compilation when a
-        // person wrote it, the database's first entry when the project's build says so, and CMake's cache when
-        // there is no database at all. Either way the result goes through one pass — `remove_args` drops,
+        // person wrote it, and the database's first entry when the project's build says so. Either way the result
+        // goes through one pass — `remove_args` drops,
         // `extra_args` appends — so that the three keys have one implementation and one order, whichever list they
         // start from.
         let base = project_config_from_flags(
@@ -625,17 +625,16 @@ impl Session<DiskFiles> {
             &project_config.config.compile,
         );
 
-        // CMake states the language standard as a **number**, not as a flag (`CMAKE_CXX_STANDARD=20`), so it is
-        // applied here rather than parsed out of the argument list — and only when nothing above it stated one: a
-        // database's `-std=` or a project's own `args` are closer to the truth than the configuration a build tree
-        // was generated with.
+        // **The standard the project's own build states**, read out of the compilation database's command line by
+        // `discovery.standard()`, applied only when nothing above it stated one: what the build ran is closer to the
+        // truth than a compiler's default, and a project's own `args` are closer still.
         let base = match (base.standard.clone(), discovery.standard()) {
             (None, Some(standard)) => base.with_standard(standard),
             _ => base,
         };
 
         // The compilers the *project* named, in their order (`discovery.named_compilers`): a project that says
-        // `clang++` gets clang's headers, and a project whose CMake cache names a compiler gets that one — before
+        // `clang++` gets clang's headers, and a project whose build names a compiler gets that one — before
         // `CXX`, before the platform's own, and before anything on `PATH`.
         let environment = Environment::current();
         let layout = crate::include::msvc::WindowsLayout::current();
@@ -647,7 +646,7 @@ impl Session<DiskFiles> {
             &named,
             // **What the project says this file is built as**: the database's entry for it, or — when the database
             // states nothing — the standard the configuration already resolved (`[compile] args = ["-std=c++17"]`,
-            // CMake's `CMAKE_CXX_STANDARD`). The compiler has to be asked about *that* standard: its
+            // the build's `-std=`). The compiler has to be asked about *that* standard: its
             // `__cplusplus` is what every `#if` in every header is a question about, and a table printed for some
             // other language version is a table that silently says `<format>` is empty.
             toolchain::BuildStatement {
@@ -796,7 +795,6 @@ impl<F: FileProvider + Clone> Session<F> {
             root: root.clone(),
             config: config_report,
             database: None,
-            cmake: None,
             problems: Vec::new(),
         };
 
@@ -831,7 +829,7 @@ impl<F: FileProvider + Clone> Session<F> {
         //
         // The flag is one claim — *a name none of the witnesses mentions is not defined* — and the witnesses are
         // the compiler's predefined names, the command line's `-D`s, and the file's own `#define`s. The second is
-        // what `discovery` reads (`.cppls.toml`, `compile_commands.json`, CMake's cache) and what
+        // what `discovery` reads (`.cppls.toml`, `compile_commands.json`) and what
         // `toolchain::discover_with` asks the compiler with. The **first** is the compiler's own answer and exists
         // nowhere else: `_MSC_VER`, `__cplusplus` and five hundred more are built in, not written down. So the
         // claim is made whenever those macros came back, and the project's build description is a *source of
@@ -932,7 +930,7 @@ impl<F: FileProvider + Clone> Session<F> {
         &self.discovery.config
     }
 
-    /// **What this analysis thinks the project is** — its configuration file, its build system, CMake's cache, and
+    /// **What this analysis thinks the project is** — its configuration file, its build, and
     /// everything that could not be worked out.
     ///
     /// The first question anybody asks about a wrong answer, and the reason the discovery is kept rather than
@@ -7800,9 +7798,9 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
 
     #[test]
     fn a_database_in_a_build_directory_is_found_and_its_flags_reach_the_session() {
-        // The whole point of the build-system half: a CMake project that exports its database into `build/` — which
-        // is where CMake puts it — must be analysed with *those* flags and *that* file list, without anybody
-        // naming the path. This is the test that fails if the discovery is written but not wired into the session.
+        // The whole point of the build-system half: a project that exports its database into `build/` must be
+        // analysed with *those* flags and *that* file list, without anybody naming the path. This is the test that
+        // fails if the discovery is written but not wired into the session.
         let project = Project::new("build-directory-database");
         project.write("main.cpp", "int main() { return 0; }\n");
         let root = project.root.to_string_lossy().replace('\\', "/");
@@ -7854,50 +7852,25 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
     }
 
     #[test]
-    fn a_cmake_project_without_a_database_is_analysed_with_what_cmake_knows() {
-        // `CMAKE_EXPORT_COMPILE_COMMANDS=OFF` is the shape that produces this: no database at all, and CMake's
-        // cache as the only statement about the compilation. It is a *worse* answer than a database — whatever a
-        // target adds is missing — and it is much better than nothing, which is why it is worth the code and why
-        // the problem list says how to do better.
-        let project = Project::new("cmake-without-database");
+    fn a_project_without_a_database_is_analysed_against_the_compilers_defaults() {
+        // No database and no `[compile].args`: the analysis is about the compiler's own defaults rather than about
+        // the project's build. That *works*, and the problem list says what would make it better — which is the
+        // whole reason the list exists.
+        let project = Project::new("without-a-database");
         project.write("main.cpp", "int main() { return 0; }\n");
-        project.write(
-            "CMakeCache.txt",
-            &format!(
-                "CMAKE_HOME_DIRECTORY:INTERNAL={}\n\
-                 CMAKE_CXX_COMPILER:FILEPATH=g++\n\
-                 CMAKE_CXX_FLAGS:STRING=-DFROM_CMAKE_CACHE\n\
-                 CMAKE_CXX_STANDARD:STRING=20\n\
-                 CMAKE_EXPORT_COMPILE_COMMANDS:BOOL=OFF\n",
-                project.root.to_string_lossy().replace('\\', "/")
-            ),
-        );
 
         let documents = OpenDocuments::new();
         let providers = SessionFiles::new(documents, DiskFiles);
         let session = Session::open(&project.root, providers, WatchFilter::new(&project.root));
 
         assert!(session.compile_database().is_none());
-        assert!(session.discovery().cmake.is_some(), "the cache was read");
-        let defines: Vec<&str> = session
-            .config()
-            .defines
-            .iter()
-            .map(|define| define.name.as_ref())
-            .collect();
-        assert_eq!(
-            defines,
-            ["FROM_CMAKE_CACHE"],
-            "the project-wide flags came from CMake"
-        );
-        assert_eq!(session.config().standard.as_deref(), Some("c++20"));
         assert!(
             session
                 .discovery()
                 .problems
                 .iter()
-                .any(|problem| problem.message.contains("CMAKE_EXPORT_COMPILE_COMMANDS=OFF")),
-            "and the one command that would make this better is spelled out: {:?}",
+                .any(|problem| problem.message.contains("no compile database")),
+            "the way to do better is spelled out: {:?}",
             session.discovery().problems
         );
     }
@@ -8069,6 +8042,8 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         );
     }
 }
+
+
 
 
 

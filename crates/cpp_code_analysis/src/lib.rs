@@ -184,10 +184,10 @@ pub use cooked::{
     configuration_from_environment_with, cook, cook_with,
 };
 pub use project::{
-    CONFIGURATION_FILE_NAMES, CmakeCache, CompileSection, ConfigProblem, ConfigReport, Database,
+    CONFIGURATION_FILE_NAMES, CompileSection, ConfigProblem, ConfigReport, Database,
     DatabaseOrigin, DiagnosticsSection, DiscoveryProblem, HoverSection, IndexSection,
-    PROJECT_CONFIG_FILE, ProjectConfig, ProjectDiscovery, Severity, WorkspaceSection, find_cmake_cache,
-    find_database, load_config, parse_cmake_cache, parse_config,
+    PROJECT_CONFIG_FILE, ProjectConfig, ProjectDiscovery, Severity, WorkspaceSection,
+    find_database, load_config, parse_config,
 };
 // `MacroBodies` is the parser's trait, re-exported here because this crate's public API names it: the seam between
 // "a file's tokens" and "what its includes say the macros mean" is one trait, and a consumer should not have to

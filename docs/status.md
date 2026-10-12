@@ -183,26 +183,210 @@ void f(int& x) { x.~int(); }   // 合法 C++（Pseudo-destructor call）
 
 > 现在的规则：**先说清这次测量在量什么，并给它一个控制组**（例如一个必然报错的输入）。
 
-## 六、下一步
+## 六、实测确认的四个问题（第一次真正拿服务去跑之后）
+
+> 以下四条都由**复现**确认，不是推断。两条有对应的 `#[ignore]` 测试（测试体就是复现，注释里写着实测结果），
+> 两条由命令与 dump 直接给出结论。
+
+### ⑩ CMake 支持 —— **已整个删除**（决定：只支持 `.cppls.toml` 与 CDB）
+
+原来那条"配置的触发时机错了"的问题不复存在，因为**触发本身被去掉了**。删掉的东西：
 
 ```text
-近期   ① argument-count 的跨文件查找 ② param-type-check 接上索引事实
-       ③ 给现有 13 项检查逐条补"真实语料上的正例"验证
-       ④ 把 checks_probe 变成 CI 里的一键回归（标准库零误报）
-
-中期   补更多 C++ 应有的诊断（访问控制已有 access-invisible，可继续：重复 case 标签、
-       返回类型不匹配的更多形态、const 重赋值、自赋值等）
-       性能：check 层已经统一走"只遍历本文件自己的节点"，把这条推广到其余通道
-
-长期   让索引与渲染的缓存跨会话复用；把"报告只针对本文件、判据来自整个项目"这条边界
-       推广到补全、跳转与引用
+crates/cpp_code_analysis/src/project/cmake.rs     提议并运行 cmake 配置（543 行，整份删除）
+crates/cpp_ls/src/handlers/execute_command/       cppls.configureCompilationDatabase 命令
+CMakeCache.txt 的解析（build.rs 的 CmakeCache / find_cmake_cache / parse_cmake_cache）
+ProjectDiscovery::cmake 字段，以及由它读出的 flags / standard / 编译器
+ToolchainSource::BuildCache 与客户端的 cppls.configureCmake 设置
 ```
 
-## 七、怎么自己验证
+**留下的两条输入，就是全部**：工程的 `.cppls.toml`，以及**编译数据库**（`compile_commands.json`）——
+后者是每个构建系统都能产出的那一种描述。一个还要读"这套构建系统的缓存"和"那套的工程文件"的服务器，
+得把每个构建系统都教一遍，而且仍然会对没人写适配器的那套答错。
+
+顺带补上一件原来靠 CMake 缓存才有的能力：**语言标准现在从编译数据库自己的命令行里读**
+（`discovery.standard()` 认 `-std=c++20`、`-std c++20`、`/std:c++20`、`/std:c++latest`）。
+没有数据库、也没写 `[compile].args` 时，会有一条明确的问题告诉用户怎么做得更好——那就是缺省状态下
+唯一的提示。
+
+### ⑪ 构造函数的参数**没有提示** —— 真因在文法，**已修**
+
+这一条查了两轮，中途修掉了两处真实缺陷，最后落在文法上：
+
+```text
+① signature.rs 把 `&mut |_: &Path| None` 交给 callees_of_a_call     → **已修**：传入 session 的解析器
+② 候选是一个类名时，类没有形参表，于是整条候选被 `continue` 丢掉    → **已修**：展开成它的构造函数
+③ 构造函数**在树里根本不存在** ✗                                  → **已修**：见下（`parse_constructor_declaration`）
+```
+
+`cpp_dump` 对 `class Widget { public: Widget(int size, int extra); };` 给出的树是：
+
+```text
+Declaration@27..56
+  DeclSpecifierSeq@27..33 > NamedType > NameExpr "Widget"   ← 类名被当成了**类型**
+  InitDeclarator@33..54 > Declarator@33..54
+    ParameterList@33..54                                    ← 形参表挂在一个**没有名字**的声明符上
+```
+
+也就是说：**类体里的 `Widget(int, int);` 被解析成了一条变量声明**，没有构造函数的声明节点，
+签名自然无从渲染。测量链完整保留了：`SIGNATURES call "Widget()" -> 1 candidate` ✓ →
+`CONSTRUCTORS `Widget` at 6: [23]` ✓ → `SOURCE at 23: list None` ✗。
+
+#### 修法（已落地，`cpp_parser`）
+
+一条新规则，与既有的析构函数、转换运算符规则并列（那两条解决的问题一模一样：**名字写在最前面、
+前面没有类型**）：
+
+```text
+parse_declaration_here 的分派里新增一支：
+  在**类体自己的成员层**（is_at_class_member_level）
+  且当前标识符**就是所属类的名字**（current_class_name —— 类头解析时记下，随类体入栈）
+  且紧跟 `(`（首参不是 `*`/`&`，那属于 `Widget (*fp)(int);` 那种形状）
+  → parse_constructor_declaration：名字进 Declarator，**形参表完成在 Declarator 之内**
+```
+
+两处细节都是量出来的，不是推的：
+
+* **"名字必须等于类名"这一条不能省。** 只用形状（标识符 + `(`）会让
+  `a_split_member_head_may_name_its_type_in_the_else_branch` 失败 —— 那条夹具里的成员函数**返回类型
+  写在另一个 `#if` 分支**，到达分派点时就长成"标识符 + `(`"，被读成构造函数、成员被改名。
+  仅凭两个 token 无法区分，必须问外层声明的名字。
+* **形参表要完成在 `Declarator` **内部**。** 先 `complete` 再读后缀会让形参表变成声明符的**兄弟**，
+  而 `parameter_list_of`（token → 最近的 `Declarator` → 它的 `ParameterList` 孩子）因此对每个构造函数
+  都答 `None`：量到的是 `SOURCE at 23: None`，而构造函数自己的名字就在 23。改成"名字与后缀同在一个
+  `Declarator` 内"后立刻变成 `Some("(int size, int extra)")`。
+
+修完的形状（与析构函数完全一致）：
+
+```text
+Declaration@27..43
+  Declarator@27..43
+    NameExpr@27..33 > Token(Identifier) "Widget"
+    ParameterList@33..43 > Parameter("int size", …)
+```
+
+#### 验证
+
+```text
+cpp_parser            21 个 target 全绿（含那条曾回归的 #if 分支测试）
+cpp_code_analysis     589 单测全绿；signature 16 条全绿，两条构造测试都不再 ignored
+整个工作区            49 ok / 3 failed（3 个失败＝既有的 handshake 3 条 + latency 1 条里的一类，见下）
+```
+
+`tests/signature.rs` 里原来那条 `a_call_of_a_class_has_no_signature` **把旧缺陷写成了断言**（"类没有
+形参表，所以诚实的答案是空白"）——它已被改写为 `a_call_of_a_class_offers_its_constructors`：类调用现在
+列出**全部**构造函数（不替用户做重载选择，与普通重载的处理一致）。
+
+#### 仍未重测的一件事
+
+`unused` 在 MSVC 头文件里的四条误报（`sprintf_s`、`swprintf_s`、`construct_at`、`addressof`）是同一个
+文法缺口的症状——那些声明现在应当作为**函数**（带形参表）而不是 `Variable` 进入索引。**187 个文件那次
+语料已不在本地**（`target/std-cook` 现在只剩 5 个文件，量到 1 条真命中 `assign-type-check`），所以这条
+回报要用真实语料重新量一次才算数。
+
+### ⑫ 头/实现分离的类，在**实现文件**里没有成员补全 —— 已推进两步，剩余原因已量清
+
+本轮修掉两处真缺陷（都不是补丁，是"事实就在那里、只是没人读"）：
+
+```text
+① 成员访问的**对象**是 `this` 时，走查拒绝它                                 → **已修**（sema/resolve.rs）
+   `name_ending_before_an_operator` 的规则是"不是运算符、不是空白就结束走查" —— 对 `x + full.` 正确，
+   对 `this->` 错误：走查停在 `this` 这个**关键字**上，对象丢失，答案成了 `Unknown(UnparsableName)`。
+   现在关键字 `this` 交回它自己的节点（`ThisExpr`，文本正好是 `this`），因为对象是按**拼写**定类型的。
+
+② 类外定义的**外层类**只从本文件的作用域链里找                              → **已修**（index/project.rs）
+   `class_of_the_enclosing_definition`：先走 `enclosing_class`，找不到再取定义的**限定名**
+   （`Widget::grow` → 前缀 `Widget`）——那正是索引记成员用的拼写，于是答案能走到头文件。
+```
+
+修复后失败点**前移**了，并且新的原因也量清楚了：
+
+```text
+ENCLOSING: innermost Some((TranslationUnit, None)) qualified None
+→ UnknownType("this")
+```
+
+也就是说：`void Widget::grow(int by) { … }` 这个定义**根本没有函数作用域** ✓ —— 光标处最内层就是
+`TranslationUnit` ✓。原因与 ⑬ 同族：**声明的名字写在说明符序列里，不在声明符里** ✗
+（`DeclSpecifierSeq > NamedType > NameExpr "Widget :: grow"`，而 `Declarator` 里只有形参表）。
+作用域构建器从声明符取名字，于是这个定义没有名字、没有作用域 ✓。
+
+复现与完整测量链在 `tests/completion.rs::a_member_function_defined_in_another_file_sees_its_class`
+（`#[ignore]`，理由就是上面这条测量）。**所以 ⑫ 的下一步与 ⑬ 是同一件事**：让"名字在说明符序列里"
+的声明把名字交给声明符——修好它，类外定义的成员函数既有作用域，`this` 也就能定类型。
+
+复现（`tests/completion.rs::a_member_function_defined_in_another_file_sees_its_class`，现为 `#[ignore]`）：
+
+```cpp
+// widget.h
+class Widget { public: int size; void grow(int by); };
+// widget.cpp
+void Widget::grow(int by) { this->| }      // 实测 member_completions 答 Unknown(UnparsableName)
+```
+
+`this->` 之后的成员查询**答不出类型** ✗ —— 因为这个文件里没有 `Widget` 的声明 ✗，而
+`this` 的类型是**外层的类**，它在另一个文件里 ✓。这与补全、跳转、引用都相关：凡"要问外层类"的地方
+都要能跨文件问索引 ✓。
+
+> 修法方向：`this` 的类型来自**当前定义的限定名**（`Widget::grow` 里的 `Widget`），
+> 而这个名字应当经索引解析 —— 与 ⑩⑪ 同一条边界："报告只针对本文件，判据来自整个项目"。
+
+### ⑬ 语法树的形状：**症状已修，原因仍在**
+
+`docs/tree-shape.md` 记了三件事，今天用 `cpp_dump` 复核：
+
+```text
+① 前向声明的名字曾是 TemplateType      → **已修**：现在是 NamedType（commit 4ec123e）
+② 类定义被解析在 DeclSpecifierSeq 内部  → **仍在**：
+     struct S { int n; };   Declaration > DeclSpecifierSeq@15..34（覆盖整个定义）> StructDef
+③ 每个节点吞掉尾随 trivia               → 仍在，且文档里有它存在的理由
+```
+
+② 的后果是**实质**的：一个类的**声明范围**等于整段定义 ✗，于是"声明上方那一行注释属于谁"、
+"这个类的名字范围在哪里"这类问题都会答错；`tree-shape.md` 的第 4 节给了改法的五个步骤与
+"先量什么"，那是这个仓库里少数**明确的、带步骤的重构**之一。
+
+> 这一条不是 bug 而是**文法决定**：`decl-specifier-seq` 的 type-specifier 可以是 class-specifier，
+> 所以"包含类定义"本身可辩护 ✗；不可辩护的是 **span** ✗ —— 它说"声明的 specifier 一直延伸到类体结束"。
+
+### 既有的两个失败 target（与本次改动无关，已在干净 HEAD 上验证）
+
+```text
+crates/cpp_ls/tests/handshake.rs    3 条失败：hover / outline / 宏实参里的签名
+crates/cpp_ls/tests/latency.rs      1 条失败：稳态补全偶发 1.4 s（预算 50 ms）
+```
+两者都用 `git stash` 在未改动的 HEAD 上复现过，数字几乎一样（latency：1405/36/39/1628 ms 对
+1455/36/42/1753 ms），所以它们是**先于本次改动**就红的，不是这次删 CMake 带出来的。
+
+## 七、下一步
+
+```text
+近期   ⑪ **已修**（文法：构造函数声明不再被读成变量）—— 用真实语料重测 `unused` 的四条误报是否随之消失
+       ⑫ `this->` 的成员查询经索引解析外层类（复现已在 tests/completion.rs 里）
+       ① argument-count 的跨文件查找 ② param-type-check 接上索引事实
+       ③ 给现有 13 项检查逐条补"真实语料上的正例"验证
+       既有：handshake 的 3 条与 latency 的 1 条
+
+中期   ⑬ 按 tree-shape.md 的步骤把类定义移出 decl-specifier-seq（先跑 ctor_probe 那三十二种拼写）
+       补更多 C++ 应有的诊断（重复 case 标签、const 重赋值、自赋值等）
+       性能：把"只遍历本文件自己的节点"推广到其余通道
+
+长期   让索引与渲染的缓存跨会话复用；把"报告只针对本文件、判据来自整个项目"这条边界
+       推广到补全、跳转、引用（⑪⑫ 正是这条边界上的两处缺口）
+```
+
+## 八、怎么自己验证
 
 ```bash
 # 全部测试
 cargo test --release --workspace
+
+# 被忽略的两条复现（它们今天会失败，那正是实测结果）
+cargo test --release -p cpp_code_analysis --test signature -- --ignored
+cargo test --release -p cpp_code_analysis --test completion -- --ignored
+
+# 语法树的形状
+cargo run --release -p cpp_parser --bin cpp_dump -- <file> --tree
 
 # 标准库零误报（需要先用真实工具链 cook 出一份语料，target/std-cook 是现成的）
 cargo run --release -p cpp_code_analysis --example checks_probe -- target/std-cook target/std-cook/assign-case.cpp
@@ -210,6 +394,12 @@ cargo run --release -p cpp_code_analysis --example checks_probe -- target/std-co
 # 逐项检查、逐条发现（带它依据的声明事实）
 cargo run --release -p cpp_code_analysis --example one_check -- target/std-cook target/std-cook/assign-case.cpp unused
 
-# 一个 token 的真实 kind（这一层的 API 之一，曾被我误判两次）
+# 一个 token 的真实 kind（这一层的 API 之一，曾被误判两次）
 cargo run --release -p cpp_parser --example token_kinds
 ```
+
+
+
+
+
+

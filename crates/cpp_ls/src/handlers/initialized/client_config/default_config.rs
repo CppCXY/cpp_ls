@@ -13,7 +13,7 @@ use serde_json::Value;
 use crate::context::ServerContextSnapshot;
 use crate::util::{path_to_uri, time_cancel_token};
 
-use super::{ClientConfig, ConfigureCmake, skip_nulls};
+use super::{ClientConfig, skip_nulls};
 
 /// The section this server's own settings live under, in a client that has no schema for us.
 const CONFIG_SECTION: &str = "cppls";
@@ -27,14 +27,6 @@ const CONFIG_SECTION: &str = "cppls";
 struct CppLsSettings {
     /// Globs to leave alone — a build tree, a vendored copy, generated sources.
     exclude: Vec<String>,
-    /// `ask`, `auto` or `never` — what the user has said about configuring the project's build. See
-    /// [`ConfigureCmake`].
-    ///
-    /// A string rather than an enum, because a settings file is written by hand and an unrecognised value has to be
-    /// readable as "they said nothing we understand" rather than as a parse failure that would take the whole
-    /// section with it.
-    #[serde(rename = "configureCmake")]
-    configure_cmake: Option<String>,
 }
 
 pub async fn get_client_config_default(
@@ -88,9 +80,10 @@ pub async fn get_client_config_default(
             settings.exclude.len()
         );
         config.exclude.extend(settings.exclude);
-        config.configure_cmake = ConfigureCmake::parse(settings.configure_cmake.as_deref());
         return Some(());
     }
 
     None
 }
+
+

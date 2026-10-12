@@ -107,17 +107,17 @@ fn main() {
         None => println!("entries        none (no database was read)"),
     }
 
-    println!("\n--- CMake ---");
-    match session.discovery().cmake.as_ref() {
-        Some(cmake) => {
-            println!("cache          {}", cmake.path.display());
-            for (key, value) in cmake.keys() {
-                println!("  {key:26} {value}");
-            }
-        }
-        None => println!("cache          none (no CMakeCache.txt for this project was found)"),
+    println!("\n--- the flags the project's build states ---");
+    let flags = session.discovery().flags();
+    if flags.is_empty() {
+        println!("flags          none (the compiler's own defaults are what this project builds with)");
+    } else {
+        println!("flags          {}", flags.join(" "));
     }
-
+    match session.discovery().standard() {
+        Some(standard) => println!("standard       {standard}"),
+        None => println!("standard       none stated by the build"),
+    }
     println!("\n--- what could not be worked out ---");
     let problems = &session.discovery().problems;
     if problems.is_empty() && session.project_config().problems.is_empty() {
@@ -216,4 +216,5 @@ fn short(path: &Path, root: &Path) -> String {
         .map(|relative| relative.to_string_lossy().into_owned())
         .unwrap_or_else(|_| path.display().to_string())
 }
+
 

@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 
 use cpp_parser::{CppDocComment, CppSyntaxElement, CppSyntaxKind, CppSyntaxNode, CppTokenKind};
 
-use crate::index::project::callees_of_a_call;
+use crate::index::project::{Callee, callees_of_a_call};
 use crate::inlay::parameter_list_of;
 use crate::sema::scopes::parameters_of;
 use crate::{FileView, Known, ProjectIndex};
@@ -99,10 +99,12 @@ where
         return Vec::new();
     };
 
-    let Known::Yes(candidates) = callees_of_a_call(index, &mut |_: &Path| None, &view.scopes, &view.root, &view.path, &call)
+    let Known::Yes(candidates) =
+        callees_of_a_call(index, &mut view_of, &view.scopes, &view.root, &view.path, &call)
     else {
         return Vec::new();
     };
+
 
     // **The callee's spelling, not the whole call**: a reader who wrote `w.scaled(` already knows the object, and
     // the popup is about which function and which parameter. A `::`-qualified name is kept whole, because there the
@@ -123,8 +125,7 @@ where
 
     for candidate in candidates {
         // The file being edited is already parsed; every other file is parsed once and kept for the rest of this
-        // answer. A file that cannot be read — or a declaration whose declarator has no parameter list, which is
-        // every class name and every variable — contributes no signature rather than an empty one.
+        // answer. A file that cannot be read contributes no signature rather than an empty one.
         let declared_in: &FileView = if candidate.file == view.path {
             view
         } else {
@@ -137,9 +138,24 @@ where
             held
         };
 
-        let Some(list) = parameter_list_of(declared_in, candidate.name_offset) else {
-            continue;
+        // **What this candidate contributes signatures from.** A declaration with a parameter list is its own
+        // answer; a **class name** is a constructor call — `Widget(` — and a class has no parameter list, so its
+        // signatures are its **constructors'**, which the index already holds as members named after the class.
+        //
+        // The fallback used to be `continue`, and that is why a constructor offered nothing at all: the name in a
+        // constructor call resolves to the class, `parameter_list_of` answered `None`, and the popup was empty on
+        // the most ordinary line of code there is. See `tests/signature.rs::a_constructor_call_offers_its_parameters`.
+        let sources: Vec<Callee> = match parameter_list_of(declared_in, candidate.name_offset) {
+            Some(_) => vec![candidate.clone()],
+            None => constructors_of(declared_in, candidate.name_offset),
         };
+
+        for source in sources {
+            let Some(list) = parameter_list_of(declared_in, source.name_offset) else {
+                continue;
+            };
+
+
 
         // **The label is one line, and the spans follow it.** The declaration's list is laid out for a reader of the
         // file (MSVC wraps three of `basic_string::append`'s nine overloads), and a popup label with a newline in it
@@ -171,14 +187,15 @@ where
             })
             .collect();
 
-        signatures.push(CallSignature {
-            label,
-            parameters,
-            active_parameter: active,
-            declared_in: candidate.file.clone(),
-            declared_at: candidate.name_offset,
-            documentation: None,
-        });
+            signatures.push(CallSignature {
+                label,
+                parameters,
+                active_parameter: active,
+                declared_in: source.file.clone(),
+                declared_at: source.name_offset,
+                documentation: None,
+            });
+        }
     }
 
     // **One row per signature**, which is the same rule the member and name lists apply and for the same reason: a
@@ -195,8 +212,77 @@ where
     signatures
 }
 
-/// The innermost call whose **arguments** contain `offset`.
+/// **The constructors of the class a call is constructing** — every member named after the class.
 ///
+/// A constructor call writes a **class name**: `Widget(` is not a function call, and the class has no parameter list
+/// to render, which is why a constructor offered no signature at all before this existed. The constructors are in the
+/// index as the class's own members — a member named after its class is a constructor, and one whose name begins
+/// `operator` is a conversion — so the answer is a fact the cook already produced rather than a second parse of the
+/// declaring file.
+///
+/// **The constructors of the class a call is constructing** — the members named after the class, read from the
+/// declaration's **own file**, which this answer already has open.
+///
+/// A constructor call writes a **class name**: `Widget(` is not a function call, and a class has no parameter list to
+/// render — which is why a constructor offered no signature at all before this existed, and why the fix is to answer
+/// with the constructors' lists instead.
+///
+/// The class is found **by its name's offset**, which is what the caller already resolved: the declaration the call's
+/// name pointed at is the class, so its node is the one whose `get_name` starts there. Everything else follows from
+/// the typed layer — a constructor is a declaration inside the class body whose own name is the class's, and its
+/// parameter list is the one `parameter_list_of` already knows how to find.
+///
+/// Asking the **index** for the member list was the first version of this, and it answered `Yes` with **zero
+/// members** for a class whose definition was three lines up in the same file — the same empty-list shape that made
+/// `assign_type_check` refuse to judge a class it could not see. Where the declaration is open, reading it is both
+/// simpler and more certain.
+fn constructors_of(declared_in: &FileView, name_offset: usize) -> Vec<Callee> {
+    use cpp_parser::{CppAstNode, CppAstToken, CppClassDef, CppDeclaration, CppKind, CppTokenKind};
+
+    let Some(class) = declared_in
+        .root
+        .descendants()
+        .filter_map(CppClassDef::cast)
+        .find(|class| {
+            class
+                .get_name()
+                .is_some_and(|name| usize::from(name.syntax().text_range().start()) == name_offset)
+        })
+    else {
+        return Vec::new();
+    };
+    let class_name = class.get_name_text().unwrap_or_default().trim().to_string();
+    if class_name.is_empty() {
+        return Vec::new();
+    }
+
+    let mut constructors = Vec::new();
+    for declaration in class.descendants::<CppDeclaration>() {
+        // The declaration's own name: the **first identifier** it writes, which is the class's for a constructor
+        // (`Widget(int size);`) and something else for every other member (`int size;`, `void grow(int);`).
+        let Some(name) = declaration
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .find(|token| {
+                CppTokenKind::from(CppKind::from(token.kind())) == CppTokenKind::Identifier
+            })
+        else {
+            continue;
+        };
+        if name.text().to_string() != class_name {
+            continue;
+        }
+        constructors.push(Callee {
+            file: declared_in.path.clone(),
+            name_offset: usize::from(name.text_range().start()),
+        });
+    }
+
+    constructors
+}
+
+/// The innermost call whose **arguments** contain `offset`.
 /// The callee's own span does not count: a cursor on `make` in `make(|)` is asking about the name, and a popup
 /// there would answer a question the user did not ask. Everything from the end of the callee to the closing
 /// parenthesis is the argument list — including the offset just past a comma, which is where a cursor sits while
@@ -318,3 +404,11 @@ fn element_contains(element: &CppSyntaxElement, offset: usize) -> bool {
 fn within(start: usize, end: usize, offset: usize) -> bool {
     offset >= start && offset <= end
 }
+
+
+
+
+
+
+
+

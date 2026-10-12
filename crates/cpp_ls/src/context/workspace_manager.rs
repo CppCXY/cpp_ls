@@ -49,18 +49,6 @@ pub struct WorkspaceManager {
     /// Bumped whenever the workspace changes underneath the analysis, so a background pass can see that it has been
     /// superseded and stop instead of writing into a workspace that no longer exists.
     workspace_version: Arc<AtomicI64>,
-    /// **Has this session offered to configure this workspace's build?**
-    ///
-    /// Once per workspace, because the offer is about a *project*: a server that asked again on every reload would
-    /// be asking the same question about the same tree, and the second question is the one that teaches a user to
-    /// dismiss messages without reading them.
-    ///
-    /// Session-scoped rather than persisted, and that is a limit of the protocol rather than a choice: a server may
-    /// *read* a client's settings and has no way to write one, so "don't ask again" cannot become the setting it
-    /// describes. What the user gets instead is silence until the workspace is reopened, and an offer that names
-    /// `cppls.configureCmake` for the permanent answer. Cleared when the roots change, because a new root is a new
-    /// project and therefore a new question.
-    configure_offered: bool,
     pub state: WorkspaceState,
 }
 
@@ -72,7 +60,6 @@ impl WorkspaceManager {
             reload_generation: Arc::new(AtomicU64::new(0)),
             file_diagnostic,
             workspace_version: Arc::new(AtomicI64::new(0)),
-            configure_offered: false,
             state: WorkspaceState::new(ClientConfig::default()),
         }
     }
@@ -87,28 +74,6 @@ impl WorkspaceManager {
         }
 
         self.state.set_roots(roots);
-        // A new set of roots is a new project, and the offer is about a project — see the field's note.
-        self.configure_offered = false;
-    }
-
-    /// **The client configuration as it stands**, for a caller that needs a setting rather than the whole state.
-    ///
-    /// A clone rather than a borrow, because the borrow would be of the lock and every caller here holds it only
-    /// for as long as it takes to read: an offer that held the manager across a question to the user would block
-    /// every reload behind a dialogue box.
-    pub fn client_config(&self) -> ClientConfig {
-        self.state.client_config.clone()
-    }
-
-    /// Has this session already offered to configure this workspace's build? See the field's note.
-    pub fn was_configure_offered(&self) -> bool {
-        self.configure_offered
-    }
-
-    /// Record that it has, **before** the question is shown: a client that never answers must not be asked again on
-    /// every reload, and this record is the only thing that says so.
-    pub fn note_configure_offered(&mut self) {
-        self.configure_offered = true;
     }
 
     /// The root the analysis runs over.
@@ -352,3 +317,6 @@ mod tests {
         assert!(!third.is_cancelled());
     }
 }
+
+
+

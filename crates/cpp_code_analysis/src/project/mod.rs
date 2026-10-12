@@ -34,17 +34,10 @@
 //! unresolved — rather than inventing a configuration that makes the numbers look better.
 
 pub mod build;
-pub mod cmake;
 pub mod config;
 pub mod discovery;
 
-pub use build::{
-    CmakeCache, COMPILE_DATABASE_FILE, CMAKE_CACHE_FILE, Database, DatabaseOrigin, find_cmake_cache,
-    find_database, parse_cmake_cache,
-};
-pub use cmake::{
-    CMAKE_SOURCE_FILE, ConfigureCommand, ConfigureReason, configure_command, run_configure,
-};
+pub use build::{COMPILE_DATABASE_FILE, Database, DatabaseOrigin, find_database};
 pub use config::{
     CompileSection, ConfigProblem, ConfigReport, DiagnosticsSection, HoverSection, IndexSection,
     PROJECT_CONFIG_FILE, ProjectConfig, Severity, WorkspaceSection, load_config, parse_config,
@@ -55,11 +48,12 @@ pub use discovery::{DiscoveryProblem, ProjectDiscovery, discover};
 ///
 /// A change to one of these is not an edit to index — it is a reason to work the project out again — so they are
 /// recognised by name anywhere in the tree: `compile_commands.json` in a build directory says as much about how
-/// this project is built as one in the root, and `CMakeCache.txt` is CMake's own record of the configuration that
-/// produced it. The list is here, next to the file that is read, so that the watcher and the discovery cannot
-/// disagree about which files matter.
-pub const CONFIGURATION_FILE_NAMES: &[&str] = &[
-    PROJECT_CONFIG_FILE,
-    "compile_commands.json",
-    "CMakeCache.txt",
-];
+/// this project is built as one in the root. The list is here, next to the file that is read, so that the watcher
+/// and the discovery cannot disagree about which files matter.
+///
+/// **Two sources, and only two.** The project's own `.cppls.toml` and a compilation database — the one format every
+/// build system can export. A server that also read *this* build system's cache and *that* one's project file would
+/// be a server that has to be taught every build system, and would still be wrong about the one nobody wrote an
+/// adapter for; a database is what they all agree on, and a project that generates none can say so in
+/// `.cppls.toml`.
+pub const CONFIGURATION_FILE_NAMES: &[&str] = &[PROJECT_CONFIG_FILE, "compile_commands.json"];

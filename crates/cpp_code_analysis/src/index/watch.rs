@@ -183,7 +183,7 @@ impl WatchFilter {
 
     /// Ignore everything under a directory — a build tree, a vendored dependency, a scratch directory.
     ///
-    /// There is no way to guess these: `build`, `out`, `target` and `cmake-build-debug` are all conventions, and a
+    /// There is no way to guess these: `build`, `out` and `target` are the ones that are, and the next project all conventions, and a
     /// project is entitled to call its build tree `tmp`. So the caller says, and this layer does not invent.
     pub fn ignore(mut self, directory: impl Into<PathBuf>) -> Self {
         self.ignored.push(directory.into());
@@ -1562,4 +1562,5 @@ mod tests {
         );
     }
 }
+
 

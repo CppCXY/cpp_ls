@@ -1052,8 +1052,6 @@ pub enum ToolchainSource {
     Configuration,
     /// The compile database's own command for the file.
     CompileDatabase,
-    /// `CMAKE_CXX_COMPILER` in the project's `CMakeCache.txt`.
-    BuildCache,
     /// `CXX` or `CC`.
     Environment,
     /// The platform's own toolchain: MSVC on Windows.
@@ -1070,7 +1068,6 @@ impl ToolchainSource {
         match self {
             ToolchainSource::Configuration => "named by .cppls.toml",
             ToolchainSource::CompileDatabase => "named by the compile database",
-            ToolchainSource::BuildCache => "named by CMake's cache",
             ToolchainSource::Environment => "named by CXX/CC",
             ToolchainSource::PlatformDefault => "the platform's own toolchain",
             ToolchainSource::Path => "found on PATH",
@@ -2339,4 +2336,5 @@ End of search list.
         let _ = std::fs::remove_dir_all(&scratch);
     }
 }
+
 

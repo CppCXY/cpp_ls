@@ -222,6 +222,69 @@ fn a_member_position_is_not_a_name_position() {
     );
 }
 
+/// **A class split across two files: its member function's body must still see the members.**
+///
+/// The class is declared in a header and its member function is defined in a `.cpp` — the ordinary layout of C++
+/// code, and the one a user reported as offering **nothing** inside the definition. What makes it interesting is
+/// where the answer has to come from: the members are declared in a file the cursor is not in, so this is the
+/// "report is about this file, the knowledge is the project's" boundary applied to completion.
+///
+/// The cursor sits after `this->`, which is the plainest way to ask: `this` has the enclosing class's type, and the
+/// enclosing class is not declared in this file.
+#[ignore = "measured: the object `this` is found now and the failure has moved to `UnknownType(\"this\")` — `void Widget::grow(…)` opens no function scope, so the cursor's innermost scope is the TranslationUnit: the definition's name is written in its specifier sequence, not its declarator"]
+#[test]
+fn a_member_function_defined_in_another_file_sees_its_class() {
+    let header = "\
+class Widget {
+public:
+    int size;
+    void grow(int by);
+};
+";
+    let source = "\
+void Widget::grow(int by) {
+    this->
+}
+";
+    let mut memory = MemoryFiles::new()
+        .with_file("/p/widget.h", header)
+        .with_file("/p/widget.cpp", source);
+    memory = memory.with_file("/p/a.cpp", "int main() { return 0; }\n");
+    let providers = SessionFiles::new(OpenDocuments::new(), memory);
+    let mut session = Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.add_project_files([
+        std::path::PathBuf::from("/p/widget.h"),
+        std::path::PathBuf::from("/p/widget.cpp"),
+        std::path::PathBuf::from("/p/a.cpp"),
+    ]);
+    session.want_cooked_reading(std::path::Path::new("/p/widget.cpp"));
+    session.index_everything();
+
+    let offset = source.find("this->").expect("the fixture") + "this->".len();
+    let view = cooked_view(&mut session, "/p/widget.cpp");
+    let offered: Vec<String> = match session.member_completions(
+        &view,
+        cpp_code_analysis::file::coordinates::FileOffset::new(offset),
+    ) {
+        Known::Yes(members) => members
+            .members
+            .members
+            .iter()
+            .map(|member| member.fact.name.clone())
+            .collect(),
+        other => panic!("the member query must answer here: {other:?}"),
+    };
+
+    assert!(
+        offered.iter().any(|name| name == "size"),
+        "the class's own members come from the file that declares them: {offered:?}"
+    );
+}
 /// **The names the implementation owns are not offered**, and the user's own underscored names still are.
 ///
 /// The standard's three rules (`__name`, `_Name`, `_name` in the global name space), applied where a *suggestion*
@@ -1119,6 +1182,9 @@ int main() {
         );
     }
 }
+
+
+
 
 
 

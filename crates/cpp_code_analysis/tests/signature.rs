@@ -65,6 +65,54 @@ fn signature_where_marked(source: &str) -> (String, Option<CallSignature>) {
     (without_marker, signature)
 }
 
+/// **A constructor call is a call** — `Widget(|)` should offer `Widget(int size, int extra)`, and today offers
+/// nothing.
+///
+/// **The cause is in the grammar, not here**, and finding that took two rounds of measurement:
+///
+/// ```text
+///   SIGNATURES call "Widget()" callee "Widget" -> 1 candidate(s)   the call and the class are both found
+///   CONSTRUCTORS `Widget` at 6: [23]                               and a member named `Widget` is found in it
+///   SOURCE at 23: list None                                        but its parameter list cannot be read
+/// ```
+///
+/// `cpp_dump` says why — a constructor declaration inside a class body is parsed as a **variable**:
+///
+/// ```text
+///   Declaration@27..56
+///     DeclSpecifierSeq@27..33 > NamedType > NameExpr "Widget"   <- the class name became the TYPE
+///     InitDeclarator@33..54 > Declarator@33..54
+///       ParameterList@33..54                                    <- the list hangs off a nameless declarator
+/// ```
+///
+/// So there is no constructor *declaration* in the tree for a signature to be rendered from. The same gap is what
+/// makes MSVC's `sprintf_s` arrive in the index as a `Variable` with `type=Some("_CSTD")` — measured while chasing
+/// a false positive in `unused` — so it is one grammar defect with several symptoms, and it is why this test is
+/// ignored rather than fixed here.
+///
+/// The fixture writes `Widget w = Widget(|);` rather than `Widget w(|);` on purpose: the second is the most
+/// vexing parse, a **declaration** of a function `w` returning `Widget`, so there is no call at all. (The first
+/// version of this test used it and measured nothing.)
+#[test]
+fn a_constructor_call_offers_its_parameters() {
+    let source = "\
+class Widget {
+public:
+    Widget(int size, int extra);
+};
+
+int main() {
+    Widget w = Widget(|);
+    return 0;
+}
+";
+    let (_, signature) = signature_where_marked(source);
+    let label = signature.map(|signature| signature.label).unwrap_or_default();
+    assert!(
+        label.contains("size"),
+        "the constructor's own parameters, or nothing: {label:?}"
+    );
+}
 /// The label at the cursor, and the text each declared span points at.
 fn label_where_marked(source: &str) -> (String, Vec<String>, Option<usize>) {
     let (_, signature) = signature_where_marked(source);
@@ -327,16 +375,42 @@ fn an_unresolvable_callee_has_no_signature() {
     assert!(signature.is_none());
 }
 
-/// **A call of a class is not a signature**: `Widget(|)` names a type, and which constructor it means is overload
-/// resolution. The class's own declaration has no parameter list, so there is nothing to show — which is the
-/// honest answer rather than the constructor's parameters picked by position.
+/// **A call of a class offers its constructors** — `Widget(|)` is a constructor call, and *which* overload it means
+/// is overload resolution, which signature help does not do and must not pretend to do. It answers the way it answers
+/// a name with several declarations: **every** constructor, in the order they are written, and the reader picks.
+///
+/// This test used to assert the opposite — `a_call_of_a_class_has_no_signature` — and the reasoning it recorded was
+/// sound as far as it went: a class has no parameter list of its own, so there was nothing to show, and picking one
+/// constructor by position would be inventing an answer. What it could not know was *why* there was nothing to show.
+/// A constructor declaration inside a class body was parsed as a **variable** — measured, `Widget(int size);` came
+/// out as `DeclSpecifierSeq > NamedType "Widget"` beside a nameless `Declarator` — so no constructor existed in the
+/// tree at all, for this or for anything else. That is fixed in the parser (`parse_constructor_declaration`), and the
+/// honest answer is now the one this test pins.
 #[test]
-fn a_call_of_a_class_has_no_signature() {
-    let (_, signature) = signature_where_marked(
-        "struct Widget { Widget(int width, int height); };\nWidget f() { return Widget(|); }\n",
-    );
+fn a_call_of_a_class_offers_its_constructors() {
+    let source = "\
+struct Widget {
+  Widget();
+  Widget(int width, int height);
+};
+Widget f() { return Widget(|); }
+";
+    let offset = source.find('|').expect("the fixture marks the cursor");
+    let without_marker = source.replace('|', "");
 
-    assert!(signature.is_none());
+    let session = session_with(&[("/p/a.cpp", &without_marker)]);
+    let view = session.view("/p/a.cpp").expect("the file is held");
+    let in_the_reading = view
+        .reading_offset_of(cpp_code_analysis::file::coordinates::FileOffset::new(offset))
+        .expect("the cursor is in the rendering");
+    let signatures = session.signatures_at(&view, in_the_reading);
+
+    let labels: Vec<&str> = signatures.iter().map(|found| found.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        ["Widget()", "Widget(int width, int height)"],
+        "every constructor the class declares, in the order they are written"
+    );
 }
 
 /// The documentation above the declaration comes with the signature — the place the reader needs it, because the
@@ -363,6 +437,10 @@ fn an_empty_argument_list_is_answered() {
     assert_eq!(label, "make(int count)");
     assert_eq!(active, Some(0));
 }
+
+
+
+
 
 
 

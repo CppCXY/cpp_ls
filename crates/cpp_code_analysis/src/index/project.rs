@@ -2570,10 +2570,11 @@ pub(crate) fn type_of_expression(
     }
 
     // `this` is the enclosing class, and no inference is involved: the scope chain already knows which class this
-    // is, and it is the same answer inside every member function of it.
+    // is, and it is the same answer inside every member function of it — and when the chain does not, the
+    // definition's own qualified name does. See [`class_of_the_enclosing_definition`].
     if written == "this" {
         let offset = usize::from(expression.text_range().start());
-        return match enclosing_class(scopes, offset) {
+        return match class_of_the_enclosing_definition(scopes, offset) {
             Some(class) => Known::Yes((Type::named(class), path.to_path_buf())),
             None => Known::Unknown(UnknownReason::UnknownType(Box::from(written))),
         };
@@ -5485,6 +5486,33 @@ fn enclosing_class(scopes: &crate::ScopeTree, offset: usize) -> Option<String> {
                 .then(|| scopes.qualified_name_of(scope))
                 .flatten()
         })
+}
+
+/// **The class a member function's body belongs to**, whether or not that class is declared in this file.
+///
+/// [`enclosing_class`] answers from the **scope chain**, which is this file's own tree — and for the ordinary layout of
+/// C++ that is not enough. `void Widget::grow(int by) { … }` written in `widget.cpp` declares no class scope at all:
+/// the class is in the header, so the chain runs from the function straight to the file, `this` had no type, and a
+/// member list after `this->` answered `Unknown(UnparsableName)` — measured in
+/// `tests/completion.rs::a_member_function_defined_in_another_file_sees_its_class`.
+///
+/// What the chain *does* say is the definition's **qualified name** — `Widget::grow` — and the class is its prefix.
+/// That is the same spelling the index keys a class's members under, so the answer reaches the header through the
+/// layer that already exists for exactly this: "the finding is about this file, the knowledge is the project's".
+///
+/// A free function's qualified name has no `::` and so names no class, which is the right answer for `this` there —
+/// there is none.
+fn class_of_the_enclosing_definition(scopes: &crate::ScopeTree, offset: usize) -> Option<String> {
+    if let Some(class) = enclosing_class(scopes, offset) {
+        return Some(class);
+    }
+
+    let innermost = scopes.scope_at(offset)?;
+    let qualified = scopes.qualified_name_of(innermost)?;
+
+    let (class, _member) = qualified.rsplit_once("::")?;
+
+    (!class.is_empty()).then(|| class.to_string())
 }
 
 /// The name of the class a written type names, with the parts that do not affect *which* class it is removed.
@@ -12464,4 +12492,6 @@ mod name_index_agrees_with_the_scan {
         assert!(index.symbols_matching("w", 10).is_empty());
     }
 }
+
+
 

@@ -37,8 +37,7 @@ use std::error::Error;
 use log::error;
 use lsp_server::{Request, Response};
 use lsp_types::request::{
-    Completion, DocumentDiagnosticRequest, DocumentSymbolRequest, ExecuteCommand,
-    FoldingRangeRequest, GotoDefinition, HoverRequest, InlayHintRequest, PrepareRenameRequest,
+    Completion, DocumentDiagnosticRequest, DocumentSymbolRequest, FoldingRangeRequest, GotoDefinition, HoverRequest, InlayHintRequest, PrepareRenameRequest,
     References, Rename, Request as LspRequest, ResolveCompletionItem, SelectionRangeRequest,
     SemanticTokensFullRequest, SignatureHelpRequest, WorkspaceSymbolRequest,
 };
@@ -50,7 +49,6 @@ use super::{
     definition::on_goto_definition_handler,
     diagnostic::on_pull_document_diagnostic,
     document_symbol::on_document_symbol,
-    execute_command::on_execute_command,
     folding_range::on_folding_range,
     hover::on_hover,
     inlay_hint::on_inlay_hint,
@@ -123,8 +121,9 @@ pub async fn on_request_handler(
         // **The one command this server offers.** A client invokes it to have the CMake configure that would write a
         // compile database run — see the module for why it is a command rather than something the server does on its
         // own, and why it is not shaped per client.
-        ExecuteCommand => on_execute_command,
-    });
+        });
 
     Ok(())
 }
+
+

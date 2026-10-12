@@ -25,8 +25,6 @@ mod configuration;
 mod definition;
 mod diagnostic;
 mod document_symbol;
-mod execute_command;
-pub use execute_command::offer_configure;
 mod folding_range;
 mod hover;
 mod inlay_hint;
@@ -167,5 +165,7 @@ semantic_token => SemanticTokenCapabilities,
     workspace_symbol => WorkspaceSymbolCapabilities,
     diagnostic => DiagnosticCapabilities,
     configuration => ConfigurationCapabilities,
-    execute_command => ExecuteCommandCapabilities,
 });
+
+
+

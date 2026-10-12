@@ -192,7 +192,7 @@ impl<'a> MacrosHere<'a> {
 /// that could not be asked (or the last-resort one built from conventional header directories, whose
 /// `builtin_macros` is empty) leaves the environment [`Marked::incomplete`] and every such condition `Unknown`.
 ///
-/// The project's own build description — `.cppls.toml`, `compile_commands.json`, CMake's cache — is a source of
+/// The project's own build description — `.cppls.toml` and `compile_commands.json`, and the cache — is a source of
 /// *flags* (`-D`s, `-std=`, include paths) rather than the licence for the claim: a project that wrote none down
 /// has none to miss, and a project built with flags nobody can read (a `Makefile`) is a hole this flag cannot see
 /// and the walk usually catches, because such a file names `-I` directories too and an `#include` that does not
@@ -704,3 +704,4 @@ mod tests {
         );
     }
 }
+
