@@ -614,13 +614,42 @@ pub fn is_a_function_definition(node: &cpp_parser::CppSyntaxNode) -> bool {
     let Some(body) = declaration.children::<CppCompoundStat>().next() else {
         return false;
     };
+    let body = span_of(body.syntax());
 
-    // **And the parameters come before the body.** Asked by position rather than by depth, so that a node wrapping
-    // a whole function — a namespace, a class, the translation unit — cannot claim to be one: what is looked for is
-    // a parameter list in this node's *head*, and those wrappers have their bodies after it or not at all.
-    declaration
-        .descendants::<CppParamList>()
-        .any(|parameters| parameters.get_range().start() < body.get_range().start())
+    // **The parameters must belong to THIS declaration's declarator, not to anything inside it.**
+    //
+    // The version before asked only whether *some* parameter list in this node began before the body — and a class
+    // definition satisfies that: measured, `struct S { ~S() {} };` is a `Declaration` whose `DeclSpecifierSeq` holds
+    // the `StructDef`, so its `CompoundStat` child is **the class body** and a method's parameter list begins before
+    // it. Every class with a defined member was therefore a "function definition", and the checks that ask this
+    // question reported the class itself. Measured through `ctor_probe`: `struct S { ~S() {} };` at namespace scope
+    // came out as a definition whose return type was the whole `struct S { … }` text.
+    //
+    // Anchoring on the declaration's **own** `InitDeclarator` is what makes the parameters the ones the body belongs
+    // to. A definition has exactly one: `int f() { }` and `S::S() { }` each put their `()` inside it.
+    let Some(parameters) = declaration
+        .get_init_declarator()
+        .and_then(|declarator| declarator.get_declarator())
+        .and_then(|declarator| declarator.syntax().descendants().find_map(CppParamList::cast))
+        .map(|parameters| span_of(parameters.syntax()))
+    else {
+        return false;
+    };
+
+    // The list is inside the head, so it starts before the body; and the body is not inside the list, which is what
+    // `void f(int g(void))` would otherwise look like — a list inside a list.
+    !contains(parameters, body) && parameters.0 < body.0
+}
+
+/// A node's span as `(start, end)` offsets — what the rest of this layer compares, and cheap to pass around.
+fn span_of(node: &cpp_parser::CppSyntaxNode) -> (usize, usize) {
+    let range = node.text_range();
+    (usize::from(range.start()), usize::from(range.end()))
+}
+
+/// Does `outer` contain `inner`? Both are `(start, end)` in the same text's offsets.
+fn contains(outer: (usize, usize), inner: (usize, usize)) -> bool {
+    outer.0 <= inner.0 && outer.1 >= inner.1
 }
 
 /// **The body of a function definition**, when it has one.
