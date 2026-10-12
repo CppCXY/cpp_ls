@@ -119,6 +119,21 @@ pub struct CmakeCache {
     /// `CMAKE_EXPORT_COMPILE_COMMANDS` — false means the build system *could* have written a database and was not
     /// asked to, which is a fixable problem rather than a missing one.
     pub exports_compile_commands: bool,
+    /// `CMAKE_MAKE_PROGRAM` — the build tool the generator drives: `ninja`, `make`, `MSBuild.exe`.
+    ///
+    /// Read for one question, and it is not about flags: **is the build tree this cache describes still usable?** A
+    /// cache names the toolchain by absolute path, so a Visual Studio that has been uninstalled or moved leaves a
+    /// cache full of paths that no longer exist — and re-running the configure in that tree fails with the build
+    /// tool's own complaint rather than with anything a reader can act on. Measured on a real project:
+    ///
+    /// ```text
+    ///   CMAKE_MAKE_PROGRAM:FILEPATH=…/CMake/Ninja/ninja.exe/ninja.exe/ninja.exe
+    ///   CMAKE_CXX_COMPILER:FILEPATH=…/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe
+    /// ```
+    ///
+    /// Neither exists, and neither does the VS installation they name. See
+    /// [`crate::project::cmake::ConfigureReason::TheCachedToolchainIsGone`].
+    pub make_program: Option<PathBuf>,
 }
 
 impl CmakeCache {
@@ -482,6 +497,7 @@ pub fn parse_cmake_cache(text: &str, path: PathBuf) -> CmakeCache {
                 }
             }
             "CMAKE_GENERATOR" => cache.generator = Some(value.to_string()),
+            "CMAKE_MAKE_PROGRAM" => cache.make_program = Some(PathBuf::from(value)),
             "CMAKE_EXPORT_COMPILE_COMMANDS" => {
                 cache.exports_compile_commands = !matches!(
                     value.to_ascii_uppercase().as_str(),

@@ -63,6 +63,17 @@ pub enum ConfigureReason {
     /// Nothing has been configured here, and `CMakeLists.txt` says a configure would work. The build directory is
     /// this module's proposal rather than a fact.
     NeverConfigured,
+    /// **The build tree exists and the toolchain it was configured with does not.**
+    ///
+    /// A cache names its tools by absolute path, so uninstalling or moving a Visual Studio leaves a tree full of
+    /// paths that are not there. Re-running the configure *in* that tree fails with the build tool's own complaint —
+    /// measured on a real project, `'…/Ninja/ninja.exe/ninja.exe/ninja.exe' '--version' failed with: no such file or
+    /// directory`, which names neither the cause nor the fix.
+    ///
+    /// So the tree is left alone and a new one is proposed. The wording differs from [`ConfigureReason::NeverConfigured`]
+    /// even though the command does not: this reader *has* a build directory, and telling them to configure a second
+    /// one without saying why would read as though the server had not noticed the first.
+    TheCachedToolchainIsGone,
 }
 
 impl ConfigureReason {
@@ -77,6 +88,10 @@ impl ConfigureReason {
             }
             ConfigureReason::NeverConfigured => {
                 "CMakeLists.txt is here and nothing has been configured, so there is no compile database"
+            }
+            ConfigureReason::TheCachedToolchainIsGone => {
+                "a CMake build tree is here and the toolchain it was configured with is not, so re-configuring it \
+                 would fail"
             }
         }
     }
@@ -144,6 +159,22 @@ pub fn configure_command(
     }
 
     match cache {
+        // **A cache describes a build tree, and the tree is only reusable while its toolchain is.**
+        //
+        // A cache names its tools by absolute path, and an uninstalled or moved Visual Studio leaves paths that are
+        // not there. Re-running the configure in such a tree fails with the *build tool's* complaint — measured on a
+        // real project, `'…/Ninja/ninja.exe/ninja.exe/ninja.exe' '--version' failed with: no such file or directory`
+        // — and that message names neither the cause nor the fix, so the reader is left holding a command this server
+        // told them to run.
+        //
+        // So the toolchain is checked first, and a dead tree is **not** re-used. What is proposed instead is the same
+        // fresh build directory as for a project that was never configured, with a reason that says why a second one
+        // is being proposed at all.
+        Some(cache) if cached_toolchain_is_gone(files, cache) => {
+            let source = source_directory(files, root, cache)?;
+            let build = source.join(PROPOSED_BUILD_DIRECTORY);
+            Some(proposal(&source, &build, ConfigureReason::TheCachedToolchainIsGone))
+        }
         // **A cache is the record of how this project was configured**, so both of these re-run what was run
         // before, into the directory it wrote before, with one more `-D` on the front.
         Some(cache) => {
@@ -170,7 +201,48 @@ pub fn configure_command(
     }
 }
 
-/// The one shape every proposal takes — see the module note for the three reasons it can carry.
+/// **Is the build tree this cache describes no longer usable**, because the toolchain it names is not there?
+///
+/// Asked of the two paths that make a tree runnable rather than of every path in the cache: the build tool the
+/// generator drives, and the compiler. A tree is usable without a compile database and not usable without either of
+/// those, and a cache that names neither is a hand-written one that `find_cmake_cache` already warns about.
+///
+/// **A path the cache does not name does not make the answer yes.** Silence is not evidence of absence: a cache
+/// written by a generator that stores its make program elsewhere would otherwise look dead, and the cost of being
+/// wrong in that direction is proposing a second build tree to a project that already has a working one.
+fn cached_toolchain_is_gone(files: &impl FileProvider, cache: &CmakeCache) -> bool {
+    let named = [cache.make_program.as_ref(), cache.compiler.as_ref()];
+    named
+        .into_iter()
+        .flatten()
+        // `files` is the session's chain, so a path is "gone" only if neither the disk nor an open buffer has it —
+        // and for an executable that is the disk. Read through the provider rather than `Path::exists` so that the
+        // answer comes from the same place as every other file question this layer asks.
+        .any(|path| files.read(path).is_none())
+}
+
+/// **The source directory to configure**, preferring what the cache recorded to what this module would guess.
+///
+/// `CMAKE_HOME_DIRECTORY` is the source directory the build tree was configured for, and it is the right answer even
+/// when the tree is dead: the *project* has not moved, only the tools that built it. The root is the fallback for a
+/// cache that names no home directory, which is the same directory in every ordinary layout.
+fn source_directory(
+    files: &impl FileProvider,
+    root: &Path,
+    cache: &CmakeCache,
+) -> Option<PathBuf> {
+    if let Some(home) = &cache.home {
+        return Some(home.clone());
+    }
+    // No home directory to go on, so the root is proposed — but only if it is a CMake project, for the same reason
+    // the never-configured case asks: advice about a build system the project does not use is worse than silence.
+    files
+        .read(&root.join(CMAKE_SOURCE_FILE))
+        .is_some()
+        .then(|| root.to_path_buf())
+}
+
+/// The one shape every proposal takes — see the module note for the reasons it can carry.
 fn proposal(source: &Path, build: &Path, reason: ConfigureReason) -> ConfigureCommand {
     // `-S` and `-B` rather than a working directory and a relative path: a configure is proposed to a person who may
     // run it from anywhere, and the two absolute directories are the whole of what it needs to know. `-D` comes
@@ -397,6 +469,51 @@ mod tests {
             configure_command(&files, Path::new("/p"), Some(&cache), false),
             None
         );
+    }
+
+    #[test]
+    fn a_dead_build_tree_is_not_re_configured() {
+        // **The defect this answers, measured on a real project.** A cache names its tools by absolute path, and a
+        // Visual Studio that has been uninstalled leaves a tree full of paths that are not there. Re-running the
+        // configure in that tree gets the *build tool's* complaint —
+        //
+        //   '…/Ninja/ninja.exe/ninja.exe/ninja.exe' '--version' failed with: no such file or directory
+        //
+        // — which names neither the cause nor the fix. The tree is therefore left alone and a fresh one proposed.
+        let files = project(&[("/p/CMakeLists.txt", "project(p)\n")]);
+        let cache = CmakeCache {
+            path: PathBuf::from("/p/out/build/x64-Debug/CMakeCache.txt"),
+            home: Some(PathBuf::from("/p")),
+            exports_compile_commands: true,
+            // A toolchain path nothing has: the case the report is about.
+            make_program: Some(PathBuf::from("/gone/Ninja/ninja.exe")),
+            ..CmakeCache::default()
+        };
+        let command = configure_command(&files, Path::new("/p"), Some(&cache), false)
+            .expect("a dead tree is a proposal, just a different one");
+        assert_eq!(command.reason, ConfigureReason::TheCachedToolchainIsGone);
+        // The **project** has not moved, only the tools: the source is still what the cache recorded.
+        assert_eq!(command.source, Path::new("/p"));
+        // And the dead tree is not named anywhere in the command.
+        assert_eq!(command.build, Path::new("/p/build"));
+        assert!(
+            !command.display().contains("x64-Debug"),
+            "{}",
+            command.display()
+        );
+    }
+
+    #[test]
+    fn a_cache_that_names_no_toolchain_is_not_called_dead() {
+        // **Silence is not evidence of absence.** A cache written by a generator that records its make program
+        // somewhere else names neither tool, and reading that as "the toolchain is gone" would propose a second
+        // build tree to a project that already has a working one. So the check is on the paths that *are* named.
+        let files = project(&[]);
+        let cache = cache("/p/build/CMakeCache.txt", "/p", true);
+        let command = configure_command(&files, Path::new("/p"), Some(&cache), false)
+            .expect("a cache naming no tool is still a proposal");
+        assert_eq!(command.reason, ConfigureReason::NoDatabaseWasWritten);
+        assert_eq!(command.build, Path::new("/p/build"));
     }
 
     #[test]

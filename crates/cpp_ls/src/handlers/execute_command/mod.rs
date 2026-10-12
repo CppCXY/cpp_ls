@@ -212,6 +212,12 @@ pub fn reason_to_mention(reason: &ConfigureReason) -> Option<&'static str> {
             "no CMake build tree was found, so this proposes a new one — change the directory if the project is \
              configured somewhere else",
         ),
+        // **And the dead tree is named as one**, because the reader has a build directory and would otherwise read
+        // this as the server having missed it. What they need to know is which tree is being left alone.
+        ConfigureReason::TheCachedToolchainIsGone => Some(
+            "the build tree that was found names a toolchain that is no longer installed, so re-configuring it would \
+             fail; this proposes a new one",
+        ),
     }
 }
 
