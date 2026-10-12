@@ -133,10 +133,19 @@ impl Check for Unused {
                 continue;
             }
 
-            // **Already in the file''s coordinates**: this range came from the summary - see `CheckContext::written`.
+            // **The name's range, not the declaration's.**
+            //
+            // This reported `fact.range`, which covers the whole declaration — so `std::string full2;` underlined
+            // from `std` to the `;`. The reader's question is "which name is unused", and the answer is one
+            // identifier. `DeclFact` carries both, and [`crate::sema::symbol::Binding`] says why they are separate:
+            // *"Collapsing them is the difference between a rename that edits one identifier and one that deletes the
+            // whole declaration."* This check collapsed them.
+            //
+            // The name is also the part that stays right when the declaration is reached through a macro: a span a
+            // macro produced reports the invocation, so the name's own range is the one a reader can act on.
             context.add_in_the_file(
                 DiagnosticCode::Unused,
-                fact.range,
+                fact.name_range,
                 fact.name.as_str(),
                 format!("`{}` is declared here and never used", fact.name),
             );

@@ -424,10 +424,24 @@ impl<'a> CheckContext<'a> {
     }
 
     /// **Every node of this file's own text**, once each, in document order.
+    /// **Every node of this file's own text**, once each, in document order.
+    ///
+    /// # The `once(child)` that made every declaration count twice
+    ///
+    /// This used to be `once(child.clone()).chain(child.descendants())`, and `descendants()` **already includes the
+    /// node it is called on** — so every top-level child was yielded twice. Measured on `int unfinished() { }`, which
+    /// holds one declaration: `own_syntax_nodes()` counted **9** where `descendants()` is 8, and the function
+    /// definition list held the same `Declaration 0..20` at index 0 *and* index 1.
+    ///
+    /// What it cost depends on the check, which is why it went unnoticed. A check that filters for a **kind below** a
+    /// declaration — every statement walk, every expression walk — never saw it, because a `Declaration` is not the
+    /// thing it asks for. The two that ask about *declarations themselves* reported every finding **twice**:
+    /// measured, `missing-return` gave two identical findings for `int unfinished() { }`. A duplicate that only
+    /// surfaces on the one node type nothing else looks at.
     pub fn own_syntax_nodes(&self) -> impl Iterator<Item = cpp_parser::CppSyntaxNode> + '_ {
         self.own_top_level_nodes()
             .into_iter()
-            .flat_map(|child| std::iter::once(child.clone()).chain(child.descendants()))
+            .flat_map(|child| child.descendants())
     }
 
     /// **Every node of this file's own text, of one type** — what a check actually asks for.

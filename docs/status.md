@@ -51,6 +51,32 @@ cargo test --release --workspace                    全绿
   例如 `std::string x = 123;` 之所以能报出来，是因为它读的是索引里 `std::string` 构造函数的形参表
   （`DeclFact::parameter_list`），而不是去解析头文件。
 
+### 已修的三条（2024，都有复现与验证）
+
+```
+① missing-return 对构造函数/析构函数误报
+     `Name(const std::string& f) : firstName(f) {}` 报
+     "this function is declared to return `Name`"。
+     原因：该 check 依赖"构造函数没有返回类型，所以 return_type_written_by 答 None"这个前提，
+     而**前提是假的**——构造函数的 Declaration 没有自己的 DeclSpecifierSeq（其祖先是
+     Declaration > ClassBody > StructDef），于是读数回落到**形参表**里，把第一个参数的
+     specifier 读成了返回类型。实测：DeclSpecifierSeq children = ["Name"]。
+     修法：新增 declares_the_enclosing_class——定义的名字与外层类名相同即为构造/析构。
+     验证：构造、析构、方法缺 return、真缺 return、void/auto/有 return 六种形状。
+
+② 诊断范围指向整行而不是名字
+     missing-return 原来用 function.text_range()（整个定义），unused 原来用 fact.range
+     （整个声明 `std::string full2;`）。两者都改为名字本身：
+     unused 用 DeclFact::name_range，missing-return 用"形参表 `(` 之前最后一个标识符"。
+     验证：`std::string full2;` 只下划线 `full2`；`int unfinished() { }` 只下划线 `unfinished`。
+
+③ own_syntax_nodes 把每一个顶层节点数了两遍
+     `once(child).chain(child.descendants())`——而 descendants() **已经包含节点自身**。
+     实测：一个只有一条声明的文件，count() 是 9 而 descendants() 是 8。
+     代价取决于 check：找声明**之下**的节点的（语句、表达式）看不见；
+     问**声明本身**的那两个把每条 finding 报了两遍（实测 missing-return 给出两条一模一样的）。
+```
+
 ## 四、已知的缺陷与未完成项（都是量出来的，不是猜的）
 
 ```text
