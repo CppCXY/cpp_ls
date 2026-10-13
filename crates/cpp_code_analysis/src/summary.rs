@@ -969,6 +969,16 @@ struct UnitState {
     /// What the unit has in force, as **definitions** rather than names — each carrying **where** it was
     /// written, because a definition is only in force from its own line (see [`UnitMacros::lookup`]).
     definitions: std::collections::HashMap<Box<str>, Binding>,
+    /// **How many times the set in force has changed** — the clock the walk's branch memo is invalidated by.
+    ///
+    /// A region's condition is answered *at the offset of the fact that asks*, and that is not bookkeeping: which
+    /// **branch** the position falls in is part of the question, and a `#define` written between two facts changes the
+    /// answer for the ones below it. Between two such changes, an answer depends on nothing but *(region, branch)* —
+    /// see the memo in `walk_one_file` for why that pair is the whole key.
+    generation: u64,
+
+
+
 }
 
 /// One definition the unit has in force: what it says, and where it was said.
@@ -979,6 +989,8 @@ struct Binding {
     defined_in: Box<std::path::Path>,
     defined_at: usize,
 }
+
+
 
 impl UnitState {
     fn define(
@@ -996,10 +1008,13 @@ impl UnitState {
                 defined_at: at,
             },
         );
+        self.generation += 1;
     }
 
     fn undefine(&mut self, name: &str) {
-        self.definitions.remove(name);
+        if self.definitions.remove(name).is_some() {
+            self.generation += 1;
+        }
     }
 }
 
@@ -1016,9 +1031,11 @@ pub struct MacroDefinitions {
     /// cache keyed by the name would hand the second fact the first one's definition — a wrong expansion rather than
     /// a missing one. A fact is identified by the range its name is written at, which is unique in its file.
     parsed: std::collections::HashMap<(std::path::PathBuf, usize), Option<std::sync::Arc<MacroDef>>>,
+
 }
 
 impl MacroDefinitions {
+
     /// The definition behind one fact, read from the file that wrote it.
     ///
     /// The `#define` is **put back together** from what the fact carries — its name, and the rest of its logical
@@ -1331,6 +1348,7 @@ fn walk_the_translation_unit<'a>(
     let mut walked = Walked::default();
     let mut unit = UnitState {
         definitions: std::collections::HashMap::new(),
+        generation: 0,
     };
 
     for include in &summary.includes {
@@ -1559,6 +1577,7 @@ impl TranslationUnit {
         };
         let mut unit = UnitState {
             definitions: std::collections::HashMap::new(),
+            generation: 0,
         };
         let mut seen: std::collections::HashSet<&std::path::Path> = std::collections::HashSet::new();
 
@@ -3147,6 +3166,9 @@ fn walk_one_file<'a>(
         return;
     }
 
+
+
+
     let Some((file, source)) = look_up(path) else {
         // A file this walk cannot read is a file **outside the analysis**: none of the files the caller indexed.
         // Pretending it defines nothing is the reading every walk here has always taken — a name nobody saw is
@@ -3166,6 +3188,23 @@ fn walk_one_file<'a>(
         timeline.enter(path, parent, from_in_parent, file.guards.visit_once)
     });
 
+
+    // **One answer per *(region, branch)*, with the generation it was worked out at.**
+    //
+    // The key is the whole correctness of this, and the first version of it was wrong: it was keyed by *region* alone,
+    // which is not enough — a region's condition is asked once per fact inside it, and two facts in the same region
+    // can be in **different branches**, which is a different question with a different answer. That version was caught
+    // by its own effect on the diagnostics (36 findings became 18) rather than by reasoning, and reverted.
+    //
+    // `(region, branch)` is sound because the branches of a region are ranges and regions nest: if two positions fall
+    // in the same branch of the innermost region, they fall in the same branch of every region enclosing it, so the
+    // *whole chain* [`SummaryGuards::visibility_of`] walks is fixed by the pair. What is left is the environment —
+    // which is what the generation covers, and only a change to the set in force can make it stale.
+    let mut decided: std::collections::HashMap<(u32, u32), bool> = std::collections::HashMap::new();
+    // The generation every answer in `decided` was worked out at. The memo lives *between two changes to the set in
+    // force* and nowhere longer, which is what the clearing below says in one line.
+    let mut decided_at = unit.generation;
+
     let mut macros = file.macros.iter().peekable();
     let mut includes = file.includes.iter().peekable();
 
@@ -3184,11 +3223,43 @@ fn walk_one_file<'a>(
                 true
             } else {
                 walked.conditional_facts += 1;
-                let taken = a_guard_is_in_force(file, fact, |at| UnitMacros {
-                    seed,
-                    state: unit,
-                    here: Some((path, at)),
-                });
+                // **Which branch this fact falls in**, asked of the ranges alone — no macro is consulted, which is
+                // what makes it usable as part of a key.
+                let branch = match fact.guard {
+                    // `regions` and `conditionals` are two views of the same list, indexed by the same region number
+                    // — see `SummaryGuards` — so the branch is one lookup away, and it needs no macro.
+                    crate::summary::FactGuard::Region(region) => file
+                        .guards
+                        .conditionals
+                        .get(region as usize)
+                        .and_then(|conditional| conditional.branch_at(fact.range.start_offset))
+                        .map(|branch| (region, branch as u32)),
+                    crate::summary::FactGuard::Unconditional => None,
+                };
+
+                // **Anything the set in force has changed since the last fact makes every answer suspect** — a
+                // definition fed by this file, or by a file it includes, can turn a branch on or off from its own
+                // line downwards. Clearing is the honest reaction and it is cheap: the map holds one entry per
+                // *(region, branch)*, and definitions arrive in bursts rather than between every two facts.
+                if unit.generation != decided_at {
+                    decided.clear();
+                    decided_at = unit.generation;
+                }
+
+                let taken = match branch.and_then(|key| decided.get(&key).copied()) {
+                    Some(answer) => answer,
+                    None => {
+                        let answer = a_guard_is_in_force(file, fact, |at| UnitMacros {
+                            seed,
+                            state: unit,
+                            here: Some((path, at)),
+                        });
+                        if let Some(key) = branch {
+                            decided.insert(key, answer);
+                        }
+                        answer
+                    }
+                };
                 if taken {
                     walked.facts_in_force += 1;
                 }
@@ -3314,6 +3385,8 @@ fn walk_one_file<'a>(
     if let (Some(frame), Some(timeline)) = (frame, walked.timeline.as_mut()) {
         timeline.leave(frame);
     }
+
+
 }
 
 /// The macros a file's **direct** includes define — the one-hop variant, kept as the measured comparison for the
@@ -4198,3 +4271,17 @@ impl DeclKind {
 // stored, not a place that knows about directives. There was a `build_declarations` here that took only a scope
 // tree and filled every guard with `Unconditional`; it was deleted rather than kept, because a function whose
 // contract is "the guards are wrong" is one a caller reaches for by accident.
+
+
+
+
+
+
+
+
+
+
+
+
+
+

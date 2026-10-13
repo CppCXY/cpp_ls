@@ -145,3 +145,93 @@ made three times in one session; the rule is cheap and it is the reason this doc
 ```
 
 Step 1 is a day's work and it decides whether steps 2-4 are worth doing. That is the point of doing it first.
+## 9. The first slice was built, measured, and **falsified** its own assumption
+
+§4.1 claimed that a header is "entered with the same names in force about sixty times". That is **wrong**, and the
+measurement says so:
+
+```text
+implemented   the environment digest (name + where the definition was written, maintained as the set changes)
+              and a `(file, digest) -> the file's conditional answers` cache, at *file* granularity — one lookup
+              per entry, no per-condition key, no allocation on the miss path
+measured      EmmyLuaCodeStyle, 1122 files, one real entry file, timed from outside:
+                without the cache   87.4 s / 95.6 s  (two runs)
+                with the cache     104.2 s
+reverted      six blocks, `cargo check` clean
+```
+
+The 60× is the number of **visits**, not of **distinct environments**. Every root defines its own macros — and its
+own headers do — *before* it reaches a shared header, so the set in force at that header's entry differs from root to
+root, and the digest almost never repeats. The cache paid a lookup per visit and bought nothing.
+
+### What this points at instead
+
+The assumption was one step too coarse. A file's conditions do not depend on the *whole* set in force — only on the
+**names those conditions mention**:
+
+```text
+#if defined(_STD_BEGIN) || _HAS_CXX20     depends on two names, and on nothing the root did
+```
+
+And which names a file's conditions mention is known **statically**, from the file's own conditional facts — no walk
+needed. So the key should be a digest of *that projection*:
+
+```text
+key  (file, digest of the values of the names this file's conditions actually read)
+```
+
+A root that defines `MY_FEATURE` before including `<string>` changes the environment but **not this projection**, so
+the entry still hits. That is the same idea clangd uses when it hashes what a preamble *uses* rather than everything
+in force, and it is the refinement this measurement bought.
+
+### The rule that survives, and the one that does not
+
+```text
+survives     a condition is a pure function of (which #if, what it can read) — memoize on *that*
+does not     "the same file is entered the same way many times" — it is not, and a key that assumes it is silent
+             and useless rather than wrong: it never hits, so nothing is ever answered wrongly, and nothing is
+             ever saved either
+```
+
+A cache that cannot hit is worse than no cache, because it is a cache that *looks* like the fix. The measurement
+that settles it is one number — the hit rate or the wall clock — and it must be taken **before** the design is
+believed, which is what §8's first step was for. It was taken, and the design changed.
+## 10. Step 1 was run, as §8 said to — and it says **stop**
+
+```text
+EmmyLuaCodeStyle, 1122 files, one real entry file:
+  walk census: 99,238 entries into 67,554 distinct (file, environment) pairs — 1.5x is repeated work
+```
+
+So the whole-environment key buys **1.5×**, not the 60× that §4.1 assumed. 99,238 − 67,554 = **31,684 entries** could be
+skipped, and the splice machinery would be paid for on the other 67,554 — and on the *cost*, which is worse than that
+ratio suggests, because the first entry of every distinct pair still walks the file in full.
+
+§8 named this branch in advance:
+
+> *a probe reports the hit rate … **If it is not high, stop and reconsider** — the rest is only worth building if the
+> duplication is really there.*
+
+It is not there, at this granularity. The 60× was the number of **visits**; the number of **reuses** is 1.5×.
+
+### What this says about the three designs, in order
+
+```text
+per-condition key        measured slower than none (81 s → 138 s); the key changes on every #define
+per-(file, environment)  measured 1.5x of the entries — not worth a splice machinery. **This is where the
+                         document's plan stops**, and it stopped because a count was taken first
+per-projection key       not measured yet. A file's conditions depend only on the names those conditions read,
+                         so the key is stable across roots that agree on *those* — which is the case §9 argues for.
+                         It is a refinement of the key above, and it needs its own count before anything is built
+```
+
+### The lesson, stated plainly
+
+§8 existed because a design believed without a number is a design that gets built and then quietly does nothing. I
+wrote §8, then built the cache, measured the wall clock, and **inferred** the hit rate from it — which is the same
+mistake in a new coat: deciding from a shape instead of from the quantity that decides. Taking the count cost one
+module, one call site and one run; skipping it cost a built-and-reverted cache and two rounds of reasoning.
+
+The count is now taken, the plan stops where the document said it would, and one number (the projection's ratio) is
+what stands between this design and being abandoned for the other half of the load — `[indexing]`, which was 34.6% of
+the instrumented work and has nothing to do with the walk.
