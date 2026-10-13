@@ -1047,8 +1047,6 @@ pub fn a_body_opens_an_inline_namespace(text: &str) -> bool {
 /// offsets mean nothing to the environment, which indexes definitions by where they were written in *their* file.
 /// It is what makes `_EXTERN_CXX_WORKAROUND` answerable in both arms of its `#if`.
 pub fn shape_of_a_body_at(text: &str, bodies: &(impl MacroBodies + ?Sized), at: usize) -> BodyShape {
-    use crate::{CppLexer, CppTokenKind, LexerConfig};
-
     // **A counter, because the cost of this function is a call count and not a per-call cost.** It lexes its argument
     // from scratch and is called once per macro definition whose body matters, so the number that decides whether
     // caching is worth anything is "how many times per index" — which nothing else reports. `CPPLS_COUNT_SHAPES`
