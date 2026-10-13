@@ -83,6 +83,12 @@ pub struct Branch {
     /// `true` once this branch is known to be macro-independent — either because the expansion came back
     /// unchanged, or because parsing it failed, which no macro state can repair.
     fixed: std::sync::OnceLock<bool>,
+    /// **The whole answer, for a condition that is one number.** `#if 0` and `#if 1` decide themselves and are
+    /// common in real headers, so they are answered without touching the macro table at all.
+    ///
+    /// A separate cache from [`Branch::parsed`] because it holds a different kind of thing: that one is an
+    /// expression that still has to be evaluated against a table, this one is the answer.
+    constant: std::sync::OnceLock<Option<bool>>,
 }
 
 impl Branch {
@@ -104,6 +110,7 @@ impl Branch {
             range,
             parsed: std::sync::OnceLock::new(),
             fixed: std::sync::OnceLock::new(),
+            constant: std::sync::OnceLock::new(),
         }
     }
 
@@ -158,15 +165,26 @@ impl Branch {
         }
     }
 
-    /// This branch's `#if`/`#elif` expression, **read once when macro replacement cannot change it**.
+    /// This branch's `#if`/`#elif` expression, **read once when the answer cannot depend on the macros**.
     ///
-    /// See the note on [`Branch::parsed`] for why that is the common case and what it costs. The two caches are set
-    /// together: the expression is stored, and `fixed` says whether storing it was sound. When `fixed` is false the
-    /// branch is re-expanded and re-parsed every time, exactly as before, and nothing is stored.
+    /// Two cases, and only two, because those are the two that can be *proved* cheaply:
     ///
-    /// `value` is what the expansion produced, so the answer comes from the same tokens in both cases — the cached
-    /// path does not re-derive anything, it just skips the expansion that would produce the same tokens again.
+    /// * **A constant.** `#if 0` and `#if 1` decide themselves, and so does any condition whose tokens are one
+    ///   number. They are extremely common in real headers — every "not yet" and every "always" — and they need no
+    ///   macro state at all, so the answer is computed once and kept.
+    /// * **A parse that macro replacement cannot change.** Reserved for the case where the expansion came back
+    ///   identical, which is rare for the reason below.
+    ///
+    /// **What this deliberately does not do.** An earlier attempt kept the parse whenever the expansion was the
+    /// identity, and measured *slower*: object-like macros are replaced too (`#if _MSC_VER >= 1930` becomes
+    /// `#if 1930 >= 1930`), so the identity case is rare, the cache almost never fills, and the test cost a flag on
+    /// every call. The tempting fix — "keep the parse when the condition has no function-like call" — is **wrong**,
+    /// and the reason is in `expand_condition`: it skips the operand of `defined`, so `defined(FOO)` must not be
+    /// expanded, but a *bare* `FOO` must be, and the two are the same token followed by the same `(`.
     fn an_expression_holds(&self, macros: &impl MacroValues) -> Option<bool> {
+        if let Some(held) = self.constant.get() {
+            return *held;
+        }
         if *self.fixed.get().unwrap_or(&false) {
             // Sound because `fixed` is only set together with `parsed`, and only when the expansion was the
             // identity — so re-parsing would yield this same expression.
@@ -178,6 +196,13 @@ impl Branch {
             };
         }
 
+        // **One number decides itself.** Checked before anything is expanded, so a constant condition never touches
+        // the macro table — which is what makes it worth having as its own case rather than folded into the other.
+        if let Some(held) = a_constant_condition(&self.tokens) {
+            let _ = self.constant.set(Some(held));
+            return Some(held);
+        }
+
         let (value, expression) = evaluate_recording(&self.tokens, macros);
         if let Some(expression) = expression {
             let _ = self.parsed.set(Some(expression));
@@ -185,6 +210,28 @@ impl Branch {
         }
         value.is_true()
     }
+}
+
+/// **The answer to a condition that is one number**, or `None` when it is anything else.
+///
+/// `#if 0` is the idiom for "not yet" and `#if 1` for "always", and neither asks about a macro. A condition of
+/// exactly one numeric token is `Known` whatever the environment says, so the whole answer is its truth value — not
+/// merely a parse that can be kept — and it holds for the life of the process.
+///
+/// Deliberately **not** generalised to "a constant expression" (`#if 0 && FOO`): that needs the parse this exists to
+/// avoid, and short-circuiting is the compiler's job, not this function's.
+fn a_constant_condition(tokens: &[Token]) -> Option<bool> {
+    let mut significant = tokens
+        .iter()
+        .filter(|token| !crate::token::is_trivia(token.kind));
+    let only = significant.next()?;
+    if significant.next().is_some() {
+        return None;
+    }
+    // A condition cannot be a float, and C++ has no `true`/`false` keyword in the preprocessor, so a numeric literal
+    // is the whole of what can be here.
+    let value = only.text().parse::<i128>().ok()?;
+    Some(value != 0)
 }
 
 /// Is the name a macro, according to a table that may not be able to say?
