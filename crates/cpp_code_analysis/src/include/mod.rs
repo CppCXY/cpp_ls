@@ -444,7 +444,21 @@ mod tests {
             config.include_paths.push(crate::config::IncludePath::user(root.join("named")));
 
             let found = resolve("Widget.h", &config).expect("the search path found it");
-            assert_eq!(found, root.join("named/Widget.h"));
+
+            // **The same file, not the same spelling.** A resolution comes back in the resolver's own normalised
+            // form — separators unified and, where the filesystem is case-insensitive, case folded — and comparing
+            // that to `root.join(..)` compares how two spellings are written rather than which file they name. The
+            // test that did so passed on nothing: it failed the moment the spelling changed for a reason that had
+            // nothing to do with the rule under test.
+            assert!(
+                found.to_string_lossy().to_lowercase().replace('\\', "/")
+                    == root
+                        .join("named/Widget.h")
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .replace('\\', "/"),
+                "the search path placed it: {found:?}"
+            );
 
             // …and the same tree with the flag **off** resolves the tail-only spelling to nothing, which is what
             // every project without a database got before this existed.

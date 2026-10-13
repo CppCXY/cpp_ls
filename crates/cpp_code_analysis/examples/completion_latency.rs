@@ -362,14 +362,20 @@ fn visibility_name(visibility: cpp_code_analysis::IncludeVisibility) -> &'static
     }
 }
 
-/// One query, with the trace window reset around it, reported as the crate's own regions.
+/// **One query, timed from the outside** — the whole of it, and nothing inside it.
+///
+/// This used to report the crate's own region-by-region table. That table is gone, and the reason is the one the
+/// number is for: the timers sat on paths taken once per condition and once per macro lookup, so measuring the
+/// query changed the query. Timing the whole call costs two `Instant::now()`s per *query*, which is nothing, and
+/// it is the figure a user actually feels.
 fn regions_of_one_query(session: &Session<DiskFiles>, file: &Path, cursor: usize) -> String {
     let Some(view) = session.view_of_the_file(file) else {
         return "no view".to_string();
     };
-    cpp_code_analysis::query_trace::reset();
+    let started = std::time::Instant::now();
     let _ = session.completions(&view, cpp_code_analysis::file::coordinates::FileOffset::new(cursor));
-    cpp_code_analysis::query_trace::report()
+
+    format!("one query took {:.1} ms", started.elapsed().as_secs_f64() * 1000.0)
 }
 
 /// One completion, asked the way the handler asks it: the file's own view, then the query at an offset in it.
@@ -404,4 +410,5 @@ fn position_of(source: &str, needle: &str) -> (u32, u32) {
         .unwrap_or(0) as u32;
     (line, character)
 }
+
 

@@ -312,8 +312,6 @@ pub fn completion_with(
     // **The measurement window for one completion**, opened here because this is the entry point the feature has:
     // everything below is the query's own work, and the server's log line splits only the outside of it
     // (`view`/`completions`). Opt-in, on `CPPLS_TRACE_COMPLETION`, like this crate's other traces — see
-    // [`crate::index::query_trace`].
-    let window = crate::index::query_trace::for_one_completion();
 
     let answer = match context {
         CompletionContext::Nothing => CompletionSet {
@@ -348,7 +346,6 @@ pub fn completion_with(
         } => headers_for(headers, &written, closed, range),
     };
 
-    drop(window);
     answer
 }
 

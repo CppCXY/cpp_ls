@@ -103,7 +103,6 @@ fn main() {
     );
     // **Where the time went**, because "the cache is being used and it is still slow" is a question about which
     // stage is paying — and this probe exists to answer the warmth question, not to leave a second one open.
-    println!("{}", cpp_code_analysis::stages::StageTimes::read().report());
 
     // **And who kept asking for a timeline.** `walked` in the stats above is a total: two hundred walks is either
     // one root walked two hundred times or two hundred roots walked once, and those want opposite fixes.

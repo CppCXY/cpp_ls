@@ -88,6 +88,27 @@ impl CommandLineMacro {
 /// be cached.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CompilerConfig {
+    /// **The project's compilation database**, when one was found — what each file's own command says.
+    ///
+    /// Carried here because the compilation is *per file* and the answer cannot be: a database with one entry per
+    /// translation unit says something different for each of them, and a project-wide list built from its first
+    /// entry is another target's compilation. That is not a simplification but a wrong answer — a header reachable
+    /// only from another target's directory resolves, and an include of `"Config.h"` takes whichever `Config.h` the
+    /// search order reaches first. [`CompilerConfig::for_file`] is where it is consulted.
+    pub database: Option<std::sync::Arc<CompileCommands>>,    /// Flags `[compile].remove_args` drops, and `[compile].extra_args` adds — kept here because they apply to
+    /// **whichever set won**, and with a compilation database there is no single winning set: each file's own
+    /// command is filtered by these in [`CompilerConfig::for_file`], in the documented order (removing first,
+    /// then appending), so that "drop the database's `-std=c++17`, add `-std=c++20`" means what it says for every
+    /// file rather than only for a project-wide answer that no longer exists.
+    pub remove_args: Vec<String>,
+    /// See [`CompilerConfig::remove_args`].
+    pub extra_args: Vec<String>,    /// **The project's compilation targets**, when its own file describes them — see
+    /// [`TargetSection`](crate::project::TargetSection), and [`CompilerConfig::for_file`] for what they decide.
+    ///
+    /// Carried on the configuration rather than looked up where it is needed, because the places that need it hold
+    /// a configuration and a **file** and nothing else.
+    pub targets: Vec<crate::project::TargetSection>,
+
     /// `-I` and `-isystem`, in the order they were given.
     ///
     /// Order is load-bearing: the first directory that holds the file wins, which is how a project
@@ -154,6 +175,108 @@ pub struct CompilerConfig {
 }
 
 impl CompilerConfig {
+    /// **This configuration as it applies to one file** — its target's include directories and defines.
+    ///
+    /// The reason the type carries [`CompilerConfig::targets`] at all. On a real C++ project the compilation is
+    /// *per target*, and one project-wide list is not a simplification but a wrong answer: a header reachable only
+    /// from another target's directory resolves, and an include of `"Config.h"` takes whichever `Config.h` the
+    /// search order happens to reach first.
+    ///
+    /// Three rules, in the order a reader would expect:
+    ///
+    /// ```text
+    /// 1. the target's directories go **in front**   its own headers win over anything project-wide
+    /// 2. `[compile.include]` follows                the older per-directory key, which this makes work
+    /// 3. the rest is unchanged                      flags, undefines, target, compiler
+    /// ```
+    ///
+    /// A file no target describes is returned unchanged, and so is a configuration whose root is unknown — the
+    /// paths in a configuration file are relative to the root, so without one there is nothing to resolve.
+    pub fn for_file(&self, file: &Path) -> CompilerConfig {
+        let Some(root) = self.root.clone() else {
+            return self.clone();
+        };
+
+        let mut config = self.clone();
+        let mut ahead: Vec<IncludePath> = Vec::new();
+
+        // **This file's own command, when the project has one.** It *replaces* whatever project-wide answer was in
+        // force rather than joining it: with one database entry per translation unit, the entry for another file is
+        // not a weaker answer but a different compilation, and its include directories are where the wrong header
+        // lives. `[compile].args` is the one thing that can override this, because a person who wrote the
+        // compilation down has said what it is — that is applied where the configuration is built, before this.
+        if let Some(command) = self
+            .database
+            .as_ref()
+            .and_then(|database| database.command_for(file))
+        {
+            // **The project's own edits apply to this file's command**, in the order the configuration documents:
+            // `remove_args` drops, `extra_args` appends. Doing it here rather than once for the project is what
+            // keeps the two keys meaning what they say now that the flags are per file.
+            let arguments: Vec<String> = command
+                .arguments
+                .iter()
+                .filter(|argument| !self.remove_args.iter().any(|drop| drop == *argument))
+                .cloned()
+                .chain(self.extra_args.iter().cloned())
+                .collect();
+
+            // **The include paths, and only those.** They are what decides which header a name resolves to, so they
+            // are the ones that must be this file's; the defines stay project-wide because the **cook** seeds every
+            // file's macro environment from the project-wide configuration, and a resolver that disagreed with the
+            // cooker about `-DFEATURE_ONLY` would answer about a program nobody compiled. Making the defines per
+            // file means making the seed per file, which is the next step rather than half of this one.
+            let own = config_from_arguments(&arguments, command.directory.clone());
+            config.include_paths = own.include_paths;
+        }
+
+        // **Every target that describes the file, nearest first.** `[compile].include` has always documented itself
+        // as additive — "*both can be true at once, and the nearer rule is the one that should be added first*" —
+        // and a target is the same idea with more to say, so the two are one mechanism here rather than two rules
+        // that would disagree. Patterns of different targets usually exclude each other (`Server/**` and `Core/**`),
+        // and where they do not, the nearer one's directories come first, which is what "nearest first" means for a
+        // search path.
+        let mut describing: Vec<(usize, std::cmp::Reverse<usize>, &crate::project::TargetSection)> = self
+            .targets
+            .iter()
+            .enumerate()
+            .filter_map(|(order, target)| {
+                target
+                    .describes(&root, file)
+                    .map(|specific| (specific, std::cmp::Reverse(order), target))
+            })
+            .collect();
+        describing.sort_by_key(|(specific, order, _)| (std::cmp::Reverse(*specific), *order));
+
+        for (_, _, target) in describing {
+            for directory in &target.includes {
+                let joined = root.join(directory);
+                if !config.include_paths.iter().any(|held| held.directory == joined)
+                    && !ahead.iter().any(|held| held.directory == joined)
+                {
+                    ahead.push(IncludePath::user(&joined));
+                }
+            }
+            for definition in &target.defines {
+                if !config
+                    .defines
+                    .iter()
+                    .any(|held| held.name.as_ref() == definition.split('=').next().unwrap_or("").trim())
+                {
+                    config.defines.push(define_from_a_config_file(definition));
+                }
+            }
+            // The nearest target that states a standard is the one that decides it.
+            if config.standard.is_none() && let Some(standard) = &target.standard {
+                config.standard = Some(standard.as_str().into());
+            }
+        }
+
+
+        ahead.extend(config.include_paths);
+        config.include_paths = ahead;
+        config
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -498,7 +621,7 @@ pub fn parse_compile_commands(json: &str) -> CompileCommands {
 }
 
 /// A parsed compile database, and what was skipped.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CompileCommands {
     pub commands: Vec<CompileCommand>,
     /// How many entries were present but not understood.
@@ -1041,4 +1164,18 @@ mod tests {
         assert!(names("wasm32-unknown-unknown").is_empty());
     }
 }
+/// **One definition as a configuration file writes it** — `"NAME"` or `"NAME=value"`, without the `-D`.
+///
+/// The same reading `-D` gets on a command line, because the two say the same thing in two places: `#if NAME`
+/// depends on which of the two spellings was used.
+fn define_from_a_config_file(written: &str) -> CommandLineMacro {
+    match written.split_once('=') {
+        Some((name, value)) => CommandLineMacro::with_value(name.trim(), value),
+        None => CommandLineMacro::defined(written.trim()),
+    }
+}
+
+
+
+
 

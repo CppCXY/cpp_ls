@@ -40,7 +40,8 @@ pub mod discovery;
 pub use build::{COMPILE_DATABASE_FILE, Database, DatabaseOrigin, find_database};
 pub use config::{
     CompileSection, ConfigProblem, ConfigReport, DiagnosticsSection, HoverSection, IndexSection,
-    PROJECT_CONFIG_FILE, ProjectConfig, Severity, WorkspaceSection, load_config, parse_config,
+    PROJECT_CONFIG_FILE, ProjectConfig, Severity, TargetSection, WorkspaceSection, load_config,
+    parse_config, target_for, targets_for,
 };
 pub use discovery::{DiscoveryProblem, ProjectDiscovery, discover};
 
@@ -57,3 +58,5 @@ pub use discovery::{DiscoveryProblem, ProjectDiscovery, discover};
 /// adapter for; a database is what they all agree on, and a project that generates none can say so in
 /// `.cppls.toml`.
 pub const CONFIGURATION_FILE_NAMES: &[&str] = &[PROJECT_CONFIG_FILE, "compile_commands.json"];
+
+

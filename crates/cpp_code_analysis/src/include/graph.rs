@@ -509,7 +509,10 @@ fn visit<F: FileProvider>(
     state.visited.insert(file);
     state.on_path.push(file);
 
-    let resolver = IncludeResolver::new(files, config);
+    // **This file's compilation, not the project's.** A real project is several targets with different include
+    // directories, and asking with the wrong one resolves another target's header — see CompilerConfig::for_file.
+    let per_file = config.for_file(&path);
+    let resolver = IncludeResolver::new(files, &per_file);
     let including = parent_normalized(&path, files.is_case_insensitive());
 
     // The directives are walked **in order**, because the order is the whole point: a `#define` is in force
@@ -1466,3 +1469,4 @@ mod tests {
         }
     }
 }
+

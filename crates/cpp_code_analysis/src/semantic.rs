@@ -213,7 +213,6 @@ pub fn classified_names(index: &ProjectIndex, view: &FileView) -> Vec<Name> {
     // Timed because this runs on the interactive path — once per request for the file being edited — and because
     // "how much does a colour cost" is a question the probe in `examples/semantic_probe.rs` answers from here
     // rather than from a second implementation of the pass.
-    let _timer = crate::stages::StageTimer::new(crate::stages::Stage::Classify);
 
     let declared = declarations_by_offset(view);
     let parameters = parameter_offsets(view);

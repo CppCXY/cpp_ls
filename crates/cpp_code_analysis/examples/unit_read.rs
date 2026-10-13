@@ -105,11 +105,9 @@ fn main() {
     census(&session, "per file");
     readings(&session, "per file");
 
-    cpp_code_analysis::stages::StageTimes::reset();
     let started = Instant::now();
     let reading = session.read_the_unit(&file);
     let elapsed = started.elapsed();
-    print!("{}", cpp_code_analysis::stages::StageTimes::read().report());
 
     match reading {
         Some(reading) => {

@@ -33,7 +33,6 @@ fn main() {
     // The first is bounded by the project; the second is bounded by the closure, and on a standard-library project
     // that is where the time goes.
     let indexed = Instant::now();
-    cpp_code_analysis::stages::StageTimes::reset();
     while session.pending() > 0 {
         session.advance(64);
     }
@@ -55,19 +54,6 @@ fn main() {
         session.stats()
     );
 
-    // **Where the time went**, stage by stage — and how much of the wall clock that accounts for.
-    //
-    // The gap is the point of printing both: a table that covers most of the wall time is an instrument, and one
-    // that covers a third is telling us where to look next. `stages::StageTimes` documents the rule that makes the
-    // sum meaningful (the stages do not overlap).
-    let stages = cpp_code_analysis::stages::StageTimes::read();
-    let wall = (indexed_for + cooked_for).as_secs_f64() * 1000.0;
-    println!(
-        "stages account for {:.1} ms of the {:.1} ms of indexing + cooking",
-        stages.total().as_secs_f64() * 1000.0,
-        wall
-    );
-    print!("{}", stages.report());
 
     // **What the index actually holds**, asked directly: whether the facts are there at all (an alias or a
     // template may never become one) or whether the lookup is keyed differently.
@@ -739,7 +725,6 @@ fn main() {
     //
     // `Session::buffer_changed` drops **every translation unit** on any edit, so the next cook re-walks the
     // whole closure — 138 files here — to answer a question a body edit cannot have changed. The instrument
-    // is the one already in the crate: `Stage::Walk` is the walk, `Stage::Closure` its closure read, and the
     // session's own `pending_work` says how much work the edit queued.
     // ---------------------------------------------------------------------------------------------
     println!("\n--- ten edits in a function body ---");
@@ -768,7 +753,6 @@ fn main() {
             edit(&mut edited, &mut session);
         }
 
-        cpp_code_analysis::stages::StageTimes::reset();
         let measured = std::time::Instant::now();
         for _ in 0..10 {
             edit(&mut edited, &mut session);
@@ -777,7 +761,6 @@ fn main() {
         let _ = before;
 
         println!("   10 body edits, warm: {wall:?} wall — every stage, in this window only:");
-        print!("{}", cpp_code_analysis::stages::StageTimes::read().report());
     }
     // **What the unit's cooked reading actually says** — the scopes, not the count. A cooked `std` count of zero
     // beside 57 files that have a reading means the scope walk over the unit's rendering never opened `std`; the

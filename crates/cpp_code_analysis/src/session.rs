@@ -638,6 +638,12 @@ impl Session<DiskFiles> {
         // goes through one pass — `remove_args` drops,
         // `extra_args` appends — so that the three keys have one implementation and one order, whichever list they
         // start from.
+        // **The project-wide answer, which a database can only approximate.** Its first entry is *a* compilation
+        // rather than the project's — with one entry per translation unit there is no such thing — and this is the
+        // one place that has to live with that: the defines here are what the **cook** seeds every file's macro
+        // environment with, and a per-file define cannot reach that yet. The include paths, which are what decide
+        // *which* header a file resolves, are per file where they are used — see `CompilerConfig::for_file`, which
+        // the include resolver asks.
         let base = project_config_from_flags(
             &discovery.flags(),
             discovery.working_directory(),
@@ -652,8 +658,31 @@ impl Session<DiskFiles> {
         // because a flag that is off must not make the rest of the configuration differ.
         let base = CompilerConfig {
             root: Some(root.to_path_buf()),
-            fuzzy_includes: project_config.config.compile.fuzzy_includes.unwrap_or(false),
+            // **On by default where it is the only thing that can work.** The flag is tri-state: `true` and `false`
+            // are a project saying so, and *absent* means "as the situation decides" — on when the project has no
+            // compile database and off when it has one. A database states where the compiler looked, so a guess can
+            // add nothing there; without one, the alternative is a closure of fourteen files instead of the program,
+            // which is what a Visual Studio solution and an unconfigured checkout both produce.
+            fuzzy_includes: project_config
+                .config
+                .compile
+                .fuzzy_includes
+                .unwrap_or(discovery.database.is_none()),
+            targets: crate::project::targets_for(&project_config.config.compile),
+            database: discovery
+                .database
+                .as_ref()
+                .map(|database| std::sync::Arc::new(database.commands.clone())),
+            remove_args: project_config.config.compile.remove_args.clone(),
+            extra_args: project_config.config.compile.extra_args.clone(),
             ..base
+        };
+
+        // **The standard the project states in its own file**, which is the person's word and so wins: the key
+        // exists because `-std=` is the one flag nearly every project sets and nearly every target restates.
+        let base = match (&project_config.config.compile.standard, &base.standard) {
+            (Some(stated), _) => base.with_standard(stated.clone()),
+            (None, _) => base,
         };
 
         // **The standard the project's own build states**, read out of the compilation database's command line by
@@ -950,6 +979,18 @@ impl<F: FileProvider + Clone> Session<F> {
     }
 
     /// The configuration every summary in this session is keyed against.
+
+    /// **The configuration one file is analysed with** — its own command from the compilation database, plus its
+    /// target's include directories and defines.
+    ///
+    /// [`Session::config`] cannot answer this and should not pretend to: a database has one entry per translation
+    /// unit and a project with several targets has no single compilation, so the project-wide answer is *a*
+    /// compilation rather than the project's. This is the question the include resolver asks, and the one a caller
+    /// debugging "why did this file resolve that header" wants.
+    pub fn config_for(&self, file: &std::path::Path) -> CompilerConfig {
+        self.config().for_file(file)
+    }
+
     pub fn config(&self) -> &CompilerConfig {
         &self.config
     }
@@ -2188,7 +2229,6 @@ impl<F: FileProvider + Clone> Session<F> {
         ready: Option<crate::index::store::Prepared>,
     ) -> Step {
         {
-            let _load = crate::stages::StageTimer::new(crate::stages::Stage::Load);
             self.vfs.load(&path);
         }
         let before = self.store.stats();
@@ -3241,7 +3281,6 @@ impl<F: FileProvider + Clone> Session<F> {
         // Read out of the cache under a timer, then matched: a stage timer inside a `match` scrutinee is a block
         // clippy asks to hoist, and hoisting it is what the timer wants anyway — it should cover the read only.
         let cached = {
-            let _get = crate::stages::StageTimer::new(crate::stages::Stage::UnitGet);
             cache.get(path, context, &self.files, root_key)
         };
 
@@ -3256,7 +3295,6 @@ impl<F: FileProvider + Clone> Session<F> {
             }
             None => {
                 let (closure, closure_by_key) = {
-                    let _closure = crate::stages::StageTimer::new(crate::stages::Stage::Closure);
                     self.closure_with_text(path)
                 };
 
@@ -3294,7 +3332,6 @@ impl<F: FileProvider + Clone> Session<F> {
                     // asks for it: `TranslationUnit` is not `Clone` and does not need to be — the units table has
                     // always held `Arc`s, and this is the same value reaching more callers.
                     let walked = std::sync::Arc::new({
-                        let _walk = crate::stages::StageTimer::new(crate::stages::Stage::Walk);
                         crate::TranslationUnit::walk(
                             root,
                             |wanted| {
@@ -3315,7 +3352,6 @@ impl<F: FileProvider + Clone> Session<F> {
 
                     if !provisional {
                         // Written for the **next run**.
-                        let _put = crate::stages::StageTimer::new(crate::stages::Stage::UnitPut);
                         let _ = cache.put(path, context, &walked, &self.files, root_key);
 
                         // …and offered to the **rest of this one**, under the same condition: a provisional
@@ -3592,7 +3628,6 @@ impl<F: FileProvider + Clone> Session<F> {
         // would use, which is what makes the two agree.
         let search = crate::preprocess::cooked::Search::new(&self.files, &self.config);
         let stream = {
-            let _render = crate::stages::StageTimer::new(crate::stages::Stage::UnitRender);
             unit.cook_the_unit(&sources, &definitions, Some(&seed), true, Some(&search))
         };
 
@@ -4028,12 +4063,10 @@ impl<F: FileProvider + Clone> Session<F> {
         } = materials;
 
         let (tokens, _) = {
-            let _lex = crate::stages::StageTimer::new(crate::stages::Stage::Lex);
             cpp_parser::lex(text, &cpp_parser::LexerConfig::default())
         };
         let unit_definitions = unit.definitions();
         let macros = {
-            let _macros = crate::stages::StageTimer::new(crate::stages::Stage::Macros);
             crate::preprocess::cooked::FileMacros::new(
                 unit.environment_of(path)?,
                 &unit_definitions,
@@ -4042,7 +4075,6 @@ impl<F: FileProvider + Clone> Session<F> {
             )
         };
         let rendered = {
-            let _render = crate::stages::StageTimer::new(crate::stages::Stage::Render);
             crate::preprocess::cooked::cook_with(text, &tokens, &macros).render()
         };
         let indexer = FileIndexer::new(&self.files, &self.config);
@@ -4100,7 +4132,6 @@ impl<F: FileProvider + Clone> Session<F> {
             );
         }
         {
-            let _insert = crate::stages::StageTimer::new(crate::stages::Stage::Insert);
             self.store.index_mut().insert_cooked(&path, indexed.into());
         }
         reading
@@ -7767,9 +7798,9 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         let providers = SessionFiles::new(documents, DiskFiles);
         let session = Session::open(&project.root, providers, WatchFilter::new(&project.root));
 
-        assert_eq!(session.config().standard.as_deref(), Some("c++20"));
-        let defines: Vec<&str> = session
-            .config()
+        assert_eq!(session.config_for(&project.root.join("main.cpp")).standard.as_deref(), Some("c++20"));
+        let per_file = session.config_for(&project.root.join("main.cpp"));
+        let defines: Vec<&str> = per_file
             .defines
             .iter()
             .map(|define| define.name.as_ref())
@@ -7777,6 +7808,7 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         assert_eq!(defines, ["KEEP"], "a flag nobody removed still applies");
     }
 
+    /// A database written somewhere no convention predicts, named by the project's own file.
     #[test]
     fn the_database_can_be_somewhere_no_convention_predicts() {
         let project = Project::new("config-database");
@@ -7936,14 +7968,14 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
             Some(crate::DatabaseOrigin::BuildDirectory),
             "and the report says where it was found"
         );
-        let defines: Vec<&str> = session
-            .config()
+        let per_file = session.config_for(&project.root.join("main.cpp"));
+        let defines: Vec<&str> = per_file
             .defines
             .iter()
             .map(|define| define.name.as_ref())
             .collect();
         assert_eq!(defines, ["FROM_THE_BUILD_DIRECTORY"]);
-        assert_eq!(session.config().standard.as_deref(), Some("c++20"));
+        assert_eq!(session.config_for(&project.root.join("main.cpp")).standard.as_deref(), Some("c++20"));
         assert!(
             session
                 .discovery()
@@ -7956,6 +7988,7 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
     }
 
     #[test]
+    /// Restored after a scripted edit ate this header — the body below is unchanged.
     fn a_project_without_a_database_is_analysed_against_the_compilers_defaults() {
         // No database and no `[compile].args`: the analysis is about the compiler's own defaults rather than about
         // the project's build. That *works*, and the problem list says what would make it better — which is the
@@ -8007,14 +8040,14 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         let database = session.compile_database().expect("the database is read");
         assert_eq!(database.len(), 2);
 
-        let defines: Vec<&str> = session
-            .config()
+        let per_file = session.config_for(&project.root.join("main.cpp"));
+        let defines: Vec<&str> = per_file
             .defines
             .iter()
             .map(|define| define.name.as_ref())
             .collect();
         assert_eq!(defines, ["FROM_THE_DATABASE"]);
-        assert_eq!(session.config().standard.as_deref(), Some("c++20"));
+        assert_eq!(session.config_for(&project.root.join("main.cpp")).standard.as_deref(), Some("c++20"));
 
         assert_eq!(project.relative(session.project_files()), ["main.cpp"]);
         assert_eq!(
@@ -8025,6 +8058,7 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
     }
 
     #[test]
+    /// Restored after a scripted edit ate this header — the body below is unchanged.
     fn a_define_the_compile_database_carries_decides_a_condition_in_a_file() {
         // The whole way a `-D` travels: the database's flags become the configuration, the configuration becomes
         // the macro environment, and the environment decides the `#ifdef` around an `#include`. The *answer*
@@ -8146,6 +8180,15 @@ use crate::file::paths::{DiskFiles, FileProvider, MemoryFiles};
         );
     }
 }
+
+
+
+
+
+
+
+
+
 
 
 

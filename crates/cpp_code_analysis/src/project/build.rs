@@ -155,7 +155,25 @@ pub fn find_database(
 /// compiled, and a project with a malformed one is better analysed the way a project with none is.
 fn read_database(files: &impl FileProvider, path: &Path) -> Option<CompileCommands> {
     let json = files.read(path)?;
-    let database = parse_compile_commands(&json);
+    let mut database = parse_compile_commands(&json);
+
+    // **The response files, read here rather than wherever the flags are used.** CMake writes a target's include
+    // paths and defines into `@CMakeFiles/<target>.dir/includes_CXX.rsp` and names that file in the command, for the
+    // Makefile and Ninja generators alike — measured on a real project: **every one** of its 108 entries was that
+    // shape. A reader that does not follow the indirection therefore sees a project with **no include paths at all**:
+    // its own headers stop resolving and the file list stops being the build's.
+    //
+    // Expanded once, where the database is read, because everything downstream — the session's flags, the per-file
+    // `command_for`, the toolchain's standard — reads these same arguments, and each of them would otherwise have to
+    // remember. The working directory is the entry's own, which is what a compiler resolves a relative `@` against.
+    for command in &mut database.commands {
+        let directory = command.directory.clone();
+        command.arguments = crate::include::config::expand_response_files(
+            &command.arguments,
+            directory.as_deref(),
+            &mut |named| files.read(named),
+        );
+    }
 
     (!database.is_empty()).then_some(database)
 }

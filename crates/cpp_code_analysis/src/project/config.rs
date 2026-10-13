@@ -141,7 +141,17 @@ pub struct CompileSection {
     /// The compiler to use, as a name on `PATH` or a path. `"auto"` (or absent) leaves it to the discovery order.
     #[serde(default)]
     pub compiler: Option<String>,
-    /// The flags to compile with, **instead of** the compile database's.
+    /// The language standard the whole project is built with, as `-std=` spells it (`"c++20"`).
+    ///
+    /// The project-wide default a `[[compile.target]]` inherits when it states none, and — like `args` — the
+    /// person's word: it is applied ahead of what the compile database's command line says, because a build's
+    /// `-std=gnu++20` is what the *build* ran rather than what the project means.
+    ///
+    /// This exists as its own key rather than as an `args` entry because it is the one flag nearly every project
+    /// states and nearly every target restates, and writing `-std=c++20` into a list of flags hides it among the
+    /// `-W`/`-O` noise. See [`TargetSection::standard`] for the per-target form.
+    #[serde(default)]
+    pub standard: Option<String>,    /// The flags to compile with, **instead of** the compile database's.
     ///
     /// # What this costs, and why it is still the right default
     ///
@@ -177,6 +187,227 @@ pub struct CompileSection {
     /// question the search path was supposed to answer.
     #[serde(default)]
     pub fuzzy_includes: Option<bool>,
+    /// **The project's compilation *targets*** — see [`TargetSection`].
+    ///
+    /// The key that makes this file usable on a real C++ project, because a real C++ project is not one
+    /// compilation: it is several, each with its own include directories and its own defines, and a single `args`
+    /// list cannot describe them. Writing every target's `-I` into one list is not a simplification but a wrong
+    /// answer — a header reachable only from another target's directory then resolves, and an include of
+    /// `"Config.h"` picks whichever `Config.h` the search order reaches first.
+    ///
+    /// Spelled `[[compile.target]]`, one table per target. A file is described by the target whose `sources` match
+    /// it most specifically; a file no target matches is described by `[compile]` itself.
+    /// Spelled [[compile.target]] — one table per target, which is CMake's word for the thing.
+    #[serde(default, rename = "target")]
+    pub targets: Vec<TargetSection>,
+}
+
+/// **One compilation target** — what a build system has and one `[compile]` cannot say.
+///
+/// ```toml
+/// [compile]
+/// standard = "c++20"
+/// fuzzy_includes = true
+///
+/// [[compile.target]]
+/// name     = "CodeFormatServer"
+/// sources  = ["CodeFormatServer/**"]
+/// includes = ["CodeFormatServer/include", "CodeFormatServer/src", "Util/include"]
+/// defines  = ["URI_STATIC_BUILD", "WIN32_LEAN_AND_MEAN"]
+/// ```
+///
+/// # The syntax, and how much of CMake it is
+///
+/// Deliberately a few ideas and no more — CMake's own words where they fit, so that a person who knows
+/// `target_include_directories` and `target_compile_definitions` has nothing to learn:
+///
+/// ```text
+/// name        what to call it in a message        (CMake: the target's name)
+/// sources     which files it describes           (CMake: add_executable's list, as a pattern)
+/// includes    its include directories            (CMake: target_include_directories)
+/// defines     its preprocessor definitions       (CMake: target_compile_definitions)
+/// standard    its language standard              (CMake: CXX_STANDARD)
+/// ```
+///
+/// **What it is not** is a build system: there are no dependencies, no sources to compile, no commands to run,
+/// and nothing here can make anything happen. It describes compilations, which is all an analysis needs and all a
+/// person should have to write down. Anything that must be *generated* belongs in a compile database — which is
+/// what `[compile].database` is for.
+///
+/// # How a file finds its target
+///
+/// `sources` is a **pattern**, matched against the file's path relative to the root, component by component:
+///
+/// ```text
+/// "CodeFormatServer/**"     the subtree, at any depth
+/// "*/src/**"                any target's src tree
+/// "Util/*.cpp"              direct children only
+/// ```
+///
+/// `**` stands for any number of components (including none), `*` for any run of characters **within** one, and
+/// everything else is literal. A pattern is matched against the whole path unless its last component is `**`.
+///
+/// When several targets match, the **most specific** wins — the one fixing the most literal components — and ties
+/// go to the one written first. A target for `Util/**` therefore beats one for `**`, and which target describes a
+/// file is decided by the file rather than by the order of the tables.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TargetSection {
+    /// What to call this target in a problem message. Absent is allowed; [`TargetSection::label`] then says
+    /// something a person can still act on.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Which files this target describes, as patterns relative to the project root.
+    #[serde(default)]
+    pub sources: Vec<String>,
+    /// Its include directories, relative to the project root (or absolute).
+    #[serde(default)]
+    pub includes: Vec<String>,
+    /// Its preprocessor definitions — `"NAME"` or `"NAME=value"`, without the `-D`.
+    #[serde(default)]
+    pub defines: Vec<String>,
+    /// Its language standard, as `-std=` spells it (`"c++20"`). The project's is used when this is absent.
+    #[serde(default)]
+    pub standard: Option<String>,
+    /// The target's **whole** command line, when a person wants to write it out — used *instead of* the
+    /// discovered flags for the files it describes, exactly as [`CompileSection::args`] is for the project.
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    /// Flags added on top of whichever set won for this target.
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+    /// Flags dropped from whichever set won for this target.
+    #[serde(default)]
+    pub remove_args: Vec<String>,
+}
+
+/// **The target that describes `file`**, for a caller that holds the list and not the section.
+///
+/// The same rule [`CompileSection::target_for`] applies, as a function, because the include resolver is built per
+/// file from a [`CompilerConfig`](crate::CompilerConfig) and never sees the configuration file itself.
+/// **Every target a configuration describes**, including the one `[compile.include]` implies.
+///
+/// `[compile].include` is the older, smaller spelling of the same idea — a directory and the include paths it
+/// needs — and it is turned into a target here rather than read anywhere else, so that there is **one** mechanism
+/// deciding which include directories a file gets. Before this it was parsed, validated, documented and never
+/// applied: a project that wrote it got nothing, which is one reason a whole project's `-I` flags end up in a
+/// single `args` list.
+///
+/// A key of `"*"` becomes the target for every file; any other key becomes that subtree's.
+pub fn targets_for(section: &CompileSection) -> Vec<TargetSection> {
+    let mut targets: Vec<TargetSection> = section
+        .include
+        .iter()
+        .map(|(directory, includes)| TargetSection {
+            name: Some(format!("[compile.include] {directory}")),
+            sources: vec![if directory == "*" {
+                "**".to_string()
+            } else {
+                format!("{directory}/**")
+            }],
+            includes: includes.clone(),
+            ..TargetSection::default()
+        })
+        .collect();
+
+    targets.extend(section.targets.iter().cloned());
+    targets
+}
+pub fn target_for<'a>(
+    targets: &'a [TargetSection],
+    root: &Path,
+    file: &Path,
+) -> Option<&'a TargetSection> {
+    targets
+        .iter()
+        .enumerate()
+        .filter_map(|(order, target)| {
+            target
+                .describes(root, file)
+                .map(|specific| (specific, std::cmp::Reverse(order), target))
+        })
+        .max_by_key(|(specific, order, _)| (*specific, *order))
+        .map(|(_, _, target)| target)
+}
+impl TargetSection {
+    /// What to call it when a message has to name it.
+    pub fn label(&self) -> &str {
+        self.name.as_deref().unwrap_or("an unnamed target")
+    }
+
+    /// **How specifically this target describes `file`**, or `None` when it does not.
+    ///
+    /// The number is the count of **literal** components the pattern fixed, which is what "most specific" means to
+    /// a reader: `Util/src/**` fixes two, `**` fixes none. No `sources` at all matches nothing — a target that
+    /// names no files is not a target for every file.
+    pub fn describes(&self, root: &Path, file: &Path) -> Option<usize> {
+        let relative = file.strip_prefix(root).ok()?;
+        let components: Vec<String> = relative
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
+            .collect();
+
+        self.sources
+            .iter()
+            .filter_map(|pattern| pattern_specificity(pattern, &components))
+            .max()
+    }
+}
+
+/// **Does `pattern` describe the path whose components are `path`**, and how specifically?
+///
+/// `Some(literal components fixed)` when it does, `None` when it does not. Matching is case-insensitive because a
+/// path that differs only in case is the same file on the platforms this runs on, and a configuration file should
+/// not be what decides otherwise.
+fn pattern_specificity(pattern: &str, path: &[String]) -> Option<usize> {
+    let parts: Vec<String> = pattern
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .map(|part| part.to_lowercase())
+        .collect();
+
+    if parts.is_empty() {
+        return None;
+    }
+
+    /// `**` matches any number of components, including none, so the walk carries how many literal components
+    /// have been fixed and takes the best of every way through.
+    fn walk(parts: &[String], path: &[String], fixed: usize) -> Option<usize> {
+        let Some((head, rest)) = parts.split_first() else {
+            // The pattern is spent: it describes this file only if the path is spent too.
+            return path.is_empty().then_some(fixed);
+        };
+
+        if head == "**" {
+            return (0..=path.len())
+                .filter_map(|skipped| walk(rest, &path[skipped..], fixed))
+                .max();
+        }
+
+        let Some((component, remaining)) = path.split_first() else {
+            return None;
+        };
+        if !component_matches(head, component) {
+            return None;
+        }
+
+        let fixed = if head.contains('*') { fixed } else { fixed + 1 };
+        walk(rest, remaining, fixed)
+    }
+
+    walk(&parts, path, 0)
+}
+
+/// One component of a pattern against one component of a path: `*` is any run of characters.
+fn component_matches(pattern: &str, component: &str) -> bool {
+    let Some(star) = pattern.find('*') else {
+        return pattern == component;
+    };
+
+    let (before, after) = (&pattern[..star], &pattern[star + 1..]);
+    component.starts_with(before)
+        && component.len() >= before.len() + after.len()
+        && component.ends_with(after)
 }
 
 impl CompileSection {
@@ -196,6 +427,23 @@ impl CompileSection {
         }
     }
 
+    /// **The target that describes `file`**, when one does.
+    ///
+    /// The most specific match wins and ties go to the one written first — see [`TargetSection::describes`] for
+    /// what "specific" counts. A file no target matches is described by `[compile]` itself, which is what makes
+    /// targets an addition rather than a replacement.
+    pub fn target_for(&self, root: &Path, file: &Path) -> Option<&TargetSection> {
+        self.targets
+            .iter()
+            .enumerate()
+            .filter_map(|(order, target)| {
+                target
+                    .describes(root, file)
+                    .map(|specific| (specific, std::cmp::Reverse(order), target))
+            })
+            .max_by_key(|(specific, order, _)| (*specific, *order))
+            .map(|(_, _, target)| target)
+    }
     /// The extra include directories that apply to a file.
     ///
     /// Longest matching prefix wins, and `"*"` applies everywhere: a project that says `"src/legacy"` means that
@@ -723,4 +971,10 @@ mod tests {
         assert_eq!(report.config.workspace.exclude, ["build/**"]);
     }
 }
+
+
+
+
+
+
 

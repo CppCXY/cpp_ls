@@ -156,5 +156,4 @@ fn main() {
         "classified {classified_total} of {identifiers_total} identifiers in {total:?} across {limit} file(s) \
          ({per_identifier:.2} µs per identifier)"
     );
-    println!("{}", cpp_code_analysis::stages::StageTimes::read().report());
 }

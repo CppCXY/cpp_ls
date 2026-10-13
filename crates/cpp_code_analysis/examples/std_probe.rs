@@ -1343,7 +1343,6 @@ definitions {unusable_unreadable}\n\
 
     // **Where the index's time went**, stage by stage — the table `crate::stages` keeps, printed here because a
     // census line says *what* got slower and only a table says *where*.
-    println!("{}", cpp_code_analysis::stages::StageTimes::read().report());
 
     // **The raw-only names, written where two runs can be diffed** — see `--dump-raw-only`. Sorted, so a `diff` of
     // two runs shows what a rule change moved rather than what order the walk happened to visit files in.

@@ -1908,15 +1908,12 @@ fn fact_for(
     // (138 files of MSVC's standard library), and each one is a different traversal of the same tree — so which of
     // them dominates is the difference between four different fixes. See `crate::stages`.
     let type_of = {
-        let _timer = crate::stages::StageTimer::new(crate::stages::Stage::TypeOf);
         declared_type_of_with(shapes, binding)
     }
     .or_else(|| {
-        let _timer = crate::stages::StageTimer::new(crate::stages::Stage::Alias);
         declared_alias_target_with(shapes, binding)
     });
     let returns = {
-        let _timer = crate::stages::StageTimer::new(crate::stages::Stage::Returns);
         // **The written return type, and the deduced one when there is none to write.** `declared_returns_of_with`
         // answers `None` for `auto`, by design and for a reason that has not changed — `auto` is not a class
         // anything can be looked up in. What is new is that the **body** is in this function's hands, and a `return`
@@ -1925,14 +1922,12 @@ fn fact_for(
         declared_returns_of_with(shapes, binding).or_else(|| deduced_returns_of(root, binding))
     };
     let bases = {
-        let _timer = crate::stages::StageTimer::new(crate::stages::Stage::Bases);
         declared_bases_of_with(shapes, binding)
     };
     // The class template's parameter names, for the members whose types are written with them. Answered from the
     // shapes like the four questions above it, and on a unit read it is the reason they are all asked of a table
     // rather than of the tree — see [`declared_template_parameters_of`].
     let parameters = {
-        let _timer = crate::stages::StageTimer::new(crate::stages::Stage::TemplateParameters);
         declared_template_parameters_with(shapes, binding)
     };
     // **Who may name it.** Recorded on the shape the binding's name sits in, which the pass that built this table
@@ -2519,7 +2514,6 @@ impl<'a> DeclarationFacts<'a> {
             preprocessing,
             root,
             shapes: {
-                let _shapes = crate::stages::StageTimer::new(crate::stages::Stage::Shapes);
                 DeclarationShapes::of(root)
             },
             declarations: Declarations::of(root, errors),

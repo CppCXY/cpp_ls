@@ -61,9 +61,6 @@ pub use store::{
 pub use watch::{ChangeBatch, EventKind, FileEvent, PathPattern, Response, WatchFilter};
 pub use worklist::{Priority, Step, StepOutcome, Worklist, outcome_of};
 
-// The completion query's own instrument. Re-exported from here as well as from the crate root, so that the module
-// which measures a query lives beside the query.
-pub use project::query_trace;
 
 use crate::cache::{SummaryKey, content_hash};
 use crate::include::config::CompilerConfig;
@@ -72,7 +69,6 @@ use crate::include::IncludeResolver;
 use crate::preprocess::directive::{Directive, SpannedDirective};
 use crate::sema::declarations::{assign_guards, build_facts, mark_settling_macro_facts};
 use crate::sema::scopes::build_scopes;
-use crate::stages::{Stage, StageTimer};
 use crate::summary::{FactGuard, FileSummary, IncludeFact, MacroFact};
 use crate::summary_codec::DecodeError;
 
@@ -295,11 +291,9 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         let config = ParserConfig::default().with_dialect(self.config.dialect());
 
         let tree = {
-            let _parse = StageTimer::new(Stage::Parse);
             CppParser::parse(source, config)
         };
         let summary = {
-            let _sweep = StageTimer::new(Stage::Sweep);
             self.index_tree(path, source, &tree, key)
         };
         // **Destroying the tree is work**, and it is timed because it is not free and not obvious: a file's tree is
@@ -307,7 +301,6 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // project this was the missing third of the cold index after the shape walk was fixed — the stages summed to
         // 6.0 s of a 9.5 s run, and the difference was here.
         {
-            let _drop = StageTimer::new(Stage::Drop);
             drop(tree);
         }
         summary
@@ -398,15 +391,12 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         let config = ParserConfig::default().with_dialect(self.config.dialect());
 
         let tree = {
-            let _parse = StageTimer::new(Stage::RenderParse);
             CppParser::parse(&rendered.text, config)
         };
         let mut summary = {
-            let _sweep = StageTimer::new(Stage::RenderSweep);
             self.index_tree(path, &rendered.text, &tree, key)
         };
         let report = {
-            let _map = StageTimer::new(Stage::Map);
             summary.map_into_the_file(rendered)
         };
 
@@ -562,7 +552,6 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // that list is the honest starting point. Absorbing it a second time would be exactly the "越走越远的
         // workaround" this milestone exists to delete.
         let tree = {
-            let _parse = StageTimer::new(Stage::RenderParse);
             // **And where one file's text ends and the next begins**, which is the parser's half of "a scope may not
             // cross a file boundary". `stream` has known it all along — [`crate::RenderedUnit::file_boundaries`] is
             // the first token of each file after the first — and nothing passed it on until now, which is why a
@@ -576,7 +565,6 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         };
 
         let summary = {
-            let _sweep = StageTimer::new(Stage::RenderSweep);
             self.index_tree(root, &stream.text, &tree, key)
         };
 
@@ -628,7 +616,6 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
 
         let root = tree.get_red_root();
         let preprocessing = {
-            let _scan = StageTimer::new(Stage::Scan);
             // **With what the compilation already knows**, so a `#define` in a branch nobody compiles is not
             // recorded: `vcruntime.h` writes `_STL_LANG` once per branch of `#ifdef __cplusplus`, the last of them
             // `0L`, and a table that keeps all three answers `0L` for a file compiled as C++20. See
@@ -650,7 +637,6 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             None => &crate::sema::scopes::NoMacroBodies,
         };
         let scopes = {
-            let _scopes = StageTimer::new(Stage::Scopes);
             build_scopes(&root, evidence)
         };
         // The diagnostics, as ranges, for the one field a fact takes from them rather than from the tree — see
@@ -663,7 +649,6 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
             .collect();
 
         let (mut declarations, mut guards) = {
-            let _facts = StageTimer::new(Stage::Facts);
             build_facts(&scopes, &preprocessing, &root, &errors)
         };
 
@@ -675,7 +660,6 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // the one step here that is not proportional to the text but to the search path. Measured on the 138-file
         // project, this is where most of the sweep goes.
         let (mut macros, mut includes) = {
-            let _includes = StageTimer::new(Stage::Includes);
 
             let macros: Vec<MacroFact> = preprocessing
                 .directives
@@ -724,7 +708,6 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         guarded.sort_by_key(|(_, at)| *at);
 
         let own_guard = {
-            let _guards = StageTimer::new(Stage::Guards);
 
             assign_guards(&mut guarded, &preprocessing, &mut guards);
 
@@ -768,7 +751,6 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // `Unconditional` has nothing to settle, and it is told which region the own guard is because the rule it
         // applies nests inside conditionals and must agree with that step about what a file guard means.
         {
-            let _settling = StageTimer::new(Stage::Settling);
             mark_settling_macro_facts(&preprocessing, own_guard, &mut macros);
         }
 
@@ -776,7 +758,6 @@ impl<'a, F: FileProvider> FileIndexer<'a, F> {
         // `import <vector>;` names a header, and the answer to "which vector" has to be the compiler's answer. See
         // [`modules_of`].
         let modules = {
-            let _includes = StageTimer::new(Stage::Includes);
             modules_of(&root, directory, &resolver, &mut interner)
         };
 
@@ -1318,7 +1299,6 @@ fn file_what_was_found(
     files: &mut [(std::path::PathBuf, crate::CookedFile)],
     unplaced: &mut usize,
 ) {
-    let _files = StageTimer::new(Stage::UnitFiles);
     for mut fact in declarations {
         let Some((file, range)) = stream.written_span(fact.range) else {
             *unplaced += 1;

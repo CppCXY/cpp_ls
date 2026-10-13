@@ -269,7 +269,6 @@ fn main() {
     );
 
     if stages {
-        println!("\n--- where the time went ---\n{}", cpp_code_analysis::stages::StageTimes::read().report());
     }
 
     // **What the compilation would have said** — every live `#error` and `#warning`, with the file that wrote it.

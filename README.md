@@ -46,6 +46,8 @@ cargo test  --release --workspace                   green
 
 ## Where it is going
 
+**Configuring a project** — `compile_commands.json` and `.cppls.toml`, including the multi-target form that a
+real C++ project needs: [`docs/configuration.md`](docs/configuration.md).
 See [`docs/status.md`](docs/status.md) — one document, describing the current state, the defects that
 are known and measured, and the plan. (It replaces nineteen older documents that described the
 process rather than the state of the code, and had drifted out of date.)
@@ -69,3 +71,4 @@ crates/cpp_parser           lexer and grammar; a lossless tree plus a typed AST 
 crates/cpp_code_analysis    preprocessing and rendering, the index, the semantic model, the checks
 crates/cpp_ls               the language server: LSP handlers and the session they run against
 ```
+

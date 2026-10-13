@@ -520,18 +520,15 @@ impl<F: FileProvider> SummaryStore<F> {
         environment: Option<(&dyn cpp_parser::MacroBodies, &dyn cpp_parser::MacroFacts)>,
     ) -> Prepared {
         let Some(source) = ({
-            let _read = crate::stages::StageTimer::new(crate::stages::Stage::Read);
             self.files.read(path)
         }) else {
             return Prepared(PreparedOutcome::Unreadable);
         };
         let key = {
-            let _hash = crate::stages::StageTimer::new(crate::stages::Stage::Hash);
             SummaryKey::new(content_hash(&source), self.context_hash(path))
         };
 
         {
-            let _lookup = crate::stages::StageTimer::new(crate::stages::Stage::Lookup);
             if let Ok(stored) = read_summary(&key.path_under(&self.cache))
                 && stored.key == key
                 && self.resolution_still_holds(path, &stored)
@@ -553,7 +550,6 @@ impl<F: FileProvider> SummaryStore<F> {
         let scanned = match includes.is_some() {
             true => {
                 let scanned = {
-                    let _scan = crate::stages::StageTimer::new(crate::stages::Stage::IncludeScan);
                     FileIndexer::new(&self.files, &self.config)
                         .with_seed(self.index.macros())
                         .scan_includes(path, &source)
@@ -587,7 +583,6 @@ impl<F: FileProvider> SummaryStore<F> {
         // nothing in the key would notice the header appearing. See the module documentation.
         let stored = !has_unresolved_includes(&summary);
         if stored {
-            let _encode = crate::stages::StageTimer::new(crate::stages::Stage::Encode);
             // A failed write is not a failed lookup: the answer is in hand and in the index. Reporting it would
             // turn a read-only checkout — a perfectly ordinary way to work — into a broken editor.
             let _ = write_summary(&summary, &self.cache);
@@ -616,7 +611,6 @@ impl<F: FileProvider> SummaryStore<F> {
                     self.stats.unstored += 1;
                 }
 
-                let _insert = crate::stages::StageTimer::new(crate::stages::Stage::IndexInsert);
                 self.index.insert(summary);
                 self.index.summary(path)
             }
@@ -1012,7 +1006,6 @@ impl<F: FileProvider> SummaryStore<F> {
         let mut sources: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let eager = units.is_empty();
         {
-            let _read = crate::stages::StageTimer::new(crate::stages::Stage::Read);
             if eager {
                 for summary in self.index.summaries() {
                     self.read_into(&mut sources, &summary.path);
@@ -1068,7 +1061,6 @@ impl<F: FileProvider> SummaryStore<F> {
         };
 
         if !eager {
-            let _read = crate::stages::StageTimer::new(crate::stages::Stage::Read);
 
             // A file no unit covers has no timeline to be read through, so its reading falls back to walking its own
             // closure — and that walk asks for the text of every file in it. Rare (a project file outside every
@@ -1130,7 +1122,6 @@ impl<F: FileProvider> SummaryStore<F> {
         // Scoped to **this loop** and stopped before the pass continues: what follows re-parses files through
         // `FileIndexer::index`, which is already timed as `Parse` + `Sweep`, and a timer that enclosed it would
         // count that work twice (measured: an enclosing version reported 106% of the wall clock).
-        let scan = crate::stages::StageTimer::new(crate::stages::Stage::BodiedScan);
         for summary in candidates.iter().copied() {
             let key = normalize_path(&summary.path, cfg!(windows));
             let Some(source) = sources.get(&key) else {
@@ -1165,13 +1156,11 @@ impl<F: FileProvider> SummaryStore<F> {
                 // The plain shape first — it is free (9.7 ms for every body in the project) and it settles most
                 // bodies; an environment is only asked for the ones it cannot read.
                 let plain = {
-                    let _plain = crate::stages::StageTimer::new(crate::stages::Stage::BodiedPlain);
                     cpp_parser::shape_of_a_body(body).a_reading_uses_this()
                 };
                 let used = if plain {
                     true
                 } else {
-                    let _inconclusive = crate::stages::StageTimer::new(crate::stages::Stage::BodiedEnv);
                     match &bodies {
                         // **The unit's own timeline**: the body is read in the environment of the file that
                         // defines it, which is a position in the walk — no closure walked here at all.
@@ -1214,7 +1203,6 @@ impl<F: FileProvider> SummaryStore<F> {
                 }
             }
         }
-        scan.stop();
 
         if bodied.is_empty() {
             return ReRead {
@@ -1249,7 +1237,6 @@ impl<F: FileProvider> SummaryStore<F> {
                 continue;
             };
             let mentioned = {
-                let _filter = crate::stages::StageTimer::new(crate::stages::Stage::ReFilter);
                 mentions_one_of(source, &bodied_names)
             };
             // **And a file whose `#define`s the walk decided about, whether or not it mentions a bodied macro.**
@@ -1286,7 +1273,6 @@ impl<F: FileProvider> SummaryStore<F> {
 
             let stored = !truncated && !has_unresolved_includes(&made);
             if stored {
-                let _encode = crate::stages::StageTimer::new(crate::stages::Stage::Encode);
                 let _ = write_summary(&made, &self.cache);
             }
             rebuilt.push((made, stored));
@@ -1318,7 +1304,6 @@ impl<F: FileProvider> SummaryStore<F> {
 
             let stored = !truncated && !has_unresolved_includes(&rebuilt);
             if stored {
-                let _encode = crate::stages::StageTimer::new(crate::stages::Stage::Encode);
                 let _ = write_summary(&rebuilt, &self.cache);
             }
             Some((rebuilt, stored))

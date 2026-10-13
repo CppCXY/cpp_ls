@@ -47,217 +47,6 @@ use crate::summary::{DeclFact, DeclKind, FactGuard, FileSummary, MacroFact};
 use crate::preprocess::directive::IncludeForm;
 use crate::symbol::{Known, UnknownReason};
 
-/// **Where one completion query spent its time**, on `CPPLS_TRACE_COMPLETION=1`.
-///
-/// The completion path is one call from the caller's point of view, and the server's own log line already splits
-/// the *outside* of it (`completion: prepare … ms, catch up … ms, modules … ms` and `completion: view … ms,
-/// completions … ms`). What neither can say is which part of the query, and the parts are not variations of one
-/// cost — they are three different questions with three different fixes:
-///
-/// ```text
-///   VISIBLE_FILES   the reverse include walk: which files the cursor's file can see, and whether each edge's
-///                   condition holds. Answers about the *graph*, and the only part of a query that reads
-///                   every guarded `#include` in the closure.
-///   GUARD_ASK       one condition evaluated (`environment::visibility_at`), which builds the file's closure
-///                   state — the cost the memo in `visibility_answers` exists to avoid.
-///   GUARD_HITS      the memos that answered instead. A query whose misses dwarf its hits is a query paying for
-///                   an invalidation rather than for work, which is a different fix from a query that is large.
-/// ```
-///
-/// Always compiled in, like [`crate::stages`] and for the same reason: two `Instant::now()` calls on a path that
-/// runs once per query are nothing against a query measured in milliseconds, and a probe behind a feature flag is
-/// a probe nobody runs when it matters. The atomics are read by a caller rather than printed, because the
-/// question is a *difference between two queries* and only the caller knows which two.
-pub mod query_trace {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{Duration, Instant};
-
-    /// A region of the query that can be timed, and the counter it accumulates into.
-    ///
-    /// An enum rather than an index, so that a call site cannot name a region that does not exist and the compiler
-    /// checks the arithmetic that turns one into the other.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum Region {
-        /// The reverse include walk: which files the cursor's file can see, and whether each edge's condition
-        /// holds. The only part of a query that reads every guarded `#include` in the closure.
-        VisibleFiles = 0,
-        /// One condition evaluated (`environment::visibility_at`), which builds the file's closure state — the
-        /// cost the memo in `visibility_answers` exists to avoid.
-        GuardAsk = 1,
-        /// Turning the walk''s `String` keys into the index''s sequence numbers, and sorting them.
-        VisibleInOrder = 2,
-        /// Reading every visible file''s declarations, filtering them, and deduplicating the cooked reading against
-        /// the raw one — everything in `ProjectIndex::visible_declarations_upto` after the walk.
-        CollectDeclarations = 3,
-        /// `certainly_in_the_translation_unit`: the include closure reached through unguarded edges only.
-        Certain = 5,
-        /// `macro_candidates` itself, when it is being used as the visibility walk.
-        Walk = 6,
-        /// The whole query, so that `completions N ms` in the server's line can be attributed: what is left after
-        /// the regions above are subtracted is work none of them names.
-        Query = 4,
-    }
-
-    /// What a memo in `visibility_answers` did: answered, or had to be evaluated.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum Memo {
-        Hit = 0,
-        Miss = 1,
-    }
-
-    /// Nanoseconds in each timed region, and how many times each was entered.
-    static NANOS: [AtomicU64; 7] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
-    static CALLS: [AtomicU64; 7] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
-    /// How often the visibility memo answered, and how often a condition had to be evaluated anyway.
-    static MEMO: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
-
-    /// A region, timed until it is dropped. `None` when the trace is off, so the cost when nobody is looking is
-    /// one `var_os` per call and a branch.
-    pub struct Timing(Option<(usize, Instant)>);
-
-    impl Drop for Timing {
-        fn drop(&mut self) {
-            if let Some((which, started)) = self.0 {
-                let nanos = started.elapsed().as_nanos() as u64;
-                NANOS[which].fetch_add(nanos, Ordering::Relaxed);
-                CALLS[which].fetch_add(1, Ordering::Relaxed);
-            }
-        }
-    }
-
-    pub fn timing(which: Region) -> Timing {
-        Timing(on().then(|| (which as usize, Instant::now())))
-    }
-
-    /// **Open a window for one completion** and report it to the log when the guard is dropped.
-    ///
-    /// Different from [`timing`] in the two ways a whole-query measurement needs: it *resets* the counters, because
-    /// the question is about this query rather than about the process, and it logs unconditionally (at `debug`, so
-    /// the sink is the switch) rather than only when an environment variable is set — a server's log is the only
-    /// place this can be read, since the LSP shell owns `stderr`.
-    pub fn for_one_completion() -> CompletionWindow {
-        reset();
-        CompletionWindow
-    }
-
-    /// See [`for_one_completion`]. Dropping it is what reports.
-    pub struct CompletionWindow;
-
-    impl Drop for CompletionWindow {
-        fn drop(&mut self) {
-            summary();
-        }
-    }
-
-    pub fn count(which: Memo) {
-        if on() {
-            MEMO[which as usize].fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    /// Is the trace on? Read per call rather than memoised: a probe turns it on before the session is built, and
-    /// an `OnceLock` here would be a second thing to reason about for no measured cost.
-    fn on() -> bool {
-        crate::probes::completion()
-    }
-
-    /// What one region cost, and how many times it ran.
-    pub fn region(which: Region) -> (Duration, u64) {
-        let at = which as usize;
-        (
-            Duration::from_nanos(NANOS[at].load(Ordering::Relaxed)),
-            CALLS[at].load(Ordering::Relaxed),
-        )
-    }
-
-    /// How often the memo answered, and how often a condition had to be evaluated anyway.
-    pub fn memo() -> (u64, u64) {
-        (
-            MEMO[Memo::Hit as usize].load(Ordering::Relaxed),
-            MEMO[Memo::Miss as usize].load(Ordering::Relaxed),
-        )
-    }
-
-    /// Start a fresh measurement window.
-    pub fn reset() {
-        for counter in NANOS.iter().chain(CALLS.iter()).chain(MEMO.iter()) {
-            counter.store(0, Ordering::Relaxed);
-        }
-    }
-
-    /// **The whole collection, told apart**, when `CPPLS_TRACE_COMPLETION` is on.
-    ///
-    /// The server's own log line splits a completion into `prepare`/`catch up`/`modules` and then `view`/`completions`;
-    /// this splits `completions`, which is the part a lock cannot explain. It goes to the [`log`] crate because that
-    /// is where a server's diagnostics go — the LSP shell owns `stderr` and a client may discard it.
-    pub fn note(what: &str) {
-        if on() {
-            log::debug!("completion query: {what} | {}", summary());
-        }
-    }
-
-    /// How many files one visibility walk ended up with, when the trace is on.
-    ///
-    /// On the [`log`] crate rather than on `stderr`, and that is not a detail: a language server's `stderr` is not
-    /// where its diagnostics go — the LSP shell owns that channel and a client may discard it — while every server
-    /// already has a log sink. A probe that needs the number can print [`report`] instead.
-    pub fn note_files(count: usize) {
-        if on() {
-            log::debug!("a visibility walk found {count} file(s)");
-        }
-    }
-
-    /// The window as one line, for a probe that has just run a query.
-    ///
-    /// On the [`log`] crate as well as in the returned text, so that a **server** can report it: a client owns the
-    /// server's `stderr` and may throw it away, while every server has a log sink.
-    pub fn report() -> String {
-        let line = summary();
-        if on() && crate::probes::completion_to_stderr() {
-            eprintln!("  query_trace: {line}");
-        }
-        line
-    }
-
-    /// The window as one line, always built — see [`report`].
-    ///
-    /// Logged at `debug` **unconditionally**, so that a server's own log carries the split without an environment
-    /// variable having to reach the process it spawned: `log::debug!` is off unless the sink says otherwise, which
-    /// is the switch a server already has (`--log-level`). The `report`/`reset` pair is for a probe that wants to
-    /// print one query's window itself.
-    pub fn summary() -> String {
-        let (collect, collect_calls) = region(Region::CollectDeclarations);
-        let (query, _) = region(Region::Query);
-        let line = format!(
-            "{} | query {} ms | collect {} ms ({} calls)",
-            regions(),
-            query.as_millis(),
-            collect.as_millis(),
-            collect_calls
-        );
-        log::debug!("query_trace: {line}");
-        line
-    }
-
-    /// The visibility walk and the conditions inside it — the inner split of a completion query.
-    pub fn regions() -> String {
-        let (visible, visible_calls) = region(Region::VisibleFiles);
-        let (guard, guard_calls) = region(Region::GuardAsk);
-        let (hits, misses) = memo();
-        format!(
-            "visible-files {} ms ({} calls) | certain {} ms | walk {} ms | guard ask {} ms ({} evaluations, \
-             {hits} memo hits, {misses} misses) | in-order {} ms",
-            visible.as_millis(),
-            visible_calls,
-            region(Region::Certain).0.as_millis(),
-            region(Region::Walk).0.as_millis(),
-            guard.as_millis(),
-            guard_calls,
-            region(Region::VisibleInOrder).0.as_millis(),
-        )
-    }
-}
-
 
 /// How many files a visibility walk will cross before giving up.
 ///
@@ -1692,7 +1481,6 @@ pub fn name_completions_at(
     path: &Path,
     offset: usize,
 ) -> Known<NameCompletions> {
-    let _whole = query_trace::timing(query_trace::Region::Query);
 
     let Some(position) = crate::sema::resolve::name_position_at(root, offset) else {
         return Known::Unknown(UnknownReason::UnparsableName);
@@ -1733,7 +1521,6 @@ pub fn name_completions_at(
 ///
 /// The server's log line splits a completion into `prepare`/`catch up`/`modules` and then `view`/`completions`;
 /// this is what goes inside `completions`, which is the half no lock can explain. A wrapper rather than a call to
-/// [`query_trace::reset`] inside the query, because the window has to start before the *first* question the query
 /// asks and the query has several ways to return early.
 pub fn name_completions_traced(
     index: &ProjectIndex,
@@ -1742,9 +1529,7 @@ pub fn name_completions_traced(
     path: &Path,
     offset: usize,
 ) -> Known<NameCompletions> {
-    query_trace::reset();
     let answer = name_completions_at(index, scopes, root, path, offset);
-    query_trace::note("name_completions_at");
     answer
 }
 
@@ -6331,12 +6116,10 @@ impl ProjectIndex {
         // by `#include` has no such restriction at all.
         let (visible_files, through_an_import) = self.visible_files_with_modules(visible_from);
         let files = self.visible_in_order_of(visible_files);
-        query_trace::note_files(files.len());
         // Everything below this line is reading facts out of files that are already known to be visible: the
         // filtering, the `DeclFact` clones, and the cooked-vs-raw deduplication. Timed apart from the walk because
         // the two have nothing in common — the walk is a question about the graph and this is a question about the
         // declarations — and because a completion that is slow with a *fast* walk is a different defect.
-        let _collecting = query_trace::timing(query_trace::Region::CollectDeclarations);
 
         let mut found = Vec::new();
 
@@ -6498,7 +6281,6 @@ impl ProjectIndex {
         &self,
         visible: Vec<(String, IncludeVisibility)>,
     ) -> Vec<(u32, IncludeVisibility)> {
-        let _order = query_trace::timing(query_trace::Region::VisibleInOrder);
         let mut files: Vec<(u32, IncludeVisibility)> = visible
             .into_iter()
             .filter_map(|(key, visibility)| Some((*self.sequence.get(&key)?, visibility)))
@@ -6578,7 +6360,6 @@ impl ProjectIndex {
         &self,
         from: &Path,
     ) -> (Vec<(String, IncludeVisibility)>, HashSet<String>) {
-        let _whole = query_trace::timing(query_trace::Region::VisibleFiles);
         let from = normalize(from);
 
         // **The walk's answer, remembered under the rule the per-condition memo uses.** A completion asks this
@@ -6615,11 +6396,8 @@ impl ProjectIndex {
         // it enters. That is the rule the module keeps being bitten by: one question, one implementation.
         let mut seen = Seen::new(&from);
         let mut state = self.macros.clone();
-        let _certain = query_trace::timing(query_trace::Region::Certain);
         let certain = self.certainly_in_the_translation_unit(Path::new(&from));
-        drop(_certain);
 
-        let _walk = query_trace::timing(query_trace::Region::Walk);
         self.macro_candidates(
             Path::new(&from),
             &mut Vec::new(),
@@ -6905,12 +6683,9 @@ impl ProjectIndex {
                             .and_then(|answers| answers.get(&key).copied())
                         {
                             Some(answer) => {
-                                query_trace::count(query_trace::Memo::Hit);
                                 answer
                             }
                             None => {
-                                query_trace::count(query_trace::Memo::Miss);
-                                let _ask = query_trace::timing(query_trace::Region::GuardAsk);
                                 let answer = crate::index::environment::visibility_at(
                                     self,
                                     Path::new(&current),
