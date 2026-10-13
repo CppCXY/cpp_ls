@@ -2774,6 +2774,7 @@ fn conditionals(preprocessing: &FilePreprocessing) -> Conditionals {
             found.conditionals.push(ConditionalRegion {
                 parent: open.last().map(|index| *index as u32),
                 branches: vec![conditional_branch(&spanned.directive, &spanned.range)],
+                decoded: std::sync::OnceLock::new(),
             });
             open.push(index);
             found.directives.push(ConditionalDirective {

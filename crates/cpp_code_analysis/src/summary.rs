@@ -3431,6 +3431,22 @@ pub struct ConditionalRegion {
     ///
     /// Regions are numbered in opening order, so a parent always has a smaller index than its children.
     pub parent: Option<u32>,
+    /// **The branches as the guard layer reads them — built once, not once per question.**
+    ///
+    /// `branches` above stores each condition as **text**, and reading it back is a lex: `as_branch` →
+    /// `GuardBranch::tokens()` → `CppLexer`. `region_at` did that on every call, and it is called once per
+    /// condition inside `visibility_of`'s loop — 37 M times in an index of a real project, each rebuilding a
+    /// `Vec<Branch>` with a `Box<str>` per token.
+    ///
+    /// It also threw away every `Branch` cache before it could be read twice, which is what made the parse cache in
+    /// `an_expression_holds` worth only 35% of what it should be: the parse was kept, and the `Branch` holding it was
+    /// dropped at the end of the same guard.
+    ///
+    /// `OnceLock` rather than a precomputed field because a summary is decoded from bytes and most regions are never
+    /// asked about: a file whose `#if`s nobody evaluates should pay nothing for this.
+    ///
+    /// **Not part of equality** — it is derived from `branches`, which is.
+    pub decoded: std::sync::OnceLock<Vec<crate::Branch>>,
 }
 
 /// One branch of a conditional: what it asks, and the body it guards.
@@ -3552,8 +3568,21 @@ impl SummaryGuards {
     pub fn region_at(&self, region: u32, offset: usize) -> Option<Region> {
         let conditional = self.conditionals.get(region as usize)?;
 
+        // **The branches are built once per region, not once per question.** `GuardBranch` holds a condition as
+        // *text*, so building them is a lex per branch — and this used to do it on every call, once per condition
+        // inside `visibility_of`'s loop. See the note on [`ConditionalRegion::decoded`].
+        //
+        // Cloned rather than borrowed because `Region` is owned and `Region::visibility` takes `&self`: the clone is
+        // a `Vec<Branch>` of tokens that are now in hand, where the old path re-lexed the text to produce those same
+        // tokens every time. **The `Branch` caches are cloned with their values**, so a parse kept by
+        // `an_expression_holds` is still there on the next question about this region instead of being dropped at
+        // the end of the guard that made it.
+        let decoded = conditional
+            .decoded
+            .get_or_init(|| conditional.branches.iter().map(GuardBranch::as_branch).collect());
+
         Some(Region {
-            branches: conditional.branches.iter().map(GuardBranch::as_branch).collect(),
+            branches: decoded.clone(),
             active_branch: conditional.branch_at(offset)?,
         })
     }

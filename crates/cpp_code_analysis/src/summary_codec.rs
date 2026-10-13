@@ -719,6 +719,9 @@ pub fn decode(bytes: &[u8]) -> Result<FileSummary, DecodeError> {
                 u32::MAX => None,
                 parent => Some(parent),
             },
+            // Empty: this is read back from bytes, and a decoded branch list is built on first use — a region
+            // nobody asks about should cost nothing to have decoded.
+            decoded: std::sync::OnceLock::new(),
         });
     }
 
@@ -1343,6 +1346,7 @@ mod tests {
                             },
                         ],
                         parent: None,
+                        decoded: std::sync::OnceLock::new(),
                     },
                     ConditionalRegion {
                         branches: vec![GuardBranch {
@@ -1352,6 +1356,7 @@ mod tests {
                             range: range(260, 9),
                         }],
                         parent: Some(0),
+                        decoded: std::sync::OnceLock::new(),
                     },
                 ],
                 // A file whose first conditional is its guard, so that the field is not the default here either.
