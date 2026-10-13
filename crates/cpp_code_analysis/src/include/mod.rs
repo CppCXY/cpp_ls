@@ -249,6 +249,33 @@ impl<'a, F: FileProvider> IncludeResolver<'a, F> {
             searched.push(candidate);
         }
 
+        // **The guess, and only after every exact candidate has failed.**
+        //
+        // There is no `-I` that could have found the file — a Visual Studio solution cannot export a database, and a
+        // checkout nobody has configured has none — so the last thing to try is the tail of what was written against
+        // the files that are under the project root. It cannot shadow a real include directory, because reaching here
+        // means every one of them was already tried and answered `None`.
+        //
+        // Refused outright for a bare file name (`vector`, `stdio.h`): a name spelled without a directory is spelled
+        // that way *because* the search path is meant to find it, and matching it against whatever same-named file is
+        // under the root is the confident wrong answer this fallback must not produce. See [`fuzzy`].
+        if self.config.fuzzy_includes
+            && let Some(root) = &self.config.root
+            && let Some(index) = fuzzy::index_for(root)
+        {
+            let matches = index.matching(&include.target);
+            if let Some(chosen) = matches.first() {
+                // Recorded under `LocalDirectory` because that is what it is in effect: the answer came from where
+                // the file is, not from a directory anything named. A consumer that shows `searched` shows every
+                // exact place that failed, and the resolved path is the answer, so nothing is hidden by this.
+                return Resolution::Resolved(self.resolved(
+                    chosen.clone(),
+                    FoundIn::LocalDirectory,
+                    interner,
+                ));
+            }
+        }
+
         Resolution::Unresolved(Unresolved {
             name: include.target.clone(),
             searched,
@@ -667,6 +694,7 @@ mod tests {
 // module keeps a re-export so that every path written before the move still resolves. The distinction is the one
 // that matters for a language server: an include search *asks* for a file, and the file layer is what *holds* one.
 pub mod config;
+pub mod fuzzy;
 pub mod graph;
 pub mod msvc;
 pub mod system_headers;

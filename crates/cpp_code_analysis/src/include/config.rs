@@ -133,6 +133,24 @@ pub struct CompilerConfig {
     /// editor's working directory. Without it, a project's own include paths resolve against nothing in
     /// particular.
     pub working_directory: Option<PathBuf>,
+
+    /// **The project root, for the one search that is about where files *are* rather than where a compiler looked.**
+    ///
+    /// `None` in every caller that has no root to name — the parser's own tests, a snippet with no project — and the
+    /// only thing that reads it is [`Self::fuzzy_includes`]'s fallback.
+    pub root: Option<PathBuf>,
+
+    /// **May an `#include` be found by matching the tail of its path against the files under [`Self::root`]?**
+    ///
+    /// Off by default, and the default is the point: this is a **guess**, and a project that has stated how it is
+    /// built must never have a guess shadow what it said. See [`crate::include::fuzzy`] for the rule and what it
+    /// refuses to match.
+    ///
+    /// **On is the interesting setting**, because the alternative is a compile database: a Visual Studio solution
+    /// cannot export one, and a checkout nobody has configured does not have one, and in both cases the choice is
+    /// between a fuzzy match and a closure of fourteen files. Measured on a real CMake project with no database, the
+    /// fallback is what turns `#include "Session/StandardIOSession.h"` from an unresolved name into the header.
+    pub fuzzy_includes: bool,
 }
 
 impl CompilerConfig {

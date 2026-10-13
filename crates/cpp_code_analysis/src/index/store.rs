@@ -1549,6 +1549,13 @@ impl<F: FileProvider> SummaryStore<F> {
         });
         bytes.push(0);
 
+        // **Whether an include nothing could place may be looked for in the tree**, because it changes which file a
+        // summary is *about*: the same text resolves `#include "Session/IOSession.h"` to a header under the root with
+        // this on and to nothing with it off, and a cache keyed without it would serve one project's facts to the
+        // other. One byte, and it is the difference between an answer and a wrong one.
+        bytes.push(u8::from(self.config.fuzzy_includes));
+        bytes.push(0);
+
         // **And whether the macro environment is the whole of what the compilation defines**, which is the same
         // kind of fact as the dialect: it changes the *reading* rather than the configuration. A summary built
         // without the claim cannot put a macro body behind a conditional in force — `_STD_BEGIN`'s

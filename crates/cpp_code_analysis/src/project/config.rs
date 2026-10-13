@@ -166,6 +166,17 @@ pub struct CompileSection {
     /// configuration cannot express and a per-file database can.
     #[serde(default)]
     pub include: BTreeMap<String, Vec<String>>,
+    /// **Find an `#include` by the tail of its path when no include directory could have.**
+    ///
+    /// `None` means "as the analysis decides", which is off — a guess must never shadow what a project stated. Set
+    /// it `true` for a project whose build system cannot state its include directories at all: a Visual Studio
+    /// solution, whose database CMake cannot export, or a checkout nobody has configured.
+    ///
+    /// See [`crate::include::fuzzy`] for the rule. It runs only after every exact candidate has failed, and it
+    /// refuses a target with no directory in it (`#include <vector>`), which is what keeps it from answering a
+    /// question the search path was supposed to answer.
+    #[serde(default)]
+    pub fuzzy_includes: Option<bool>,
 }
 
 impl CompileSection {

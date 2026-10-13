@@ -644,6 +644,18 @@ impl Session<DiskFiles> {
             &project_config.config.compile,
         );
 
+        // **The project root, so that an include nothing could place can be looked for in the tree.**
+        //
+        // The one search that is about where files *are* rather than where a compiler looked, and the reason it is
+        // needed at all is that a Visual Studio solution cannot export a compile database and a checkout nobody has
+        // configured has none. `[compile].fuzzy_includes` decides whether it runs; the root is recorded either way,
+        // because a flag that is off must not make the rest of the configuration differ.
+        let base = CompilerConfig {
+            root: Some(root.to_path_buf()),
+            fuzzy_includes: project_config.config.compile.fuzzy_includes.unwrap_or(false),
+            ..base
+        };
+
         // **The standard the project's own build states**, read out of the compilation database's command line by
         // `discovery.standard()`, applied only when nothing above it stated one: what the build ran is closer to the
         // truth than a compiler's default, and a project's own `args` are closer still.
