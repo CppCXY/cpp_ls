@@ -80,6 +80,21 @@ pub enum Stage {
     /// `Sweep`. Measured on the 138-file project, the enclosing version reported 106% of the wall clock, which is
     /// how the overlap was found.
     BodiedScan,
+    /// *Detail*: asking whether one of a file's **`#define`s or `#undef`s** is in force, inside `Walk` — the walk's
+    /// own guard evaluation, one per macro fact per file per translation unit that reaches the file.
+    ///
+    /// Kept apart from [`Stage::Guards`], which is `assign_guards` inside `Sweep`: both decide visibility and neither
+    /// is a share of the other, so one number for the two of them would say nothing about either.
+    WalkMacroGuard,
+    /// *Detail*: asking whether one of a file's **`#include`s** is in force, inside `Walk`. One per include per visit,
+    /// and the reason a conditional include is not followed — see the note at the call.
+    WalkIncludeGuard,
+    /// *Detail*: putting a `#define`/`#undef` into the walk's own table (`UnitState::define`/`undefine`), inside
+    /// `Walk`. Called for every macro fact in force, and it is a hash-map insert with a `Box<str>` name.
+    WalkDefine,
+    /// *Detail*: recording one fact into the unit's **timeline** (`TimelineBuilder::record`), inside `Walk`. Every
+    /// fact in force reaches it, and the timeline is what the unit is for.
+    WalkRecord,
     /// *Detail*: the directive and condition scan of one file (`preprocess`), inside `Sweep`.
     Scan,
     /// *Detail*: the scope tree of one file (`build_scopes`), inside `Sweep`.
@@ -192,7 +207,7 @@ impl Stage {
 }
 
 /// Every stage, in the order the table prints them.
-pub const STAGES: [Stage; 42] = [
+pub const STAGES: [Stage; 46] = [
     Stage::Read,
     Stage::Hash,
     Stage::Lookup,
@@ -212,6 +227,10 @@ pub const STAGES: [Stage; 42] = [
     Stage::UnitGet,
     Stage::UnitPut,
     Stage::BodiedScan,
+    Stage::WalkMacroGuard,
+    Stage::WalkIncludeGuard,
+    Stage::WalkDefine,
+    Stage::WalkRecord,
     Stage::Scan,
     Stage::Scopes,
     Stage::Facts,
@@ -260,6 +279,10 @@ impl Stage {
             Stage::UnitGet => "unit-get",
             Stage::UnitPut => "unit-put",
             Stage::BodiedScan => "bodied-scan",
+            Stage::WalkMacroGuard => "walk-macro-guard",
+            Stage::WalkIncludeGuard => "walk-include-guard",
+            Stage::WalkDefine => "walk-define",
+            Stage::WalkRecord => "walk-record",
             Stage::Scan => "scan",
             Stage::Scopes => "scopes",
             Stage::Facts => "facts",
@@ -338,7 +361,13 @@ impl Stage {
             | Stage::UnitPut
             | Stage::UnitRender
             | Stage::UnitFence
-            | Stage::UnitFiles => Family::Units,
+            | Stage::UnitFiles
+            // The four halves of `Walk`, and the family is what they *are* counted in: they are inside it, so they
+            // are the units half for the same reason it is.
+            | Stage::WalkMacroGuard
+            | Stage::WalkIncludeGuard
+            | Stage::WalkDefine
+            | Stage::WalkRecord => Family::Units,
         }
     }
 }

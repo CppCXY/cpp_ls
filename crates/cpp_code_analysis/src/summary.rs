@@ -3184,6 +3184,7 @@ fn walk_one_file<'a>(
                 true
             } else {
                 walked.conditional_facts += 1;
+                let _guard = crate::stages::StageTimer::new(crate::stages::Stage::WalkMacroGuard);
                 let taken = a_guard_is_in_force(file, fact, |at| UnitMacros {
                     seed,
                     state: unit,
@@ -3211,6 +3212,7 @@ fn walk_one_file<'a>(
             // again. Fed for conditional facts too — a `#define` in a branch that **was** taken is a definition like
             // any other, and it is what the next file's conditions are answered against.
             if fact.kind.is_definition() {
+                let _define = crate::stages::StageTimer::new(crate::stages::Stage::WalkDefine);
                 if let Some(definition) = definitions_of.get_or_read(path, source, fact) {
                     unit.define(&fact.name, definition, path, fact.range.start_offset);
                 } else {
@@ -3249,6 +3251,7 @@ fn walk_one_file<'a>(
             // hold what the per-file walk would have collected — including the conditional-but-in-force bodies the
             // second channel carries.
             if let (Some(frame), Some(timeline)) = (frame, walked.timeline.as_mut()) {
+                let _record = crate::stages::StageTimer::new(crate::stages::Stage::WalkRecord);
                 timeline.record(frame, fact, source, matches!(fact.guard, FactGuard::Unconditional));
             }
 
@@ -3258,7 +3261,6 @@ fn walk_one_file<'a>(
         let Some(include) = includes.next() else {
             break;
         };
-
         // **An `#include` is a guarded fact, and the walk asks whether its guard is in force.**
         //
         // It did not, and that is not a small omission on a compiler's own headers: *every* conditional include in
@@ -3276,13 +3278,23 @@ fn walk_one_file<'a>(
         //
         // A guard that cannot be decided is **`Unknown`, and `a_guard_holds` is false for it** — the same rule the
         // macro facts below already followed, and the reason `Visibility` has three states rather than two.
-        if !crate::index::environment::a_guard_holds(file, include.guard, include.range.start_offset, |at| {
-            UnitMacros {
-                seed,
-                state: unit,
-                here: Some((path, at)),
-            }
-        }) {
+        //
+        // Taken under its own timer: one per include per visit, and `Walk` was measured at 78 s with nothing inside
+        // it accounted for.
+        let include_is_in_force = {
+            let _guard = crate::stages::StageTimer::new(crate::stages::Stage::WalkIncludeGuard);
+            crate::index::environment::a_guard_holds(
+                file,
+                include.guard,
+                include.range.start_offset,
+                |at| UnitMacros {
+                    seed,
+                    state: unit,
+                    here: Some((path, at)),
+                },
+            )
+        };
+        if !include_is_in_force {
             walked.includes_skipped += 1;
             continue;
         }
