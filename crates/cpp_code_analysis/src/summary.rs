@@ -1033,6 +1033,34 @@ impl MacroDefinitions {
     ) -> Option<std::sync::Arc<MacroDef>> {
         let key = (path.to_path_buf(), fact.range.start_offset);
 
+        // **A hit rate, because it decides whether the key is worth making cheap.** The key allocates a `PathBuf` on
+        // every lookup, and the cache exists so that a hit costs a hash rather than a re-parse — so the question is
+        // what fraction of lookups are hits. `CPPLS_COUNT_DEFINITIONS=1` answers it; `docs/status.md` records what it
+        // said, and why the obvious fix for the allocation is not safe to make blind.
+        if std::env::var_os("CPPLS_COUNT_DEFINITIONS").is_some() {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static HITS: AtomicU64 = AtomicU64::new(0);
+            static MISSES: AtomicU64 = AtomicU64::new(0);
+            let hit = self.parsed.contains_key(&key);
+            let (hits, misses) = if hit {
+                (
+                    HITS.fetch_add(1, Ordering::Relaxed) + 1,
+                    MISSES.load(Ordering::Relaxed),
+                )
+            } else {
+                (
+                    HITS.load(Ordering::Relaxed),
+                    MISSES.fetch_add(1, Ordering::Relaxed) + 1,
+                )
+            };
+            if (hits + misses) % 1_000_000 == 0 {
+                eprintln!(
+                    "definition_of: {hits} hits, {misses} misses, {:.1}% hit",
+                    100.0 * hits as f64 / (hits + misses) as f64
+                );
+            }
+        }
+
         if let Some(known) = self.parsed.get(&key) {
             return known.clone();
         }
