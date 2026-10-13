@@ -384,6 +384,38 @@ pub fn a_guard_holds<M: crate::MacroValues>(
     offset: usize,
     macros_at: impl Fn(usize) -> M,
 ) -> bool {
+    // **Counted, because this is the hot question of a walk.** `docs/status.md` measured 10.8 M guard evaluations
+    // over a real project's index, with the walk as 80% of the time — so "how many calls, and what do they cost in
+    // total" is the number that decides whether the walk can be made cheaper at all. `CPPLS_COUNT_GUARDS=1` turns it
+    // on and reports every million.
+    if std::env::var_os("CPPLS_COUNT_GUARDS").is_some() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static CALLS: AtomicU64 = AtomicU64::new(0);
+        static NANOS: AtomicU64 = AtomicU64::new(0);
+        let started = std::time::Instant::now();
+        let answer = a_guard_holds_measured(file, guard, offset, macros_at);
+        let nanos = started.elapsed().as_nanos() as u64;
+        let calls = CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+        let total = NANOS.fetch_add(nanos, Ordering::Relaxed) + nanos;
+        if calls % 1_000_000 == 0 {
+            eprintln!(
+                "a_guard_holds: {calls} calls, cumulative {} ms, this call {nanos} ns",
+                total / 1_000_000
+            );
+        }
+        return answer;
+    }
+
+    a_guard_holds_measured(file, guard, offset, macros_at)
+}
+
+/// [`a_guard_holds`] without the counter — see the note there.
+fn a_guard_holds_measured<M: crate::MacroValues>(
+    file: &FileSummary,
+    guard: FactGuard,
+    offset: usize,
+    macros_at: impl Fn(usize) -> M,
+) -> bool {
     if matches!(guard, FactGuard::Unconditional) {
         return true;
     }
