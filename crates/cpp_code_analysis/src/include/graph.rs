@@ -936,11 +936,23 @@ fn record(graph: &mut FileGraph, file: FileId, entry: FileEntry) {
 /// The command line is the exception: `-DFOO` and `-DFOO=1` are parsed into definitions rather than names,
 /// because that is where they come from and because dropping them would make every `#ifdef FOO` in a
 /// configured project answer the wrong way.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct Marked {
     /// Bindings in order, each name either present or explicitly undefined. Later binds shadow earlier ones,
     /// which is what makes `#undef` and redefinition work without deleting history.
     bindings: Vec<(Box<str>, bool)>,
+    /// **Every name `bindings` has ever held, for membership only.** The same names as `bindings`, in no order —
+    /// an index, not a second copy of the state.
+    ///
+    /// It exists because `bindings` is a `Vec` and the questions asked of it are membership questions: `mentions`,
+    /// `is_defined` and `get` each scanned it end to end, once per identifier of every condition of every guard. The
+    /// `Vec` grows with the compiler's own predefines — a thousand entries for MSVC with a configuration — so every
+    /// `#ifdef` in every file was a thousand string comparisons. Measured: `a_guard_holds` was 165 s of a 391 s
+    /// index of `EmmyLuaCodeStyle` after the trace-variable fix, and it is one of the last things on that path.
+    ///
+    /// The `Vec` itself stays: order is what decides shadowing, and the reverse scan in `is_defined` is over a
+    /// handful of entries once this has said the name is there at all.
+    mentioned: std::collections::HashSet<Box<str>>,
     /// Definitions from the command line, kept so that a lookup can answer about a *value* as well as a name.
     command_line: Vec<crate::macros::MacroDef>,
     /// Whether macros this state does not mention might still have been in force.
@@ -959,6 +971,20 @@ pub struct Marked {
     /// the reading that would make the rest of the file's conditions wrong rather than unknown.
     uncertain: HashSet<Box<str>>,
 }
+
+/// **Equality is over the state, not over the index.** `mentioned` holds exactly the names `bindings` holds, so two
+/// states that differ in it have already differed in `bindings` — comparing it would be comparing a fact twice, and
+/// a caller that builds the same state two ways would see two unequal states for no reason a reader could act on.
+impl PartialEq for Marked {
+    fn eq(&self, other: &Self) -> bool {
+        self.bindings == other.bindings
+            && self.command_line == other.command_line
+            && self.incomplete == other.incomplete
+            && self.uncertain == other.uncertain
+    }
+}
+
+impl Eq for Marked {}
 
 impl crate::condition::MacroValues for Marked {
     /// The definition behind a name, for evaluating a condition.
@@ -1066,7 +1092,7 @@ impl Marked {
 
     /// Did anything in this state mention the name, one way or the other?
     fn mentions(&self, name: &str) -> bool {
-        self.bindings.iter().any(|(bound, _)| &**bound == name)
+        self.mentioned.contains(name)
     }
 
     /// Is the name one this state passed without being able to decide?
@@ -1084,6 +1110,7 @@ impl Marked {
 
         for name in &config.undefines {
             marked.bindings.push((name.clone(), false));
+        marked.mentioned.insert(name.clone());
         }
 
         marked
@@ -1109,6 +1136,7 @@ impl Marked {
         };
 
         self.bindings.push((parsed.name.clone(), true));
+        self.mentioned.insert(parsed.name.clone());
         self.command_line
             .retain(|existing| existing.name != parsed.name);
         self.command_line.push(parsed);
@@ -1116,6 +1144,7 @@ impl Marked {
 
     pub fn define(&mut self, definition: crate::macros::MacroDef) {
         self.bindings.push((definition.name.clone(), true));
+        self.mentioned.insert(definition.name.clone());
         self.command_line
             .retain(|existing| existing.name != definition.name);
         self.command_line.push(definition);
@@ -1203,14 +1232,24 @@ impl Marked {
     /// definition that is no longer the one in force.
     pub fn define_name(&mut self, name: &str) {
         self.bindings.push((name.into(), true));
+        self.mentioned.insert(name.into());
         self.command_line.retain(|existing| &*existing.name != name);
     }
     pub fn undefine(&mut self, name: &str) {
         self.bindings.push((name.into(), false));
+        self.mentioned.insert(name.into());
         self.command_line.retain(|existing| &*existing.name != name);
     }
 
     pub fn is_defined(&self, name: &str) -> bool {
+        // **The index answers "is it there at all" first, and it is the common answer that is *no*.** A condition
+        // asks about names the compiler never heard of — `__cplusplus`, a project's own feature macro — so the scan
+        // below used to run to the end of the `Vec` for every one of them, against the compiler's own thousand
+        // predefines. With the index that case is one hash, and the reverse scan only happens for a name that is
+        // really in the list, where it stops at the binding in force.
+        if !self.mentioned.contains(name) {
+            return false;
+        }
         self.bindings
             .iter()
             .rev()
