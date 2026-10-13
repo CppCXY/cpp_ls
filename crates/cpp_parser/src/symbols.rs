@@ -1049,6 +1049,43 @@ pub fn a_body_opens_an_inline_namespace(text: &str) -> bool {
 pub fn shape_of_a_body_at(text: &str, bodies: &(impl MacroBodies + ?Sized), at: usize) -> BodyShape {
     use crate::{CppLexer, CppTokenKind, LexerConfig};
 
+    // **A counter, because the cost of this function is a call count and not a per-call cost.** It lexes its argument
+    // from scratch and is called once per macro definition whose body matters, so the number that decides whether
+    // caching is worth anything is "how many times per index" — which nothing else reports. `CPPLS_COUNT_SHAPES`
+    // turns it on; the measurement it produced is recorded in `docs/status.md`.
+    if std::env::var_os("CPPLS_COUNT_SHAPES").is_some() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static CALLS: AtomicU64 = AtomicU64::new(0);
+        static NANOS: AtomicU64 = AtomicU64::new(0);
+        let started = std::time::Instant::now();
+        let answer = shape_of_a_body_at_measured(text, bodies, at);
+        let nanos = started.elapsed().as_nanos() as u64;
+        let calls = CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+        let total = NANOS.fetch_add(nanos, Ordering::Relaxed) + nanos;
+        // **Every 1 000 calls, and never per call.** A per-call print was tried and it changed the measurement: the
+        // formatting and the line-buffered write dominated, and the reported cumulative time fell from 41 s to 7 ms.
+        // The number that matters is the share of the walk this function is *not* — see `docs/status.md`.
+        if calls % 1_000 == 0 {
+            eprintln!(
+                "shape_of_a_body_at: {calls} calls, cumulative {} ms, this call {nanos} ns, text {} B",
+                total / 1_000_000,
+                text.len(),
+            );
+        }
+        return answer;
+    }
+
+    shape_of_a_body_at_measured(text, bodies, at)
+}
+
+/// [`shape_of_a_body_at`], without the counter — see the note there.
+fn shape_of_a_body_at_measured(
+    text: &str,
+    bodies: &(impl MacroBodies + ?Sized),
+    at: usize,
+) -> BodyShape {
+    use crate::{CppLexer, CppTokenKind, LexerConfig};
+
     // **A token's kind and what it is spelled as.** The spelling is carried rather than the token's range, because
     // a **spliced** token — one that came out of a replacement list — has offsets into the *body's* text and not
     // into `text`. Reading a name back out of `text` by a range that belongs to another string is how a namespace

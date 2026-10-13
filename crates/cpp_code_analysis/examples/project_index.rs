@@ -49,6 +49,36 @@ fn main() {
     );
     let opened = started.elapsed();
 
+    // **What the session decided this project is**, printed before anything is walked with it. The number that
+    // follows is unreadable without it: a project whose files cannot resolve their `#include`s walks timelines with
+    // nothing in them, and `unstored` in the stats line is that fact rather than a cache problem.
+    {
+        let config = session.config();
+        println!(
+            "include paths: {} | defines: {} | compiler: {:?}",
+            config.include_paths.len(),
+            config.defines.len(),
+            session
+                .toolchain()
+                .and_then(|toolchain| toolchain.compiler.as_ref()).map(|path| path.display().to_string()),
+        );
+        for path in config.include_paths.iter().take(12) {
+            println!("    {}{}", path.directory.display(), if path.is_system { "  (system)" } else { "" });
+        }
+        let discovery = session.discovery();
+        println!(
+            "database: {:?} | discovery problems: {}",
+            discovery
+                .database
+                .as_ref()
+                .map(|database| database.path.display().to_string()),
+            discovery.problems.len(),
+        );
+        for problem in &discovery.problems {
+            println!("    [{:?}] {}", problem.severity, problem.message);
+        }
+    }
+
     // **The file a request is about**, so that the run includes the closure expansion a real session does rather
     // than only the project scan.
     if let Some(entry) = &entry {
