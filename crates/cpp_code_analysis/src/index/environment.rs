@@ -384,10 +384,6 @@ pub fn a_guard_holds<M: crate::MacroValues>(
     offset: usize,
     macros_at: impl Fn(usize) -> M,
 ) -> bool {
-    // **Counted, because this is the hot question of a walk.** `docs/status.md` measured 10.8 M guard evaluations
-    // over a real project's index, with the walk as 80% of the time — so "how many calls, and what do they cost in
-    // total" is the number that decides whether the walk can be made cheaper at all. `CPPLS_COUNT_GUARDS=1` turns it
-    // on and reports every million.
     if std::env::var_os("CPPLS_COUNT_GUARDS").is_some() {
         use std::sync::atomic::{AtomicU64, Ordering};
         static CALLS: AtomicU64 = AtomicU64::new(0);
@@ -398,8 +394,11 @@ pub fn a_guard_holds<M: crate::MacroValues>(
         let calls = CALLS.fetch_add(1, Ordering::Relaxed) + 1;
         let total = NANOS.fetch_add(nanos, Ordering::Relaxed) + nanos;
         if calls % 1_000_000 == 0 {
+            // **The whole call, and the count of how many were slow.** A median of 400 ns with occasional 100 us is
+            // not an average and not a distribution: what matters is how many calls are in the slow tail, because
+            // that is what says whether the cost is one expensive shape or every call being quietly expensive.
             eprintln!(
-                "a_guard_holds: {calls} calls, cumulative {} ms, this call {nanos} ns",
+                "a_guard_holds: {calls} calls, total {} ms, this call {nanos} ns",
                 total / 1_000_000
             );
         }
