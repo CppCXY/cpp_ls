@@ -1188,6 +1188,7 @@ impl Marked {
                     // (What is *not* here is the file's identity: a `Marked` is one file's state, and the ranges
                     // are positions in it.)
                     written_in: Some(crate::macros::MacroFile::Here),
+                    value: std::sync::OnceLock::new(),
                 }),
                 // **The name the body aliased, when the body *is* one name** — `#define _STL_LANG __cplusplus`.
                 //
@@ -1217,6 +1218,7 @@ impl Marked {
                         range: fact.range,
                         name_range: fact.range,
                         written_in: Some(crate::macros::MacroFile::Here),
+                    value: std::sync::OnceLock::new(),
                     }),
                     None => self.define_name(&fact.name),
                 },

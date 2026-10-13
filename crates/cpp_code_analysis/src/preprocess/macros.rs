@@ -111,6 +111,18 @@ pub struct MacroDef {
     /// ([`MacroFile::Frame`]); and one reconstructed from evidence that carried text and nothing else is in no
     /// file at all (`None`) — its ranges are offsets in the reconstruction, and showing them points nowhere.
     pub written_in: Option<MacroFile>,
+
+    /// **The value this definition is in a condition, when it cannot depend on anything.** `None` inside the inner
+    /// `Option` means "read, and it is not a value"; the outer `None` means "not read yet".
+    ///
+    /// `macro_value` is what `#if NAME > 2` costs, and it re-expands the body and re-parses the result **on every
+    /// evaluation** — a `Vec<Token>` and a `Box<str>` per token, for a body that is usually one integer literal.
+    /// A body of exactly one integer literal is a value whatever the macros say, so it is computed once and kept.
+    ///
+    /// `OnceLock` rather than a plain field because a `MacroDef` is built by many paths — read from source, decoded
+    /// from a cache, reconstructed from evidence — and this is derived from `body`, which one of them already read.
+    /// Not part of equality: it is a function of `body`.
+    pub value: std::sync::OnceLock<Option<i128>>,
 }
 
 /// **Which file a definition's positions are in.**
@@ -500,6 +512,7 @@ pub fn parse_define(tokens: &[Token], range: SourceRange) -> Option<MacroDef> {
         range,
         name_range,
         written_in: Some(MacroFile::Here),
+        value: std::sync::OnceLock::new(),
     })
 }
 

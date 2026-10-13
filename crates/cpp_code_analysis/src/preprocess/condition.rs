@@ -563,12 +563,42 @@ const EXPANSION_BUDGET: usize = 4096;
 /// `Unknown` — a preprocessor does not expand a name inside its own body, and saying so here is what keeps that
 /// rule from becoming a hang.
 fn macro_value(definition: &MacroDef, macros: &impl MacroValues) -> Value {
+    // **A body of one integer literal is a value, whatever the macros say**, so it is read once and kept. This is
+    // the shape almost every condition's macro has — `#define _MSC_VER 1930`, `#define WINAPI_FAMILY 100` — and
+    // without this the whole of `macro_value` ran on every evaluation: a `Vec<Token>` built from the body, a clone of
+    // every token (each owning a `Box<str>`), an `expand_with_budget` traversal, and then a re-parse of the result.
+    //
+    // `definitions_of` already parses each `#define` once per file, and this is the same rule one level further in:
+    // a *value* read out of a definition is a property of the definition.
+    //
+    // Nothing about the macro state can change the answer, which is the whole reason it may be kept: one integer
+    // literal is `IntegerLiteral` whether or not any macro is defined. A body that is anything else — a name, an
+    // expression, a function-like macro — is not cached, and every one of those still goes the long way, because
+    // their value really can depend on the table.
+    if let Some(held) = definition.value.get() {
+        return match held {
+            Some(value) => Value::Known(*value),
+            None => Value::Unknown,
+        };
+    }
+
     let body: Vec<Token> = definition.body.significant().cloned().collect();
 
     // `#define FOO` with an empty body: `#if FOO` is a syntax error in a real preprocessor, and `Unknown` is what
     // keeps the caller quiet about it.
     if body.is_empty() {
         return Value::Unknown;
+    }
+
+    // **The one case that can be decided from the body alone**, checked before anything is expanded — and the answer
+    // is stored, so the next evaluation of this definition does not reach here at all.
+    if definition.params.is_none()
+        && let [only] = body.as_slice()
+        && only.kind == CppTokenKind::IntegerLiteral
+        && let Some(value) = parse_integer(only.text())
+    {
+        let _ = definition.value.set(Some(value));
+        return Value::Known(value);
     }
 
     let expanded = crate::expand::expand_with_budget(&body, macros, EXPANSION_BUDGET);
