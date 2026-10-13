@@ -203,6 +203,23 @@ impl Branch {
             return Some(held);
         }
 
+        // **A condition macro replacement cannot express differently is parsed once.** See
+        // [`a_replacement_can_change_the_parse`] for the test and why it is this one.
+        if !a_replacement_can_change_the_parse(&self.tokens) {
+            // Parsed with **no expansion at all**, and the parse is what is kept. `eval` resolves each name against
+            // `macros` itself, so the expression is the same one the expanding path would have built.
+            let parsed = crate::preprocess::condition::parse_condition(&self.tokens).ok();
+            let held = parsed
+                .as_ref()
+                .map(|expr| crate::preprocess::condition::eval(expr, macros).is_true())
+                // The same answer `evaluate` gives for tokens that do not parse: not decidable. No macro state can
+                // make them parse, so this is kept too — see the `fixed` note.
+                .unwrap_or(None);
+            let _ = self.parsed.set(parsed);
+            let _ = self.fixed.set(true);
+            return held;
+        }
+
         let (value, expression) = evaluate_recording(&self.tokens, macros);
         if let Some(expression) = expression {
             let _ = self.parsed.set(Some(expression));
@@ -210,6 +227,56 @@ impl Branch {
         }
         value.is_true()
     }
+}
+
+/// **Could macro replacement turn this condition into a different expression?**
+///
+/// False means the condition can be parsed once and the parse kept forever, which is what makes this worth asking:
+/// `evaluate` expands and parses **on every call**, and a branch is evaluated once per macro fact per file per
+/// translation unit that reaches its file — 37 M conditions and 105 s in an index of a real project.
+///
+/// # The test, and why not the obvious one
+///
+/// Only a **function-like macro call** can change the parse. `expand_condition` replaces a run's tokens with the
+/// macro's body, but the condition grammar has exactly one shape for a name — `Identifier` — and `eval` resolves it
+/// against the table anyway (`ConditionExpr::Identifier` -> `macro_value`). So `#if _MSC_VER >= 1930` parses the same
+/// whether `_MSC_VER` is `1930` or still a name, and only `#if WINAPI_FAMILY_PARTITION(...)` — which has **no
+/// production** in the grammar until it is replaced by its body — needs the expansion.
+///
+/// That means: a name **directly followed by `(`** can be a call, and any other shape cannot.
+///
+/// # The two exceptions, which are the whole difficulty
+///
+/// `expand_condition` deliberately **skips the operand of `defined` and of the builtin operators**, because the
+/// standard says those are not replaced — `defined(FOO)` must reach the evaluator with the name the file wrote, or
+/// "is `FOO` defined" becomes "is `1` defined". So `(` after `defined` or after `__has_include` and its family is
+/// **not** a call, and treating it as one would make every include guard in the corpus uncacheable.
+///
+/// This is the mistake the first attempt at caching made: it asked whether the *expansion* came back unchanged,
+/// which object-like replacement makes false almost everywhere, instead of asking whether a replacement could
+/// matter at all.
+fn a_replacement_can_change_the_parse(tokens: &[Token]) -> bool {
+    use crate::token::is_trivia;
+    let significant: Vec<&Token> = tokens.iter().filter(|token| !is_trivia(token.kind)).collect();
+
+    for (index, token) in significant.iter().enumerate() {
+        if token.kind != cpp_parser::CppTokenKind::Identifier {
+            continue;
+        }
+        let is_a_call_shape = significant
+            .get(index + 1)
+            .is_some_and(|next| next.kind == cpp_parser::CppTokenKind::LeftParen);
+        if !is_a_call_shape {
+            continue;
+        }
+        // The two forms whose `(` introduces an operand rather than a call.
+        if token.text() == "defined" || crate::preprocess::condition::is_a_builtin_operator(token.text()) {
+            continue;
+        }
+        return true;
+    }
+
+    false
 }
 
 /// **The answer to a condition that is one number**, or `None` when it is anything else.
