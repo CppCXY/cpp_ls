@@ -370,9 +370,120 @@ mod tests {
         resolution
     }
 
+    /// **The fuzzy fallback, which reads the disk rather than the provider.**
+    ///
+    /// See [`crate::include::fuzzy`]: a match is a statement about what is *there*, so the root has to be a real
+    /// directory. Each test gets its own, and the process-wide index cache is cleared first because a name reused
+    /// across tests would otherwise be answered from another test's tree.
+    mod fuzzy_fallback {
+        use crate::include::fuzzy;
+        use crate::{CompilerConfig, DiskFiles, IncludeResolver};
+
+        use super::{Include, IncludeForm, PathInterner, Resolution};
+
+        /// A root on disk with `files` in it, and a config that points at it.
+        fn project(name: &str, files: &[&str]) -> (std::path::PathBuf, CompilerConfig) {
+            let root = std::env::temp_dir().join("cppls-include-fuzzy").join(name);
+            let _ = std::fs::remove_dir_all(&root);
+            for file in files {
+                let path = root.join(file);
+                std::fs::create_dir_all(path.parent().expect("a parent")).expect("a directory");
+                std::fs::write(&path, "// a header\n").expect("a file");
+            }
+            fuzzy::forget_everything();
+
+            let config = CompilerConfig {
+                root: Some(root.clone()),
+                fuzzy_includes: true,
+                ..CompilerConfig::new()
+            };
+            (root, config)
+        }
+
+        fn resolve(name: &str, config: &CompilerConfig) -> Option<std::path::PathBuf> {
+            let resolver = IncludeResolver::new(&DiskFiles, config);
+            let mut interner = PathInterner::new(false);
+            let include = Include {
+                form: IncludeForm::Quote,
+                target: name.into(),
+                is_next: false,
+            };
+            match resolver.resolve(&include, std::path::Path::new("/nowhere"), None, &mut interner) {
+                Resolution::Resolved(resolved) => Some(resolved.path),
+                Resolution::Unresolved(_) => None,
+            }
+        }
+
+        #[test]
+        fn a_header_nothing_could_place_is_found_by_its_tail() {
+            // **The case this exists for.** No `-I` names `CodeFormatServer/include`, so
+            // `#include "Session/StandardIOSession.h"` was searched for beside the including file and in the
+            // compiler's own directories — and the closure of a real project's `main.cpp` was 14 files instead of
+            // the whole program.
+            let (root, config) = project(
+                "tail",
+                &["CodeFormatServer/include/Session/StandardIOSession.h"],
+            );
+
+            let found = resolve("Session/StandardIOSession.h", &config).expect("found by its tail");
+            assert_eq!(
+                found,
+                root.join("CodeFormatServer/include/Session/StandardIOSession.h")
+            );
+        }
+
+        #[test]
+        fn an_exact_include_directory_is_never_shadowed() {
+            // **The rule that makes the fallback safe.** A file that a search path *can* place must be placed by it:
+            // reaching the fallback means every exact candidate was tried and answered `None`, so a guess can never
+            // take a resolution away from a directory the project named.
+            let (root, mut config) = project(
+                "shadow",
+                &["named/Widget.h", "elsewhere/named/Widget.h"],
+            );
+            config.include_paths.push(crate::config::IncludePath::user(root.join("named")));
+
+            let found = resolve("Widget.h", &config).expect("the search path found it");
+            assert_eq!(found, root.join("named/Widget.h"));
+
+            // …and the same tree with the flag **off** resolves the tail-only spelling to nothing, which is what
+            // every project without a database got before this existed.
+            let strict = CompilerConfig {
+                include_paths: config.include_paths.clone(),
+                ..CompilerConfig::new()
+            };
+            assert_eq!(resolve("Session/Absent.h", &strict), None);
+        }
+
+        #[test]
+        fn a_bare_name_is_left_to_the_search_path() {
+            // `#include <vector>` spelled without a directory is spelled that way *because* the search path is meant
+            // to find it, so a miss means the path is wrong rather than that the file is elsewhere. Matching it
+            // against whatever same-named file is under the root is the confident wrong answer this refuses.
+            let (_, config) = project("bare", &["a/vector", "b/vector", "c/stdio.h"]);
+
+            assert_eq!(resolve("vector", &config), None);
+            assert_eq!(resolve("stdio.h", &config), None);
+        }
+
+        #[test]
+        fn the_flag_off_means_no_fallback_at_all() {
+            // **The default, stated as a test.** A project that has stated how it is built must not have a guess
+            // run underneath it, and a project that has said nothing gets the guess only when it asks for one.
+            let (_root, config) = project("off", &["include/Session/IOSession.h"]);
+            let strict = CompilerConfig {
+                root: config.root.clone(),
+                fuzzy_includes: false,
+                ..CompilerConfig::new()
+            };
+
+            assert_eq!(resolve("Session/IOSession.h", &strict), None);
+            assert!(resolve("Session/IOSession.h", &config).is_some());
+        }
+    }
+
     #[test]
-    fn a_quoted_include_prefers_the_files_own_directory() {
-        let resolution = resolve("local.h", IncludeForm::Quote, "src", false);
+    fn a_quoted_include_prefers_the_files_own_directory() {        let resolution = resolve("local.h", IncludeForm::Quote, "src", false);
 
         assert_eq!(
             resolution.resolved().map(|it| it.path.as_path()),
