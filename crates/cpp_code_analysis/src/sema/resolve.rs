@@ -645,11 +645,9 @@ fn inside_a_comment_or_a_literal(token: &cpp_parser::CppSyntaxToken) -> bool {
 fn name_node_around(root: &CppSyntaxNode, offset: usize) -> Option<CppSyntaxNode> {
     let mut found = None;
     let mut node = root.clone();
-    // Read once, not once per call: this runs on every symbol resolution, and a variable that is unset cannot become
-    // set during a run. The same shape in `preprocess::cooked` and `summary` cost 106 s and 40 s of a real index.
-    static TRACING: std::sync::LazyLock<bool> =
-        std::sync::LazyLock::new(|| std::env::var_os("CPPLS_TRACE_COORDINATES").is_some());
-    let tracing = *TRACING;
+    // Read once — see `crate::probes`. This runs on every symbol resolution, and reading the environment per call
+    // was the same mistake that cost 106 s and 40 s at two other sites of it.
+    let tracing = crate::probes::coordinates();
 
     loop {
         let range = node.text_range();

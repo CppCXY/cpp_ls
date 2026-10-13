@@ -158,7 +158,7 @@ pub mod query_trace {
     /// Is the trace on? Read per call rather than memoised: a probe turns it on before the session is built, and
     /// an `OnceLock` here would be a second thing to reason about for no measured cost.
     fn on() -> bool {
-        std::env::var_os("CPPLS_TRACE_COMPLETION").is_some()
+        crate::probes::completion()
     }
 
     /// What one region cost, and how many times it ran.
@@ -213,7 +213,7 @@ pub mod query_trace {
     /// server's `stderr` and may throw it away, while every server has a log sink.
     pub fn report() -> String {
         let line = summary();
-        if on() && std::env::var_os("CPPLS_TRACE_COMPLETION_STDERR").is_some() {
+        if on() && crate::probes::completion_to_stderr() {
             eprintln!("  query_trace: {line}");
         }
         line
@@ -1122,7 +1122,7 @@ pub fn members_of(
     // The diagnostic that found why `std::ios::` offered nothing: whether a member is *present* and at what depth,
     // which is the difference between "the base walk worked" and "the list happens to be long". Off unless asked
     // for, like this crate's other traces.
-    if std::env::var_os("CPPLS_TRACE_MEMBERS").is_some()
+    if crate::probes::members()
         && let Known::Yes(list) = &listed
     {
         eprintln!(
@@ -1954,7 +1954,7 @@ fn names_in_a_scope(
                     }),
                 Known::Unknown(_) | Known::No => false,
             };
-            if std::env::var_os("CPPLS_TRACE_MEMBERS").is_some() {
+            if crate::probes::members() {
                 let bare = spelling.rsplit("::").next().unwrap_or(spelling);
                 let facts: Vec<String> = index
                     .every_fact_named(bare)
@@ -2042,7 +2042,7 @@ fn names_in_a_scope(
                 // so the two cannot disagree about what the spelling names.
                 let named = resolve_aliases(index, scopes, root, path, spelling);
                 let named = named.as_ref();
-                if std::env::var_os("CPPLS_TRACE_MEMBERS").is_some() {
+                if crate::probes::members() {
                     eprintln!("    names_a_type({spelling}) -> alias resolved to {named:?}");
                 }                match names_of_a_class(index, scopes, root, path, named) {
                     Known::Yes(members) => names.extend(offered(members, 0)),

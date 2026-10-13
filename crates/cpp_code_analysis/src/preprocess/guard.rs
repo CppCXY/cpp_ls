@@ -120,19 +120,10 @@ impl Branch {
         // guards through different code, and when they disagree the disagreement is invisible from outside: this
         // prints what *this* path decided, for a condition whose text mentions the name the caller asked about.
         //
-        // **The variable is read once, not once per branch.** This is called for every branch of every region of
-        // every condition of every guard — tens of millions of times in one index — and the `std::env::var_os` was a
-        // lock of the process environment each time, plus a `to_string_lossy` allocation and a scan of the condition's
-        // tokens. All three of those decide a question whose answer cannot change during a run. The same mistake cost
-        // 106 s in `UnitMacros::lookup` and is recorded there; this is the second site of it.
-        //
-        // An empty value means "off", which is what an unset variable meant before — a trace name is never empty.
-        static TRACED: std::sync::LazyLock<Option<String>> = std::sync::LazyLock::new(|| {
-            std::env::var_os("CPPLS_TRACE_GUARD")
-                .filter(|wanted| !wanted.is_empty())
-                .map(|wanted| wanted.to_string_lossy().into_owned())
-        });
-        if let Some(wanted) = TRACED.as_deref() {
+        // The variable is read once — see `crate::probes`. This is called for every branch of every region of every
+        // condition of every guard, tens of millions of times in one index, and reading the environment here was a
+        // lock of the process per branch: **40 s** of a real project's index, measured.
+        if let Some(wanted) = crate::probes::guard_name() {
             let mentions = self.tokens.iter().any(|token| token.text().contains(wanted));
             if mentions {
                 let answer = match self.kind {

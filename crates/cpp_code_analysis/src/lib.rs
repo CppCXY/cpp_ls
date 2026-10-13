@@ -51,6 +51,7 @@ pub mod include;
 pub mod index;
 pub mod inlay;
 pub mod preprocess;
+pub mod probes;
 pub mod project;
 pub mod sema;
 pub mod semantic;

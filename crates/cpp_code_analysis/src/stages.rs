@@ -420,7 +420,7 @@ pub mod check_trace {
     }
 
     fn on() -> bool {
-        std::env::var_os("CPPLS_TRACE_DIAGNOSTICS").is_some()
+        crate::probes::diagnostics()
     }
 
     pub fn reset() {

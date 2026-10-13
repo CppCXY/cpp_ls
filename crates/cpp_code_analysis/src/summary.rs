@@ -1032,35 +1032,12 @@ impl MacroDefinitions {
         fact: &MacroFact,
     ) -> Option<std::sync::Arc<MacroDef>> {
         let key = (path.to_path_buf(), fact.range.start_offset);
-
-        // **A hit rate, because it decides whether the key is worth making cheap.** The key allocates a `PathBuf` on
-        // every lookup, and the cache exists so that a hit costs a hash rather than a re-parse — so the question is
-        // what fraction of lookups are hits. `CPPLS_COUNT_DEFINITIONS=1` answers it; `docs/status.md` records what it
-        // said, and why the obvious fix for the allocation is not safe to make blind.
-        if std::env::var_os("CPPLS_COUNT_DEFINITIONS").is_some() {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            static HITS: AtomicU64 = AtomicU64::new(0);
-            static MISSES: AtomicU64 = AtomicU64::new(0);
-            let hit = self.parsed.contains_key(&key);
-            let (hits, misses) = if hit {
-                (
-                    HITS.fetch_add(1, Ordering::Relaxed) + 1,
-                    MISSES.load(Ordering::Relaxed),
-                )
-            } else {
-                (
-                    HITS.load(Ordering::Relaxed),
-                    MISSES.fetch_add(1, Ordering::Relaxed) + 1,
-                )
-            };
-            if (hits + misses) % 1_000_000 == 0 {
-                eprintln!(
-                    "definition_of: {hits} hits, {misses} misses, {:.1}% hit",
-                    100.0 * hits as f64 / (hits + misses) as f64
-                );
-            }
-        }
-
+        // **The key allocates, and it stays that way because the measurement said the allocation is 1 s of a 250 s
+        // index.** A counter was put here to answer "what fraction of lookups are hits" — five million lookups per
+        // index at 98.7%, so the waste is real and the fix is not obvious: a pointer-keyed index would be the cheap
+        // answer and the unsafe one, because a path that is replaced could then hand one file's definition to
+        // another. The counter is gone; the number it produced is in `docs/status.md`, and that number — not the
+        // shape of this line — is what a second attempt should start from.
         if let Some(known) = self.parsed.get(&key) {
             return known.clone();
         }
@@ -1189,27 +1166,18 @@ struct UnitMacros<'a> {
 
 impl crate::condition::MacroValues for UnitMacros<'_> {
     fn lookup(&self, name: &str) -> crate::condition::Lookup<'_> {
-        // **What the walk's own evaluator is told about a name**, behind an environment variable.
+        // **What the walk's own evaluator is told about a name.**
         //
-        // The cook and the walk decide the same guards through different code, and when they disagree nothing
-        // outside shows it: a guard the walk reads as `None` silently drops every fact inside it, and the only
-        // symptom is content missing from a stream much later. `CPPLS_TRACE_LOOKUP=NAME` prints this path's answer.
+        // The cook and the walk decide the same guards through different code, and when they disagree nothing outside
+        // shows it: a guard the walk reads as `None` silently drops every fact inside it, and the only symptom is
+        // content missing from a stream much later. `CPPLS_TRACE_LOOKUP=NAME` prints this path's answer.
         //
-        // **The variable is read once, not once per lookup.** This is the hottest function in a warm index —
-        // `a_guard_holds` was measured at 271 s of a 465 s index, and every identifier of every condition of every
-        // guard arrives here — so a `std::env::var_os` on each call is a lock of the process environment on the
-        // hottest path in the program. Measured: hoisting it behind a `LazyLock` took `a_guard_holds` from
-        // **271,479 ms to 192,350 ms** and the walk from 319 s to 253 s, with nothing else changed.
-        //
-        // `None` when the variable is unset or empty — no macro is called the empty string, so an empty value is a
-        // way to say "off" that needs no sentinel. The comparison is one string equality on a stack string, where
-        // the environment lock was the cost.
-        static TRACED: std::sync::LazyLock<Option<String>> = std::sync::LazyLock::new(|| {
-            std::env::var_os("CPPLS_TRACE_LOOKUP")
-                .filter(|wanted| !wanted.is_empty())
-                .map(|wanted| wanted.to_string_lossy().into_owned())
-        });
-        if let Some(wanted) = TRACED.as_deref()
+        // **The trace comes from `crate::probes`, which reads its variable once.** This is the hottest function in a
+        // warm index — `a_guard_holds` was measured at 271 s of a 465 s index, and every identifier of every
+        // condition of every guard arrives here — so reading the environment per call was a lock of the process on
+        // the hottest path in the program. Measured: hoisting that one read took `a_guard_holds` from **271,479 ms**
+        // to **192,350 ms**, and dropping the `to_string_lossy` beside it took it to **165,312 ms**.
+        if let Some(wanted) = crate::probes::lookup_name()
             && wanted == name
         {
             let from_state = self.state.definitions.get(name).map(|binding| {
@@ -3533,32 +3501,12 @@ impl SummaryGuards {
     ///
     /// The file's own guard is left out: it is not a condition — see [`SummaryGuards::own_guard`].
     pub fn conditions_of(&self, region: u32) -> Vec<ConditionAt> {
-        // **Counted, because `visibility_of` calls this once per guard and allocates a `Vec` every time.**
-        // `CPPLS_COUNT_CONDITIONS=1` reports the call count and the conditions produced: the ratio says whether most
-        // guards are one condition — a `Vec` of one, millions of times — or many.
-        if std::env::var_os("CPPLS_COUNT_CONDITIONS").is_some() {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            static CALLS: AtomicU64 = AtomicU64::new(0);
-            static FOUND: AtomicU64 = AtomicU64::new(0);
-            let started = std::time::Instant::now();
-            let answer = self.conditions_of_measured(region);
-            let calls = CALLS.fetch_add(1, Ordering::Relaxed) + 1;
-            let found =
-                FOUND.fetch_add(answer.len() as u64, Ordering::Relaxed) + answer.len() as u64;
-            if calls % 1_000_000 == 0 {
-                eprintln!(
-                    "conditions_of: {calls} calls, {found} conditions ({:.2} each), this call {} ns",
-                    found as f64 / calls as f64,
-                    started.elapsed().as_nanos()
-                );
-            }
-            return answer;
-        }
-        self.conditions_of_measured(region)
-    }
-
-    /// [`conditions_of`] without the counter — see the note there.
-    fn conditions_of_measured(&self, region: u32) -> Vec<ConditionAt> {
+        // **It allocates a `Vec` on every call, and it stays that way because the measurement said not to bother.**
+        // `visibility_of` calls this once per guard — nine million times in an index of a real project — so the
+        // allocation looked like the cost. A counter said otherwise: nine million calls producing 37 M conditions,
+        // **100-300 ns each**, about two seconds in total. The cost was in what the conditions are then used for, not
+        // in making the list. The counter is gone; `docs/status.md` keeps the number, which is the thing that says
+        // this line is not worth changing.
         let mut found = Vec::new();
         let mut current = Some(region);
 

@@ -790,20 +790,11 @@ impl crate::macros::MacroBindings for FileMacros<'_> {
     fn definition_at(&self, name: &str, offset: usize) -> Option<&crate::macros::MacroDef> {
         let found = self.definition_at_traced(name, offset);
 
-        // **The variable is read once, not once per lookup.** `definition_at` is the expander's own name resolution
-        // and runs for every macro name it meets — tens of millions of times in an index of a real project. A
-        // `std::env::var_os` each time is a lock of the process environment and a `to_string_lossy` an allocation, to
-        // answer a question that cannot change during a run. The same mistake cost 106 s in `UnitMacros::lookup` and
-        // 40 s in `Condition::holds`; this is the third site, found by grepping for the shape rather than by
-        // measuring, which is what should have happened the second time.
-        //
-        // An empty value means "off", which is what an unset variable meant before — a trace name is never empty.
-        static TRACED: std::sync::LazyLock<Option<String>> = std::sync::LazyLock::new(|| {
-            std::env::var_os("CPPLS_TRACE_MACRO")
-                .filter(|wanted| !wanted.is_empty())
-                .map(|wanted| wanted.to_string_lossy().into_owned())
-        });
-        if let Some(wanted) = TRACED.as_deref()
+        // **The trace is asked for through `crate::probes`, which reads its variable once.** `definition_at` is the
+        // expander's own name resolution and runs for every macro name it meets — tens of millions of times in an
+        // index of a real project — so a `std::env::var_os` and a `to_string_lossy` here cost 106 s and 40 s at the
+        // two other sites of the same shape. See that module for why every probe moved there.
+        if let Some(wanted) = crate::probes::macro_name()
             && wanted == name
         {
             match &found {

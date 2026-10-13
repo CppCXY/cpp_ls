@@ -125,9 +125,7 @@ pub struct DiagTrace(Option<(&'static str, std::time::Instant)>);
 impl DiagTrace {
     pub fn new(what: &'static str) -> DiagTrace {
         DiagTrace(
-            std::env::var_os("CPPLS_TRACE_DIAGNOSTICS")
-                .is_some()
-                .then(|| (what, std::time::Instant::now())),
+            crate::probes::diagnostics().then(|| (what, std::time::Instant::now())),
         )
     }
 }
@@ -1611,7 +1609,7 @@ impl<F: FileProvider + Clone> Session<F> {
         // It is `&self` work, so it is allowed here — what it is not allowed to be is *inside the writer* on the
         // pump's path, which is what [`Session::prepare_a_wave`] exists for.
         let units = self.units_for_the_pass(&done.iter().map(|step| step.path.clone()).collect::<Vec<_>>());
-        if std::env::var_os("CPPLS_TRACE_UNITS").is_some() {
+        if crate::probes::units() {
             eprintln!(
                 "ADVANCE steps={} done={:?} closure(api.h)={:?}",
                 steps,
@@ -2349,7 +2347,7 @@ impl<F: FileProvider + Clone> Session<F> {
     /// the end of the work there is.
     pub fn index_everything(&mut self) -> usize {
         let mut total = 0;
-        let tracing = std::env::var_os("CPPLS_TRACE_COOKING").is_some();
+        let tracing = crate::probes::cooking();
 
         loop {
             let read = self.advance(64).len();
@@ -2553,7 +2551,7 @@ impl<F: FileProvider + Clone> Session<F> {
         match self.known_rendering_of(&file.path, &file.text) {
             Some(rendered) => Some(FileView::parse_rendering(file, &rendered)),
             None => {
-                if std::env::var_os("CPPLS_TRACE_COOKING").is_some() {
+                if crate::probes::cooking() {
                     // **The two halves of the lookup, printed.** The key is `(path, content_hash(text))`, and a
                     // write and a read that disagree about either half are a miss that looks exactly like "this file
                     // was never cooked". The count says whether the cache has anything at all.
@@ -3976,7 +3974,7 @@ impl<F: FileProvider + Clone> Session<F> {
             let key = (path.clone(), crate::cache::content_hash(&text));
             let before = known.len();
             known.insert(key, std::sync::Arc::clone(&indexed.rendered));
-            if std::env::var_os("CPPLS_TRACE_COOKING").is_some() {
+            if crate::probes::cooking() {
                 eprintln!(
                     "commit_a_cooked: inserted {} | cache {} -> {}",
                     path.display(),
@@ -3984,7 +3982,7 @@ impl<F: FileProvider + Clone> Session<F> {
                     known.len()
                 );
             }
-        } else if std::env::var_os("CPPLS_TRACE_COOKING").is_some() {
+        } else if crate::probes::cooking() {
             // **The other way this can silently not happen**: `self.text` answers `None` (the file is no longer
             // readable) or the lock is poisoned, and both leave the cache exactly as it was while the facts go into
             // the index — "read" and "available" apart again, which is the state this whole change is about.
@@ -4030,7 +4028,7 @@ impl<F: FileProvider + Clone> Session<F> {
                 // that decides whether there is work left reads `cooked == 0` as "nothing to do". Naming the reason
                 // is what separates "the summary is not in the index yet" (a state) from "the unit is provisional"
                 // (also a state) from a defect.
-                if built.is_none() && std::env::var_os("CPPLS_TRACE_COOKING").is_some() {
+                if built.is_none() && crate::probes::cooking() {
                     let indexed = self.store.index().summary(&path).is_some();
                     let (unit, provisional) = match self.unit_and_state_of(&path) {
                         Some((_, provisional)) => ("held", provisional),
@@ -4052,7 +4050,7 @@ impl<F: FileProvider + Clone> Session<F> {
         &self,
         materials: Vec<CookingMaterials>,
     ) -> Vec<(crate::IndexedRendering, CookedReading)> {
-        let tracing = std::env::var_os("CPPLS_TRACE_COOKING").is_some();
+        let tracing = crate::probes::cooking();
         materials
             .into_iter()
             .filter_map(|materials| {
