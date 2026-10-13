@@ -3518,6 +3518,32 @@ impl SummaryGuards {
     ///
     /// The file's own guard is left out: it is not a condition — see [`SummaryGuards::own_guard`].
     pub fn conditions_of(&self, region: u32) -> Vec<ConditionAt> {
+        // **Counted, because `visibility_of` calls this once per guard and allocates a `Vec` every time.**
+        // `CPPLS_COUNT_CONDITIONS=1` reports the call count and the conditions produced: the ratio says whether most
+        // guards are one condition — a `Vec` of one, millions of times — or many.
+        if std::env::var_os("CPPLS_COUNT_CONDITIONS").is_some() {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static CALLS: AtomicU64 = AtomicU64::new(0);
+            static FOUND: AtomicU64 = AtomicU64::new(0);
+            let started = std::time::Instant::now();
+            let answer = self.conditions_of_measured(region);
+            let calls = CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+            let found =
+                FOUND.fetch_add(answer.len() as u64, Ordering::Relaxed) + answer.len() as u64;
+            if calls % 1_000_000 == 0 {
+                eprintln!(
+                    "conditions_of: {calls} calls, {found} conditions ({:.2} each), this call {} ns",
+                    found as f64 / calls as f64,
+                    started.elapsed().as_nanos()
+                );
+            }
+            return answer;
+        }
+        self.conditions_of_measured(region)
+    }
+
+    /// [`conditions_of`] without the counter — see the note there.
+    fn conditions_of_measured(&self, region: u32) -> Vec<ConditionAt> {
         let mut found = Vec::new();
         let mut current = Some(region);
 
