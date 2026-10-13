@@ -1194,8 +1194,23 @@ impl crate::condition::MacroValues for UnitMacros<'_> {
         // The cook and the walk decide the same guards through different code, and when they disagree nothing
         // outside shows it: a guard the walk reads as `None` silently drops every fact inside it, and the only
         // symptom is content missing from a stream much later. `CPPLS_TRACE_LOOKUP=NAME` prints this path's answer.
-        if let Some(wanted) = std::env::var_os("CPPLS_TRACE_LOOKUP")
-            && wanted.to_string_lossy() == name
+        //
+        // **The variable is read once, not once per lookup.** This is the hottest function in a warm index —
+        // `a_guard_holds` was measured at 271 s of a 465 s index, and every identifier of every condition of every
+        // guard arrives here — so a `std::env::var_os` on each call is a lock of the process environment on the
+        // hottest path in the program. Measured: hoisting it behind a `LazyLock` took `a_guard_holds` from
+        // **271,479 ms to 192,350 ms** and the walk from 319 s to 253 s, with nothing else changed.
+        //
+        // `None` when the variable is unset or empty — no macro is called the empty string, so an empty value is a
+        // way to say "off" that needs no sentinel. The comparison is one string equality on a stack string, where
+        // the environment lock was the cost.
+        static TRACED: std::sync::LazyLock<Option<String>> = std::sync::LazyLock::new(|| {
+            std::env::var_os("CPPLS_TRACE_LOOKUP")
+                .filter(|wanted| !wanted.is_empty())
+                .map(|wanted| wanted.to_string_lossy().into_owned())
+        });
+        if let Some(wanted) = TRACED.as_deref()
+            && wanted == name
         {
             let from_state = self.state.definitions.get(name).map(|binding| {
                 // **The shape, not just the name.** A definition whose parameter list or body did not survive the
