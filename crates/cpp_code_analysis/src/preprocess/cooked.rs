@@ -1650,12 +1650,7 @@ fn branch_of(directive: &Directive, range: SourceRange) -> Option<Branch> {
         _ => (Vec::new(), None),
     };
 
-    Some(Branch {
-        kind,
-        tokens,
-        name,
-        range,
-    })
+    Some(Branch::new(kind, tokens, name, range))
 }
 
 /// Expand the tokens `from..to` against the macros in force there, and keep what is not trivia.

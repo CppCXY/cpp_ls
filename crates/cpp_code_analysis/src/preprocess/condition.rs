@@ -319,14 +319,57 @@ pub fn evaluate(tokens: &[Token], macros: &impl MacroValues) -> Value {
     }
 }
 
+/// [`evaluate`], and **whether the parsed expression may be kept**.
+///
+/// The second half is `Some(expression)` when the parse can be reused for any macro state: macro replacement left
+/// the tokens unchanged, so `expand_condition` would produce exactly these tokens again and `parse_condition`
+/// exactly this expression. `None` means the condition really does depend on the macros — a function-like call was
+/// replaced — and the caller must not keep the expression, because the next call may expand to something else.
+///
+/// Returning the answer here rather than letting the caller compare token streams is what makes the check cheap:
+/// the expander already knows where every token came from, and the question is only "was any of them not written
+/// here". See [`Branch::parsed`] for why the unchanged case is the common one.
+///
+/// [`Branch::parsed`]: crate::Branch
+pub fn evaluate_recording(
+    tokens: &[Token],
+    macros: &impl MacroValues,
+) -> (Value, Option<ConditionExpr>) {
+    let (expanded, unchanged) = expand_condition_recording(tokens, macros);
+    match parse_condition(&expanded) {
+        Ok(expr) => {
+            let value = eval(&expr, macros);
+            (value, unchanged.then_some(expr))
+        }
+        // **A parse failure is kept too**, by the caller: no macro state can make these tokens parse. The `None`
+        // here is about the *expression*, and the caller records "fixed" separately — see `an_expression_holds`.
+        Err(_) => (Value::Unknown, None),
+    }
+}
+
 /// Expand a condition's tokens, leaving the operands of `defined` and `__has_include` **alone**.
 ///
 /// That exception is the standard's, and it is load-bearing: `defined`'s operand is not replaced, so `defined (FOO)`
 /// must reach the evaluator with the identifier the file wrote. Expanding it would turn "is the macro `FOO`
 /// defined" into "is `1` defined" — a different question with a different answer.
 fn expand_condition(tokens: &[Token], macros: &impl MacroValues) -> Vec<Token> {
+    expand_condition_recording(tokens, macros).0
+}
+
+/// [`expand_condition`], and **whether the expansion was the identity**.
+///
+/// `true` means every token of the result was written in the condition itself — nothing was spliced in from a macro
+/// body — so expanding again would produce this same sequence whatever the macros say, and the parse built from it
+/// can be kept. That is the question the caller actually has, and it is answered here because the expander is the
+/// only thing that knows: [`crate::preprocess::expand::ExpandedToken::origin`] already records where each token came
+/// from, so this is a flag rather than a second comparison of two token streams.
+///
+/// **The `defined` operand is not an expansion**, deliberately: it is copied verbatim and is part of the condition's
+/// own text, so it does not make the result depend on the macros — see the note below.
+fn expand_condition_recording(tokens: &[Token], macros: &impl MacroValues) -> (Vec<Token>, bool) {
     let mut expanded: Vec<Token> = Vec::new();
     let mut run: Vec<Token> = Vec::new();
+    let mut unchanged = true;
     let mut index = 0;
 
     while index < tokens.len() {
@@ -341,7 +384,9 @@ fn expand_condition(tokens: &[Token], macros: &impl MacroValues) -> Vec<Token> {
             continue;
         }
 
-        expanded.extend(expand_a_run(&run, macros));
+        let (from_run, run_unchanged) = expand_a_run_recording(&run, macros);
+        expanded.extend(from_run);
+        unchanged &= run_unchanged;
         run.clear();
         expanded.push(token);
         index += 1;
@@ -365,21 +410,33 @@ fn expand_condition(tokens: &[Token], macros: &impl MacroValues) -> Vec<Token> {
         }
     }
 
-    expanded.extend(expand_a_run(&run, macros));
-    expanded
+    let (from_run, run_unchanged) = expand_a_run_recording(&run, macros);
+    expanded.extend(from_run);
+    unchanged &= run_unchanged;
+    (expanded, unchanged)
 }
 
-/// Everything between two of those operands is ordinary macro replacement.
-fn expand_a_run(tokens: &[Token], macros: &impl MacroValues) -> Vec<Token> {
+/// Everything between two of those operands is ordinary macro replacement, and whether any token came out of a
+/// macro body.
+fn expand_a_run_recording(tokens: &[Token], macros: &impl MacroValues) -> (Vec<Token>, bool) {
     if tokens.is_empty() {
-        return Vec::new();
+        return (Vec::new(), true);
     }
 
-    crate::expand::expand_with_budget(tokens, macros, EXPANSION_BUDGET)
+    let expansion = crate::expand::expand_with_budget(tokens, macros, EXPANSION_BUDGET);
+    // **`Origin::Source` for every token is the identity.** An expansion that replaced a call yields tokens whose
+    // origin is a macro body, or two tokens joined by `##` — anything but "exactly what was written here". So this
+    // one flag covers the whole question without comparing texts.
+    let unchanged = expansion
+        .tokens
+        .iter()
+        .all(|expanded| matches!(expanded.origin, crate::preprocess::expand::Origin::Source));
+    let tokens = expansion
         .tokens
         .into_iter()
         .map(|expanded| expanded.token)
-        .collect()
+        .collect();
+    (tokens, unchanged)
 }
 
 /// Evaluate a parsed condition.

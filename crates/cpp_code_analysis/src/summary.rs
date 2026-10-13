@@ -3698,19 +3698,13 @@ impl GuardBranch {
     /// [`crate::Branch::holds`] reads it — so the two layers cannot disagree about what `#ifdef` means, and
     /// neither can they about `#else` or about an expression.
     pub fn as_branch(&self) -> Branch {
+        // `Branch::new` starts the two caches empty: this reads a branch back out of a cached summary, which stores
+        // the condition's *text*, so there is nothing parsed yet to carry over.
         match self.kind {
-            crate::DirectiveKind::Ifdef | crate::DirectiveKind::Ifndef => Branch {
-                kind: self.kind,
-                tokens: Vec::new(),
-                name: self.condition.clone(),
-                range: self.range,
-            },
-            _ => Branch {
-                kind: self.kind,
-                tokens: self.tokens(),
-                name: None,
-                range: self.range,
-            },
+            crate::DirectiveKind::Ifdef | crate::DirectiveKind::Ifndef => {
+                Branch::new(self.kind, Vec::new(), self.condition.clone(), self.range)
+            }
+            _ => Branch::new(self.kind, self.tokens(), None, self.range),
         }
     }
 

@@ -367,12 +367,7 @@ fn branch_of(directive: &Directive, range: cpp_parser::SourceRange) -> Option<Br
         _ => (Vec::new(), None),
     };
 
-    Some(Branch {
-        kind,
-        tokens,
-        name,
-        range,
-    })
+    Some(Branch::new(kind, tokens, name, range))
 }
 
 /// Every macro name a file might want to know about, whether or not it is in force.

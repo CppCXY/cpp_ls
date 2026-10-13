@@ -953,11 +953,8 @@ fn an_unclosed_conditional_leaves_an_unclosed_guard() {
 fn an_elif_is_an_alternative_to_the_branches_before_it() {
     let mut stack = GuardStack::new();
 
-    let branch = |kind: DirectiveKind| Branch {
-        kind,
-        tokens: Vec::new(),
-        name: None,
-        range: cpp_parser::SourceRange::new(0, 1),
+    let branch = |kind: DirectiveKind| {
+        Branch::new(kind, Vec::new(), None, cpp_parser::SourceRange::new(0, 1))
     };
 
     stack.observe(DirectiveKind::If, branch(DirectiveKind::If));

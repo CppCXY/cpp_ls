@@ -49,7 +49,7 @@
 use cpp_parser::SourceRange;
 
 use crate::{
-    condition::{MacroValues, evaluate},
+    condition::{MacroValues, evaluate_recording},
     directive::DirectiveKind,
     token::Token,
 };
@@ -65,9 +65,48 @@ pub struct Branch {
     pub name: Option<Box<str>>,
     /// Where the branch was written.
     pub range: SourceRange,
+    /// **The parsed expression, when macro replacement cannot change it.** `None` means either "not decided
+    /// yet" or "this one has to be re-read every time" — the flag below tells the two apart.
+    ///
+    /// `evaluate` expands the tokens and parses the result **on every call**, and a branch is evaluated once per
+    /// guard, per include, per translation unit that reaches the file it is written in — millions of times for a
+    /// real project's index. But `expand_condition` only does anything for a **function-like macro call**
+    /// (`#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_APP)`); an object-like name is not expanded there at all, it
+    /// is looked up during `eval` by `ConditionExpr::Identifier`. So for a condition with no function-like call the
+    /// expansion is the identity, the parse depends on nothing, and re-reading it millions of times is pure waste.
+    ///
+    /// `PartialEq`/`Eq` compare the two `OnceLock`s as well, which they can because `ConditionExpr` and `bool` both
+    /// have it — and that is the honest comparison: two branches that have computed different things about the same
+    /// tokens *are* different values, and the only ways to get here are `Clone` (which copies them) and the four
+    /// construction sites (which leave them empty).
+    parsed: std::sync::OnceLock<Option<crate::preprocess::condition::ConditionExpr>>,
+    /// `true` once this branch is known to be macro-independent — either because the expansion came back
+    /// unchanged, or because parsing it failed, which no macro state can repair.
+    fixed: std::sync::OnceLock<bool>,
 }
 
 impl Branch {
+    /// One branch, with its two caches empty.
+    ///
+    /// A constructor rather than struct literals at the four call sites, because the caches are private and must
+    /// always start empty: carrying a parse across from a *different* token list would be a wrong answer that nothing
+    /// downstream could detect.
+    pub fn new(
+        kind: DirectiveKind,
+        tokens: Vec<Token>,
+        name: Option<Box<str>>,
+        range: SourceRange,
+    ) -> Branch {
+        Branch {
+            kind,
+            tokens,
+            name,
+            range,
+            parsed: std::sync::OnceLock::new(),
+            fixed: std::sync::OnceLock::new(),
+        }
+    }
+
     /// Does this branch's own expression hold?
     ///
     /// `None` when it cannot be decided. An `#else` has no expression, so it always "holds" — whether
@@ -98,7 +137,7 @@ impl Branch {
             if mentions {
                 let answer = match self.kind {
                     DirectiveKind::If | DirectiveKind::Elif => {
-                        evaluate(&self.tokens, macros).is_true()
+                        evaluate_recording(&self.tokens, macros).0.is_true()
                     }
                     DirectiveKind::Ifdef => is_defined(self.name.as_deref(), macros),
                     DirectiveKind::Ifndef => {
@@ -120,12 +159,40 @@ impl Branch {
         }
 
         match self.kind {
-            DirectiveKind::If | DirectiveKind::Elif => evaluate(&self.tokens, macros).is_true(),
+            DirectiveKind::If | DirectiveKind::Elif => self.an_expression_holds(macros),
             DirectiveKind::Ifdef => is_defined(self.name.as_deref(), macros),
             DirectiveKind::Ifndef => is_defined(self.name.as_deref(), macros).map(|defined| !defined),
             DirectiveKind::Else => Some(true),
             _ => None,
         }
+    }
+
+    /// This branch's `#if`/`#elif` expression, **read once when macro replacement cannot change it**.
+    ///
+    /// See the note on [`Branch::parsed`] for why that is the common case and what it costs. The two caches are set
+    /// together: the expression is stored, and `fixed` says whether storing it was sound. When `fixed` is false the
+    /// branch is re-expanded and re-parsed every time, exactly as before, and nothing is stored.
+    ///
+    /// `value` is what the expansion produced, so the answer comes from the same tokens in both cases — the cached
+    /// path does not re-derive anything, it just skips the expansion that would produce the same tokens again.
+    fn an_expression_holds(&self, macros: &impl MacroValues) -> Option<bool> {
+        if *self.fixed.get().unwrap_or(&false) {
+            // Sound because `fixed` is only set together with `parsed`, and only when the expansion was the
+            // identity — so re-parsing would yield this same expression.
+            return match self.parsed.get().and_then(Option::as_ref) {
+                Some(expr) => crate::preprocess::condition::eval(expr, macros).is_true(),
+                // Stored as `None`: the tokens do not parse, and no macro state makes them parse. `evaluate`
+                // answers `Unknown` for that, which is `None` here.
+                None => None,
+            };
+        }
+
+        let (value, expression) = evaluate_recording(&self.tokens, macros);
+        if let Some(expression) = expression {
+            let _ = self.parsed.set(Some(expression));
+            let _ = self.fixed.set(true);
+        }
+        value.is_true()
     }
 }
 
