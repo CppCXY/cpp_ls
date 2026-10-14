@@ -42,7 +42,8 @@
 //! costs a client that shows the wrong ones.
 
 use cpp_code_analysis::semantic::{Name, NameKind};
-use cpp_code_analysis::VfsFile;
+
+use cpp_code_analysis::{FileView, VfsFile};
 use lsp_types::{
     ClientCapabilities, SemanticToken, SemanticTokens, SemanticTokensFullOptions,
     SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
@@ -67,6 +68,14 @@ struct Legend {
     /// The protocol's name for it, advertised to the client.
     token_type: SemanticTokenType,
 }
+
+/// **Where `keyword` sits in the legend**, which is the number the encoding sends for a keyword.
+///
+/// Not a [`Legend`] entry, because a `Legend` maps a [`NameKind`] to a type and a keyword is not a name — the
+/// analysis classifies declarations, and `int` declares nothing. The number is still the legend's, and the legend is
+/// still fixed: `keyword` is appended last so that every index above keeps the meaning it already had, and a client
+/// that cached a legend from a previous session is not shown a different colour for the same number.
+const KEYWORD_INDEX: u32 = LEGEND.len() as u32;
 
 /// **The token types this server uses**, in the order the encoding's numbers refer to.
 ///
@@ -167,11 +176,15 @@ fn modifier_bits(name: &cpp_code_analysis::semantic::Name) -> u32 {
 
 /// The legend, as advertised in `initialize` and as the encoding indexes it.
 fn legend() -> SemanticTokensLegend {
+    let mut token_types: Vec<SemanticTokenType> = LEGEND
+        .iter()
+        .map(|entry| entry.token_type.clone())
+        .collect();
+    // **Last, and at the index the encoding uses** — see [`KEYWORD_INDEX`].
+    token_types.push(SemanticTokenType::KEYWORD);
+
     SemanticTokensLegend {
-        token_types: LEGEND
-            .iter()
-            .map(|entry| entry.token_type.clone())
-            .collect(),
+        token_types,
         token_modifiers: TOKEN_MODIFIERS.to_vec(),
     }
 }
@@ -220,10 +233,76 @@ pub async fn on_semantic_tokens(
         let names = session.classified_names(&view);
         Some(SemanticTokensResult::Tokens(SemanticTokens {
             result_id: None,
-            data: encode(held, &names, &drawable),
+            data: encode(held, Some(&view), &names, &drawable),
         }))
     })
     .await
+}
+
+/// **The two things a token can be, merged into one stream.**
+///
+/// A name the analysis placed ([`Name`]) and a **keyword**, which no name is: `int`, `return`, `const` and
+/// `noexcept` are the lexer's, and the analysis classifies names rather than punctuation.
+///
+/// # Why keywords are sent at all, having deliberately not been
+///
+/// See the module note, which said a client that already lexes C++ draws keywords itself and two answers for one span
+/// is flicker. That is right about a file the parser read and wrong about the file a reader is editing: a keyword
+/// only reaches a client that lexed it, and a client's lexer is not what decides where `const` is. `struct`, `template`
+/// and `constexpr` are exactly the tokens a partial parse leaves uncoloured, and they are the ones a reader is
+/// scanning for.
+///
+/// # Never two tokens for one span
+///
+/// The protocol requires the walk to be **ordered and non-overlapping**, and a keyword token is skipped when any
+/// classified name's range covers its first byte. `operator` is a keyword and begins `operator+`; a name always wins,
+/// because the analysis read a declaration where the lexer read a word.
+struct Ranged {
+    start: usize,
+    end: usize,
+    /// `None` for a keyword — no legend lookup, no modifiers.
+    name: Option<&'static Legend>,
+    modifiers: u32,
+}
+
+fn merged(view: Option<&FileView>, names: &[Name]) -> Vec<Ranged> {
+    let mut out: Vec<Ranged> = names
+        .iter()
+        .filter_map(|name| {
+            let entry = legend_entry(name.kind)?;
+            Some(Ranged {
+                start: name.range.start_offset,
+                end: name.range.end_offset(),
+                name: Some(entry),
+                modifiers: modifier_bits(name),
+            })
+        })
+        .collect();
+
+    // **The file's own tokens**, which is what the reader sees rather than what the cooker produced: a keyword
+    // inside a macro body is not in this file, and one written here is not in the rendering.
+    for token in view.map(|view| view.tree.get_tokens()).unwrap_or_default() {
+        if !cpp_parser::is_keyword(token.kind) {
+            continue;
+        }
+        let start = token.range.start_offset;
+        // A name the analysis placed wins the span — see the note above.
+        if names
+            .iter()
+            .any(|name| name.range.start_offset <= start && start < name.range.end_offset())
+        {
+            continue;
+        }
+        out.push(Ranged {
+            start,
+            end: token.range.end_offset(),
+            name: None,
+            modifiers: 0,
+        });
+    }
+
+    out.sort_by_key(|ranged| (ranged.start, ranged.end));
+    out
 }
 
 /// Which of this server's kinds the client says it can draw.
@@ -244,28 +323,39 @@ fn drawable_types(supported: Option<Vec<SemanticTokenType>>) -> Option<Vec<Seman
 ///
 /// `drawable` is the client's list of supported types, or `None` for "it said nothing", in which case everything
 /// this server can say is sent.
+///
+/// `view` is the file being drawn, and `None` means **names only** — which is what a caller with no parse in hand
+/// has, and what the tests of the walk itself use. Keywords come from the view's own token stream, so a caller
+/// without one sends classified names and nothing else, which is what this handler did before keywords were sent.
 pub fn encode(
     file: &VfsFile,
+    view: Option<&FileView>,
     names: &[Name],
     drawable: &Option<Vec<SemanticTokenType>>,
 ) -> Vec<SemanticToken> {
     let mut tokens: Vec<SemanticToken> = Vec::new();
     let mut previous: Option<(u32, u32)> = None;
 
-    for name in names {
-        let Some(entry) = legend_entry(name.kind) else {
-            continue;
+    for ranged in merged(view, names) {
+        // A keyword takes the legend's own index; a name is looked up by its kind. See [`Ranged`].
+        let (index, token_type, modifiers) = match ranged.name {
+            Some(entry) => (entry.index, entry.token_type.clone(), ranged.modifiers),
+            None => (
+                KEYWORD_INDEX,
+                SemanticTokenType::KEYWORD,
+                ranged.modifiers,
+            ),
         };
 
         // The kind is one this server knows and the client cannot draw: sending its number would be sending a
         // number the client maps to nothing.
         if let Some(types) = drawable
-            && !types.contains(&entry.token_type)
+            && !types.contains(&token_type)
         {
             continue;
         }
 
-        let Some(position) = position_in_file(file, name.range.start_offset) else {
+        let Some(position) = position_in_file(file, ranged.start) else {
             // A range the file cannot place — an offset past its end, which a stale view could produce. Dropping
             // one token is the only option that keeps the walk valid: a guessed position would move every token
             // after it.
@@ -281,18 +371,20 @@ pub fn encode(
         };
         previous = Some((position.line, position.character));
 
-        // **UTF-16 code units**, which is what the protocol counts — the identifier's own text, not its byte
-        // length: a name with a character outside the basic plane is longer in bytes than in what the client
-        // measures the span with.
-        let text = &file.text[name.range.start_offset..name.range.end_offset()];
+        // **UTF-16 code units**, which is what the protocol counts — the token's own text, not its byte length: a
+        // name with a character outside the basic plane is longer in bytes than in what the client measures the span
+        // with.
+        let Some(text) = file.text.get(ranged.start..ranged.end) else {
+            continue;
+        };
         let length = text.encode_utf16().count() as u32;
 
         tokens.push(SemanticToken {
             delta_line,
             delta_start,
             length,
-            token_type: entry.index,
-            token_modifiers_bitset: modifier_bits(name),
+            token_type: index,
+            token_modifiers_bitset: modifiers,
         });
     }
 
@@ -389,7 +481,7 @@ mod tests {
             name(start, spelling.len(), NameKind::Variable, true)
         };
         let names = vec![at("alpha"), at("beta"), at("gamma")];
-        let tokens = encode(file, &names, &None);
+        let tokens = encode(file, None, &names, &None);
 
         let mut line = 0u32;
         let mut character = 0u32;
@@ -445,12 +537,12 @@ mod tests {
         names.insert(1, namespace);
 
         // With everything drawable: three tokens.
-        assert_eq!(encode(file, &names, &None).len(), 3);
+        assert_eq!(encode(file, None, &names, &None).len(), 3);
 
         // With namespaces unsupported: two, and the second variable's delta is measured from the *first variable*
         // — the skipped token is not a step in the walk.
         let drawable = Some(vec![SemanticTokenType::VARIABLE]);
-        let tokens = encode(file, &names, &drawable);
+        let tokens = encode(file, None, &names, &drawable);
         assert_eq!(tokens.len(), 2);
         assert_eq!((tokens[0].delta_line, tokens[0].delta_start), (0, 4));
         assert_eq!(
@@ -473,7 +565,7 @@ mod tests {
             name(text.len() + 40, 4, NameKind::Variable, true),
         ];
 
-        assert_eq!(encode(file, &names, &None).len(), 1);
+        assert_eq!(encode(file, None, &names, &None).len(), 1);
     }
 
     /// **The advertised legend and the numbers in the answer are the same list**, position by position: a token's
@@ -483,7 +575,15 @@ mod tests {
     #[test]
     fn the_advertised_legend_is_the_list_the_numbers_index() {
         let advertised = legend();
-        assert_eq!(advertised.token_types.len(), LEGEND.len());
+        // **One more than `LEGEND`**, because the keyword type is appended rather than listed: it has no `NameKind`
+        // to key on — see [`KEYWORD_INDEX`]. The count is asserted so that a type added to one and not the other is
+        // caught here rather than by a client colouring every name as whatever shifted into its index.
+        assert_eq!(advertised.token_types.len(), LEGEND.len() + 1);
+        assert_eq!(
+            advertised.token_types[KEYWORD_INDEX as usize],
+            SemanticTokenType::KEYWORD,
+            "the appended type is the one the keyword index refers to"
+        );
         assert_eq!(advertised.token_modifiers, TOKEN_MODIFIERS.to_vec());
 
         for (position, entry) in LEGEND.iter().enumerate() {
@@ -516,6 +616,66 @@ mod tests {
 
     /// A client that asks for semantic tokens but names no type this server uses gets an empty list rather than a
     /// legend it cannot read.
+    /// **A keyword is sent, and a name that covers it wins the span.**
+    ///
+    /// The module note used to say keywords are the client's to draw, which is right about a file the parser read and
+    /// wrong about the file a reader is editing: `struct`, `constexpr` and `template` are exactly what a partial parse
+    /// leaves uncoloured. This checks that they are sent, and that the walk stays ordered and non-overlapping — the
+    /// one invariant a client cannot recover from, because an overlap shifts every token after it.
+    #[test]
+    fn a_keyword_is_coloured_and_nothing_overlaps() {
+        let text = "struct Widget { int size; };\n";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+
+        let tokens = encode(file, Some(&view), &names, &None);
+        assert!(
+            tokens.iter().any(|token| token.token_type == KEYWORD_INDEX),
+            "`struct` and `int` are keywords and neither is a name"
+        );
+
+        // Every span, rebuilt from the deltas — which is what a client does, and the only way to see a length that
+        // disagrees with the text.
+        let mut spans = Vec::new();
+        let (mut line, mut character) = (0u32, 0u32);
+        for token in &tokens {
+            line += token.delta_line;
+            character = if token.delta_line == 0 {
+                character + token.delta_start
+            } else {
+                token.delta_start
+            };
+            spans.push((line, character, token.length));
+        }
+
+        assert!(
+            !spans.iter().any(|(_, _, length)| *length == 0),
+            "a zero-length token is invalid in this encoding: {spans:?}"
+        );
+        // `struct` is first, at line 0 column 0, six characters; `Widget` is a name at column 7, also six.
+        assert_eq!(spans[0], (0, 0, 6));
+        assert_eq!(
+            spans
+                .iter()
+                .find(|(line, character, _)| *line == 0 && *character == 7)
+                .expect("`Widget` is coloured at column 7")
+                .2,
+            6
+        );
+
+        // **No two tokens overlap**, which the deltas alone cannot show.
+        for pair in spans.windows(2) {
+            let (line, character, length) = pair[0];
+            let (next_line, next_character, _) = pair[1];
+            assert!(
+                next_line > line || next_character >= character + length,
+                "tokens overlap: {pair:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_client_that_supports_none_of_our_types_gets_nothing_to_draw() {
         let text = "int alpha;\n";
@@ -525,7 +685,7 @@ mod tests {
         let names = vec![name(4, 5, NameKind::Variable, true)];
         let drawable = Some(vec![SemanticTokenType::COMMENT, SemanticTokenType::STRING]);
 
-        assert!(encode(file, &names, &drawable).is_empty());
+        assert!(encode(file, None, &names, &drawable).is_empty());
     }
 
     /// The number the encoding sends for a kind, for a test that wants to name it rather than spell it.
