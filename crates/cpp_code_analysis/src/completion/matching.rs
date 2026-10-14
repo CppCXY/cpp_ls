@@ -175,11 +175,44 @@ fn word_quality(candidate: &[u8], typed: &[u8]) -> Option<Quality> {
             WORD_PREFIX
         });
     }
-    // The same, with the last character still being typed inside the word it began — `bsc` → `basic_string`.
-    if starts_the_name && every_character_begins_a_word(candidate, typed, true) {
+    // **One character may instead continue the one before it** — a reader still inside a word they began.
+    // `basic_string` answers `bsc` because `b` begins `basic`, `s` begins `string`, and `c` follows the `s`; it does
+    // not answer `btc`, where `t` begins nothing and is not the last character. And it is one continuation and not
+    // two, which is what stops `getpid` answering `gpid` — there the `t` and the `p` would both have to continue.
+    if starts_the_name && one_continuation_allowed(candidate, typed) {
         return Some(WORD_START);
     }
     None
+}
+
+/// The same run, with **exactly one** character allowed to be a continuation rather than a word start.
+fn one_continuation_allowed(candidate: &[u8], typed: &[u8]) -> bool {
+    let mut at = 0usize;
+    let mut continuations = 0usize;
+    let last = typed.len().saturating_sub(1);
+
+    for (position, wanted) in typed.iter().enumerate() {
+        // A word start at or after the cursor, or — when nothing was found — the byte straight after the previous
+        // match, which is a continuation.
+        match next_at_a_word_start(candidate, *wanted, at) {
+            Some(found) => at = found + 1,
+            None => {
+                if position == 0 || position > last {
+                    return false;
+                }
+                let Some(follows) = candidate.get(at) else {
+                    return false;
+                };
+                if follows.to_ascii_lowercase() != *wanted {
+                    return false;
+                }
+                continuations += 1;
+                at += 1;
+            }
+        }
+    }
+
+    continuations == 1
 }
 
 /// The next byte equal to `wanted` (ignoring ASCII case) **that begins a word**, at or after `from`.

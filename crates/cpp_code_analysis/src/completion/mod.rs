@@ -268,9 +268,16 @@ impl Default for CompletionSet {
 /// The score is **not** a field of [`CompletionItem`]: a consumer renders items, and a number it must not re-sort
 /// by is a field it would eventually misuse. Keeping the two together here means the order is decided once, in one
 /// place, and thrown away at the same moment.
+///
+/// `matched` is how well the item answers what was typed, and it is the **last** thing the order looks at — after the
+/// tier, which says where a declaration is, and after the penalty, which says what kind of thing it is. It is here
+/// rather than inside `score` because it is a fact about the *typed text* and not about the declaration: the same
+/// name scores the same whatever the reader has written, and the same declaration scores differently on every
+/// keystroke.
 #[derive(Debug, Clone)]
 struct Scored {
     score: Score,
+    matched: crate::completion::matching::Quality,
     item: CompletionItem,
 }
 
@@ -531,8 +538,18 @@ fn members(
             });
         }
 
+        // **What the reader has typed, matched against the name they would be typing.** A member list has a prefix
+        // like any other, and a member whose name does not answer it is dropped rather than merely ranked low — see
+        // [`crate::completion::matching`] for the rule and why the client's own filter cannot do this alone (it
+        // cannot see `to_string` when the reader typed `string`, and it does not know the words of a name).
+        let matched = crate::completion::matching::quality(&item.label, &prefix);
+        if matched == crate::completion::matching::NONE {
+            continue;
+        }
+
         scored.push(Scored {
             score: member_score(member, class),
+            matched,
             item,
         });
     }
@@ -624,8 +641,20 @@ fn names(
                     item.filter = Some(format!("{}::{}", listed.scope, offered.fact.name));
                 }
 
+                // **Matched against what the client would filter on**, which is `filter` when the item has one and the
+                // label otherwise: inside `std::` the reader types `str` and the item's filter is `std::string`, so
+                // matching the label alone would answer `str` with nothing.
+                let matched = matching::quality(
+                    item.filter.as_deref().unwrap_or(&item.label),
+                    &listed_prefix,
+                );
+                if matched == matching::NONE {
+                    continue;
+                }
+
                 scored.push(Scored {
                     score: name_score(offered),
+                    matched,
                     item,
                 });
             }
@@ -641,11 +670,13 @@ fn names(
         let in_a_class = in_a_class_body(scopes, offset);
 
         for snippet in table::snippets_for(statements) {
-            if !starts_with(snippet.trigger, &listed_prefix) {
+            let matched = matching::quality(snippet.trigger, &listed_prefix);
+            if matched == matching::NONE {
                 continue;
             }
             scored.push(Scored {
                 score: Score::new(Score::SNIPPET, 0),
+                matched,
                 item: CompletionItem::snippet(snippet.trigger, snippet.detail, snippet.body),
             });
         }
@@ -653,13 +684,16 @@ fn names(
         for keyword in table::keywords_for(statements, in_a_class) {
             // A snippet that writes the same word already stands for it: two items with one label and different
             // effects is a choice to make by accident.
-            if table::a_snippet_writes_this(keyword.spelling)
-                || !starts_with(keyword.spelling, &listed_prefix)
-            {
+            if table::a_snippet_writes_this(keyword.spelling) {
+                continue;
+            }
+            let matched = matching::quality(keyword.spelling, &listed_prefix);
+            if matched == matching::NONE {
                 continue;
             }
             scored.push(Scored {
                 score: Score::new(Score::KEYWORD, 0),
+                matched,
                 item: CompletionItem::word(keyword.spelling, ItemKind::Keyword, keyword.detail),
             });
         }
@@ -668,11 +702,13 @@ fn names(
         // keywords because that is how a compiler reads them, and they are here because a file that never includes
         // `<cstddef>` still writes `size_t`.
         for (name, detail) in table::BUILTIN_TYPES {
-            if !starts_with(name, &listed_prefix) {
+            let matched = matching::quality(name, &listed_prefix);
+            if matched == matching::NONE {
                 continue;
             }
             scored.push(Scored {
                 score: Score::new(Score::KEYWORD, 0),
+                matched,
                 item: CompletionItem::word(name, ItemKind::Class, detail),
             });
         }
@@ -691,10 +727,13 @@ fn names(
 }
 
 /// The directives themselves, after a `#`.
+///
+/// Filtered by the same rule as every other list — see [`crate::completion::matching`] — so that `#ifnd` finds
+/// `ifndef` and `#inc` finds `include` for the same reason a name list answers the initials of its words.
 fn directives(written: &str, range: SourceRange) -> CompletionSet {
     let items: Vec<CompletionItem> = table::DIRECTIVES
         .iter()
-        .filter(|directive| starts_with(directive.name, written))
+        .filter(|directive| matching::quality(directive.name, written) != matching::NONE)
         .map(|directive| {
             let mut item = CompletionItem::word(directive.name, ItemKind::Keyword, directive.detail);
             item.replace = range;
@@ -812,6 +851,10 @@ fn ordered(mut scored: Vec<Scored>) -> (Vec<CompletionItem>, bool) {
         one.score
             .keys()
             .cmp(&other.score.keys())
+            // **How well it answers what was typed**, before the alphabetical tiebreak. `str` puts `string` above
+            // `to_string` even when both are in the same header, because one begins the name and the other begins a
+            // later word — and that is the ordering a reader expects from having typed something.
+            .then_with(|| other.matched.cmp(&one.matched))
             .then_with(|| one.item.label.cmp(&other.item.label))
     });
 
@@ -922,22 +965,6 @@ fn in_a_class_body(scopes: &ScopeTree, offset: usize) -> bool {
     })
 }
 
-/// Does this spelling begin with what has been typed, ignoring case?
-///
-/// Case-insensitive because C++ spells types `Widget` and a reader types `wid`; a **prefix** match rather than a
-/// fuzzy one because the client does the fuzzy matching, and a server that dropped a candidate the client would
-/// have ranked would be answering a different question than the one that was asked.
-fn starts_with(spelling: &str, prefix: &str) -> bool {
-    if prefix.is_empty() {
-        return true;
-    }
-
-    let mut written = spelling.chars();
-    prefix
-        .chars()
-        .all(|wanted| written.next().is_some_and(|have| have.eq_ignore_ascii_case(&wanted)))
-}
-
 /// **An index of headers**, read from a configuration and a project's own file list.
 ///
 /// The one constructor a session needs, so that the walk and its budget are decided in one place rather than at the
@@ -960,13 +987,26 @@ pub fn header_index(
 mod tests {
     use super::*;
 
+    /// **A name that does not answer what was typed is dropped, not ranked low.** The rule itself lives in
+    /// [`crate::completion::matching`] and is tested there; this is the property the list depends on — that the
+    /// filtering happens on this side at all, so a client does not have to receive and sort several hundred names to
+    /// show four.
     #[test]
-    fn a_prefix_match_ignores_case_and_does_not_go_fuzzy() {
-        assert!(starts_with("Widget", "wid"));
-        assert!(starts_with("Widget", ""));
-        assert!(starts_with("Widget", "Widget"));
-        assert!(!starts_with("Widget", "idget"), "not a substring match");
-        assert!(!starts_with("Widget", "wdgt"), "not a subsequence match");
+    fn a_candidate_that_does_not_answer_the_prefix_is_dropped() {
+        use crate::completion::matching::{NONE, PREFIX, SUBSEQUENCE, WORD_START, quality};
+
+        assert_eq!(quality("Widget", "wid"), PREFIX);
+        assert_eq!(quality("Widget", ""), quality("Widget", ""), "the empty prefix matches everything");
+        // The fuzzy tiers are why this is not `starts_with` any more: `bsc` is nowhere in `basic_string` as a
+        // prefix, and the analysis still offers it. Which *tier* it earns is the matching module's business — what
+        // this test is about is that a candidate the rule rejects is dropped and one it accepts is not.
+        assert!(quality("basic_string", "bsc") > NONE);
+        assert_eq!(quality("get_parent_id", "gpid"), WORD_START);
+        // The characters are not in `Widget` at all, so it is dropped rather than ranked last.
+        assert_eq!(quality("Widget", "xyz"), NONE);
+        assert_eq!(quality("Widget", "wz"), NONE);
+        // …and this one is in there in order, which is a real match and the lowest tier.
+        assert_eq!(quality("Widget", "wdgt"), SUBSEQUENCE);
     }
 
     /// The **order of the tiers** is the feature, so it is asserted rather than assumed: a local before a keyword,
