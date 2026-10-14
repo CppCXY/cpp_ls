@@ -437,11 +437,34 @@ fn an_empty_argument_list_is_answered() {
     assert_eq!(label, "make(int count)");
     assert_eq!(active, Some(0));
 }
+/// **A call written inside a macro's argument is still that call.**
+///
+/// `scale(2, |)` is an argument of `PICK(...)`, so the rendering the analysis parses is not the text the file writes:
+/// the macro is expanded, and the call appears inside `pick_impl((1), (scale(2, )))` — present, but under a different
+/// parent and at a different offset. The cursor has to cross that seam, and the question this holds is *which token
+/// the file wrote at that position*: the mapping from a file offset into the rendering asked each span where it
+/// **reports** (which for anything an expansion touches is the outermost call site) instead of where it was
+/// **written**, so the cursor landed before `scale` rather than inside it, the call found was the enclosing
+/// `pick_impl`, and the answer was no signature at all.
+#[test]
+fn a_call_inside_a_macros_argument_answers_its_own_signature() {
+    let source = "\
+#define PICK(first, second) pick_impl((first), (second))
 
+/// Scales a count.
+int scale(int count, double factor);
+int pick_impl(int first, int second);
 
+int f() {
+    return PICK(1, scale(2, |));
+}
+";
+    let (label, spans, active) = label_where_marked(source);
 
-
-
-
-
-
+    assert!(
+        label.contains("scale") && label.contains("double factor"),
+        "the call inside the macro argument is the one asked about: {label:?}"
+    );
+    assert_eq!(spans.len(), 2, "two parameters: {spans:?}");
+    assert_eq!(active, Some(1), "and the cursor is on the second");
+}

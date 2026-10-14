@@ -461,11 +461,20 @@ impl DeclarationShapes {
                     .find(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::TemplateParameterList)
                 && let Some(owner) = node.parent()
             {
-                for child in owner.children() {
-                    if CppSyntaxKind::from(child.kind()) == CppSyntaxKind::DeclSpecifierSeq {
-                        templates.push((cpp_parser::source_range(child.text_range()), list.clone()));
-                    }
-                }
+                // **The range is the declaration the template heads, not just its specifier sequence.**
+                //
+                // A class template's name is written in that sequence, so pairing the list with the sequence was
+                // enough for `template <class T> struct S`. A **function** template's name is not there:
+                // `template <class T> T h();` has the return type in the sequence and `h` in the declarator beside
+                // it, which the reshape made a sibling of the template head. The pair was therefore recorded against
+                // a range that never contains the name, `declared_template_parameters_with` found no template for it,
+                // and a call that named its argument — `h<int>()`, or a deduced `_It` from a passed `int*` — kept the
+                // **parameter's name** as the type instead of substituting it. Measured: two semantic tests.
+                //
+                // The outer of two nested templates is recorded with the outer declaration's range, which contains
+                // the inner name as well — the "last entry in document order wins" rule that
+                // `declared_template_parameters_with` already applies is what makes the innermost one the answer.
+                templates.push((cpp_parser::source_range(owner.text_range()), list.clone()));
             }
 
             let read = children_a_question_reads(&node);
@@ -4060,6 +4069,7 @@ int Box<int>::Inner::deep = 0;
         assert_eq!(of("plain").returns.as_deref(), Some("void"));
     }
 }
+
 
 
 

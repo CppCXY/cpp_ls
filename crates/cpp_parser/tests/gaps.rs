@@ -1103,7 +1103,7 @@ fn a_type_may_be_spelled_by_the_compiler() {
         .collect::<Vec<_>>();
     assert_eq!(
         builtin,
-        vec!["unsigned ".to_string(), "__int128 ".to_string()],
+        vec!["unsigned".to_string(), "__int128".to_string()],
         "both words are type specifiers"
     );
     assert!(
@@ -3782,7 +3782,10 @@ int after;
         .descendants()
         .find(|node| {
             CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CompoundStat
-                && node.text().to_string().starts_with('{')
+                // **Trimmed**, because the layout before `{` is a sibling of nothing in particular: the reshape
+                // leaves a leading space as the block's first token, and a predicate that reads the raw text is
+                // testing where the whitespace landed rather than which node this is.
+                && node.text().to_string().trim_start().starts_with('{')
         })
         .expect("the linkage block is a node");
 
@@ -3820,7 +3823,10 @@ int after;
         .descendants()
         .find(|node| {
             CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CompoundStat
-                && node.text().to_string().starts_with('{')
+                // **Trimmed**, because the layout before `{` is a sibling of nothing in particular: the reshape
+                // leaves a leading space as the block's first token, and a predicate that reads the raw text is
+                // testing where the whitespace landed rather than which node this is.
+                && node.text().to_string().trim_start().starts_with('{')
         })
         .expect("the linkage block is a node");
     assert!(
@@ -5461,7 +5467,7 @@ fn modern_constructs_produce_the_right_nodes() {
         .text()
         .to_string();
     assert_eq!(
-        specifiers, "int ",
+        specifiers, "int",
         "the member-pointer operator belongs to the declarator, not to the type"
     );
 
@@ -5483,7 +5489,9 @@ fn modern_constructs_produce_the_right_nodes() {
         "the block is the definition's body, not a statement after it"
     );
     assert_eq!(
-        body.text().to_string(),
+        // **Trimmed**: what the block *contains* is the question, and the layout before `{` is trivia that the
+        // reshape leaves where it was written rather than inside the block's own type.
+        body.text().to_string().trim_start(),
         "{ int x = 1; }",
         "and its own declarations are inside it"
     );

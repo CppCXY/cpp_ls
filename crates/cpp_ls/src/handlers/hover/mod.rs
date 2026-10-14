@@ -301,9 +301,7 @@ fn macro_markdown(session: &Session<DiskFiles>, view: &FileView, found: &Project
         where_clause(session, Some(view), &found.file, fact.range.start_offset)
     ));
 
-    if let Some(documentation) =
-        documentation_markdown(session, view, &found.file, fact.range.start_offset)
-    {
+    if let Some(documentation) = documentation_of_a_fact(session, view, &found.file, fact.range.start_offset) {
         out.push_str(&format!("\n{documentation}\n"));
     }
 
@@ -330,9 +328,7 @@ fn declaration_markdown(
 
     // The comment the file writes above the declaration, in the place clangd and the C++ extension put it: after
     // the signature, before where it was declared from.
-    if let Some(documentation) =
-        documentation_markdown(session, view, &found.file, fact.range.start_offset)
-    {
+    if let Some(documentation) = documentation_of_a_fact(session, view, &found.file, fact.range.start_offset) {
         out.push_str(&format!("\n{documentation}\n"));
     }
 
@@ -785,16 +781,26 @@ mod tests {
         assert_eq!(code_block(""), "");
     }
 }
+/// **The documentation above a declaration an index fact names** — with the coordinate seam crossed.
+///
+/// Two coordinate systems meet here and only one of them is obvious. A `DeclFact` comes from the index, and the index
+/// is built from a file's **cooked reading** — the program a compiler sees, with comments removed. So
+/// `fact.range.start_offset` is an offset in the *rendering*, while the comment it documents is in the text the
+/// **reader wrote**, and the two differ by exactly what the cook deleted. `Session::documentation` parses the written
+/// text and looks the offset up there, so it has to be given a file offset: the signature path crosses that seam
+/// (see `Session::signatures_at`, which says the same thing about `declared_at`), and this path did not — the
+/// documented declaration's hover carried no comment at all, on a file whose comment sits right above it.
+fn documentation_of_a_fact(
+    session: &Session<DiskFiles>,
+    view: &FileView,
+    file: &std::path::Path,
+    offset: usize,
+) -> Option<String> {
+    let declared = session.view(file)?;
+    let in_the_file = declared.file_offset_of(
+        cpp_code_analysis::file::coordinates::ReadingOffset::new(offset),
+    )?;
 
-
-
-
-
-
-
-
-
-
-
-
+    documentation_markdown(session, view, file, in_the_file.get())
+}
 

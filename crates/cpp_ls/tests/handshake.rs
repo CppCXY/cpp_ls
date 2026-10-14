@@ -3532,3 +3532,80 @@ fn what_the_completion_answers_here() {
         println!("{number:>3}: {:<40} -> {items} item(s): {first:?}", body.trim());
     }
 }
+/// **A probe, not a test: what does the real project's server do to the CPU after it has settled?**
+///
+/// Reported from the outside before this existed: after the index burst and the workspace diagnostic pass, `cpp_ls`
+/// held **exactly one core** — 2.00 s of CPU per 2.00 s of wall clock, flat, for as long as it was watched. A curve
+/// that flat is not work being finished; it is something being scheduled again.
+///
+/// The reason it needs the harness rather than a hand-written script is the protocol's other direction: the server
+/// **asks the client** for things (`window/workDoneProgress/create` while a pass reports progress), and a client that
+/// never answers leaves it waiting instead of working — measured, two hand-written runs sat at 5 s of CPU for five
+/// minutes because indexing never began. This pump answers, so the server reaches the state worth watching.
+///
+/// It is `#[ignore]`d because it drives the real project for four minutes and asserts nothing; run it by hand and
+/// watch the process from outside:
+///
+/// ```text
+/// cargo test --release -p cpp_ls --test handshake probe_the_cpu_shape -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "a probe, run by hand: four minutes on the real project, and it asserts nothing"]
+fn probe_the_cpu_shape_of_the_real_project() {
+    let root = std::path::Path::new(r"E:\EmmyLuaCodeStyle");
+
+    let mut server = Server::start(root);
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(root),
+            "capabilities": {
+                "textDocument": { "diagnostic": {}, "hover": {} },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+
+    let started = Instant::now();
+    let mut answered = 0;
+    while started.elapsed() < Duration::from_secs(240) {
+        while let Ok(message) = server.messages.try_recv() {
+            let is_a_request = message.get("method").is_some() && message.get("id").is_some();
+            if is_a_request {
+                server.answer(&message);
+                answered += 1;
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    println!("the client answered {answered} request(s) from the server while it worked");
+
+    // **What the loop was saying while it spun.** The pump's own `debug!` lines are the only channel that names
+    // which file would not leave the queue, and the harness keeps the server's stderr for exactly this kind of
+    // question. Counted rather than printed whole: a loop that runs a hundred thousand times says the same thing.
+    let log = server.log.lock().expect("the log is not poisoned").clone();
+    let lines: Vec<&str> = log.lines().collect();
+    println!("the server logged {} line(s); the last 30:", lines.len());
+    for line in lines.iter().rev().take(30).rev() {
+        println!("  {line}");
+    }
+
+    let mut repeated: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for line in &lines {
+        let shape = line.split_whitespace().take(8).collect::<Vec<_>>().join(" ");
+        *repeated.entry(shape).or_insert(0) += 1;
+    }
+    let mut worst: Vec<(String, usize)> = repeated.into_iter().collect();
+    worst.sort_by(|left, right| right.1.cmp(&left.1));
+    println!("the most repeated line shapes:");
+    for (shape, count) in worst.iter().take(8) {
+        println!("  {count:>7} x {shape}");
+    }
+}
+
+

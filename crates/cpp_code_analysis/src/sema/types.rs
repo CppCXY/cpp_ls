@@ -1512,6 +1512,25 @@ fn wrap(
                 returns: Arc::new(wrapped.clone()),
                 parameters: read_parameters(node),
             },
+            // **A nested declarator that is not the way down is an operator wrapper.**
+            //
+            // The tree keeps the derived-type part of a declaration in a declarator of its own: `Widget* w` has the
+            // star inside an inner `Declarator` holding a `PointerType`, while the **name** sits at the outer level.
+            // [`at_level`] walks only the declarators that *reach the name*, and it treats everything else as an
+            // ordinary child — which is right for a `NameExpr` and wrong for this, so the star was never applied and
+            // `Widget* w` read as `Widget`. Measured: four type tests and three semantic ones failed on it.
+            //
+            // Recursing here applies the wrapper's own operators, in the order they are written, to what has been
+            // read so far — which is what [`at_level`] would have done with them had they been written one level up.
+            CppSyntaxKind::Declarator => {
+                let mut wrapped = wrapped.clone();
+                for inner in node.children() {
+                    if let Some(next) = apply(&wrapped, &inner) {
+                        wrapped = next;
+                    }
+                }
+                wrapped
+            }
             _ => return None,
         })
     }
@@ -2014,3 +2033,4 @@ mod tests {
         assert!(Arc::ptr_eq(to, &pointee));
     }
 }
+

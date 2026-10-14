@@ -623,7 +623,7 @@ fn a_description_never_includes_the_layout_around_it() {
         ("/// @brief   B\nint x;\n", "B"),
         ("/** @brief B */\nint x;\n", "B"),
         ("/** @brief B  */\nint x;\n", "B"),
-        ("/** @brief B\n */\nint x;\n", "B\n"),
+        ("/** @brief B\n */\nint x;\n", "B"),
         ("/// @param x the x\nint f(int x);\n", "the x"),
         ("/// @param x  the x\nint f(int x);\n", "the x"),
         // A `*` line marker in the middle of a block body *is* text, and stays in it: `/** @brief A\n *

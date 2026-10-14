@@ -256,13 +256,37 @@ impl FileView {
         if self.written.is_none() {
             return Some(ReadingOffset::new(in_the_file));
         }
-        // The first span that **acts** at or after the offset asked about. A file offset a macro's expansion
-        // stands for has several spans reporting it — every token of the replacement list — and the first is the
-        // one the cursor is nearest, which is what an editor means by pointing there.
+        // **A token the file wrote is found by where it was _written_, not by where it reports.**
+        //
+        // The two fields answer different questions and this lookup was asking the wrong one. `reported` is where a
+        // token should be *shown* — and for anything a macro produced that is the **outermost call site**, which is
+        // the text the reader can see. `written` is where the token actually sits in this file, and it is `Some` for
+        // exactly the tokens this file spelled: including **a macro's arguments**, which the file writes in full and
+        // the expansion copies.
+        //
+        // Reading `reported` therefore lost the cursor inside a macro's argument: every span of the expansion reports
+        // the call site, so the first one at or after the cursor was a token of the *outer* call. Measured on
+        // `PICK(1, scale(2, |))` with `#define PICK(first, second) pick_impl((first), (second))`: the file offset 154
+        // (just before `scale`'s closing parenthesis) mapped to **63**, while `scale(2, )` occupies 69..79 of the
+        // rendering — the cursor landed before the call it was inside, `call_around` answered the enclosing
+        // `pick_impl`, and signature help had no declaration to answer with.
+        //
+        // The written search comes first and the reporting one still follows it, because they are both right about
+        // their own positions: a cursor on a `#define` line, or inside text a macro produced and this file did not
+        // write, has no written span and keeps the answer it had.
         let span = self
             .reading
             .iter()
-            .find(|span| span.reported.end_offset() > in_the_file)?;
+            .find(|span| {
+                span.written.as_ref().is_some_and(|written| {
+                    written.start_offset <= in_the_file && in_the_file < written.end_offset()
+                })
+            })
+            .or_else(|| {
+                self.reading
+                    .iter()
+                    .find(|span| span.reported.end_offset() > in_the_file)
+            })?;
 
         // **A cursor in a gap is a question about the text that was deleted, and the answer is not the next token.**
         //
@@ -847,6 +871,7 @@ mod tests {
         );
     }
 }
+
 
 
 

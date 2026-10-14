@@ -178,7 +178,7 @@ fn an_old_style_definition_is_one_declaration_with_its_body() {
         children_of(&list),
         vec![CppSyntaxKind::Declaration, CppSyntaxKind::Declaration]
     );
-    assert_eq!(list.text().to_string(), "int argc;\n    char *argv[];\n");
+    assert_eq!(list.text().to_string(), "int argc;\n    char *argv[];");
 }
 
 #[test]
@@ -191,7 +191,7 @@ fn the_names_are_read_as_parameters_and_the_truth_as_a_second_list() {
         node(DEFINITION, CppSyntaxKind::ParameterList)
             .text()
             .to_string(),
-        "(argc, argv)\n    ",
+        "(argc, argv)",
         "`argc` and `argv` are read as the parameter list, because a parameter's type may be a name"
     );
     assert_eq!(
@@ -206,7 +206,7 @@ fn the_names_are_read_as_parameters_and_the_truth_as_a_second_list() {
         .children()
         .map(|declaration| declaration.text().to_string())
         .collect();
-    assert_eq!(declarations, ["int argc;\n    ", "char *argv[];\n"]);
+    assert_eq!(declarations, ["int argc;", "char *argv[];"]);
 }
 
 #[test]
@@ -279,7 +279,7 @@ fn the_head_and_the_body_may_sit_in_different_conditional_branches() {
         .expect("the old-style branch is a declaration");
     assert_eq!(
         old_style.text().to_string(),
-        "int main(argc, argv)\nint argc;\nchar* argv[];\n"
+        "int main(argc, argv)\nint argc;\nchar* argv[];"
     );
 
     // The body belongs to the *modern* branch, which is the declaration written after the `#else`.
@@ -336,7 +336,7 @@ fn the_list_holds_declarations_and_stops_at_anything_else() {
         node(source, CppSyntaxKind::OldStyleParameterList)
             .text()
             .to_string(),
-        "int a;\n",
+        "int a;",
         "and the statement after it is not part of it"
     );
 }
