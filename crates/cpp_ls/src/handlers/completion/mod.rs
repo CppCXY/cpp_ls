@@ -47,7 +47,7 @@
 //! The cost of setting it is one request per keystroke while a big namespace is being typed through, which is the
 //! request a client sends anyway when it does not know the answer.
 
-use cpp_code_analysis::{CompletionItem as AnalysisItem, DiskFiles, ItemKind, Session};
+use cpp_code_analysis::{CompletionItem as AnalysisItem, DiskFiles, ItemKind, Session, detail_of};
 use lsp_types::{
     ClientCapabilities, CompletionItem, CompletionItemKind, CompletionItemLabelDetails,
     CompletionOptions, CompletionParams, CompletionResponse, CompletionTextEdit, Documentation,
@@ -304,6 +304,20 @@ fn snippets_of(supported: bool) -> Snippets {
 
 /// One analysis item, as the protocol's item.
 ///
+/// # Why the detail is not here
+///
+/// `detail` and `labelDetails.detail` are the two fields the protocol says a client may show beside the label, and
+/// this server has something to put in both — a function's return type and parameter list, a variable's type, a
+/// class's bases. **They are left out on purpose**, and asked for again in `completionItem/resolve`:
+///
+/// * a completion is answered while somebody is typing, and the list is several hundred items. A parameter list per
+///   item is the largest part of the answer, and the client shows a *few dozen rows* of it;
+/// * `resolve` is the protocol's answer to exactly this problem — it is sent for **the one item the user is
+///   looking at**, which is the only item whose detail anybody will read.
+///
+/// The cost is one round trip before a client can draw a row's second column, and the protocol is built for it: a
+/// client that never resolves simply shows the label, which is the item minus a hint rather than a broken item.
+///
 /// # Why `sortText` and not `sortText` alone
 ///
 /// The rank is written as a zero-padded number, because `sortText` is a **string** and a client compares strings:
@@ -320,26 +334,21 @@ fn item_for(
 
     CompletionItem {
         label: item.label.clone(),
-        // The kind and the detail are separate fields of the protocol on purpose, and 3.17 lets a client draw them
-        // as one line — which is what the analysis's `detail` was written for.
-        label_details: item
-            .detail
-            .as_ref()
-            .map(|detail| CompletionItemLabelDetails {
-                detail: Some(format!("  {detail}")),
-                description: None,
-            }),
         kind: Some(completion_kind(item.kind)),
-        // **Where the declaration is**, for `completionItem/resolve` to find it again — see `identity_of`.
+        // **Where the declaration is**, for `completionItem/resolve` to find it again — see `identity_of`. This is
+        // what makes the deferral above possible: the detail is not sent, and the *identity* that produces it is.
         data: item
             .identity
             .as_ref()
             .and_then(|(file, offset)| identity_of(file, *offset)),
-        detail: item.detail.clone(),
         // The order the analysis produced, carried through as the client's own sort key.
         sort_text: Some(format!("{rank:04}_{}", item.label)),
         // Only when it differs from the label: for a qualified listing the client filters on `std::string` while
         // showing `string`, which is what makes the *ordering* and the *filtering* agree.
+        //
+        // **Kept even though the server filters**, because this is what the client highlights against: the analysis
+        // matched `std::string` while a reader typed `str`, and a client told only the label would bold the wrong
+        // letters — or none.
         filter_text: item.filter.clone(),
         insert_text_format: insert_as_a_snippet.then_some(InsertTextFormat::SNIPPET),
         text_edit: text_edit(view, replace, item, insert_as_a_snippet),
@@ -423,24 +432,63 @@ pub async fn on_completion_resolve(
 
     context.analysis().prepare(&file).await;
 
+    let looked_up = file.clone();
     let resolved = snapshot_query(context.analysis(), cancel_token, move |session| {
+        // **The detail the list did not send**, found from the identity the list did send. This is the whole reason
+        // `item_for` leaves the two detail fields empty: a parameter list per item is the largest part of a
+        // completion answer and a client draws a few dozen rows of it. See the note there.
+        let detail = declaration_in(session, &looked_up, offset).and_then(|fact| detail_of(&fact));
+
         // The view is of the **declaring** file, which is what makes the lookup below one walk for a declaration in
         // the file being edited and one parse for the first name that comes from a header.
-        let view = session.view(&file)?;
-        let comment = session.documentation(&view, &file, offset)?;
+        let documentation = session
+            .view(&file)
+            .and_then(|view| session.documentation(&view, &looked_up, offset))
+            .map(|comment| documentation_text(&comment));
 
-        Some(documentation_text(&comment))
+        Some((detail, documentation.flatten()))
     })
     .await;
 
-    if let RequestOutcome::Ready(Some(text)) = resolved {
-        item.documentation = Some(Documentation::MarkupContent(MarkupContent {
-            kind: MarkupKind::Markdown,
-            value: text,
-        }));
+    if let RequestOutcome::Ready((detail, documentation)) = resolved {
+        // 3.17 lets a client draw the label and this as one line, which is what the analysis's `detail` was written
+        // for — a function's return type and parameter list, a variable's type, a class's bases.
+        item.label_details = detail.as_ref().map(|detail| CompletionItemLabelDetails {
+            detail: Some(format!("  {detail}")),
+            description: None,
+        });
+        item.detail = detail;
+
+        if let Some(text) = documentation {
+            item.documentation = Some(Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: text,
+            }));
+        }
     }
 
     RequestOutcome::Ready(item)
+}
+
+/// **The declaration an item's identity names**, read back out of the file it was declared in.
+///
+/// `offset` is `DeclFact::name_range`'s start, which is what [`identity_of`] was given — so the fact is found by the
+/// position of its own name and confirmed by the label the client echoed, because two declarations can share an
+/// offset in a *recovered* parse and only one of them is the item the user is looking at.
+///
+/// `None` for an item that has no declaration behind it — a keyword, a snippet, a header — and the caller then
+/// sends no detail, which is the item minus a hint rather than a wrong hint.
+fn declaration_in(
+    session: &cpp_code_analysis::Session<DiskFiles>,
+    file: &std::path::Path,
+    offset: usize,
+) -> Option<cpp_code_analysis::DeclFact> {
+    let summary = session.index().summary(file)?;
+    summary
+        .declarations
+        .iter()
+        .find(|fact| fact.name_range.start_offset == offset)
+        .cloned()
 }
 
 /// The protocol's icon for an item kind.

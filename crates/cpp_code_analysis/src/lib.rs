@@ -88,7 +88,7 @@ pub use align::{
 pub use completion::{
     BUILTIN_TYPES, CompletionContext, CompletionItem, CompletionSet, DIRECTIVES, DirectiveName,
     Header, HeaderIndex, HeaderKind, ItemKind, KEYWORDS, Keyword, KeywordUse, SNIPPETS, SharedHeaders, Snippet,
-    completion_at, context_at, header_index, why_no_members,
+    completion_at, context_at, detail_of, header_index, why_no_members,
 };
 pub use file::token;
 pub use include::{config, graph, msvc, paths, system_headers, toolchain};

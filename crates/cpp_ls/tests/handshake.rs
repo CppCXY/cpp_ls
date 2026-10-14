@@ -1033,10 +1033,25 @@ fn a_members_members_are_offered_over_the_wire() {
         "a **field** rather than a variable, because it is reached through an object — the completion layer \
          distinguishes the two positions, and a client draws them with different icons: {size}"
     );
+    // **The line's second column is not in the list**, and that is the design rather than an omission: a type or a
+    // parameter list per item is the largest part of a completion answer, and a client draws a few dozen rows of it.
+    // The protocol's answer is `completionItem/resolve`, sent for the one item a user is looking at — so this asks
+    // for it, exactly as a client does, and checks that it comes back.
     assert_eq!(
         size["detail"],
+        Value::Null,
+        "the detail is left for `completionItem/resolve`: {size}"
+    );
+    let resolved = server.request(4, "completionItem/resolve", size.clone());
+    assert_eq!(
+        resolved["result"]["detail"],
         json!("int"),
-        "and the type the declaration was written with, which is what the item's own line is for: {size}"
+        "and resolve supplies the type the declaration was written with: {resolved}"
+    );
+    assert_eq!(
+        resolved["result"]["labelDetails"]["detail"],
+        json!("  int"),
+        "as the label's second half too, which is where 3.17 draws it: {resolved}"
     );
     assert_eq!(
         size["textEdit"]["range"]["start"],

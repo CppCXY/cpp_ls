@@ -214,7 +214,7 @@ fn kind_of(kind: DeclKind) -> ItemKind {
 /// `(…)` survives for the one case it is still the honest answer to: a fact written before the field existed, or a
 /// function whose declarator the reading could not reach. It says "this function takes something", which is less
 /// than the truth and not more.
-fn detail_of(fact: &DeclFact) -> Option<String> {
+pub fn detail_of(fact: &DeclFact) -> Option<String> {
     match fact.kind {
         DeclKind::Function => match (&fact.returns, &fact.parameter_list) {
             (Some(returns), Some(parameters)) => Some(format!("{returns} {parameters}")),
