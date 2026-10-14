@@ -239,22 +239,22 @@ fn a_comment_in_a_class_body_documents_the_member_after_it() {
     );
 }
 
-/// **A comment after a member is nested in that member's declaration — and the walk still finds the
-/// member it describes.**
+/// **A comment between two members belongs to the class body, not to either member.**
 ///
-/// The nesting is a wart: the declaration rule consumes its `;` and the trivia after it before it
-/// closes its own node, so the next member's doc comment is emitted inside the declaration above it
-/// rather than beside the members. It is pinned here because the tree shape is what it is, and because
-/// the *outward* step of [`cpp_parser::CppDocComment::get_owner`] is what makes the relationship
-/// survive it: from the last child of a declaration, the search continues with the declaration's own
-/// following sibling, which is the member the comment describes.
+/// This test used to be `a_comment_after_a_member_is_nested_but_still_finds_its_declaration`, and its own note said
+/// what to do when the nesting was fixed: *"this test's first assertion fails and the expectation should be
+/// upgraded to 'the comment is a child of the class body'"*. That is what this is.
 ///
-/// The fix for the nesting belongs in `expect_semicolon`/`emit_trivia_after_current_token` — the
-/// declaration has to be closed before the layout that follows its `;` is emitted. When that lands,
-/// this test's first assertion fails and the expectation should be upgraded to "the comment is a child
-/// of the class body".
+/// The nesting was an accident of the parser rather than a decision — the declaration rule consumed its `;` **and
+/// the layout after it** before closing its own node, so the next member's doc comment was emitted inside the
+/// declaration above it. The module note at the top of this file already states the shape the tree is supposed to
+/// have: a comment between two members belongs to the class body.
+///
+/// The relationship is read **forwards from the comment** either way, which is the point of testing both halves
+/// here: the shape changed and the answer did not, because [`cpp_parser::CppDocComment::get_owner`] walks the tree
+/// rather than relying on the comment's parent.
 #[test]
-fn a_comment_after_a_member_is_nested_but_still_finds_its_declaration() {
+fn a_comment_between_two_members_belongs_to_the_class_body() {
     let tree = parse("struct S {\n    int x;\n    /// The y.\n    int y;\n};\n");
 
     let comment = comments(&tree)
@@ -263,16 +263,22 @@ fn a_comment_after_a_member_is_nested_but_still_finds_its_declaration() {
         .expect("the comment");
 
     assert_eq!(
+        comment.get_parent::<CppDeclaration>(),
+        None,
+        "the comment is beside the members, not inside the one before it"
+    );
+    assert_eq!(
         comment
-            .get_parent::<CppDeclaration>()
-            .and_then(|declaration| declaration.get_name_text()),
-        Some("x".to_string()),
-        "the comment is emitted inside the member before it, not into the class body"
+            .syntax()
+            .parent()
+            .map(|parent| CppSyntaxKind::from(parent.kind())),
+        Some(CppSyntaxKind::ClassBody),
+        "it is a child of the class body, where a reader sees it"
     );
     assert_eq!(
         documented_name(&comment),
         Some("y".to_string()),
-        "and yet it documents the member after it, because the walk steps outward"
+        "and it still documents the member after it, which is the relationship that matters"
     );
 }
 

@@ -4541,6 +4541,13 @@ pub fn expect_semicolon(p: &mut CppParser) -> ParseResult {
     }
 
     if p.current_token() == CppTokenKind::Semicolon {
+        // **Still a `bump`, and the reason is worth recording.** Consuming the `;` without the layout after it — the
+        // way `parse_access_specifier` consumes its colon — is what this needs to be for the comment below a member to
+        // land in the class body, but it is not enough on its own: `consume_current_token` stops the cursor *on* the
+        // trivia and leaves it for `emit_trivia_after_current_token`, and no rule here calls that. Measured, the
+        // layout was then never emitted at all: five tests in `tests/ast.rs` failed on the tree no longer reproducing
+        // the file. The change belongs with a matching `emit_trivia_after_current_token` at each of this function's
+        // ten call sites, which is a bigger edit than this one.
         p.bump();
         return Ok(CompleteMarker::empty());
     }

@@ -1870,6 +1870,11 @@ impl<'a> CppParser<'a> {
             self.note_brackets(token.kind);
         }
 
+        // **The cursor stops on the trivia, not past it** — that is the whole contract, and the caller's
+        // `emit_trivia_after_current_token` is what consumes it once its node is closed. Skipping to the next real
+        // token here as well emits the trivia *and* leaves nothing for that call to emit, which measured as a file
+        // whose text no longer reconstructed: `tests/ast.rs`'s `a_realistic_module_unit_yields_its_declarations`
+        // lost a newline after `y_(y) {}`.
         self.move_the_cursor_to(consumed_index + 1);
         self.current_token = self
             .tokens
