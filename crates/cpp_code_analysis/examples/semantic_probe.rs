@@ -31,6 +31,10 @@ fn main() {
         .and_then(|at| std::env::args().nth(at + 1))
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(4);
+    // **`--tokens`, for the question the distribution cannot answer.** "How many were classified" is a health
+    // number; "which identifier got nothing, and what does it say" is a bug report. Off by default because it
+    // prints a line per identifier, which is thousands of lines for a header.
+    let per_token = std::env::args().any(|argument| argument == "--tokens");
 
     let paths: Vec<PathBuf> = std::fs::read_to_string(&list)
         .expect("the list reads")
@@ -68,7 +72,7 @@ fn main() {
     let mut classified_total = 0usize;
 
     for path in paths.iter().take(limit) {
-        let Some(view) = session.view(path) else {
+        let Some(view) = session.view_of_the_file(path) else {
             println!("{}: not held", path.display());
             continue;
         };
@@ -145,6 +149,31 @@ fn main() {
             "{}: an empty token cannot be encoded",
             path.display()
         );
+
+        // **Which identifiers got nothing, and what they are.** The distribution above says how many were
+        // classified; this says *which* were not, which is the only form of the question that answers "why is this
+        // word in my editor not coloured". An identifier the analysis skipped is one it had no classification for —
+        // the client draws it with its own default, which is the honest drawing of "nothing to say" and looks
+        // exactly like a bug when the word is a type.
+        if per_token {
+            let classified: HashMap<usize, &cpp_code_analysis::semantic::NameKind> = names
+                .iter()
+                .map(|name| (name.range.start_offset, &name.kind))
+                .collect();
+            println!("--- {} ---", path.display());
+            for token in view.tree.get_tokens() {
+                if token.kind != cpp_parser::CppTokenKind::Identifier {
+                    continue;
+                }
+                let text = &view.source[token.range.start_offset..token.range.end_offset()];
+                match classified.get(&token.range.start_offset) {
+                    Some(kind) => println!("  {:>5}  {text:<32} {kind:?}", token.range.start_offset),
+                    // **The interesting line.** `unclassified` is what a reader sees as "no colour", and the word
+                    // printed beside it is what they will report.
+                    None => println!("  {:>5}  {text:<32} -- unclassified --", token.range.start_offset),
+                }
+            }
+        }
 
         total += elapsed;
         identifiers_total += identifiers;
