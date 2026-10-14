@@ -146,9 +146,13 @@ mod tests {
         assert!(chain.len() >= 3, "the fixture has several rungs: {chain:?}");
 
         let nested = chain_of(file, &chain).expect("every rung is a place in the file");
+        // **The statement's rung is one line, and it used to be two.** `return 1;` has the node's range end at its `;`
+        // now, where the trailing newline — layout, not part of the statement — used to be glued inside it. The old
+        // expectation, `(1, 2)`, was the newline's line; the range a client gets is the statement a reader would select
+        // by double-clicking, which is this one.
         assert_eq!(
             rungs(&nested),
-            vec![(1, 1), (1, 2), (0, 3), (0, 3)],
+            vec![(1, 1), (1, 1), (0, 3), (0, 3)],
             "the token, the statement, the function, and the file: {nested:?}"
         );
 

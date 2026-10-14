@@ -1859,13 +1859,23 @@ fn a_selection_expands_one_rung_at_a_time() {
         current = range.get("parent").filter(|parent| !parent.is_null());
     }
 
+    // **The statement's rung ends at its `;`, on its own line.** It used to run to `(2, 0)` because the trailing
+    // newline was glued inside the statement's node; the node now ends where its last token does, and the range a
+    // client gets is the statement a reader would select — `return w.size;` and not the line break after it.
+    //
+    // **The body's rung begins one character early, at `(0, 7)` rather than `(0, 8)`**, and that is the trivia pass
+    // rather than a slip: a block reaches back over the layout in front of it, because the layout between two
+    // statements belongs to the block that holds both of them. Here the layout in front of `{` is the space in
+    // `int f() {`, so the body's range covers it. The rule is the one the reference implementation states, and the
+    // cost is a selection that starts one character left of the brace on the one line where a function's `{` is
+    // written after a space.
     assert_eq!(
         rungs,
         vec![
             (1, 13, 1, 17), // `size`
             (1, 11, 1, 17), // `w.size`
-            (1, 4, 2, 0),   // `return w.size;`
-            (0, 8, 3, 0),   // the function body
+            (1, 4, 1, 18),  // `return w.size;`
+            (0, 7, 3, 0),   // the function body, including the space before its `{`
             (0, 0, 3, 0),   // the function definition
         ],
         "the chain, innermost first: {answer}"

@@ -849,7 +849,9 @@ fn member_node_at(root: &CppSyntaxNode, offset: usize) -> Option<CppSyntaxNode> 
     let mut node = root.clone();
 
     loop {
-        if !contains(&node, offset) {
+        // **`reaches`, not `contains`.** The caret of `(*make()).` sits at the `IndexExpr`'s end, which the node now
+        // reaches exactly — see [`reaches`] for why the range changed and why the end is a real cursor position.
+        if !reaches(&node, offset) {
             return found;
         }
 
@@ -862,7 +864,7 @@ fn member_node_at(root: &CppSyntaxNode, offset: usize) -> Option<CppSyntaxNode> 
 
         match node
             .children_with_tokens()
-            .find(|element| contains_element(element, offset))
+            .find(|element| reaches_element(element, offset))
             .and_then(|element| element.into_node())
         {
             Some(child) => node = child,
@@ -1156,6 +1158,34 @@ fn bindings_named<'a>(scope: &'a Scope, name: &Name) -> Vec<&'a Binding> {
 fn contains(node: &CppSyntaxNode, offset: usize) -> bool {
     let range = node.text_range();
     offset >= usize::from(range.start()) && offset < usize::from(range.end())
+}
+
+/// **Does this node's range reach `offset` — counting its end as reached?**
+///
+/// The difference from [`contains`] is the one that matters for the *last* construct on a line, and it is a
+/// consequence of the tree no longer gluing layout into nodes:
+///
+/// ```text
+/// before   IndexExpr(60..71)   the trailing newline was a child, so the end was past the cursor
+/// now      IndexExpr(60..70)   the node ends where its last token does
+/// ```
+///
+/// A cursor drawn just past the operator is at offset 70, which `contains` rejects — so the node was never entered and
+/// the member-access shape was never recognised. Measured, that is what made `(*make()).` answer
+/// `Unknown(UnparsableName)` instead of the pointed-to class's members.
+///
+/// The end is a legitimate cursor position: an offset is a *gap* between characters, and the gap after the last
+/// character of a node is the position "at the end of this construct" — which is exactly where a client puts the caret
+/// when the user has typed `expr.` and not yet the member.
+fn reaches(node: &CppSyntaxNode, offset: usize) -> bool {
+    let range = node.text_range();
+    offset >= usize::from(range.start()) && offset <= usize::from(range.end())
+}
+
+/// The same question as [`reaches`], for an element.
+fn reaches_element(element: &cpp_parser::CppSyntaxElement, offset: usize) -> bool {
+    let range = element.text_range();
+    offset >= usize::from(range.start()) && offset <= usize::from(range.end())
 }
 
 /// Is `offset` inside this element's range?
