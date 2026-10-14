@@ -30,14 +30,14 @@
 
 use cpp_code_analysis::{FileView, OutlineSymbol};
 use lsp_types::{
-    ClientCapabilities, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, OneOf, Range,
+    ClientCapabilities, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, OneOf, Position, Range,
     ServerCapabilities,
 };
 use tokio_util::sync::CancellationToken;
 
 use super::RegisterCapabilities;
 use crate::context::{RequestOutcome, ServerContextSnapshot, snapshot_query};
-use crate::util::{position_at_offset, symbol_kind, uri_to_file_path};
+use crate::util::{symbol_kind, uri_to_file_path};
 
 pub async fn on_document_symbol(
     context: ServerContextSnapshot,
@@ -114,11 +114,41 @@ fn document_symbol(view: &FileView, symbol: &OutlineSymbol) -> DocumentSymbol {
     }
 }
 
-/// A source range as a place in the file, through the line index the view already holds.
+/// A source range as a place in the file, through **the file's own** line index.
+///
+/// # Why this is not [`crate::util::position_at_offset`], which every other handler uses
+///
+/// Because an outline's offsets are not in the reading. `position_at_offset` takes a [`ReadingOffset`] and maps it
+/// through `FileView::file_offset_of` — the rendering-to-file seam, for a span the parser produced. An outline is
+/// built from the file's **own** declarations ([`cpp_code_analysis::FileSummary::outline`], or the buffer's own
+/// parse), so its offsets are already file offsets, and putting them through that seam measures them against the
+/// wrong document. Measured on the handshake fixture, where the rendering of `main.cpp` collapses two `#include`
+/// lines and a false `#if OFF` branch: `Dead`'s range starts at file offset 45, `file_offset_of(45)` answers
+/// **100**, and the symbol's range came out empty — a client draws a breadcrumb entry it cannot navigate to.
+///
+/// [`FileView::written_lines`] paired with [`FileView::written_text`] is the file's own index and text, and they are
+/// the same pair `position_at_offset` uses once it has crossed the seam. When the view is of the file itself —
+/// `written` is `None` — this is that same call.
 fn range_in_file(view: &FileView, range: cpp_parser::SourceRange) -> Option<Range> {
+    let text = view.written_text().unwrap_or(&view.source);
+    let lines = view.written_lines();
     Some(Range::new(
-        position_at_offset(view, cpp_code_analysis::file::coordinates::ReadingOffset::new(range.start_offset))?,
-        position_at_offset(view, cpp_code_analysis::file::coordinates::ReadingOffset::new(range.end_offset()))?,
+        file_position(text, lines, range.start_offset)?,
+        file_position(text, lines, range.end_offset())?,
+    ))
+}
+
+/// One byte offset in `text`, as a client's position — **the file's** coordinates, through the file's own index.
+///
+/// These three lines are `crate::util::position_in`'s body. It is private because every other handler reaches it
+/// through a seam that first takes a *reading* offset, and this is the one caller whose offsets are already the
+/// file's — see [`range_in_file`].
+fn file_position(text: &str, lines: &cpp_parser::LineIndex, offset: usize) -> Option<Position> {
+    let (line, column) = lines.position_of(offset, text)?;
+    let body = crate::util::line_body(text, line)?;
+    Some(Position::new(
+        line as u32,
+        crate::util::utf16_column(body, column),
     ))
 }
 
