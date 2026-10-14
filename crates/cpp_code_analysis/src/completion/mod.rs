@@ -57,6 +57,7 @@
 
 pub mod context;
 pub mod includes;
+pub mod matching;
 pub mod table;
 
 use std::path::{Path, PathBuf};
