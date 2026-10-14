@@ -1654,23 +1654,55 @@ enum SpecifierName {
 ///
 /// The search is over the declarators rather than over the whole subtree, so a `CompoundStat` belonging to
 /// something else — a lambda's body in an initialiser — is not mistaken for this function's.
+/// **Does this declaration write a constructor** — a function declarator whose name is its own class's?
+///
+/// The test for the shape [`function_body`] reads a body out of a *sibling* for, and it has to be narrow: a plain
+/// declaration followed by a block is two constructs, and taking the block would give the first one a body it does
+/// not have. What makes the sibling arrangement unambiguous is the **member-initializer list**, which no other
+/// construct writes — so the question is whether this declaration has one.
+///
+/// A constructor with no initializer list (`C(int p) { … }`) needs no such reading: the grammar keeps its body
+/// inside the declaration, and `first_child` finds it.
+fn declares_a_constructor(node: &CppSyntaxNode) -> bool {
+    node.children()
+        .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::MemberInitializer)
+}
+
 fn function_body(node: &CppSyntaxNode) -> Option<CppSyntaxNode> {
     if let Some(direct) = first_child(node, CppSyntaxKind::CompoundStat) {
         return Some(direct);
     }
 
-    // **A constructor's body is not found here, and that is the bug this function is next to.** The member-initializer
-    // list sits between the declarator and the body and is itself a direct child of the declaration:
+    // **A constructor's body is a sibling of its declaration, and this is where that is handled.**
+    //
+    // The grammar writes the member-initializer list and the body as siblings of the declarator, and the parse tree
+    // puts the body **outside** the declaration:
     //
     // ```text
-    // void set(const int v) { … }        Declaration > InitDeclarator > Declarator > CompoundStat
-    // Name(const int f) : first(f) { … } Declaration > Declarator, MemberInitializer, MemberInitializer
+    // void set(int v) { … }   Declaration > InitDeclarator > Declarator > CompoundStat
+    // A(int f) : x(f) { … }   Declaration > Declarator, MemberInitializer   ▏  CompoundStat
+    //                         └──────────── ClassBody children ────────────┘
     // ```
     //
-    // The second shape has **no `CompoundStat` under the declaration at all** — instrumented, its children are
-    // exactly the three above while the body exists elsewhere in the tree — so searching the declaration's own
-    // children for one (tried, and it changes nothing) does not help. Until this is understood, a constructor with a
-    // member-initializer list opens no function scope, and its parameters are bound nowhere.
+    // Measured on `struct A { A(int f) : x(f) { } };`: the `CompoundStat`'s parent is the **`ClassBody`**, with
+    // `["Declaration", "CompoundStat", "Declaration"]` for siblings. That is why a constructor opened a scope its
+    // parameters were bound in and then reached none of them: the scope's range was `15..24`, the declarator and its
+    // parameter list, so `f` was a `Parameter` at the one offset inside the scope and unclassified at both of its
+    // uses — in `: x(f)` and in the body.
+    //
+    // Searching the declaration's own children cannot find it, because it is not there. What finds it is the parse
+    // tree's own order: the body is the `CompoundStat` that **immediately follows** this declaration among its
+    // parent's children. Anchored on the sibling relationship rather than on a search of the subtree, so a
+    // `CompoundStat` belonging to something else — a lambda's body in an initialiser, a nested class's member — is
+    // not mistaken for this function's.
+    let body_after_the_declaration = node
+        .next_sibling()
+        .filter(|sibling| CppSyntaxKind::from(sibling.kind()) == CppSyntaxKind::CompoundStat)
+        .filter(|_| declares_a_constructor(node));
+    if body_after_the_declaration.is_some() {
+        return body_after_the_declaration;
+    }
+
     for declarator in declarators(node) {
         for child in declarator.children() {
             if CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat {
