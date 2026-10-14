@@ -127,6 +127,21 @@ pub fn parse_stats(p: &mut CppParser) {
             break;
         }
 
+        // **A comment between two statements belongs to the block, not to either statement.**
+        //
+        // `expect_semicolon` consumes a statement's `;` and stops before a comment, so that a comment written below a
+        // declaration is not filed under it — the shape the module note in `tests/doc_owner.rs` describes. What that
+        // leaves is the comment sitting at this loop's cursor, and a loop that went straight on to read a statement
+        // would read the comment as rubble: measured, `/// Which primitive a shape is.` before an `enum class` in a
+        // namespace became an `ErrorNode` and a spurious "expected primary expression".
+        //
+        // Emitting it here is what puts it in the block, which encloses both the statement above and the statement
+        // below and is therefore the only honest answer to "which one does this describe".
+        p.emit_trivia_after_current_token();
+        if p.is_eof() || (block_follow(p) && unclosed_braces <= 0) {
+            break;
+        }
+
         // A `}` with a debt outstanding closes the statement that was abandoned, not this block.
         if p.current_token() == CppTokenKind::RightBrace {
             unclosed_braces -= 1;

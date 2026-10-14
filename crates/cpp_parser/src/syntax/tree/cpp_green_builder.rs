@@ -269,9 +269,10 @@ fn is_a_container(kind: CppSyntaxKind) -> bool {
 
 /// Is this element a comment? Both spellings, because a `///` and a `/* */` live in the same place.
 ///
-/// [`normalize_comments`] orders by position and so needs no opinion about kinds — but the tests below do, and the
-/// distinction between a comment and layout is the one this file must not get wrong: a pass that treats a comment as
-/// layout deletes it, because "trim the trivia at this edge" then runs over the one node whose purpose is to be read.
+/// [`normalize_comments`] orders by position and so needs no opinion about kinds — but this is the distinction the
+/// file must not get wrong, so it is stated once here and asserted by the test below: a pass that treats a comment as
+/// layout **deletes it**, because "trim the trivia at this edge" then runs over the one node whose whole purpose is to
+/// be read. Measured, the first version of that pass did exactly that.
 #[cfg(test)]
 fn is_a_comment(element: &CppGreenElement) -> bool {
     match element {
@@ -286,19 +287,20 @@ fn is_a_comment(element: &CppGreenElement) -> bool {
     }
 }
 
+/// Is this element layout rather than content — whitespace, a line break, a line continuation?
+///
+/// The other half of the distinction above, and the one the ordering pass must leave alone.
 #[cfg(test)]
 fn is_layout(element: &CppGreenElement) -> bool {
-    matches!(element, CppGreenElement::Token { kind, .. } if is_layout_kind(*kind))
-}
-
-#[cfg(test)]
-fn is_layout_kind(kind: CppTokenKind) -> bool {
     matches!(
-        kind,
-        CppTokenKind::Whitespace
-            | CppTokenKind::Newline
-            | CppTokenKind::LineContinuation
-            | CppTokenKind::None
+        element,
+        CppGreenElement::Token {
+            kind: CppTokenKind::Whitespace
+                | CppTokenKind::Newline
+                | CppTokenKind::LineContinuation
+                | CppTokenKind::None,
+            ..
+        }
     )
 }
 
@@ -446,6 +448,44 @@ mod tests {
                 rowan::NodeOrToken::Token(t) => out.push(t.text().to_string()),
             }
         }
+    }
+
+    /// **A comment is not layout, and the two live in different places in the tree.**
+    ///
+    /// The distinction this pins is the one that cost the most to get wrong: the first version of the ordering pass
+    /// treated a comment as trivia and **deleted every comment in the file**, because "trim the trivia at this edge"
+    /// then ran over the one node whose whole purpose is to be read. The tree stayed well-formed and stayed free of
+    /// diagnostics, so nothing but the missing text could have shown it.
+    #[test]
+    fn a_comment_is_content_and_layout_is_not() {
+        let comment = CppGreenElement::Node {
+            kind: CppSyntaxKind::DocComment,
+            children: Vec::new(),
+        };
+        assert!(is_a_comment(&comment), "a DocComment node is a comment");
+        assert!(!is_layout(&comment), "and it is not layout");
+
+        for kind in [
+            CppTokenKind::Whitespace,
+            CppTokenKind::Newline,
+            CppTokenKind::LineContinuation,
+        ] {
+            let layout = CppGreenElement::Token {
+                kind,
+                range: SourceRange::new(0, 1),
+            };
+            assert!(is_layout(&layout), "{kind:?} is layout");
+            assert!(!is_a_comment(&layout), "and it is not a comment");
+        }
+
+        // **A comment written as a bare token is still a comment**, which is the spelling the lexer produces before
+        // the documentation layer groups it into a node. Both are handled because both reach this code.
+        let bare = CppGreenElement::Token {
+            kind: CppTokenKind::LineComment,
+            range: SourceRange::new(0, 4),
+        };
+        assert!(is_a_comment(&bare), "a bare LineComment token is a comment");
+        assert!(!is_layout(&bare), "and it is not layout");
     }
 
     #[test]

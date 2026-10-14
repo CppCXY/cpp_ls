@@ -158,15 +158,26 @@ fn a_trailing_comment_documents_nothing_forwards() {
 
     // The declaration it really documents is the one before it, and it is reachable — just not
     // through this accessor.
+    //
+    // The walk steps over the comment itself, and that step is the shape change rather than a workaround: the comment
+    // is now a **sibling** of the members, so the first thing before the member that follows it is the comment. See
+    // `a_comment_between_two_members_belongs_to_the_class_body` for why the tree is that way.
     let previous = comment
         .get_owner()
         .and_then(|owner| owner.prev_sibling())
+        .and_then(|before| {
+            if CppSyntaxKind::from(before.kind()) == CppSyntaxKind::DocComment {
+                before.prev_sibling()
+            } else {
+                Some(before)
+            }
+        })
         .and_then(CppDeclaration::cast)
         .and_then(|declaration| declaration.get_name_text());
     assert_eq!(
         previous,
         Some("a".to_string()),
-        "the member it documents is its previous sibling"
+        "the member it documents is the declaration before it"
     );
 }
 

@@ -4352,6 +4352,22 @@ fn parse_class_body_members(p: &mut CppParser) -> ParseResult {
             break;
         }
 
+        // **The layout and the comments between two members belong to the class body.**
+        //
+        // `expect_semicolon` consumes a member's `;` and stops before a comment, so that a comment written below a
+        // member is not filed under it — the shape the module note in `tests/doc_owner.rs` describes. What that leaves
+        // is the comment sitting at this loop's cursor, and a loop that went straight on to read a member would read
+        // the comment as rubble: measured, an `ErrorNode` holding the newline and the indent, and the class body
+        // carrying a syntax error it does not have.
+        //
+        // Emitting it here, before the member is read, is what puts it in the class body — which is the node that
+        // encloses both the member above and the member below, and therefore the only honest answer to "which member
+        // does this describe".
+        p.emit_trivia_after_current_token();
+        if p.is_eof() {
+            break;
+        }
+
         // A `}` with a debt outstanding closes the member that was abandoned, not this body.
         if p.current_token() == CppTokenKind::RightBrace {
             unclosed_braces -= 1;
@@ -4541,14 +4557,22 @@ pub fn expect_semicolon(p: &mut CppParser) -> ParseResult {
     }
 
     if p.current_token() == CppTokenKind::Semicolon {
-        // **Still a `bump`, and the reason is worth recording.** Consuming the `;` without the layout after it — the
-        // way `parse_access_specifier` consumes its colon — is what this needs to be for the comment below a member to
-        // land in the class body, but it is not enough on its own: `consume_current_token` stops the cursor *on* the
-        // trivia and leaves it for `emit_trivia_after_current_token`, and no rule here calls that. Measured, the
-        // layout was then never emitted at all: five tests in `tests/ast.rs` failed on the tree no longer reproducing
-        // the file. The change belongs with a matching `emit_trivia_after_current_token` at each of this function's
-        // ten call sites, which is a bigger edit than this one.
-        p.bump();
+        // **The `;` goes in, the comment after it does not.**
+        //
+        // The semicolon is the declaration's own token and stays one — it is a child of this node like any other
+        // token. What must not stay is a comment written *below* the declaration: `bump` would attach it here, because
+        // this rule runs while the declaration is still open, and the declaration completes after it returns.
+        // Measured, `struct S { int x; /// The y. int y; };` filed `/// The y.` under `x`, and the module note in
+        // `tests/doc_owner.rs` says the shape should be the other one: a comment between two members belongs to the
+        // class body.
+        //
+        // So the token is consumed directly and only the **layout** that follows it is emitted, leaving a comment for
+        // whichever node encloses this declaration. The layout still goes in, which is what keeps the tree lossless —
+        // see [`CppParser::emit_layout_after_current_token`], which is this and nothing more.
+        //
+        // This is the technique `parse_access_specifier` already uses for the same complaint one node over.
+        p.consume_current_token();
+        p.emit_layout_after_current_token();
         return Ok(CompleteMarker::empty());
     }
 

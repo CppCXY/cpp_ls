@@ -1916,6 +1916,44 @@ impl<'a> CppParser<'a> {
             .unwrap_or(CppTokenKind::Eof);
     }
 
+    /// Emit the **layout** the cursor is sitting on and stop at the first comment.
+    ///
+    /// # Why a rule wants this instead of `bump`
+    ///
+    /// `bump` attaches everything after a token to whichever node is open, and a rule that is about to close its node
+    /// is still open — so a comment written *below* the construct it just read becomes a child of that construct.
+    /// Measured: `struct S { int x; /// The y. int y; };` made `/// The y.` a child of the declaration of `x`, and the
+    /// module note in `tests/doc_owner.rs` says what the shape should be — the comment between two members belongs to
+    /// the class body, where a reader sees it.
+    ///
+    /// Consuming only the layout and stopping short of the comment is what puts it there: the caller completes its
+    /// node, and the comment is emitted afterwards into the node that encloses it both.
+    ///
+    /// # The layout still has to be emitted
+    ///
+    /// Stopping at a comment is not the same as stopping at *all* trivia. A version that consumed the `;` and emitted
+    /// nothing stranded the layout entirely: five tests in `tests/ast.rs` failed on the tree no longer reproducing the
+    /// file, because the newline after a `}` was never written to the tree by anything. Whitespace and line breaks go
+    /// in here, as they did before; only the comment is left for later.
+    pub fn emit_layout_after_current_token(&mut self) {
+        let start = self.token_index;
+        let mut next_index = start;
+        while let Some(token) = self.tokens.get(next_index) {
+            if !is_line_layout_kind(token.kind) {
+                break;
+            }
+            next_index += 1;
+        }
+
+        self.parse_trivia_tokens(start, next_index);
+        self.move_the_cursor_to(next_index);
+        self.current_token = self
+            .tokens
+            .get(self.token_index)
+            .map(|token| token.kind)
+            .unwrap_or(CppTokenKind::Eof);
+    }
+
     /// Emit a zero-width `MissingNode`, i.e. "a token was expected here but is not present".
     ///
     /// Zero-width nodes cost nothing in the tree and are what make completion work at a broken
