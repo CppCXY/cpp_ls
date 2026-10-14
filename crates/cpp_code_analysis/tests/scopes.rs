@@ -232,8 +232,9 @@ fn a_class_with_a_destructor_in_its_body_keeps_its_own_name() {
 
     assert_eq!(
         shape(&table),
-        "File{Widget}(Class{size})",
-        "the class is `Widget` and `size` is its member"
+        "File{Widget}(Class{size,~Widget})",
+        "the class is `Widget`, `size` is its member, and the destructor is a member too — it binds now, where \
+         the walker used to bind no declarator that was not an `InitDeclarator`"
     );
     assert_eq!(kind_of(&table, file, "Widget"), Some(BindingKind::Class));
     assert_eq!(
@@ -260,30 +261,24 @@ fn a_class_with_an_operator_in_its_body_keeps_its_own_name() {
     );
 }
 
-/// A declaration whose declarator is **not** wrapped in an `InitDeclarator` declares nothing here yet.
+/// A declaration whose declarator is a bare `Declarator` — no `InitDeclarator` — **does** declare its name.
 ///
-/// The boundary, written down rather than left to be discovered — see "现在答不了什么" in
-/// It is a gap in this walker, not a decision: `~Widget();` is
-/// `Declaration[Declarator[NameExpr(~ Widget), ParameterList]]`, with no `DeclSpecifierSeq` and no
-/// `InitDeclarator`, and [`is_unnamed_declaration`] asks `CppDeclaration::get_name_text` — which reads the first
-/// `init-declarator` — so the declaration looks unnamed and is dropped.
+/// This test used to be `a_destructor_without_a_specifier_declares_nothing_yet`, written to fail the day the gap
+/// landed, and it has: `~Widget();` is `Declaration[Declarator[NameExpr, ParameterList]]` with no
+/// `DeclSpecifierSeq` and no `InitDeclarator`, and `CppDeclaration::get_name_token` now reads a bare declarator as
+/// well. The rule it needed is exactly the one the old note asked for — a bare declarator whose `NameExpr` holds a
+/// name — and the two shapes `is_unnamed_declaration` exists to reject are still rejected, which
+/// `a_call_statement_declares_nothing` and `a_real_declaration_is_still_declared` above still check.
 ///
-/// What it costs today: a destructor or a `= delete`d special member is not a binding, so it is missing from a
-/// member list and a jump to it from a call site cannot land. What landing it needs: a rule for "a bare
-/// declarator names the entity" that does **not** also accept the shapes `is_unnamed_declaration` exists to
-/// reject — see `a_call_statement_declares_nothing` and `a_real_declaration_is_still_declared` just above, which
-/// are the two sides that rule has to keep apart.
-///
-/// The test is written to fail the day it lands, on purpose: the fix is then a deliberate edit here.
+/// The name is the **whole spelling** `~Widget`, because a destructor's declarator is a `Declarator` whose
+/// `NameExpr` holds a nested `Declaration` rather than an identifier: the token the walker finds has an empty
+/// spelling, so `name_from_text` falls back to the node's own text. Without that the member would be bound as the
+/// empty string — a row with no label, which is worse than the row being absent.
 #[test]
-fn a_destructor_without_a_specifier_declares_nothing_yet() {
+fn a_destructor_without_a_specifier_declares_its_name() {
     let table = scopes("struct Widget {\n  ~Widget();\n  int size;\n};\n");
 
-    assert_eq!(
-        shape(&table),
-        "File{Widget}(Class{size})",
-        "`~Widget` is not bound; when it is, this becomes `Class{{size,~Widget}}` and the test has to be updated"
-    );
+    assert_eq!(shape(&table), "File{Widget}(Class{size,~Widget})");
 }
 
 /// A `virtual` destructor **is** bound, and its name is not an identifier.

@@ -168,6 +168,27 @@ impl CppDeclaration {
             return Some(name);
         }
 
+        // **A constructor is a bare `Declarator`, not an `InitDeclarator`.** Its declaration has no
+        // `decl-specifier-seq` — there is no return type to write — so the grammar puts the name straight under the
+        // declaration:
+        //
+        // ```text
+        // Name(const int f);      Declaration > Declarator > NameExpr, ParameterList
+        // void set(const int v);  Declaration > DeclSpecifierSeq, InitDeclarator > Declarator
+        // ```
+        //
+        // Without this arm the name is not found and `get_name_text` answers `None` for a declaration that plainly
+        // has one — which `sema::scopes`' `is_unnamed_declaration` reads as *"this is a call statement, not a
+        // declaration"* and skips entirely. Measured on the pair above: the constructor's parameters were bound
+        // **nowhere**, so they were missing from completion and uncoloured by semantic tokens, while the member
+        // function's beside them were both right.
+        if let Some(declarator) = self.child::<CppDeclarator>()
+            && let Some(name) = declarator.get_name()
+            && !name.get_text().is_empty()
+        {
+            return Some(name);
+        }
+
         self.elaborated_type_name()
     }
 

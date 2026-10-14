@@ -1091,6 +1091,15 @@ impl ScopeWalker<'_> {
         {
             self.items(&body, function);
         }
+
+        // **Not fixed here, and the measurement is why.** A constructor's member-initializer list holds a use of
+        // each parameter — `Name(const int f) : first(f) { … }` — and the grammar puts it in a `MemberInitializer`
+        // node **beside** the declarator, so nothing walks it into the function scope. Adding that walk here was
+        // tried and changed nothing, because the scope it would walk into is never reached: `function_body` does not
+        // find this declaration's `CompoundStat` either. Instrumented, the declaration's children are
+        // `["Declarator", "MemberInitializer", "MemberInitializer"]` while the body exists elsewhere in the tree, so
+        // the walker creates no function scope for a constructor whose declarator carries a member-initializer list.
+        // See `tests/completion.rs`'s ignored `a_constructors_parameters_are_in_scope`.
     }
 
     /// The names a structured binding pattern declares, if this declaration has one.
@@ -1650,6 +1659,18 @@ fn function_body(node: &CppSyntaxNode) -> Option<CppSyntaxNode> {
         return Some(direct);
     }
 
+    // **A constructor's body is not found here, and that is the bug this function is next to.** The member-initializer
+    // list sits between the declarator and the body and is itself a direct child of the declaration:
+    //
+    // ```text
+    // void set(const int v) { … }        Declaration > InitDeclarator > Declarator > CompoundStat
+    // Name(const int f) : first(f) { … } Declaration > Declarator, MemberInitializer, MemberInitializer
+    // ```
+    //
+    // The second shape has **no `CompoundStat` under the declaration at all** — instrumented, its children are
+    // exactly the three above while the body exists elsewhere in the tree — so searching the declaration's own
+    // children for one (tried, and it changes nothing) does not help. Until this is understood, a constructor with a
+    // member-initializer list opens no function scope, and its parameters are bound nowhere.
     for declarator in declarators(node) {
         for child in declarator.children() {
             if CppSyntaxKind::from(child.kind()) == CppSyntaxKind::CompoundStat {
@@ -1989,10 +2010,27 @@ fn declared_name(node: &CppSyntaxNode) -> Option<(Name, cpp_parser::SourceRange)
         let token = first_identifier_in_name(&name_node)?;
         let text = token.text();
 
+        // **The name node's own range when the token has none.** A destructor's declarator holds a `NameExpr` whose
+        // child is a nested `Declaration` rather than an identifier, so the token found here covers nothing — and a
+        // range of nothing is what every consumer would slice the file with, giving a member row with no label. The
+        // node spans the whole spelling (`~Derived`), which is what `NameKind::Destructor` holds.
+        let range = if token.text_range().is_empty() {
+            cpp_parser::source_range(name_node.text_range())
+        } else {
+            cpp_parser::source_range(token.text_range())
+        };
+
         // The **name node** decides what the name is, not the declaration around it. See
         // [`name_from_text`] — the difference is a class whose body contains a destructor.
         if let Some(name) = name_from_text(text, &name_node) {
-            return Some((name, cpp_parser::source_range(token.text_range())));
+            return Some((name, range));
+        }
+        if std::env::var_os("CPPLS_ZZ").is_some() {
+            eprintln!(
+                "declared_name: node={:?} text={text:?} node_text={:?}",
+                cpp_parser::CppSyntaxKind::from(name_node.kind()),
+                name_node.text().to_string(),
+            );
         }
     }
 
@@ -2527,15 +2565,45 @@ fn name_from_text(text: &str, node: &CppSyntaxNode) -> Option<Name> {
         return Some(Name::operator(text));
     }
 
-    // A destructor is spelled `~Name` and the `~` is a token of its own, so the identifier alone cannot tell
-    // it from the class. A declaration whose name is preceded by `~` is a destructor.
-    let has_tilde = node
-        .descendants_with_tokens()
-        .filter_map(|child| child.into_token())
-        .any(|token| CppTokenKind::from(token.kind()) == CppTokenKind::Tilde);
+    // **A destructor is spelled `~Name`, and the `~` is not inside the node this is asked about.**
+    //
+    // It used to be searched for among the node's own tokens, which finds it only when the node *is* the declarator
+    // — `~Widget();` writes `Declarator > NameExpr, ParameterList`, so the `~` is the declarator's first token and
+    // the `NameExpr` beside it holds a nested `Declaration` rather than an identifier. Looking one level out at the
+    // declarator's own spelling is what tells the two apart, and it is the only reading that does not depend on
+    // which node the caller happened to pass.
+    let declarator_text = node
+        .parent()
+        .filter(|parent| CppSyntaxKind::from(parent.kind()) == CppSyntaxKind::Declarator)
+        .map(|parent| parent.text().to_string())
+        .unwrap_or_else(|| node.text().to_string());
+    let has_tilde = declarator_text.trim_start().starts_with('~');
 
     if has_tilde {
-        return Some(Name::destructor(text));
+        // **The class name, without the `~`, because `NameKind::Destructor`'s `Display` writes it.**
+        //
+        // The spelling comes from the declarator when the token the walker found has none — which is this case, and
+        // why a destructor used to be bound as the empty string: a name with no text is a member row with no label.
+        // The `~` is stripped rather than stored because `Display` adds it back, so keeping it would print
+        // `~~Derived`. Whitespace goes too: the grammar has forms where it appears (`~ Derived`, `~Derived::name`)
+        // and the stored spelling is compared against what a reader writes, which has none.
+        let spelling: String = if text.is_empty() {
+            declarator_text
+        } else {
+            text.to_string()
+        }
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+
+        let class = spelling.strip_prefix('~').unwrap_or(&spelling);
+        // **Up to the parameter list.** The declarator's spelling is the whole `~Derived()`, and only the name is
+        // wanted: the `(` is where the name stops on every declaration this is asked about.
+        let class = class.split(['(', '<']).next().unwrap_or(class);
+        if class.is_empty() {
+            return None;
+        }
+        return Some(Name::destructor(class));
     }
 
     if text.is_empty() {

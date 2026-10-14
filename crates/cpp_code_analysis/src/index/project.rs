@@ -10475,28 +10475,35 @@ mod tests {
         );
     }
 
+    /// **A destructor is a member, and its name is its whole spelling.**
+    ///
+    /// This test used to be `a_destructor_without_a_specifier_is_not_a_member_yet`, and the fix that landed is the
+    /// one its own failure message named: `CppDeclaration::get_name_token` now reads a bare `Declarator` as well as
+    /// an `InitDeclarator`. A constructor and a destructor have no `decl-specifier-seq` — there is no return type to
+    /// write — so the grammar puts their name straight under the declaration:
+    ///
+    /// ```text
+    /// Name(const int f);  Declaration > Declarator > NameExpr("Name"), ParameterList
+    /// ~Derived();         Declaration > Declarator > NameExpr, Declaration["Derived()"]
+    /// void f();           Declaration > DeclSpecifierSeq, InitDeclarator > Declarator
+    /// ```
+    ///
+    /// The second shape needs `name_from_text`'s fallback as well: its `NameExpr` holds a nested `Declaration`
+    /// rather than an identifier, so the token the walker finds has an empty spelling, and `NameKind::Destructor`
+    /// holds the **whole** spelling — an empty one would be a member row with no label.
+    ///
+    /// What the fixture was originally written to pin is still pinned: the class is found by **its own** name —
+    /// before `name_from_text` was fixed, a class whose body held a destructor was itself named `~Derived`, `d` was
+    /// filed under that, and `Derived` was never bound.
     #[test]
-    fn a_destructor_without_a_specifier_is_not_a_member_yet() {
-        // The boundary, asserted rather than left to be discovered — see "现在答不了什么" in
-        // and `a_destructor_without_a_specifier_declares_nothing_yet` in
-        // `tests/scopes.rs` for the rule and for what landing it needs.
-        //
-        // What this test is really pinning is the *other* half: the class is found by its own name. Before the fix
-        // in `name_from_text`, a class whose body held a destructor was itself named `~Derived` — its scope was
-        // `~Derived`, `d` was filed under that, and `Derived` was never bound. So this fixture used to answer
-        // `Unknown(NotDeclaredHere("Derived"))`, which is why it is here as well as in `tests/scopes.rs`.
+    fn a_destructor_without_a_specifier_is_a_member() {
         let source = "struct Derived {\n  ~Derived();\n  int d;\n};\n";
         let found = members_of_class(&[], "/p/a.cpp", source, "Derived");
 
         let Known::Yes(list) = found else {
             panic!("the class must be found by its own name: {found:?}");
         };
-        assert_eq!(
-            names(&list),
-            ["d"],
-            "`~Derived` is not listed yet: the walker binds no declarator that is not an `InitDeclarator`, so the \
-             destructor is not a fact for this query to list"
-        );
+        assert_eq!(names(&list), ["~Derived", "d"]);
     }
 
     #[test]

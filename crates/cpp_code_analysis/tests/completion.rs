@@ -1193,3 +1193,75 @@ int main() {
 
 
 
+
+/// **A constructor's parameters are in scope in its body and in its member-initializer list.**
+///
+/// Reported as a missing completion: inside `Name(const std::string& f, ...) { first_| }` the list did not hold
+/// `firstName`, and the semantic tokens pass says why — `firstName`, `middleName` and `lastName` are classified
+/// as the **class's fields** and `f`, `m`, `l` are classified as **nothing at all**, where a plain member
+/// function's parameter is classified `Parameter`. So the constructor's parameters are not in the scope tree,
+/// and two questions are answered wrongly from the same gap.
+///
+/// Both positions are checked, because they are answered by different machinery: the initializer list is read
+/// before the body exists, and the body is an ordinary block.
+/// **Still failing on the member-initializer list, and the repro is left in place.**
+///
+/// What is fixed: a constructor is now recognised as a declaration that *names* something. Its declaration is a
+/// bare `Declarator` rather than an `InitDeclarator` — there is no return type, so no `decl-specifier-seq` — and
+/// `CppDeclaration::get_name_token` only looked at `InitDeclarator`. So the name was not found, the declaration
+/// was read as "unnamed", and `is_unnamed_declaration` skipped it entirely: the constructor's parameters were
+/// bound nowhere. Measured after the fix: `f` and `m` are `Parameter` where they are declared, and the
+/// constructor itself is a `Method` rather than a bare `Type`.
+///
+/// What is not: their **uses**. `f` inside `: first(f)` and inside the body is still unclassified. The body is a
+/// `CompoundStat` that is **not a child of the declaration** — instrumented, the declaration's children are
+/// `["Declarator", "MemberInitializer", "MemberInitializer"]` while a `CompoundStat` for that body exists
+/// elsewhere in the tree — so `function_body` does not find it and nothing is walked into the function scope.
+/// The member-initializer walk added beside it therefore has no scope to walk into.
+///
+/// `#[ignore]` rather than deleted: it is the measurement, and the next round starts from here.
+#[ignore]
+#[test]
+fn a_constructors_parameters_are_in_scope() {
+    let source = "struct Name {\n\
+                      Name(const int f, const int m)\n\
+                          : first(f), second(m) {\n\
+                          int here = f;\n\
+                      }\n\
+                      int first;\n\
+                      int second;\n\
+                  };\n";
+    let files = MemoryFiles::new().with_file("/p/ctor.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = cpp_code_analysis::Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.load("/p/ctor.cpp");
+    let view = session.view_of_the_file(std::path::Path::new("/p/ctor.cpp")).expect("a view");
+
+    for (what, needle) in [("the member-initializer list", ": first("), ("the body", "int here = ")] {
+        let at = source.find(needle).expect("the fixture writes it") + needle.len();
+        let names = match session.name_completions(
+            &view,
+            cpp_code_analysis::file::coordinates::FileOffset::new(at),
+        ) {
+            Known::Yes(found) => found.names.iter().map(|offered| offered.fact.name.clone()).collect::<Vec<_>>(),
+            other => panic!("{what} should be answerable, got {other:?}"),
+        };
+        assert!(
+            names.contains(&"f".to_string()),
+            "the constructor's own parameter, in {what}: {names:?}"
+        );
+        assert!(
+            names.contains(&"m".to_string()),
+            "and the second one, in {what}: {names:?}"
+        );
+        assert!(
+            names.contains(&"first".to_string()),
+            "and the field it initialises, in {what}: {names:?}"
+        );
+    }
+}
