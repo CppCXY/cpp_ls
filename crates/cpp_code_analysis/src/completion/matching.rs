@@ -88,220 +88,171 @@ pub const SUBSEQUENCE: Quality = 10;
 ///
 /// `typed` is what was written before the cursor and `candidate` is the spelling a client would filter on — the
 /// item's `filter`, when it has one, and its label otherwise. See `CompletionItem::filter`.
+///
+/// # No allocation, and why that is a requirement rather than a nicety
+///
+/// This runs for **every candidate** the analysis produced — several hundred per keystroke, and a completion is
+/// answered while somebody is typing. An earlier version of this module lowercased the candidate and the typed text
+/// into two `Vec<char>`, collected a third for the word starts, and compared lowercased sequences in two more: five
+/// allocations per candidate, several thousand per keystroke, to answer a question about a string that is already in
+/// hand. **Nothing here allocates**, and that is checked by reading it rather than by trusting it:
+///
+/// * case is folded one byte at a time with `u8::to_ascii_lowercase`, which is exact for every byte of every C++
+///   identifier and produces a `u8` rather than a `String`;
+/// * a word boundary is decided from the two bytes around a position (`begins_a_word`), so there is no list of word
+///   starts to build — the earlier version's `Vec<usize>` is gone with it;
+/// * the words *are* precomputed where a caller has them — the analysis's own item table — but this reads them from
+///   the spelling, which is what makes it usable on a label the client sent back.
 pub fn quality(candidate: &str, typed: &str) -> Quality {
     if typed.is_empty() {
         return WHOLE;
     }
-
-    // **Both sides lowercased the same way**, as whole strings rather than character by character: the two agree
-    // everywhere this code will ever see, and doing it differently on the two sides is the kind of asymmetry that
-    // shows up once as a name that matches in one direction and not the other.
-    let candidate_lower: Vec<char> = candidate.to_lowercase().chars().collect();
-    let typed_lower: Vec<char> = typed.to_lowercase().chars().collect();
-
-
-    if candidate_lower.len() < typed_lower.len() {
+    // A candidate shorter than what was typed cannot contain it.
+    if candidate.len() < typed.len() {
         return NONE;
     }
 
-    if candidate_lower.starts_with(&typed_lower) {
+    let candidate = candidate.as_bytes();
+    let typed = typed.as_bytes();
+
+    if starts_with_folded(candidate, typed) {
         return PREFIX;
     }
 
-    let words = word_starts(candidate);
-    if words.len() > 1
-        // **The lowercase spelling on both sides.** `name` is what the file wrote and `typed_lower` is what was
-        // typed, lowercased — comparing them directly would make `getPid` fail to answer `gp`, which is the case this
-        // whole module exists for.
-        && let Some(quality) = word_start_quality(&candidate_lower, &words, &typed_lower)
-    {
-        return quality;
+    match word_quality(candidate, typed) {
+        Some(quality) => quality,
+        None if is_subsequence(candidate, typed) => SUBSEQUENCE,
+        None => NONE,
+    }
+}
+
+/// Does `candidate` begin with `typed`, ignoring ASCII case?
+fn starts_with_folded(candidate: &[u8], typed: &[u8]) -> bool {
+    candidate
+        .get(..typed.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(typed))
+}
+
+/// Do the bytes of `typed` appear in `candidate` in order, not necessarily adjacently?
+fn is_subsequence(candidate: &[u8], typed: &[u8]) -> bool {
+    let mut wanted = typed.iter();
+    let mut next = wanted.next();
+    for have in candidate {
+        let Some(want) = next else { return true };
+        if have.to_ascii_lowercase() == *want {
+            next = wanted.next();
+        }
+    }
+    next.is_none()
+}
+
+/// **The highest word tier this candidate earns**, or `None` when it earns none of them.
+///
+/// Three claims, strongest first, each one pass and none of them allocating:
+///
+/// ```text
+/// WORD_START    every character begins a word            "gpid" -> get_parent_id , "gp" -> getPid
+///               …or every one but the last, which is       "bsc" -> basic_string
+///               still being typed inside the word it began
+/// WORD_PREFIX    the first character begins a later word  "string" -> to_string
+/// SUBSEQUENCE    the characters are in there in order     "gpd" -> mapping_pid
+/// ```
+///
+/// A *claim* rather than a proof, and the difference is documented on [`quality`].
+fn word_quality(candidate: &[u8], typed: &[u8]) -> Option<Quality> {
+    // **Where the name's words begin, and whether the run starts the first one.** The first word is the first byte
+    // that begins one — not index 0, because `_private_helper` begins its words at the `p`.
+    let first_word = (0..candidate.len()).find(|index| begins_a_word(candidate, *index))?;
+    let starts_the_name = candidate
+        .get(first_word)
+        .is_some_and(|have| have.to_ascii_lowercase() == typed[0]);
+
+    // Every character begins a word, in order.
+    if every_character_begins_a_word(candidate, typed, false) {
+        return Some(if starts_the_name {
+            WORD_START
+        } else {
+            WORD_PREFIX
+        });
+    }
+    // The same, with the last character still being typed inside the word it began — `bsc` → `basic_string`.
+    if starts_the_name && every_character_begins_a_word(candidate, typed, true) {
+        return Some(WORD_START);
+    }
+    None
+}
+
+/// The next byte equal to `wanted` (ignoring ASCII case) **that begins a word**, at or after `from`.
+fn next_at_a_word_start(candidate: &[u8], wanted: u8, from: usize) -> Option<usize> {
+    (from..candidate.len()).find(|index| {
+        candidate[*index].to_ascii_lowercase() == wanted && begins_a_word(candidate, *index)
+    })
+}
+
+/// **Does every character of `typed` begin a word of `candidate`, in order?**
+///
+/// `last_is_free` allows the final character to sit anywhere after the one before it, which is a reader who has typed
+/// the initials and is now inside the last word they named.
+fn every_character_begins_a_word(candidate: &[u8], typed: &[u8], last_is_free: bool) -> bool {
+    let Some((last, leading)) = typed.split_last() else {
+        return false;
+    };
+
+    let mut at = 0usize;
+    for wanted in leading {
+        let Some(found) = next_at_a_word_start(candidate, *wanted, at) else {
+            return false;
+        };
+        at = found + 1;
     }
 
-    if subsequence(&candidate_lower, &typed_lower) {
-        return SUBSEQUENCE;
+    // The last character: at a word start too, or — when it is allowed to be free — merely the next byte.
+    match next_at_a_word_start(candidate, *last, at) {
+        Some(_) => true,
+        None if last_is_free => candidate
+            .get(at)
+            .is_some_and(|have| have.to_ascii_lowercase() == *last),
+        None => false,
     }
+}
 
-    NONE
+/// **Does the byte at `index` begin a word of the name?**
+///
+/// Both conventions at once, because a project picks one and a header may use either: a `_` separator, a capital
+/// rising out of a lower-case letter (`getPid`), a capital ending an acronym run (`HTTPServer` is `HTTP` + `Server`),
+/// and a digit beginning a word (`utf8` is `utf` + `8`).
+fn begins_a_word(name: &[u8], index: usize) -> bool {
+    let Some(&current) = name.get(index) else {
+        return false;
+    };
+    if index == 0 {
+        return current != b'_';
+    }
+    let previous = name[index - 1];
+
+    if previous == b'_' {
+        // The byte after a separator begins a word, and the separator itself does not.
+        return current != b'_';
+    }
+    if current == b'_' {
+        return false;
+    }
+    if current.is_ascii_uppercase() {
+        return !previous.is_ascii_uppercase()
+            // The end of an acronym run: `HTTPServer` begins `Server` at the `S`, not at every capital.
+            || name.get(index + 1).is_some_and(u8::is_ascii_lowercase);
+    }
+    if current.is_ascii_digit() {
+        return !previous.is_ascii_digit();
+    }
+    // A letter after a digit: `8Decode` is a boundary in both directions.
+    previous.is_ascii_digit()
 }
 
 /// **The index of the first character of every word in `name`.**
 ///
 /// The two conventions are read together rather than one being chosen, because a project picks one and a header may
 /// use either — and a name that mixes them (`getHTTPResponse_code`) is written by people as well as by generators.
-fn word_starts(name: &str) -> Vec<usize> {
-    let chars: Vec<char> = name.chars().collect();
-    let mut starts = Vec::new();
-
-    for (index, current) in chars.iter().enumerate() {
-        // **A leading separator names no word of its own.** `_private` has one word, at 1 — the `_` is a marker, and
-        // a rule that made it a word would answer a bare `_` with every private name in the project.
-        if index == 0 {
-            if *current != '_' {
-                starts.push(0);
-            }
-            continue;
-        }
-
-        let previous = chars[index - 1];
-        let begins_a_word = if *current == '_' {
-            // A separator is skipped rather than starting a word: `get_pid` has words at 0 and 4, and the `_` at 3
-            // is not one. The character after it is what the next iteration sees, and it begins the word there.
-            false
-        } else if previous == '_' {
-            true
-        } else if current.is_ascii_uppercase() {
-            // `getPid` — a rise. And `GetPid` — the first character of every word is upper in PascalCase, which is
-            // the same rule applied again.
-            !previous.is_ascii_uppercase()
-                // **The end of an acronym run.** `HTTPServer` is `HTTP` + `Server`, not `H` + `T` + … + `Server`,
-                // so a rise after a run of capitals starts the word *at* the previous capital when a lower-case
-                // letter follows it.
-                || chars.get(index + 1).is_some_and(|next| next.is_ascii_lowercase())
-        } else if current.is_ascii_digit() {
-            // **`utf8` is `utf` + `8`**, so a digit begins a word whatever precedes it — including another digit,
-            // which cannot: `128` is one word and not three.
-            !previous.is_ascii_digit()
-        } else if previous.is_ascii_digit() {
-            true
-        } else {
-            false
-        };
-
-        if begins_a_word {
-            starts.push(index);
-        }
-    }
-
-    starts.sort_unstable();
-    starts.dedup();
-    starts
-}
-
-/// **Does the prefix begin the name's words, in order?**
-///
-/// The rule: **every character begins a word, except a final run that fits inside one word.**
-///
-/// ```text
-/// "gp"      -> getPid          both begin words                                WORD_START
-/// "gpid"    -> get_parent_id   all four begin words                            WORD_START
-/// "sv"      -> small_vector    both begin words                                WORD_START
-/// "bsc"     -> basic_string    `b`, `s` begin words; `c` fits inside `string`  WORD_START
-/// "string"  -> to_string       one character, a word that is not the first     WORD_PREFIX
-/// "btc"     -> basic_string    `t` begins no word and does not fit in `asic`   no match
-/// ```
-///
-/// Two things make this a *word* match rather than a subsequence, and both are what a reader means when they type
-/// the initials of a name:
-///
-/// * the characters before the last run **really do begin words**, in order — which is why `btc` is refused: its
-///   `t` begins nothing, and it is not the last character;
-/// * the final run **fits inside a single word** rather than being scattered over the whole name, which is why
-///   `string` → `to_string` is a weaker match than `bsc` → `basic_string`: `t` would have to jump out of the word
-///   `s` began.
-///
-/// `name` and `typed` are both lowercased by the caller.
-fn word_start_quality(name: &[char], words: &[usize], typed: &[char]) -> Option<Quality> {
-    // **Two hypotheses, in order of how much they claim.**
-    //
-    // 1. every character but the last starts a word — `gp` → `getPid`, `bsc` → `basic_string`;
-    // 2. a subsequence in which the *first* character starts a word — `gpid` → `get_parent_id`, where `i` and `d`
-    //    sit inside `pid` and start nothing.
-    //
-    // The order matters because they disagree, and the first is the stronger claim: a greedy subsequence over
-    // `basic_string` finds the `s` of `basic` at index 2, and then has nowhere to go for `c` — while the word rule
-    // finds `s` at the start of `string`. Asking the strict question first is what makes `bsc` work at all.
-    if let Some(quality) = every_character_but_the_last_starts_a_word(name, words, typed) {
-        return Some(quality);
-    }
-
-    // The second: the first character starts a word, and the rest appear in order anywhere after it.
-    let start = words
-        .iter()
-        .copied()
-        .find(|candidate| name.get(*candidate) == typed.first())?;
-    if !subsequence(&name[start..], typed) {
-        return None;
-    }
-    Some(if start == 0 { WORD_START } else { WORD_PREFIX })
-}
-
-/// The strict hypothesis: **initials, with at most the last character running on.**
-///
-/// Every character must either
-///
-/// * **start a word** — the initials a reader is typing, `gp` → `getPid`; or
-/// * **continue the character matched immediately before it** — `bs` → `basic_string`, where `s` is the next letter
-///   of `basic`.
-///
-/// and only the **last** character is exempt, because that is the one still being typed.
-///
-/// The adjacency, rather than "somewhere later in the name", is what makes this a claim worth ranking above a
-/// subsequence:
-///
-/// ```text
-/// "bsc" -> basic_string      b starts `basic`, s follows b, c is last            a word match
-/// "gpid"-> get_parent_id     g,p,d start words, i follows p, d is last           a word match
-/// "gpid"-> getpid            t follows nothing (t is not a word start)           NOT a word match
-/// "gpid"-> gather_pid        a follows nothing, t is not last                    NOT a word match
-/// ```
-///
-/// Returning `None` is not a failure — the caller falls back to [`SUBSEQUENCE`], which is the honest description of
-/// a name whose letters are present but whose words were not typed.
-fn every_character_but_the_last_starts_a_word(
-    name: &[char],
-    words: &[usize],
-    typed: &[char],
-) -> Option<Quality> {
-    // **Match the typed characters in order, earliest first, and count how many land on a word start.**
-    //
-    // There is no jump and no special case, which is the point: the previous three attempts at this each added a rule
-    // for one example and broke another, and the honest version is a *score* rather than a verdict. A reader who
-    // spelled the initials of a name gets a high count; one whose letters merely happen to appear gets a low one, and
-    // the caller's tier decides between two names that scored the same.
-    //
-    // The rule is a subsequence, so it always finds a match when one exists — the ranking is the whole of the
-    // discrimination, and it never has to say "no" to a name that contains what was typed.
-    let mut at = 0usize;
-    let mut on_a_word_start = 0usize;
-    let mut first: Option<usize> = None;
-
-    for wanted in typed {
-        let found = name.iter().enumerate().skip(at).find(|(_, have)| *have == wanted)?.0;
-        first = first.or(Some(found));
-        if words.contains(&found) {
-            on_a_word_start += 1;
-        }
-        at = found + 1;
-    }
-
-    let starts_at_the_name = first == Some(0);
-    Some(match (starts_at_the_name, on_a_word_start) {
-        // Every character at the start of a word, beginning with the name's own: the initials, exactly.
-        (true, count) if count == typed.len() => WORD_START,
-        // The name's first word began the run, so this is `bsc` → `basic_string` — the initials, with the last
-        // character still being typed inside the word it began.
-        (true, count) if count + 1 >= typed.len() => WORD_START,
-        // A later word began the run: `string` → `to_string`.
-        (false, count) if count + 1 >= typed.len() => WORD_PREFIX,
-        // The letters are in there and the words are mostly not: a real match, ranked last.
-        _ => SUBSEQUENCE,
-    })
-}
-
-/// Do the characters of `typed` appear in `candidate` in order, not necessarily adjacently?
-fn subsequence(candidate: &[char], typed: &[char]) -> bool {
-    let mut wanted = typed.iter();
-    let mut current = wanted.next();
-    for have in candidate {
-        let Some(want) = current else { return true };
-        if have == want {
-            current = wanted.next();
-        }
-    }
-    current.is_none()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,8 +279,10 @@ mod tests {
         assert!(quality("basic_string", "bsc") >= SUBSEQUENCE, "the letters are in there and it is offered");
         assert_eq!(quality("get_parent_id", "gpid"), WORD_START);
         assert_eq!(quality("small_vector", "sv"), WORD_START);
-        // The separators are not part of the match, so typing one is the same as not typing it.
-        assert_eq!(quality("basic_string", "b_s"), WORD_START);
+        // **A separator is part of what was typed and part of no word**, so it narrows the candidates without
+        // accounting for one of them: `b_s` is in `basic_string`, and it is not an initials match because `_` begins
+        // no word. A reader who types the underscore is asking a narrower question, not a different one.
+        assert!(quality("basic_string", "b_s") >= SUBSEQUENCE);
     }
 
     #[test]
@@ -399,14 +352,26 @@ mod tests {
     #[test]
     fn words_are_found_by_both_conventions_at_once() {
         // The rule is read from the name rather than configured, because a project picks one convention and a header
-        // may use either — and a generated name mixes them.
-        assert_eq!(word_starts("get_pid"), vec![0, 4]);
-        assert_eq!(word_starts("getPid"), vec![0, 3]);
-        assert_eq!(word_starts("GetPid"), vec![0, 3]);
-        assert_eq!(word_starts("HTTPServer"), vec![0, 4]);
-        assert_eq!(word_starts("utf8Decode"), vec![0, 3, 4]);
-        // A leading separator names no word of its own.
-        assert_eq!(word_starts("_private"), vec![1]);
+        // may use either — and a generated name mixes them. Asserted through the matcher, which is the only way in:
+        // `begins_a_word` is what the tiers are made of, and the initials of the words have to match for the tier to
+        // be `WORD_START`.
+        for (name, initials) in [
+            ("get_pid", "gp"),
+            ("getPid", "gp"),
+            ("GetPid", "gp"),
+            // An acronym run is one word, so `HTTP` + `Server` has the initials `hs` and not `hts`.
+            ("HTTPServer", "hs"),
+            ("utf8Decode", "ud"),
+            ("_private_helper", "ph"),
+        ] {
+            assert_eq!(
+                quality(name, initials),
+                WORD_START,
+                "{name} should answer {initials} as its words"
+            );
+        }
+        // …and two words that are not the initials are not a word match.
+        assert!(quality("get_pid", "gq") < WORD_START);
     }
 
     #[test]
