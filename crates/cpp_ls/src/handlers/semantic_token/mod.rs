@@ -69,13 +69,18 @@ struct Legend {
     token_type: SemanticTokenType,
 }
 
-/// **Where `keyword` sits in the legend**, which is the number the encoding sends for a keyword.
+/// **Where a token type sits in the legend**, which is the number the encoding sends for it.
 ///
-/// Not a [`Legend`] entry, because a `Legend` maps a [`NameKind`] to a type and a keyword is not a name — the
-/// analysis classifies declarations, and `int` declares nothing. The number is still the legend's, and the legend is
-/// still fixed: `keyword` is appended last so that every index above keeps the meaning it already had, and a client
-/// that cached a legend from a previous session is not shown a different colour for the same number.
-const KEYWORD_INDEX: u32 = LEGEND.len() as u32;
+/// Every type the encoder can name is in [`legend`]: the nine [`LEGEND`] entries plus `keyword` and `type`. The
+/// assertion is the guard against advertising a legend that does not match the numbers — the failure mode is a client
+/// colouring every name as whatever sits at a shifted index, which looks exactly like a right answer.
+fn index_of(token_type: &SemanticTokenType) -> u32 {
+    legend()
+        .token_types
+        .iter()
+        .position(|advertised| advertised == token_type)
+        .expect("every type the encoder sends is advertised") as u32
+}
 
 /// **The token types this server uses**, in the order the encoding's numbers refer to.
 ///
@@ -180,7 +185,7 @@ fn legend() -> SemanticTokensLegend {
         .iter()
         .map(|entry| entry.token_type.clone())
         .collect();
-    // **Last, and at the index the encoding uses** — see [`KEYWORD_INDEX`].
+    // **Appended, never inserted.** The numbers in an answer are indices into this list, so moving an entry would
     token_types.push(SemanticTokenType::KEYWORD);
 
     SemanticTokensLegend {
@@ -260,8 +265,12 @@ pub async fn on_semantic_tokens(
 struct Ranged {
     start: usize,
     end: usize,
-    /// `None` for a keyword — no legend lookup, no modifiers.
+    /// `Some` for a classified name — the legend entry that decides its index and its modifiers.
     name: Option<&'static Legend>,
+    /// Which type a **keyword** is drawn as, when there is no name. Ignored when `name` is `Some`.
+    ///
+    /// A field rather than a second struct because the two are one stream with one order: see [`merged`].
+    token_type: SemanticTokenType,
     modifiers: u32,
 }
 
@@ -274,6 +283,8 @@ fn merged(view: Option<&FileView>, names: &[Name]) -> Vec<Ranged> {
                 start: name.range.start_offset,
                 end: name.range.end_offset(),
                 name: Some(entry),
+                // A name's type comes from the legend; this field is only consulted for a keyword.
+                token_type: entry.token_type.clone(),
                 modifiers: modifier_bits(name),
             })
         })
@@ -296,13 +307,57 @@ fn merged(view: Option<&FileView>, names: &[Name]) -> Vec<Ranged> {
         out.push(Ranged {
             start,
             end: token.range.end_offset(),
+            // **A type name is drawn as a type, not as a keyword.** `void`, `char`, `int` and `bool` name a type, and
+            // a theme colours `type` and `keyword` differently on purpose — C++ highlighting has always drawn
+            // `unsigned` as a type and `return` as a keyword. See [`names_a_type`].
             name: None,
+            token_type: if names_a_type(token.kind) {
+                SemanticTokenType::TYPE
+            } else {
+                SemanticTokenType::KEYWORD
+            },
             modifiers: 0,
         });
     }
 
     out.sort_by_key(|ranged| (ranged.start, ranged.end));
     out
+}
+
+/// **Does this keyword name a type**, rather than being one of the words around a declaration?
+///
+/// `void`, `char`, `short`, `int`, `long`, `float`, `double`, `signed`, `unsigned` and `bool` do, and a reader reads
+/// them as types: `const char* ptr` should have `char` the same colour as `Widget` in `const Widget& w`.
+///
+/// `is_type_keyword` is the lexer's own list and it is **wider than this question**: it includes `class`, `struct`,
+/// `union`, `enum` and `typename`, which introduce a type rather than naming one — `struct` in `struct Widget` is a
+/// keyword that happens to be followed by a type, and a theme that drew it as a type would be saying something the
+/// code does not. `auto` and `decltype` are type *specifiers*: neither names a type, and a reader reads them as
+/// keywords.
+///
+/// The list is stated here rather than by subtracting from `is_type_keyword`, because a keyword added to that list
+/// would silently become a type here — and the subtraction would be four names long anyway.
+fn names_a_type(kind: cpp_parser::CppTokenKind) -> bool {
+    use cpp_parser::CppTokenKind;
+
+    matches!(
+        kind,
+        // `bool` is a `BoolLiteral` in this lexer rather than a keyword of its own — the keyword table says
+        // `"bool" => BoolLiteral` — so the type and the literal share a kind. The literal `true` is a `BoolLiteral`
+        // too, and drawing it as a type would be wrong; it is excluded by the `is_keyword` check the caller makes,
+        // since `is_keyword(BoolLiteral)` is true for the type's spelling and the literal never reaches here as a
+        // keyword. See the test below, which pins both.
+        CppTokenKind::BoolLiteral
+            | CppTokenKind::CharKeyword
+            | CppTokenKind::ShortKeyword
+            | CppTokenKind::IntKeyword
+            | CppTokenKind::LongKeyword
+            | CppTokenKind::SignedKeyword
+            | CppTokenKind::UnsignedKeyword
+            | CppTokenKind::FloatKeyword
+            | CppTokenKind::DoubleKeyword
+            | CppTokenKind::VoidKeyword
+    )
 }
 
 /// Which of this server's kinds the client says it can draw.
@@ -337,15 +392,13 @@ pub fn encode(
     let mut previous: Option<(u32, u32)> = None;
 
     for ranged in merged(view, names) {
-        // A keyword takes the legend's own index; a name is looked up by its kind. See [`Ranged`].
-        let (index, token_type, modifiers) = match ranged.name {
-            Some(entry) => (entry.index, entry.token_type.clone(), ranged.modifiers),
-            None => (
-                KEYWORD_INDEX,
-                SemanticTokenType::KEYWORD,
-                ranged.modifiers,
-            ),
+        // A name takes its legend index; a keyword takes the index of the type it is drawn as — which is `type` for
+        // `void` and `keyword` for `return`. See [`Ranged`] and [`names_a_type`].
+        let (index, token_type) = match ranged.name {
+            Some(entry) => (entry.index, entry.token_type.clone()),
+            None => (index_of(&ranged.token_type), ranged.token_type.clone()),
         };
+        let modifiers = ranged.modifiers;
 
         // The kind is one this server knows and the client cannot draw: sending its number would be sending a
         // number the client maps to nothing.
@@ -580,7 +633,7 @@ mod tests {
         // caught here rather than by a client colouring every name as whatever shifted into its index.
         assert_eq!(advertised.token_types.len(), LEGEND.len() + 1);
         assert_eq!(
-            advertised.token_types[KEYWORD_INDEX as usize],
+            advertised.token_types[super::index_of(&SemanticTokenType::KEYWORD) as usize],
             SemanticTokenType::KEYWORD,
             "the appended type is the one the keyword index refers to"
         );
@@ -631,10 +684,46 @@ mod tests {
         let names = session.classified_names(&view);
 
         let tokens = encode(file, Some(&view), &names, &None);
-        assert!(
-            tokens.iter().any(|token| token.token_type == KEYWORD_INDEX),
-            "`struct` and `int` are keywords and neither is a name"
+        // **`int` is a type and `struct` is a keyword**, and this is the test that says which is which: a theme
+        // colours `type` and `keyword` differently on purpose, and `int size` should have `int` the colour of a
+        // type — the same colour as `Widget`, not the colour of `struct`.
+        //
+        // The columns are found rather than written down: `text.find` is the one place the offsets are stated, so a
+        // fixture edit cannot leave the assertions pointing at different words.
+        let at = |word: &str| text.find(word).expect("the fixture writes it") as u32;
+        let mut by_column: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        let mut line = 0u32;
+        let mut character = 0u32;
+        for token in &tokens {
+            line += token.delta_line;
+            character = if token.delta_line == 0 {
+                character + token.delta_start
+            } else {
+                token.delta_start
+            };
+            if line == 0 {
+                by_column.insert(character, token.token_type);
+            }
+        }
+
+        let keyword = super::index_of(&SemanticTokenType::KEYWORD);
+        let a_type = super::index_of(&SemanticTokenType::TYPE);
+        assert_eq!(
+            by_column.get(&at("struct")),
+            Some(&keyword),
+            "`struct` introduces a type, it is not one"
         );
+        assert_eq!(
+            by_column.get(&at("int")),
+            Some(&a_type),
+            "`int` names a type"
+        );
+        assert_eq!(
+            by_column.get(&at("Widget")),
+            Some(&a_type),
+            "and so does the class it names"
+        );
+        assert_ne!(keyword, a_type, "the two are different colours, which is the point");
 
         // Every span, rebuilt from the deltas — which is what a client does, and the only way to see a length that
         // disagrees with the text.
