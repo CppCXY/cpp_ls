@@ -1459,3 +1459,68 @@ fn a_constructors_parameters_are_in_scope() {
         );
     }
 }
+/// **A missing `;` is a parse error and has to reach the client.**
+///
+/// Reported: `std::cout << middleName << std::endl` with no semicolon produced no diagnostic, however long the user
+/// waited. The question this pins is the first one — whether the answer exists at all — because a missing diagnostic
+/// is either "nothing was found" or "it was found and never published", and the two are fixed in different places.
+#[test]
+fn a_missing_semicolon_is_reported() {
+    let source = "int g();\nstruct Name {\n    void print(int i) {\n        std::cout << middleName << std::endl\n    }\n};\n";
+    let files = MemoryFiles::new().with_file("/p/a.cpp", source);
+    let providers = SessionFiles::new(OpenDocuments::new(), files);
+    let mut session = cpp_code_analysis::Session::with_config(
+        "/p",
+        providers,
+        WatchFilter::new("/p"),
+        CompilerConfig::default(),
+    );
+    session.load("/p/a.cpp");
+    session.add_project_files([std::path::PathBuf::from("/p/a.cpp")]);
+    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.index_everything();
+    println!(
+        "before the edit: {:?}",
+        session
+            .diagnostics(std::path::Path::new("/p/a.cpp"))
+            .map(|found| found.errors.len())
+    );
+
+    // What a user typing does: the session is told the file's new text.
+    session.did_open(std::path::Path::new("/p/a.cpp"), source);
+    println!(
+        "right after the edit: {:?}",
+        session
+            .diagnostics(std::path::Path::new("/p/a.cpp"))
+            .map(|found| found.errors.len())
+    );
+    session.want_cooked_reading(std::path::Path::new("/p/a.cpp"));
+    session.index_everything();
+    println!(
+        "after re-indexing: {:?}",
+        session
+            .diagnostics(std::path::Path::new("/p/a.cpp"))
+            .map(|found| found.errors.len())
+    );
+
+    let found = session
+        .diagnostics("/p/a.cpp")
+        .expect("the file is held, so it has an answer");
+    println!(
+        "reading={:?} errors={} unplaced={}",
+        found.reading,
+        found.errors.len(),
+        found.unplaced
+    );
+    for error in &found.errors {
+        println!("  {error:?}");
+    }
+    assert!(
+        found
+            .errors
+            .iter()
+            .any(|error| error.message.contains(';') || error.message.contains("expected")),
+        "the missing `;` is a parse error and nothing else: {:?}",
+        found.errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
+    );
+}

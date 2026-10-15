@@ -136,7 +136,7 @@ impl DiagnosticService {
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_millis(interval)) => {
                     let published = analysis
-                        .run_blocking(move |session| diagnose_file(session, &path))
+                        .cook_and_diagnose(&path)
                         .await;
 
                     match published {

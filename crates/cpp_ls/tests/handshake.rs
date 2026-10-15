@@ -851,6 +851,100 @@ fn a_branch_nobody_takes_is_published_as_clean_once_the_file_is_cooked() {
     server.notify("exit", Value::Null);
 }
 
+/// **An error typed into an open file is published, and the edit has not been cooked yet.**
+///
+/// Reported: `std::cout << middleName << std::endl` with no `;` sat there with no diagnostic, however long the user
+/// waited — and this is the case the older diagnostics test does not reach, because it opens a file whose text is
+/// already on disk.
+///
+/// What makes it different is that **an edit drops the cooked reading**, and a diagnostic is answered from that
+/// reading. So the pass that runs after the typing stops found no reading at all, `diagnose_file` answered `None`,
+/// and the service logged *"nothing to diagnose"* and published nothing. The reading comes back when the index pump
+/// reaches the file, and the pump works through its queue rather than the editor.
+///
+/// Measured on the fixture, at the analysis layer:
+///
+/// ```text
+/// before the edit:       Some(1)
+/// right after the edit:  None       ← what was being published as nothing
+/// after re-indexing:     Some(1)
+/// ```
+///
+/// So this opens a file that is **clean**, edits it into having a missing `;`, and requires the client to be told
+/// about it. A server that waits for a re-read fails here and passes the fixture whose text was already on disk.
+#[test]
+fn an_error_typed_into_an_open_file_is_published() {
+    let project = Project::new("diagnostics-after-an-edit");
+    project.write("main.cpp", CLEAN_CPP);
+
+    let mut server = Server::start(project.root());
+    let main_uri = uri_of(&project.root().join("main.cpp"));
+
+    server.request(
+        1,
+        "initialize",
+        json!({
+            "processId": std::process::id(),
+            "rootUri": uri_of(project.root()),
+            "capabilities": {
+                "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "window": { "workDoneProgress": true },
+            },
+        }),
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "cpp", "version": 1, "text": CLEAN_CPP }
+        }),
+    );
+
+    // **The edit**, as a client sends it: the whole text, one version later. `EDITED_CPP` differs from `CLEAN_CPP` by
+    // a missing `;` and nothing else, so an error reported here is about this edit.
+    server.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": main_uri, "version": 2 },
+            "contentChanges": [{ "text": EDITED_CPP }],
+        }),
+    );
+
+    let with_the_error = server.wait_for(|message| {
+        message["method"] == json!("textDocument/publishDiagnostics")
+            && message["params"]["uri"] == json!(main_uri)
+            && message["params"]["diagnostics"]
+                .as_array()
+                .is_some_and(|diagnostics| !diagnostics.is_empty())
+    });
+
+    let diagnostics = with_the_error["params"]["diagnostics"]
+        .as_array()
+        .expect("diagnostics is an array");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(';'))),
+        "the missing `;` is the only difference from the clean file: {with_the_error}"
+    );
+    assert_eq!(
+        with_the_error["params"]["version"],
+        json!(2),
+        "and the answer is stamped with the revision it is about, so a client can discard it: {with_the_error}"
+    );
+
+    server.request(999, "shutdown", Value::Null);
+    server.notify("exit", Value::Null);
+}
+
+/// The clean file [`an_error_typed_into_an_open_file_is_published`] opens, and the same file one `;` short.
+const CLEAN_CPP: &str = "int g();\nstruct Name {\n    int middleName;\n    void print(int i) {\n        \
+                         middleName = i;\n    }\n};\n";
+const EDITED_CPP: &str = "int g();\nstruct Name {\n    int middleName;\n    void print(int i) {\n        \
+                          middleName = i\n    }\n};\n";
+
 /// The namespace is opened by a macro in a header the open file includes. **The raw reading handles this one** —
 /// an indexer given the closure's macro bodies reads `BEGIN_NS` as `namespace one {`, which is what the shape rules
 /// exist for — so this fixture is about the member question rather than about the second reading.
