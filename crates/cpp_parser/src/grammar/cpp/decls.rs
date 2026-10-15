@@ -1530,7 +1530,24 @@ pub fn parse_init_declarator(p: &mut CppParser) -> ParseResult {
 /// (`again:`) starts with an identifier, exactly like an initializer clause, so a function whose
 /// first statement is a label was read as an `InitListExpr` and then reported "expected primary
 /// expression" at its own first statement.
-fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) -> ParseResult {
+/// Finish an init-declarator: the tail every declaration shares.
+///
+/// # Why the declaration's marker is handed back open
+///
+/// A function declarator's **body is the declaration's**, and a constructor reaches its `{` down a path that has to
+/// open the declaration around a body it has not read yet — [`CompleteMarker::precede`] is that operation, and it
+/// needs the node **closed** already and a `Marker` that is still open for the wrapper. So both are returned: the
+/// [completed](CompleteMarker) declaration, which is what a caller with nothing more to read wants, and the raw
+/// [`Marker`], which is what a caller with a body to wrap wants.
+///
+/// Completing the declaration *before* the `{` instead — which is what this did — put every function body beside its
+/// declaration. Measured on `struct A { A(int f) : x(f) { } };`: `Declaration@11..26` with `CompoundStat@26..42` as a
+/// following sibling, so every constructor's parameters were invisible in its own body.
+fn finish_init_declarator(
+    p: &mut CppParser,
+    m: Marker,
+    declarator_from: usize,
+) -> ParseResult {
     // A declarator with a parameter list can only declare a function, so a `{` after it opens a
     // body no matter what is inside. `parse_declaration` handles the body; this rule must not
     // consume it.
@@ -2048,6 +2065,8 @@ fn finish_init_declarator(p: &mut CppParser, m: Marker, declarator_from: usize) 
         _ => {}
     }
 
+    // **The declaration is completed, and the completed marker is handed back** so that a caller with a body to read
+    // can wrap it — see this function's note.
     Ok(m.complete(p))
 }
 
@@ -4866,19 +4885,30 @@ fn parse_declaration_starting_at_a_name(
         p.close_marks_above(base);
         return Err(err);
     }
-    if let Err(err) = finish_init_declarator(p, m, declarator_from) {
-        p.close_marks_above(base);
-        return Err(err);
-    }
+    // **The declaration's completed marker is kept**, because a body belongs to the declaration: `precede` opens a
+    // declaration around the node those events already describe, and the body then joins it as the second child.
+    //
+    // Completing the declaration *before* the `{` without wrapping put the body beside it; reading the body with the
+    // mark still open and then returning `CompleteMarker::empty()` dropped the declaration's marker altogether.
+    // Measured on `struct A { A(int f) : x(f) { } };`: `Declaration@11..26` with `CompoundStat@26..42` as a following
+    // sibling, so every constructor's parameters were invisible in its own body.
+    let declaration = match finish_init_declarator(p, m, declarator_from) {
+        Ok(declaration) => declaration,
+        Err(err) => {
+            p.close_marks_above(base);
+            return Err(err);
+        }
+    };
 
     // A body, or its `;`. A declarator whose parameter list has been read is a *function*, so the brace after
     // it is a definition rather than a braced initializer.
     if p.current_token() == CppTokenKind::LeftBrace {
+        let wrapped = declaration.precede(p, CppSyntaxKind::Declaration);
         if let Err(err) = parse_compound_stat(p) {
             p.close_marks_above(base);
             return Err(err);
         }
-        return Ok(CompleteMarker::empty());
+        return Ok(wrapped.complete(p));
     }
 
     if let Err(err) = expect_semicolon(p) {
@@ -4886,7 +4916,7 @@ fn parse_declaration_starting_at_a_name(
         return Err(err);
     }
 
-    Ok(CompleteMarker::empty())
+    Ok(declaration)
 }
 
 /// Is the qualified name at the cursor followed by an `=`, making this a `using` **alias**?

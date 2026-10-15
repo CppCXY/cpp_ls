@@ -189,6 +189,29 @@ impl CppDeclaration {
             return Some(name);
         }
 
+        // **A constructor's declaration wraps a declaration.** The grammar reads the name, the parameter list and the
+        // member-initializer list as one declaration, then reopens a declaration around the body with
+        // `CompleteMarker::precede` — so the node this is asked about has no declarator of its own and the name lives
+        // one level down:
+        //
+        // ```text
+        // Declaration            ← the wrapper, which this is asked about
+        //   Declaration          ← the declaration proper: Declarator, MemberInitializer
+        //   CompoundStat         ← the body `precede` wrapped it with
+        // ```
+        //
+        // Without this the wrapper has no name, `get_name_text` answers `None`, and `sema::scopes`'
+        // `is_unnamed_declaration` reads that as *"this is a call statement, not a declaration"* and skips the whole
+        // thing: measured, the tree held only `TranslationUnit` and `Class` — no function scope at all — so a
+        // constructor's parameters were bound nowhere and neither its member-initializer list nor its body could see
+        // them.
+        if let Some(wrapped) = self.child::<CppDeclaration>()
+            && let Some(name) = wrapped.get_name()
+            && !name.get_text().is_empty()
+        {
+            return Some(name);
+        }
+
         self.elaborated_type_name()
     }
 

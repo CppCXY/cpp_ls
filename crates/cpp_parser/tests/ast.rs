@@ -878,37 +878,34 @@ fn an_unterminated_attribute_list_is_reported_and_consumes_the_rest() {
 }
 /// **A function definition holds its body**, whichever way the body is written.
 ///
-/// The plain spelling nests the body under the declarator and the tree has always shown it inside the declaration.
-/// A constructor writes a member-initializer list between the two, which puts the body one level out — and a
-/// consumer reading "the declaration's body" then finds nothing, which is what made a constructor's parameters
-/// invisible in its own body.
-/// **`#[ignore]`: a constructor's body is a sibling of its declaration, not a child.**
-///
-/// The grammar's marker for a constructor's declaration **does** span the body — `parse_declaration_here` runs the
-/// body rule with that mark open — but the body's own marker opens *after* the declarator's marker has been put back
-/// into the parent's child list, so the range this pass computes for the body starts one element before its first
-/// child. Measured on `struct A { A(int f) : x(f) { } };`:
+/// Three spellings, and they reach the tree by two different routes:
 ///
 /// ```text
-/// Declaration  recorded=6 kept=6..=10  :: [ …, DeclaratorN@6, …, MemberInitializerN@10, Whitespace@26 ]
-/// CompoundStat recorded=8 kept=7..=11  :: [ …, DeclaratorN@7, Whitespace@26, LeftBrace@27, … ]
-///                                            ↑ index 7 is the declaration, not this body's child
+/// int g() { … }                the declaration rule reads the body itself
+/// struct A { void g() { … } }; the same rule, one class deeper
+/// struct A { A(int f) : x(f) { … } };   a constructor, which has a member-initializer list between
 /// ```
 ///
-/// So the body comes out beside the declaration instead of inside it, and a consumer asking "what is this
-/// declaration's body" finds nothing — which is what made a constructor's parameters invisible in its own body.
+/// The third is the one that was wrong, and it is what this test is for. A constructor does not go through the
+/// declaration rule at all — the grammar has `parse_constructor_declaration`, because a constructor's name is also
+/// its type — and that path read the body with the declaration's marker still open and then returned
+/// `CompleteMarker::empty()`, dropping the marker. So the declaration closed before the `{` and the body landed
+/// **beside** it: measured, `Declaration@11..26` with `CompoundStat@26..42` as its following sibling.
 ///
-/// # Why this is not fixed by moving it afterwards
+/// What a consumer sees is `CppDeclaration::get_body` answering `None` for every constructor — and the parameters
+/// being invisible in the constructor's own body, because the function scope a constructor opened never reached the
+/// statements that used them.
 ///
-/// Reparenting the sibling into the declaration is not enough, and is worse: the body's range holds the **tail of the
-/// declaration** as well as the body, so moving it puts those elements after the declaration's last child in text
-/// order. Measured, `/// @returns …\n    double x()` came out as `/// @returns …\n     doublex()` — every byte
-/// present, the length equal, and the file no longer reconstructable.
+/// # The fix, and why the shape is asserted rather than the symptom
 ///
-/// The correction belongs where the range is computed. This test is the measurement for it, and the first two cases
-/// pass today — a plain function and a member function both nest their body — so it is specifically the
-/// member-initializer list that puts the body one level out.
-#[ignore]
+/// The declaration is complete before its body is read — the name, the parameter list and the initializer list are
+/// all in — so the body is wrapped **around** it with `CompleteMarker::precede`, which opens a node whose `NodeStart`
+/// stands before events already emitted. That is the parser's own mechanism for exactly this, used by the expression
+/// rules and now by this one.
+///
+/// A reparenting pass in the tree builder was tried first and is worse: it moves the body's *range*, which still
+/// holds the tail of the declaration, so the elements come out in the wrong text order and the file stops being
+/// reconstructable. Asserting the shape here is what keeps the correction at the layer that can make it.
 #[test]
 fn a_function_definition_holds_its_body() {
     for (what, source) in [

@@ -295,26 +295,6 @@ impl ScopeWalker<'_> {
         let mut opened: Vec<(ScopeId, ScopeId)> = Vec::new();
 
         for child in node.children() {
-            // **A constructor's body has already been walked, by the declaration that owns it.**
-            //
-            // The grammar writes the member-initializer list and the body as siblings of the declarator, so the body
-            // is a child of the **class body** rather than of the declaration:
-            //
-            // ```text
-            // A(int f) : x(f) { … }   Declaration > Declarator, MemberInitializer  ▏  CompoundStat
-            //                         └──────────── ClassBody children ────────────┘
-            // ```
-            //
-            // `declaration_parts` reads that shape (`function_body`) and walks the body into the **function** scope,
-            // where the parameters are. This loop would then meet the same `CompoundStat` a second time and open a
-            // `Block` under the *class*, so the body's positions resolve through that block — whose chain is
-            // `[Block, Class, …]` and does not contain the function at all. Measured: a cursor in the body saw
-            // `here` (declared in the block) and the class's fields, and **not** `f` or `m`, while the same cursor in
-            // `: x(f)` saw them both — the one difference being that the initializer list has no block of its own.
-            if is_a_constructors_body(&child) {
-                continue;
-            }
-
             // **A directive is read before it is asked about**, so a `#define` this file writes is in force for
             // everything below it and not for what stands above. See [`ScopeWalker::own`].
             if let Some((name, body)) = a_define_at(&child) {
@@ -1681,80 +1661,33 @@ enum SpecifierName {
     InDeclarator(BindingKind),
 }
 
-/// **Is this the body of the constructor declared just above it?**
-///
-/// The grammar writes a constructor's member-initializer list and its body as siblings of the declarator, which puts
-/// the body among the class body's children rather than inside the declaration. [`declaration_parts`] reads that and
-/// walks the body into the function scope; the child loop must not then walk it again under the class.
-///
-/// The anchor is the same one [`function_body`] uses, and for the same reason: a preceding sibling that declares a
-/// constructor — a declaration carrying a `MemberInitializer`, which no other construct writes.
-fn is_a_constructors_body(node: &CppSyntaxNode) -> bool {
-    CppSyntaxKind::from(node.kind()) == CppSyntaxKind::CompoundStat
-        && node
-            .prev_sibling()
-            .is_some_and(|before| declares_a_constructor(&before))
-}
-
-/// **Does this declaration write a constructor** — a function declarator whose name is its own class's?
-///
-/// The test for the shape [`function_body`] reads a body out of a *sibling* for, and it has to be narrow: a plain
-/// declaration followed by a block is two constructs, and taking the block would give the first one a body it does
-/// not have. What makes the sibling arrangement unambiguous is the **member-initializer list**, which no other
-/// construct writes — so the question is whether this declaration has one.
-///
-/// A constructor with no initializer list (`C(int p) { … }`) needs no such reading: the grammar keeps its body
-/// inside the declaration, and `first_child` finds it.
-fn declares_a_constructor(node: &CppSyntaxNode) -> bool {
-    node.children()
-        .any(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::MemberInitializer)
-}
-
 /// The body of a function, which the grammar places beside or around the declarator rather than inside it.
 ///
 /// Several shapes reach here and all of them occur in real code:
 ///
 /// ```text
-/// int f() { ... }                  the body is a direct child of the declaration
-/// struct S { void m() { ... } };   inside a class body, inside the specifier sequence
-/// void f() { ... }                 the body hangs off the *declarator*, which is not a direct child
+/// int f() { ... }                    the body is a direct child of the declaration
+/// struct S { void m() { ... } };     inside a class body, inside the specifier sequence
+/// void f() { ... }                   the body hangs off the *declarator*, which is not a direct child
+/// S(int a) : x(a) { ... }            a constructor, whose member-initializer list comes first
 /// ```
+///
+/// A **constructor's** declaration is a wrapper: the grammar closes the declaration once its name, parameter list and
+/// member-initializer list are read, then reopens it around the body with `CompleteMarker::precede`, so the body is a
+/// direct child of the declaration that carries the initializer list — the first arm finds it, and no special case is
+/// needed.
+///
+/// It used to need one, because the grammar put the body **beside** the declaration:
+/// `Declaration@11..26` with `CompoundStat@26..42` as a following sibling. That is what this function used to look
+/// for, and what made a constructor open a scope its parameters were bound in while reaching none of them — the
+/// scope's range was the declarator alone. The grammar fix is `parse_constructor_declaration`; this is the reading it
+/// left behind.
 ///
 /// The search is over the declarators rather than over the whole subtree, so a `CompoundStat` belonging to
 /// something else — a lambda's body in an initialiser — is not mistaken for this function's.
 fn function_body(node: &CppSyntaxNode) -> Option<CppSyntaxNode> {
     if let Some(direct) = first_child(node, CppSyntaxKind::CompoundStat) {
         return Some(direct);
-    }
-
-    // **A constructor's body is a sibling of its declaration, and this is where that is handled.**
-    //
-    // The grammar writes the member-initializer list and the body as siblings of the declarator, and the parse tree
-    // puts the body **outside** the declaration:
-    //
-    // ```text
-    // void set(int v) { … }   Declaration > InitDeclarator > Declarator > CompoundStat
-    // A(int f) : x(f) { … }   Declaration > Declarator, MemberInitializer   ▏  CompoundStat
-    //                         └──────────── ClassBody children ────────────┘
-    // ```
-    //
-    // Measured on `struct A { A(int f) : x(f) { } };`: the `CompoundStat`'s parent is the **`ClassBody`**, with
-    // `["Declaration", "CompoundStat", "Declaration"]` for siblings. That is why a constructor opened a scope its
-    // parameters were bound in and then reached none of them: the scope's range was `15..24`, the declarator and its
-    // parameter list, so `f` was a `Parameter` at the one offset inside the scope and unclassified at both of its
-    // uses — in `: x(f)` and in the body.
-    //
-    // Searching the declaration's own children cannot find it, because it is not there. What finds it is the parse
-    // tree's own order: the body is the `CompoundStat` that **immediately follows** this declaration among its
-    // parent's children. Anchored on the sibling relationship rather than on a search of the subtree, so a
-    // `CompoundStat` belonging to something else — a lambda's body in an initialiser, a nested class's member — is
-    // not mistaken for this function's.
-    let body_after_the_declaration = node
-        .next_sibling()
-        .filter(|sibling| CppSyntaxKind::from(sibling.kind()) == CppSyntaxKind::CompoundStat)
-        .filter(|_| declares_a_constructor(node));
-    if body_after_the_declaration.is_some() {
-        return body_after_the_declaration;
     }
 
     for declarator in declarators(node) {
@@ -2049,6 +1982,27 @@ fn class_like_binding_of(specifier: &CppSyntaxNode) -> Option<BindingKind> {
 ///
 /// `int a, b;` has two init-declarators; `int a;` has one; a declaration of a class has neither. The fallback
 /// matters for the shapes the grammar produces without an initialiser, where the declarator is a direct child.
+///
+/// # The nested `Declaration` a constructor is written with
+///
+/// A constructor's declaration is a wrapper: the grammar reads the name, the parameter list and the member-initializer
+/// list as one declaration, then reopens a declaration around the body with `CompleteMarker::precede` — so the node
+/// this is asked about holds a **`Declaration`** child that holds the declarator, and a search of the direct children
+/// finds none:
+///
+/// ```text
+/// Declaration@11..42            ← the wrapper, whose children this function is asked about
+///   Declaration@11..26          ← the declaration proper: Declarator, MemberInitializer
+///   CompoundStat@26..42         ← the body `precede` wrapped it with
+/// ```
+///
+/// Measured on `struct Name { Name(const int f) : first(f) { … } };`: with no declarator found, no function scope was
+/// opened at all — the tree held only `TranslationUnit` and `Class`, and the constructor's parameters were bound
+/// nowhere, which is why neither `: first(f)` nor the body could see them.
+///
+/// Descending one level is what the shape asks for, and it is written as a **search rather than a rule about
+/// constructors**: a declaration whose declarators live in a nested declaration is exactly what wrapping produces, and
+/// the search stops at the first level, so it cannot wander into a body.
 fn declarators(node: &CppSyntaxNode) -> Vec<CppSyntaxNode> {
     let init: Vec<CppSyntaxNode> = node
         .children()
@@ -2059,8 +2013,18 @@ fn declarators(node: &CppSyntaxNode) -> Vec<CppSyntaxNode> {
         return init;
     }
 
-    node.children()
+    let direct: Vec<CppSyntaxNode> = node
+        .children()
         .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declarator)
+        .collect();
+
+    if !direct.is_empty() {
+        return direct;
+    }
+
+    node.children()
+        .filter(|child| CppSyntaxKind::from(child.kind()) == CppSyntaxKind::Declaration)
+        .flat_map(|wrapped| declarators(&wrapped))
         .collect()
 }
 
@@ -2108,13 +2072,6 @@ fn declared_name(node: &CppSyntaxNode) -> Option<(Name, cpp_parser::SourceRange)
         // [`name_from_text`] — the difference is a class whose body contains a destructor.
         if let Some(name) = name_from_text(text, &name_node) {
             return Some((name, range));
-        }
-        if std::env::var_os("CPPLS_ZZ").is_some() {
-            eprintln!(
-                "declared_name: node={:?} text={text:?} node_text={:?}",
-                cpp_parser::CppSyntaxKind::from(name_node.kind()),
-                name_node.text().to_string(),
-            );
         }
     }
 
