@@ -290,10 +290,18 @@ fn merged(view: Option<&FileView>, names: &[Name]) -> Vec<Ranged> {
         })
         .collect();
 
+    // **Two ways to be a keyword.** The lexer's kinds, and the words it deliberately leaves as identifiers: a reader
+    // is looking at `requires` and `concept` as keywords, and the grammar reads them by text for the same reason the
+    // lexer does not reserve them. See [`is_contextual_keyword`].
+    let source: &str = view.map(|view| view.source.as_ref()).unwrap_or_default();
+
     // **The file's own tokens**, which is what the reader sees rather than what the cooker produced: a keyword
     // inside a macro body is not in this file, and one written here is not in the rendering.
     for token in view.map(|view| view.tree.get_tokens()).unwrap_or_default() {
-        if !cpp_parser::is_keyword(token.kind) {
+        let text = &source[token.range.start_offset..token.range.end_offset()];
+        let contextual =
+            token.kind == cpp_parser::CppTokenKind::Identifier && is_contextual_keyword(text);
+        if !cpp_parser::is_keyword(token.kind) && !contextual {
             continue;
         }
         let start = token.range.start_offset;
@@ -322,6 +330,28 @@ fn merged(view: Option<&FileView>, names: &[Name]) -> Vec<Ranged> {
 
     out.sort_by_key(|ranged| (ranged.start, ranged.end));
     out
+}
+
+/// **A word that is a keyword in this position but an ordinary identifier in another.**
+///
+/// The lexer does not make these keywords, and it is right not to: `requires`, `concept` and even `final` are legal
+/// names — `int requires;` compiles, and so does a member called `override` — so a lexer that reserved them would
+/// change what a file means. The parser matches them **by text**, and
+/// [`cpp_parser::is_keyword`](cpp_parser::is_keyword) says why in the same words.
+///
+/// A highlighter is the other kind of consumer, and it wants the *reader's* answer rather than the grammar's: in
+/// `template <class T> concept C = requires(T t) { t.f(); };` nobody is reading `concept` or `requires` as a name.
+/// So the two are separated here, on the same list the grammar uses, and only for colour.
+///
+/// # Why the list is short
+///
+/// The words below are the ones a C++20 reader meets constantly and that no reasonable code uses as identifiers.
+/// `module` and `import` are deliberately absent although they are the same kind of word: `import` is a common
+/// variable name (`import` in a parser for a file format, `import` as a member), and underlining it as a keyword
+/// would be the false positive this whole layer is written against. `final` and `override` are absent for the same
+/// reason — `final` is a routine method name in code that predates C++11 and in code that does not use it.
+fn is_contextual_keyword(text: &str) -> bool {
+    matches!(text, "requires" | "concept")
 }
 
 /// **Does this keyword name a type**, rather than being one of the words around a declaration?
@@ -506,6 +536,120 @@ mod tests {
         );
         session.load("/p/a.cpp");
         (session, std::path::PathBuf::from("/p/a.cpp"))
+    }
+
+    /// **Every token the encoding sends, by absolute offset** — decoding the walk the way a client does.
+    ///
+    /// The deltas are relative, so a test that read them directly would be asserting about arithmetic rather than
+    /// about colour. This rebuilds absolute positions from the line starts, which is what a client does with them.
+    fn by_offset(text: &str, tokens: &[lsp_types::SemanticToken]) -> std::collections::HashMap<usize, u32> {
+        let mut line_starts = vec![0usize];
+        for (at, ch) in text.char_indices() {
+            if ch == '\n' {
+                line_starts.push(at + 1);
+            }
+        }
+
+        let mut out = std::collections::HashMap::new();
+        let mut line = 0usize;
+        let mut character = 0u32;
+        for token in tokens {
+            line += token.delta_line as usize;
+            character = if token.delta_line == 0 {
+                character + token.delta_start
+            } else {
+                token.delta_start
+            };
+            if let Some(start) = line_starts.get(line) {
+                out.insert(start + character as usize, token.token_type);
+            }
+        }
+        out
+    }
+
+    /// **The reported file: a constructor is the class's name, and `requires` is a keyword.**
+    ///
+    /// Reported from an editor, on the `ExpectedVoid` class: the constructors were drawn as `method` — which VS Code
+    /// spells `entity.name.function.member`, the colour of a member function — and `requires` was not drawn at all.
+    ///
+    /// # Why the constructors were methods
+    ///
+    /// A constructor and a member function are spelled the same way, and the only thing that separates them is that
+    /// a constructor's name is its class's — which `sema::scopes`' `function_binding_kind` cannot know while the
+    /// class is still being built, and says so in its own note. So every constructor arrived as `BindingKind::Function`
+    /// and was coloured as one. The class's name is known once its body has been read, and that is where the kind is
+    /// corrected now.
+    ///
+    /// # Why the parameter's type was one too
+    ///
+    /// `ExpectedVoid(const ExpectedVoid& other)` writes the class name a second time, and a *use* of that spelling
+    /// resolves through the scope chain to whichever binding is nearest — which was the constructor. The two
+    /// positions are one question, and answering the first answers both.
+    ///
+    /// # `requires`
+    ///
+    /// It is a **contextual** keyword: `int requires;` is a legal declaration, so the lexer leaves it an identifier
+    /// and the grammar matches it by text — the same position `final` and `override` are in. A highlighter wants the
+    /// reader's answer rather than the grammar's, so it is recognised by text here and sent as a keyword.
+    #[test]
+    fn a_constructors_name_is_a_type_and_requires_is_a_keyword() {
+        let text = "template <class Err>\n\
+                    class ExpectedVoid {\n\
+                    public:\n\
+                    \x20   constexpr ExpectedVoid() {}\n\
+                    \x20   ExpectedVoid(const ExpectedVoid& other) = delete;\n\
+                    \x20   constexpr ~ExpectedVoid() requires is_trivially_destructible_v<Err> = default;\n\
+                    };\n";
+        let (session, path) = a_held_file(text);
+        let view = session.view_of_the_file(&path).expect("a view");
+        let file = session.files().held(&path).expect("the file is held");
+        let names = session.classified_names(&view);
+        let tokens = encode(file, Some(&view), &names, &None);
+        let at_type = by_offset(text, &tokens);
+
+        let a_type = super::index_of(&SemanticTokenType::TYPE);
+        let a_keyword = super::index_of(&SemanticTokenType::KEYWORD);
+        let a_parameter = super::index_of(&SemanticTokenType::PARAMETER);
+        let a_type_parameter = super::index_of(&SemanticTokenType::TYPE_PARAMETER);
+
+        // **Every occurrence of the class's name**, including the three that are constructors and destructors and
+        // the one that is a parameter's type. `match_indices` rather than `find`, because the whole point of this
+        // test is that the *same* spelling is one colour wherever it appears.
+        let written: Vec<usize> = text.match_indices("ExpectedVoid").map(|(at, _)| at).collect();
+        assert_eq!(
+            written.len(),
+            5,
+            "the class name, three constructors/destructors, and the parameter's type: {written:?}"
+        );
+        for at in written {
+            assert_eq!(
+                at_type.get(&at),
+                Some(&a_type),
+                "`ExpectedVoid` at {at} is the class's name — a constructor and a parameter's type are the class too"
+            );
+        }
+
+        // The parameter *name* is a parameter, which is a different token from its type.
+        let other = text.find("other").expect("the fixture names it");
+        assert_eq!(
+            at_type.get(&other),
+            Some(&a_parameter),
+            "the parameter's own name is a parameter"
+        );
+
+        // The template parameter, which was already right and must stay so.
+        assert_eq!(
+            at_type.get(&text.find("Err").expect("the fixture names it")),
+            Some(&a_type_parameter)
+        );
+
+        // **`requires`**, which is the word a C++20 reader scans for and which arrived uncoloured.
+        let requires = text.find("requires").expect("the fixture writes it");
+        assert_eq!(
+            at_type.get(&requires),
+            Some(&a_keyword),
+            "`requires` is a keyword to a reader even though the lexer leaves it an identifier"
+        );
     }
 
     fn name(start: usize, length: usize, kind: NameKind, declaration: bool) -> Name {

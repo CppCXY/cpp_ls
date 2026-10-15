@@ -722,11 +722,22 @@ fn kind_of_binding(binding: &Binding, view: &FileView, is_a_parameter: bool) -> 
         }
         BindingKind::TemplateParameter => NameKind::TypeParameter,
         BindingKind::Enumerator => NameKind::EnumMember,
+        // **A constructor and a destructor are the class's own name, so they are drawn as the class.**
+        //
+        // Reported from an editor: `ExpectedVoid()` came out as `method` — `entity.name.function.member` in VS Code's
+        // own theme — while the class name above it was `type`. A constructor's name *is* the class's name
+        // (`[class.ctor]`: a constructor has no name of its own), and a theme colours the two the same way for the
+        // same reason: a reader scanning `class ExpectedVoid { ExpectedVoid(); }` is looking at one name written
+        // twice, not at a type and a function.
+        //
+        // It also matters beyond the declaration. A constructor's name shares its spelling with the class, so a
+        // *use* of that spelling — `ExpectedVoid(const ExpectedVoid& other)`, where the parameter's type is the
+        // class — resolves through the scope chain to whichever binding is nearer, and grouping the kinds keeps the
+        // answer a type either way round. Measured before this: every `ExpectedVoid` in the file was `method`.
+        BindingKind::Constructor | BindingKind::Destructor => NameKind::Type,
         // **Member or free** is a fact about the scope the binding lives in, which the model already records: a
-        // function declared inside a class is a method, and a constructor is one whatever it is called.
+        // function declared inside a class is a method.
         BindingKind::Function
-        | BindingKind::Constructor
-        | BindingKind::Destructor
         | BindingKind::ConversionFunction
         | BindingKind::OperatorFunction
         | BindingKind::LiteralOperator => {

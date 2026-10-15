@@ -705,6 +705,30 @@ impl ScopeWalker<'_> {
 
         // The body is this scope, so its members land here rather than in a block inside it.
         self.items_in_scope(node, scope, &[CppSyntaxKind::ClassBody]);
+
+        // **Now that the class has a name, its constructors can be told from its functions.**
+        //
+        // A constructor and a member function are spelled the same way — `ExpectedVoid()` and `ExpectedVoid()` — and
+        // the only thing that separates them is that a constructor's name is the class's. [`function_binding_kind`]
+        // cannot know that while the class is being built, and its own note says so; this is the moment the
+        // question becomes answerable, and it is asked once per class rather than once per declaration.
+        //
+        // Measured on `class ExpectedVoid { constexpr ExpectedVoid() {} };`: without this the constructor was a
+        // `Function`, and a highlighter reading it as one drew the constructor's name — and every *use* of the class
+        // name near it, which resolves to the same binding — as `method`. A reader scanning the class sees the class
+        // name written three times and one of them coloured as a function.
+        //
+        // The reassignment is safe because it only ever moves `Function` to its own special case: a class cannot have
+        // a member function with the class's name, since that is a constructor by definition ([class.ctor]).
+        if let Some(class_name) = declared_text.as_deref()
+            && let Some(data) = self.table.scope_mut(scope)
+        {
+            for binding in &mut data.bindings {
+                if binding.kind == BindingKind::Function && binding.name.text() == class_name {
+                    binding.kind = BindingKind::Constructor;
+                }
+            }
+        }
     }
 
     /// An `enum`, scoped or unscoped.
